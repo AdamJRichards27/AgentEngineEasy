@@ -419,4 +419,79 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
   res.json({ workflow, steps, documentPackage: docPackage });
 });
 
+// Go Live (Phase 7, ARCHITECTURE.md §10) — the transition into "able to
+// receive offers." Gated on the Ready to List workflow being fully
+// Complete (every step) — the same "gate on real completion, not on the
+// button having been clicked" discipline as everywhere else in this app.
+// This was a genuine pre-existing gap: nothing before Phase 7 ever moved a
+// property to "Listed" or published LISTING_LIVE despite both existing in
+// the schema/event registry since Phase 1.
+propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const user = req.authedUser!;
+  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const [workflow] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, id), eq(workflows.workflowType, "ReadyToList")));
+  if (!workflow) {
+    res.status(400).json({ error: "Ready to List has not been started for this property." });
+    return;
+  }
+  const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
+  const incomplete = steps.filter((s) => s.status !== "Complete");
+  if (incomplete.length > 0) {
+    res.status(400).json({
+      error: "Ready to List is not fully complete yet.",
+      incompleteSteps: incomplete.map((s) => ({ label: s.label, status: s.status, blockedReason: s.blockedReason })),
+    });
+    return;
+  }
+
+  if (property.listingStatus !== "Listed") {
+    await db
+      .update(properties)
+      .set({ workflowStage: "Listed", listingStatus: "Listed", updatedAt: new Date() })
+      .where(eq(properties.id, id));
+
+    try {
+      await publishDomainEvent({
+        eventType: "LISTING_LIVE",
+        occurredAt: new Date(),
+        propertyId: id,
+        transactionId: null,
+        partyId: null,
+        brokerageId: user.brokerageId,
+        agentId: user.id,
+        actorType: "USER",
+        actorId: user.id,
+        source: "api:properties:go-live",
+        correlationId: newCorrelationId(),
+        causationId: null,
+        idempotencyKey: `listing-live:${id}`,
+        payload: { propertyId: id },
+        metadata: {},
+      });
+    } catch (err) {
+      console.error("publishDomainEvent(LISTING_LIVE) failed", err);
+    }
+
+    await logAudit({
+      userId: user.id,
+      action: "listing_live",
+      recordType: "property",
+      recordId: String(id),
+      propertyId: id,
+    });
+  }
+
+  const [updated] = await db.select().from(properties).where(eq(properties.id, id));
+  res.json({ property: updated });
+});
+
 export const _internal = { insertPropertySchema }; // re-export for tests

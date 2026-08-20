@@ -21,9 +21,22 @@ export class LocalObjectStorageProvider implements ObjectStorageProvider {
   private resolveKey(key: string): string {
     // Keys are server-generated (propertyId/packageId/documentType), never
     // raw user input, but normalise + reject traversal defensively anyway.
+    //
+    // Fixed (found during Phase 7 live-verify): this used to compare a path
+    // built with path.join(this.baseDir, ...) — left relative whenever
+    // baseDir itself was relative (the .env.example default, "./storage")
+    // — against path.resolve(this.baseDir), which is always absolute. A
+    // relative path never startsWith an absolute one, so every write threw
+    // "outside baseDir" whenever OBJECT_STORAGE_LOCAL_DIR was left at its
+    // documented default. Both sides are now resolved from the same base,
+    // and the containment check requires an exact match or a proper
+    // path-separator boundary (not just a string prefix, which would have
+    // wrongly accepted a sibling directory like "storage-evil" alongside
+    // "storage").
     const normalised = path.normalize(key).replace(/^(\.\.(\/|\\|$))+/, "");
-    const resolved = path.join(this.baseDir, normalised);
-    if (!resolved.startsWith(path.resolve(this.baseDir))) {
+    const resolvedBase = path.resolve(this.baseDir);
+    const resolved = path.resolve(resolvedBase, normalised);
+    if (resolved !== resolvedBase && !resolved.startsWith(resolvedBase + path.sep)) {
       throw new Error(`Refusing to write object storage key outside baseDir: ${key}`);
     }
     return resolved;

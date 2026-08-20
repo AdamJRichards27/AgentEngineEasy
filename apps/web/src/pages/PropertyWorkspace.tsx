@@ -82,6 +82,34 @@ interface PaymentBlock {
   failureReason: string | null;
 }
 
+interface OfferBlock {
+  id: number;
+  propertyId: number;
+  buyerPartyId: number | null;
+  offerPriceCents: number;
+  status: string;
+  shareToken: string | null;
+  createdAt: string;
+}
+
+interface TransactionBlock {
+  id: number;
+  propertyId: number;
+  purchasePriceCents: number;
+  contractDate: string | null;
+  financeApprovedAt: string | null;
+  settlementDate: string | null;
+  settlementCompletedAt: string | null;
+  status: string;
+  grossCommissionCents: number | null;
+  gstCents: number | null;
+  commissionCalculatedAt: string | null;
+  fundsReceivedCents: number;
+  fundsReceivedAt: string | null;
+  agentPaidAt: string | null;
+  closedAt: string | null;
+}
+
 interface WorkspaceResponse {
   property: PropertyOverview;
   ownership: OwnershipBlock;
@@ -217,6 +245,62 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     onSuccess: ({ serviceOrderId }) => {
       invalidateServiceOrders();
       queryClient.invalidateQueries({ queryKey: ["service-order-payments", serviceOrderId] });
+    },
+  });
+
+  // Phase 7: Go Live, offer capture/acceptance, and the Transaction
+  // lifecycle (contract → settlement → payout → close). Mirrors the
+  // idempotent-chokepoint pattern used everywhere else — accepting an
+  // already-accepted offer, or closing an already-closed transaction, is
+  // just a no-op response from the server, not a client-side guess.
+  const goLive = useMutation({
+    mutationFn: () => apiFetch(`/properties/${propertyId}/go-live`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+
+  const { data: offersData } = useQuery({
+    queryKey: ["offers", propertyId],
+    queryFn: () => apiFetch<{ offers: OfferBlock[] }>(`/offers/by-property/${propertyId}`),
+  });
+  const invalidateOffers = () => queryClient.invalidateQueries({ queryKey: ["offers", propertyId] });
+
+  const { data: transactionData } = useQuery({
+    queryKey: ["transaction", propertyId],
+    queryFn: () => apiFetch<{ transaction: TransactionBlock | null }>(`/transactions/by-property/${propertyId}`),
+  });
+  const invalidateTransaction = () => queryClient.invalidateQueries({ queryKey: ["transaction", propertyId] });
+
+  const createOffer = useMutation({
+    mutationFn: (input: Record<string, unknown>) =>
+      apiFetch(`/offers/by-property/${propertyId}`, { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidateOffers,
+  });
+
+  const acceptOffer = useMutation({
+    mutationFn: (offerId: number) => apiFetch(`/offers/${offerId}/accept`, { method: "POST" }),
+    onSuccess: () => {
+      invalidateOffers();
+      invalidateTransaction();
+      invalidate();
+    },
+  });
+
+  const declineOffer = useMutation({
+    mutationFn: (offerId: number) => apiFetch(`/offers/${offerId}/decline`, { method: "POST" }),
+    onSuccess: invalidateOffers,
+  });
+
+  const withdrawOffer = useMutation({
+    mutationFn: (offerId: number) => apiFetch(`/offers/${offerId}/withdraw`, { method: "POST" }),
+    onSuccess: invalidateOffers,
+  });
+
+  const transactionAction = useMutation({
+    mutationFn: ({ transactionId, action, body }: { transactionId: number; action: string; body?: Record<string, unknown> }) =>
+      apiFetch(`/transactions/${transactionId}/${action}`, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+    onSuccess: () => {
+      invalidateTransaction();
+      invalidate();
     },
   });
 
@@ -479,6 +563,55 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           {readyToList.isError && <p>{(readyToList.error as Error).message}</p>}
         </div>
       )}
+
+      {/* Go Live (Phase 7) — gated server-side on every Ready to List step
+          being Complete, not just on having been clicked. */}
+      {data.property.workflowStage === "Ready to List" && (
+        <div>
+          <button onClick={() => goLive.mutate()}>Go Live</button>
+          {goLive.isError && (
+            <p>
+              {(goLive.error as Error).message} — check every Next Action above is Complete (Ready to List must fully
+              finish before a property can go live).
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Offers (Phase 7) — agent-entered (a buyer submits to the agent by
+          phone/email/in person, not via a public form); accepting one
+          auto-declines every other open offer and creates the Transaction. */}
+      {(data.property.listingStatus === "Listed" || (offersData?.offers.length ?? 0) > 0) && (
+        <section>
+          <h2>Offers</h2>
+          <OffersBlock
+            offers={offersData?.offers ?? []}
+            onCreate={(input) => createOffer.mutate(input)}
+            createError={createOffer.isError ? (createOffer.error as Error).message : null}
+            onAccept={(id) => acceptOffer.mutate(id)}
+            acceptError={acceptOffer.isError ? (acceptOffer.error as Error).message : null}
+            onDecline={(id) => declineOffer.mutate(id)}
+            onWithdraw={(id) => withdrawOffer.mutate(id)}
+          />
+        </section>
+      )}
+
+      {/* Transaction (Phase 7) — created the moment an offer is accepted;
+          walks contract signing → settlement → payout → close. Agent-paid
+          and close are Brokerage Administrator actions server-side — the
+          buttons here are shown to everyone (this app has no client-side
+          role awareness yet, same as the refund button in Payments above)
+          and the server's 403 surfaces as the action's error message. */}
+      {transactionData?.transaction && (
+        <section>
+          <h2>Transaction</h2>
+          <TransactionBlockView
+            transaction={transactionData.transaction}
+            onAction={(action, body) => transactionAction.mutate({ transactionId: transactionData.transaction!.id, action, body })}
+            error={transactionAction.isError ? (transactionAction.error as Error).message : null}
+          />
+        </section>
+      )}
     </div>
   );
 }
@@ -720,6 +853,202 @@ function PaymentMethodsBlock({
           <button onClick={() => setShowAdd(false)}>Cancel</button>
         </div>
       )}
+      {error && <p>{error}</p>}
+    </div>
+  );
+}
+
+function offerStatusLabel(o: OfferBlock): string {
+  return `${formatCents(o.offerPriceCents)} — ${o.status}`;
+}
+
+// Offer capture + acceptance (Phase 7). The buyer is either an already
+// captured Party (buyerPartyId) or minimum contact fields entered inline —
+// same "enter once" pattern as AddPartyForm above.
+function OffersBlock({
+  offers,
+  onCreate,
+  createError,
+  onAccept,
+  acceptError,
+  onDecline,
+  onWithdraw,
+}: {
+  offers: OfferBlock[];
+  onCreate: (input: Record<string, unknown>) => void;
+  createError: string | null;
+  onAccept: (offerId: number) => void;
+  acceptError: string | null;
+  onDecline: (offerId: number) => void;
+  onWithdraw: (offerId: number) => void;
+}) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [offerPrice, setOfferPrice] = useState("");
+  const [buyerFirstName, setBuyerFirstName] = useState("");
+  const [buyerLastName, setBuyerLastName] = useState("");
+  const [buyerEmail, setBuyerEmail] = useState("");
+  const [buyerMobile, setBuyerMobile] = useState("");
+
+  const submit = () => {
+    onCreate({
+      offerPriceCents: Math.round(Number(offerPrice) * 100),
+      buyer: {
+        firstName: buyerFirstName || undefined,
+        lastName: buyerLastName || undefined,
+        email: buyerEmail || undefined,
+        mobile: buyerMobile || undefined,
+      },
+    });
+    setShowAdd(false);
+    setOfferPrice("");
+    setBuyerFirstName("");
+    setBuyerLastName("");
+    setBuyerEmail("");
+    setBuyerMobile("");
+  };
+
+  const hasAccepted = offers.some((o) => o.status === "Accepted");
+
+  return (
+    <div>
+      {offers.length === 0 ? (
+        <p>No offers recorded yet.</p>
+      ) : (
+        <ul>
+          {offers.map((o) => (
+            <li key={o.id}>
+              {offerStatusLabel(o)}
+              {o.status === "Received" && (
+                <>
+                  <button onClick={() => onAccept(o.id)} disabled={hasAccepted}>
+                    Accept
+                  </button>
+                  <button onClick={() => onDecline(o.id)}>Decline</button>
+                  <button onClick={() => onWithdraw(o.id)}>Withdraw</button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {acceptError && <p>{acceptError}</p>}
+
+      {!hasAccepted &&
+        (!showAdd ? (
+          <button onClick={() => setShowAdd(true)}>+ Record Offer</button>
+        ) : (
+          <div>
+            <input value={offerPrice} onChange={(e) => setOfferPrice(e.target.value)} placeholder="Offer price ($)" />
+            <input value={buyerFirstName} onChange={(e) => setBuyerFirstName(e.target.value)} placeholder="Buyer first name" />
+            <input value={buyerLastName} onChange={(e) => setBuyerLastName(e.target.value)} placeholder="Buyer last name" />
+            <input value={buyerEmail} onChange={(e) => setBuyerEmail(e.target.value)} placeholder="Buyer email" />
+            <input value={buyerMobile} onChange={(e) => setBuyerMobile(e.target.value)} placeholder="Buyer mobile" />
+            <button onClick={submit} disabled={!offerPrice || !buyerFirstName}>
+              Save
+            </button>
+            <button onClick={() => setShowAdd(false)}>Cancel</button>
+          </div>
+        ))}
+      {createError && <p>{createError}</p>}
+    </div>
+  );
+}
+
+// Transaction lifecycle (Phase 7) — contract signing → settlement →
+// payout → close, matching lib/transactions.ts's chokepoints one for one.
+function TransactionBlockView({
+  transaction,
+  onAction,
+  error,
+}: {
+  transaction: TransactionBlock;
+  onAction: (action: string, body?: Record<string, unknown>) => void;
+  error: string | null;
+}) {
+  const [settlementDate, setSettlementDate] = useState("");
+  const [fundsAmount, setFundsAmount] = useState("");
+
+  return (
+    <div>
+      <p>
+        Purchase price: {formatCents(transaction.purchasePriceCents)} · Status: {transaction.status}
+      </p>
+
+      <p>
+        Contract: {transaction.contractDate ? `signed ${transaction.contractDate}` : "not yet signed"}
+        {!transaction.contractDate && <button onClick={() => onAction("contract-signed")}>Mark Contract Signed</button>}
+      </p>
+
+      <p>
+        Finance: {transaction.financeApprovedAt ? `approved ${transaction.financeApprovedAt}` : "not recorded"}
+        {!transaction.financeApprovedAt && (
+          <button onClick={() => onAction("finance-approved")}>Mark Finance Approved</button>
+        )}
+      </p>
+
+      <p>
+        Settlement:{" "}
+        {transaction.settlementCompletedAt
+          ? `completed ${transaction.settlementCompletedAt}`
+          : transaction.settlementDate
+            ? `scheduled ${transaction.settlementDate}`
+            : "not yet scheduled"}
+      </p>
+      {!transaction.settlementCompletedAt && (
+        <div>
+          <input type="date" value={settlementDate} onChange={(e) => setSettlementDate(e.target.value)} />
+          <button
+            onClick={() => settlementDate && onAction("settlement-schedule", { settlementDate })}
+            disabled={!settlementDate}
+          >
+            Schedule Settlement
+          </button>
+          {transaction.settlementDate && (
+            <button onClick={() => onAction("settlement-complete")}>Mark Settlement Completed</button>
+          )}
+        </div>
+      )}
+
+      <p>
+        Commission:{" "}
+        {transaction.commissionCalculatedAt
+          ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
+          : "not yet calculated"}
+        {!transaction.commissionCalculatedAt && (
+          <button onClick={() => onAction("calculate-commission")}>Calculate Commission</button>
+        )}
+      </p>
+
+      <p>
+        Funds received: {formatCents(transaction.fundsReceivedCents)}
+        <input value={fundsAmount} onChange={(e) => setFundsAmount(e.target.value)} placeholder="Amount ($)" />
+        <button
+          onClick={() => {
+            if (!fundsAmount) return;
+            onAction("funds-received", { amountCents: Math.round(Number(fundsAmount) * 100) });
+            setFundsAmount("");
+          }}
+          disabled={!fundsAmount}
+        >
+          Record Funds Received
+        </button>
+      </p>
+
+      <p>
+        Agent paid: {transaction.agentPaidAt ?? "not yet"}
+        {!transaction.agentPaidAt && <button onClick={() => onAction("agent-paid")}>Mark Agent Paid</button>}
+      </p>
+
+      <p>
+        {transaction.status === "Closed" ? (
+          `Closed ${transaction.closedAt}`
+        ) : (
+          <button onClick={() => onAction("close")} disabled={transaction.status !== "Settled"}>
+            Close Transaction
+          </button>
+        )}
+      </p>
+
       {error && <p>{error}</p>}
     </div>
   );
