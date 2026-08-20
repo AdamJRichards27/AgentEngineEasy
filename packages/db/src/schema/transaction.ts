@@ -18,6 +18,14 @@ export const offers = pgTable("offers", {
 
 // Real structured fields from day one — not a single flat `commission` number
 // (the clearest schema gap the prior Agent Engine audit found).
+//
+// Phase 7 (ARCHITECTURE.md §10): this table had zero rows anywhere in the
+// app until offer acceptance actually created one, so the milestone columns
+// below were added fresh rather than migrated — same "zero pre-existing
+// rows, no migration risk" justification Phase 6 used for paymentMethods.
+// status progresses ContractPreparation -> UnderContract ->
+// SettlementScheduled -> Settled -> Closed; financeApprovedAt is informational
+// (not every contract carries a finance condition) and never gates status.
 export const transactions = pgTable("transactions", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull().references(() => properties.id),
@@ -29,7 +37,9 @@ export const transactions = pgTable("transactions", {
   depositCents: integer("deposit_cents"),
 
   contractDate: timestamp("contract_date"),
-  settlementDate: timestamp("settlement_date"),
+  financeApprovedAt: timestamp("finance_approved_at"),
+  settlementDate: timestamp("settlement_date"), // scheduled date
+  settlementCompletedAt: timestamp("settlement_completed_at"), // actual completion
 
   legalRepresentatives: jsonb("legal_representatives"), // { sellerSolicitor, buyerSolicitor }
 
@@ -37,6 +47,17 @@ export const transactions = pgTable("transactions", {
 
   grossCommissionCents: integer("gross_commission_cents"),
   gstCents: integer("gst_cents"),
+  commissionCalculatedAt: timestamp("commission_calculated_at"),
+
+  // Manual bookkeeping records, not real fund movement — this app has no
+  // trust-accounting ledger/provider; these are agent/brokerage-admin
+  // confirmations (e.g. "the trust account statement shows this cleared"),
+  // real trust-account integration is future scope.
+  fundsReceivedCents: integer("funds_received_cents").notNull().default(0), // cumulative — may recur for partial payments
+  fundsReceivedAt: timestamp("funds_received_at"),
+  agentPaidAt: timestamp("agent_paid_at"),
+
+  closedAt: timestamp("closed_at"),
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

@@ -1,5 +1,15 @@
 import { eq, and, inArray } from "drizzle-orm";
-import { db, properties, propertyParties, workflows, workflowSteps, amlVerifications, documentPackages, documents } from "@aee/db";
+import {
+  db,
+  properties,
+  propertyParties,
+  workflows,
+  workflowSteps,
+  amlVerifications,
+  documentPackages,
+  documents,
+  transactions,
+} from "@aee/db";
 
 const AML_TERMINAL_OK = ["Complete"];
 const AML_NEEDS_REVIEW = ["Review Required", "Failed"];
@@ -136,4 +146,69 @@ export async function refreshReadyToListSteps(propertyId: number): Promise<void>
     .update(properties)
     .set({ amlStatusSummary: amlSummary, updatedAt: new Date() })
     .where(eq(properties.id, propertyId));
+}
+
+/**
+ * WorkflowStep orchestration for the Transaction workflow (Phase 7,
+ * ARCHITECTURE.md §10) — same "recompute from live state after every
+ * mutation" shape as refreshReadyToListSteps above, keyed off the single
+ * Transaction a property has (this build assumes one active Transaction per
+ * property at a time — a prior contract falling through and a fresh offer
+ * being accepted later is real future scope, not handled here, same as
+ * Phase 6 documented its payer-resolution gap rather than silently
+ * mishandling it).
+ */
+export async function refreshTransactionSteps(propertyId: number): Promise<void> {
+  const [workflow] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "Transaction")));
+  if (!workflow) return;
+
+  const [transaction] = await db.select().from(transactions).where(eq(transactions.propertyId, propertyId));
+  if (!transaction) return;
+
+  const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
+  const stepByKey = new Map(steps.map((s) => [s.stepKey, s]));
+
+  let contractSigning: StepUpdate;
+  if (transaction.contractDate) {
+    contractSigning = { status: "Complete", blockedReason: null, completedAt: transaction.contractDate };
+  } else {
+    contractSigning = { status: "InProgress", blockedReason: null, completedAt: null };
+  }
+
+  let settlement: StepUpdate;
+  if (contractSigning.status !== "Complete") {
+    settlement = { status: "Blocked", blockedReason: "Awaiting contract signing.", completedAt: null };
+  } else if (transaction.settlementCompletedAt) {
+    settlement = { status: "Complete", blockedReason: null, completedAt: transaction.settlementCompletedAt };
+  } else if (transaction.settlementDate) {
+    settlement = { status: "InProgress", blockedReason: `Scheduled — awaiting completion.`, completedAt: null };
+  } else {
+    settlement = { status: "Ready", blockedReason: "Not yet scheduled.", completedAt: null };
+  }
+
+  let payout: StepUpdate;
+  if (settlement.status !== "Complete") {
+    payout = { status: "Blocked", blockedReason: "Awaiting settlement.", completedAt: null };
+  } else if (transaction.agentPaidAt) {
+    payout = { status: "Complete", blockedReason: null, completedAt: transaction.agentPaidAt };
+  } else if (transaction.fundsReceivedCents > 0) {
+    payout = { status: "InProgress", blockedReason: "Funds received — awaiting agent payout.", completedAt: null };
+  } else {
+    payout = { status: "Ready", blockedReason: "Awaiting funds received.", completedAt: null };
+  }
+
+  const updates: Array<[string, StepUpdate]> = [
+    ["ContractSigning", contractSigning],
+    ["Settlement", settlement],
+    ["Payout", payout],
+  ];
+
+  for (const [key, update] of updates) {
+    const step = stepByKey.get(key);
+    if (!step) continue;
+    await db.update(workflowSteps).set(update).where(eq(workflowSteps.id, step.id));
+  }
 }

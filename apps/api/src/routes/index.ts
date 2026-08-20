@@ -5,6 +5,8 @@ import { partiesRouter } from "./parties.js";
 import { amlRouter } from "./aml.js";
 import { documentsRouter } from "./documents.js";
 import { paymentsRouter } from "./payments.js";
+import { offersRouter } from "./offers.js";
+import { transactionsRouter } from "./transactions.js";
 
 export const apiRouter = Router();
 
@@ -14,6 +16,8 @@ apiRouter.use("/parties", partiesRouter);
 apiRouter.use("/aml", amlRouter);
 apiRouter.use("/documents", documentsRouter);
 apiRouter.use("/payments", paymentsRouter);
+apiRouter.use("/offers", offersRouter);
+apiRouter.use("/transactions", transactionsRouter);
 
-// Phase 7+ route stubs — offers.ts, transactions.ts land as those phases
-// are built (ARCHITECTURE.md §10).
+// Phase 8 — Agent command experience (Home screen, exceptions surfaced) is
+// next; no further route stubs remain (ARCHITECTURE.md §10).
