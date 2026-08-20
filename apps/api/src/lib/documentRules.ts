@@ -3,12 +3,21 @@ export interface RequiredDocumentRule {
   title: string;
 }
 
+// Bumped whenever BASE_DOCUMENTS/STATE_DOCUMENTS changes shape in a way
+// that affects which documents an already-created DocumentPackage was
+// built from — stamped onto DocumentPackage.ruleSetVersion (Phase 5) so a
+// package created under an older rule set is traceable, not silently
+// reinterpreted as having been produced by the current one.
+export const DOCUMENT_RULE_SET_VERSION = 1;
+
 // Required-document determination (Build Brief §9-10, ARCHITECTURE.md §10
-// Phase 3). This is a placeholder rule set — it exists so a DocumentPackage
-// can be created and tracked through the workflow. The real per-state rule
-// engine, template population, and legal/compliance content accuracy review
-// are explicitly Phase 5 scope; nothing below has been verified against
-// current state legislation and none of it should be treated as such.
+// Phase 3/5). This is still a placeholder rule set, now versioned — it
+// exists so a DocumentPackage can be created, populated, and tracked
+// through the workflow. Real legal/compliance content accuracy review
+// against current state legislation has NOT happened; nothing below (or in
+// lib/documentTemplates.ts's rendered output) should be treated as
+// verified legal content or sent to a real client without review by a
+// licensed conveyancer/lawyer.
 const BASE_DOCUMENTS: RequiredDocumentRule[] = [
   { documentType: "AgencyAgreement", title: "Exclusive Agency Agreement" },
   { documentType: "AMLConsent", title: "Client Identification & AML Consent" },

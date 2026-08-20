@@ -15,6 +15,7 @@
     "@aee/integration-property-data": "workspace:*",
     "@aee/integration-aml": "workspace:*",
     "@aee/integration-esign": "workspace:*",
+    "@aee/integration-object-storage": "workspace:*",
     "@aee/integration-payments": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "express": "^4.21.0",

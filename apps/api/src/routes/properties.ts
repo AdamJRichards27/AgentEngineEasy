@@ -11,6 +11,8 @@ import {
   amlVerifications,
   documentPackages,
   documents,
+  signatureRequests,
+  agencyAgreementTerms,
   insertPropertySchema,
 } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
@@ -18,7 +20,7 @@ import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
-import { determineRequiredDocuments } from "../lib/documentRules.js";
+import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/documentRules.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 
 export const propertiesRouter = Router();
@@ -173,6 +175,13 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   const packageDocuments = docPackage
     ? await db.select().from(documents).where(eq(documents.packageId, docPackage.id))
     : [];
+  // Phase 5: signature status + whether commission terms have been
+  // captured yet, so the workspace can offer "generate"/"send"/"resolve
+  // missing terms" without a separate round trip.
+  const [signatureRequest] = docPackage
+    ? await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, docPackage.id))
+    : [];
+  const [agreementTerms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, id));
 
   res.json({
     property: {
@@ -218,9 +227,18 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
       ? {
           id: docPackage.id,
           status: docPackage.status,
-          documents: packageDocuments.map((d) => ({ documentType: d.documentType, title: d.title, status: d.status })),
+          documents: packageDocuments.map((d) => ({
+            id: d.id,
+            documentType: d.documentType,
+            title: d.title,
+            status: d.status,
+          })),
+          signatureRequest: signatureRequest
+            ? { id: signatureRequest.id, status: signatureRequest.status, sentAt: signatureRequest.sentAt, completedAt: signatureRequest.completedAt }
+            : null,
         }
       : null,
+    agencyAgreementTerms: agreementTerms ?? null,
   });
 });
 
@@ -330,7 +348,13 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
     const required = determineRequiredDocuments(property.state);
     [docPackage] = await db
       .insert(documentPackages)
-      .values({ propertyId: id, purpose: "ReadyToList", state: property.state, status: "Preparing" })
+      .values({
+        propertyId: id,
+        purpose: "ReadyToList",
+        state: property.state,
+        status: "Preparing",
+        ruleSetVersion: DOCUMENT_RULE_SET_VERSION,
+      })
       .returning();
     await db.insert(documents).values(
       required.map((r) => ({

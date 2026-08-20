@@ -41,7 +41,17 @@ interface PartyLink {
 interface DocumentPackageBlock {
   id: number;
   status: string;
-  documents: Array<{ documentType: string; title: string; status: string }>;
+  documents: Array<{ id: number; documentType: string; title: string; status: string }>;
+  signatureRequest: { id: number; status: string; sentAt: string | null; completedAt: string | null } | null;
+}
+
+interface AgencyAgreementTermsBlock {
+  id: number;
+  commissionType: string;
+  commissionRateBps: number | null;
+  flatFeeCents: number | null;
+  marketingFeeCents: number | null;
+  agreementTermDays: number;
 }
 
 interface WorkspaceResponse {
@@ -50,6 +60,7 @@ interface WorkspaceResponse {
   parties: PartyLink[];
   nextActions: Array<{ label: string; status: string; blockedReason?: string | null }>;
   documentPackage: DocumentPackageBlock | null;
+  agencyAgreementTerms: AgencyAgreementTermsBlock | null;
 }
 
 const ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
@@ -125,6 +136,31 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
       invalidate();
     },
   });
+
+  // Phase 5: agency agreement terms capture, template population, and
+  // send-for-signature.
+  const saveAgencyTerms = useMutation({
+    mutationFn: (input: Record<string, unknown>) =>
+      apiFetch(`/documents/agency-agreement-terms/${propertyId}`, { method: "PUT", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+
+  const populatePackage = useMutation({
+    mutationFn: (packageId: number) => apiFetch(`/documents/packages/${packageId}/populate`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+
+  const sendForSignature = useMutation({
+    mutationFn: (packageId: number) => apiFetch(`/documents/packages/${packageId}/send-for-signature`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+
+  const [preview, setPreview] = useState<{ documentId: number; content: string } | null>(null);
+  const previewDocument = async (documentId: number) => {
+    const res = await fetch(`/api/documents/${documentId}/content`);
+    const content = res.ok ? await res.text() : `Could not load content (${res.status}).`;
+    setPreview({ documentId, content });
+  };
 
   if (isLoading || !data) return <p>Loading…</p>;
 
@@ -261,19 +297,74 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         )}
       </section>
 
-      {/* Required documents (ARCHITECTURE.md §10 Phase 3) — determined and
-          created by Ready to List; content population/e-sign is Phase 5. */}
+      {/* Agency agreement terms (Phase 5) — real structured fields (Build
+          Brief §3 explicitly rejected the legacy app's opaque-JSON
+          commission storage). Required before the AgencyAgreement document
+          itself can be generated — see the "not yet captured" note below. */}
+      {data.documentPackage && (
+        <section>
+          <h2>Agency agreement terms</h2>
+          <AgencyTermsForm
+            initial={data.agencyAgreementTerms}
+            onSubmit={(input) => saveAgencyTerms.mutate(input)}
+          />
+        </section>
+      )}
+
+      {/* Required documents (ARCHITECTURE.md §10 Phase 3/5) — determined by
+          Ready to List, generated and sent for signature here. Every
+          generated document is a placeholder — see the disclaimer banner in
+          its content — pending real legal review. */}
       {data.documentPackage && (
         <section>
           <h2>Required Documents</h2>
           <p>Package status: {data.documentPackage.status}</p>
           <ul>
-            {data.documentPackage.documents.map((d, i) => (
-              <li key={i}>
+            {data.documentPackage.documents.map((d) => (
+              <li key={d.id}>
                 {d.title} — {d.status}
+                {(d.status === "Generated" || d.status === "Signed") && (
+                  <button onClick={() => previewDocument(d.id)}>Preview</button>
+                )}
               </li>
             ))}
           </ul>
+          <button onClick={() => populatePackage.mutate(data.documentPackage!.id)}>Generate Documents</button>
+          {((populatePackage.data as any)?.skipped?.length ?? 0) > 0 && (
+            <p>
+              {(populatePackage.data as any).skipped
+                .map((s: { reason: string }) => s.reason)
+                .join(" ")}
+            </p>
+          )}
+          {populatePackage.isError && <p>{(populatePackage.error as Error).message}</p>}
+
+          <button
+            onClick={() => sendForSignature.mutate(data.documentPackage!.id)}
+            disabled={data.documentPackage.status !== "Ready"}
+          >
+            Send for Signature
+          </button>
+          {data.documentPackage.status !== "Ready" && data.documentPackage.status !== "Sent" && data.documentPackage.status !== "Completed" && (
+            <p>Generate every document before sending for signature.</p>
+          )}
+          {sendForSignature.isError && <p>{(sendForSignature.error as Error).message}</p>}
+
+          {data.documentPackage.signatureRequest && (
+            <p>
+              Signature status: {data.documentPackage.signatureRequest.status}
+              {data.documentPackage.signatureRequest.completedAt
+                ? ` (completed ${data.documentPackage.signatureRequest.completedAt})`
+                : ""}
+            </p>
+          )}
+
+          {preview && (
+            <div style={{ border: "1px solid", padding: "0.5rem", marginTop: "0.5rem" }}>
+              <button onClick={() => setPreview(null)}>Close preview</button>
+              <pre style={{ whiteSpace: "pre-wrap" }}>{preview.content}</pre>
+            </div>
+          )}
         </section>
       )}
 
@@ -352,6 +443,65 @@ function AddPartyForm({
       <input value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="Mobile" />
       <button onClick={submit}>Save</button>
       <button onClick={onCancel}>Cancel</button>
+    </div>
+  );
+}
+
+const COMMISSION_TYPES = ["Percentage", "FlatFee"] as const;
+
+// Real structured agency-agreement terms capture (Phase 5) — feeds directly
+// into the AgencyAgreement document template (apps/api/src/lib/
+// documentTemplates.ts); the document can't be generated until these are
+// saved at least once.
+function AgencyTermsForm({
+  initial,
+  onSubmit,
+}: {
+  initial: {
+    commissionType: string;
+    commissionRateBps: number | null;
+    flatFeeCents: number | null;
+    marketingFeeCents: number | null;
+    agreementTermDays: number;
+  } | null;
+  onSubmit: (input: Record<string, unknown>) => void;
+}) {
+  const [commissionType, setCommissionType] = useState<(typeof COMMISSION_TYPES)[number]>(
+    (initial?.commissionType as (typeof COMMISSION_TYPES)[number]) ?? "Percentage",
+  );
+  const [commissionRate, setCommissionRate] = useState(initial?.commissionRateBps ? (initial.commissionRateBps / 100).toString() : "");
+  const [flatFee, setFlatFee] = useState(initial?.flatFeeCents ? (initial.flatFeeCents / 100).toString() : "");
+  const [marketingFee, setMarketingFee] = useState(initial?.marketingFeeCents ? (initial.marketingFeeCents / 100).toString() : "");
+  const [termDays, setTermDays] = useState(String(initial?.agreementTermDays ?? 90));
+
+  const submit = () => {
+    onSubmit({
+      commissionType,
+      commissionRateBps: commissionType === "Percentage" && commissionRate ? Math.round(Number(commissionRate) * 100) : undefined,
+      flatFeeCents: commissionType === "FlatFee" && flatFee ? Math.round(Number(flatFee) * 100) : undefined,
+      marketingFeeCents: marketingFee ? Math.round(Number(marketingFee) * 100) : undefined,
+      agreementTermDays: Number(termDays) || 90,
+    });
+  };
+
+  return (
+    <div>
+      {!initial && <p>Not yet captured — the Agency Agreement document can't be generated until these are saved.</p>}
+      <select value={commissionType} onChange={(e) => setCommissionType(e.target.value as (typeof COMMISSION_TYPES)[number])}>
+        {COMMISSION_TYPES.map((t) => (
+          <option key={t} value={t}>
+            {t}
+          </option>
+        ))}
+      </select>
+      {commissionType === "Percentage" ? (
+        <input value={commissionRate} onChange={(e) => setCommissionRate(e.target.value)} placeholder="Commission rate (%)" />
+      ) : (
+        <input value={flatFee} onChange={(e) => setFlatFee(e.target.value)} placeholder="Flat fee ($)" />
+      )}
+      <input value={marketingFee} onChange={(e) => setMarketingFee(e.target.value)} placeholder="Marketing fee ($, optional)" />
+      <input value={termDays} onChange={(e) => setTermDays(e.target.value)} placeholder="Agreement term (days)" />
+      <button onClick={submit}>Save Terms</button>
     </div>
   );
 }
