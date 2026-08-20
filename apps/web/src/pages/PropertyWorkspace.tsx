@@ -54,6 +54,34 @@ interface AgencyAgreementTermsBlock {
   agreementTermDays: number;
 }
 
+interface ServiceOrderBlock {
+  id: number;
+  propertyId: number;
+  serviceType: string;
+  provider: string;
+  customerPriceCents: number;
+  gstCents: number;
+  paymentStatus: string;
+  status: string;
+}
+
+interface PaymentMethodBlock {
+  id: number;
+  payerType: string;
+  payerId: number;
+  provider: string;
+  label: string | null;
+  isDefault: boolean;
+}
+
+interface PaymentBlock {
+  id: number;
+  status: string;
+  amountCents: number;
+  receiptUrl: string | null;
+  failureReason: string | null;
+}
+
 interface WorkspaceResponse {
   property: PropertyOverview;
   ownership: OwnershipBlock;
@@ -153,6 +181,43 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const sendForSignature = useMutation({
     mutationFn: (packageId: number) => apiFetch(`/documents/packages/${packageId}/send-for-signature`, { method: "POST" }),
     onSuccess: invalidate,
+  });
+
+  // Phase 6: service charges (AML etc., billed via ServiceOrder) + stored
+  // payment methods. Actual charging goes through the same idempotent
+  // chokepoint pattern as the rest of the app — see lib/payments.ts.
+  const { data: serviceOrdersData } = useQuery({
+    queryKey: ["service-orders", propertyId],
+    queryFn: () => apiFetch<{ serviceOrders: ServiceOrderBlock[] }>(`/aml/service-orders/by-property/${propertyId}`),
+  });
+
+  const { data: paymentMethodsData } = useQuery({
+    queryKey: ["payment-methods"],
+    queryFn: () => apiFetch<{ mine: PaymentMethodBlock[]; brokerage: PaymentMethodBlock[] }>("/payments/payment-methods"),
+  });
+
+  const invalidateServiceOrders = () => queryClient.invalidateQueries({ queryKey: ["service-orders", propertyId] });
+
+  const addPaymentMethod = useMutation({
+    mutationFn: (input: Record<string, unknown>) => apiFetch("/payments/payment-methods", { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["payment-methods"] }),
+  });
+
+  const chargeServiceOrder = useMutation({
+    mutationFn: (serviceOrderId: number) => apiFetch(`/payments/service-orders/${serviceOrderId}/charge`, { method: "POST" }),
+    onSuccess: (_data, serviceOrderId) => {
+      invalidateServiceOrders();
+      queryClient.invalidateQueries({ queryKey: ["service-order-payments", serviceOrderId] });
+    },
+  });
+
+  const refundPayment = useMutation({
+    mutationFn: ({ paymentId, serviceOrderId }: { paymentId: number; serviceOrderId: number }) =>
+      apiFetch(`/payments/${paymentId}/refund`, { method: "POST" }).then((r) => ({ result: r, serviceOrderId })),
+    onSuccess: ({ serviceOrderId }) => {
+      invalidateServiceOrders();
+      queryClient.invalidateQueries({ queryKey: ["service-order-payments", serviceOrderId] });
+    },
   });
 
   const [preview, setPreview] = useState<{ documentId: number; content: string } | null>(null);
@@ -368,6 +433,43 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         </section>
       )}
 
+      {/* Service charges & payment methods (Phase 6, ARCHITECTURE.md §10) —
+          ServiceOrder rows (e.g. the AML check) get created elsewhere
+          (lib/aml.ts); this is where they're actually charged. Charging
+          resolves to the listing agent's own default stored method. */}
+      <section>
+        <h2>Payment methods</h2>
+        <PaymentMethodsBlock
+          mine={paymentMethodsData?.mine ?? []}
+          brokerage={paymentMethodsData?.brokerage ?? []}
+          onAdd={(input) => addPaymentMethod.mutate(input)}
+          error={addPaymentMethod.isError ? (addPaymentMethod.error as Error).message : null}
+        />
+      </section>
+
+      {serviceOrdersData && serviceOrdersData.serviceOrders.length > 0 && (
+        <section>
+          <h2>Service charges</h2>
+          <ul>
+            {serviceOrdersData.serviceOrders.map((so) => (
+              <ServiceOrderRow
+                key={so.id}
+                serviceOrder={so}
+                onCharge={() => chargeServiceOrder.mutate(so.id)}
+                charging={chargeServiceOrder.isPending && chargeServiceOrder.variables === so.id}
+                chargeError={
+                  chargeServiceOrder.isError && chargeServiceOrder.variables === so.id
+                    ? (chargeServiceOrder.error as Error).message
+                    : null
+                }
+                onRefund={(paymentId) => refundPayment.mutate({ paymentId, serviceOrderId: so.id })}
+                refundError={refundPayment.isError ? (refundPayment.error as Error).message : null}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+
       {data.property.workflowStage === "Appraisal" && (
         <div>
           <button onClick={() => readyToList.mutate()} disabled={sellers.length === 0}>
@@ -502,6 +604,123 @@ function AgencyTermsForm({
       <input value={marketingFee} onChange={(e) => setMarketingFee(e.target.value)} placeholder="Marketing fee ($, optional)" />
       <input value={termDays} onChange={(e) => setTermDays(e.target.value)} placeholder="Agreement term (days)" />
       <button onClick={submit}>Save Terms</button>
+    </div>
+  );
+}
+
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+// One ServiceOrder (e.g. the AML check) plus its own payment attempts —
+// fetched per-row rather than folded into the workspace response, since
+// most properties will only ever have a couple of these.
+function ServiceOrderRow({
+  serviceOrder,
+  onCharge,
+  charging,
+  chargeError,
+  onRefund,
+  refundError,
+}: {
+  serviceOrder: ServiceOrderBlock;
+  onCharge: () => void;
+  charging: boolean;
+  chargeError: string | null;
+  onRefund: (paymentId: number) => void;
+  refundError: string | null;
+}) {
+  const { data } = useQuery({
+    queryKey: ["service-order-payments", serviceOrder.id],
+    queryFn: () => apiFetch<{ payments: PaymentBlock[] }>(`/payments/service-orders/${serviceOrder.id}/payments`),
+  });
+  const latest = data?.payments?.[0] ?? null;
+
+  return (
+    <li>
+      {serviceOrder.serviceType} — {formatCents(serviceOrder.customerPriceCents + serviceOrder.gstCents)} (incl. GST) —{" "}
+      {serviceOrder.paymentStatus}
+      {(serviceOrder.paymentStatus === "Pending" || serviceOrder.paymentStatus === "Failed") && (
+        <button onClick={onCharge} disabled={charging}>
+          {charging ? "Charging…" : serviceOrder.paymentStatus === "Failed" ? "Retry Charge" : "Charge"}
+        </button>
+      )}
+      {chargeError && <p>{chargeError}</p>}
+      {latest?.failureReason && <p>Last attempt failed: {latest.failureReason}</p>}
+      {latest?.receiptUrl && (
+        <p>
+          <a href={latest.receiptUrl} target="_blank" rel="noreferrer">
+            View receipt
+          </a>
+        </p>
+      )}
+      {latest && latest.status === "Succeeded" && (
+        <button onClick={() => onRefund(latest.id)}>Refund</button>
+      )}
+      {refundError && <p>{refundError}</p>}
+    </li>
+  );
+}
+
+// Add-a-stored-method form (Phase 6). Real card capture must happen
+// client-side via Stripe Elements/PaymentSheet — this only ever accepts the
+// resulting tokenized references, never raw card data, matching the hard
+// requirement that card numbers never transit this server.
+function PaymentMethodsBlock({
+  mine,
+  brokerage,
+  onAdd,
+  error,
+}: {
+  mine: PaymentMethodBlock[];
+  brokerage: PaymentMethodBlock[];
+  onAdd: (input: Record<string, unknown>) => void;
+  error: string | null;
+}) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [scope, setScope] = useState<"Mine" | "Brokerage">("Mine");
+  const [label, setLabel] = useState("");
+  const [providerCustomerRef, setProviderCustomerRef] = useState("");
+  const [providerPaymentMethodRef, setProviderPaymentMethodRef] = useState("");
+
+  const submit = () => {
+    onAdd({ scope, label: label || undefined, providerCustomerRef, providerPaymentMethodRef });
+    setShowAdd(false);
+    setLabel("");
+    setProviderCustomerRef("");
+    setProviderPaymentMethodRef("");
+  };
+
+  return (
+    <div>
+      <p>My methods: {mine.length === 0 ? "none on file" : mine.map((m) => m.label ?? `#${m.id}`).join(", ")}</p>
+      <p>Brokerage methods: {brokerage.length === 0 ? "none on file" : brokerage.map((m) => m.label ?? `#${m.id}`).join(", ")}</p>
+      {!showAdd ? (
+        <button onClick={() => setShowAdd(true)}>+ Add Payment Method</button>
+      ) : (
+        <div>
+          <select value={scope} onChange={(e) => setScope(e.target.value as "Mine" | "Brokerage")}>
+            <option value="Mine">Mine</option>
+            <option value="Brokerage">Brokerage</option>
+          </select>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. Visa ending 4242)" />
+          <input
+            value={providerCustomerRef}
+            onChange={(e) => setProviderCustomerRef(e.target.value)}
+            placeholder="Provider customer reference"
+          />
+          <input
+            value={providerPaymentMethodRef}
+            onChange={(e) => setProviderPaymentMethodRef(e.target.value)}
+            placeholder="Provider payment method reference"
+          />
+          <button onClick={submit} disabled={!providerCustomerRef || !providerPaymentMethodRef}>
+            Save
+          </button>
+          <button onClick={() => setShowAdd(false)}>Cancel</button>
+        </div>
+      )}
+      {error && <p>{error}</p>}
     </div>
   );
 }
