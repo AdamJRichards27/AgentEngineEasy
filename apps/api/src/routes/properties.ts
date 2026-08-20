@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { db, properties, propertyParties, parties, workflows, workflowSteps, insertPropertySchema } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
@@ -50,6 +50,9 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
   if (parsed.data.placeId) {
     // Ownership check (Build Brief §8) — surfaced as a review prompt later,
     // never a hard block, since trusts/companies/estates/POAs can legitimately differ.
+    // No sellers exist yet at this point, so this only fetches the data —
+    // the actual comparison runs in reviewOwnershipForProperty() once a
+    // Seller party is added (see routes/parties.ts).
     ownershipData = await propertyDataProvider.lookupOwnership(parsed.data.placeId);
   }
 
@@ -130,9 +133,11 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   }
 
   const links = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, id));
-  const partyRows = links.length
-    ? await db.select().from(parties).where(eq(parties.id, links[0].partyId))
-    : [];
+  const partyIds = links.map((l) => l.partyId);
+  // Multi-seller capture (Phase 2): fetch every linked party, not just the
+  // first — the original Phase 1 version of this query only ever returned
+  // one party regardless of how many were linked.
+  const partyRows = partyIds.length ? await db.select().from(parties).where(inArray(parties.id, partyIds)) : [];
 
   const [workflow] = await db.select().from(workflows).where(eq(workflows.propertyId, id));
   const steps = workflow
@@ -140,9 +145,28 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     : [];
 
   res.json({
-    property,
+    property: {
+      id: property.id,
+      formattedAddress: property.formattedAddress,
+      suburb: property.suburb,
+      state: property.state,
+      postcode: property.postcode,
+      isManualAddress: property.isManualAddress,
+      workflowStage: property.workflowStage,
+      amlStatusSummary: property.amlStatusSummary,
+      listingStatus: property.listingStatus,
+    },
+    ownership: {
+      data: property.ownershipData,
+      reviewRequired: property.ownershipReviewRequired,
+      reviewedBy: property.ownershipReviewedBy,
+      reviewedAt: property.ownershipReviewedAt,
+      reviewNotes: property.ownershipReviewNotes,
+    },
     parties: links.map((link) => ({
+      linkId: link.id,
       role: link.role,
+      isPrimary: link.isPrimary,
       partyId: link.partyId,
       party: partyRows.find((p) => p.id === link.partyId) ?? null,
     })),
@@ -150,6 +174,50 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
       .sort((a, b) => a.sequence - b.sequence)
       .map((s) => ({ label: s.label, status: s.status, blockedReason: s.blockedReason })),
   });
+});
+
+// Ownership review resolution (Build Brief §8): the agent clears the review
+// flag with an optional note — this never blocked property progress, it
+// only surfaced a prompt, so resolving it is a simple acknowledgement.
+const ownershipReviewSchema = z.object({ notes: z.string().optional() });
+
+propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const parsed = ownershipReviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+  const user = req.authedUser!;
+
+  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const [updated] = await db
+    .update(properties)
+    .set({
+      ownershipReviewRequired: false,
+      ownershipReviewedBy: user.id,
+      ownershipReviewedAt: new Date(),
+      ownershipReviewNotes: parsed.data.notes ?? null,
+      updatedAt: new Date(),
+    })
+    .where(eq(properties.id, id))
+    .returning();
+
+  await logAudit({
+    userId: user.id,
+    action: "ownership_review_resolved",
+    recordType: "property",
+    recordId: String(id),
+    propertyId: id,
+    updatedValue: parsed.data.notes,
+  });
+
+  res.json({ property: updated });
 });
 
 // Ready to List (Build Brief §5): once selected, AgentEngineEasy determines

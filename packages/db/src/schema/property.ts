@@ -39,6 +39,9 @@ export const properties = pgTable("properties", {
   // entered (Build Brief §8) — mismatch shown as a review prompt, not a hard block.
   ownershipData: jsonb("ownership_data"),
   ownershipReviewRequired: boolean("ownership_review_required").notNull().default(false),
+  ownershipReviewedBy: integer("ownership_reviewed_by").references(() => users.id),
+  ownershipReviewedAt: timestamp("ownership_reviewed_at"),
+  ownershipReviewNotes: text("ownership_review_notes"),
 
   isDraft: boolean("is_draft").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),

@@ -5,7 +5,12 @@
     "rootDir": "src",
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    // apps/* are terminal, bundled build targets, never consumed as
+    // libraries by another TS package — composite/declaration output is
+    // for packages/* only (see apps/api/tsconfig.json for the same note).
+    "composite": false,
+    "declaration": false
   },
   "include": ["src"]
 }

@@ -1,18 +1,22 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { db, parties, propertyParties, properties } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
+import { reviewOwnershipForProperty } from "../lib/ownership.js";
 
 export const partiesRouter = Router();
 
 // One-time party capture (Build Brief §4): minimum fields only; entity
 // structure detail (trust/company/estate) is requested only when needed.
+// Multi-seller capture (ARCHITECTURE.md §10 Phase 2): a property can have
+// any number of Seller links — nothing here caps it to one.
 const addPartySchema = z.object({
   propertyId: z.number(),
   role: z.enum(["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"]),
   partyType: z.enum(["Person", "Organisation", "Trust", "Estate", "Other"]).default("Person"),
+  isPrimary: z.boolean().optional().default(false),
   firstName: z.string().optional(),
   middleName: z.string().optional(),
   lastName: z.string().optional(),
@@ -53,7 +57,12 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
 
   const [link] = await db
     .insert(propertyParties)
-    .values({ propertyId: parsed.data.propertyId, partyId: party.id, role: parsed.data.role })
+    .values({
+      propertyId: parsed.data.propertyId,
+      partyId: party.id,
+      role: parsed.data.role,
+      isPrimary: parsed.data.isPrimary,
+    })
     .returning();
 
   await logAudit({
@@ -64,6 +73,14 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
     propertyId: parsed.data.propertyId,
   });
 
+  if (parsed.data.role === "Seller") {
+    // Re-run the ownership review-not-block check now that a seller exists
+    // to compare against (Build Brief §8) — see apps/api/src/lib/ownership.ts.
+    await reviewOwnershipForProperty(parsed.data.propertyId).catch((err) =>
+      console.error("reviewOwnershipForProperty failed", err),
+    );
+  }
+
   res.status(201).json({ party, link });
 });
 
@@ -71,15 +88,46 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
   const links = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
   const partyIds = links.map((l) => l.partyId);
-  const allParties = partyIds.length
-    ? await db.select().from(parties)
-    : [];
-  const partyRows = allParties.filter((p) => partyIds.includes(p.id));
+  const partyRows = partyIds.length ? await db.select().from(parties).where(inArray(parties.id, partyIds)) : [];
 
   res.json({
     parties: links.map((link) => ({
+      linkId: link.id,
       role: link.role,
+      isPrimary: link.isPrimary,
       party: partyRows.find((p) => p.id === link.partyId) ?? null,
     })),
   });
+});
+
+// Removing a mis-added seller/buyer link (multi-seller capture polish,
+// Phase 2) — removes the property↔party link only; the Party record itself
+// is left intact since it may be linked elsewhere or worth keeping.
+partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
+  const linkId = Number(req.params.linkId);
+  const user = req.authedUser!;
+
+  const [link] = await db.select().from(propertyParties).where(eq(propertyParties.id, linkId));
+  if (!link) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  await db.delete(propertyParties).where(eq(propertyParties.id, linkId));
+
+  await logAudit({
+    userId: user.id,
+    action: "party_link_removed",
+    recordType: "property_party",
+    recordId: String(linkId),
+    propertyId: link.propertyId,
+  });
+
+  if (link.role === "Seller") {
+    await reviewOwnershipForProperty(link.propertyId).catch((err) =>
+      console.error("reviewOwnershipForProperty failed", err),
+    );
+  }
+
+  res.status(204).end();
 });

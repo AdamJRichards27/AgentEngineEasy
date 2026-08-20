@@ -16,6 +16,7 @@
     "@aee/integration-aml": "workspace:*",
     "@aee/integration-esign": "workspace:*",
     "@aee/integration-payments": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "express": "^4.21.0",
     "cors": "^2.8.5",
     "zod": "^3.25.76"
