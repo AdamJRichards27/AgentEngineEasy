@@ -1,7 +1,7 @@
 import { pgTable, serial, integer, text, numeric, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { properties, parties } from "./property.js";
+import { properties, parties } from "./property";
 
 // Offers are never overwritten in place — each change is a new row
 // (revision-chain pattern proven in Agent Engine Staging's offers.ts).

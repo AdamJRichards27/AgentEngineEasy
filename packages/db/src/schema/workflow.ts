@@ -1,7 +1,7 @@
 import { pgTable, serial, integer, text, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { properties } from "./property.js";
+import { properties } from "./property";
 
 // Generic engine: a Property (or, later, a Transaction) has an active
 // Workflow made of ordered WorkflowSteps. This is what answers "what needs

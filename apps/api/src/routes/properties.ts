@@ -1,11 +1,25 @@
 import { Router } from "express";
-import { eq, inArray } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { z } from "zod";
-import { db, properties, propertyParties, parties, workflows, workflowSteps, insertPropertySchema } from "@aee/db";
+import {
+  db,
+  properties,
+  propertyParties,
+  parties,
+  workflows,
+  workflowSteps,
+  amlVerifications,
+  documentPackages,
+  documents,
+  insertPropertySchema,
+} from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
+import { initiateAmlIfNeeded } from "../lib/aml.js";
+import { determineRequiredDocuments } from "../lib/documentRules.js";
+import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 
 export const propertiesRouter = Router();
 const propertyDataProvider = createPropertyDataProvider();
@@ -139,9 +153,25 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   // one party regardless of how many were linked.
   const partyRows = partyIds.length ? await db.select().from(parties).where(inArray(parties.id, partyIds)) : [];
 
+  // Phase 3: per-party AML status, matching the shape ARCHITECTURE.md §4
+  // originally documented (`parties: [{ name, role, amlStatus }]`).
+  const verifications = partyIds.length
+    ? await db.select().from(amlVerifications).where(
+        and(eq(amlVerifications.propertyId, id), inArray(amlVerifications.partyId, partyIds)),
+      )
+    : [];
+
   const [workflow] = await db.select().from(workflows).where(eq(workflows.propertyId, id));
   const steps = workflow
     ? await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id))
+    : [];
+
+  const [docPackage] = await db
+    .select()
+    .from(documentPackages)
+    .where(and(eq(documentPackages.propertyId, id), eq(documentPackages.purpose, "ReadyToList")));
+  const packageDocuments = docPackage
+    ? await db.select().from(documents).where(eq(documents.packageId, docPackage.id))
     : [];
 
   res.json({
@@ -169,10 +199,18 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
       isPrimary: link.isPrimary,
       partyId: link.partyId,
       party: partyRows.find((p) => p.id === link.partyId) ?? null,
+      amlStatus: verifications.find((v) => v.partyId === link.partyId)?.status ?? null,
     })),
     nextActions: steps
       .sort((a, b) => a.sequence - b.sequence)
       .map((s) => ({ label: s.label, status: s.status, blockedReason: s.blockedReason })),
+    documentPackage: docPackage
+      ? {
+          id: docPackage.id,
+          status: docPackage.status,
+          documents: packageDocuments.map((d) => ({ documentType: d.documentType, title: d.title, status: d.status })),
+        }
+      : null,
   });
 });
 
@@ -223,6 +261,12 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
 // Ready to List (Build Brief §5): once selected, AgentEngineEasy determines
 // and orchestrates the required next steps — the agent does not separately
 // visit an AML screen, a documents screen, and an e-signature screen.
+// Phase 3 (ARCHITECTURE.md §10): gates on at least one seller being
+// captured, initiates AML for every seller (idempotently — see
+// lib/aml.ts), determines and creates the required document package
+// (idempotently), and recomputes the workflow's step statuses from that
+// live state (lib/workflowSteps.ts). Ownership review, by contrast,
+// intentionally does NOT gate this — see lib/ownership.ts / Build Brief §8.
 propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
@@ -232,14 +276,86 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
     return;
   }
 
-  const [workflow] = await db
-    .insert(workflows)
-    .values({ propertyId: id, workflowType: "ReadyToList" })
-    .returning();
+  const links = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, id));
+  const sellerLinks = links.filter((l) => l.role === "Seller");
+  if (sellerLinks.length === 0) {
+    res.status(400).json({ error: "At least one seller must be captured before Ready to List." });
+    return;
+  }
 
-  await db.insert(workflowSteps).values(
-    READY_TO_LIST_STEPS.map((step) => ({ workflowId: workflow.id, ...step })),
-  );
+  // Idempotent: re-running Ready to List (e.g. a double click, or calling it
+  // again after adding another seller) reuses the existing workflow rather
+  // than creating a second one.
+  let [workflow] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, id), eq(workflows.workflowType, "ReadyToList")));
+  if (!workflow) {
+    [workflow] = await db.insert(workflows).values({ propertyId: id, workflowType: "ReadyToList" }).returning();
+    await db.insert(workflowSteps).values(READY_TO_LIST_STEPS.map((step) => ({ workflowId: workflow.id, ...step })));
+  }
+
+  // AML initiation — one order per seller, never a duplicate (Build Brief
+  // critical idempotency requirement) — see lib/aml.ts.
+  for (const link of sellerLinks) {
+    try {
+      await initiateAmlIfNeeded({
+        propertyId: id,
+        partyId: link.partyId,
+        userId: user.id,
+        brokerageId: user.brokerageId,
+      });
+    } catch (err) {
+      console.error(`initiateAmlIfNeeded failed for party ${link.partyId}`, err);
+    }
+  }
+
+  // Required-document determination + package creation — idempotent: only
+  // created once per property (see the ReadyToList-purpose lookup below).
+  let [docPackage] = await db
+    .select()
+    .from(documentPackages)
+    .where(and(eq(documentPackages.propertyId, id), eq(documentPackages.purpose, "ReadyToList")));
+  if (!docPackage) {
+    const required = determineRequiredDocuments(property.state);
+    [docPackage] = await db
+      .insert(documentPackages)
+      .values({ propertyId: id, purpose: "ReadyToList", state: property.state, status: "Preparing" })
+      .returning();
+    await db.insert(documents).values(
+      required.map((r) => ({
+        propertyId: id,
+        packageId: docPackage.id,
+        documentType: r.documentType,
+        title: r.title,
+        status: "Draft",
+      })),
+    );
+
+    try {
+      await publishDomainEvent({
+        eventType: "DOCUMENT_PACKAGE_CREATED",
+        occurredAt: new Date(),
+        propertyId: id,
+        transactionId: null,
+        partyId: null,
+        brokerageId: user.brokerageId,
+        agentId: user.id,
+        actorType: "USER",
+        actorId: user.id,
+        source: "api:properties:ready-to-list",
+        correlationId: newCorrelationId(),
+        causationId: null,
+        idempotencyKey: `document-package-created:${docPackage.id}`,
+        payload: { packageId: docPackage.id, documentTypes: required.map((r) => r.documentType) },
+        metadata: {},
+      });
+    } catch (err) {
+      console.error("publishDomainEvent(DOCUMENT_PACKAGE_CREATED) failed", err);
+    }
+  }
+
+  await refreshReadyToListSteps(id);
 
   await db.update(properties).set({ workflowStage: "Ready to List" }).where(eq(properties.id, id));
 
@@ -265,7 +381,8 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
     console.error("publishDomainEvent(READY_TO_LIST) failed", err);
   }
 
-  res.json({ workflow, steps: READY_TO_LIST_STEPS });
+  const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
+  res.json({ workflow, steps, documentPackage: docPackage });
 });
 
 export const _internal = { insertPropertySchema }; // re-export for tests

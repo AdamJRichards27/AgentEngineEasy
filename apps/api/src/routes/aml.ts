@@ -1,17 +1,19 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, amlVerifications, parties } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
-import { createAMLProvider } from "@aee/integration-aml";
+import { db, amlVerifications, parties, properties } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
+import { initiateAmlIfNeeded } from "../lib/aml.js";
+import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 
-// Phase 1 stub — full workflow (payment gate, webhook processing, exceptions)
-// is Phase 4 per ARCHITECTURE.md §10. This establishes the shape: AML must
-// be triggered from the property/party flow, never operated as a standalone
-// screen the agent has to separately visit (Build Brief §6).
+// Manual/direct AML request path — Ready to List (routes/properties.ts)
+// covers the common case automatically, but a Brokerage Administrator or
+// Pit Crew member may need to (re-)trigger a check for a party outside that
+// flow. Both paths funnel through lib/aml.ts's initiateAmlIfNeeded(), so
+// neither can double-order (Build Brief critical idempotency requirement).
+// Full workflow (payment gate, webhook processing, exceptions) is Phase 4
+// per ARCHITECTURE.md §10.
 export const amlRouter = Router();
-const amlProvider = createAMLProvider();
 
 const requestSchema = z.object({
   propertyId: z.number(),
@@ -27,63 +29,31 @@ amlRouter.post("/request", requireAuth, async (req, res) => {
   }
   const user = req.authedUser!;
 
+  const [property] = await db.select().from(properties).where(eq(properties.id, parsed.data.propertyId));
+  if (!property) {
+    res.status(404).json({ error: "Property not found" });
+    return;
+  }
+
   const [party] = await db.select().from(parties).where(eq(parties.id, parsed.data.partyId));
   if (!party) {
     res.status(404).json({ error: "Party not found" });
     return;
   }
 
-  const { providerReference } = await amlProvider.requestVerification({
+  const { verification, created } = await initiateAmlIfNeeded({
     propertyId: parsed.data.propertyId,
     partyId: parsed.data.partyId,
     verificationType: parsed.data.verificationType,
-    partyDetails: {
-      firstName: party.firstName ?? undefined,
-      middleName: party.middleName ?? undefined,
-      lastName: party.lastName ?? undefined,
-      email: party.email ?? undefined,
-      mobile: party.mobile ?? undefined,
-      residentialAddress: party.residentialAddress ?? undefined,
-    },
+    userId: user.id,
+    brokerageId: user.brokerageId,
   });
 
-  const [verification] = await db
-    .insert(amlVerifications)
-    .values({
-      propertyId: parsed.data.propertyId,
-      partyId: parsed.data.partyId,
-      provider: process.env.AML_PROVIDER ?? "mock",
-      providerReference,
-      verificationType: parsed.data.verificationType,
-      status: "Awaiting Seller",
-      requestedAt: new Date(),
-      createdBy: user.id,
-    })
-    .returning();
+  await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
+    console.error("refreshReadyToListSteps failed", err),
+  );
 
-  try {
-    await publishDomainEvent({
-      eventType: "AML_REQUESTED",
-      occurredAt: new Date(),
-      propertyId: parsed.data.propertyId,
-      transactionId: null,
-      partyId: parsed.data.partyId,
-      brokerageId: user.brokerageId,
-      agentId: user.id,
-      actorType: "USER",
-      actorId: user.id,
-      source: "api:aml:request",
-      correlationId: newCorrelationId(),
-      causationId: null,
-      idempotencyKey: `aml-requested:${verification.id}`,
-      payload: { verificationId: verification.id, providerReference },
-      metadata: {},
-    });
-  } catch (err) {
-    console.error("publishDomainEvent(AML_REQUESTED) failed", err);
-  }
-
-  res.status(201).json({ verification });
+  res.status(created ? 201 : 200).json({ verification, created });
 });
 
 amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {

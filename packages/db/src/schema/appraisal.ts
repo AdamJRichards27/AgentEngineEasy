@@ -1,7 +1,7 @@
 import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { properties } from "./property.js";
+import { properties } from "./property";
 
 export const appraisals = pgTable("appraisals", {
   id: serial("id").primaryKey(),

@@ -33,6 +33,13 @@ interface PartyLink {
   isPrimary: boolean;
   partyId: number;
   party: { firstName?: string; lastName?: string; organisationName?: string; email?: string; mobile?: string } | null;
+  amlStatus: string | null;
+}
+
+interface DocumentPackageBlock {
+  id: number;
+  status: string;
+  documents: Array<{ documentType: string; title: string; status: string }>;
 }
 
 interface WorkspaceResponse {
@@ -40,6 +47,7 @@ interface WorkspaceResponse {
   ownership: OwnershipBlock;
   parties: PartyLink[];
   nextActions: Array<{ label: string; status: string; blockedReason?: string | null }>;
+  documentPackage: DocumentPackageBlock | null;
 }
 
 const ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
@@ -158,6 +166,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             <li key={p.linkId}>
               {partyName(p.party)}
               {p.isPrimary ? " (primary)" : ""}
+              {p.amlStatus ? ` — AML: ${p.amlStatus}` : ""}
               <button onClick={() => removeParty.mutate(p.linkId)}>Remove</button>
             </li>
           ))}
@@ -200,8 +209,30 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         )}
       </section>
 
+      {/* Required documents (ARCHITECTURE.md §10 Phase 3) — determined and
+          created by Ready to List; content population/e-sign is Phase 5. */}
+      {data.documentPackage && (
+        <section>
+          <h2>Required Documents</h2>
+          <p>Package status: {data.documentPackage.status}</p>
+          <ul>
+            {data.documentPackage.documents.map((d, i) => (
+              <li key={i}>
+                {d.title} — {d.status}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       {data.property.workflowStage === "Appraisal" && (
-        <button onClick={() => readyToList.mutate()}>Ready to List</button>
+        <div>
+          <button onClick={() => readyToList.mutate()} disabled={sellers.length === 0}>
+            Ready to List
+          </button>
+          {sellers.length === 0 && <p>Capture at least one seller before Ready to List.</p>}
+          {readyToList.isError && <p>{(readyToList.error as Error).message}</p>}
+        </div>
       )}
     </div>
   );

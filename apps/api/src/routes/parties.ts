@@ -1,10 +1,20 @@
 import { Router } from "express";
-import { eq, inArray } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { z } from "zod";
-import { db, parties, propertyParties, properties } from "@aee/db";
+import { db, parties, propertyParties, properties, workflows } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
+import { initiateAmlIfNeeded } from "../lib/aml.js";
+import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
+
+async function readyToListWorkflowExists(propertyId: number): Promise<boolean> {
+  const [workflow] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "ReadyToList")));
+  return Boolean(workflow);
+}
 
 export const partiesRouter = Router();
 
@@ -79,6 +89,22 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
     await reviewOwnershipForProperty(parsed.data.propertyId).catch((err) =>
       console.error("reviewOwnershipForProperty failed", err),
     );
+
+    // If Ready to List already ran for this property, a seller added
+    // afterwards still needs AML initiated and the workflow steps
+    // recomputed — Ready to List itself only covers sellers present at the
+    // time it was triggered.
+    if (await readyToListWorkflowExists(parsed.data.propertyId)) {
+      await initiateAmlIfNeeded({
+        propertyId: parsed.data.propertyId,
+        partyId: party.id,
+        userId: user.id,
+        brokerageId: user.brokerageId,
+      }).catch((err) => console.error("initiateAmlIfNeeded failed", err));
+      await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
+        console.error("refreshReadyToListSteps failed", err),
+      );
+    }
   }
 
   res.status(201).json({ party, link });
@@ -127,6 +153,14 @@ partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
     await reviewOwnershipForProperty(link.propertyId).catch((err) =>
       console.error("reviewOwnershipForProperty failed", err),
     );
+    if (await readyToListWorkflowExists(link.propertyId)) {
+      // The seller's existing AML verification record is left in place —
+      // it's history, not deleted — but the workflow steps need to reflect
+      // the current seller list.
+      await refreshReadyToListSteps(link.propertyId).catch((err) =>
+        console.error("refreshReadyToListSteps failed", err),
+      );
+    }
   }
 
   res.status(204).end();

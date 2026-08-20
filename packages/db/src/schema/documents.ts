@@ -1,7 +1,7 @@
 import { pgTable, serial, integer, text, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { properties } from "./property.js";
+import { properties } from "./property";
 
 // A package is what gets sent as one signature envelope (Build Brief §10) —
 // e.g. "Ready to List package" = agency agreement + disclosures + AML consent.

@@ -1,8 +1,8 @@
 import { pgTable, serial, integer, text, boolean, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { properties, parties } from "./property.js";
-import { users } from "./users.js";
+import { properties, parties } from "./property";
+import { users } from "./users";
 
 // Agent-facing status only (Build Brief §6) — provider-side complexity
 // (18-value pipelines etc.) stays behind the AMLProvider adapter, never

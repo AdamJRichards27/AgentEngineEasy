@@ -1,8 +1,8 @@
 import { pgTable, serial, integer, text, numeric, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { properties, parties } from "./property.js";
-import { users, brokerages } from "./users.js";
+import { properties, parties } from "./property";
+import { users, brokerages } from "./users";
 
 // Who pays for a service — designed so the payer can later become a team,
 // brokerage, or subscription allowance without rebuilding ServiceOrder (§12).
@@ -66,4 +66,4 @@ export type ServiceOrder = typeof serviceOrders.$inferSelect;
 export type Payment = typeof payments.$inferSelect;
 
 // re-exported for callers that only need brokerage/user typing alongside commerce types
-export type { Brokerage, User } from "./users.js";
+export type { Brokerage, User } from "./users";

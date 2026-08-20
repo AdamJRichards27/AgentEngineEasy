@@ -1,7 +1,7 @@
 import { pgTable, serial, text, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { brokerages, users } from "./users.js";
+import { brokerages, users } from "./users";
 
 // The property progresses through this stage list; each stage is what
 // determines "what needs to happen next" on the Property Workspace.
