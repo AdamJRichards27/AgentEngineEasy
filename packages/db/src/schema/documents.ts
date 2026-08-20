@@ -1,16 +1,15 @@
-import { pgTable, serial, integer, text, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, timestamp, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
-import { z } from "zod";
-import { properties } from "./property";
+import { properties } from "./property.js";
+import { users } from "./users.js";
 
-// A package is what gets sent as one signature envelope (Build Brief §10) —
-// e.g. "Ready to List package" = agency agreement + disclosures + AML consent.
 export const documentPackages = pgTable("document_packages", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull().references(() => properties.id),
-  purpose: text("purpose").notNull(), // e.g. "ReadyToList", "Contract"
-  state: text("state"), // AU state/territory the package rules were resolved for
-  status: text("status").notNull().default("Preparing"), // Preparing | Ready | Sent | Completed
+  purpose: text("purpose").notNull(),
+  state: text("state"),
+  status: text("status").notNull().default("Preparing"),
+  ruleSetVersion: integer("rule_set_version").notNull().default(1),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -18,12 +17,11 @@ export const documentPackages = pgTable("document_packages", {
 export const documents = pgTable("documents", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull().references(() => properties.id),
-  packageId: integer("package_id").references(() => documentPackages.id),
-  documentType: text("document_type").notNull(), // e.g. AgencyAgreement, Disclosure, Form
+  packageId: integer("package_id").notNull().references(() => documentPackages.id),
+  documentType: text("document_type").notNull(),
   title: text("title").notNull(),
-  status: text("status").notNull().default("Draft"), // Draft | Generated | Signed
+  status: text("status").notNull().default("Draft"),
   objectStorageKey: text("object_storage_key"),
-  metadata: jsonb("metadata"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -31,24 +29,47 @@ export const documents = pgTable("documents", {
 export const signatureRequests = pgTable("signature_requests", {
   id: serial("id").primaryKey(),
   packageId: integer("package_id").notNull().references(() => documentPackages.id),
-  provider: text("provider").notNull(),
+  provider: text("provider").notNull().default("mock"),
   providerReference: text("provider_reference"),
-  signatories: jsonb("signatories"), // [{ partyId, name, email, status }]
-  status: text("status").notNull().default("Draft"), // Draft | Sent | PartiallySigned | Completed | Voided
+  status: text("status").notNull().default("Draft"),
   sentAt: timestamp("sent_at"),
   completedAt: timestamp("completed_at"),
   completedDocumentKey: text("completed_document_key"),
+  lastWebhookOutcome: text("last_webhook_outcome"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
-export const insertDocumentPackageSchema = createInsertSchema(documentPackages).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertDocumentSchema = createInsertSchema(documents).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertSignatureRequestSchema = createInsertSchema(signatureRequests).omit({ id: true, createdAt: true, updatedAt: true });
+// Phase 5: real structured agency-agreement commission terms — explicitly
+// not the legacy app's opaque-JSON commission storage (ARCHITECTURE.md §3).
+export const agencyAgreementTerms = pgTable(
+  "agency_agreement_terms",
+  {
+    id: serial("id").primaryKey(),
+    propertyId: integer("property_id").notNull().references(() => properties.id),
+    commissionType: text("commission_type").notNull().default("Percentage"),
+    commissionRateBps: integer("commission_rate_bps"),
+    flatFeeCents: integer("flat_fee_cents"),
+    marketingFeeCents: integer("marketing_fee_cents"),
+    agreementTermDays: integer("agreement_term_days").notNull().default(90),
+    createdBy: integer("created_by").references(() => users.id),
+    updatedBy: integer("updated_by").references(() => users.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({ onePerProperty: unique().on(t.propertyId) }),
+);
 
-export type InsertDocumentPackage = z.infer<typeof insertDocumentPackageSchema>;
-export type InsertDocument = z.infer<typeof insertDocumentSchema>;
-export type InsertSignatureRequest = z.infer<typeof insertSignatureRequestSchema>;
+export const insertDocumentPackageSchema = createInsertSchema(documentPackages);
+export const insertDocumentSchema = createInsertSchema(documents);
+export const insertSignatureRequestSchema = createInsertSchema(signatureRequests);
+export const insertAgencyAgreementTermsSchema = createInsertSchema(agencyAgreementTerms);
+
 export type DocumentPackage = typeof documentPackages.$inferSelect;
+export type InsertDocumentPackage = typeof documentPackages.$inferInsert;
 export type Document = typeof documents.$inferSelect;
+export type InsertDocument = typeof documents.$inferInsert;
 export type SignatureRequest = typeof signatureRequests.$inferSelect;
+export type InsertSignatureRequest = typeof signatureRequests.$inferInsert;
+export type AgencyAgreementTerms = typeof agencyAgreementTerms.$inferSelect;
+export type InsertAgencyAgreementTerms = typeof agencyAgreementTerms.$inferInsert;
