@@ -34,6 +34,8 @@ interface PartyLink {
   partyId: number;
   party: { firstName?: string; lastName?: string; organisationName?: string; email?: string; mobile?: string } | null;
   amlStatus: string | null;
+  amlVerificationId: number | null;
+  amlException: { outcome: string | null; riskLevel: string | null } | null;
 }
 
 interface DocumentPackageBlock {
@@ -66,6 +68,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const queryClient = useQueryClient();
   const [showAddParty, setShowAddParty] = useState(false);
   const [reviewNotes, setReviewNotes] = useState("");
+  const [exceptionNotes, setExceptionNotes] = useState<Record<number, string>>({});
 
   const { data, isLoading } = useQuery({
     queryKey: ["property-workspace", propertyId],
@@ -94,6 +97,24 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const removeParty = useMutation({
     mutationFn: (linkId: number) => apiFetch(`/parties/link/${linkId}`, { method: "DELETE" }),
     onSuccess: invalidate,
+  });
+
+  // AML exception handling (Phase 4): retry re-runs the check; resolve
+  // records a Brokerage Administrator's compliance decision (mandatory
+  // notes, enforced server-side too) rather than silently overriding a
+  // failed/flagged outcome.
+  const retryAml = useMutation({
+    mutationFn: (verificationId: number) => apiFetch(`/aml/${verificationId}/retry`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+
+  const resolveAmlException = useMutation({
+    mutationFn: ({ verificationId, notes }: { verificationId: number; notes: string }) =>
+      apiFetch(`/aml/${verificationId}/resolve-exception`, { method: "POST", body: JSON.stringify({ notes }) }),
+    onSuccess: (_data, variables) => {
+      setExceptionNotes((prev) => ({ ...prev, [variables.verificationId]: "" }));
+      invalidate();
+    },
   });
 
   const addParty = useMutation({
@@ -168,6 +189,37 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
               {p.isPrimary ? " (primary)" : ""}
               {p.amlStatus ? ` — AML: ${p.amlStatus}` : ""}
               <button onClick={() => removeParty.mutate(p.linkId)}>Remove</button>
+
+              {/* AML exception (Phase 4): Review Required / Failed never
+                  silently clears — retry re-runs the check, resolving
+                  requires a note and is a Brokerage Administrator action. */}
+              {p.amlException && p.amlVerificationId && (
+                <div style={{ border: "1px solid", padding: "0.5rem", marginTop: "0.25rem" }}>
+                  <p>
+                    AML exception{p.amlException.outcome ? ` (${p.amlException.outcome})` : ""}
+                    {p.amlException.riskLevel ? ` — risk: ${p.amlException.riskLevel}` : ""}
+                  </p>
+                  <button onClick={() => retryAml.mutate(p.amlVerificationId!)}>Retry check</button>
+                  <input
+                    value={exceptionNotes[p.amlVerificationId] ?? ""}
+                    onChange={(e) =>
+                      setExceptionNotes((prev) => ({ ...prev, [p.amlVerificationId!]: e.target.value }))
+                    }
+                    placeholder="Compliance note (required to resolve)"
+                  />
+                  <button
+                    onClick={() =>
+                      resolveAmlException.mutate({
+                        verificationId: p.amlVerificationId!,
+                        notes: exceptionNotes[p.amlVerificationId!] ?? "",
+                      })
+                    }
+                    disabled={!(exceptionNotes[p.amlVerificationId] ?? "").trim()}
+                  >
+                    Mark Resolved
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

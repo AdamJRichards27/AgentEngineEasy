@@ -1,18 +1,23 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, amlVerifications, parties, properties } from "@aee/db";
-import { requireAuth } from "../middlewares/auth.js";
-import { initiateAmlIfNeeded } from "../lib/aml.js";
+import { db, amlVerifications, parties, properties, serviceOrders } from "@aee/db";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
+import { logAudit } from "../lib/audit.js";
 
 // Manual/direct AML request path — Ready to List (routes/properties.ts)
 // covers the common case automatically, but a Brokerage Administrator or
 // Pit Crew member may need to (re-)trigger a check for a party outside that
 // flow. Both paths funnel through lib/aml.ts's initiateAmlIfNeeded(), so
 // neither can double-order (Build Brief critical idempotency requirement).
-// Full workflow (payment gate, webhook processing, exceptions) is Phase 4
-// per ARCHITECTURE.md §10.
+//
+// Phase 4 (ARCHITECTURE.md §10) adds: a real HttpAMLProvider adapter
+// (packages/integrations/aml), webhook processing (below, POST /webhook),
+// exception handling (retry / resolve-exception), and ServiceOrder billing
+// records created alongside each verification (see lib/aml.ts). Actually
+// charging a stored payment method for those ServiceOrders is Phase 6.
 export const amlRouter = Router();
 
 const requestSchema = z.object({
@@ -60,4 +65,99 @@ amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
   const rows = await db.select().from(amlVerifications).where(eq(amlVerifications.propertyId, propertyId));
   res.json({ verifications: rows });
+});
+
+// Provider webhook — reports the outcome of a verification requested via
+// requestVerification(). Deliberately NOT behind requireAuth: the caller is
+// the AML provider's server, not a logged-in AgentEngineEasy user, so
+// authenticity is established by the HMAC signature instead (see
+// lib/aml.ts processAmlWebhook / HttpAMLProvider.verifyWebhookSignature).
+// Uses req.rawBody (captured in app.ts) rather than JSON.stringify(req.body)
+// so the signature check runs against the exact bytes the provider signed.
+amlRouter.post("/webhook", async (req, res) => {
+  const signature = String(req.header("x-aml-signature") ?? req.header("x-webhook-signature") ?? "");
+  const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
+
+  const result = await processAmlWebhook(rawBody, signature, req.body);
+
+  if (result.reason === "invalid_signature") {
+    res.status(401).json({ error: "Invalid webhook signature" });
+    return;
+  }
+  if (result.reason === "verification_not_found") {
+    // 200, not 404/400 — an unrecognised verification is usually the
+    // provider retrying a webhook for a check this environment never made
+    // (e.g. staging vs prod credentials), not a client error to retry into
+    // a loop.
+    res.status(200).json({ received: true, processed: false, reason: result.reason });
+    return;
+  }
+
+  res.status(200).json({ received: true, processed: result.processed, reason: result.reason });
+});
+
+const resolveExceptionSchema = z.object({ notes: z.string().trim().min(1, "notes are required to resolve an AML exception") });
+
+// Exception resolution (Phase 4) — restricted to Brokerage Administrators:
+// this records a compliance decision, not a routine agent action. Requires
+// non-empty notes so it can never be a silent one-click bypass of a failed
+// or flagged identity check.
+amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const verificationId = Number(req.params.verificationId);
+  const parsed = resolveExceptionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+  const user = req.authedUser!;
+
+  try {
+    const verification = await resolveAmlException({ verificationId, userId: user.id, notes: parsed.data.notes });
+    await logAudit({
+      userId: user.id,
+      action: "aml_exception_resolved",
+      recordType: "aml_verification",
+      recordId: String(verificationId),
+      propertyId: verification.propertyId,
+      updatedValue: parsed.data.notes,
+    });
+    res.json({ verification });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+// Retry — re-runs a Failed or still-open Review Required check against the
+// same AmlVerification row (see lib/aml.ts retryAmlVerification). Any
+// authenticated user can retry; unlike resolve-exception this doesn't
+// override an outcome, it just asks the provider again.
+amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
+  const verificationId = Number(req.params.verificationId);
+  const user = req.authedUser!;
+
+  try {
+    const verification = await retryAmlVerification(verificationId);
+    await logAudit({
+      userId: user.id,
+      action: "aml_verification_retried",
+      recordType: "aml_verification",
+      recordId: String(verificationId),
+      propertyId: verification.propertyId,
+    });
+    res.json({ verification });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+// Cost/billing visibility for a property's AML checks (Section 11) — the
+// ServiceOrder rows created by initiateAmlIfNeeded, read-only here; actual
+// charging is Phase 6.
+amlRouter.get("/service-orders/by-property/:propertyId", requireAuth, async (req, res) => {
+  const propertyId = Number(req.params.propertyId);
+  const rows = await db
+    .select()
+    .from(serviceOrders)
+    .where(eq(serviceOrders.propertyId, propertyId));
+  res.json({ serviceOrders: rows });
 });

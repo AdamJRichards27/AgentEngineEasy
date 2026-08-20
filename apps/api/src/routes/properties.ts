@@ -193,14 +193,24 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
       reviewedAt: property.ownershipReviewedAt,
       reviewNotes: property.ownershipReviewNotes,
     },
-    parties: links.map((link) => ({
-      linkId: link.id,
-      role: link.role,
-      isPrimary: link.isPrimary,
-      partyId: link.partyId,
-      party: partyRows.find((p) => p.id === link.partyId) ?? null,
-      amlStatus: verifications.find((v) => v.partyId === link.partyId)?.status ?? null,
-    })),
+    parties: links.map((link) => {
+      const verification = verifications.find((v) => v.partyId === link.partyId);
+      return {
+        linkId: link.id,
+        role: link.role,
+        isPrimary: link.isPrimary,
+        partyId: link.partyId,
+        party: partyRows.find((p) => p.id === link.partyId) ?? null,
+        amlStatus: verification?.status ?? null,
+        // Phase 4: lets the workspace offer retry/resolve-exception actions
+        // directly against the verification without a separate lookup.
+        amlVerificationId: verification?.id ?? null,
+        amlException:
+          verification && (verification.status === "Review Required" || verification.status === "Failed")
+            ? { outcome: verification.outcome, riskLevel: verification.riskLevel }
+            : null,
+      };
+    }),
     nextActions: steps
       .sort((a, b) => a.sequence - b.sequence)
       .map((s) => ({ label: s.label, status: s.status, blockedReason: s.blockedReason })),
