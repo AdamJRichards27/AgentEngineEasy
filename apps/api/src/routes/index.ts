@@ -7,6 +7,7 @@ import { documentsRouter } from "./documents.js";
 import { paymentsRouter } from "./payments.js";
 import { offersRouter } from "./offers.js";
 import { transactionsRouter } from "./transactions.js";
+import { homeRouter } from "./home.js";
 
 export const apiRouter = Router();
 
@@ -18,6 +19,8 @@ apiRouter.use("/documents", documentsRouter);
 apiRouter.use("/payments", paymentsRouter);
 apiRouter.use("/offers", offersRouter);
 apiRouter.use("/transactions", transactionsRouter);
+apiRouter.use("/home", homeRouter);
 
-// Phase 8 — Agent command experience (Home screen, exceptions surfaced) is
-// next; no further route stubs remain (ARCHITECTURE.md §10).
+// Phase 8 (Agent command experience: Home screen, exceptions surfaced) is
+// built. No further phases are scoped in ARCHITECTURE.md §10 beyond this —
+// BI dashboards are explicitly out of scope for this build.
