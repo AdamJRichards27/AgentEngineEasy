@@ -1,0 +1,17 @@
+{
+  "name": "agent-engine-easy",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev:api": "pnpm --filter @aee/api run dev",
+    "dev:web": "pnpm --filter @aee/web run dev",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "typecheck": "tsc --build",
+    "db:push": "pnpm --filter @aee/db run db:push"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "prettier": "^3.9.5"
+  }
+}

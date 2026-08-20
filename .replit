@@ -1,0 +1,12 @@
+run = "pnpm install && pnpm run dev:api"
+entrypoint = "apps/api/src/index.ts"
+
+[env]
+PORT = "8080"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[nix]
+channel = "stable-24_05"
