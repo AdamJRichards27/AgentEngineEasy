@@ -231,3 +231,48 @@ export async function getHomeSummary(brokerageId: number): Promise<HomeSummaryIt
 
   return items;
 }
+
+export interface DashboardProperty {
+  id: number;
+  address: string;
+  workflowStage: string;
+}
+
+export interface DashboardSettlement {
+  propertyId: number;
+  address: string;
+  settlementDate: string;
+}
+
+// The Dashboard's other two sections (staging brief: "Dashboard — Needs
+// Attention, Active Properties, Settlements"). Needs Attention is
+// getHomeSummary()'s Exception items above; these two are simple,
+// unfiltered lists — not exceptions, just "what's currently open" and
+// "what's coming up" — so they're kept separate rather than folded into the
+// exceptions/next-actions aggregation, which is deliberately curated.
+export async function getDashboardOverview(
+  brokerageId: number,
+): Promise<{ activeProperties: DashboardProperty[]; upcomingSettlements: DashboardSettlement[] }> {
+  const propertyRows = await db.select().from(properties).where(eq(properties.brokerageId, brokerageId));
+  const activeProperties = propertyRows
+    .filter((p) => p.workflowStage !== "Closed")
+    .sort((a, b) => a.formattedAddress.localeCompare(b.formattedAddress))
+    .map((p) => ({ id: p.id, address: p.formattedAddress, workflowStage: p.workflowStage }));
+
+  if (activeProperties.length === 0) return { activeProperties, upcomingSettlements: [] };
+
+  const propertyIds = activeProperties.map((p) => p.id);
+  const addressById = new Map(activeProperties.map((p) => [p.id, p.address]));
+  const transactionRows = await db.select().from(transactions).where(inArray(transactions.propertyId, propertyIds));
+
+  const upcomingSettlements = transactionRows
+    .filter((t) => t.settlementDate && !t.settlementCompletedAt)
+    .sort((a, b) => a.settlementDate!.getTime() - b.settlementDate!.getTime())
+    .map((t) => ({
+      propertyId: t.propertyId,
+      address: addressById.get(t.propertyId) ?? `Property ${t.propertyId}`,
+      settlementDate: t.settlementDate!.toISOString(),
+    }));
+
+  return { activeProperties, upcomingSettlements };
+}
