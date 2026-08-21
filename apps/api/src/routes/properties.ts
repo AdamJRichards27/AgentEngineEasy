@@ -22,6 +22,7 @@ import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/documentRules.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
+import { getPropertyTimeline } from "../lib/timeline.js";
 
 export const propertiesRouter = Router();
 const propertyDataProvider = createPropertyDataProvider();
@@ -182,6 +183,10 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     ? await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, docPackage.id))
     : [];
   const [agreementTerms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, id));
+  const timeline = await getPropertyTimeline(id).catch((err) => {
+    console.error("getPropertyTimeline failed", err);
+    return [];
+  });
 
   res.json({
     property: {
@@ -239,6 +244,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
         }
       : null,
     agencyAgreementTerms: agreementTerms ?? null,
+    timeline,
   });
 });
 
