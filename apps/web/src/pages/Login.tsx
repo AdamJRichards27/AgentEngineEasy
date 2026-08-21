@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
 import type { SessionUser } from "../lib/session";
+import { LOGO_LOGIN } from "../brand";
 
 interface KnownUser {
   id: number;
@@ -51,7 +52,7 @@ export default function Login() {
   return (
     <div className="auth-screen">
       <div className="auth-card">
-        <h1>AgentEngineEasy</h1>
+        <img src={LOGO_LOGIN} alt="Agent Engine" className="auth-logo" />
         <p className="muted">Sign in to get started.</p>
 
         {knownUsers && knownUsers.length > 0 && !showForm && (

@@ -161,10 +161,10 @@ a {
 }
 
 .app-sidebar-brand {
-  color: var(--color-sidebar-text);
-  font-weight: 700;
-  font-size: 1.05rem;
-  padding: 0.4rem 0.5rem;
+  display: block;
+  height: 30px;
+  width: auto;
+  margin: 0.4rem 0.5rem;
 }
 
 .app-sidebar-nav {
@@ -705,8 +705,11 @@ details.section > *:not(summary) {
   max-width: 380px;
 }
 
-.auth-card h1 {
-  color: var(--color-text);
+.auth-logo {
+  display: block;
+  height: 23px;
+  width: auto;
+  margin: 0 auto 1rem;
 }
 
 .cost-summary {
