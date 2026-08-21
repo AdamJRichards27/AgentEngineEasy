@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { authRouter } from "./auth.js";
 import { healthRouter } from "./health.js";
 import { propertiesRouter } from "./properties.js";
 import { partiesRouter } from "./parties.js";
@@ -11,6 +12,7 @@ import { homeRouter } from "./home.js";
 
 export const apiRouter = Router();
 
+apiRouter.use("/auth", authRouter);
 apiRouter.use("/health", healthRouter);
 apiRouter.use("/properties", propertiesRouter);
 apiRouter.use("/parties", partiesRouter);

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch } from "../lib/api";
+import { apiFetch, ApiError } from "../lib/api";
 
 interface PropertyOverview {
   id: number;
@@ -110,6 +110,12 @@ interface TransactionBlock {
   closedAt: string | null;
 }
 
+interface TimelineEntry {
+  id: number;
+  at: string;
+  label: string;
+}
+
 interface WorkspaceResponse {
   property: PropertyOverview;
   ownership: OwnershipBlock;
@@ -117,6 +123,7 @@ interface WorkspaceResponse {
   nextActions: Array<{ label: string; status: string; blockedReason?: string | null }>;
   documentPackage: DocumentPackageBlock | null;
   agencyAgreementTerms: AgencyAgreementTermsBlock | null;
+  timeline: TimelineEntry[];
 }
 
 const ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
@@ -127,9 +134,57 @@ function partyName(p: PartyLink["party"]): string {
   return p.organisationName || `${p.firstName ?? ""} ${p.lastName ?? ""}`.trim() || "—";
 }
 
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function formatWhen(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const isToday = d.toDateString() === today.toDateString();
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return isToday ? `Today ${time}` : `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${time}`;
+}
+
+// Clean, agent-facing AML status copy (staging brief's AML Status UX) —
+// never the raw provider outcome/status string.
+function amlStatusCopy(status: string): string {
+  switch (status) {
+    case "Not Started":
+      return "Not started";
+    case "Awaiting Seller":
+    case "In Progress":
+      return "Verification Sent";
+    case "Complete":
+      return "Ready";
+    case "Review Required":
+      return "Needs review";
+    case "Failed":
+      return "Failed";
+    default:
+      return status;
+  }
+}
+
+function amlPillClass(status: string): string {
+  if (status === "Complete") return "pill pill-success";
+  if (status === "Review Required" || status === "Failed") return "pill pill-danger";
+  return "pill";
+}
+
+// Clean document status copy (staging brief's Document UX) — Draft/Generated
+// are implementation detail, not something an agent needs to parse.
+function documentStatusCopy(status: string): string {
+  if (status === "Signed") return "Signed";
+  if (status === "Generated") return "Ready";
+  return "Preparing";
+}
+
 // The Property Action Screen (Build Brief §13 / ARCHITECTURE.md §4) — the
 // screen the whole build orients around. Answers "what needs to happen
-// next?" with one primary action, not a module menu.
+// next?" with one primary action up top, then a compact People/Timeline
+// view, then everything else tucked behind progressive-disclosure sections
+// (staging brief: "avoid tabs... prioritise the current action").
 export default function PropertyWorkspace({ params }: { params: { id: string } }) {
   const propertyId = Number(params.id);
   const queryClient = useQueryClient();
@@ -137,7 +192,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const [reviewNotes, setReviewNotes] = useState("");
   const [exceptionNotes, setExceptionNotes] = useState<Record<number, string>>({});
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["property-workspace", propertyId],
     queryFn: () => apiFetch<WorkspaceResponse>(`/properties/${propertyId}/workspace`),
   });
@@ -233,9 +288,9 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
   const chargeServiceOrder = useMutation({
     mutationFn: (serviceOrderId: number) => apiFetch(`/payments/service-orders/${serviceOrderId}/charge`, { method: "POST" }),
-    onSuccess: (_data, serviceOrderId) => {
+    onSuccess: () => {
       invalidateServiceOrders();
-      queryClient.invalidateQueries({ queryKey: ["service-order-payments", serviceOrderId] });
+      queryClient.invalidateQueries({ queryKey: ["service-order-payments"] });
     },
   });
 
@@ -249,10 +304,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   });
 
   // Phase 7: Go Live, offer capture/acceptance, and the Transaction
-  // lifecycle (contract → settlement → payout → close). Mirrors the
-  // idempotent-chokepoint pattern used everywhere else — accepting an
-  // already-accepted offer, or closing an already-closed transaction, is
-  // just a no-op response from the server, not a client-side guess.
+  // lifecycle (contract → settlement → payout → close).
   const goLive = useMutation({
     mutationFn: () => apiFetch(`/properties/${propertyId}/go-live`, { method: "POST" }),
     onSuccess: invalidate,
@@ -306,42 +358,162 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
   const [preview, setPreview] = useState<{ documentId: number; content: string } | null>(null);
   const previewDocument = async (documentId: number) => {
-    const res = await fetch(`/api/documents/${documentId}/content`);
-    const content = res.ok ? await res.text() : `Could not load content (${res.status}).`;
+    const res = await fetch(`/api/documents/${documentId}/content`, { credentials: "include" });
+    const content = res.ok ? await res.text() : "Could not load this document right now.";
     setPreview({ documentId, content });
   };
 
-  if (isLoading || !data) return <p>Loading…</p>;
+  if (isLoading || !data) {
+    if (isError) return <p className="error-text">{(error as ApiError).friendly}</p>;
+    return <p className="muted">Loading…</p>;
+  }
 
   const sellers = data.parties.filter((p) => p.role === "Seller");
   const others = data.parties.filter((p) => p.role !== "Seller");
+  const pendingServiceOrders = (serviceOrdersData?.serviceOrders ?? []).filter(
+    (so) => so.paymentStatus === "Pending" || so.paymentStatus === "Failed",
+  );
+  const defaultPaymentMethod = paymentMethodsData?.mine.find((m) => m.isDefault) ?? paymentMethodsData?.mine[0] ?? null;
+  const transaction = transactionData?.transaction ?? null;
+  const offers = offersData?.offers ?? [];
+
+  // "What happens next?" (staging brief's Next Action Design) — one
+  // prominent primary action, derived from live state, instead of a grid of
+  // module buttons. Falls through to the next-most-specific thing that's
+  // actually true right now.
+  let primary: { title: string; description?: string; action?: ReactNode } | null = null;
+
+  if (data.property.workflowStage === "Appraisal") {
+    primary = {
+      title: "Verify Sellers & Get Ready to List",
+      description:
+        sellers.length > 0
+          ? `${sellers.length} seller${sellers.length > 1 ? "s" : ""} captured.`
+          : "Add at least one seller below before continuing.",
+      action: (
+        <button className="btn btn-primary" onClick={() => readyToList.mutate()} disabled={sellers.length === 0 || readyToList.isPending}>
+          Ready to List
+        </button>
+      ),
+    };
+  } else if (data.property.workflowStage === "Ready to List") {
+    const amlExceptionParty = sellers.find((p) => p.amlException);
+    const pendingCharge = pendingServiceOrders[0];
+    const incompleteStep = data.nextActions.find((a) => a.status !== "Complete");
+
+    if (amlExceptionParty) {
+      primary = {
+        title: `AML review needed — ${partyName(amlExceptionParty.party)}`,
+        description: "See People below to retry the check or resolve it.",
+      };
+    } else if (pendingCharge && defaultPaymentMethod) {
+      primary = {
+        title: "Pay for AML verification",
+        description: `${pendingServiceOrders.length} service charge${pendingServiceOrders.length > 1 ? "s" : ""} awaiting payment.`,
+        action: (
+          <button className="btn btn-primary" onClick={() => chargeServiceOrder.mutate(pendingCharge.id)} disabled={chargeServiceOrder.isPending}>
+            Confirm & Continue
+          </button>
+        ),
+      };
+    } else if (pendingCharge && !defaultPaymentMethod) {
+      primary = { title: "Add a payment method", description: "Needed to pay for AML verification — see Payment methods below." };
+    } else if (data.documentPackage && !data.agencyAgreementTerms) {
+      primary = { title: "Add agency agreement terms", description: "Required before documents can be generated — see Documents below." };
+    } else if (data.documentPackage && data.documentPackage.documents.some((d) => d.status === "Draft")) {
+      primary = {
+        title: "Generate required documents",
+        action: (
+          <button className="btn btn-primary" onClick={() => populatePackage.mutate(data.documentPackage!.id)} disabled={populatePackage.isPending}>
+            Generate Documents
+          </button>
+        ),
+      };
+    } else if (data.documentPackage?.status === "Ready") {
+      primary = {
+        title: "Send Agency Documents",
+        action: (
+          <button className="btn btn-primary" onClick={() => sendForSignature.mutate(data.documentPackage!.id)} disabled={sendForSignature.isPending}>
+            Send for Signature
+          </button>
+        ),
+      };
+    } else if (data.documentPackage?.status === "Sent") {
+      primary = { title: "Awaiting signatures", description: "We'll update this automatically as each seller signs." };
+    } else if (!incompleteStep) {
+      primary = {
+        title: "Ready to go live",
+        action: (
+          <button className="btn btn-primary" onClick={() => goLive.mutate()} disabled={goLive.isPending}>
+            Go Live
+          </button>
+        ),
+      };
+    } else {
+      primary = { title: incompleteStep.label, description: incompleteStep.blockedReason ?? undefined };
+    }
+  } else if (data.property.workflowStage === "Listed" && !transaction) {
+    const received = offers.filter((o) => o.status === "Received");
+    primary =
+      received.length > 0
+        ? { title: `Review ${received.length} offer${received.length > 1 ? "s" : ""}`, description: "See Offers below." }
+        : { title: "Awaiting offers", description: "Record an offer as soon as a buyer submits one — see Offers below." };
+  } else if (transaction) {
+    if (!transaction.contractDate) {
+      primary = {
+        title: "Prepare Contract",
+        action: (
+          <button className="btn btn-primary" onClick={() => transactionAction.mutate({ transactionId: transaction.id, action: "contract-signed" })}>
+            Mark Contract Signed
+          </button>
+        ),
+      };
+    } else if (!transaction.financeApprovedAt) {
+      primary = {
+        title: "Confirm Finance",
+        action: (
+          <button className="btn btn-primary" onClick={() => transactionAction.mutate({ transactionId: transaction.id, action: "finance-approved" })}>
+            Mark Finance Approved
+          </button>
+        ),
+      };
+    } else if (!transaction.settlementDate) {
+      primary = { title: "Schedule settlement", description: "See Transaction below to set a date." };
+    } else if (!transaction.settlementCompletedAt) {
+      primary = {
+        title: "Prepare Settlement",
+        description: `Settlement due ${new Date(transaction.settlementDate).toLocaleDateString()}.`,
+      };
+    } else if (transaction.status !== "Closed") {
+      primary = { title: "Wrap up the transaction", description: "See Transaction below for funds, payout, and close." };
+    } else {
+      primary = { title: "Transaction closed", description: "There's nothing further to action on this property." };
+    }
+  }
 
   return (
     <div>
       <h1>{data.property.formattedAddress}</h1>
+      <p className="muted">
+        {data.property.workflowStage}
+        {[data.property.suburb, data.property.state, data.property.postcode].filter(Boolean).length > 0
+          ? ` · ${[data.property.suburb, data.property.state, data.property.postcode].filter(Boolean).join(", ")}`
+          : ""}
+      </p>
 
-      {/* Property overview (ARCHITECTURE.md §10 Phase 2) */}
-      <section>
-        <h2>Overview</h2>
-        <p>Stage: {data.property.workflowStage}</p>
-        <p>
-          {[data.property.suburb, data.property.state, data.property.postcode].filter(Boolean).join(", ") ||
-            (data.property.isManualAddress ? "Manually entered address — no further detail available." : "—")}
-        </p>
-        <p>AML: {data.property.amlStatusSummary} · Listing: {data.property.listingStatus}</p>
-      </section>
-
-      {/* Ownership review — review, not block (Build Brief §8) */}
+      {/* Ownership review — review, not block (Build Brief §8). Always
+          visible when it applies, since it's a standing prompt rather than
+          part of the single "what happens next" flow. */}
       {data.ownership.reviewRequired && (
-        <section style={{ border: "1px solid", padding: "0.75rem" }}>
+        <section className="card">
           <h2>Ownership review</h2>
-          <p>
+          <p className="muted">
             The seller(s) entered don't clearly match the title ownership data on file. This does not block
             progress — trusts, companies, estates, and powers of attorney can legitimately differ. Review and
             clear when satisfied.
           </p>
           {data.ownership.data && (
-            <ul>
+            <ul className="plain">
               {data.ownership.data.map((o, i) => (
                 <li key={i}>
                   {o.ownerName}
@@ -355,68 +527,95 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             onChange={(e) => setReviewNotes(e.target.value)}
             placeholder="Optional note (e.g. selling via Power of Attorney)"
           />
-          <button onClick={() => resolveOwnershipReview.mutate()}>Mark Reviewed</button>
+          <button className="btn btn-secondary" onClick={() => resolveOwnershipReview.mutate()}>
+            Mark Reviewed
+          </button>
         </section>
       )}
-      {!data.ownership.reviewRequired && data.ownership.reviewNotes && (
-        <p>Ownership reviewed: {data.ownership.reviewNotes}</p>
+
+      {/* What happens next — one primary action (staging brief's Next
+          Action Design). */}
+      {primary && (
+        <section className="primary-action">
+          <div className="eyebrow">Next step</div>
+          <h2>{primary.title}</h2>
+          {primary.description && <p className="muted">{primary.description}</p>}
+          {primary.action}
+        </section>
       )}
 
-      <section>
-        <h2>People</h2>
-
-        <h3>Sellers</h3>
-        {sellers.length === 0 ? <p>No sellers captured yet.</p> : null}
-        <ul>
-          {sellers.map((p) => (
-            <li key={p.linkId}>
-              {partyName(p.party)}
-              {p.isPrimary ? " (primary)" : ""}
-              {p.amlStatus ? ` — AML: ${p.amlStatus}` : ""}
-              <button onClick={() => removeParty.mutate(p.linkId)}>Remove</button>
-
-              {/* AML exception (Phase 4): Review Required / Failed never
-                  silently clears — retry re-runs the check, resolving
-                  requires a note and is a Brokerage Administrator action. */}
-              {p.amlException && p.amlVerificationId && (
-                <div style={{ border: "1px solid", padding: "0.5rem", marginTop: "0.25rem" }}>
-                  <p>
-                    AML exception{p.amlException.outcome ? ` (${p.amlException.outcome})` : ""}
-                    {p.amlException.riskLevel ? ` — risk: ${p.amlException.riskLevel}` : ""}
-                  </p>
-                  <button onClick={() => retryAml.mutate(p.amlVerificationId!)}>Retry check</button>
-                  <input
-                    value={exceptionNotes[p.amlVerificationId] ?? ""}
-                    onChange={(e) =>
-                      setExceptionNotes((prev) => ({ ...prev, [p.amlVerificationId!]: e.target.value }))
-                    }
-                    placeholder="Compliance note (required to resolve)"
-                  />
-                  <button
-                    onClick={() =>
-                      resolveAmlException.mutate({
-                        verificationId: p.amlVerificationId!,
-                        notes: exceptionNotes[p.amlVerificationId!] ?? "",
-                      })
-                    }
-                    disabled={!(exceptionNotes[p.amlVerificationId] ?? "").trim()}
-                  >
-                    Mark Resolved
+      {/* Sellers — the property-workspace example in the staging brief
+          shows the seller list front and centre, not tucked away. */}
+      <section className="card">
+        <h2>Sellers</h2>
+        {sellers.length === 0 ? (
+          <p className="muted">No sellers captured yet.</p>
+        ) : (
+          <ul className="item-list">
+            {sellers.map((p) => (
+              <li key={p.linkId}>
+                <div>
+                  {partyName(p.party)}
+                  {p.isPrimary ? " (primary)" : ""}
+                  {p.amlStatus && <span className={amlPillClass(p.amlStatus)} style={{ marginLeft: "0.5rem" }}>{amlStatusCopy(p.amlStatus)}</span>}
+                  <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
+                    Remove
                   </button>
                 </div>
-              )}
-            </li>
-          ))}
-        </ul>
+
+                {/* AML exception (Phase 4): clean status by default; raw
+                    outcome/risk detail is behind "View Details" rather than
+                    shown up front (staging brief: "Do not expose raw AML
+                    API responses"). */}
+                {p.amlException && p.amlVerificationId && (
+                  <div className="cost-summary">
+                    <p className="muted" style={{ marginBottom: "0.4rem" }}>
+                      We'll update this property automatically when {partyName(p.party)} completes verification.
+                    </p>
+                    <button className="btn btn-small" onClick={() => retryAml.mutate(p.amlVerificationId!)}>
+                      Resend
+                    </button>
+                    <details style={{ marginTop: "0.5rem" }}>
+                      <summary className="muted">View Details</summary>
+                      <p className="muted">
+                        {p.amlException.outcome ? `Outcome: ${p.amlException.outcome}` : ""}
+                        {p.amlException.riskLevel ? ` · Risk: ${p.amlException.riskLevel}` : ""}
+                      </p>
+                      <input
+                        value={exceptionNotes[p.amlVerificationId] ?? ""}
+                        onChange={(e) => setExceptionNotes((prev) => ({ ...prev, [p.amlVerificationId!]: e.target.value }))}
+                        placeholder="Compliance note (required to resolve)"
+                      />
+                      <button
+                        className="btn btn-small"
+                        onClick={() =>
+                          resolveAmlException.mutate({
+                            verificationId: p.amlVerificationId!,
+                            notes: exceptionNotes[p.amlVerificationId!] ?? "",
+                          })
+                        }
+                        disabled={!(exceptionNotes[p.amlVerificationId] ?? "").trim()}
+                      >
+                        Mark Resolved
+                      </button>
+                    </details>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
 
         {others.length > 0 && (
           <>
             <h3>Other parties</h3>
-            <ul>
+            <ul className="item-list">
               {others.map((p) => (
                 <li key={p.linkId}>
                   {p.role}: {partyName(p.party)}
-                  <button onClick={() => removeParty.mutate(p.linkId)}>Remove</button>
+                  <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
+                    Remove
+                  </button>
                 </li>
               ))}
             </ul>
@@ -424,194 +623,151 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         )}
 
         {!showAddParty ? (
-          <button onClick={() => setShowAddParty(true)}>+ Add Person</button>
+          <button className="btn btn-secondary" onClick={() => setShowAddParty(true)}>
+            + Add Person
+          </button>
         ) : (
           <AddPartyForm onCancel={() => setShowAddParty(false)} onSubmit={(input) => addParty.mutate(input)} />
         )}
       </section>
 
-      <section>
-        <h2>Next Actions</h2>
-        {data.nextActions.length === 0 ? (
-          <p>No active workflow yet.</p>
-        ) : (
-          <ul>
-            {data.nextActions.map((a, i) => (
-              <li key={i}>
-                {a.label} — {a.status}
-                {a.blockedReason ? ` (${a.blockedReason})` : ""}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* Agency agreement terms (Phase 5) — real structured fields (Build
-          Brief §3 explicitly rejected the legacy app's opaque-JSON
-          commission storage). Required before the AgencyAgreement document
-          itself can be generated — see the "not yet captured" note below. */}
-      {data.documentPackage && (
-        <section>
-          <h2>Agency agreement terms</h2>
-          <AgencyTermsForm
-            initial={data.agencyAgreementTerms}
-            onSubmit={(input) => saveAgencyTerms.mutate(input)}
-          />
-        </section>
-      )}
-
-      {/* Required documents (ARCHITECTURE.md §10 Phase 3/5) — determined by
-          Ready to List, generated and sent for signature here. Every
-          generated document is a placeholder — see the disclaimer banner in
-          its content — pending real legal review. */}
-      {data.documentPackage && (
-        <section>
-          <h2>Required Documents</h2>
-          <p>Package status: {data.documentPackage.status}</p>
-          <ul>
-            {data.documentPackage.documents.map((d) => (
-              <li key={d.id}>
-                {d.title} — {d.status}
-                {(d.status === "Generated" || d.status === "Signed") && (
-                  <button onClick={() => previewDocument(d.id)}>Preview</button>
-                )}
-              </li>
-            ))}
-          </ul>
-          <button onClick={() => populatePackage.mutate(data.documentPackage!.id)}>Generate Documents</button>
-          {((populatePackage.data as any)?.skipped?.length ?? 0) > 0 && (
-            <p>
-              {(populatePackage.data as any).skipped
-                .map((s: { reason: string }) => s.reason)
-                .join(" ")}
-            </p>
-          )}
-          {populatePackage.isError && <p>{(populatePackage.error as Error).message}</p>}
-
-          <button
-            onClick={() => sendForSignature.mutate(data.documentPackage!.id)}
-            disabled={data.documentPackage.status !== "Ready"}
-          >
-            Send for Signature
-          </button>
-          {data.documentPackage.status !== "Ready" && data.documentPackage.status !== "Sent" && data.documentPackage.status !== "Completed" && (
-            <p>Generate every document before sending for signature.</p>
-          )}
-          {sendForSignature.isError && <p>{(sendForSignature.error as Error).message}</p>}
-
-          {data.documentPackage.signatureRequest && (
-            <p>
-              Signature status: {data.documentPackage.signatureRequest.status}
-              {data.documentPackage.signatureRequest.completedAt
-                ? ` (completed ${data.documentPackage.signatureRequest.completedAt})`
-                : ""}
-            </p>
-          )}
-
-          {preview && (
-            <div style={{ border: "1px solid", padding: "0.5rem", marginTop: "0.5rem" }}>
-              <button onClick={() => setPreview(null)}>Close preview</button>
-              <pre style={{ whiteSpace: "pre-wrap" }}>{preview.content}</pre>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Service charges & payment methods (Phase 6, ARCHITECTURE.md §10) —
-          ServiceOrder rows (e.g. the AML check) get created elsewhere
-          (lib/aml.ts); this is where they're actually charged. Charging
-          resolves to the listing agent's own default stored method. */}
-      <section>
-        <h2>Payment methods</h2>
-        <PaymentMethodsBlock
-          mine={paymentMethodsData?.mine ?? []}
-          brokerage={paymentMethodsData?.brokerage ?? []}
-          onAdd={(input) => addPaymentMethod.mutate(input)}
-          error={addPaymentMethod.isError ? (addPaymentMethod.error as Error).message : null}
-        />
-      </section>
-
-      {serviceOrdersData && serviceOrdersData.serviceOrders.length > 0 && (
-        <section>
-          <h2>Service charges</h2>
-          <ul>
-            {serviceOrdersData.serviceOrders.map((so) => (
-              <ServiceOrderRow
-                key={so.id}
-                serviceOrder={so}
-                onCharge={() => chargeServiceOrder.mutate(so.id)}
-                charging={chargeServiceOrder.isPending && chargeServiceOrder.variables === so.id}
-                chargeError={
-                  chargeServiceOrder.isError && chargeServiceOrder.variables === so.id
-                    ? (chargeServiceOrder.error as Error).message
-                    : null
-                }
-                onRefund={(paymentId) => refundPayment.mutate({ paymentId, serviceOrderId: so.id })}
-                refundError={refundPayment.isError ? (refundPayment.error as Error).message : null}
-              />
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {data.property.workflowStage === "Appraisal" && (
-        <div>
-          <button onClick={() => readyToList.mutate()} disabled={sellers.length === 0}>
-            Ready to List
-          </button>
-          {sellers.length === 0 && <p>Capture at least one seller before Ready to List.</p>}
-          {readyToList.isError && <p>{(readyToList.error as Error).message}</p>}
-        </div>
-      )}
-
-      {/* Go Live (Phase 7) — gated server-side on every Ready to List step
-          being Complete, not just on having been clicked. */}
-      {data.property.workflowStage === "Ready to List" && (
-        <div>
-          <button onClick={() => goLive.mutate()}>Go Live</button>
-          {goLive.isError && (
-            <p>
-              {(goLive.error as Error).message} — check every Next Action above is Complete (Ready to List must fully
-              finish before a property can go live).
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Offers (Phase 7) — agent-entered (a buyer submits to the agent by
-          phone/email/in person, not via a public form); accepting one
-          auto-declines every other open offer and creates the Transaction. */}
-      {(data.property.listingStatus === "Listed" || (offersData?.offers.length ?? 0) > 0) && (
-        <section>
+      {/* Offers (Phase 7) */}
+      {(data.property.listingStatus === "Listed" || offers.length > 0) && (
+        <section className="card">
           <h2>Offers</h2>
           <OffersBlock
-            offers={offersData?.offers ?? []}
+            offers={offers}
             onCreate={(input) => createOffer.mutate(input)}
-            createError={createOffer.isError ? (createOffer.error as Error).message : null}
+            createError={createOffer.isError ? (createOffer.error as ApiError).friendly : null}
             onAccept={(id) => acceptOffer.mutate(id)}
-            acceptError={acceptOffer.isError ? (acceptOffer.error as Error).message : null}
+            acceptError={acceptOffer.isError ? (acceptOffer.error as ApiError).friendly : null}
             onDecline={(id) => declineOffer.mutate(id)}
             onWithdraw={(id) => withdrawOffer.mutate(id)}
           />
         </section>
       )}
 
-      {/* Transaction (Phase 7) — created the moment an offer is accepted;
-          walks contract signing → settlement → payout → close. Agent-paid
-          and close are Brokerage Administrator actions server-side — the
-          buttons here are shown to everyone (this app has no client-side
-          role awareness yet, same as the refund button in Payments above)
-          and the server's 403 surfaces as the action's error message. */}
-      {transactionData?.transaction && (
-        <section>
+      {/* Transaction (Phase 7) */}
+      {transaction && (
+        <section className="card">
           <h2>Transaction</h2>
           <TransactionBlockView
-            transaction={transactionData.transaction}
-            onAction={(action, body) => transactionAction.mutate({ transactionId: transactionData.transaction!.id, action, body })}
-            error={transactionAction.isError ? (transactionAction.error as Error).message : null}
+            transaction={transaction}
+            onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
+            error={transactionAction.isError ? (transactionAction.error as ApiError).friendly : null}
           />
         </section>
       )}
+
+      {/* Timeline (staging brief) — a plain read projection over the audit
+          log; every mutation above already writes to it. */}
+      {data.timeline.length > 0 && (
+        <details className="section" open>
+          <summary>Timeline</summary>
+          <ul className="timeline">
+            {data.timeline.map((t) => (
+              <li key={t.id}>
+                <span className="when">{formatWhen(t.at)}</span>
+                {t.label}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {/* Everything below is detail, not the current action — tucked
+          behind progressive disclosure (staging brief: "avoid tabs unless
+          genuinely required"). */}
+
+      {data.documentPackage && (
+        <details className="section">
+          <summary>Documents & Agency Agreement</summary>
+
+          <h3>Agency agreement terms</h3>
+          <AgencyTermsForm initial={data.agencyAgreementTerms} onSubmit={(input) => saveAgencyTerms.mutate(input)} />
+
+          <h3 style={{ marginTop: "1rem" }}>Documents</h3>
+          <ul className="item-list">
+            {data.documentPackage.documents.map((d) => (
+              <li key={d.id}>
+                {d.title} <span className={d.status === "Signed" ? "pill pill-success" : "pill"}>{documentStatusCopy(d.status)}</span>
+                {(d.status === "Generated" || d.status === "Signed") && (
+                  <button className="btn btn-link" onClick={() => previewDocument(d.id)}>
+                    Review
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          {((populatePackage.data as any)?.skipped?.length ?? 0) > 0 && (
+            <p className="muted">{(populatePackage.data as any).skipped.map((s: { reason: string }) => s.reason).join(" ")}</p>
+          )}
+          {populatePackage.isError && <p className="error-text">{(populatePackage.error as ApiError).friendly}</p>}
+          {sendForSignature.isError && <p className="error-text">{(sendForSignature.error as ApiError).friendly}</p>}
+
+          {data.documentPackage.signatureRequest && (
+            <p className="muted">
+              Signature status: {data.documentPackage.signatureRequest.status}
+              {data.documentPackage.signatureRequest.completedAt ? ` (completed ${data.documentPackage.signatureRequest.completedAt})` : ""}
+            </p>
+          )}
+
+          {preview && (
+            <div className="card">
+              <button className="btn btn-link" onClick={() => setPreview(null)}>
+                Close
+              </button>
+              <pre style={{ whiteSpace: "pre-wrap" }}>{preview.content}</pre>
+            </div>
+          )}
+        </details>
+      )}
+
+      <details className="section">
+        <summary>Payment methods & service charges</summary>
+
+        <PaymentMethodsBlock
+          mine={paymentMethodsData?.mine ?? []}
+          brokerage={paymentMethodsData?.brokerage ?? []}
+          onAdd={(input) => addPaymentMethod.mutate(input)}
+          error={addPaymentMethod.isError ? (addPaymentMethod.error as ApiError).friendly : null}
+        />
+
+        {serviceOrdersData && serviceOrdersData.serviceOrders.length > 0 && (
+          <>
+            <h3 style={{ marginTop: "1rem" }}>Service charges</h3>
+            <ul className="item-list">
+              {serviceOrdersData.serviceOrders.map((so) => (
+                <ServiceOrderRow
+                  key={so.id}
+                  serviceOrder={so}
+                  onCharge={() => chargeServiceOrder.mutate(so.id)}
+                  charging={chargeServiceOrder.isPending && chargeServiceOrder.variables === so.id}
+                  chargeError={chargeServiceOrder.isError && chargeServiceOrder.variables === so.id ? (chargeServiceOrder.error as ApiError).friendly : null}
+                  onRefund={(paymentId) => refundPayment.mutate({ paymentId, serviceOrderId: so.id })}
+                  refundError={refundPayment.isError ? (refundPayment.error as ApiError).friendly : null}
+                />
+              ))}
+            </ul>
+          </>
+        )}
+      </details>
+
+      {/* Ready to List / Go Live fallback controls — normally reached via
+          the primary action above; kept here too so nothing is lost if the
+          primary action logic doesn't match a given state. */}
+      {data.property.workflowStage === "Appraisal" && !primary && (
+        <div>
+          <button className="btn btn-primary" onClick={() => readyToList.mutate()} disabled={sellers.length === 0}>
+            Ready to List
+          </button>
+          {readyToList.isError && <p className="error-text">{(readyToList.error as ApiError).friendly}</p>}
+        </div>
+      )}
+      {readyToList.isError && data.property.workflowStage === "Appraisal" && primary && (
+        <p className="error-text">{(readyToList.error as ApiError).friendly}</p>
+      )}
+      {goLive.isError && <p className="error-text">{(goLive.error as ApiError).friendly}</p>}
     </div>
   );
 }
@@ -647,47 +803,71 @@ function AddPartyForm({
   };
 
   return (
-    <div>
-      <select value={role} onChange={(e) => setRole(e.target.value as (typeof ROLES)[number])}>
-        {ROLES.map((r) => (
-          <option key={r} value={r}>
-            {r}
-          </option>
-        ))}
-      </select>
-      <select value={partyType} onChange={(e) => setPartyType(e.target.value as (typeof PARTY_TYPES)[number])}>
-        {PARTY_TYPES.map((t) => (
-          <option key={t} value={t}>
-            {t}
-          </option>
-        ))}
-      </select>
+    <div className="card stack">
+      <div className="inline-form">
+        <label>
+          Role
+          <select value={role} onChange={(e) => setRole(e.target.value as (typeof ROLES)[number])}>
+            {ROLES.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Type
+          <select value={partyType} onChange={(e) => setPartyType(e.target.value as (typeof PARTY_TYPES)[number])}>
+            {PARTY_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       {partyType === "Person" ? (
-        <>
-          <input value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="First name" />
-          <input value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Last name" />
-        </>
+        <div className="inline-form">
+          <label>
+            First name
+            <input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+          </label>
+          <label>
+            Last name
+            <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
+          </label>
+        </div>
       ) : (
-        <input
-          value={organisationName}
-          onChange={(e) => setOrganisationName(e.target.value)}
-          placeholder={`${partyType} name`}
-        />
+        <label>
+          {partyType} name
+          <input value={organisationName} onChange={(e) => setOrganisationName(e.target.value)} />
+        </label>
       )}
-      <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-      <input value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="Mobile" />
-      <button onClick={submit}>Save</button>
-      <button onClick={onCancel}>Cancel</button>
+      <div className="inline-form">
+        <label>
+          Email
+          <input value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label>
+          Mobile
+          <input value={mobile} onChange={(e) => setMobile(e.target.value)} />
+        </label>
+      </div>
+      <div className="inline-form">
+        <button className="btn btn-primary" onClick={submit}>
+          Save
+        </button>
+        <button className="btn btn-link" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
 
 const COMMISSION_TYPES = ["Percentage", "FlatFee"] as const;
 
-// Real structured agency-agreement terms capture (Phase 5) — feeds directly
-// into the AgencyAgreement document template (apps/api/src/lib/
-// documentTemplates.ts); the document can't be generated until these are
-// saved at least once.
+// Real structured agency-agreement terms capture (Phase 5).
 function AgencyTermsForm({
   initial,
   onSubmit,
@@ -720,34 +900,51 @@ function AgencyTermsForm({
   };
 
   return (
-    <div>
-      {!initial && <p>Not yet captured — the Agency Agreement document can't be generated until these are saved.</p>}
-      <select value={commissionType} onChange={(e) => setCommissionType(e.target.value as (typeof COMMISSION_TYPES)[number])}>
-        {COMMISSION_TYPES.map((t) => (
-          <option key={t} value={t}>
-            {t}
-          </option>
-        ))}
-      </select>
-      {commissionType === "Percentage" ? (
-        <input value={commissionRate} onChange={(e) => setCommissionRate(e.target.value)} placeholder="Commission rate (%)" />
-      ) : (
-        <input value={flatFee} onChange={(e) => setFlatFee(e.target.value)} placeholder="Flat fee ($)" />
-      )}
-      <input value={marketingFee} onChange={(e) => setMarketingFee(e.target.value)} placeholder="Marketing fee ($, optional)" />
-      <input value={termDays} onChange={(e) => setTermDays(e.target.value)} placeholder="Agreement term (days)" />
-      <button onClick={submit}>Save Terms</button>
+    <div className="stack">
+      {!initial && <p className="muted">Not yet captured — the Agency Agreement document can't be generated until these are saved.</p>}
+      <div className="inline-form">
+        <label>
+          Commission type
+          <select value={commissionType} onChange={(e) => setCommissionType(e.target.value as (typeof COMMISSION_TYPES)[number])}>
+            {COMMISSION_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        {commissionType === "Percentage" ? (
+          <label>
+            Rate (%)
+            <input value={commissionRate} onChange={(e) => setCommissionRate(e.target.value)} />
+          </label>
+        ) : (
+          <label>
+            Flat fee ($)
+            <input value={flatFee} onChange={(e) => setFlatFee(e.target.value)} />
+          </label>
+        )}
+      </div>
+      <div className="inline-form">
+        <label>
+          Marketing fee ($, optional)
+          <input value={marketingFee} onChange={(e) => setMarketingFee(e.target.value)} />
+        </label>
+        <label>
+          Term (days)
+          <input value={termDays} onChange={(e) => setTermDays(e.target.value)} />
+        </label>
+      </div>
+      <button className="btn btn-secondary" onClick={submit}>
+        Save Terms
+      </button>
     </div>
   );
 }
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 // One ServiceOrder (e.g. the AML check) plus its own payment attempts —
-// fetched per-row rather than folded into the workspace response, since
-// most properties will only ever have a couple of these.
+// shown as a clean cost summary + Confirm & Continue rather than raw
+// provider-reference fields (staging brief's Payment UX).
 function ServiceOrderRow({
   serviceOrder,
   onCharge,
@@ -768,18 +965,34 @@ function ServiceOrderRow({
     queryFn: () => apiFetch<{ payments: PaymentBlock[] }>(`/payments/service-orders/${serviceOrder.id}/payments`),
   });
   const latest = data?.payments?.[0] ?? null;
+  const total = serviceOrder.customerPriceCents + serviceOrder.gstCents;
 
   return (
     <li>
-      {serviceOrder.serviceType} — {formatCents(serviceOrder.customerPriceCents + serviceOrder.gstCents)} (incl. GST) —{" "}
-      {serviceOrder.paymentStatus}
+      <div className="cost-summary">
+        <div className="line">
+          <span>{serviceOrder.serviceType}</span>
+          <span>{formatCents(serviceOrder.customerPriceCents)}</span>
+        </div>
+        <div className="line">
+          <span>GST</span>
+          <span>{formatCents(serviceOrder.gstCents)}</span>
+        </div>
+        <div className="line total">
+          <span>Total</span>
+          <span>{formatCents(total)}</span>
+        </div>
+      </div>
+      <span className={serviceOrder.paymentStatus === "Charged" ? "pill pill-success" : serviceOrder.paymentStatus === "Failed" ? "pill pill-danger" : "pill"}>
+        {serviceOrder.paymentStatus}
+      </span>
       {(serviceOrder.paymentStatus === "Pending" || serviceOrder.paymentStatus === "Failed") && (
-        <button onClick={onCharge} disabled={charging}>
-          {charging ? "Charging…" : serviceOrder.paymentStatus === "Failed" ? "Retry Charge" : "Charge"}
+        <button className="btn btn-primary btn-small" onClick={onCharge} disabled={charging} style={{ marginLeft: "0.5rem" }}>
+          {charging ? "Charging…" : serviceOrder.paymentStatus === "Failed" ? "Retry Charge" : "Confirm & Continue"}
         </button>
       )}
-      {chargeError && <p>{chargeError}</p>}
-      {latest?.failureReason && <p>Last attempt failed: {latest.failureReason}</p>}
+      {chargeError && <p className="error-text">{chargeError}</p>}
+      {latest?.failureReason && <p className="error-text">Last attempt failed: {latest.failureReason}</p>}
       {latest?.receiptUrl && (
         <p>
           <a href={latest.receiptUrl} target="_blank" rel="noreferrer">
@@ -788,17 +1001,18 @@ function ServiceOrderRow({
         </p>
       )}
       {latest && latest.status === "Succeeded" && (
-        <button onClick={() => onRefund(latest.id)}>Refund</button>
+        <button className="btn btn-link" onClick={() => onRefund(latest.id)}>
+          Refund
+        </button>
       )}
-      {refundError && <p>{refundError}</p>}
+      {refundError && <p className="error-text">{refundError}</p>}
     </li>
   );
 }
 
 // Add-a-stored-method form (Phase 6). Real card capture must happen
 // client-side via Stripe Elements/PaymentSheet — this only ever accepts the
-// resulting tokenized references, never raw card data, matching the hard
-// requirement that card numbers never transit this server.
+// resulting tokenized references, never raw card data.
 function PaymentMethodsBlock({
   mine,
   brokerage,
@@ -826,34 +1040,40 @@ function PaymentMethodsBlock({
 
   return (
     <div>
-      <p>My methods: {mine.length === 0 ? "none on file" : mine.map((m) => m.label ?? `#${m.id}`).join(", ")}</p>
-      <p>Brokerage methods: {brokerage.length === 0 ? "none on file" : brokerage.map((m) => m.label ?? `#${m.id}`).join(", ")}</p>
+      <p>Payment method: {mine.length === 0 ? "none on file" : mine.map((m) => m.label ?? `#${m.id}`).join(", ")}</p>
+      {brokerage.length > 0 && <p className="muted">Brokerage methods: {brokerage.map((m) => m.label ?? `#${m.id}`).join(", ")}</p>}
       {!showAdd ? (
-        <button onClick={() => setShowAdd(true)}>+ Add Payment Method</button>
+        <button className="btn btn-secondary" onClick={() => setShowAdd(true)}>
+          + Add Payment Method
+        </button>
       ) : (
-        <div>
+        <div className="stack">
+          <p className="muted">
+            Card capture happens through the payment provider directly, not this app — paste the resulting reference here for now
+            (real in-app card entry is a follow-up build).
+          </p>
           <select value={scope} onChange={(e) => setScope(e.target.value as "Mine" | "Brokerage")}>
             <option value="Mine">Mine</option>
             <option value="Brokerage">Brokerage</option>
           </select>
           <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. Visa ending 4242)" />
-          <input
-            value={providerCustomerRef}
-            onChange={(e) => setProviderCustomerRef(e.target.value)}
-            placeholder="Provider customer reference"
-          />
+          <input value={providerCustomerRef} onChange={(e) => setProviderCustomerRef(e.target.value)} placeholder="Provider customer reference" />
           <input
             value={providerPaymentMethodRef}
             onChange={(e) => setProviderPaymentMethodRef(e.target.value)}
             placeholder="Provider payment method reference"
           />
-          <button onClick={submit} disabled={!providerCustomerRef || !providerPaymentMethodRef}>
-            Save
-          </button>
-          <button onClick={() => setShowAdd(false)}>Cancel</button>
+          <div className="inline-form">
+            <button className="btn btn-primary" onClick={submit} disabled={!providerCustomerRef || !providerPaymentMethodRef}>
+              Save
+            </button>
+            <button className="btn btn-link" onClick={() => setShowAdd(false)}>
+              Cancel
+            </button>
+          </div>
         </div>
       )}
-      {error && <p>{error}</p>}
+      {error && <p className="error-text">{error}</p>}
     </div>
   );
 }
@@ -862,9 +1082,7 @@ function offerStatusLabel(o: OfferBlock): string {
   return `${formatCents(o.offerPriceCents)} — ${o.status}`;
 }
 
-// Offer capture + acceptance (Phase 7). The buyer is either an already
-// captured Party (buyerPartyId) or minimum contact fields entered inline —
-// same "enter once" pattern as AddPartyForm above.
+// Offer capture + acceptance (Phase 7).
 function OffersBlock({
   offers,
   onCreate,
@@ -884,6 +1102,10 @@ function OffersBlock({
 }) {
   const [showAdd, setShowAdd] = useState(false);
   const [offerPrice, setOfferPrice] = useState("");
+  const [deposit, setDeposit] = useState("");
+  const [settlementDate, setSettlementDate] = useState("");
+  const [conditions, setConditions] = useState("");
+  const [additionalTerms, setAdditionalTerms] = useState("");
   const [buyerFirstName, setBuyerFirstName] = useState("");
   const [buyerLastName, setBuyerLastName] = useState("");
   const [buyerEmail, setBuyerEmail] = useState("");
@@ -892,6 +1114,12 @@ function OffersBlock({
   const submit = () => {
     onCreate({
       offerPriceCents: Math.round(Number(offerPrice) * 100),
+      conditions: {
+        depositCents: deposit ? Math.round(Number(deposit) * 100) : undefined,
+        settlementDate: settlementDate || undefined,
+        conditions: conditions || undefined,
+        additionalTerms: additionalTerms || undefined,
+      },
       buyer: {
         firstName: buyerFirstName || undefined,
         lastName: buyerLastName || undefined,
@@ -901,6 +1129,10 @@ function OffersBlock({
     });
     setShowAdd(false);
     setOfferPrice("");
+    setDeposit("");
+    setSettlementDate("");
+    setConditions("");
+    setAdditionalTerms("");
     setBuyerFirstName("");
     setBuyerLastName("");
     setBuyerEmail("");
@@ -912,50 +1144,100 @@ function OffersBlock({
   return (
     <div>
       {offers.length === 0 ? (
-        <p>No offers recorded yet.</p>
+        <p className="muted">No offers recorded yet.</p>
       ) : (
-        <ul>
+        <ul className="item-list">
           {offers.map((o) => (
             <li key={o.id}>
               {offerStatusLabel(o)}
               {o.status === "Received" && (
-                <>
-                  <button onClick={() => onAccept(o.id)} disabled={hasAccepted}>
+                <div className="inline-form" style={{ marginTop: "0.4rem" }}>
+                  <button className="btn btn-primary btn-small" onClick={() => onAccept(o.id)} disabled={hasAccepted}>
                     Accept
                   </button>
-                  <button onClick={() => onDecline(o.id)}>Decline</button>
-                  <button onClick={() => onWithdraw(o.id)}>Withdraw</button>
-                </>
+                  <button className="btn btn-small" onClick={() => onDecline(o.id)}>
+                    Decline
+                  </button>
+                  <button className="btn btn-link" onClick={() => onWithdraw(o.id)}>
+                    Withdraw
+                  </button>
+                </div>
               )}
             </li>
           ))}
         </ul>
       )}
-      {acceptError && <p>{acceptError}</p>}
+      {acceptError && <p className="error-text">{acceptError}</p>}
 
       {!hasAccepted &&
         (!showAdd ? (
-          <button onClick={() => setShowAdd(true)}>+ Record Offer</button>
+          <button className="btn btn-secondary" onClick={() => setShowAdd(true)}>
+            + Record Offer
+          </button>
         ) : (
-          <div>
-            <input value={offerPrice} onChange={(e) => setOfferPrice(e.target.value)} placeholder="Offer price ($)" />
-            <input value={buyerFirstName} onChange={(e) => setBuyerFirstName(e.target.value)} placeholder="Buyer first name" />
-            <input value={buyerLastName} onChange={(e) => setBuyerLastName(e.target.value)} placeholder="Buyer last name" />
-            <input value={buyerEmail} onChange={(e) => setBuyerEmail(e.target.value)} placeholder="Buyer email" />
-            <input value={buyerMobile} onChange={(e) => setBuyerMobile(e.target.value)} placeholder="Buyer mobile" />
-            <button onClick={submit} disabled={!offerPrice || !buyerFirstName}>
-              Save
-            </button>
-            <button onClick={() => setShowAdd(false)}>Cancel</button>
+          <div className="stack card">
+            <div className="inline-form">
+              <label>
+                Offer price ($)
+                <input value={offerPrice} onChange={(e) => setOfferPrice(e.target.value)} />
+              </label>
+              <label>
+                Deposit ($)
+                <input value={deposit} onChange={(e) => setDeposit(e.target.value)} />
+              </label>
+            </div>
+            <div className="inline-form">
+              <label>
+                Settlement date
+                <input type="date" value={settlementDate} onChange={(e) => setSettlementDate(e.target.value)} />
+              </label>
+              <label>
+                Conditions
+                <input value={conditions} onChange={(e) => setConditions(e.target.value)} placeholder="e.g. Subject to finance" />
+              </label>
+            </div>
+            <label>
+              Additional terms
+              <input value={additionalTerms} onChange={(e) => setAdditionalTerms(e.target.value)} />
+            </label>
+            <h3 style={{ marginTop: "0.5rem" }}>Buyer</h3>
+            <div className="inline-form">
+              <label>
+                First name
+                <input value={buyerFirstName} onChange={(e) => setBuyerFirstName(e.target.value)} />
+              </label>
+              <label>
+                Last name
+                <input value={buyerLastName} onChange={(e) => setBuyerLastName(e.target.value)} />
+              </label>
+            </div>
+            <div className="inline-form">
+              <label>
+                Email
+                <input value={buyerEmail} onChange={(e) => setBuyerEmail(e.target.value)} />
+              </label>
+              <label>
+                Mobile
+                <input value={buyerMobile} onChange={(e) => setBuyerMobile(e.target.value)} />
+              </label>
+            </div>
+            <div className="inline-form">
+              <button className="btn btn-primary" onClick={submit} disabled={!offerPrice || !buyerFirstName}>
+                Save
+              </button>
+              <button className="btn btn-link" onClick={() => setShowAdd(false)}>
+                Cancel
+              </button>
+            </div>
           </div>
         ))}
-      {createError && <p>{createError}</p>}
+      {createError && <p className="error-text">{createError}</p>}
     </div>
   );
 }
 
-// Transaction lifecycle (Phase 7) — contract signing → settlement →
-// payout → close, matching lib/transactions.ts's chokepoints one for one.
+// Transaction lifecycle (Phase 7) — shown as a checklist with upcoming
+// dates, matching the staging brief's Transaction Workspace example.
 function TransactionBlockView({
   transaction,
   onAction,
@@ -969,60 +1251,72 @@ function TransactionBlockView({
   const [fundsAmount, setFundsAmount] = useState("");
 
   return (
-    <div>
+    <div className="stack">
       <p>
-        Purchase price: {formatCents(transaction.purchasePriceCents)} · Status: {transaction.status}
+        {formatCents(transaction.purchasePriceCents)} · <span className="pill">{transaction.status}</span>
       </p>
 
-      <p>
+      <div>
         Contract: {transaction.contractDate ? `signed ${transaction.contractDate}` : "not yet signed"}
-        {!transaction.contractDate && <button onClick={() => onAction("contract-signed")}>Mark Contract Signed</button>}
-      </p>
+        {!transaction.contractDate && (
+          <button className="btn btn-small" onClick={() => onAction("contract-signed")} style={{ marginLeft: "0.5rem" }}>
+            Mark Contract Signed
+          </button>
+        )}
+      </div>
 
-      <p>
+      <div>
         Finance: {transaction.financeApprovedAt ? `approved ${transaction.financeApprovedAt}` : "not recorded"}
         {!transaction.financeApprovedAt && (
-          <button onClick={() => onAction("finance-approved")}>Mark Finance Approved</button>
+          <button className="btn btn-small" onClick={() => onAction("finance-approved")} style={{ marginLeft: "0.5rem" }}>
+            Mark Finance Approved
+          </button>
         )}
-      </p>
+      </div>
 
-      <p>
+      <div>
         Settlement:{" "}
         {transaction.settlementCompletedAt
           ? `completed ${transaction.settlementCompletedAt}`
           : transaction.settlementDate
-            ? `scheduled ${transaction.settlementDate}`
+            ? `scheduled ${new Date(transaction.settlementDate).toLocaleDateString()}`
             : "not yet scheduled"}
-      </p>
+      </div>
       {!transaction.settlementCompletedAt && (
-        <div>
+        <div className="inline-form">
           <input type="date" value={settlementDate} onChange={(e) => setSettlementDate(e.target.value)} />
           <button
+            className="btn btn-small"
             onClick={() => settlementDate && onAction("settlement-schedule", { settlementDate })}
             disabled={!settlementDate}
           >
             Schedule Settlement
           </button>
           {transaction.settlementDate && (
-            <button onClick={() => onAction("settlement-complete")}>Mark Settlement Completed</button>
+            <button className="btn btn-small" onClick={() => onAction("settlement-complete")}>
+              Mark Settlement Completed
+            </button>
           )}
         </div>
       )}
 
-      <p>
+      <div>
         Commission:{" "}
         {transaction.commissionCalculatedAt
           ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
           : "not yet calculated"}
         {!transaction.commissionCalculatedAt && (
-          <button onClick={() => onAction("calculate-commission")}>Calculate Commission</button>
+          <button className="btn btn-small" onClick={() => onAction("calculate-commission")} style={{ marginLeft: "0.5rem" }}>
+            Calculate Commission
+          </button>
         )}
-      </p>
+      </div>
 
-      <p>
-        Funds received: {formatCents(transaction.fundsReceivedCents)}
+      <div className="inline-form">
+        <span>Funds received: {formatCents(transaction.fundsReceivedCents)}</span>
         <input value={fundsAmount} onChange={(e) => setFundsAmount(e.target.value)} placeholder="Amount ($)" />
         <button
+          className="btn btn-small"
           onClick={() => {
             if (!fundsAmount) return;
             onAction("funds-received", { amountCents: Math.round(Number(fundsAmount) * 100) });
@@ -1032,24 +1326,28 @@ function TransactionBlockView({
         >
           Record Funds Received
         </button>
-      </p>
+      </div>
 
-      <p>
+      <div>
         Agent paid: {transaction.agentPaidAt ?? "not yet"}
-        {!transaction.agentPaidAt && <button onClick={() => onAction("agent-paid")}>Mark Agent Paid</button>}
-      </p>
+        {!transaction.agentPaidAt && (
+          <button className="btn btn-small" onClick={() => onAction("agent-paid")} style={{ marginLeft: "0.5rem" }}>
+            Mark Agent Paid
+          </button>
+        )}
+      </div>
 
-      <p>
+      <div>
         {transaction.status === "Closed" ? (
           `Closed ${transaction.closedAt}`
         ) : (
-          <button onClick={() => onAction("close")} disabled={transaction.status !== "Settled"}>
+          <button className="btn btn-primary btn-small" onClick={() => onAction("close")} disabled={transaction.status !== "Settled"}>
             Close Transaction
           </button>
         )}
-      </p>
+      </div>
 
-      {error && <p>{error}</p>}
+      {error && <p className="error-text">{error}</p>}
     </div>
   );
 }
