@@ -22,7 +22,7 @@ export interface TemplateContext {
 // to a real seller for signature.
 const DISCLAIMER =
   "*** TEMPLATE PLACEHOLDER — NOT LEGAL ADVICE ***\n" +
-  "This document was generated automatically by AgentEngineEasy from an unverified template " +
+  "This document was generated automatically by Agent Engine from an unverified template " +
   `(document rule set v${DOCUMENT_RULE_SET_VERSION}). It has NOT been reviewed for legal or ` +
   "regulatory accuracy against current state legislation. Do not send this to a client for " +
   "signature without review by a licensed conveyancer/lawyer.\n" +

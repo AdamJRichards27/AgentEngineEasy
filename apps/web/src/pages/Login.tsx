@@ -51,7 +51,7 @@ export default function Login() {
   return (
     <div className="auth-screen">
       <div className="auth-card">
-        <h1>AgentEngineEasy</h1>
+        <h1>Agent Engine</h1>
         <p className="muted">Sign in to get started.</p>
 
         {knownUsers && knownUsers.length > 0 && !showForm && (

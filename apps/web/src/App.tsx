@@ -64,7 +64,7 @@ function SidebarLayout({
     <>
       <nav className="app-sidebar">
         <div>
-          <div className="app-sidebar-brand">AgentEngineEasy</div>
+          <div className="app-sidebar-brand">Agent Engine</div>
           <div className="app-sidebar-nav">
             {links.map((l) => (
               <Link
