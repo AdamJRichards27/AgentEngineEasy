@@ -6,6 +6,7 @@ import PropertyWorkspace from "./pages/PropertyWorkspace";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import { useSession, useLogout } from "./lib/session";
+import { LOGO_SIDEBAR } from "./brand";
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -64,7 +65,7 @@ function SidebarLayout({
     <>
       <nav className="app-sidebar">
         <div>
-          <div className="app-sidebar-brand">Agent Engine</div>
+          <img src={LOGO_SIDEBAR} alt="Agent Engine" className="app-sidebar-brand" />
           <div className="app-sidebar-nav">
             {links.map((l) => (
               <Link
