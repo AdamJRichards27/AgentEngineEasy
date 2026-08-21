@@ -45,9 +45,10 @@ function formatDate(iso: string): string {
 }
 
 // "What needs my attention today?" — Build Brief §13/§26 UI principle: one
-// or two decisions, not a menu of modules. Sections: Needs Attention
-// (exceptions), Active Properties, Settlements (staging brief's Dashboard
-// spec) — all from one GET /home/summary call (lib/homeSummary.ts).
+// or two decisions, not a menu of modules. A stat-tile row (matching the
+// reference Agent Engine app's dashboard layout) gives an at-a-glance
+// summary of the same counts the sections below spell out in full;
+// everything comes from one GET /home/summary call (lib/homeSummary.ts).
 export default function Home() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["home-summary"],
@@ -72,6 +73,45 @@ export default function Home() {
 
       {!isLoading && !isError && (
         <>
+          <div className="stat-tiles">
+            <Link href="/properties" className="stat-tile">
+              <div>
+                <div className="stat-tile-label">Active Properties</div>
+                <div className="stat-tile-value">{data?.activeProperties.length ?? 0}</div>
+              </div>
+              <span className="stat-tile-icon" aria-hidden="true">
+                🏠
+              </span>
+            </Link>
+            <div className="stat-tile">
+              <div>
+                <div className="stat-tile-label">Needs Attention</div>
+                <div className="stat-tile-value">{data?.exceptions.length ?? 0}</div>
+              </div>
+              <span className="stat-tile-icon" aria-hidden="true">
+                ⚠️
+              </span>
+            </div>
+            <div className="stat-tile">
+              <div>
+                <div className="stat-tile-label">Next Actions</div>
+                <div className="stat-tile-value">{data?.nextActions.length ?? 0}</div>
+              </div>
+              <span className="stat-tile-icon" aria-hidden="true">
+                ➡️
+              </span>
+            </div>
+            <div className="stat-tile">
+              <div>
+                <div className="stat-tile-label">Settlements</div>
+                <div className="stat-tile-value">{data?.upcomingSettlements.length ?? 0}</div>
+              </div>
+              <span className="stat-tile-icon" aria-hidden="true">
+                📅
+              </span>
+            </div>
+          </div>
+
           <section className="card">
             <h2>Needs Attention</h2>
             {hasNothingUrgent ? (
