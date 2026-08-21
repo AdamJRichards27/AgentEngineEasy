@@ -1,5 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
-import type { UserRole } from "@aee/db";
+import { db, users, type UserRole } from "@aee/db";
+import { eq } from "drizzle-orm";
+import { readSessionCookie, verifySessionToken } from "../lib/session.js";
 
 // AgentEngineEasy's 3-role model (Build Brief §22) — deliberately small.
 // Agent: full access to their own properties/transactions.
@@ -26,14 +28,35 @@ declare global {
 }
 
 /**
- * Loads the authenticated user onto the request. Placeholder for the real
- * auth provider integration (Clerk or equivalent) — Phase 1 wires the shape,
- * not the provider, so route/permission code doesn't change when the real
- * provider is connected.
+ * Loads the authenticated user onto the request from the staging session
+ * cookie (see lib/session.ts, routes/auth.ts). Mounted globally in app.ts,
+ * ahead of every route — a missing/invalid cookie just leaves
+ * req.authedUser unset, which requireAuth below turns into a 401.
+ *
+ * This is the "wire the shape, not the provider" placeholder Phase 1
+ * originally described, now actually functional for staging use; swapping
+ * in real Clerk verification later means changing this one function's body,
+ * not any route or permission code (ARCHITECTURE.md §10 closing note).
  */
+export async function loadSession(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  try {
+    const token = readSessionCookie(req.headers.cookie);
+    const verified = verifySessionToken(token);
+    if (!verified) {
+      next();
+      return;
+    }
+    const [row] = await db.select().from(users).where(eq(users.id, verified.uid));
+    if (row && row.isActive && row.brokerageId) {
+      req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
+    }
+  } catch (err) {
+    console.error("loadSession failed", err);
+  }
+  next();
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  // TODO: verify the incoming session/bearer token against the configured
-  // auth provider and populate req.authedUser from the resulting user record.
   if (!req.authedUser) {
     res.status(401).json({ error: "Not authenticated" });
     return;
