@@ -6,7 +6,27 @@ PORT = "8080"
 
 [[ports]]
 localPort = 8080
+externalPort = 8081
+
+[[ports]]
+localPort = 5000
 externalPort = 80
 
 [nix]
 channel = "stable-24_05"
+packages = ["nodejs_20", "nodePackages.pnpm"]
+
+[workflows]
+
+[[workflows.workflow]]
+name = "Dev"
+mode = "parallel"
+author = 48455239
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm dev:api"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
