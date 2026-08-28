@@ -20,6 +20,30 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "FUNDS_RECEIVED",
   "AGENT_PAID",
   "TRANSACTION_CLOSED",
+  "SUBSCRIPTION_CREATED",
+  "SUBSCRIPTION_UPDATED",
+  "SUBSCRIPTION_CANCELLED",
+  "ENTITLEMENT_GRANTED",
+  "ENTITLEMENT_REVOKED",
+  "ENTITLEMENT_ALLOCATION_CHANGED",
+  "GROW_ACCESS_ACTIVATED",
+  "GROW_ACCESS_SUSPENDED",
+  "RELATIONSHIP_CREATED",
+  "RELATIONSHIP_UPDATED",
+  "OPPORTUNITY_CREATED",
+  "OPPORTUNITY_STAGE_CHANGED",
+  "OPPORTUNITY_CONVERTED",
+  // AI Governance, Authority & Action Control Architecture (Stage G7).
+  "AI_ACTION_PROPOSED",
+  "AI_ACTION_APPROVAL_REQUIRED",
+  "AI_ACTION_APPROVED",
+  "AI_ACTION_REJECTED",
+  "AI_ACTION_EXECUTED",
+  "AI_ACTION_FAILED",
+  "AI_ACTION_BLOCKED",
+  "AI_WORKFLOW_CHANGE_PROPOSED",
+  "AI_WORKFLOW_CHANGE_APPROVED",
+  "AI_WORKFLOW_VERSION_ACTIVATED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -44,6 +68,30 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   FUNDS_RECEIVED: { version: 1, description: "Funds were confirmed received (may recur for partial payments)." },
   AGENT_PAID: { version: 1, description: "Payment to the agent was confirmed." },
   TRANSACTION_CLOSED: { version: 1, description: "The transaction satisfied AgentEngineEasy's defined closure criteria." },
+  SUBSCRIPTION_CREATED: { version: 1, description: "A brokerage subscription (Starter, Pro, or an add-on such as Grow) was created." },
+  SUBSCRIPTION_UPDATED: { version: 1, description: "A subscription's status, period, or items changed." },
+  SUBSCRIPTION_CANCELLED: { version: 1, description: "A subscription was cancelled (immediately or at period end)." },
+  ENTITLEMENT_GRANTED: { version: 1, description: "An entitlement grant became active for a brokerage, office, team, or user." },
+  ENTITLEMENT_REVOKED: { version: 1, description: "An entitlement grant was revoked or expired." },
+  ENTITLEMENT_ALLOCATION_CHANGED: { version: 1, description: "A brokerage administrator changed who a seat-limited entitlement is allocated to." },
+  GROW_ACCESS_ACTIVATED: { version: 1, description: "Grow became usable for a brokerage (grow.access granted)." },
+  GROW_ACCESS_SUSPENDED: { version: 1, description: "Grow access was suspended for a brokerage (grow.access revoked, data retained)." },
+  RELATIONSHIP_CREATED: { version: 1, description: "A Grow person-property relationship was created." },
+  RELATIONSHIP_UPDATED: { version: 1, description: "A Grow person-property relationship's status, role, or validity changed." },
+  OPPORTUNITY_CREATED: { version: 1, description: "A Grow opportunity was created." },
+  OPPORTUNITY_STAGE_CHANGED: { version: 1, description: "A Grow opportunity moved stage." },
+  OPPORTUNITY_CONVERTED: { version: 1, description: "A Grow opportunity was converted into a RUN appraisal or transaction." },
+  // AI Governance, Authority & Action Control Architecture (Stage G7).
+  AI_ACTION_PROPOSED: { version: 1, description: "An AI action request was created and is awaiting policy evaluation or approval." },
+  AI_ACTION_APPROVAL_REQUIRED: { version: 1, description: "An AI action request was risk-classified as requiring explicit human approval before execution." },
+  AI_ACTION_APPROVED: { version: 1, description: "An authorised human approved a proposed AI action request." },
+  AI_ACTION_REJECTED: { version: 1, description: "An authorised human rejected a proposed AI action request." },
+  AI_ACTION_EXECUTED: { version: 1, description: "An AI action request was executed through the AI Action Execution Gateway." },
+  AI_ACTION_FAILED: { version: 1, description: "An AI action request passed policy and approval but failed during execution." },
+  AI_ACTION_BLOCKED: { version: 1, description: "An AI action request was blocked by policy evaluation before approval or execution." },
+  AI_WORKFLOW_CHANGE_PROPOSED: { version: 1, description: "The AI proposed a workflow change as a new draft version without altering the active version." },
+  AI_WORKFLOW_CHANGE_APPROVED: { version: 1, description: "An authorised human approved a proposed AI workflow change." },
+  AI_WORKFLOW_VERSION_ACTIVATED: { version: 1, description: "A new workflow version was activated by an authorised human." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {
@@ -58,7 +106,7 @@ export interface DomainEvent<TPayload = Record<string, unknown>> {
   transactionId: number | null;
   partyId: number | null;
 
-  actorType: "USER" | "SYSTEM" | "PIT_CREW" | "INTEGRATION";
+  actorType: "USER" | "SYSTEM" | "PIT_CREW" | "INTEGRATION" | "AI";
   actorId: number | null;
 
   brokerageId: number | null;

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { AskAgentEngine } from "../components/AskAgentEngine";
 import { apiFetch, ApiError } from "../lib/api";
 
 interface PropertyOverview {
@@ -535,6 +536,8 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
       {/* What happens next — one primary action (staging brief's Next
           Action Design). */}
+      <AskAgentEngine contextType="property" contextId={propertyId} />
+
       {primary && (
         <section className="primary-action">
           <div className="eyebrow">Next step</div>

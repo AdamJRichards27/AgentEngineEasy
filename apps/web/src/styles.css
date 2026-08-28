@@ -161,10 +161,20 @@ a {
 }
 
 .app-sidebar-brand {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   height: 30px;
-  width: auto;
   margin: 0.4rem 0.5rem;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 1.05rem;
+  white-space: nowrap;
+}
+
+.app-sidebar-brand svg {
+  flex-shrink: 0;
+  color: var(--color-primary);
 }
 
 .app-sidebar-nav {
@@ -706,10 +716,21 @@ details.section > *:not(summary) {
 }
 
 .auth-logo {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
   height: 23px;
-  width: auto;
   margin: 0 auto 1rem;
+  color: var(--color-text);
+  font-weight: 700;
+  font-size: 0.95rem;
+  white-space: nowrap;
+}
+
+.auth-logo svg {
+  flex-shrink: 0;
+  color: var(--color-primary);
 }
 
 .cost-summary {
@@ -731,4 +752,82 @@ details.section > *:not(summary) {
   border-top: 1px solid var(--color-border);
   margin-top: 0.4rem;
   padding-top: 0.4rem;
+}
+/* Phase 9: Contextual AI Architecture - "Ask Agent Engine" Copilot widget. */
+.ai-copilot-input {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.ai-copilot-input input {
+  flex: 1;
+}
+.ai-copilot-answer {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border, #e2e2e2);
+}
+
+/* Stage A: Grow Subscription/Entitlement/Core Data build - Grow shell + locked upgrade state. */
+.grow-locked {
+  max-width: 640px;
+}
+
+.grow-locked h2 {
+  margin-top: 0;
+}
+
+.empty-state {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.grow-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+}
+
+.grow-table th,
+.grow-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.9rem;
+}
+
+.grow-table th {
+  color: var(--color-text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+}
+
+.billing-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.billing-plan-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.billing-plan-card .plan-name {
+  font-weight: 600;
+}
+
+.billing-plan-card .plan-price {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.dup-row {
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.75rem;
+  margin-top: 0.75rem;
 }

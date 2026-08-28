@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
+import { AskAgentEngine } from "../components/AskAgentEngine";
 
 interface HomeSummaryItem {
   propertyId: number;
@@ -67,6 +68,8 @@ export default function Home() {
           + Start Property
         </Link>
       </div>
+
+      <AskAgentEngine contextType="business" contextId={null} />
 
       {isLoading && <p className="muted">Loading…</p>}
       {isError && <p className="error-text">{(error as ApiError).friendly}</p>}

@@ -1,7 +1,68 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiFetch, ApiError } from "../lib/api";
 import { useSession } from "../lib/session";
+
+interface CatalogueProduct {
+  productId: number;
+  code: string;
+  name: string;
+  description: string | null;
+  priceId: number | null;
+  amountCents: number | null;
+  currency: string | null;
+  billingInterval: string | null;
+}
+
+interface SubscriptionSummary {
+  id: number;
+  status: string;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+}
+
+interface SubscriptionResponse {
+  subscription: SubscriptionSummary | null;
+  entitlements: string[];
+}
+
+function formatPrice(amountCents: number | null, currency: string | null, interval: string | null): string {
+  if (amountCents === null || currency === null) return "Contact us";
+  const amount = (amountCents / 100).toLocaleString(undefined, { style: "currency", currency });
+  return interval ? `${amount}/${interval}` : amount;
+}
 
 export default function Settings() {
   const { user } = useSession();
+  const isAdmin = user?.role === "Brokerage Administrator";
+  const queryClient = useQueryClient();
+
+  const subscription = useQuery<SubscriptionResponse>({
+    queryKey: ["billing-subscription"],
+    queryFn: () => apiFetch("/billing/subscription"),
+  });
+  const catalogue = useQuery<{ products: CatalogueProduct[] }>({
+    queryKey: ["billing-catalogue"],
+    queryFn: () => apiFetch("/billing/catalogue"),
+    enabled: isAdmin,
+  });
+
+  const invalidateBilling = () => {
+    queryClient.invalidateQueries({ queryKey: ["billing-subscription"] });
+    queryClient.invalidateQueries({ queryKey: ["grow-access"] });
+  };
+
+  const checkout = useMutation({
+    mutationFn: (productCode: string) =>
+      apiFetch("/billing/checkout", { method: "POST", body: JSON.stringify({ productCode }) }),
+    onSuccess: invalidateBilling,
+  });
+
+  const cancel = useMutation({
+    mutationFn: (atPeriodEnd: boolean) =>
+      apiFetch("/billing/cancel", { method: "POST", body: JSON.stringify({ atPeriodEnd }) }),
+    onSuccess: invalidateBilling,
+  });
+
   return (
     <div>
       <h1>Settings</h1>
@@ -10,8 +71,63 @@ export default function Settings() {
         <p>
           {user?.firstName} {user?.lastName} · {user?.email}
         </p>
-        <p className="muted">{user?.brokerageName} · {user?.role}</p>
+        <p className="muted">
+          {user?.brokerageName} · {user?.role}
+        </p>
       </section>
+
+      <section className="card">
+        <h2>Billing</h2>
+        {subscription.isLoading && <p className="muted">Loading…</p>}
+        {subscription.data?.subscription ? (
+          <>
+            <p>
+              Status: <span className="pill pill-success">{subscription.data.subscription.status}</span>
+              {subscription.data.subscription.cancelAtPeriodEnd && (
+                <span className="pill pill-warning" style={{ marginLeft: "0.5rem" }}>
+                  Cancels at period end
+                </span>
+              )}
+            </p>
+            {subscription.data.subscription.currentPeriodEnd && (
+              <p className="muted">
+                Current period ends {new Date(subscription.data.subscription.currentPeriodEnd).toLocaleDateString()}
+              </p>
+            )}
+            <p className="muted">Active entitlements: {subscription.data.entitlements.join(", ") || "none"}</p>
+            {isAdmin && !subscription.data.subscription.cancelAtPeriodEnd && (
+              <button className="btn btn-secondary btn-small" onClick={() => cancel.mutate(true)} disabled={cancel.isPending}>
+                Cancel at period end
+              </button>
+            )}
+          </>
+        ) : (
+          <p className="muted">No active subscription. Brokerage-wide activation is the only allocation unit in this build - office/team seat allocation is not yet available.</p>
+        )}
+        {(checkout.isError || cancel.isError) && (
+          <p className="error-text">{((checkout.error ?? cancel.error) as ApiError).friendly}</p>
+        )}
+
+        {isAdmin && catalogue.data && catalogue.data.products.length > 0 && (
+          <div className="billing-plan-grid">
+            {catalogue.data.products.map((p) => (
+              <div className="billing-plan-card" key={p.productId}>
+                <div className="plan-name">{p.name}</div>
+                <div className="plan-price">{formatPrice(p.amountCents, p.currency, p.billingInterval)}</div>
+                {p.description && <p className="muted">{p.description}</p>}
+                <button
+                  className="btn btn-primary btn-small"
+                  onClick={() => checkout.mutate(p.code)}
+                  disabled={checkout.isPending}
+                >
+                  {checkout.isPending ? "Starting…" : "Subscribe"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <p className="muted">Integrations and Pit Crew configuration land here as later phases build them out.</p>
     </div>
   );
