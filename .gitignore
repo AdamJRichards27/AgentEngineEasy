@@ -8,3 +8,8 @@ build/
 .replit-artifact/
 /storage/
 apps/api/storage/
+
+# TypeScript incremental build cache (generated per-package by tsc --build /
+# project references). Never a source artefact, safe to regenerate, and
+# noisy in diffs. Added Foundation Remediation Stage 2.
+*.tsbuildinfo

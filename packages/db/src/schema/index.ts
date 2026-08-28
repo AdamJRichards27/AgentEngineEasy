@@ -12,3 +12,4 @@ export * from "./ai";
 export * from "./billing";
 export * from "./grow";
 export * from "./import";
+export * from "./automation";

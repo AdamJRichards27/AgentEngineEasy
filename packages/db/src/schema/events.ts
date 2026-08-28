@@ -20,6 +20,13 @@ export const domainEvents = pgTable(
     brokerageId: integer("brokerage_id"),
     agentId: integer("agent_id"),
 
+    // Agent Engine 2.0 (Stage 2): generalised aggregate reference so the
+    // Workflow Automation Engine can correlate/trigger against any domain
+    // entity, not just the fixed property/transaction/party/brokerage/agent
+    // columns above (which remain for existing consumers).
+    aggregateType: text("aggregate_type"),
+    aggregateId: text("aggregate_id"),
+
     actorType: text("actor_type").notNull(), // USER | SYSTEM | PIT_CREW | INTEGRATION
     actorId: integer("actor_id"),
 
@@ -32,6 +39,12 @@ export const domainEvents = pgTable(
 
     payload: jsonb("payload"),
     metadata: jsonb("metadata"),
+
+    // Agent Engine 2.0 (Stage 2, Build Instructions section on audit/observability):
+    // sensitive values/credentials/identity documents must not be written
+    // into logs. This marks payload sensitivity so audit/log surfaces can
+    // redact SENSITIVE rows; it does not itself redact anything.
+    dataClassification: text("data_classification").notNull().default("STANDARD"), // STANDARD | SENSITIVE
 
     processingStatus: text("processing_status").notNull().default("PROCESSED"),
     handlerErrors: jsonb("handler_errors"),

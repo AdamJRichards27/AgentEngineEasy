@@ -44,6 +44,22 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "AI_WORKFLOW_CHANGE_PROPOSED",
   "AI_WORKFLOW_CHANGE_APPROVED",
   "AI_WORKFLOW_VERSION_ACTIVATED",
+  // Agent Engine 2.0 — Workflow Automation Engine (Stage 2). Added to close
+  // gaps against the required 26-type canonical event catalogue confirmed in
+  // docs/stage-wf/WF1_DISCOVERY.md §1. WORKFLOW_ACTION_* were renamed to
+  // AUTOMATION_ACTION_* to avoid the confirmed naming collision with the
+  // existing, unrelated per-property "workflows" checklist engine (§2).
+  "APPRAISAL_CREATED",
+  "PROPOSAL_SENT",
+  "CONTRACT_PREPARATION_STARTED",
+  "CONTRACT_EXCHANGED",
+  "TRANSACTION_UNCONDITIONAL",
+  "TASK_COMPLETED",
+  "TASK_OVERDUE",
+  "AUTOMATION_ACTION_FAILED",
+  "AUTOMATION_ACTION_BLOCKED",
+  "EXCEPTION_CREATED",
+  "EXCEPTION_RESOLVED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -92,6 +108,18 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   AI_WORKFLOW_CHANGE_PROPOSED: { version: 1, description: "The AI proposed a workflow change as a new draft version without altering the active version." },
   AI_WORKFLOW_CHANGE_APPROVED: { version: 1, description: "An authorised human approved a proposed AI workflow change." },
   AI_WORKFLOW_VERSION_ACTIVATED: { version: 1, description: "A new workflow version was activated by an authorised human." },
+  // Agent Engine 2.0 — Workflow Automation Engine (Stage 2).
+  APPRAISAL_CREATED: { version: 1, description: "An appraisal record was created for a property." },
+  PROPOSAL_SENT: { version: 1, description: "A listing proposal was sent to a prospective vendor." },
+  CONTRACT_PREPARATION_STARTED: { version: 1, description: "Contract preparation began for a transaction." },
+  CONTRACT_EXCHANGED: { version: 1, description: "Contracts were formally exchanged between parties." },
+  TRANSACTION_UNCONDITIONAL: { version: 1, description: "A transaction became unconditional (all conditions satisfied)." },
+  TASK_COMPLETED: { version: 1, description: "A workflow step / task was marked complete." },
+  TASK_OVERDUE: { version: 1, description: "A workflow step / task passed its due date while still incomplete." },
+  AUTOMATION_ACTION_FAILED: { version: 1, description: "An automation rule's action attempt failed during execution." },
+  AUTOMATION_ACTION_BLOCKED: { version: 1, description: "An automation rule's action was blocked by the authority/policy engine." },
+  EXCEPTION_CREATED: { version: 1, description: "A new Exception & Risk Engine record was raised." },
+  EXCEPTION_RESOLVED: { version: 1, description: "An open Exception & Risk Engine record was resolved." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {
