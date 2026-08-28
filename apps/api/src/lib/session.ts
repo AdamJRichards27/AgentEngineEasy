@@ -1,27 +1,52 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Response } from "express";
+import { isInsecureCookieExplicitlyAllowed } from "./env.js";
 
 // Minimal session mechanism for staging/prototype use (ARCHITECTURE.md §7,
-// §10 Phase 1-8 closing note: "the real Clerk auth integration" is
+// §10 Phase 1-8 closing note: "the real Clerk auth integration is the
 // documented future scope). This is deliberately NOT a general-purpose auth
-// system — it's an HMAC-signed cookie carrying a user id, enough to make
+// system - it's an HMAC-signed cookie carrying a user id, enough to make
 // every requireAuth-gated route actually usable end-to-end on staging while
 // real Clerk integration is scheduled. No passwords, no third-party
 // identity provider: POST /auth/dev-login finds-or-creates a user by email
-// and signs them in directly (see routes/auth.ts).
+// and signs them in directly (see routes/auth.ts) - and that route is only
+// reachable when an operator has explicitly enabled it (see lib/env.ts).
+//
+// Foundation Remediation, Stage 1.2/1.3: the insecure hardcoded fallback
+// secret that used to live here has been removed. A missing or weak
+// SESSION_SECRET now makes secret() throw, and index.ts calls
+// assertSessionSecretConfigured() during boot so the process refuses to
+// start rather than quietly signing tokens no one can trust across a
+// restart or a redeploy.
 
 const COOKIE_NAME = "aee_session";
-const MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 days — staging convenience, not a security-critical session
+const MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 days - staging convenience, not a security-critical session
+const MIN_SECRET_LENGTH = 32;
 
 function secret(): string {
   const s = process.env.SESSION_SECRET;
-  if (!s) {
-    // Never throw here — a missing secret shouldn't take the whole API
-    // down, but it does mean sessions aren't trustworthy across restarts.
-    // Logged once per process, not per request.
-    return "aee-dev-insecure-default-secret-set-SESSION_SECRET-in-env";
+  if (!s || s.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      "SESSION_SECRET is not configured, or is shorter than " +
+        MIN_SECRET_LENGTH +
+        " characters. Refusing to sign or verify sessions: a weak or " +
+        "absent secret means every session cookie could be forged. Set " +
+        "SESSION_SECRET to a random value of at least " +
+        MIN_SECRET_LENGTH +
+        " characters (for example: `openssl rand -base64 48`) before " +
+        "starting the API.",
+    );
   }
   return s;
+}
+
+/**
+ * Call once during process boot (see index.ts). Throws - and is meant to
+ * crash startup - if SESSION_SECRET is missing or too weak, so the failure
+ * happens loudly at deploy time instead of silently at request time.
+ */
+export function assertSessionSecretConfigured(): void {
+  secret();
 }
 
 function base64url(input: Buffer | string): string {
@@ -42,13 +67,19 @@ export function verifySessionToken(token: string | undefined | null): { uid: num
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
   const expected = sign(payload);
-  // Constant-time comparison — signature is attacker-influenced input.
+  // Constant-time comparison - signature is attacker-influenced input.
   const a = Buffer.from(signature);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    if (typeof decoded?.uid !== "number") return null;
+    if (typeof decoded?.uid !== "number" || typeof decoded?.iat !== "number") return null;
+    // Foundation Remediation, Stage 1.5: reject sessions older than
+    // MAX_AGE_SECONDS server-side too, not just via the cookie's own
+    // Max-Age. A leaked or replayed token must expire even if it's
+    // presented outside the browser's own cookie-expiry enforcement.
+    const ageSeconds = (Date.now() - decoded.iat) / 1000;
+    if (!Number.isFinite(ageSeconds) || ageSeconds < 0 || ageSeconds > MAX_AGE_SECONDS) return null;
     return { uid: decoded.uid };
   } catch {
     return null;
@@ -74,12 +105,14 @@ export function readSessionCookie(cookieHeader: string | undefined): string | un
 
 export function setSessionCookie(res: Response, userId: number): void {
   const token = createSessionToken(userId);
+  const secureAttr = isInsecureCookieExplicitlyAllowed() ? "" : "; Secure";
   res.setHeader(
     "Set-Cookie",
-    `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${MAX_AGE_SECONDS}`,
+    `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${MAX_AGE_SECONDS}${secureAttr}`,
   );
 }
 
 export function clearSessionCookie(res: Response): void {
-  res.setHeader("Set-Cookie", `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  const secureAttr = isInsecureCookieExplicitlyAllowed() ? "" : "; Secure";
+  res.setHeader("Set-Cookie", `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureAttr}`);
 }

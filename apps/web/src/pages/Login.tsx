@@ -29,6 +29,12 @@ export default function Login() {
   const { data: knownUsers } = useQuery({
     queryKey: ["known-users"],
     queryFn: () => apiFetch<{ users: KnownUser[] }>("/auth/known-users").then((r) => r.users),
+    // Foundation Remediation Stage 1.1: this endpoint is intentionally
+    // unavailable (404) outside an explicitly enabled development
+    // environment. Do not retry a disabled route, and let a missing
+    // result fall through to the manual sign-in form below rather than
+    // depending on this list being reachable.
+    retry: false,
   });
 
   const signIn = useMutation({

@@ -1,6 +1,12 @@
 import { createApp } from "./app.js";
 import { configureEvents } from "./lib/events.js";
 import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
+import { assertSessionSecretConfigured } from "./lib/session.js";
+
+// Foundation Remediation Stage 1.2: fail closed at boot, not at first
+// request, if SESSION_SECRET is missing or too weak. A process that
+// can't sign trustworthy sessions must not accept traffic at all.
+assertSessionSecretConfigured();
 
 configureEvents();
 

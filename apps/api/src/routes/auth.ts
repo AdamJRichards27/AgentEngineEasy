@@ -5,6 +5,7 @@ import { db, users, brokerages } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { setSessionCookie, clearSessionCookie } from "../lib/session.js";
 import { logAudit } from "../lib/audit.js";
+import { isDevAuthEnabled } from "../lib/env.js";
 
 export const authRouter = Router();
 
@@ -26,6 +27,15 @@ function userView(row: typeof users.$inferSelect, brokerageName?: string | null)
 // yet, and this is a staging tool for a small internal test group, not a
 // public directory.
 authRouter.get("/known-users", async (_req, res) => {
+  // Foundation Remediation Stage 1.1: unauthenticated user enumeration
+  // must never be reachable outside an explicitly declared development
+  // environment. Returns 404 (not 403) so a disabled environment gives
+  // no signal that this route exists at all.
+  if (!isDevAuthEnabled()) {
+    res.status(404).end();
+    return;
+  }
+
   const rows = await db.select().from(users).innerJoin(brokerages, eq(users.brokerageId, brokerages.id));
   res.json({
     users: rows
@@ -51,6 +61,16 @@ const devLoginSchema = z.object({
 // transaction-close are all Brokerage-Administrator-only actions elsewhere
 // in this app.
 authRouter.post("/dev-login", async (req, res) => {
+  // Foundation Remediation Stage 1.1: passwordless account creation and
+  // sign-in must never be reachable outside an explicitly declared
+  // development environment (see lib/env.ts::isDevAuthEnabled). Returns
+  // 404, matching /known-users above, rather than a 403 that would
+  // confirm the route exists.
+  if (!isDevAuthEnabled()) {
+    res.status(404).end();
+    return;
+  }
+
   const parsed = devLoginSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Enter a name, email, and brokerage to continue." });
