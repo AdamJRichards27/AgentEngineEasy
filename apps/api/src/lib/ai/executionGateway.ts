@@ -125,7 +125,7 @@ export async function executeAIAction(requestId: number, brokerageId: number): P
       .set({ status: "COMPLETED", executionResult: (result ?? null) as AiActionRequest["executionResult"], executedAt: new Date(), updatedAt: new Date() })
       .where(eq(aiActionRequests.id, row.id))
       .returning();
-    await publishAiActionEvent(row, "AI_ACTION_EXECUTED", { result: result ?? null });
+    await publishAiActionEvent(completed, "AI_ACTION_EXECUTED", { result: result ?? null });
     return { ok: true, request: completed, result };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : "Unknown execution error";
@@ -134,7 +134,7 @@ export async function executeAIAction(requestId: number, brokerageId: number): P
       .set({ status: "FAILED", errorMessage, updatedAt: new Date() })
       .where(eq(aiActionRequests.id, row.id))
       .returning();
-    await publishAiActionEvent(row, "AI_ACTION_FAILED", { errorMessage });
+    await publishAiActionEvent(failed, "AI_ACTION_FAILED", { errorMessage });
     return { ok: false, reason: "EXECUTION_FAILED", request: failed, errorMessage };
   }
 }
