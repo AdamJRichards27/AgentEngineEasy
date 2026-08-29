@@ -1,0 +1,112 @@
+name: CI
+
+# Foundation Remediation Stage 3.2 — continuous integration gate.
+#
+# Runs on every pull request and on every push to staging or main. Installs
+# the declared Node.js and pnpm versions from a committed lockfile, then
+# runs the workspace typecheck, the API automated test suite (against a
+# disposable, ephemeral Postgres service container — never a real
+# database), a deterministic clean-database migration check, and both
+# production builds. Any required step failing fails the workflow.
+#
+# This workflow deliberately requires no production secrets. The only
+# environment values it sets are a throwaway Postgres connection string
+# scoped to the ephemeral `postgres` service below, and a locally-generated
+# dummy SESSION_SECRET used only to satisfy this repository's own
+# fail-closed session-secret check during the test run. Neither value is a
+# real credential and neither is capable of reaching any real environment.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - staging
+      - main
+
+# Cancel superseded runs on the same branch/PR to avoid wasting CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20.12.2"
+  PNPM_VERSION: "8.15.5"
+
+jobs:
+  build-and-test:
+    name: Typecheck, test, build, migration validation
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aee_ci
+          POSTGRES_PASSWORD: aee_ci_password
+          POSTGRES_DB: aee_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aee_ci -d aee_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Ephemeral, CI-local database only. This is never a real environment
+      # and this workflow never runs against staging's or production's
+      # actual DATABASE_URL, which is not available to it.
+      DATABASE_URL: postgresql://aee_ci:aee_ci_password@localhost:5432/aee_ci
+      # A locally-generated, non-secret placeholder used only so this
+      # repository's own fail-closed SESSION_SECRET check (see
+      # apps/api/src/lib/session.ts) is satisfied during CI test runs. This
+      # is not used anywhere outside this workflow and is not a credential
+      # for any real system.
+      SESSION_SECRET: ci-only-non-production-session-secret-value-not-a-real-secret
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Workspace typecheck
+        run: pnpm -r run typecheck
+
+      - name: Deterministic clean-database migration check
+        # Proves the versioned migrations in packages/db/migrations can
+        # initialise a brand-new, empty database on their own, with no
+        # manual schema step. Runs only against the disposable `postgres`
+        # service above.
+        run: pnpm --filter @aee/db run db:migrate
+
+      - name: Schema drift check
+        # Fails the build if the TypeScript schema was changed without a
+        # matching migration being generated and committed alongside it.
+        run: |
+          pnpm --filter @aee/db exec drizzle-kit generate
+          git diff --exit-code -- packages/db/migrations || {
+            echo "::error::packages/db/migrations is out of date with packages/db/src/schema. Run 'pnpm --filter @aee/db run db:generate' locally and commit the result.";
+            exit 1;
+          }
+
+      - name: API automated test suite
+        run: pnpm --filter @aee/api run test
+
+      - name: API production build
+        run: pnpm --filter @aee/api run build
+
+      - name: Web production build
+        run: pnpm --filter @aee/web run build
