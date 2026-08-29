@@ -1,6 +1,6 @@
 # WF2 — Workflow Automation Engine: Foundation Implementation
 
-Status: **Foundation slice implemented, pending CI verification and review.**
+Status: **Foundation slice implemented and verified; ready for PR review.**
 Branch: `feat/wae-foundation`, created from `origin/staging` @ `c733b1104f5dfa344a4aace37df8ae8ac8b5d69b`
 (the commit verified in `RECOVERY COMPLETE — STAGING VERIFIED`).
 Baseline discovery doc: `docs/stage-wf/WF1_DISCOVERY.md`.
@@ -137,8 +137,9 @@ engine reads and writes (`automation_rules`, `automation_rule_versions`,
 `packages/db/src/schema/automation.ts`, already baked into the single baseline migration
 (`packages/db/migrations/0000_baseline_schema.sql`), and were confirmed present with zero rows
 in `docs/foundation-remediation/F2_AUTOMATION_SCHEMA_CHECKPOINT.md` — "scaffolded only," no
-prior reader or writer. This PR is their first consumer. The CI schema-drift check
-(`drizzle-kit generate` + `git diff --exit-code`) is expected to be a clean no-op as a result.
+prior reader or writer. This PR is their first consumer. Real execution of the CI schema-drift
+check (`pnpm --filter @aee/db exec drizzle-kit generate`) confirmed this: `No schema changes,
+nothing to migrate`, and `git diff --exit-code -- packages/db/migrations` reported no changes.
 
 ## 6. Explicitly out of scope (unchanged from the task)
 
@@ -178,17 +179,47 @@ foundation. Additionally deferred, and flagged as genuine gaps rather than silen
 `src/lib/automation/__tests__/*.test.ts` so this suite runs in CI alongside the existing
 suites; nothing else in that script changed.
 
-## 8. Environment note
+## 8. Verification results (executed, not manually reasoned)
 
-This implementation was written and reviewed against the exact source of every module it
-integrates with (fetched directly from `origin/staging` via the GitHub API) rather than a
-local editable checkout, because the Replit workspace this task's environment normally uses
-for `pnpm install/typecheck/test/build` was unreachable for the remainder of this session
-(the browser-automation connection to it dropped mid-session and did not reconnect), and this
-sandbox's own git/API access to this specific repository is intentionally not enabled. Every
-new/modified file's types and call signatures were cross-checked line-by-line against the
-real, current contents of every module it calls into (`policyEngine.ts`, `executionGateway.ts`,
-`actionRequests.ts`, `automation.ts`'s schema, `events/types.ts`, etc.) rather than assumed.
-The authoritative, executable verification is the CI run this PR triggers automatically
-against a real ephemeral Postgres instance, using the exact command sequence in
-`.github/workflows/ci.yml` — see the PR for its result.
+The Replit workspace this task normally verifies against reconnected during this session, so
+every step below was actually run there against the real toolchain and a real Postgres
+database — not inferred from reading source. This run found and fixed two genuine defects
+that static review had missed:
+
+- **`tsc` (real compiler) caught a bad import**: `engine.ts` imported `PolicyActor` from
+  `../ai/actionRequests.js`, but that module only imports it from `policyEngine.ts` for its
+  own internal use and never re-exports it (`TS2459`). Fixed by importing both `PolicyActor`
+  and `PolicyDecision` directly from `../ai/policyEngine.js`, the module that actually defines
+  them.
+- **The real test run caught a wrong operator**: the "supports nested groups" test in
+  `conditions.test.ts` asserted array membership with the `in` operator (scalar-is-member-of-
+  list) against an array fact value, so it evaluated `false` unconditionally. Fixed by using
+  `contains` (array-includes-scalar), the operator that actually expresses the test's intent.
+
+With both fixes applied, the full CI-equivalent sequence was executed in order:
+
+| Step | Command | Result |
+| --- | --- | --- |
+| Install | `pnpm install --frozen-lockfile` | Clean; no new/changed dependencies |
+| Typecheck | `pnpm -r run typecheck` | All 10 workspace projects report `Done`; `apps/api` clean after the `engine.ts` fix |
+| Migration (Replit dev DB) | `pnpm --filter @aee/db run db:migrate` | Failed — see below; does not reflect CI |
+| Schema drift | `pnpm --filter @aee/db exec drizzle-kit generate` + `git diff --exit-code -- packages/db/migrations` | `No schema changes, nothing to migrate`; diff clean |
+| Tests | `pnpm --filter @aee/api run test` | **171 tests: 170 pass, 0 fail, 1 skipped** (the skip is pre-existing and unrelated — an entitlement-restriction placeholder in `apps/api/src/lib/ai/__tests__`, documented in its own SKIP reason, not touched by this PR) |
+| API build | `pnpm --filter @aee/api run build` | `esbuild` succeeded, `dist/index.mjs` 296.4kb, done in 126ms |
+| Web build | `pnpm --filter @aee/web run build` | `vite build` succeeded, done in 1.31s (only output: a pre-existing Node-version advisory from Vite, unrelated to this PR and present regardless of it) |
+
+**On the migration failure**: this Replit workspace's Postgres database is a long-lived dev
+database, not the fresh, ephemeral instance CI provisions per run. Direct inspection
+(`psql "$DATABASE_URL" -c '\dt'`) shows all 44 baseline tables — including all five
+`automation_*`/`event_processing_receipts` tables this PR uses — already exist in this
+database, while `select * from drizzle.__drizzle_migrations` returns zero rows. That
+combination means this database's schema was created out of band at some point in this
+workspace's history (e.g. via `drizzle-kit push` during earlier development) rather than
+through the tracked `db:migrate` journal, so re-running `db:migrate` against it tries to
+`CREATE TABLE "brokerages"` from scratch and fails on the first statement because the table is
+already there. This is a pre-existing property of this one long-lived database, not a defect
+introduced by this PR: it would fail identically on a pristine checkout of `origin/staging`
+with zero WAE changes, and it is independent of anything this PR's code does. It is also not
+the authoritative check — `.github/workflows/ci.yml` provisions a genuinely fresh, empty
+Postgres 16 service container for every run, applies only the single baseline migration to it,
+and that is the check whose result this PR's CI run reports.
