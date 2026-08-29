@@ -60,6 +60,16 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "AUTOMATION_ACTION_BLOCKED",
   "EXCEPTION_CREATED",
   "EXCEPTION_RESOLVED",
+  // Agent Engine 2.0 — Workflow Automation Engine (Stage: Foundation).
+  // Execution-level lifecycle events, complementing the action-level
+  // AUTOMATION_ACTION_FAILED/BLOCKED above — component "Structured audit
+  // events for evaluation and execution". Deliberately minimal: an
+  // action-level success is already fully audited by the existing
+  // AI_ACTION_EXECUTED event (published by executionGateway.ts's own
+  // publishAiActionEvent call, reused unchanged by the automation engine),
+  // so no separate AUTOMATION_ACTION_SUCCEEDED was added.
+  "AUTOMATION_EXECUTION_SKIPPED",
+  "AUTOMATION_EXECUTION_COMPLETED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -120,6 +130,9 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   AUTOMATION_ACTION_BLOCKED: { version: 1, description: "An automation rule's action was blocked by the authority/policy engine." },
   EXCEPTION_CREATED: { version: 1, description: "A new Exception & Risk Engine record was raised." },
   EXCEPTION_RESOLVED: { version: 1, description: "An open Exception & Risk Engine record was resolved." },
+  // Agent Engine 2.0 — Workflow Automation Engine (Stage: Foundation).
+  AUTOMATION_EXECUTION_SKIPPED: { version: 1, description: "An automation rule version's conditions did not match the triggering event; no action was attempted." },
+  AUTOMATION_EXECUTION_COMPLETED: { version: 1, description: "An automation execution reached COMPLETED — every action succeeded." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {

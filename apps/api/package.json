@@ -8,7 +8,7 @@
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --packages=external",
     "start": "node dist/index.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/ai/__tests__/*.test.ts src/lib/entitlements/__tests__/*.test.ts src/lib/billing/__tests__/*.test.ts src/middlewares/__tests__/*.test.ts src/lib/import/__tests__/*.test.ts src/lib/__tests__/*.test.ts src/routes/__tests__/*.test.ts"
+    "test": "tsx --test src/lib/ai/__tests__/*.test.ts src/lib/entitlements/__tests__/*.test.ts src/lib/billing/__tests__/*.test.ts src/middlewares/__tests__/*.test.ts src/lib/import/__tests__/*.test.ts src/lib/__tests__/*.test.ts src/routes/__tests__/*.test.ts src/lib/automation/__tests__/*.test.ts"
   },
   "dependencies": {
     "@aee/db": "workspace:*",
