@@ -65,9 +65,9 @@ import {
 } from "@aee/db";
 import { publishDomainEvent, type DomainEvent } from "@aee/events";
 import { getActionDefinition } from "../ai/actions/registry.js";
-import { proposeAIAction, type PolicyActor } from "../ai/actionRequests.js";
+import { proposeAIAction } from "../ai/actionRequests.js";
 import { executeAIAction } from "../ai/executionGateway.js";
-import type { PolicyDecision } from "../ai/policyEngine.js";
+import type { PolicyActor, PolicyDecision } from "../ai/policyEngine.js";
 import { buildFacts, type AutomationFacts } from "./facts.js";
 import { evaluateConditionGroup, type AutomationConditionGroup } from "./conditions.js";
 import { resolveActionParams } from "./templating.js";
