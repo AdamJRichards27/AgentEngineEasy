@@ -1,0 +1,259 @@
+# AgentEngineEasy — Architecture Plan
+
+Produced before implementation, per the build brief's Section "Before writing significant code." Covers: proposed folder structure, domain model, database changes, integration interfaces, development sequence, reusable components from Agent Engine Staging, and components explicitly not carried across. This document ships in the repo (`/ARCHITECTURE.md`) as the standing reference for the build.
+
+Full prior-art audit (KEEP/ADAPT/REBUILD/RETIRE/FUTURE classification of every capability in `AgentEngineStaging`) lives in that audit's own delivered document; this file restates only what's load-bearing for the build itself.
+
+---
+
+## 1. Proposed folder structure
+
+```
+AgentEngineEasy/
+  ARCHITECTURE.md
+  README.md
+  package.json                    pnpm workspace root
+  pnpm-workspace.yaml
+  tsconfig.base.json
+  .env.example
+  .replit                         Replit run configuration
+
+  packages/
+    db/                           Drizzle schema + client (own database — see §7)
+      src/schema/
+        users.ts                  User, Brokerage
+        property.ts                Property, Party, PropertyParty
+        appraisal.ts                Appraisal
+        aml.ts                      AMLVerification
+        documents.ts                Document, DocumentPackage, SignatureRequest, AgencyAgreementTerms
+        commerce.ts                 ServiceOrder, Payment, PaymentMethod
+        transaction.ts              Offer, Transaction
+        workflow.ts                 Workflow, WorkflowStep
+        events.ts                   DomainEvent
+        audit.ts                    AuditLog
+        index.ts                    barrel export
+      drizzle.config.ts
+      migrations/                  hand-written idempotent SQL (convention kept from Agent Engine)
+
+    events/                       Domain event backbone (ported pattern from lib/events)
+      src/types.ts                  19 canonical event types (§6)
+      src/registry.ts                handler registration/dispatch
+      src/publisher.ts               publish + idempotency
+
+    integrations/                 Provider abstraction layer (§5)
+      property-data/src/index.ts    PropertyDataProvider interface + GooglePlaces adapter + Mock
+      aml/src/index.ts               AMLProvider interface + HttpAMLProvider (real REST + HMAC webhook) + Mock
+      esign/src/index.ts             ESignProvider interface + HttpESignProvider (real REST + HMAC webhook) + Mock
+      object-storage/src/index.ts    ObjectStorageProvider interface + LocalObjectStorageProvider (Phase 5)
+      payments/src/index.ts          PaymentProvider interface + StripePaymentProvider (real REST + HMAC webhook) + Mock (Phase 6)
+      # (no new integration package in Phase 7 — offers/transactions have no external vendor)
+
+  apps/
+    api/                         Express/TypeScript API
+      src/app.ts                    app assembly (captures req.rawBody for webhook signature verification)
+      src/index.ts                   server bootstrap
+      src/middlewares/auth.ts        role model: Agent, Brokerage Administrator, Pit Crew
+      src/lib/audit.ts               logAudit() — ported pattern
+      src/lib/events.ts              publishDomainEvent() wiring
+      src/lib/aml.ts                 initiateAmlIfNeeded / processAmlWebhook / retryAmlVerification / resolveAmlException
+      src/lib/documentRules.ts       determineRequiredDocuments (versioned — DOCUMENT_RULE_SET_VERSION)
+      src/lib/documentTemplates.ts   populateTemplate() — placeholder content, disclaimer-banked (Phase 5)
+      src/lib/documents.ts           upsertAgencyAgreementTerms / populateDocumentPackage / sendPackageForSignature / processEsignWebhook
+      src/lib/payments.ts            addPaymentMethod / chargeServiceOrder / processPaymentWebhook / refundPayment (Phase 6)
+      src/lib/offers.ts              createOffer / withdrawOffer / declineOffer / getOfferByShareToken (Phase 7)
+      src/lib/transactions.ts        acceptOffer / recordContractSigned / recordFinanceApproved / scheduleSettlement /
+                                      completeSettlement / calculateCommission / recordFundsReceived / recordAgentPaid /
+                                      closeTransaction (Phase 7)
+      src/lib/homeSummary.ts         getHomeSummary() — cross-property exceptions/next-actions (Phase 8)
+      src/routes/
+        health.ts
+        properties.ts                Start Property, get, list, ready-to-list, go-live (Phase 7)
+        parties.ts                   add/list sellers & buyers on a property
+        aml.ts                       request, webhook, retry, resolve-exception, service-orders (Phase 4, built)
+        documents.ts                 agency terms, populate, send-for-signature, webhook, content preview (Phase 5, built)
+        payments.ts                  payment methods, service-order charging, webhook, refund (Phase 6, built)
+        offers.ts                    create/list/accept/decline/withdraw, public share-token status (Phase 7, built)
+        transactions.ts              contract/finance/settlement/commission/funds/payout/close (Phase 7, built)
+        home.ts                      GET /home/summary — the Home screen's data source (Phase 8, built)
+        index.ts
+
+    web/                         React/Vite frontend
+      src/pages/
+        Home.tsx                     "what needs my attention today" — real cross-property exceptions/next-actions (Phase 8, built)
+        PropertiesList.tsx
+        StartProperty.tsx            address search → property created
+        PropertyWorkspace.tsx        the Property Action Screen (§4)
+        Settings.tsx
+      src/lib/api.ts
+      src/App.tsx                    shallow route table — 5 destinations, not 15
+      src/main.tsx
+```
+
+This mirrors the *pattern* proven in `AgentEngineStaging` (pnpm workspace, `packages/*` for shared domain logic, `apps/*` for the two runtimes) without inheriting its module-per-page navigation.
+
+---
+
+## 2. Domain model
+
+Core entities, matching the build brief's Section 23 list, resolved against what the prior audit found:
+
+| Entity | Notes |
+|---|---|
+| **User** | Same shape as Agent Engine's `users` table (id, clerkId, name, role, officeId→brokerageId, isActive). |
+| **Brokerage** | Built as a real first-class entity from day one — the prior audit flagged this as a gap in the old app (tenancy was `officeId`-by-convention only). AgentEngineEasy does not repeat that gap. |
+| **Property** | The single operational container. Holds address, workflow stage, and denormalized status summaries (aml, listing, contract) for fast "what's next" queries. |
+| **Party** | Person / Organisation / Trust / Estate / Other. Minimum fields captured once (first/middle/last name, mobile, email, residential address); entity-specific fields requested only when `partyType !== "Person"`. |
+| **PropertyParty** | Join table: property ↔ party ↔ role (Seller, Buyer, Solicitor, etc.) ↔ relationship metadata. This is the mechanism that makes "enter once" real. |
+| **Appraisal** | Property-scoped, versioned (immutable snapshot on finalisation — this pattern from Agent Engine's `appraisals.ts` is worth keeping). |
+| **AMLVerification** | Exact shape from Section 7 of the brief: verification_id, property_id, party_id, provider, provider_reference, verification_type, status, requested_at, completed_at, outcome, risk_level, review_required, evidence_reference, created_by, audit timestamps. Agent-facing status is the 6-value enum (Not Started / Awaiting Seller / In Progress / Complete / Review Required / Failed); provider-side detail stays server-side. |
+| **Document / DocumentPackage** | `Document` = one generated/uploaded file; `DocumentPackage` = the bundle assembled for a given workflow stage (e.g. "Ready to List package") and sent as one signature envelope. |
+| **SignatureRequest** | One row per e-sign envelope; tracks provider reference, signatories, status, webhook history. |
+| **ServiceOrder** | Generic paid-service entity (Section 11) — AML verification, searches, paid forms all flow through this one table rather than a bespoke billing path per service type. |
+| **Payment / PaymentMethod** | Stored payment method + charge records, with a `payerType`/`payerId` pair (individual / team / brokerage / subscription-allowance / central) from day one, per Section 12 — so introducing brokerage billing later doesn't require rebuilding `ServiceOrder`. |
+| **Offer** | Revision-chain shape (each change is a new row, matching Agent Engine's proven `offers.ts` pattern — never overwritten in place). |
+| **Transaction** | Created from an accepted Offer, linked to the Property rather than duplicating seller/buyer/property data. Real structured fields (not a single flat `commission` number) from the start — the prior audit's biggest schema warning. |
+| **Workflow / WorkflowStep** | Generic engine instance: a Property (or Transaction) has an active `Workflow` made of ordered `WorkflowStep`s, each mapped to a real status. This is what answers "what needs to happen next?" generically instead of hand-coding per-page logic, and what will later let state/brokerage rules vary the milestone set (Section 16) without a schema change. |
+| **Event** | `DomainEvent` — 19 canonical types (§6). |
+| **AuditLog** | Ported pattern: who/what/property/party/previous→new value/provider reference/timestamp. Property Timeline is a read projection over this + Event, exactly as Agent Engine already does it. |
+
+---
+
+## 3. Database changes vs. Agent Engine Staging
+
+AgentEngineEasy uses its **own separate database** (Section 1) — this is additive design, not a migration of existing rows. Where a table shape is being reused, it's reused as a *pattern*, re-created fresh:
+
+- `users`, `contacts`→`Party`, `contactPropertyRelationships`→`PropertyParty`, `documents`/`documentVersions`/`documentActivity`, `tasks`(folded into `WorkflowStep`), `auditLogs`, `domainEvents` — ported near-as-is.
+- `offices` → **replaced**, not extended: a real `brokerages` table from the start (see §2).
+- `agencyAgreements` → not ported as-is. AgentEngineEasy's `DocumentPackage`/`Document` model carries agency-agreement terms as real structured fields, not opaque JSON — this was the single clearest "not a source of truth" finding in the prior audit and is not being repeated.
+- `transactions` → not ported as-is (the flat single-table shape, and the unresolved schema-drift bug found in the old app, are both left behind). Real `Transaction` + `WorkflowStep` milestones from the start.
+- `amlRequests` (legacy, parallel table in the old app) → not ported at all. Only the `amlOrders`-equivalent (`AMLVerification`) exists here.
+- No `Listing` table yet in Phase 1–3 scope — tracked as a `Property.workflowStage` value initially, exactly like the old app, with the same caveat flagged in the prior audit: revisit before assuming a status field is enough once listing-specific history (price changes, relisting) matters.
+
+---
+
+## 4. The Property Action Screen (frontend anchor)
+
+`PropertyWorkspace.tsx` is the one screen the whole build orients around. It renders from a single `GET /api/properties/:id/workspace` response shaped as:
+
+```
+{
+  property: { address, stage },
+  parties: [{ name, role, amlStatus }],
+  nextActions: [{ label, status, cta }],   // e.g. "Verify Sellers", "Agency Agreement", "Required Documents"
+  timeline: [...]                          // recent audit/event entries, human-readable
+}
+```
+
+One primary CTA at a time (`Review & Send`, `Verify Sellers`, etc.) — never a menu of fifteen options. This is the concrete implementation of Section 13/26's UI principle.
+
+---
+
+## 5. Integration interfaces (provider abstraction)
+
+Every external service sits behind a narrow interface in `packages/integrations/*`, never called directly from route or UI code (Section 18–19):
+
+```ts
+// packages/integrations/property-data/src/index.ts
+export interface PropertyDataProvider {
+  searchAddress(query: string): Promise<AddressCandidate[]>;
+  lookupOwnership(addressId: string): Promise<OwnershipRecord[] | null>;
+}
+
+// packages/integrations/aml/src/index.ts
+export interface AMLProvider {
+  requestVerification(input: AMLVerificationRequest): Promise<{ providerReference: string }>;
+  handleWebhook(payload: unknown, signature: string): Promise<AMLWebhookResult>;
+}
+
+// packages/integrations/esign/src/index.ts
+export interface ESignProvider {
+  createEnvelope(pkg: DocumentPackageInput): Promise<{ providerReference: string }>;
+  handleWebhook(payload: unknown, signature: string): Promise<ESignWebhookResult>;
+}
+
+// packages/integrations/payments/src/index.ts
+export interface PaymentProvider {
+  chargeStoredMethod(input: ChargeRequest): Promise<ChargeResult>;
+  refund(providerReference: string, amountCents: number): Promise<void>;
+}
+```
+
+Every provider package ships a `Mock*Provider` implementing the same interface, used until real credentials exist — the app runs end-to-end against mocks from the first commit, provider swap is a factory-config change only (matching the AML/Payments factory pattern already proven in Agent Engine Staging).
+
+---
+
+## 6. Event architecture
+
+19 canonical events (Section 17's list, carried forward exactly):
+
+`PROPERTY_CREATED`, `APPRAISAL_COMPLETED`, `READY_TO_LIST`, `AML_REQUESTED`, `AML_COMPLETED`, `DOCUMENT_PACKAGE_CREATED`, `AGENCY_AGREEMENT_SENT`, `AGENCY_AGREEMENT_SIGNED`, `LISTING_LIVE`, `OFFER_RECEIVED`, `OFFER_ACCEPTED`, `CONTRACT_SIGNED`, `FINANCE_APPROVED`, `SETTLEMENT_SCHEDULED`, `SETTLEMENT_COMPLETED`, `COMMISSION_CALCULATED`, `FUNDS_RECEIVED`, `AGENT_PAID`, `TRANSACTION_CLOSED`.
+
+Same rules as the proven Agent Engine pattern: persist-then-publish, always try/catch + logged (never blocks the business transaction), idempotency key required on anything retriable, handlers isolated from each other and from the publisher.
+
+---
+
+## 7. Environment separation
+
+- Separate GitHub repository (`AgentEngineEasy`, private), independent of `AgentEngineStaging` — no shared history, no shared branches.
+- Separate database (own `DATABASE_URL`), separate Clerk (or equivalent) application/credentials, separate provider API keys — all via `.env`, `.env.example` committed, real values never committed.
+- Branches: `main` (protected, releases only) and `staging` (all active development, per the brief). Feature branches fork from `staging`.
+- Deployment: Replit-connectable (`.replit` included), same as the reference app.
+
+---
+
+## 8. Reusable components from Agent Engine Staging
+
+Pattern-level reuse (re-implemented fresh in this repo, not copy-pasted, since it's now a separate codebase and several of these change shape — see §3):
+
+- Domain event backbone design (types/registry/publisher/handler isolation).
+- Audit logging shape and Property-Timeline-as-projection idea.
+- Role-middleware pattern (`requireAuth`/`requireRole`) — roles renamed to the brief's 3-role model (Agent, Brokerage Administrator, Pit Crew) rather than the old app's 10-role list.
+- AML/Payments provider factory+interface pattern, generalized into the `packages/integrations/*` shape used for all four provider categories.
+- Offer revision-chain (never overwrite, always insert) pattern.
+- Idempotent hand-written SQL migration convention.
+- Party/PropertyParty normalized-junction-table shape.
+- Ownership-mismatch-as-review-not-block pattern (Section 8 of the brief matches what `OwnershipStageGate`/`validateAMLRequestOwnership` already do in the old app).
+
+## 9. Components explicitly NOT carried across
+
+- The old app's 15-destination navigation and per-module pages (`AmlList`/`AmlOrderDetail`, standalone `DocumentsList`/`DocumentTemplates`, `Brokerage.tsx`, `AccountsDashboard.tsx`, `Billing.tsx`, `PitCrewList`/`PitCrewManager` as nav destinations) — superseded by the Property Workspace + 5-destination nav.
+- `agencyAgreements`' JSON-only commission storage.
+- The flat, drift-affected `transactions` table.
+- The legacy `amlRequests` table.
+- Any of the six 50–97KB monolithic page components — rebuilt as composed, smaller pieces from the start.
+- `artifacts/mockup-sandbox` (design tooling, not part of any product repo).
+- The 10-role `USER_ROLES` list — replaced by the brief's 3-role model; can grow later, deliberately, not by accretion.
+- Traditional CRM functionality not directly supporting a property transaction (prospecting, nurture campaigns, standalone contacts-first navigation) — out of scope per the brief's opening instruction.
+
+---
+
+## 10. Development sequence
+
+Following the brief's Section 25 order exactly (it was checked against the domain model above and no reordering is warranted):
+
+**Phase 1 — Foundation** (built): repo, environment separation, `packages/db` schema for every entity in §2, `packages/events`, role/auth middleware skeleton, audit/event wiring, `apps/api` + `apps/web` skeletons, Property + Party CRUD.
+**Phase 2 — Start Property** (built): `GooglePlacesProvider` (autocomplete + address-component resolution) behind `PropertyDataProvider`, `PROPERTY_DATA_PROVIDER=google-places` factory wiring with a safe fallback to the mock when no API key is set; manual address fallback (unchanged from Phase 1, verified still works standalone); ownership review-not-block flow — `reviewOwnershipForProperty()` compares each linked Seller's name against the provider's ownership data and flips `ownershipReviewRequired`, resolved via `POST /properties/:id/ownership-review` with an optional note (`ownershipReviewedBy`/`ownershipReviewedAt`/`ownershipReviewNotes` columns added); multi-seller capture — fixed a Phase 1 bug where the workspace endpoint only ever returned one linked party regardless of how many were linked, added `DELETE /parties/link/:linkId` to remove a mis-added link, and an inline add/remove party UI on the Property Workspace; property overview — the workspace response and UI now surface suburb/state/postcode, manual-address flag, AML/listing status summaries, and the ownership block.
+**Phase 3 — Ready to List workflow** (built): seller validation gates the endpoint (`400` if no seller is captured yet) while ownership review continues to never gate anything (Build Brief §8); AML initiation is idempotent per (property, party) — `lib/aml.ts`'s `initiateAmlIfNeeded()` is the single chokepoint every trigger (Ready to List, a seller added afterwards, a direct `POST /aml/request`) funnels through, so re-running any of them never double-orders (verified live: re-requesting an existing verification returns `created:false` with the same row); required-document determination is a placeholder per-state rule set (`lib/documentRules.ts`, explicitly not verified legal content — the real rule engine is Phase 5) that creates a `DocumentPackage` + `Document` rows once per property; `WorkflowStep` orchestration (`lib/workflowSteps.ts`) recomputes step status/blockedReason from live AML + document-package state after every mutation that could change it, keeping `Property.amlStatusSummary` in sync as the read-side projection. All of the above was verified end-to-end against a real local Postgres (not just typecheck) — seller gate, idempotent AML ordering, multi-seller auto-initiation, and step transitions through to `Complete`/`Ready` all behaved as designed. That test also surfaced a genuine Phase 1 infrastructure bug: `drizzle-kit push` couldn't resolve `packages/db`'s own schema files, because its internal loader doesn't understand the TypeScript `Bundler`-resolution `.js`→`.ts` mapping that `tsc`/`tsx`/`esbuild`/`vite` all support — fixed by dropping the `.js` extensions from `packages/db`'s internal relative imports (extensionless is valid under `Bundler` resolution and is what drizzle-kit's own loader can actually resolve).
+**Phase 4 — AML integration** (built): `HttpAMLProvider` (`packages/integrations/aml`) — a genuine REST + HMAC-SHA256-webhook adapter, `AML_PROVIDER=http` (no specific vendor procured yet, so it targets a plain documented-shape contract; the `Mock*Provider` interface pattern means swapping in a named vendor later is a single-file change, not a workflow rewrite). Webhook processing: `POST /aml/webhook` (deliberately unauthenticated — the caller is the provider, not a logged-in user — authenticity comes from the signature) verifies the signature against `req.rawBody` (captured by `express.json({ verify })` in `app.ts`, since re-serialising the parsed JSON body can byte-for-byte differ from what was actually signed), maps the outcome to the 6-value agent-facing status, updates the linked `ServiceOrder`, and publishes `AML_COMPLETED`. Idempotency here is outcome-aware, not a blanket "ignore anything after the first webhook": a redelivery of the *same* outcome is skipped, but a legitimate state change (e.g. a provider clearing a Review Required case later) still processes — verified live, including that an invalid signature is rejected with `401` and an unrecognised `providerReference` is accepted-but-not-processed rather than triggering a provider retry storm. Exceptions: `Review Required`/`Failed` are never silently reinterpreted as verified. `POST /aml/:id/retry` re-runs the same check against the same `AmlVerification`/`ServiceOrder` row (a real second HTTP call to the provider — verified live), while `POST /aml/:id/resolve-exception` records a Brokerage-Administrator-only compliance decision with mandatory notes (`exceptionResolvedBy`/`At`/`Notes` columns, enforced both by role and by a non-empty-notes check) — the audit trail for a human decision made alongside the system, mirroring the ownership review-not-block pattern rather than adding a silent bypass. Service charges: `initiateAmlIfNeeded()` now creates a `ServiceOrder` (`serviceType: "AmlVerification"`) alongside every new `AmlVerification`, linked via `amlVerifications.serviceOrderId`, with placeholder pricing (`AML_WHOLESALE_COST_CENTS`/`AML_CUSTOMER_PRICE_CENTS`, `.env.example`) and `paymentStatus: "Pending"` — this is the billing *record*, not a charge; actually charging a stored payment method is explicitly Phase 6's job. All of the above was verified end-to-end against a real local Postgres plus a real local HTTP "fake vendor" server (not just typecheck) — 25 live checks covering real HTTP verification requests, real HMAC signature verification (valid/invalid/duplicate), idempotent initiation surviving the provider swap, exception resolution's role gate and mandatory-notes gate, and retry issuing a genuine second provider call.
+**Phase 5 — Documents + e-sign** (built): state rule engine — `determineRequiredDocuments()` is now versioned (`DOCUMENT_RULE_SET_VERSION`, stamped onto `DocumentPackage.ruleSetVersion` at creation) so a package is traceable to the rule set it was built under rather than silently reinterpreted if the rules change later; still explicitly placeholder legal content, now carried through into the rendered documents themselves (every generated document opens with a "TEMPLATE PLACEHOLDER — NOT LEGAL ADVICE" banner, `lib/documentTemplates.ts`, so nothing produced by this pipeline can be mistaken for something ready to send to a real client). Template population: `populateDocumentPackage()` renders each Draft document from live property/seller/agency-terms data and stores it via `ObjectStorageProvider` (new `packages/integrations/object-storage`, `LocalObjectStorageProvider` by default — a genuinely functional local-disk store, not a stub, matching how `HttpAMLProvider`/`HttpESignProvider` are genuinely functional even with no vendor procured); idempotent/incremental — safe to call again after agency terms are captured, only re-renders what's still Draft. Real structured agency-agreement terms: new `AgencyAgreementTerms` table (`PUT /documents/agency-agreement-terms/:propertyId`) — commission type/rate/flat-fee/marketing-fee/term as real columns, explicitly not the legacy app's opaque-JSON commission storage (ARCHITECTURE.md §3) — the `AgencyAgreement` document is deliberately left in `Draft` (not rendered with placeholder commission figures) until these are captured. `HttpESignProvider` (`packages/integrations/esign`): the same real-REST-plus-HMAC-webhook shape as Phase 4's `HttpAMLProvider`, vendor TBD. Webhook status: `POST /documents/webhook` verifies the signature against `req.rawBody`, updates the linked `SignatureRequest`, and on `Completed` marks every document in the package `Signed`, the package itself `Completed`, and publishes `AGENCY_AGREEMENT_SIGNED` when the package contains an Agency Agreement — idempotency is the same outcome-aware pattern as Phase 4's AML webhook (a redelivery of the same status is skipped, a real transition still processes). `sendPackageForSignature()` is idempotent per package (mirrors `initiateAmlIfNeeded`'s chokepoint pattern) and gates on the package being `Ready` (every document generated) and at least one seller having an email address to sign with; sending publishes `AGENCY_AGREEMENT_SENT`. `WorkflowStep` orchestration (`lib/workflowSteps.ts`) was split more finely: `AgencyAgreement` now tracks that one document's own generate→send→sign lifecycle (separately blocked on missing commission terms vs. sent-awaiting-signature vs. signed), while `RequiredDocuments` tracks the package as a whole and is only `Complete` once every document is actually signed — `Ready`/`Sent` are still in-progress, not done. Completed-document storage: `signatureRequests.completedDocumentKey` is populated straight from the webhook payload and is genuinely retrievable via `GET /documents/:id/content` (reads back through the same `ObjectStorageProvider`), not just a database field nobody can resolve. All of the above was verified end-to-end against a real local Postgres plus a real local HTTP "fake e-sign vendor" server (not just typecheck) — 25 live checks covering the pre-terms/post-terms populate distinction, a genuine local-object-storage round trip (content readable back, disclaimer + real data present), a real HTTP envelope-creation call, real HMAC signature verification (valid/invalid/duplicate), idempotent send-for-signature, and both `WorkflowStep`s reaching `Complete` only once the document was actually signed.
+**Phase 6 — Payments** (built): `paymentMethods`/`payments` (`packages/db/src/schema/commerce.ts`) had existed since Phase 1 with zero rows ever written to them — Phase 6 is what actually wires up storing a method and charging a `ServiceOrder` against it. `StripePaymentProvider` (`packages/integrations/payments`) targets Stripe's real REST shape specifically (form-encoded `POST /v1/payment_intents` and `/v1/refunds`, `Idempotency-Key` header, real `Stripe-Signature: t=...,v1=...` HMAC-SHA256 webhook verification with a 5-minute tolerance window) rather than a generic documented-shape contract like Phase 4/5's AML/e-sign adapters — Stripe is a specifically named vendor already referenced in `.env.example` since Phase 1. Its base URL is overridable via `STRIPE_API_BASE_URL` (defaults to `https://api.stripe.com`), the same convention as `AML_API_BASE_URL`/`ESIGN_API_BASE_URL`, purely so it can be pointed at a local fake-Stripe server for testing. Scope limitation stated plainly in the adapter's own comments: real card capture must happen client-side via Stripe Elements/PaymentSheet (raw card data must never transit this server) — this charges an already-tokenized stored method against an already-created customer; building that client-side capture flow is separate, later work. Idempotent charging: `lib/payments.ts`'s `chargeServiceOrder()` is the chokepoint (Section 21 — "repeated button clicks must never charge twice") — an existing Succeeded-or-Pending `Payment` for a `ServiceOrder` is returned as-is, but unlike the AML/e-sign chokepoints a prior *Failed* attempt does not block a new one (a declined card must be retryable), so each attempt gets its own `idempotencyKey` (`service-order-charge:<id>:<attempt>`). The `Payment` row is inserted `Pending` *before* the provider call, not after, so a crash mid-charge leaves a durable record rather than nothing. Payer resolution defaults to the property's listing agent's own default stored method (`paymentMethods.payerType="Agent"`); brokerage/team billing is modelled in the schema (`payerType` already includes `Brokerage`/`Team`/etc.) but not wired into the charge path yet — real future scope, not a gap discovered late. Receipts: a successful charge's `receiptUrl` comes straight from the provider response (or webhook); `GET /payments/service-orders/:id/payments` surfaces it, and a failed attempt's `failureReason` (new column) is shown instead of a bare "Failed". Webhook: `POST /payments/webhook` uses the same outcome-aware idempotency as Phase 4/5 (a same-status redelivery is a no-op, a real transition — e.g. an async refund confirmation — still processes). Refunds are restricted to Brokerage Administrators (`POST /payments/:paymentId/refund`), mirroring the AML exception-resolution role gate for anything that reverses a recorded financial outcome. Payment-method management (`POST`/`GET`/`DELETE /payments/payment-methods`) never trusts a client-supplied payer id — an Agent can only ever manage their own methods, a Brokerage-scoped method requires Brokerage Administrator — and delete is a soft-deactivate (`paymentMethods.isActive`), since `payments.paymentMethodId` still needs to point at *something* for a completed charge's history even after the card is removed. Two schema fixes made along the way, both to columns Phase 6 was the first phase to actually write to (so no data migration risk): `paymentMethods.isDefault` was a `numeric(1)` `"1"`/`"0"` string left over from Phase 1 — changed to a real `boolean`; `payments`/`paymentMethods` gained `updatedAt`. A third, unrelated infrastructure fix found in the same pass: the root `package.json`'s `typecheck`/`build` scripts called `tsc --build`, which had never actually worked — there was no root `tsconfig.json`, and `apps/api`/`apps/web` are deliberately `composite: false` (documented as terminal bundled build targets, not TS project-reference libraries), so project references could never have included them anyway. Fixed by pointing the root `typecheck` script at `pnpm -r run typecheck` — the per-package command every phase's verification has actually been using since Phase 3. All of the above was verified end-to-end against a real local Postgres plus a real local fake-Stripe HTTP server (not just typecheck) — 26 live checks covering: charging with no payment method on file fails clearly; adding, listing, and (ownership-gated) removing a stored method; a successful charge marking the `ServiceOrder` `Charged`; a double-charge being fully idempotent (`created:false`, zero new `Payment` rows); refund being forbidden for an Agent and succeeding for a Brokerage Administrator; a fresh charge attempt succeeding after a prior one was refunded (retry is not blocked); the payments webhook route skipping a same-status redelivery and processing a real transition; and, against the fake-Stripe server specifically, a real HTTP `payment_intents` call succeeding, a declined-card response mapping to `Failed` with a human-readable `failureReason`, a real refund call, and both valid and invalid Stripe webhook signatures being correctly accepted/rejected.
+**Phase 7 — Offers & Transactions** (built): Go Live — a genuine pre-existing gap closed here: nothing before Phase 7 ever moved a property to `Listed` or published `LISTING_LIVE` despite both existing in the schema/event registry since Phase 1. `POST /properties/:id/go-live` gates on every Ready to List step being `Complete` (not just the button having been clicked), matching the discipline every other gate in this app already follows. Offers are agent-entered — a buyer submits to the agent by phone/email/in person, as is normal AU real-estate practice; there's no public self-serve submission form — and a buyer who isn't already a captured Party is created inline from minimum contact fields, the same "enter once" pattern `routes/parties.ts` already uses. `offers.shareToken` (present in the schema since Phase 1 but unused until now) gives the agent a link to hand the buyer so they can check their offer's status without an account (`GET /offers/public/:shareToken`, unauthenticated, deliberately minimal — status/price/address only, never other buyers' offers). Offer creation is gated to `property.workflowStage === "Listed"` — before Listed there's nothing to bid on, and once one offer is accepted the property has moved past Listed, so the same single check blocks both "too early" and "already under contract"; capturing backup offers alongside an existing contract is real future scope, not silently allowed. `acceptOffer()` (`lib/transactions.ts`) is the idempotent chokepoint that turns a Property into an active Transaction: accepting an already-accepted offer just returns the existing Transaction (`created:false`), and accepting auto-declines every other still-open offer on the property — this build assumes one active Transaction per property at a time (a fallen-through contract followed by a fresh sale later is documented future scope, not handled, same spirit as Phase 6's payer-resolution gap). A second `workflows.workflowType = "Transaction"` track (the schema comment reserving that value since Phase 1) runs alongside `ReadyToList`, with its own `refreshTransactionSteps()` orchestration (`lib/workflowSteps.ts`) covering ContractSigning → Settlement → Payout, recomputed from live Transaction state exactly like `refreshReadyToListSteps()` does for AML/documents. `property.workflowStage` walks Listed → Under Offer → Contract → Settlement → Closed as each milestone lands. Commission calculation reads the real structured `agencyAgreementTerms` captured in Phase 5 (not an ad hoc figure) — `commissionRateBps` for a Percentage agreement or `flatFeeCents` for a FlatFee one, plus 10% AU GST on top — and runs automatically the first time settlement completes (`completeSettlement()` calls `calculateCommission()` internally), with `POST /transactions/:id/calculate-commission` available to force a recompute if terms were corrected afterward. `FUNDS_RECEIVED`/`AGENT_PAID` are manual bookkeeping confirmations, not real fund movement — this app has no trust-accounting ledger/provider, so these record that the agent/brokerage-admin confirmed something happened (e.g. against a trust account statement) rather than calling a PaymentProvider; `fundsReceivedCents` accumulates across calls since real settlements can arrive in more than one transfer (matching the `FUNDS_RECEIVED` event registry description, "may recur for partial payments"). `agent-paid` and `close` are restricted to Brokerage Administrators (`POST /transactions/:id/agent-paid`, `POST /transactions/:id/close`) — same precedent as refunds (Phase 6) and AML exception resolution (Phase 4): anything that finalises a recorded financial outcome isn't a routine self-certified agent action; `close` is additionally gated on `status === "Settled"`, so a transaction can't be closed before settlement actually completes. Schema change: `transactions` gained `financeApprovedAt`, `settlementCompletedAt` (settlementDate is now explicitly the *scheduled* date), `commissionCalculatedAt`, `fundsReceivedCents`/`fundsReceivedAt`, `agentPaidAt`, and `closedAt` — safe because this table had zero rows anywhere in the app until Phase 7, same "zero pre-existing rows, no migration risk" justification Phase 6 used for `paymentMethods`. This closes out the full 19-event canonical registry (`packages/events/src/types.ts`) — every one of `LISTING_LIVE`, `OFFER_RECEIVED`, `OFFER_ACCEPTED`, `CONTRACT_SIGNED`, `FINANCE_APPROVED`, `SETTLEMENT_SCHEDULED`, `SETTLEMENT_COMPLETED`, `COMMISSION_CALCULATED`, `FUNDS_RECEIVED`, `AGENT_PAID`, and `TRANSACTION_CLOSED` now actually fires somewhere, alongside the 8 events Phases 1–6 already covered. A genuine pre-existing bug was found and fixed along the way, unrelated to this phase's own scope: `LocalObjectStorageProvider.resolveKey()` (`packages/integrations/object-storage`, Phase 5) compared a path built with `path.join(baseDir, ...)` — left relative whenever `baseDir` itself was relative, which is `.env.example`'s documented default (`./storage`) — against `path.resolve(baseDir)`, which is always absolute; a relative path can never `startsWith` an absolute one, so every single object-storage write threw "outside baseDir" whenever `OBJECT_STORAGE_LOCAL_DIR` was left at its documented default. Fixed by resolving both sides from the same base and requiring an exact match or a proper path-separator boundary (not a bare string prefix, which would have wrongly accepted a sibling directory like `storage-evil` alongside `storage`). All of the above was verified end-to-end against a real local Postgres (not just typecheck) — 55 live checks covering: the go-live gate (blocked before Ready to List starts, blocked while any step is incomplete, succeeds once every step is `Complete`, idempotent on a second call); offer creation blocked both before a property is Listed and after it already has an accepted offer; withdraw/decline on a non-`Received` offer failing clearly and not double-transitioning; the public share-token view working unauthenticated and reflecting status changes; `acceptOffer()`'s auto-decline of sibling offers, its idempotent double-accept, and accepting an already-declined offer failing clearly; every transaction milestone's ordering gate (settlement-complete before a date is scheduled, agent-paid and close before settlement is completed — tested as Brokerage Administrator specifically, so the failure is provably the state gate and not the role gate); the role gate itself (agent-paid and close both 403 for a plain Agent, both before and after settlement completes); contract-signing idempotency; settlement rescheduling being allowed (not blocked like a one-shot chokepoint) right up until settlement actually completes, after which rescheduling is rejected; commission auto-calculating correctly on first settlement completion with the exact expected gross/GST figures verified by direct computation; funds-received accumulating correctly across two partial payments; agent-paid and close idempotency; every Transaction workflow step reaching `Complete`; and a final sweep confirming all 11 of this phase's event types were actually published to the `domainEvents` table for the test property.
+**Phase 8 — Agent command experience** (built): the Home screen stub from Phase 1 ("what needs your attention today will appear here once properties exist") is now real. `getHomeSummary(brokerageId)` (`lib/homeSummary.ts`) is a single aggregation function — no new tables, no denormalised summary rows — that reads live state across every non-`Closed` property in the brokerage and returns a flat list of concrete items, each tagged `Exception` or `NextAction` and carrying a `propertyId` so the UI can link straight back into the Property Workspace (Section 13/26's "one or two decisions, not a menu of modules" principle, now applied brokerage-wide instead of per-property). `Exception` covers things that got stuck or need a deliberate human decision: an unresolved ownership mismatch (`ownershipReviewRequired`), an AML verification still `Review Required`/`Failed` (filtering on status alone is sufficient — `resolveAmlException()` always moves status to `Complete`, so nothing resolved can still match), a `ServiceOrder` whose `paymentStatus` is `Failed` (stays `Failed` until a retried charge succeeds — see `chargeServiceOrder()`), a `Blocked` `WorkflowStep` on either workflow track, and a `Transaction` whose `settlementDate` has passed without `settlementCompletedAt` being set. `NextAction` covers the routine next step: a Ready to List workflow with every step `Complete` but not yet gone live, an `Offer` still `Received`, and each `Transaction` milestone in turn (`ContractPreparation` → prepare contract, `UnderContract` with no settlement date → schedule it, `Settled` → record funds received or confirm the agent's been paid depending on whether `fundsReceivedCents` is already positive, agent paid but not closed → close the transaction). Deliberately not surfaced: in-progress/pending steps and anything already scheduled-and-on-track — those are normal work in flight, not something needing a decision, and listing every step status for every property is exactly the BI-dashboard scope this phase explicitly excludes (counts, charts, trends). Scoping is brokerage-wide, matching every other list endpoint in this app (`GET /properties` has no per-agent filter either) — `GET /home/summary` doesn't invent a "mine only" view that no other screen has. `GET /home/summary` (`routes/home.ts`) just splits the aggregated list into `{ exceptions, nextActions }`; `Home.tsx` renders both as plain linked lists, replacing the placeholder paragraph. All of the above was verified end-to-end against a real local Postgres (not just typecheck) — 23 live checks covering: every exception category firing on a purpose-built property (ownership, AML review-required, failed payment, blocked step, overdue settlement) with an exact count assertion so nothing extra leaks in; every next-action category firing (ready-to-go-live, offer received, prepare contract, schedule settlement, record funds received vs. confirm agent paid depending on `fundsReceivedCents`, close transaction) with the same exact-count assertion; a `Closed` property contributing nothing at all even with `ownershipReviewRequired` set, proving the upfront exclusion actually runs before every check rather than being bypassed by any one of them; a second brokerage's property never leaking into the first brokerage's summary; a Brokerage Administrator and an Agent on the same brokerage seeing an identical summary (Home is scope-gated, not role-gated); an unauthenticated request returning `401`; and a sanity check that mounting the new router didn't disturb `GET /properties`.
+
+## Phase 9 — Contextual AI Architecture (addendum, added after the sequence above)
+
+Phase 9 adds a provider-agnostic AI Gateway at apps/api/src/lib/ai/gateway.ts, sitting behind an AiProvider interface (apps/api/src/lib/ai/providers/provider.ts) with two implementations: MockAiProvider (deterministic, offline, no network calls, used as the default and as the automatic fallback) and AnthropicAiProvider (calls the Anthropic Messages API directly via fetch, gated entirely by env vars). AI_PROVIDER, ANTHROPIC_API_KEY, AI_MODEL, AI_TEMPERATURE, AI_MAX_OUTPUT_TOKENS, AI_TIMEOUT_MS, AI_RETRY_LIMIT and AI_FALLBACK_PROVIDER (see .env.example) select and configure the provider; if AI_PROVIDER is anthropic but no API key is present, the gateway logs a warning and silently runs on the mock provider instead of failing startup. generateWithGateway() retries the primary provider AI_RETRY_LIMIT+1 times and, if every attempt fails, falls back once to AI_FALLBACK_PROVIDER (mock by default), so a live Anthropic outage degrades to mock responses rather than 500s; every fallback is flagged back to the caller and surfaced to the end user as a disclaimer on the response.
+
+A Context Engine at apps/api/src/lib/ai/context/contextEngine.ts assembles a single AiContextPackage per request from five sub-builders — user, brokerage, business, property and transaction context — run in parallel and scoped strictly to the requesting user's brokerageId. buildPropertyContext is the tenant-isolation boundary: it loads the property by id and returns null (not the row) if the property's brokerageId does not match the caller's, so a malicious or mistaken contextId can never leak another brokerage's data into a prompt; this is covered by an automated test. Two further builders, growContext and pitCrewContext (apps/api/src/lib/ai/context/growContext.ts and pitCrewContext.ts), exist only as typed function signatures that always return null — they are architected so a future Grow or Pit Crew module has a defined shape to fill in, but neither is implemented, wired up, or called by anything yet.
+
+A read-only Tool Registry at apps/api/src/lib/ai/tools/registry.ts exposes six tools to the orchestrator — portfolio overview, property summary, transaction status, offers for a property, property timeline and AML status for a property — each a thin wrapper over an existing service function (getDashboardOverview, listOffersForProperty, getPropertyTimeline, and direct Drizzle queries), never a new write path. selectToolsForContext() chooses which tools apply based on whether the request is business-scoped or property-scoped, and every tool result is attributed back to the caller's context, so the registry cannot be used to reach data outside the same brokerageId boundary the Context Engine already enforces.
+
+The Orchestration Layer (apps/api/src/lib/ai/orchestrator.ts, askCopilot()) is the single place these pieces are wired together: it checks the AI_ENABLED and AI_COPILOT_ENABLED feature flags, builds context, checks the caller's subscription-tier entitlement for the copilot role, asserts the request stays within the Level 0 (read-only) auto-execute ceiling, runs the tool registry, calls the Gateway, classifies the result, and writes an audit row — in that order, with every rejection (disabled flag, missing entitlement) logged and returned as an explicit 403 rather than silently degrading. Every response is shaped as an AiStructuredResponse with an explicit kind of fact, inference, recommendation or unknown (classifyResponseKind() only returns fact when a tool actually returned non-empty data, and unknown when no tool succeeded at all, so the AI cannot present an unsupported guess as if it were a database fact). A parallel action-risk-level framework runs Level 0 (read-only, no side effects) through Level 4 (compliance or financial actions); assertWithinAutoExecuteCeiling() hard-throws if any request would exceed Level 0, and no code path in this phase creates, modifies or sends anything on a user's behalf — Copilot in this build can only read and summarize, never act.
+
+A five-role architecture is defined in apps/api/src/lib/ai/roles.ts and apps/api/src/lib/ai/types.ts (copilot, proactive_intelligence, business_coach, workflow_ai, pitcrew_ai), but only copilot has a working implementation; the other four are concrete classes that extend a shared NotImplementedRole and throw if ever called, so the shape future roles must fill in is fixed without any of them being reachable from the app today. Both the per-role feature flags (apps/api/src/lib/ai/featureFlags.ts, AI_COPILOT_ENABLED etc., all default to disabled except copilot) and the subscription-tier capability table (apps/api/src/lib/ai/entitlements.ts, TIER_CAPABILITIES for STARTER, GROW and PRO) are enforced only inside askCopilot() on the server — the Ask Agent Engine widget calls GET /api/ai/capabilities to decide whether to render at all, but that is a UX convenience, not the security boundary; a direct POST /api/ai/ask from a disabled or unentitled account is rejected server-side regardless of what the client shows. resolveBrokerageTier() currently always returns STARTER because there is no subscription/tier concept anywhere else in the schema yet — this is a documented gap, not a placeholder that silently grants access.
+
+Five new tables back this phase — ai_configurations, ai_prompt_versions, ai_interactions, ai_usage and ai_action_requests (packages/db/src/schema/ai.ts) — pushed to the live database with drizzle-kit push; every call to askCopilot() writes an ai_interactions row (role, context, prompt key/version, response kind, risk level, status) and, on success, a linked ai_usage row (provider, model, token counts, a rough estimated cost, latency), giving a real per-request audit and cost trail rather than a design for one. The only new user-facing surface is POST /api/ai/ask and GET /api/ai/capabilities plus a single Ask Agent Engine widget (apps/web/src/components/AskAgentEngine.tsx) mounted on the Home dashboard (business-scoped) and the Property Workspace (property-scoped); it renders nothing if the caller is not entitled. Fourteen automated tests (apps/api/src/lib/ai/__tests__/, run with pnpm --filter @aee/api run test) cover tenant isolation in the Context Engine, feature-flag and entitlement rejection, and gateway retry/fallback behavior. Consistent with the build instructions' stop point, this phase does not add Grow, prospecting or contact-intelligence AI, predictive recommendations, autonomous or scheduled workflows, a working Business Coach or Pit Crew role, any outbound AI-authored communication, or any form of AI memory beyond the per-request audit log — those remain explicitly out of scope pending further instruction.
+
+This closes the phase sequence `ARCHITECTURE.md` §10 laid out before implementation began (Phases 1–8; Phase 9 above was a separate, later addition). No further phase is scoped in this document — BI dashboards, real trust-accounting, brokerage/team billing, multi-transaction-per-property, and the real Clerk auth integration are all noted above as deliberate, documented future scope rather than gaps discovered late.
+
+This document, plus the prior full capability audit, are the standing reference — update this file as decisions are made, don't let it drift from what's actually built.

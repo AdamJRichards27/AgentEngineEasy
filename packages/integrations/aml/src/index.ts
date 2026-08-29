@@ -1,0 +1,173 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export interface AMLVerificationRequest {
+  propertyId: number;
+  partyId: number;
+  verificationType: string;
+  partyDetails: {
+    firstName?: string;
+    middleName?: string;
+    lastName?: string;
+    email?: string;
+    mobile?: string;
+    residentialAddress?: string;
+  };
+}
+
+export interface AMLWebhookResult {
+  providerReference: string;
+  outcome: "VERIFIED" | "PARTIALLY_VERIFIED" | "UNABLE_TO_VERIFY";
+  riskLevel?: string;
+  reviewRequired: boolean;
+}
+
+export interface AMLProvider {
+  requestVerification(input: AMLVerificationRequest): Promise<{ providerReference: string }>;
+  // `payload` should be the raw request body (Buffer/string) whenever the
+  // provider signs raw bytes, which is the normal case for HMAC-based
+  // webhook signatures — re-serialising parsed JSON can byte-for-byte
+  // differ from what was actually signed and silently break verification.
+  verifyWebhookSignature(payload: unknown, signature: string): boolean;
+  parseWebhook(payload: unknown): AMLWebhookResult;
+}
+
+/**
+ * Mock provider — ships by default. A real adapter (matching the swappable
+ * factory/interface pattern already proven for AML in Agent Engine Staging)
+ * implements the same interface; workflow code never changes.
+ */
+export class MockAMLProvider implements AMLProvider {
+  async requestVerification(input: AMLVerificationRequest): Promise<{ providerReference: string }> {
+    return { providerReference: `mock-aml-${input.partyId}-${Date.now()}` };
+  }
+
+  verifyWebhookSignature(_payload: unknown, _signature: string): boolean {
+    return true; // mock provider — no real signature to verify
+  }
+
+  parseWebhook(payload: unknown): AMLWebhookResult {
+    const p = payload as Partial<AMLWebhookResult>;
+    return {
+      providerReference: p.providerReference ?? "unknown",
+      outcome: p.outcome ?? "VERIFIED",
+      riskLevel: p.riskLevel,
+      reviewRequired: p.reviewRequired ?? false,
+    };
+  }
+}
+
+export interface HttpAMLProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+  webhookSecret: string;
+}
+
+/**
+ * Generic REST + HMAC-webhook adapter (Phase 4, ARCHITECTURE.md §10).
+ *
+ * No specific AML/KYC vendor has been procured yet, so this targets a
+ * plain, documented-shape REST contract (POST /verifications to start a
+ * check, an HMAC-SHA256-signed webhook to report the outcome) rather than
+ * a named vendor's exact API — the field mapping in `parseWebhook` below
+ * will need adjusting once a real vendor contract exists, but the
+ * request/response handling, error handling, and signature verification
+ * are genuine, not mocked. Swapping vendors should only ever mean editing
+ * this one file — the `AMLProvider` interface and every caller stay the
+ * same, matching the proven Agent Engine Staging pattern.
+ */
+export class HttpAMLProvider implements AMLProvider {
+  constructor(private readonly config: HttpAMLProviderConfig) {}
+
+  async requestVerification(input: AMLVerificationRequest): Promise<{ providerReference: string }> {
+    const res = await fetch(`${this.config.baseUrl}/verifications`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.apiKey}`,
+      },
+      body: JSON.stringify({
+        verificationType: input.verificationType,
+        subject: {
+          firstName: input.partyDetails.firstName,
+          middleName: input.partyDetails.middleName,
+          lastName: input.partyDetails.lastName,
+          email: input.partyDetails.email,
+          mobile: input.partyDetails.mobile,
+          address: input.partyDetails.residentialAddress,
+        },
+        // Lets the provider's dashboard/support correlate a case back to
+        // AgentEngineEasy without us having to store their internal IDs
+        // anywhere except providerReference.
+        externalReference: `property:${input.propertyId}:party:${input.partyId}`,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`AML provider requestVerification failed: ${res.status} ${body}`);
+    }
+
+    const body = (await res.json()) as { id?: string; reference?: string };
+    const providerReference = body.id ?? body.reference;
+    if (!providerReference) {
+      throw new Error("AML provider response did not include a verification reference");
+    }
+    return { providerReference };
+  }
+
+  verifyWebhookSignature(payload: unknown, signature: string): boolean {
+    if (!signature) return false;
+    const raw = Buffer.isBuffer(payload)
+      ? payload
+      : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8");
+    const expected = createHmac("sha256", this.config.webhookSecret).update(raw).digest("hex");
+    const expectedBuf = Buffer.from(expected, "utf8");
+    const givenBuf = Buffer.from(signature, "utf8");
+    // Different-length buffers must still short-circuit safely — comparing
+    // unequal-length buffers with timingSafeEqual throws rather than
+    // returning false.
+    if (expectedBuf.length !== givenBuf.length) return false;
+    return timingSafeEqual(expectedBuf, givenBuf);
+  }
+
+  parseWebhook(payload: unknown): AMLWebhookResult {
+    const p = (payload ?? {}) as Record<string, unknown>;
+    const rawOutcome = String(p.status ?? p.outcome ?? "").toLowerCase();
+
+    const outcomeMap: Record<string, AMLWebhookResult["outcome"]> = {
+      verified: "VERIFIED",
+      passed: "VERIFIED",
+      partial: "PARTIALLY_VERIFIED",
+      partially_verified: "PARTIALLY_VERIFIED",
+      manual_review: "PARTIALLY_VERIFIED",
+      failed: "UNABLE_TO_VERIFY",
+      unable_to_verify: "UNABLE_TO_VERIFY",
+      declined: "UNABLE_TO_VERIFY",
+    };
+
+    return {
+      providerReference: String(p.id ?? p.reference ?? p.providerReference ?? "unknown"),
+      outcome: outcomeMap[rawOutcome] ?? "UNABLE_TO_VERIFY",
+      riskLevel: typeof p.riskLevel === "string" ? p.riskLevel : typeof p.risk_level === "string" ? p.risk_level : undefined,
+      reviewRequired: Boolean(p.reviewRequired ?? p.review_required ?? rawOutcome === "manual_review"),
+    };
+  }
+}
+
+export function createAMLProvider(): AMLProvider {
+  const provider = process.env.AML_PROVIDER ?? "mock";
+
+  if (provider === "http") {
+    const baseUrl = process.env.AML_API_BASE_URL;
+    const apiKey = process.env.AML_PROVIDER_API_KEY;
+    const webhookSecret = process.env.AML_WEBHOOK_SECRET;
+    if (baseUrl && apiKey && webhookSecret) {
+      return new HttpAMLProvider({ baseUrl, apiKey, webhookSecret });
+    }
+    console.warn(
+      "AML_PROVIDER=http but AML_API_BASE_URL/AML_PROVIDER_API_KEY/AML_WEBHOOK_SECRET are not all set — falling back to MockAMLProvider.",
+    );
+  }
+
+  return new MockAMLProvider();
+}

@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+    // apps/* are terminal, bundled build targets (esbuild/vite), never
+    // consumed as libraries by another TS package — composite/declaration
+    // output is for packages/* only. Left on, composite mode forces every
+    // exported Express Router to have a fully portable type across pnpm's
+    // nested node_modules paths, which isn't a real problem here.
+    "composite": false,
+    "declaration": false
+  },
+  "include": ["src"]
+}

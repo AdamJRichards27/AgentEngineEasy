@@ -1,0 +1,61 @@
+// Thrown by apiFetch on any non-2xx response. Carries the HTTP status so
+// callers can special-case auth (401) without string-matching a message,
+// and a `.friendly` message that's safe to show an agent directly — see
+// humanizeApiError() below for how it's derived.
+export class ApiError extends Error {
+  status: number;
+  friendly: string;
+
+  constructor(status: number, friendly: string, technical?: string) {
+    super(technical ?? friendly);
+    this.status = status;
+    this.friendly = friendly;
+  }
+}
+
+// Error States (staging brief): an agent should never see a raw
+// "API /x failed: 500" or a provider's technical error text — always a
+// plain sentence plus a clear next step. This is the one place that
+// mapping happens, so every mutation in the app gets it for free rather
+// than re-deriving copy per call site.
+function humanizeApiError(path: string, status: number, serverMessage?: string): string {
+  if (status === 401) return "You've been signed out. Sign in again to continue.";
+  if (status === 403) return "You don't have permission to do that — ask a Brokerage Administrator.";
+  if (status === 404) return "That couldn't be found — it may have been removed.";
+  if (status >= 500) {
+    if (path.includes("/aml/")) return "We couldn't submit the verification request. Nothing has been charged. Try again.";
+    if (path.includes("/documents/") && path.includes("send-for-signature")) {
+      return "Documents couldn't be sent for signature. Nothing has been sent to the sellers yet.";
+    }
+    if (path.includes("/payments/") || path.includes("/charge")) {
+      return "We couldn't process that payment. Your card has not been charged. Try again.";
+    }
+    return "Something went wrong on our end. Try again in a moment.";
+  }
+  // 400/409/etc — these already carry a specific, agent-relevant reason
+  // from the server (e.g. "At least one seller must be captured before
+  // Ready to List."), so pass it through rather than genericising it.
+  return serverMessage ?? "That didn't go through. Check the details and try again.";
+}
+
+export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    ...init,
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+  });
+  if (!res.ok) {
+    let serverMessage: string | undefined;
+    try {
+      const body = await res.json();
+      serverMessage = typeof body?.error === "string" ? body.error : undefined;
+    } catch {
+      // Non-JSON error body — fall through with no server message.
+    }
+    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage), `API ${path} failed: ${res.status}`);
+  }
+  if (res.status === 204) {
+    return undefined as T;
+  }
+  return res.json() as Promise<T>;
+}
