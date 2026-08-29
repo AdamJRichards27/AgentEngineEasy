@@ -116,7 +116,7 @@ test("evaluateConditionGroup supports nested groups", () => {
       {
         operator: "ANY",
         conditions: [
-          { field: "payload.tags", operator: "in", value: ["urgent"] },
+          { field: "payload.tags", operator: "contains", value: "urgent" },
           { field: "payload.tags", operator: "eq", value: "never" },
         ],
       },
