@@ -16,6 +16,20 @@
 // (Level 4 EXECUTE) and a workflow-change proposal/activation pair (Level 3
 // PREPARE / Level 5 SYSTEM_CHANGE) -- the latter is Part 24's Example 3
 // almost verbatim.
+//
+// Agent Engine 2.0 -- Workflow Automation Engine (Stage: Foundation): the
+// automation engine (apps/api/src/lib/automation/engine.ts) proposes and
+// executes actions through this SAME registry and the SAME
+// proposeAIAction()/executeAIAction() pipeline every human/AI-initiated
+// action already uses -- not a parallel, competing action path. It does so
+// as actorType "SYSTEM", a value aiActionRequests.actorType and
+// addPropertyNote's actorType parameter already anticipated before this
+// change. "SYSTEM" was added to PROPERTY_NOTE_ADD's and
+// WORKFLOW_VERSION_ACTIVATE's allowedActorTypes below -- and ONLY those two
+// -- because they are the two actions this foundation stage's automation
+// vertical slice and its approval-required-action test coverage need;
+// WORKFLOW_CHANGE_PROPOSE is untouched. Every other check on both actions
+// (allowedRoles, riskLevel, requiresApproval, execute()) is unchanged.
 import { z } from "zod";
 import type { UserRole } from "@aee/db";
 import type { RiskLevel } from "../types.js";
@@ -90,7 +104,11 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
     authorityLevel: AUTHORITY_LEVELS.EXECUTE,
     riskLevel: 0,
     allowedRoles: ["Agent", "Brokerage Administrator"],
-    allowedActorTypes: ["AI", "USER"],
+    // "SYSTEM" added (Agent Engine 2.0 WAE foundation): this is the action
+    // the AGENCY_AGREEMENT_SIGNED system template rule uses -- see
+    // apps/api/src/lib/automation/templates.ts. Additive/reversible/riskLevel 0,
+    // so this stays auto-execute-eligible regardless of actor type.
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
     resourceType: "property",
     inputSchema: propertyNoteInput,
     reversible: true,
@@ -147,7 +165,13 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
     authorityLevel: AUTHORITY_LEVELS.SYSTEM_CHANGE,
     riskLevel: 3,
     allowedRoles: ["Brokerage Administrator"],
-    allowedActorTypes: ["AI", "USER"],
+    // "SYSTEM" added (Agent Engine 2.0 WAE foundation) so an automation
+    // rule can propose activation -- it still always requires Brokerage
+    // Administrator approval (SYSTEM_CHANGE never auto-executes, see
+    // authority.ts's isAutoExecuteEligible) through the same, unmodified
+    // approval endpoints. Nothing about this action's role/approval
+    // requirements changed.
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
     resourceType: "workflow_change_proposal",
     inputSchema: workflowVersionActivateInput,
     reversible: false,
