@@ -88,7 +88,7 @@ export function computeBackoff(attemptCount: number, now: Date = new Date()): { 
   return { delayMs, nextRetryEligibleAt: new Date(now.getTime() + delayMs) };
 }
 
-export type ActionRollupOutcome = "SUCCEEDED" | "BLOCKED" | "AWAITING_APPROVAL" | "RETRY_SCHEDULED" | "FAILED_TERMINAL";
+export type ActionRollupOutcome = "SUCCEEDED" | "BLOCKED" | "AWAITING_APPROVAL" | "RETRY_SCHEDULED" | "FAILED_TERMINAL" | "CANCELLED";
 
 /**
  * Called by engine.ts immediately after an action's execute attempt comes
@@ -164,6 +164,33 @@ export function deriveExecutionRollup(outcomes: ActionRollupOutcome[]): {
   return { status: "PARTIALLY_COMPLETED", statusReason: "A mix of succeeded and non-succeeded actions." };
 }
 
+/**
+ * The two execution-level rollup fields deriveExecutionRollup itself does
+ * not compute (it only sees the coarse outcome per action, not the
+ * classification/back-off detail). Reads the SAME action rows the caller
+ * already has -- never queried independently of them, so this can never
+ * disagree with what deriveExecutionRollup saw for the same call.
+ */
+export function deriveExecutionRollupExtras(
+  actions: Array<Pick<AutomationAction, "failureClassification" | "nextRetryEligibleAt" | "completedAt">>,
+): { lastFailureClassification: FailureClassification | null; nextRetryEligibleAt: Date | null } {
+  let lastFailureClassification: FailureClassification | null = null;
+  let lastCompletedAtMs = -Infinity;
+  for (const a of actions) {
+    if (!a.failureClassification) continue;
+    const completedAtMs = a.completedAt ? a.completedAt.getTime() : 0;
+    if (completedAtMs >= lastCompletedAtMs) {
+      lastCompletedAtMs = completedAtMs;
+      lastFailureClassification = a.failureClassification as FailureClassification;
+    }
+  }
+
+  const pending = actions.map((a) => a.nextRetryEligibleAt).filter((d): d is Date => d !== null);
+  const nextRetryEligibleAt = pending.length === 0 ? null : new Date(Math.min(...pending.map((d) => d.getTime())));
+
+  return { lastFailureClassification, nextRetryEligibleAt };
+}
+
 // ---------------------------------------------------------------------
 // Section 4: safe execution claiming -- reuses the existing compare-and-set
 // convention (executionGateway.ts's "UPDATE ... WHERE status = X").
@@ -197,6 +224,20 @@ export async function claimActionForRetry(
 
   const { action } = row;
   if (action.status !== "RETRY_SCHEDULED" && action.status !== "FAILED") {
+    return { ok: false, reason: "NOT_RETRY_ELIGIBLE" };
+  }
+  // A RETRY_SCHEDULED row was already classified RETRYABLE by
+  // finalizeFailedAction when it got here -- re-deriving the same
+  // classification below is a cheap no-op for it. A legacy "FAILED" row
+  // (one that predates finalizeFailedAction, or was written directly, as
+  // in a test fixture) was NEVER classified, so this is the only place
+  // that check happens for it -- without it, a tamper/policy-denied
+  // failure recorded as plain "FAILED" would be silently claimed and
+  // re-executed, exactly what "never blindly retried" forbids. Checked
+  // BEFORE the claim below so a rejected row is never touched (no status
+  // transition to RUNNING and back).
+  const classification = classifyActionFailure({ authorityDecision: action.authorityDecision, errorMessage: action.errorMessage });
+  if (classification !== "RETRYABLE") {
     return { ok: false, reason: "NOT_RETRY_ELIGIBLE" };
   }
   if (action.attemptCount >= action.maxAttempts) return { ok: false, reason: "MAX_ATTEMPTS_REACHED" };

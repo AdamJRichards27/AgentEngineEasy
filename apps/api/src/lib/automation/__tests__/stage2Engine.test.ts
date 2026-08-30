@@ -693,7 +693,7 @@ test("repeated action execution attempt: retrying an already-SUCCEEDED action is
 
   const result = await retryAutomationAction(succeededAction.id, brokerageId);
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.reason, "NOT_RETRYABLE_STATUS");
+  if (!result.ok) assert.equal(result.reason, "NOT_RETRY_ELIGIBLE");
 
   const tasksAfter = await taskKeysFor(propertyId);
   assert.equal(tasksAfter.length, 5, "a refused repeated-execution attempt must never create a second round of tasks");
