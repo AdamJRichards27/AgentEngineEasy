@@ -39,7 +39,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
   brokerages,
@@ -154,7 +154,6 @@ async function cleanupBrokerage(brokerageId: number): Promise<void> {
   if (propertyIds.length > 0) {
     await db.delete(automationTasks).where(inArray(automationTasks.propertyId, propertyIds));
     await db.delete(automationAttentionItems).where(inArray(automationAttentionItems.propertyId, propertyIds));
-    await db.delete(offers).where(inArray(offers.propertyId, propertyIds));
 
     const workflowRows = await db.select({ id: workflows.id }).from(workflows).where(inArray(workflows.propertyId, propertyIds));
     const workflowIds = workflowRows.map((r) => r.id);
@@ -162,7 +161,13 @@ async function cleanupBrokerage(brokerageId: number): Promise<void> {
       await db.delete(workflowSteps).where(inArray(workflowSteps.workflowId, workflowIds));
     }
     await db.delete(workflows).where(inArray(workflows.propertyId, propertyIds));
+    // transactions.acceptedOfferId references offers.id, so transactions
+    // must be deleted before offers — reversed from an earlier draft, which
+    // deleted offers first and failed teardown with a foreign-key violation
+    // whenever a test's fixture had gone through acceptOffer() (real
+    // execution against Replit's Postgres caught this, not static review).
     await db.delete(transactions).where(inArray(transactions.propertyId, propertyIds));
+    await db.delete(offers).where(inArray(offers.propertyId, propertyIds));
   }
 
   const eventRows = await db.select({ id: domainEvents.id }).from(domainEvents).where(eq(domainEvents.brokerageId, brokerageId));
@@ -779,7 +784,18 @@ test("audit continuity: a Stage 2 execution and its completion event both carry 
   await approveAndActivateRuleVersion({ versionId: version.id, brokerageId, approvedByUserId: adminId });
   await acceptOffer({ offerId, userId: agentId, brokerageId });
 
-  const [event] = await db.select().from(domainEvents).where(eq(domainEvents.brokerageId, brokerageId));
+  // Filtered on eventType, not just brokerageId: by the time acceptOffer()
+  // resolves, the engine has already synchronously published
+  // AUTOMATION_EXECUTION_COMPLETED for this same brokerage, so an
+  // unfiltered, unordered query over domainEvents can nondeterministically
+  // return either row first. Real execution against Replit's Postgres
+  // caught this (an earlier draft filtered on brokerageId alone and failed
+  // intermittently with "Cannot read properties of undefined" once a
+  // second event existed) -- not something static review would have found.
+  const [event] = await db
+    .select()
+    .from(domainEvents)
+    .where(and(eq(domainEvents.brokerageId, brokerageId), eq(domainEvents.eventType, "OFFER_ACCEPTED")));
   const [execution] = await db.select().from(automationExecutions).where(eq(automationExecutions.triggeringEventId, event.id));
   assert.equal(execution.correlationId, event.correlationId);
 
