@@ -152,6 +152,31 @@ export const automationExecutions = pgTable(
     completedAt: timestamp("completed_at"),
     errorMessage: text("error_message"),
 
+    // --- Operational Readiness (WF4): additive, nullable/defaulted columns.
+    // statusReason is the general-purpose "why is this execution in its
+    // current status" note (skip reason, block reason, cancel reason,
+    // retry-scheduled reason) -- errorMessage above is left untouched for
+    // backward compatibility (still set on BLOCKED/FAILED) but is really
+    // just the failure-shaped special case of the same concept.
+    statusReason: text("status_reason"),
+    // Rolled up from this execution's automationActions rows at every
+    // status recompute (operations.ts's computeExecutionOutcome) -- never
+    // independently written, so it can never drift from the authoritative
+    // per-action values.
+    lastFailureClassification: text("last_failure_classification"),
+    nextRetryEligibleAt: timestamp("next_retry_eligible_at"),
+    // Execution-level claim, used only by the abandoned-RUNNING recovery
+    // sweep (operations.ts's recoverAbandonedRunning) to record which
+    // recovery pass touched a stale row, for diagnosis -- distinct from the
+    // per-action claim below, which guards actual retry/cancel execution.
+    claimedAt: timestamp("claimed_at"),
+    claimedBy: text("claimed_by"),
+    cancelledAt: timestamp("cancelled_at"),
+    cancelledByUserId: integer("cancelled_by_user_id").references(() => users.id),
+    resolutionNote: text("resolution_note"),
+    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    resolvedAt: timestamp("resolved_at"),
+
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => ({
@@ -201,6 +226,26 @@ export const automationActions = pgTable(
 
     startedAt: timestamp("started_at"),
     completedAt: timestamp("completed_at"),
+
+    // --- Operational Readiness (WF4): the action row is the actual
+    // claimable/retryable unit (attemptCount/maxAttempts already lived
+    // here) -- these columns are additive and nullable, never breaking an
+    // existing read of this table.
+    failureClassification: text("failure_classification"),
+    // RETRYABLE | APPROVAL_REQUIRED | VALIDATION_OR_POLICY | TERMINAL_TECHNICAL
+    nextRetryEligibleAt: timestamp("next_retry_eligible_at"),
+    // Set atomically in the SAME conditional UPDATE that claims this row
+    // for retry (operations.ts's claimActionForRetry), mirroring
+    // executionGateway.ts's existing "claim = conditional UPDATE ... WHERE
+    // status = X" convention -- never a separate lock table.
+    claimedAt: timestamp("claimed_at"),
+    claimedBy: text("claimed_by"),
+    cancelledAt: timestamp("cancelled_at"),
+    cancelledByUserId: integer("cancelled_by_user_id").references(() => users.id),
+    resolutionNote: text("resolution_note"),
+    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    resolvedAt: timestamp("resolved_at"),
+
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => ({
