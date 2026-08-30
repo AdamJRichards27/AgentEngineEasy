@@ -14,6 +14,7 @@ import { aiActionsRouter } from "./ai-actions.js";
 import { billingRouter } from "./billing.js";
 import { growRouter } from "./grow.js";
 import { importRouter } from "./import.js";
+import { automationOpsRouter } from "./automationOps.js";
 
 export const apiRouter = Router();
 
@@ -32,6 +33,7 @@ apiRouter.use("/ai/actions", aiActionsRouter);
 apiRouter.use("/billing", billingRouter);
 apiRouter.use("/grow", growRouter);
 apiRouter.use("/import", importRouter);
+apiRouter.use("/automation/ops", automationOpsRouter);
 
 // Phase 8 (Agent command experience: Home screen, exceptions surfaced) is
 // built. Phase 9 (Contextual AI Architecture - see ARCHITECTURE.md) adds a
