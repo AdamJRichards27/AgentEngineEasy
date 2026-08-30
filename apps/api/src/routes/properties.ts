@@ -23,6 +23,7 @@ import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/documentRules.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 import { getPropertyTimeline } from "../lib/timeline.js";
+import { getAppraisalByProperty } from "../lib/appraisals.js";
 
 export const propertiesRouter = Router();
 const propertyDataProvider = createPropertyDataProvider();
@@ -129,9 +130,12 @@ propertiesRouter.get("/", requireAuth, async (req, res) => {
   res.json({ properties: rows });
 });
 
+// #123 — tenant scoping: previously matched by id alone, so any
+// authenticated user from any brokerage could read any property by id.
 propertiesRouter.get("/:id", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
-  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  const user = req.authedUser!;
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -141,9 +145,11 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
 
 // The Property Action Screen's data source (ARCHITECTURE.md §4) — one
 // response shaped for "what needs to happen next", not fifteen sub-screens.
+// #123 — same tenant-scoping fix as GET /:id above.
 propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
-  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  const user = req.authedUser!;
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -187,6 +193,9 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     console.error("getPropertyTimeline failed", err);
     return [];
   });
+  // Stage A (#114) — surfaced additively; an unstarted appraisal is simply
+  // null here, never a blocking field.
+  const appraisal = await getAppraisalByProperty(id);
 
   res.json({
     property: {
@@ -199,6 +208,10 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
       workflowStage: property.workflowStage,
       amlStatusSummary: property.amlStatusSummary,
       listingStatus: property.listingStatus,
+      salesMethod: property.salesMethod,
+      priceDisplay: property.priceDisplay,
+      campaignStartDate: property.campaignStartDate,
+      campaignEndDate: property.campaignEndDate,
     },
     ownership: {
       data: property.ownershipData,
@@ -244,6 +257,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
         }
       : null,
     agencyAgreementTerms: agreementTerms ?? null,
+    appraisal,
     timeline,
   });
 });
@@ -262,7 +276,7 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
   }
   const user = req.authedUser!;
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -292,6 +306,54 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
   res.json({ property: updated });
 });
 
+// Stage C — Listing preparation (#116). Purely descriptive/informational
+// fields shown ahead of Go Live — never publishes a listing, orders a
+// supplier, or incurs a cost (governing spec §8 excludes both from this
+// build). Any subset may be sent; an omitted field keeps its current value.
+const listingDetailsSchema = z.object({
+  salesMethod: z.string().optional(),
+  priceDisplay: z.string().optional(),
+  campaignStartDate: z.coerce.date().optional(),
+  campaignEndDate: z.coerce.date().optional(),
+});
+
+propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const parsed = listingDetailsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+  const user = req.authedUser!;
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const [updated] = await db
+    .update(properties)
+    .set({
+      salesMethod: parsed.data.salesMethod ?? property.salesMethod,
+      priceDisplay: parsed.data.priceDisplay ?? property.priceDisplay,
+      campaignStartDate: parsed.data.campaignStartDate ?? property.campaignStartDate,
+      campaignEndDate: parsed.data.campaignEndDate ?? property.campaignEndDate,
+      updatedAt: new Date(),
+    })
+    .where(eq(properties.id, id))
+    .returning();
+
+  await logAudit({
+    userId: user.id,
+    action: "listing_details_updated",
+    recordType: "property",
+    recordId: String(id),
+    propertyId: id,
+  });
+
+  res.json({ property: updated });
+});
+
 // Ready to List (Build Brief §5): once selected, AgentEngineEasy determines
 // and orchestrates the required next steps — the agent does not separately
 // visit an AML screen, a documents screen, and an e-signature screen.
@@ -304,7 +366,7 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
 propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -429,13 +491,10 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 // receive offers." Gated on the Ready to List workflow being fully
 // Complete (every step) — the same "gate on real completion, not on the
 // button having been clicked" discipline as everywhere else in this app.
-// This was a genuine pre-existing gap: nothing before Phase 7 ever moved a
-// property to "Listed" or published LISTING_LIVE despite both existing in
-// the schema/event registry since Phase 1.
 propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(eq(properties.id, id));
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;

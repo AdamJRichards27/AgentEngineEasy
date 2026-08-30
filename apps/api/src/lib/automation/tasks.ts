@@ -30,6 +30,10 @@
 // sibling-offer auto-decline, scheduleSettlement's reschedule handling);
 // see automation.ts's own column comment on why this table has plain
 // indexes rather than a unique constraint here.
+//
+// #122 (Run Transaction Vertical Slice) adds completeAutomationTask at the
+// bottom of this file — agent-facing task completion, closing the gap
+// where automationTasks/automationAttentionItems had zero non-admin surface.
 
 import { and, eq, isNull } from "drizzle-orm";
 import { db, automationTasks, properties, transactions, type AutomationTask, type UserRole } from "@aee/db";
@@ -249,6 +253,51 @@ export async function assignAutomationTaskToRole(input: AssignAutomationTaskOwne
     recordId: updated.id,
     propertyId: input.propertyId,
     updatedValue: input.assignedRole,
+  });
+
+  return { ok: true, task: updated };
+}
+
+export type CompleteAutomationTaskDenialReason = "NOT_FOUND" | "ALREADY_TERMINAL";
+
+export interface CompleteAutomationTaskResult {
+  ok: boolean;
+  task?: AutomationTask;
+  reason?: CompleteAutomationTaskDenialReason;
+}
+
+/**
+ * Agent-facing task completion (#122). Idempotent: completing an
+ * already-COMPLETED task is a no-op that returns the same row; a
+ * SUPERSEDED or CANCELLED task cannot be completed — SUPERSEDED means a
+ * fresher row already replaced it, so there is nothing left to action on
+ * this one.
+ */
+export async function completeAutomationTask(input: { brokerageId: number; taskId: string; userId: number }): Promise<CompleteAutomationTaskResult> {
+  const [task] = await db.select().from(automationTasks).where(eq(automationTasks.id, input.taskId));
+  if (!task || task.brokerageId !== input.brokerageId) {
+    return { ok: false, reason: "NOT_FOUND" };
+  }
+  if (task.status === "COMPLETED") {
+    return { ok: true, task };
+  }
+  if (task.status === "SUPERSEDED" || task.status === "CANCELLED") {
+    return { ok: false, reason: "ALREADY_TERMINAL" };
+  }
+
+  const [updated] = await db
+    .update(automationTasks)
+    .set({ status: "COMPLETED", completedAt: new Date(), updatedAt: new Date() })
+    .where(eq(automationTasks.id, task.id))
+    .returning();
+
+  await logAudit({
+    userId: input.userId,
+    action: "automation_task_completed",
+    recordType: "automation_task",
+    recordId: updated.id,
+    propertyId: updated.propertyId,
+    updatedValue: updated.title,
   });
 
   return { ok: true, task: updated };
