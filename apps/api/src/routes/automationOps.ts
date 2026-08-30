@@ -51,6 +51,93 @@ function actorFrom(authedUser: { id: number; role: string }): { id: number; role
 }
 
 // ---------------------------------------------------------------------
+// GET /automation/ops/health -- Section 11/12 structured health/metrics,
+// the one place an operator (or a future monitoring integration) checks
+// for degraded automation processing.
+// ---------------------------------------------------------------------
+automationOpsRouter.get("/health", async (req, res) => {
+  const authedUser = req.authedUser;
+  if (authedUser === undefined) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  try {
+    const report = await getAutomationHealth();
+    res.json(report);
+  } catch (err) {
+    console.error("GET /automation/ops/health failed", err);
+    res.status(500).json({ error: "Could not load automation health right now. Try again in a moment." });
+  }
+});
+
+// ---------------------------------------------------------------------
+// GET /automation/ops/executions -- paginated, filtered, tenant-scoped
+// list. conditionResult is redacted the same way the detail route redacts
+// it; the list never includes automationActions rows at all.
+// ---------------------------------------------------------------------
+const listQuerySchema = z.object({
+  status: z.string().optional(),
+  ruleId: z.coerce.number().int().optional(),
+  correlationId: z.string().uuid().optional(),
+  executionId: z.string().uuid().optional(),
+  propertyId: z.coerce.number().int().optional(),
+  transactionId: z.coerce.number().int().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+automationOpsRouter.get("/executions", async (req, res) => {
+  const authedUser = req.authedUser;
+  if (authedUser === undefined) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+  const q = parsed.data;
+  try {
+    const conditions = [eq(automationExecutions.brokerageId, authedUser.brokerageId)];
+    if (q.status) conditions.push(eq(automationExecutions.status, q.status));
+    if (q.ruleId !== undefined) conditions.push(eq(automationExecutions.ruleId, q.ruleId));
+    if (q.correlationId) conditions.push(eq(automationExecutions.correlationId, q.correlationId));
+    if (q.executionId) conditions.push(eq(automationExecutions.id, q.executionId));
+    if (q.propertyId !== undefined) conditions.push(eq(domainEvents.propertyId, q.propertyId));
+    if (q.transactionId !== undefined) conditions.push(eq(domainEvents.transactionId, q.transactionId));
+
+    const rows = await db
+      .select({ execution: automationExecutions, triggeringEvent: domainEvents })
+      .from(automationExecutions)
+      .innerJoin(domainEvents, eq(automationExecutions.triggeringEventId, domainEvents.id))
+      .where(and(...conditions))
+      .orderBy(desc(automationExecutions.createdAt))
+      .limit(q.limit)
+      .offset(q.offset);
+
+    res.json({
+      executions: rows.map((r) => ({
+        ...r.execution,
+        conditionResult: redactSensitiveFields(r.execution.conditionResult),
+        triggeringEvent: {
+          id: r.triggeringEvent.id,
+          eventType: r.triggeringEvent.eventType,
+          propertyId: r.triggeringEvent.propertyId,
+          transactionId: r.triggeringEvent.transactionId,
+          occurredAt: r.triggeringEvent.occurredAt,
+        },
+      })),
+      limit: q.limit,
+      offset: q.offset,
+    });
+  } catch (err) {
+    console.error("GET /automation/ops/executions failed", err);
+    res.status(500).json({ error: "Could not load executions right now. Try again in a moment." });
+  }
+});
+
+// ---------------------------------------------------------------------
 // GET /automation/ops/executions/:id -- detail, including actions,
 // approval linkage (aiActionRequestId per action, resolvable through the
 // existing GET /ai/actions/requests/:id), and the triggering event.
