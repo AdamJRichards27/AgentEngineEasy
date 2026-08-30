@@ -1,8 +1,10 @@
-import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uuid, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uuid, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
+import { properties } from "./property";
+import { transactions } from "./transaction";
 import { domainEvents } from "./events";
 import { aiActionRequests } from "./ai";
 
@@ -245,6 +247,158 @@ export const eventProcessingReceipts = pgTable(
   }),
 );
 
+// ---------------------------------------------------------------------
+// Agent Engine 2.0 — WAE Stage 2: Controlled Production Workflows.
+//
+// Two new tables backing the six-action Stage 2 registry (CREATE_INTERNAL_TASK,
+// CREATE_REMINDER, ASSIGN_TASK_OWNER, PROPERTY_NOTE_ADD [reused],
+// RAISE_ATTENTION_ITEM, REQUEST_ACTION_APPROVAL — see
+// apps/api/src/lib/ai/actions/registry.ts). Both are deliberately NEW tables,
+// not additions to the pre-existing ./workflow.ts workflows/workflowSteps —
+// that table is a fixed, wholesale-recomputed-from-live-state checklist
+// (apps/api/src/lib/workflowSteps.ts's refreshReadyToListSteps /
+// refreshTransactionSteps overwrite its rows entirely on every call) and
+// inserting dynamic, workflow-generated rows into it would both risk
+// corrupting that recompute and repeat the exact "Workflow" naming collision
+// this package's automation_* tables were named to avoid in the first place
+// (see the module comment above and docs/stage-wf/WF1_DISCOVERY.md §2).
+// ---------------------------------------------------------------------
+
+// automation_tasks — the durable record behind CREATE_INTERNAL_TASK and
+// CREATE_REMINDER (kind distinguishes the two; a reminder is simply a task
+// with an authoritative dueAt). Rows are never deleted or overwritten in
+// place: a workflow re-run whose underlying date/content materially changed
+// (e.g. a settlement reschedule) SUPERSEDES the prior ACTIVE row and inserts
+// a fresh one, so the superseded instance survives as historical evidence
+// (Build Instructions §6, "retain evidence of superseded dates/tasks rather
+// than silently overwriting history").
+export const automationTasks = pgTable(
+  "automation_tasks",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    propertyId: integer("property_id").notNull().references(() => properties.id),
+    transactionId: integer("transaction_id").references(() => transactions.id),
+
+    // Closed vocabulary — AUTOMATION_TASK_KEYS
+    // (apps/api/src/lib/automation/types.ts). Never a free-form string a
+    // rule author could invent; CREATE_INTERNAL_TASK/CREATE_REMINDER's zod
+    // inputSchema validates against exactly this list before a row is ever
+    // written here.
+    taskKey: text("task_key").notNull(),
+    kind: text("kind").notNull().default("TASK"), // TASK | REMINDER
+    title: text("title").notNull(),
+    detail: text("detail"),
+
+    // One of USER_ROLES (packages/db/src/schema/users.ts), or null =
+    // unassigned. Re-assignable at any time via ASSIGN_TASK_OWNER.
+    assignedRole: text("assigned_role"),
+    dueAt: timestamp("due_at"),
+
+    // ACTIVE | COMPLETED | SUPERSEDED | CANCELLED.
+    status: text("status").notNull().default("ACTIVE"),
+    supersededByTaskId: uuid("superseded_by_task_id"),
+
+    // Traceability back to exactly what created this row (component:
+    // "traceable through correlation/causation identifiers", "preserve the
+    // originating event and field"). originatingExecutionId is populated
+    // only when the caller has a concrete execution id available directly
+    // (e.g. a future admin/back-fill path) — the templated action-params
+    // path (resolveActionParams, ./automation's templating.ts) cannot supply
+    // it, because the automation_executions row is only assigned an id
+    // AFTER the engine has already built the event facts an action's params
+    // are resolved against; for a workflow-created row the authoritative
+    // trace is instead automationActions.result.taskId (this row's id) ->
+    // automationActions.executionId -> automationExecutions, which is a
+    // complete, genuine chain without needing a direct FK here.
+    originatingEventId: uuid("originating_event_id").references(() => domainEvents.id),
+    originatingExecutionId: uuid("originating_execution_id").references(() => automationExecutions.id),
+    // The specific event field this row's dueAt/content was derived from,
+    // e.g. "payload.settlementDate" — component: "preserve the originating
+    // event and field".
+    originatingField: text("originating_field"),
+
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    // Query-performance index for the (transaction, taskKey, status) lookup
+    // createAutomationTask/assignAutomationTaskToRole perform on every call
+    // — deliberately NOT a unique constraint: idempotency and the
+    // supersede-on-material-change decision are business logic evaluated in
+    // apps/api/src/lib/automation/tasks.ts (read-then-write), the same
+    // established convention every other domain service in this codebase
+    // already uses for business-rule idempotency (see acceptOffer's
+        // sibling-offer handling, scheduleSettlement's reschedule handling) —
+    // duplicate-EVENT-delivery protection (the security-relevant idempotency
+    // boundary) is already fully owned by automation_executions/
+    // event_processing_receipts above, not by this table.
+    transactionTaskKeyIdx: index("automation_tasks_transaction_task_key_idx").on(
+      table.transactionId,
+      table.taskKey,
+      table.status,
+    ),
+    propertyTaskKeyIdx: index("automation_tasks_property_task_key_idx").on(
+      table.propertyId,
+      table.taskKey,
+      table.status,
+    ),
+  }),
+);
+
+// automation_attention_items — Stage 2's minimal, compatible interface onto
+// the future Exception & Risk Engine (EXCEPTION_CREATED/EXCEPTION_RESOLVED,
+// packages/events/src/types.ts, zero call sites before this change). This
+// table is deliberately narrow: it records that a workflow could not
+// proceed and why, in a durable, auditable, tenant-scoped place, without
+// building the full exception-routing/escalation/ownership system the
+// future Exception & Risk Engine is expected to own (Build Instructions §7:
+// "use the smallest compatible interface and document the future
+// integration point" — see docs/stage-wf/WF3_STAGE2_CONTROLLED_WORKFLOWS.md).
+export const automationAttentionItems = pgTable(
+  "automation_attention_items",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    propertyId: integer("property_id").notNull().references(() => properties.id),
+    transactionId: integer("transaction_id").references(() => transactions.id),
+
+    // Closed vocabulary — AUTOMATION_ATTENTION_REASON_CODES
+    // (apps/api/src/lib/automation/types.ts).
+    reasonCode: text("reason_code").notNull(),
+    summary: text("summary").notNull(),
+    detail: jsonb("detail"),
+
+    status: text("status").notNull().default("OPEN"), // OPEN | RESOLVED
+    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    resolvedAt: timestamp("resolved_at"),
+    resolutionNote: text("resolution_note"),
+
+    originatingEventId: uuid("originating_event_id").references(() => domainEvents.id),
+    originatingExecutionId: uuid("originating_execution_id").references(() => automationExecutions.id),
+
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    // Same "index, not unique constraint" reasoning as automation_tasks
+    // above — raiseAttentionItem() (apps/api/src/lib/automation/attentionItems.ts)
+    // reads-then-writes to avoid re-raising a fresh row for an
+    // already-OPEN condition of the same reasonCode.
+    transactionReasonIdx: index("automation_attention_items_transaction_reason_idx").on(
+      table.transactionId,
+      table.reasonCode,
+      table.status,
+    ),
+    propertyReasonIdx: index("automation_attention_items_property_reason_idx").on(
+      table.propertyId,
+      table.reasonCode,
+      table.status,
+    ),
+  }),
+);
+
 export const insertAutomationRuleSchema = createInsertSchema(automationRules).omit({
   id: true,
   createdAt: true,
@@ -262,14 +416,28 @@ export const insertAutomationActionSchema = createInsertSchema(automationActions
   id: true,
   createdAt: true,
 });
+export const insertAutomationTaskSchema = createInsertSchema(automationTasks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertAutomationAttentionItemSchema = createInsertSchema(automationAttentionItems).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
 
 export type InsertAutomationRule = z.infer<typeof insertAutomationRuleSchema>;
 export type InsertAutomationRuleVersion = z.infer<typeof insertAutomationRuleVersionSchema>;
 export type InsertAutomationExecution = z.infer<typeof insertAutomationExecutionSchema>;
 export type InsertAutomationAction = z.infer<typeof insertAutomationActionSchema>;
+export type InsertAutomationTask = z.infer<typeof insertAutomationTaskSchema>;
+export type InsertAutomationAttentionItem = z.infer<typeof insertAutomationAttentionItemSchema>;
 
 export type AutomationRule = typeof automationRules.$inferSelect;
 export type AutomationRuleVersion = typeof automationRuleVersions.$inferSelect;
 export type AutomationExecution = typeof automationExecutions.$inferSelect;
 export type AutomationAction = typeof automationActions.$inferSelect;
 export type EventProcessingReceipt = typeof eventProcessingReceipts.$inferSelect;
+export type AutomationTask = typeof automationTasks.$inferSelect;
+export type AutomationAttentionItem = typeof automationAttentionItems.$inferSelect;
