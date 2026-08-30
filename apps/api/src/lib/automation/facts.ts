@@ -23,6 +23,18 @@ const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "prototype", "constructor"
 
 export function buildFacts(event: DomainEvent): AutomationFacts {
   return {
+    // Stage 2 addition (WAE Stage 2 — Controlled Production Workflows):
+    // eventId/correlationId/causationId are flattened here alongside the
+    // fields Stage 1 already exposed, purely additively — nothing existing
+    // reads these paths today, so this cannot change any Stage 1
+    // condition/templating behaviour. This is what lets a Stage 2 workflow
+    // template set an action's originatingEventId to "$event.eventId"
+    // (automation_tasks/automation_attention_items' own traceability
+    // columns) without the engine needing a live DB join or the action
+    // execution context (ActionExecutionContext, ai/actions/registry.ts)
+    // needing to carry an executionId that does not exist yet at the point
+    // action params are resolved.
+    eventId: event.id,
     eventType: event.eventType,
     eventVersion: event.eventVersion,
     occurredAt: event.occurredAt instanceof Date ? event.occurredAt.toISOString() : event.occurredAt,
@@ -34,6 +46,8 @@ export function buildFacts(event: DomainEvent): AutomationFacts {
     actorType: event.actorType,
     actorId: event.actorId,
     source: event.source,
+    correlationId: event.correlationId,
+    causationId: event.causationId,
     payload: (event.payload ?? {}) as Record<string, unknown>,
     metadata: (event.metadata ?? {}) as Record<string, unknown>,
   };

@@ -80,3 +80,85 @@ export type EventProcessingReceiptStatus = (typeof EVENT_PROCESSING_RECEIPT_STAT
 // Stable and unique across the codebase — see packages/db/src/schema/automation.ts's
 // eventProcessingReceipts comment ("e.g. 'automation-engine'").
 export const AUTOMATION_ENGINE_HANDLER_NAME = "automation-engine";
+
+// ---------------------------------------------------------------------
+// Agent Engine 2.0 — WAE Stage 2: Controlled Production Workflows.
+// ---------------------------------------------------------------------
+
+export const AUTOMATION_TASK_KINDS = ["TASK", "REMINDER"] as const;
+export type AutomationTaskKind = (typeof AUTOMATION_TASK_KINDS)[number];
+
+export const AUTOMATION_TASK_STATUSES = ["ACTIVE", "COMPLETED", "SUPERSEDED", "CANCELLED"] as const;
+export type AutomationTaskStatus = (typeof AUTOMATION_TASK_STATUSES)[number];
+
+export const AUTOMATION_ATTENTION_ITEM_STATUSES = ["OPEN", "RESOLVED"] as const;
+export type AutomationAttentionItemStatus = (typeof AUTOMATION_ATTENTION_ITEM_STATUSES)[number];
+
+// Closed vocabulary of task keys the Stage 2 workflow catalogue
+// (templates.ts) is permitted to create. Never a free-form string a rule
+// author could invent — CREATE_INTERNAL_TASK/CREATE_REMINDER's zod
+// inputSchema (apps/api/src/lib/ai/actions/registry.ts) validates against
+// exactly this list, and rules.ts's assertActionsAreRegistered/
+// createRuleVersion never accept action params outside a registered
+// action's own schema.
+export const AUTOMATION_TASK_KEYS = [
+  // Workflow 1 — Agency Agreement Signed
+  "CONFIRM_AML_CTF_REQUIREMENTS",
+  "VERIFY_REGISTERED_PROPERTY_OWNERS",
+  "PREPARE_LISTING_LAUNCH_REQUIREMENTS",
+  "REQUEST_MISSING_PROPERTY_CAMPAIGN_INFO",
+  // Workflow 2 — Offer Accepted
+  "PREPARE_CONTRACT_DOCUMENTATION",
+  "CONFIRM_TRANSACTION_LEGAL_REPRESENTATIVES",
+  "RECORD_TRANSACTION_DATES_CONDITIONS",
+  "FOLLOWUP_EXCHANGE_UNCONDITIONAL_STATUS",
+  "IDENTIFY_MISSING_TRANSACTION_INFO",
+  // Workflow 3 — Contract Signed
+  "CONFIRM_CONTRACT_EXCHANGE_STATUS",
+  "CAPTURE_CONTRACT_CONDITION_DATES",
+  "CONDITION_DEADLINE_FOLLOWUP",
+  "IDENTIFY_MISSING_LEGAL_REPRESENTATIVES",
+  "PREPARE_SETTLEMENT_TRACKING",
+  // Workflow 4 — Settlement Scheduled
+  "CONFIRM_SETTLEMENT_DATE_TIME",
+  "PRE_SETTLEMENT_MILESTONE_REMINDER",
+  "IDENTIFY_UNRESOLVED_TRANSACTION_CONDITIONS",
+  "PREPARE_INTERNAL_SETTLEMENT_TASKS",
+  // Workflow 5 — Settlement Completed
+  "CONFIRM_TRANSACTION_RECORD_COMPLETE",
+  "PREPARE_COMMISSION_PROCESSING_CHECKLIST",
+  "RECORD_RETENTION_CLOSURE_CHECK",
+  "PREPARE_PERMITTED_CLIENT_FOLLOWUP",
+  "PREPARE_PROPERTY_TRANSACTION_CLOSURE",
+] as const;
+export type AutomationTaskKey = (typeof AUTOMATION_TASK_KEYS)[number];
+
+// Closed vocabulary of attention-item reason codes — the minimal, compatible
+// interface onto the future Exception & Risk Engine (Build Instructions §7:
+// "use the smallest compatible interface and document the future
+// integration point" — see docs/stage-wf/WF3_STAGE2_CONTROLLED_WORKFLOWS.md §7).
+export const AUTOMATION_ATTENTION_REASON_CODES = [
+  "MISSING_SETTLEMENT_DATE",
+  "INCOMPLETE_TRIGGERING_EVENT",
+  "MISSING_REGISTERED_OWNER",
+  "MISSING_LEGAL_REPRESENTATIVE",
+  "CONDITION_WITHOUT_DUE_DATE",
+  "OTHER",
+] as const;
+export type AutomationAttentionReasonCode = (typeof AUTOMATION_ATTENTION_REASON_CODES)[number];
+
+// Closed vocabulary of "protected future action" labels REQUEST_ACTION_APPROVAL
+// may reference — descriptive only, never a registered, executable actionKey.
+// Stage 2 explicitly does not execute any of these; see Build Instructions
+// §"Out of scope" — AML verification orders, listing publication, supplier
+// orders, and any action that would incur cost all stay strictly manual.
+export const PROTECTED_FUTURE_ACTION_KEYS = [
+  "ORDER_AML_VERIFICATION",
+  "PUBLISH_LISTING",
+  "ENGAGE_SUPPLIER",
+  "INCUR_COST",
+  "SEND_BINDING_INSTRUCTION",
+  "ALTER_CONTRACT",
+  "OTHER_PROTECTED_ACTION",
+] as const;
+export type ProtectedFutureActionKey = (typeof PROTECTED_FUTURE_ACTION_KEYS)[number];

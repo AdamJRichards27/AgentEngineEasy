@@ -30,14 +30,33 @@
 // vertical slice and its approval-required-action test coverage need;
 // WORKFLOW_CHANGE_PROPOSE is untouched. Every other check on both actions
 // (allowedRoles, riskLevel, requiresApproval, execute()) is unchanged.
+//
+// Agent Engine 2.0 -- WAE Stage 2 (Controlled Production Workflows): five
+// new actions below (CREATE_INTERNAL_TASK, CREATE_REMINDER,
+// ASSIGN_TASK_OWNER, RAISE_ATTENTION_ITEM, REQUEST_ACTION_APPROVAL) back the
+// initial production workflow catalogue (apps/api/src/lib/automation/templates.ts).
+// Every one of them is internal and reversible (Build Instructions §5):
+// none sends an external email/SMS, touches money, calls a third party, or
+// mutates anything outside the new automation_tasks/automation_attention_items
+// tables this stage adds. Their execute() functions call ordinary domain
+// functions in apps/api/src/lib/automation/{tasks,attentionItems}.ts, the
+// exact same "registry never touches the database" convention as every
+// other entry in this file.
 import { z } from "zod";
-import type { UserRole } from "@aee/db";
+import { USER_ROLES, type UserRole } from "@aee/db";
 import type { RiskLevel } from "../types.js";
 import type { AuthorityLevel } from "../authority.js";
 import { AUTHORITY_LEVELS } from "../authority.js";
 import { addPropertyNote } from "../../propertyNotes.js";
 import { proposeWorkflowChange, activateWorkflowChangeProposal } from "../../workflowProposals.js";
 import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js";
+import { createAutomationTask, assignAutomationTaskToRole } from "../../automation/tasks.js";
+import { raiseAttentionItem } from "../../automation/attentionItems.js";
+import {
+  AUTOMATION_TASK_KEYS,
+  AUTOMATION_ATTENTION_REASON_CODES,
+  PROTECTED_FUTURE_ACTION_KEYS,
+} from "../../automation/types.js";
 
 // Part 18: actor-type axis. Kept local to the action-request system (distinct
 // from packages/events' broader actorType, which predates this work and also
@@ -67,7 +86,7 @@ export interface AIActionDefinition<TInput = unknown> {
   // Central Stage-A entitlement key (apps/api/src/lib/entitlements), if this
   // action requires a paid capability. Never bypassed for AI (Part 17).
   requiredEntitlementKey?: string;
-  resourceType: "property" | "workflow_change_proposal" | null;
+  resourceType: "property" | "workflow_change_proposal" | "automation_task" | "automation_attention_item" | null;
   inputSchema: z.ZodType<TInput>;
   reversible: boolean;
   auditRequired: true;
@@ -93,6 +112,65 @@ const workflowChangeProposeInput = z.object({
 
 const workflowVersionActivateInput = z.object({
   proposalId: z.number().int().positive(),
+});
+
+// ---------------------------------------------------------------------
+// WAE Stage 2 — input schemas.
+//
+// isValidIsoDate: a plain, non-throwing validity check (no eval/Function) —
+// this is how "handle missing/invalid dates safely" (Build Instructions §6)
+// is enforced for CREATE_REMINDER: an invalid dueAt fails zod validation
+// (evaluateAIAction's INPUT_SCHEMA_INVALID branch) and the automation
+// action is cleanly BLOCKED with a clear reason, rather than throwing or
+// silently coercing to `Invalid Date`.
+// ---------------------------------------------------------------------
+
+function isValidIsoDate(value: string): boolean {
+  return !Number.isNaN(Date.parse(value));
+}
+
+const automationTaskKeyEnum = z.enum(AUTOMATION_TASK_KEYS);
+const userRoleEnum = z.enum(USER_ROLES);
+
+const createInternalTaskInput = z.object({
+  propertyId: z.number().int().positive(),
+  transactionId: z.number().int().positive().nullable().optional(),
+  taskKey: automationTaskKeyEnum,
+  title: z.string().min(1).max(200),
+  detail: z.string().max(2000).nullable().optional(),
+  assignedRole: userRoleEnum.nullable().optional(),
+  dueAt: z.string().refine(isValidIsoDate, { message: "dueAt must be a valid ISO-8601 date" }).nullable().optional(),
+  originatingEventId: z.string().uuid().nullable().optional(),
+  originatingField: z.string().max(200).nullable().optional(),
+});
+
+const createReminderInput = createInternalTaskInput.extend({
+  // A reminder is a task whose date is authoritative and required (Build
+  // Instructions §6: "use authoritative transaction dates") — the one
+  // required field CREATE_INTERNAL_TASK leaves optional.
+  dueAt: z.string().refine(isValidIsoDate, { message: "dueAt must be a valid ISO-8601 date" }),
+});
+
+const assignTaskOwnerInput = z.object({
+  propertyId: z.number().int().positive(),
+  taskKey: automationTaskKeyEnum,
+  assignedRole: userRoleEnum,
+});
+
+const raiseAttentionItemInput = z.object({
+  propertyId: z.number().int().positive(),
+  transactionId: z.number().int().positive().nullable().optional(),
+  reasonCode: z.enum(AUTOMATION_ATTENTION_REASON_CODES),
+  summary: z.string().min(1).max(500),
+  detail: z.record(z.unknown()).nullable().optional(),
+  originatingEventId: z.string().uuid().nullable().optional(),
+});
+
+const requestActionApprovalInput = z.object({
+  propertyId: z.number().int().positive(),
+  transactionId: z.number().int().positive().nullable().optional(),
+  protectedActionKey: z.enum(PROTECTED_FUTURE_ACTION_KEYS),
+  reason: z.string().min(1).max(1000),
 });
 
 export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
@@ -180,6 +258,166 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
     version: 1,
     summarize: (input) => `Activate workflow change proposal #${input.proposalId}, superseding the current active version.`,
     execute: async (ctx, input) => activateWorkflowChangeProposal(input.proposalId, ctx.brokerageId, ctx.userId),
+  },
+
+  // ---------------------------------------------------------------------
+  // WAE Stage 2 — Controlled Production Workflows.
+  // ---------------------------------------------------------------------
+
+  CREATE_INTERNAL_TASK: {
+    actionKey: "CREATE_INTERNAL_TASK",
+    name: "Create internal task",
+    description:
+      "Create an internal, human-actionable follow-up task for a property/transaction from a closed vocabulary of task keys. Purely additive and reversible — completing or cancelling a task never deletes its historical record.",
+    category: "automation",
+    authorityLevel: AUTHORITY_LEVELS.EXECUTE,
+    riskLevel: 0,
+    allowedRoles: ["Agent", "Brokerage Administrator", "Pit Crew"],
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
+    resourceType: "automation_task",
+    inputSchema: createInternalTaskInput,
+    reversible: true,
+    auditRequired: true,
+    enabled: true,
+    version: 1,
+    summarize: (input) => `Create internal task "${input.title}" for property #${input.propertyId} (${input.taskKey})`,
+    execute: async (ctx, input) =>
+      createAutomationTask({
+        brokerageId: ctx.brokerageId,
+        propertyId: input.propertyId,
+        transactionId: input.transactionId ?? null,
+        taskKey: input.taskKey,
+        kind: "TASK",
+        title: input.title,
+        detail: input.detail ?? null,
+        assignedRole: input.assignedRole ?? null,
+        dueAt: input.dueAt ? new Date(input.dueAt) : null,
+        originatingEventId: input.originatingEventId ?? null,
+        originatingField: input.originatingField ?? null,
+      }),
+  },
+
+  CREATE_REMINDER: {
+    actionKey: "CREATE_REMINDER",
+    name: "Create reminder",
+    description:
+      "Create a date-based internal reminder tied to an authoritative transaction date from a closed vocabulary of task keys. Purely additive and reversible. A material date change supersedes the prior reminder rather than overwriting it.",
+    category: "automation",
+    authorityLevel: AUTHORITY_LEVELS.EXECUTE,
+    riskLevel: 0,
+    allowedRoles: ["Agent", "Brokerage Administrator", "Pit Crew"],
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
+    resourceType: "automation_task",
+    inputSchema: createReminderInput,
+    reversible: true,
+    auditRequired: true,
+    enabled: true,
+    version: 1,
+    summarize: (input) => `Create reminder "${input.title}" due ${input.dueAt} for property #${input.propertyId} (${input.taskKey})`,
+    execute: async (ctx, input) =>
+      createAutomationTask({
+        brokerageId: ctx.brokerageId,
+        propertyId: input.propertyId,
+        transactionId: input.transactionId ?? null,
+        taskKey: input.taskKey,
+        kind: "REMINDER",
+        title: input.title,
+        detail: input.detail ?? null,
+        assignedRole: input.assignedRole ?? null,
+        dueAt: new Date(input.dueAt),
+        originatingEventId: input.originatingEventId ?? null,
+        originatingField: input.originatingField ?? null,
+      }),
+  },
+
+  ASSIGN_TASK_OWNER: {
+    actionKey: "ASSIGN_TASK_OWNER",
+    name: "Assign task to an internal role",
+    description:
+      "Assign or re-assign the current active internal automation task for a property to an authorised internal role. Reversible — a task can be re-assigned again at any time.",
+    category: "automation",
+    authorityLevel: AUTHORITY_LEVELS.EXECUTE,
+    riskLevel: 0,
+    allowedRoles: ["Agent", "Brokerage Administrator", "Pit Crew"],
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
+    resourceType: "automation_task",
+    inputSchema: assignTaskOwnerInput,
+    reversible: true,
+    auditRequired: true,
+    enabled: true,
+    version: 1,
+    summarize: (input) => `Assign task ${input.taskKey} on property #${input.propertyId} to ${input.assignedRole}`,
+    execute: async (ctx, input) =>
+      assignAutomationTaskToRole({
+        brokerageId: ctx.brokerageId,
+        propertyId: input.propertyId,
+        taskKey: input.taskKey,
+        assignedRole: input.assignedRole,
+      }),
+  },
+
+  RAISE_ATTENTION_ITEM: {
+    actionKey: "RAISE_ATTENTION_ITEM",
+    name: "Raise attention item",
+    description:
+      "Raise an internal exception/attention item when a workflow cannot safely proceed. The smallest compatible interface onto the future Exception & Risk Engine — see docs/stage-wf/WF3_STAGE2_CONTROLLED_WORKFLOWS.md.",
+    category: "automation",
+    authorityLevel: AUTHORITY_LEVELS.EXECUTE,
+    riskLevel: 0,
+    allowedRoles: ["Agent", "Brokerage Administrator", "Pit Crew"],
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
+    resourceType: "automation_attention_item",
+    inputSchema: raiseAttentionItemInput,
+    reversible: true,
+    auditRequired: true,
+    enabled: true,
+    version: 1,
+    summarize: (input) => `Raise attention item (${input.reasonCode}) for property #${input.propertyId}: ${input.summary.slice(0, 120)}`,
+    execute: async (ctx, input) =>
+      raiseAttentionItem({
+        brokerageId: ctx.brokerageId,
+        propertyId: input.propertyId,
+        transactionId: input.transactionId ?? null,
+        reasonCode: input.reasonCode,
+        summary: input.summary,
+        detail: input.detail ?? null,
+        originatingEventId: input.originatingEventId ?? null,
+      }),
+  },
+
+  REQUEST_ACTION_APPROVAL: {
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    name: "Request approval for a protected future action",
+    description:
+      "Record a request for human approval before a protected, out-of-scope action (e.g. ordering AML verification, publishing a listing, engaging a supplier) is performed manually. This action never performs the protected action itself — Stage 2 has no executable path for any of them, by design — it only creates a durable, approval-gated record that a human reviewed and approved proceeding manually. riskLevel/authorityLevel are set so this action is never auto-execute-eligible (isAutoExecuteEligible always returns false for it) — approval is enforced by the existing AI Governance policy engine, never a boolean flag the workflow itself controls.",
+    category: "automation",
+    authorityLevel: AUTHORITY_LEVELS.EXECUTE,
+    riskLevel: 2,
+    allowedRoles: ["Agent", "Brokerage Administrator"],
+    allowedActorTypes: ["AI", "USER", "SYSTEM"],
+    resourceType: "automation_attention_item",
+    inputSchema: requestActionApprovalInput,
+    reversible: true,
+    auditRequired: true,
+    enabled: true,
+    version: 1,
+    summarize: (input) => `Request approval before "${input.protectedActionKey}" for property #${input.propertyId}: ${input.reason.slice(0, 120)}`,
+    // Executes only once a human has actually approved the request through
+    // the existing, unmodified approval endpoints (component 8, "execute
+    // only the exact approved action"): the "exact approved action" here is
+    // precisely "record that approval was granted for this protected,
+    // out-of-scope action" — never the protected action itself, which this
+    // codebase has no registered, executable path for.
+    execute: async (ctx, input) =>
+      raiseAttentionItem({
+        brokerageId: ctx.brokerageId,
+        propertyId: input.propertyId,
+        transactionId: input.transactionId ?? null,
+        reasonCode: "OTHER",
+        summary: `Approval granted to proceed with ${input.protectedActionKey} (manual, outside this system): ${input.reason}`,
+        detail: { protectedActionKey: input.protectedActionKey, approvedByUserId: ctx.userId },
+        originatingEventId: null,
+      }),
   },
 };
 

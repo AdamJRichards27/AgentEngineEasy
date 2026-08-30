@@ -102,6 +102,24 @@ export async function createAutomationRule(input: CreateAutomationRuleInput): Pr
   return row;
 }
 
+/**
+ * Looks up a brokerage's existing system-template rule by templateKey, if
+ * one has already been installed — WAE Stage 2 addition, used by
+ * templates.ts's installStage2WorkflowCatalogue() so re-running the
+ * installer for a brokerage that already has a template installed extends
+ * it with a new version rather than creating a duplicate rule row.
+ */
+export async function getAutomationRuleByTemplateKey(
+  brokerageId: number,
+  templateKey: string,
+): Promise<AutomationRule | null> {
+  const [row] = await db
+    .select()
+    .from(automationRules)
+    .where(and(eq(automationRules.brokerageId, brokerageId), eq(automationRules.templateKey, templateKey)));
+  return row ?? null;
+}
+
 export interface CreateRuleVersionInput {
   ruleId: number;
   brokerageId: number;
