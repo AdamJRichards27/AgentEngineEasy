@@ -35,6 +35,18 @@ export const properties = pgTable("properties", {
   amlStatusSummary: text("aml_status_summary").notNull().default("Not Started"),
   listingStatus: text("listing_status").notNull().default("Not Listed"),
 
+  // Stage C — Listing preparation (Agent Engine 2.0 — Run Transaction
+  // Vertical Slice). Purely descriptive/informational fields shown to the
+  // agent ahead of Go Live — capturing them never publishes a listing,
+  // orders a supplier, or incurs a cost (the governing spec's Section 8
+  // explicitly excludes both from this build). Missing values are
+  // surfaced by the workspace as a non-blocking prompt, the same
+  // "review, not block" precedent already used for ownership review.
+  salesMethod: text("sales_method"), // e.g. Auction | PrivateTreaty | Tender | ExpressionsOfInterest — free text, no fixed enum
+  priceDisplay: text("price_display"), // e.g. "$800,000" or "Auction — Guide $750,000"
+  campaignStartDate: timestamp("campaign_start_date"),
+  campaignEndDate: timestamp("campaign_end_date"),
+
   // Ownership data from the property-data provider, compared against sellers
   // entered (Build Brief §8) — mismatch shown as a review prompt, not a hard block.
   ownershipData: jsonb("ownership_data"),
