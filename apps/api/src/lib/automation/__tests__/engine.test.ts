@@ -556,7 +556,12 @@ test("scenario 11 — non-retryable failure: a tamper/policy-class failure is re
   });
   const tamperedResult = await retryAutomationAction(tamperedAction.id, brokerageId);
   assert.equal(tamperedResult.ok, false);
-  if (!tamperedResult.ok) assert.equal(tamperedResult.reason, "NON_RETRYABLE_FAILURE");
+  // Classified VALIDATION_OR_POLICY by operations.ts's classifyActionFailure
+  // (errorMessage matches the PAYLOAD_TAMPERED pattern) -- claimActionForRetry
+  // rejects it before ever claiming the row, same "never touch the row"
+  // guarantee as before, now backed by the shared classifier instead of a
+  // second, engine.ts-local regex.
+  if (!tamperedResult.ok) assert.equal(tamperedResult.reason, "NOT_RETRY_ELIGIBLE");
 
   const { action: exhaustedAction } = await insertMinimalExecutionAndAction({
     brokerageId,

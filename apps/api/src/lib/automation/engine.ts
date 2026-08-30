@@ -62,6 +62,7 @@ import {
   type AutomationRule,
   type AutomationRuleVersion,
   type AutomationExecution,
+  type AutomationAction,
 } from "@aee/db";
 import { publishDomainEvent, type DomainEvent } from "@aee/events";
 import { getActionDefinition } from "../ai/actions/registry.js";
@@ -73,6 +74,13 @@ import { evaluateConditionGroup, type AutomationConditionGroup } from "./conditi
 import { resolveActionParams } from "./templating.js";
 import { getActiveRuleVersionsForTrigger, type AutomationRuleAction } from "./rules.js";
 import { AUTOMATION_ENGINE_HANDLER_NAME, type AutomationAuthorityDecision } from "./types.js";
+import {
+  finalizeFailedAction,
+  deriveExecutionRollup,
+  deriveExecutionRollupExtras,
+  claimActionForRetry,
+  type ActionRollupOutcome,
+} from "./operations.js";
 
 // ---------------------------------------------------------------------
 // Component 7: idempotency and duplicate-event protection at the outbox /
@@ -165,7 +173,7 @@ export async function handleAutomationDomainEvent(event: DomainEvent): Promise<v
 }
 
 async function publishAutomationEvent(
-  eventType: "AUTOMATION_EXECUTION_SKIPPED" | "AUTOMATION_EXECUTION_COMPLETED" | "AUTOMATION_ACTION_BLOCKED" | "AUTOMATION_ACTION_FAILED",
+  eventType: "AUTOMATION_EXECUTION_SKIPPED" | "AUTOMATION_EXECUTION_COMPLETED" | "AUTOMATION_ACTION_BLOCKED" | "AUTOMATION_ACTION_FAILED" | "AUTOMATION_ACTION_RETRY_SCHEDULED",
   triggeringEvent: DomainEvent,
   payload: Record<string, unknown>,
   idempotencyKey: string,
@@ -236,7 +244,13 @@ async function evaluateAndExecuteRule(
   if (!conditionResult.matched) {
     await db
       .update(automationExecutions)
-      .set({ status: "SKIPPED", conditionResult, startedAt: new Date(), completedAt: new Date() })
+      .set({
+        status: "SKIPPED",
+        conditionResult,
+        statusReason: "Condition group did not match the triggering event.",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      })
       .where(eq(automationExecutions.id, execution.id));
     await publishAutomationEvent(
       "AUTOMATION_EXECUTION_SKIPPED",
@@ -273,14 +287,13 @@ async function evaluateAndExecuteRule(
     outcomes.push(await executeAutomationAction({ execution, rule, approver, action, sequence, event, facts }));
   }
 
-  const finalStatus = computeExecutionStatus(outcomes);
-  await db.update(automationExecutions).set({ status: finalStatus, completedAt: new Date() }).where(eq(automationExecutions.id, execution.id));
+  const { status: finalStatus, actionCount } = await recomputeExecutionRollup(execution);
 
   if (finalStatus === "COMPLETED") {
     await publishAutomationEvent(
       "AUTOMATION_EXECUTION_COMPLETED",
       event,
-      { ruleId: rule.id, ruleVersionId: version.id, executionId: execution.id, actionCount: outcomes.length },
+      { ruleId: rule.id, ruleVersionId: version.id, executionId: execution.id, actionCount },
       `automation_execution:${execution.id}:AUTOMATION_EXECUTION_COMPLETED`,
     );
   }
@@ -298,7 +311,7 @@ async function resolveVersionApprover(version: AutomationRuleVersion, brokerageI
 async function blockExecution(execution: AutomationExecution, errorMessage: string): Promise<void> {
   await db
     .update(automationExecutions)
-    .set({ status: "BLOCKED", errorMessage, completedAt: new Date() })
+    .set({ status: "BLOCKED", errorMessage, statusReason: errorMessage, completedAt: new Date() })
     .where(eq(automationExecutions.id, execution.id));
 }
 
@@ -309,7 +322,7 @@ async function blockExecution(execution: AutomationExecution, errorMessage: stri
 // parameter already documented as a valid value before this PR.
 // ---------------------------------------------------------------------
 
-type AutomationActionOutcome = "SUCCEEDED" | "FAILED" | "BLOCKED" | "AWAITING_APPROVAL";
+type AutomationActionOutcome = ActionRollupOutcome; // "SUCCEEDED" | "BLOCKED" | "AWAITING_APPROVAL" | "RETRY_SCHEDULED" | "FAILED_TERMINAL" | "CANCELLED"
 
 export function mapDecisionToAuthorityDecision(decision: PolicyDecision): AutomationAuthorityDecision {
   if (decision.allowed) return decision.requiresApproval ? "ALLOW_WITH_APPROVAL" : "ALLOW";
@@ -429,31 +442,80 @@ async function executeAutomationAction(input: {
     return "SUCCEEDED";
   }
 
-  await db
-    .update(automationActions)
-    .set({ status: "FAILED", errorMessage: execResult.errorMessage ?? execResult.reason ?? "Execution failed", completedAt: new Date() })
-    .where(eq(automationActions.id, row.id));
+  // Component: safe, bounded retry with deterministic backoff
+  // (operations.ts's finalizeFailedAction/classifyActionFailure) — a
+  // genuine execution-time failure is never blindly retried forever nor
+  // silently dropped; it is classified, and only a RETRYABLE classification
+  // with attempts remaining is scheduled for a later attempt. Never inserts
+  // a new automationActions row: attemptCount was already incremented on
+  // this SAME row above, before this branch is reached.
+  const failureMessage = execResult.errorMessage ?? execResult.reason ?? "Execution failed";
+  const actionForClassification: AutomationAction = { ...row, attemptCount: row.attemptCount + 1, authorityDecision };
+  const { outcome, classification, nextRetryEligibleAt } = await finalizeFailedAction(actionForClassification, failureMessage);
   // AUTOMATION_ACTION_FAILED already exists in the canonical catalogue
   // (added in the same prior-session change that added AUTOMATION_ACTION_BLOCKED);
   // AI_ACTION_FAILED was already published by executeAIAction itself
   // (actionEvents.ts) — this is the automation-specific complement of that,
   // scoped to the automationActions row rather than the aiActionRequests row.
+  // AUTOMATION_ACTION_RETRY_SCHEDULED (new this stage) gives the retry path
+  // its own distinct, filterable event instead of overloading FAILED for a
+  // state that is not actually terminal.
+  const failureEventType = outcome === "RETRY_SCHEDULED" ? "AUTOMATION_ACTION_RETRY_SCHEDULED" : "AUTOMATION_ACTION_FAILED";
   await publishAutomationEvent(
-    "AUTOMATION_ACTION_FAILED",
+    failureEventType,
     event,
-    { executionId: execution.id, actionId: row.id, actionKey: action.actionKey, reason: execResult.reason },
-    `automation_action:${row.id}:AUTOMATION_ACTION_FAILED:${row.attemptCount + 1}`,
+    { executionId: execution.id, actionId: row.id, actionKey: action.actionKey, reason: execResult.reason, classification, nextRetryEligibleAt },
+    `automation_action:${row.id}:${failureEventType}:${row.attemptCount + 1}`,
   );
-  return "FAILED";
+  return outcome;
 }
 
-function computeExecutionStatus(outcomes: AutomationActionOutcome[]): "COMPLETED" | "BLOCKED" | "AWAITING_APPROVAL" | "FAILED" | "PARTIALLY_COMPLETED" {
-  if (outcomes.length === 0) return "COMPLETED";
-  if (outcomes.every((o) => o === "SUCCEEDED")) return "COMPLETED";
-  if (outcomes.every((o) => o === "BLOCKED")) return "BLOCKED";
-  if (outcomes.some((o) => o === "AWAITING_APPROVAL")) return "AWAITING_APPROVAL";
-  if (outcomes.every((o) => o === "FAILED")) return "FAILED";
-  return "PARTIALLY_COMPLETED";
+function mapActionStatusToOutcome(status: string): AutomationActionOutcome | null {
+  switch (status) {
+    case "SUCCEEDED":
+    case "BLOCKED":
+    case "AWAITING_APPROVAL":
+    case "RETRY_SCHEDULED":
+    case "FAILED_TERMINAL":
+    case "CANCELLED":
+      return status as AutomationActionOutcome;
+    case "FAILED":
+      // Legacy pre-classification terminal value (predates finalizeFailedAction);
+      // treated as a non-retryable terminal outcome for rollup purposes.
+      return "FAILED_TERMINAL";
+    default:
+      // PENDING / RUNNING are transient, in-flight states that should never
+      // be observed here in practice (every action this function is asked
+      // to roll up has already been executed at least once by the time this
+      // is called) -- excluded rather than guessed at if one somehow is.
+      return null;
+  }
+}
+
+// Single source of truth for recomputing and persisting an execution's
+// rollup (status/statusReason/lastFailureClassification/nextRetryEligibleAt)
+// from its CURRENT automationActions rows -- used both after a fresh
+// evaluation runs all of a rule version's actions, and after a single
+// action is retried (retryAutomationAction, below), so the two call sites
+// can never compute this differently.
+async function recomputeExecutionRollup(execution: AutomationExecution): Promise<{ status: string; actionCount: number }> {
+  const actionRows = await db.select().from(automationActions).where(eq(automationActions.executionId, execution.id));
+  const outcomes = actionRows
+    .map((a) => mapActionStatusToOutcome(a.status))
+    .filter((o): o is AutomationActionOutcome => o !== null);
+  const rollup = deriveExecutionRollup(outcomes);
+  const extras = deriveExecutionRollupExtras(actionRows);
+  await db
+    .update(automationExecutions)
+    .set({
+      status: rollup.status,
+      statusReason: rollup.statusReason,
+      lastFailureClassification: extras.lastFailureClassification,
+      nextRetryEligibleAt: extras.nextRetryEligibleAt,
+      completedAt: new Date(),
+    })
+    .where(eq(automationExecutions.id, execution.id));
+  return { status: rollup.status, actionCount: actionRows.length };
 }
 
 // ---------------------------------------------------------------------
@@ -466,45 +528,68 @@ function computeExecutionStatus(outcomes: AutomationActionOutcome[]): "COMPLETED
 // increments on the SAME row, per its own unique-index comment.
 // ---------------------------------------------------------------------
 
-export type RetryDenialReason = "NOT_FOUND" | "NOT_RETRYABLE_STATUS" | "MAX_ATTEMPTS_REACHED" | "NON_RETRYABLE_FAILURE";
+export type RetryDenialReason =
+  | "NOT_FOUND"
+  | "NOT_RETRY_ELIGIBLE"
+  | "NOT_YET_ELIGIBLE"
+  | "MAX_ATTEMPTS_REACHED"
+  | "LOST_CLAIM_RACE"
+  | "NON_RETRYABLE_FAILURE";
 
-// Failure classes that must never be blindly retried — retrying a tampered
-// or policy-denied request would just fail identically (or, worse, mask a
-// real security event as routine flakiness). Only a genuine execution-time
-// failure (e.g. the underlying domain function threw) is retryable.
-const NON_RETRYABLE_ERROR_PATTERN = /PAYLOAD_TAMPERED|POLICY_DENIED|ACTION_NOT_FOUND|NOT_FOUND/;
+// Failure classification (RETRYABLE / APPROVAL_REQUIRED / VALIDATION_OR_POLICY
+// / TERMINAL_TECHNICAL) now lives centrally in operations.ts's
+// classifyActionFailure, applied once at the moment an action first fails
+// (finalizeFailedAction, inside executeAutomationAction above). By the time
+// an action reaches RETRY_SCHEDULED it has already been classified
+// RETRYABLE; re-deriving that classification a second time here from the
+// same errorMessage would be a second, potentially disagreeing source of
+// truth for the same decision.
 
 export async function retryAutomationAction(
   actionId: string,
   brokerageId: number,
+  claimedBy = "system",
 ): Promise<{ ok: true; status: AutomationActionOutcome } | { ok: false; reason: RetryDenialReason }> {
-  const [row] = await db
-    .select({ action: automationActions, execution: automationExecutions })
-    .from(automationActions)
-    .innerJoin(automationExecutions, eq(automationActions.executionId, automationExecutions.id))
-    .where(and(eq(automationActions.id, actionId), eq(automationExecutions.brokerageId, brokerageId)));
-  if (!row) return { ok: false, reason: "NOT_FOUND" };
+  // Component 4: safe execution claiming. The atomic compare-and-set claim
+  // (operations.ts's claimActionForRetry) is now the sole gate on whether a
+  // retry is allowed to proceed — replacing the unguarded read-then-check
+  // this function used before this stage. Two concurrent callers can both
+  // reach this function for the same action; only one can ever win the
+  // claim, so this function can never execute the same attempt twice.
+  const claim = await claimActionForRetry(actionId, brokerageId, claimedBy);
+  if (!claim.ok) return { ok: false, reason: claim.reason };
+  const action = claim.action;
 
-  const { action, execution } = row;
-  if (action.status !== "FAILED") return { ok: false, reason: "NOT_RETRYABLE_STATUS" };
-  if (action.attemptCount >= action.maxAttempts) return { ok: false, reason: "MAX_ATTEMPTS_REACHED" };
-  if (action.errorMessage && NON_RETRYABLE_ERROR_PATTERN.test(action.errorMessage)) {
+  // From this point the action is claimed (status RUNNING). Every remaining
+  // failure branch below must leave the row in a resolved terminal state
+  // rather than abandoning it RUNNING — releaseRetryClaim is the single place
+  // that does so, so no branch can forget.
+  const releaseRetryClaim = async (errorMessage: string): Promise<{ ok: false; reason: RetryDenialReason }> => {
+    await db
+      .update(automationActions)
+      .set({ status: "FAILED_TERMINAL", failureClassification: "VALIDATION_OR_POLICY", errorMessage, completedAt: new Date() })
+      .where(and(eq(automationActions.id, action.id), eq(automationActions.status, "RUNNING")));
     return { ok: false, reason: "NON_RETRYABLE_FAILURE" };
+  };
+
+  const [execution] = await db.select().from(automationExecutions).where(eq(automationExecutions.id, action.executionId));
+  if (!execution || execution.brokerageId !== brokerageId) {
+    return releaseRetryClaim("Execution record could not be re-verified for this brokerage.");
   }
 
   const [rule] = await db.select().from(automationRules).where(eq(automationRules.id, execution.ruleId));
-  if (!rule) return { ok: false, reason: "NOT_FOUND" };
+  if (!rule) return releaseRetryClaim("Rule record no longer exists.");
 
   const [version] = await db.select().from(automationRuleVersions).where(eq(automationRuleVersions.id, execution.ruleVersionId));
-  if (!version) return { ok: false, reason: "NOT_FOUND" };
+  if (!version) return releaseRetryClaim("Rule version record no longer exists.");
 
   // Re-verify authority fresh, exactly as the original attempt did — an
   // approver who was valid at first attempt may no longer be.
   const approver = await resolveVersionApprover(version, brokerageId);
-  if (!approver) return { ok: false, reason: "NON_RETRYABLE_FAILURE" };
+  if (!approver) return releaseRetryClaim("Rule version's approving user could not be re-verified; authority cannot be established.");
 
   const [eventRow] = await db.select().from(domainEvents).where(eq(domainEvents.id, execution.triggeringEventId));
-  if (!eventRow) return { ok: false, reason: "NOT_FOUND" };
+  if (!eventRow) return releaseRetryClaim("Triggering event record no longer exists.");
   const triggeringEvent = { ...eventRow, handlerErrors: eventRow.handlerErrors as DomainEvent["handlerErrors"] } as DomainEvent;
   const facts = buildFacts(triggeringEvent);
 
@@ -517,6 +602,23 @@ export async function retryAutomationAction(
     event: triggeringEvent,
     facts,
   });
+
+  // Component: a retry only re-runs ONE action, but the execution's own
+  // rollup (status/statusReason/lastFailureClassification/nextRetryEligibleAt)
+  // must still reflect the outcome across ALL of its actions afterward —
+  // e.g. the last RETRY_SCHEDULED action in a 3-action execution finally
+  // succeeding must be able to bring the execution to COMPLETED. Reuses the
+  // exact same recompute function the initial evaluation path uses, so the
+  // two can never disagree.
+  const { status: finalStatus, actionCount } = await recomputeExecutionRollup(execution);
+  if (finalStatus === "COMPLETED") {
+    await publishAutomationEvent(
+      "AUTOMATION_EXECUTION_COMPLETED",
+      triggeringEvent,
+      { ruleId: rule.id, ruleVersionId: version.id, executionId: execution.id, actionCount },
+      `automation_execution:${execution.id}:AUTOMATION_EXECUTION_COMPLETED`,
+    );
+  }
 
   return { ok: true, status: outcome };
 }

@@ -70,6 +70,17 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   // so no separate AUTOMATION_ACTION_SUCCEEDED was added.
   "AUTOMATION_EXECUTION_SKIPPED",
   "AUTOMATION_EXECUTION_COMPLETED",
+  // Agent Engine 2.0 -- WAE Operational Readiness (Stage: WF4). Explicit
+  // audit-event complements for the new operator-facing lifecycle actions
+  // (retry scheduling, cancellation, abandoned-RUNNING recovery) -- section
+  // "audit event for every retry scheduling and execution attempt" /
+  // "emit an audit event" for every operator control. Execution *attempts*
+  // themselves are already fully covered by the existing AI_ACTION_EXECUTED/
+  // AI_ACTION_FAILED/AUTOMATION_ACTION_FAILED events a retry re-triggers.
+  "AUTOMATION_ACTION_RETRY_SCHEDULED",
+  "AUTOMATION_ACTION_CANCELLED",
+  "AUTOMATION_EXECUTION_CANCELLED",
+  "AUTOMATION_EXECUTION_RECOVERED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -133,6 +144,11 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   // Agent Engine 2.0 — Workflow Automation Engine (Stage: Foundation).
   AUTOMATION_EXECUTION_SKIPPED: { version: 1, description: "An automation rule version's conditions did not match the triggering event; no action was attempted." },
   AUTOMATION_EXECUTION_COMPLETED: { version: 1, description: "An automation execution reached COMPLETED — every action succeeded." },
+  // Agent Engine 2.0 -- WAE Operational Readiness (Stage: WF4).
+  AUTOMATION_ACTION_RETRY_SCHEDULED: { version: 1, description: "A retryable automation action failure was scheduled for a later retry attempt." },
+  AUTOMATION_ACTION_CANCELLED: { version: 1, description: "An authorised operator cancelled an automation action before it performed an irreversible side effect." },
+  AUTOMATION_EXECUTION_CANCELLED: { version: 1, description: "An authorised operator cancelled an automation execution before it performed an irreversible side effect." },
+  AUTOMATION_EXECUTION_RECOVERED: { version: 1, description: "An automation execution or action abandoned in a stale RUNNING state (worker/process interruption) was recovered by the operational-readiness sweep." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {
