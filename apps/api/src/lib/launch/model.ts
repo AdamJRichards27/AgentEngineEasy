@@ -860,7 +860,7 @@ export async function confirmLaunchLive(launchPlanId: string, brokerageId: numbe
 
 export async function pauseLaunchPlan(launchPlanId: string, brokerageId: number, actor: ActorRef, reason: string): Promise<LaunchPlan> {
   const plan = await loadLaunchPlanInBrokerage(launchPlanId, brokerageId);
-  if (plan.status === "CANCELLED" || plan.status === "LISTING_LIVE") {
+  if (plan.status === "CANCELLED" || plan.status === "LISTING_LIVE" || plan.status === "PAUSED") {
     throw new LaunchError("INVALID_STATUS", `Cannot pause a launch plan in status ${plan.status}`);
   }
   const [updated] = await db

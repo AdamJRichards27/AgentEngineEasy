@@ -36,6 +36,13 @@
       "when": 1788158437079,
       "tag": "0004_white_shaman",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788169448605,
+      "tag": "0005_wonderful_pet_avengers",
+      "breakpoints": true
     }
   ]
 }

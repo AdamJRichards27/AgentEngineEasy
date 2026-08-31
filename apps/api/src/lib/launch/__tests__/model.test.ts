@@ -280,6 +280,8 @@ test("scenario: partial portal launch — one portal live and one failed still a
   const { propertyId } = await createListedProperty(baseUrl, A.agent.cookie, { address: `13 Partial Portal St ${suffix}` });
   const detail = await waitForAutoProposedPlan(propertyId, A.brokerageId);
   const actor = actorOf(A.agent);
+  const targetDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  await setTargetLaunchDate(detail.plan.id, A.brokerageId, actor, targetDate);
 
   await applyTemplate(detail.plan.id, A.brokerageId, actor, "OFF_MARKET"); // smaller template: PHOTOGRAPHY + COPYWRITING + DIGITAL_AD
   const afterTemplate = await getLaunchPlanDetail(propertyId, A.brokerageId);
