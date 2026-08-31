@@ -17,6 +17,7 @@ import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
 import { tasksRouter } from "./tasks.js";
+import { exceptionsRouter } from "./exceptions.js";
 
 export const apiRouter = Router();
 
@@ -39,6 +40,14 @@ apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
 apiRouter.use("/appraisals", appraisalsRouter);
 apiRouter.use("/tasks", tasksRouter);
+// Agent Engine 2.0 — Exception & Risk Engine (Priority 4). Mounted
+// unprefixed: exceptionsRouter's own route paths are already fully
+// qualified ("/properties/:propertyId/exceptions", "/exceptions...") rather
+// than relative to a mount prefix, since the property-scoped read sits
+// under the existing /properties namespace while the rest of the surface
+// is its own top-level /exceptions namespace — no single prefix covers
+// both, so the router declares its own paths in full instead.
+apiRouter.use(exceptionsRouter);
 
 // Phase 8 (Agent command experience: Home screen, exceptions surfaced) is
 // built. Phase 9 (Contextual AI Architecture - see ARCHITECTURE.md) adds a
