@@ -41,12 +41,12 @@ function actorFrom(user: AuthedUser): ActorRef {
   return { id: user.id, role: user.role };
 }
 
-function canViewFinancials(user: AuthedUser): boolean {
+export function canViewFinancials(user: AuthedUser): boolean {
   return BROKERAGE_ADMIN_ROLES.includes(user.role);
 }
 
 /** Agent/Pit Crew see only exceptions on properties they're the agent for; Brokerage Administrator sees the whole tenant. Mirrors resolveDefaultOwner's single agentId-based ownership model — no separate Pit Crew service-assignment record exists yet (see exceptions.ts's own comment on RISK_EXCEPTION_OWNER_TYPES). */
-async function restrictedPropertyIdsFor(user: AuthedUser): Promise<number[] | null> {
+export async function restrictedPropertyIdsFor(user: AuthedUser): Promise<number[] | null> {
   if (BROKERAGE_ADMIN_ROLES.includes(user.role)) return null;
   const rows = await db.select({ id: properties.id }).from(properties).where(and(eq(properties.brokerageId, user.brokerageId), eq(properties.agentId, user.id)));
   return rows.map((r) => r.id);
