@@ -343,6 +343,14 @@ export async function processEsignWebhook(
 
     const hasAgencyAgreement = packageDocuments.some((d) => d.documentType === "AgencyAgreement");
     if (hasAgencyAgreement) {
+      // #131/#135 fix: this webhook has no authenticated caller to take
+      // brokerageId/agentId from (unlike sendPackageForSignature's
+      // AGENCY_AGREEMENT_SENT above), so resolve them from the property
+      // itself -- exactly the pattern lib/aml.ts's processAmlWebhook
+      // already uses for AML_COMPLETED. Previously hardcoded to null,
+      // which silently made this event invisible to every brokerageId-
+      // filtered domain event consumer (the Property Timeline included).
+      const [property] = await db.select().from(properties).where(eq(properties.id, docPackage.propertyId));
       try {
         await publishDomainEvent({
           eventType: "AGENCY_AGREEMENT_SIGNED",
@@ -350,8 +358,8 @@ export async function processEsignWebhook(
           propertyId: docPackage.propertyId,
           transactionId: null,
           partyId: null,
-          brokerageId: null,
-          agentId: null,
+          brokerageId: property?.brokerageId ?? null,
+          agentId: property?.agentId ?? null,
           actorType: "INTEGRATION",
           actorId: null,
           source: `webhook:esign:${updated.provider}`,

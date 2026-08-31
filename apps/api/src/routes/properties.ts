@@ -17,7 +17,7 @@ import {
 } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/documentRules.js";
@@ -189,10 +189,6 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     ? await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, docPackage.id))
     : [];
   const [agreementTerms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, id));
-  const timeline = await getPropertyTimeline(id).catch((err) => {
-    console.error("getPropertyTimeline failed", err);
-    return [];
-  });
   // Stage A (#114) — surfaced additively; an unstarted appraisal is simply
   // null here, never a blocking field.
   const appraisal = await getAppraisalByProperty(id);
@@ -258,8 +254,25 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
       : null,
     agencyAgreementTerms: agreementTerms ?? null,
     appraisal,
-    timeline,
   });
+});
+
+// Property Timeline (#131-#134) — a dedicated endpoint, separate from the
+// workspace aggregate above, so a Timeline-only refresh doesn't require
+// refetching the whole workspace and vice versa (#131 design doc §3/§4).
+// Same #123-precedent tenant scoping as every other :id route in this
+// file; canViewFinancials gates the financial-entitlement boundary
+// (commission/funds/agent-paid figures) inside getPropertyTimeline itself.
+propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const user = req.authedUser!;
+  const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(user.role);
+  try {
+    const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
+    res.json({ timeline });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
 });
 
 // Ownership review resolution (Build Brief §8): the agent clears the review

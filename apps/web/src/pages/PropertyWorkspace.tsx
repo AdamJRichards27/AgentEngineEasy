@@ -114,10 +114,23 @@ interface TransactionBlock {
   legalRepresentatives: { sellerSolicitorPartyId?: number | null; buyerSolicitorPartyId?: number | null } | null;
 }
 
-interface TimelineEntry {
-  id: number;
-  at: string;
+// #131-#134 — the unified Timeline read-model (apps/api/src/lib/timeline.ts),
+// served from its own GET /properties/:id/timeline endpoint rather than
+// embedded in the workspace response, so a Timeline-only refresh doesn't
+// require refetching the whole workspace. A SENSITIVE entry's label is
+// already redacted server-side for a non-Brokerage-Administrator viewer
+// (detail is simply absent then) — the frontend never re-derives that.
+interface TimelineItem {
+  id: string;
+  propertyId: number;
+  entryType: string;
+  category: "Property" | "Party" | "AML" | "Appraisal" | "Listing" | "Document" | "Offer" | "Transaction" | "Task" | "Compliance";
+  occurredAt: string;
+  actor: { type: string; userId: number | null; label: string } | null;
   label: string;
+  sensitivity: "STANDARD" | "SENSITIVE";
+  detail?: Record<string, unknown>;
+  source: "domain_event" | "audit_log";
 }
 
 // Stage A (#114) — Appraisals. priceRangeLow/High come back as numeric
@@ -175,7 +188,6 @@ interface WorkspaceResponse {
   documentPackage: DocumentPackageBlock | null;
   agencyAgreementTerms: AgencyAgreementTermsBlock | null;
   appraisal: AppraisalBlock | null;
-  timeline: TimelineEntry[];
 }
 
 const ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
@@ -230,6 +242,17 @@ function documentStatusCopy(status: string): string {
   if (status === "Signed") return "Signed";
   if (status === "Generated") return "Ready";
   return "Preparing";
+}
+
+// #131-#134 — Timeline category pill. Compliance carries the redacted
+// financial milestones (commission/funds/agent-paid) alongside payment
+// audit entries, so it gets the same warning tone the rest of the app
+// already uses for "needs attention" (amlPillClass, above) rather than a
+// plain default pill.
+function timelineCategoryPillClass(category: TimelineItem["category"]): string {
+  if (category === "Compliance") return "pill pill-warning";
+  if (category === "Offer" || category === "Transaction") return "pill pill-success";
+  return "pill";
 }
 
 // The Property Action Screen (Build Brief §13 / ARCHITECTURE.md §4) — the
@@ -386,6 +409,14 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     queryFn: () => apiFetch<{ transaction: TransactionBlock | null }>(`/transactions/by-property/${propertyId}`),
   });
   const invalidateTransaction = () => queryClient.invalidateQueries({ queryKey: ["transaction", propertyId] });
+
+  // #131-#134 — Property Timeline, its own query so re-running an action
+  // elsewhere (offers, transactions, documents, AML) only has to invalidate
+  // this key rather than the whole workspace, and vice versa.
+  const { data: timelineData } = useQuery({
+    queryKey: ["property-timeline", propertyId],
+    queryFn: () => apiFetch<{ timeline: TimelineItem[] }>(`/properties/${propertyId}/timeline`),
+  });
 
   const createOffer = useMutation({
     mutationFn: (input: Record<string, unknown>) =>
@@ -878,15 +909,21 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         </section>
       )}
 
-      {/* Timeline (staging brief) — a plain read projection over the audit
-          log; every mutation above already writes to it. */}
-      {data.timeline.length > 0 && (
+      {/* Timeline (#131-#134) — the unified read-model over domainEvents +
+          a curated auditLogs allow-list (apps/api/src/lib/timeline.ts):
+          every real milestone appears exactly once, in order, with
+          commission/funds/agent-paid figures already redacted server-side
+          for anyone who isn't a Brokerage Administrator. */}
+      {timelineData && timelineData.timeline.length > 0 && (
         <details className="section" open>
           <summary>Timeline</summary>
           <ul className="timeline">
-            {data.timeline.map((t) => (
+            {timelineData.timeline.map((t) => (
               <li key={t.id}>
-                <span className="when">{formatWhen(t.at)}</span>
+                <span className="when">{formatWhen(t.occurredAt)}</span>
+                <span className={timelineCategoryPillClass(t.category)} style={{ marginRight: "0.5rem" }}>
+                  {t.category}
+                </span>
                 {t.label}
               </li>
             ))}

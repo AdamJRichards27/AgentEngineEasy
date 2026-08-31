@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
-import { db, amlVerifications } from "@aee/db";
+import { db, amlVerifications, type UserRole } from "@aee/db";
+import { BROKERAGE_ADMIN_ROLES } from "../../../middlewares/auth.js";
 import { listOffersForProperty } from "../../offers.js";
 import { getPropertyTimeline } from "../../timeline.js";
 import type { AiContextPackage, AiToolDefinition, AiToolResult } from "../types.js";
@@ -71,7 +72,13 @@ const getPropertyTimelineTool: AiToolDefinition = {
     if (property === null) {
       return { tool: "get_property_timeline", ok: false, error: NO_PROPERTY_ERROR };
     }
-    const timeline = await getPropertyTimeline(property.id);
+    // #131/#134 — the Timeline's financial-entitlement boundary applies to
+    // every reader, including Copilot: a non-Brokerage-Administrator asking
+    // the AI about a property must not get commission/funds/agent-paid
+    // figures back through this tool when they couldn't see them on the
+    // Property Workspace page itself.
+    const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(ctx.userRole as UserRole);
+    const timeline = await getPropertyTimeline(property.id, ctx.brokerageId, canViewFinancials);
     return { tool: "get_property_timeline", ok: true, data: timeline };
   },
 };
