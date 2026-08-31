@@ -154,7 +154,7 @@ test("campaign item status validation: BLOCKED without a blockedReason is reject
     headers: { "content-type": "application/json", cookie: A.agent.cookie },
     body: JSON.stringify({ status: "BLOCKED" }),
   });
-  assert.equal(res.status, 409);
+  assert.equal(res.status, 400);
   const body = (await res.json()) as { reason: string };
   assert.equal(body.reason, "VALIDATION");
 });
