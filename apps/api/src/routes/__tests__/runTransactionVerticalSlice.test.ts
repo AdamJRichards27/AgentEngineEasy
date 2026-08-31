@@ -176,9 +176,16 @@ test("Stage C: Listing details are captured, purely descriptive -- no listing pu
 });
 
 test("Stage D: Offer accepted -> Transaction created with offer data carried forward, publishing OFFER_ACCEPTED exactly once", async () => {
+  // conditions.conditions (the offer's free-text condition) is deliberately
+  // left empty here -- acceptOffer's carry-forward would otherwise create a
+  // second, separate Pending transactionConditions row (proven in
+  // transactions.test.ts's carry-forward test), which Stage E below never
+  // resolves and would therefore permanently block automatic unconditional.
+  // This journey's Contract Condition stage is exercised with exactly the
+  // one condition it adds explicitly.
   const offerRes = await postJson(`/offers/by-property/${propertyId}`, A.agent.cookie, {
     offerPriceCents: 82000000,
-    conditions: { depositCents: 4100000, settlementDate: "2027-03-10", conditions: "Subject to finance", additionalTerms: "Standard terms" },
+    conditions: { depositCents: 4100000, settlementDate: "2027-03-10", conditions: "", additionalTerms: "Standard terms" },
     buyer: { firstName: "Bob", lastName: "Buyer", email: `buyer-${suffix}@example.com` },
   });
   assert.equal(offerRes.status, 201);
