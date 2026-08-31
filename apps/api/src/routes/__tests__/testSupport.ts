@@ -31,6 +31,11 @@ import {
   importRecords,
   riskExceptions,
   riskExceptionTransitions,
+  launchPlans,
+  campaignItems,
+  portalDestinations,
+  vendorApprovals,
+  launchPlanTransitions,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -268,6 +273,13 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * properties.id/transactions.id are all non-cascading (see
  * packages/db/src/schema/exceptions.ts), so both must be deleted before the
  * transactions delete and the properties delete further down this block.
+ *
+ * Agent Engine 2.0 — Property Launch & Campaign Coordination: extended
+ * again for launch_plan_transitions / vendor_approvals / campaign_items /
+ * portal_destinations / launch_plans — all five carry non-cascading FKs
+ * onto properties.id (launch_plans directly; the other four transitively
+ * via launch_plans.id — see packages/db/src/schema/launch.ts), so all must
+ * be deleted before the properties delete further down this block.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -317,6 +329,21 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
       await db.delete(riskExceptionTransitions).where(inArray(riskExceptionTransitions.exceptionId, riskExceptionIds));
     }
     await db.delete(riskExceptions).where(inArray(riskExceptions.propertyId, propertyIds));
+
+    // Agent Engine 2.0 — Property Launch & Campaign Coordination. Scoped
+    // by launch_plans.id (every one of the four child tables carries
+    // launch_plan_id directly) rather than by propertyId on each child
+    // table, since that's the FK they actually declare — see this
+    // function's own doc comment above.
+    const launchPlanRows = await db.select({ id: launchPlans.id }).from(launchPlans).where(inArray(launchPlans.propertyId, propertyIds));
+    const launchPlanIds = launchPlanRows.map((p) => p.id);
+    if (launchPlanIds.length > 0) {
+      await db.delete(launchPlanTransitions).where(inArray(launchPlanTransitions.launchPlanId, launchPlanIds));
+      await db.delete(vendorApprovals).where(inArray(vendorApprovals.launchPlanId, launchPlanIds));
+      await db.delete(campaignItems).where(inArray(campaignItems.launchPlanId, launchPlanIds));
+      await db.delete(portalDestinations).where(inArray(portalDestinations.launchPlanId, launchPlanIds));
+    }
+    await db.delete(launchPlans).where(inArray(launchPlans.propertyId, propertyIds));
 
     // Stage A (#114) — appraisals.propertyId -> properties.id, non-cascading.
     await db.delete(appraisals).where(inArray(appraisals.propertyId, propertyIds));

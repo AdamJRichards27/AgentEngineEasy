@@ -18,6 +18,7 @@ import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
+import { launchRouter } from "./launch.js";
 
 export const apiRouter = Router();
 
@@ -48,6 +49,11 @@ apiRouter.use("/tasks", tasksRouter);
 // is its own top-level /exceptions namespace — no single prefix covers
 // both, so the router declares its own paths in full instead.
 apiRouter.use(exceptionsRouter);
+// Agent Engine 2.0 — Property Launch & Campaign Coordination. Same
+// unprefixed-mount reasoning as exceptionsRouter above — launchRouter's
+// own paths span both /properties/:propertyId/launch and a top-level
+// /launch/... namespace.
+apiRouter.use(launchRouter);
 
 // Phase 8 (Agent command experience: Home screen, exceptions surfaced) is
 // built. Phase 9 (Contextual AI Architecture - see ARCHITECTURE.md) adds a

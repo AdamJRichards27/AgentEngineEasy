@@ -81,6 +81,37 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "AUTOMATION_ACTION_CANCELLED",
   "AUTOMATION_EXECUTION_CANCELLED",
   "AUTOMATION_EXECUTION_RECOVERED",
+  // Agent Engine 2.0 — Property Launch & Campaign Coordination. 23 new
+  // event types covering the operational Launch stage (AGENCY AGREEMENT
+  // SIGNED -> LAUNCH PLANNING -> CAMPAIGN PRODUCTION -> VENDOR APPROVAL ->
+  // MARKET READY -> PORTAL SUBMISSION -> LISTING LIVE). LISTING_LIVE itself
+  // is deliberately NOT redeclared here — the existing event above is
+  // reused unchanged (lib/launch/model.ts's confirmLaunchLive() publishes
+  // it through the same properties.go-live path routes/properties.ts
+  // already uses), so "going live" is never represented two different ways.
+  "LAUNCH_PLAN_CREATED",
+  "LAUNCH_TEMPLATE_APPLIED",
+  "LAUNCH_TARGET_DATE_CHANGED",
+  "LAUNCH_DUE_DATES_CALCULATED",
+  "LAUNCH_DEFAULT_RESPONSIBILITY_ASSIGNED",
+  "CAMPAIGN_ITEM_ADDED",
+  "CAMPAIGN_ITEM_STATUS_CHANGED",
+  "CAMPAIGN_ITEM_BLOCKED",
+  "CAMPAIGN_ITEM_COMPLETED",
+  "CAMPAIGN_ITEM_EVIDENCE_ATTACHED",
+  "VENDOR_SELECTED",
+  "VENDOR_COST_RECORDED",
+  "VENDOR_APPROVAL_REQUESTED",
+  "VENDOR_APPROVAL_DECIDED",
+  "LAUNCH_BUDGET_SET",
+  "LAUNCH_BUDGET_EXCEEDED",
+  "PORTAL_DESTINATION_ADDED",
+  "PORTAL_SUBMISSION_RECORDED",
+  "PORTAL_SUBMISSION_FAILED",
+  "MARKET_READY_EVALUATED",
+  "MARKET_READY_OVERRIDDEN",
+  "LAUNCH_PAUSED",
+  "LAUNCH_CANCELLED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -149,6 +180,30 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   AUTOMATION_ACTION_CANCELLED: { version: 1, description: "An authorised operator cancelled an automation action before it performed an irreversible side effect." },
   AUTOMATION_EXECUTION_CANCELLED: { version: 1, description: "An authorised operator cancelled an automation execution before it performed an irreversible side effect." },
   AUTOMATION_EXECUTION_RECOVERED: { version: 1, description: "An automation execution or action abandoned in a stale RUNNING state (worker/process interruption) was recovered by the operational-readiness sweep." },
+  // Agent Engine 2.0 — Property Launch & Campaign Coordination.
+  LAUNCH_PLAN_CREATED: { version: 1, description: "A Launch Plan was created for a property (typically proposed automatically once the agency agreement is signed)." },
+  LAUNCH_TEMPLATE_APPLIED: { version: 1, description: "A campaign template (Standard Private Treaty, Auction, Off-Market, or Custom) was applied or changed on a Launch Plan, generating its campaign items." },
+  LAUNCH_TARGET_DATE_CHANGED: { version: 1, description: "A Launch Plan's target launch date was set or changed." },
+  LAUNCH_DUE_DATES_CALCULATED: { version: 1, description: "Campaign item due dates were backward-calculated from the target launch date." },
+  LAUNCH_DEFAULT_RESPONSIBILITY_ASSIGNED: { version: 1, description: "Default responsibility (owner type/user) was assigned across a Launch Plan's campaign items." },
+  CAMPAIGN_ITEM_ADDED: { version: 1, description: "A campaign item was added to a Launch Plan." },
+  CAMPAIGN_ITEM_STATUS_CHANGED: { version: 1, description: "A campaign item's status changed." },
+  CAMPAIGN_ITEM_BLOCKED: { version: 1, description: "A campaign item was marked blocked, with a reason." },
+  CAMPAIGN_ITEM_COMPLETED: { version: 1, description: "A campaign item was marked complete." },
+  CAMPAIGN_ITEM_EVIDENCE_ATTACHED: { version: 1, description: "Evidence (a photo, document, or other file) was attached to a campaign item." },
+  VENDOR_SELECTED: { version: 1, description: "A vendor/supplier name was recorded against a campaign item." },
+  VENDOR_COST_RECORDED: { version: 1, description: "A cost was recorded against a campaign item." },
+  VENDOR_APPROVAL_REQUESTED: { version: 1, description: "A vendor, budget, or campaign-item-cost approval was requested." },
+  VENDOR_APPROVAL_DECIDED: { version: 1, description: "A Brokerage Administrator approved, rejected, or requested changes to a pending vendor/budget approval." },
+  LAUNCH_BUDGET_SET: { version: 1, description: "A Launch Plan's approved marketing budget was set or changed by a Brokerage Administrator." },
+  LAUNCH_BUDGET_EXCEEDED: { version: 1, description: "A Launch Plan's recorded spend exceeded its approved budget." },
+  PORTAL_DESTINATION_ADDED: { version: 1, description: "A portal destination (a named real estate portal or channel) was added to a Launch Plan." },
+  PORTAL_SUBMISSION_RECORDED: { version: 1, description: "An agent recorded that a listing was submitted to a portal destination (an operational record, never a direct portal API call)." },
+  PORTAL_SUBMISSION_FAILED: { version: 1, description: "A recorded portal submission failed, with a reason." },
+  MARKET_READY_EVALUATED: { version: 1, description: "The deterministic Market Ready evaluator ran against a Launch Plan, producing a ready/not-ready result with structured blockers." },
+  MARKET_READY_OVERRIDDEN: { version: 1, description: "A Brokerage Administrator overrode one or more outstanding Market Ready blockers." },
+  LAUNCH_PAUSED: { version: 1, description: "A Launch Plan was paused." },
+  LAUNCH_CANCELLED: { version: 1, description: "A Launch Plan was cancelled." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {

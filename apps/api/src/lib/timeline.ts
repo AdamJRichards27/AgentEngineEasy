@@ -158,6 +158,39 @@ const TIMELINE_ENTRY_TYPES: Record<string, EntryTypeConfig> = {
   risk_exception_auto_resolved: { source: "audit_log", category: "Compliance", sensitive: false },
   risk_exception_dismissed: { source: "audit_log", category: "Compliance", sensitive: false },
   risk_exception_reassigned: { source: "audit_log", category: "Compliance", sensitive: false },
+
+  // Agent Engine 2.0 — Property Launch & Campaign Coordination. A curated
+  // subset of the 23 canonical Launch events plus a couple of audit-only
+  // milestones (Build spec: "not flooding with minor updates") — deliberately
+  // excludes the high-frequency per-item events (CAMPAIGN_ITEM_ADDED/
+  // STATUS_CHANGED/BLOCKED/COMPLETED/EVIDENCE_ATTACHED, VENDOR_SELECTED,
+  // VENDOR_COST_RECORDED, LAUNCH_DEFAULT_RESPONSIBILITY_ASSIGNED,
+  // LAUNCH_DUE_DATES_CALCULATED, and MARKET_READY_EVALUATED — the last of
+  // which can fire on every mutation; only its material, one-time
+  // false->true transition is surfaced, as launch_market_ready_achieved
+  // below). Grouped under "Listing" — the existing category this table
+  // already uses for the campaign-facing side of a property's lifecycle
+  // (READY_TO_LIST, LISTING_LIVE) rather than a new category, for the same
+  // "don't widen a fixed union speculatively" reasoning as the
+  // risk_exception_* rows above. None of these carry a dollar figure
+  // sensitive enough to need redaction (campaign budgets/vendor costs are
+  // operational marketing spend, not the commission/funds/payout figures
+  // this file already treats as SENSITIVE).
+  LAUNCH_PLAN_CREATED: { source: "domain_event", category: "Listing", sensitive: false },
+  LAUNCH_TEMPLATE_APPLIED: { source: "domain_event", category: "Listing", sensitive: false },
+  LAUNCH_TARGET_DATE_CHANGED: { source: "domain_event", category: "Listing", sensitive: false },
+  VENDOR_APPROVAL_REQUESTED: { source: "domain_event", category: "Listing", sensitive: false },
+  VENDOR_APPROVAL_DECIDED: { source: "domain_event", category: "Listing", sensitive: false },
+  LAUNCH_BUDGET_SET: { source: "domain_event", category: "Listing", sensitive: false },
+  LAUNCH_BUDGET_EXCEEDED: { source: "domain_event", category: "Listing", sensitive: false },
+  PORTAL_DESTINATION_ADDED: { source: "domain_event", category: "Listing", sensitive: false },
+  PORTAL_SUBMISSION_RECORDED: { source: "domain_event", category: "Listing", sensitive: false },
+  PORTAL_SUBMISSION_FAILED: { source: "domain_event", category: "Listing", sensitive: false },
+  MARKET_READY_OVERRIDDEN: { source: "domain_event", category: "Listing", sensitive: false },
+  LAUNCH_PAUSED: { source: "domain_event", category: "Listing", sensitive: false },
+  LAUNCH_CANCELLED: { source: "domain_event", category: "Listing", sensitive: false },
+  launch_market_ready_achieved: { source: "audit_log", category: "Listing", sensitive: false },
+  launch_resumed: { source: "audit_log", category: "Listing", sensitive: false },
 };
 
 const DOMAIN_EVENT_ENTRY_TYPES = Object.entries(TIMELINE_ENTRY_TYPES)
@@ -203,6 +236,13 @@ const SIMPLE_DOMAIN_EVENT_LABELS: Record<string, string> = {
   FINANCE_APPROVED: "Finance approved",
   SETTLEMENT_COMPLETED: "Settlement completed",
   TRANSACTION_CLOSED: "Transaction closed",
+  // Agent Engine 2.0 — Property Launch & Campaign Coordination.
+  LAUNCH_PLAN_CREATED: "Launch plan created",
+  VENDOR_APPROVAL_REQUESTED: "Vendor/budget approval requested",
+  LAUNCH_BUDGET_EXCEEDED: "Campaign budget exceeded",
+  MARKET_READY_OVERRIDDEN: "Market Ready overridden",
+  LAUNCH_PAUSED: "Launch paused",
+  LAUNCH_CANCELLED: "Launch cancelled",
 };
 
 const SIMPLE_AUDIT_LABELS: Record<string, string> = {
@@ -224,6 +264,9 @@ const SIMPLE_AUDIT_LABELS: Record<string, string> = {
   automation_task_completed: "Task completed",
   automation_attention_item_raised: "Attention item raised",
   automation_attention_item_resolved: "Attention item resolved",
+  // Agent Engine 2.0 — Property Launch & Campaign Coordination.
+  launch_market_ready_achieved: "Market Ready achieved",
+  launch_resumed: "Launch resumed",
 };
 
 // Figure-free version of a SENSITIVE entry's label, used whenever the
@@ -401,6 +444,35 @@ export async function getPropertyTimeline(
     if (row.eventType === "FUNDS_RECEIVED") {
       const payload = (row.payload ?? {}) as { amountCents?: number };
       return typeof payload.amountCents === "number" ? `Funds received (${formatCents(payload.amountCents)})` : "Funds received";
+    }
+    // Agent Engine 2.0 — Property Launch & Campaign Coordination.
+    if (row.eventType === "LAUNCH_TEMPLATE_APPLIED") {
+      const payload = (row.payload ?? {}) as { templateType?: string };
+      return payload.templateType ? `Campaign template applied: ${payload.templateType.replace(/_/g, " ").toLowerCase()}` : "Campaign template applied";
+    }
+    if (row.eventType === "LAUNCH_TARGET_DATE_CHANGED") {
+      const payload = (row.payload ?? {}) as { targetLaunchDate?: string };
+      return payload.targetLaunchDate ? `Target launch date set to ${formatDate(payload.targetLaunchDate)}` : "Target launch date changed";
+    }
+    if (row.eventType === "VENDOR_APPROVAL_DECIDED") {
+      const payload = (row.payload ?? {}) as { decision?: string };
+      return payload.decision ? `Vendor/budget approval ${String(payload.decision).toLowerCase().replace(/_/g, " ")}` : "Vendor/budget approval decided";
+    }
+    if (row.eventType === "LAUNCH_BUDGET_SET") {
+      const payload = (row.payload ?? {}) as { budgetCents?: number };
+      return typeof payload.budgetCents === "number" ? `Campaign budget set to ${formatCents(payload.budgetCents)}` : "Campaign budget set";
+    }
+    if (row.eventType === "PORTAL_DESTINATION_ADDED") {
+      const payload = (row.payload ?? {}) as { portalName?: string };
+      return payload.portalName ? `Added portal destination: ${payload.portalName}` : "Portal destination added";
+    }
+    if (row.eventType === "PORTAL_SUBMISSION_RECORDED") {
+      const payload = (row.payload ?? {}) as { portalName?: string };
+      return payload.portalName ? `Submitted to portal: ${payload.portalName}` : "Portal submission recorded";
+    }
+    if (row.eventType === "PORTAL_SUBMISSION_FAILED") {
+      const payload = (row.payload ?? {}) as { portalName?: string };
+      return payload.portalName ? `Portal submission failed: ${payload.portalName}` : "Portal submission failed";
     }
     return (
       SIMPLE_DOMAIN_EVENT_LABELS[row.eventType] ??

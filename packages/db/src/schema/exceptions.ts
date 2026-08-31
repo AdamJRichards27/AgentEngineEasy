@@ -61,6 +61,14 @@ export const RISK_EXCEPTION_CATEGORIES = [
   "AML_CTF",
   "SETTLEMENT_CLOSURE",
   "WORKFLOW_OPERATIONAL",
+  // Agent Engine 2.0 — Property Launch & Campaign Coordination. No existing
+  // category cleanly means "launch/campaign readiness" — LISTING is
+  // specifically the live-listing record's own fields (see rules/listing.ts),
+  // WORKFLOW_OPERATIONAL is stalled-automation signals. Additive: this
+  // column is `text`, not a Postgres enum (see riskExceptions below), so
+  // adding a value here is a one-line, non-breaking change — no migration
+  // required for this column itself.
+  "LAUNCH_CAMPAIGN",
 ] as const;
 export type RiskExceptionCategory = (typeof RISK_EXCEPTION_CATEGORIES)[number];
 

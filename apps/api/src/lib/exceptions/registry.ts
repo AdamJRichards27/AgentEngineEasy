@@ -40,6 +40,11 @@ import { CONTRACT_CONDITIONS_RULES } from "./rules/contractConditions.js";
 import { AML_CTF_RULES } from "./rules/amlCtf.js";
 import { SETTLEMENT_CLOSURE_RULES } from "./rules/settlementClosure.js";
 import { WORKFLOW_OPERATIONAL_RULES } from "./rules/workflowOperational.js";
+// Agent Engine 2.0 — Property Launch & Campaign Coordination. Reuses this
+// registry outright (13 LAUNCH_CAMPAIGN rules) rather than building a
+// separate Launch warning system — see rules/launchCampaign.ts's own
+// module comment.
+import { LAUNCH_CAMPAIGN_RULES } from "./rules/launchCampaign.js";
 
 export const RISK_RULES: RiskRule[] = [
   ...APPRAISAL_AGREEMENT_RULES,
@@ -49,6 +54,7 @@ export const RISK_RULES: RiskRule[] = [
   ...AML_CTF_RULES,
   ...SETTLEMENT_CLOSURE_RULES,
   ...WORKFLOW_OPERATIONAL_RULES,
+  ...LAUNCH_CAMPAIGN_RULES,
 ];
 
 // Fail loudly at import time on a duplicate ruleId — a copy-paste error in

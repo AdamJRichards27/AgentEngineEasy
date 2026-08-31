@@ -24,6 +24,7 @@ import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/do
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 import { getPropertyTimeline } from "../lib/timeline.js";
 import { getAppraisalByProperty } from "../lib/appraisals.js";
+import { goLiveProperty } from "../lib/goLive.js";
 
 export const propertiesRouter = Router();
 const propertyDataProvider = createPropertyDataProvider();
@@ -504,6 +505,10 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 // receive offers." Gated on the Ready to List workflow being fully
 // Complete (every step) — the same "gate on real completion, not on the
 // button having been clicked" discipline as everywhere else in this app.
+// Agent Engine 2.0 — Property Launch & Campaign Coordination: the actual
+// gating/transition logic now lives in lib/goLive.ts's goLiveProperty(),
+// shared with Launch's own confirmLaunchLive() — this route is a thin
+// HTTP wrapper over it, not a second implementation.
 propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
@@ -513,63 +518,20 @@ propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
     return;
   }
 
-  const [workflow] = await db
-    .select()
-    .from(workflows)
-    .where(and(eq(workflows.propertyId, id), eq(workflows.workflowType, "ReadyToList")));
-  if (!workflow) {
-    res.status(400).json({ error: "Ready to List has not been started for this property." });
-    return;
-  }
-  const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
-  const incomplete = steps.filter((s) => s.status !== "Complete");
-  if (incomplete.length > 0) {
+  const result = await goLiveProperty(id, user.brokerageId, { id: user.id }, "api:properties:go-live");
+  if (!result.ok) {
+    if (result.reason === "NO_READY_TO_LIST_WORKFLOW") {
+      res.status(400).json({ error: "Ready to List has not been started for this property." });
+      return;
+    }
     res.status(400).json({
       error: "Ready to List is not fully complete yet.",
-      incompleteSteps: incomplete.map((s) => ({ label: s.label, status: s.status, blockedReason: s.blockedReason })),
+      incompleteSteps: result.incompleteSteps,
     });
     return;
   }
 
-  if (property.listingStatus !== "Listed") {
-    await db
-      .update(properties)
-      .set({ workflowStage: "Listed", listingStatus: "Listed", updatedAt: new Date() })
-      .where(eq(properties.id, id));
-
-    try {
-      await publishDomainEvent({
-        eventType: "LISTING_LIVE",
-        occurredAt: new Date(),
-        propertyId: id,
-        transactionId: null,
-        partyId: null,
-        brokerageId: user.brokerageId,
-        agentId: user.id,
-        actorType: "USER",
-        actorId: user.id,
-        source: "api:properties:go-live",
-        correlationId: newCorrelationId(),
-        causationId: null,
-        idempotencyKey: `listing-live:${id}`,
-        payload: { propertyId: id },
-        metadata: {},
-      });
-    } catch (err) {
-      console.error("publishDomainEvent(LISTING_LIVE) failed", err);
-    }
-
-    await logAudit({
-      userId: user.id,
-      action: "listing_live",
-      recordType: "property",
-      recordId: String(id),
-      propertyId: id,
-    });
-  }
-
-  const [updated] = await db.select().from(properties).where(eq(properties.id, id));
-  res.json({ property: updated });
+  res.json({ property: result.property });
 });
 
 export const _internal = { insertPropertySchema }; // re-export for tests

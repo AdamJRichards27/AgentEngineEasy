@@ -5,6 +5,7 @@ import { assertSessionSecretConfigured } from "./lib/session.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
+import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -26,6 +27,11 @@ registerAutomationEngine();
 // requirement as registerAutomationEngine() above, for the same reason (no
 // canonical event fired between boot and registration should be missed).
 registerExceptionEngine();
+
+// Agent Engine 2.0 — Property Launch & Campaign Coordination. Registers
+// the AGENCY_AGREEMENT_SIGNED auto-propose handler — same ordering
+// requirement as the two engines above.
+registerLaunchEngine();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.
