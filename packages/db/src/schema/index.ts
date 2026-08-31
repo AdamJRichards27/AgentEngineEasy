@@ -15,3 +15,8 @@ export * from "./import";
 export * from "./automation";
 // Agent Engine 2.0 — Exception & Risk Engine (Priority 4).
 export * from "./exceptions";
+// Agent Engine 2.0 — Property Launch & Campaign Coordination. Reuses
+// risk_exceptions' owner-type vocabulary (see launch.ts's own comment) —
+// exceptions.ts is exported above this line so launch.ts's re-export of it
+// has already been defined by the time anything imports from the barrel.
+export * from "./launch";
