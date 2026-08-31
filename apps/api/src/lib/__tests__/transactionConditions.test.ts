@@ -119,8 +119,12 @@ test("resolving every Pending condition to a non-blocking status auto-marks the 
     conditionsText: "", // the free-text offer condition is separate from the finance condition we add explicitly below
   });
   await signContract(A.agent.cookie, transactionId);
-  await recordExchange({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
 
+  // Conditions must be added before exchange -- addCondition deliberately
+  // refuses to add to an already-unconditional transaction ("Transaction
+  // N is already unconditional -- cannot add further conditions"), so
+  // adding them after exchange (when this fixture would otherwise have
+  // become vacuously unconditional on zero conditions) would throw.
   const financeCondition = await addCondition({
     transactionId,
     userId: A.agent.user.id,
@@ -134,11 +138,10 @@ test("resolving every Pending condition to a non-blocking status auto-marks the 
     description: "Subject to building & pest inspection",
   });
 
-  // Adding a condition after exchange must have reopened the transaction --
-  // it was vacuously unconditional a moment ago (zero conditions), and now
-  // has two Pending ones.
+  await recordExchange({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
+
   let current = await loadTransaction(transactionId);
-  assert.equal(current.unconditionalAt, null, "adding a Pending condition must not leave a stale unconditionalAt from before it existed");
+  assert.equal(current.unconditionalAt, null, "exchanging with two Pending conditions outstanding must not auto-mark unconditional");
 
   await resolveCondition({ conditionId: financeCondition.id, userId: A.agent.user.id, brokerageId: A.brokerageId, status: "Satisfied" });
   current = await loadTransaction(transactionId);
