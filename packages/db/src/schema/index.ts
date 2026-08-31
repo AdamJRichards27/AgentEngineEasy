@@ -13,3 +13,5 @@ export * from "./billing";
 export * from "./grow";
 export * from "./import";
 export * from "./automation";
+// Agent Engine 2.0 — Exception & Risk Engine (Priority 4).
+export * from "./exceptions";
