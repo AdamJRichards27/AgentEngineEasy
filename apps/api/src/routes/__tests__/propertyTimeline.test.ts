@@ -104,8 +104,9 @@ test("Property Timeline: full property+transaction lifecycle produces exactly on
   assert.equal(buyerAmlWebhookRes.status, 200, await buyerAmlWebhookRes.text());
 
   const exchangeRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/exchange`, { method: "POST", headers });
-  assert.equal(exchangeRes.status, 200, await exchangeRes.text());
-  const { transaction: afterExchange } = await json<{ transaction: { unconditionalAt: string | null } }>(exchangeRes);
+  const exchangeBody = await exchangeRes.text();
+  assert.equal(exchangeRes.status, 200, exchangeBody);
+  const { transaction: afterExchange } = JSON.parse(exchangeBody) as { transaction: { unconditionalAt: string | null } };
   assert.ok(afterExchange.unconditionalAt, "zero-condition transaction should become unconditional the moment it's exchanged");
 
   const scheduleRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/settlement-schedule`, {
@@ -116,8 +117,9 @@ test("Property Timeline: full property+transaction lifecycle produces exactly on
   assert.equal(scheduleRes.status, 200, await scheduleRes.text());
 
   const completeRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/settlement-complete`, { method: "POST", headers });
-  assert.equal(completeRes.status, 200, await completeRes.text());
-  const { transaction: settled } = await json<{ transaction: { grossCommissionCents: number; gstCents: number } }>(completeRes);
+  const completeBody = await completeRes.text();
+  assert.equal(completeRes.status, 200, completeBody);
+  const { transaction: settled } = JSON.parse(completeBody) as { transaction: { grossCommissionCents: number; gstCents: number } };
   assert.ok(settled.grossCommissionCents > 0, "settlement-complete should auto-calculate a non-zero commission");
 
   const fundsRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/funds-received`, {
@@ -141,8 +143,9 @@ test("Property Timeline: full property+transaction lifecycle produces exactly on
 
   // --- As a plain Agent: every entry present, financial figures redacted ---
   const agentTimelineRes = await getTimeline(A.agent.cookie, propertyId);
-  assert.equal(agentTimelineRes.status, 200, await agentTimelineRes.text());
-  const { timeline: agentTimeline } = await json<{ timeline: TimelineItem[] }>(agentTimelineRes);
+  const agentTimelineBody = await agentTimelineRes.text();
+  assert.equal(agentTimelineRes.status, 200, agentTimelineBody);
+  const { timeline: agentTimeline } = JSON.parse(agentTimelineBody) as { timeline: TimelineItem[] };
 
   const expectedSingular = [
     "PROPERTY_CREATED",
