@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, amlVerifications, parties, properties, serviceOrders } from "@aee/db";
+import { db, amlVerifications, serviceOrders } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
@@ -10,8 +10,15 @@ import { logAudit } from "../lib/audit.js";
 // Manual/direct AML request path — Ready to List (routes/properties.ts)
 // covers the common case automatically, but a Brokerage Administrator or
 // Pit Crew member may need to (re-)trigger a check for a party outside that
-// flow. Both paths funnel through lib/aml.ts's initiateAmlIfNeeded(), so
-// neither can double-order (Build Brief critical idempotency requirement).
+// flow, and non-Seller parties (Buyer, Solicitor, PowerOfAttorney, Other)
+// have no automatic trigger at all — Ready to List is deliberately a
+// Seller-only workflow concept, so this is their only path to a check
+// (Property Timeline prerequisite: the buyer/other-party AML action on the
+// Property Workspace calls this same route). Both paths funnel through
+// lib/aml.ts's initiateAmlIfNeeded(), so neither can double-order (Build
+// Brief critical idempotency requirement), and tenant/linkage validation
+// lives in that one shared function too (see assertPartyOnPropertyInBrokerage
+// in lib/aml.ts) so this route no longer needs its own existence checks.
 //
 // Phase 4 (ARCHITECTURE.md §10) adds: a real HttpAMLProvider adapter
 // (packages/integrations/aml), webhook processing (below, POST /webhook),
@@ -34,31 +41,27 @@ amlRouter.post("/request", requireAuth, async (req, res) => {
   }
   const user = req.authedUser!;
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, parsed.data.propertyId));
-  if (!property) {
-    res.status(404).json({ error: "Property not found" });
-    return;
+  try {
+    const { verification, created } = await initiateAmlIfNeeded({
+      propertyId: parsed.data.propertyId,
+      partyId: parsed.data.partyId,
+      verificationType: parsed.data.verificationType,
+      userId: user.id,
+      brokerageId: user.brokerageId,
+    });
+
+    await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
+      console.error("refreshReadyToListSteps failed", err),
+    );
+
+    res.status(created ? 201 : 200).json({ verification, created });
+  } catch (err) {
+    // initiateAmlIfNeeded throws "not found" uniformly for a missing
+    // property/party AND for a cross-tenant or unlinked one — a caller
+    // outside the brokerage can never distinguish "doesn't exist" from
+    // "exists but isn't yours" from this response.
+    res.status(404).json({ error: (err as Error).message });
   }
-
-  const [party] = await db.select().from(parties).where(eq(parties.id, parsed.data.partyId));
-  if (!party) {
-    res.status(404).json({ error: "Party not found" });
-    return;
-  }
-
-  const { verification, created } = await initiateAmlIfNeeded({
-    propertyId: parsed.data.propertyId,
-    partyId: parsed.data.partyId,
-    verificationType: parsed.data.verificationType,
-    userId: user.id,
-    brokerageId: user.brokerageId,
-  });
-
-  await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
-  );
-
-  res.status(created ? 201 : 200).json({ verification, created });
 });
 
 amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
