@@ -25,17 +25,22 @@
 // approveAndActivateRuleVersion() (rules.ts) — a rule-management UI is
 // explicitly out of scope for this stage (see the WF2 report).
 //
-// NOTE ON PRODUCTION WIRING: repository search confirmed no code path
-// currently calls publishDomainEvent({eventType: "AGENCY_AGREEMENT_SIGNED", ...})
-// anywhere in this codebase — the event exists in the canonical catalogue
-// (packages/events/src/types.ts) but nothing yet publishes it from the
-// real agency-agreement/e-sign completion flow. Wiring that publish call
-// belongs to the document/e-sign integration module, not this foundation
-// PR (out of scope: "large refactors unrelated to the foundation"), and is
-// recorded as a deferred item in the WF2 report. This engine is fully
-// functional and fully tested against a directly published
-// AGENCY_AGREEMENT_SIGNED event in the interim. Still true as of Stage 2 —
-// see docs/stage-wf/WF3_STAGE2_CONTROLLED_WORKFLOWS.md's deferred-items list.
+// NOTE ON PRODUCTION WIRING (corrected — Agent Engine 2.0, Run Transaction
+// Vertical Slice): AGENCY_AGREEMENT_SIGNED IS published from real
+// production code — apps/api/src/lib/documents.ts's processEsignWebhook()
+// publishes it when an AgencyAgreement document completes signing via the
+// e-sign webhook. The claim that used to sit here (accurate when written,
+// at the WAE Foundation stage, before documents.ts's e-sign completion
+// flow existed) went stale as the rest of the app was built out and is
+// corrected here rather than left to mislead the next reader. What WAS
+// still true until this same vertical-slice change: this template's
+// rule/version existed in the database but was never installed or
+// activated for any real brokerage
+// (installAgencyAgreementSignedStage2Version had zero production call
+// sites) — see lib/automation/catalogueBootstrap.ts, which now installs
+// and activates this and the other four Stage 2 templates automatically
+// at boot, per brokerage, once that brokerage has a genuine Brokerage
+// Administrator to approve the activation.
 
 import type { AutomationRule, AutomationRuleVersion } from "@aee/db";
 import {
@@ -141,9 +146,19 @@ export async function installAgencyAgreementSignedTemplate(input: {
 // "documented gap, not a fabricated capability" precedent the WAE
 // Foundation stage set for AGENCY_AGREEMENT_SIGNED's zero production
 // publishers. See docs/stage-wf/WF3_STAGE2_CONTROLLED_WORKFLOWS.md §9 for
-// the full deferred-items list this implies for a future stage (structured
-// condition-date columns + a real deadline-scheduler dependency, Build
-// Instructions §6's "document the deferred scheduler dependency").
+// the full deferred-items list this implies for a future stage. UPDATE
+// (Agent Engine 2.0 — Run Transaction Vertical Slice): the structured
+// condition-date columns referenced above now exist —
+// packages/db/src/schema/transaction.ts's transactionConditions table,
+// populated from the accepted offer's conditions at acceptOffer() time and
+// further managed via lib/transactionConditions.ts. This task's own
+// deterministic prompt-a-human behaviour is unchanged (a human still
+// confirms/edits the carried-forward dates rather than the engine
+// inventing them), but the "nothing structured exists yet" premise no
+// longer holds — left as-is here since the task still does real, useful
+// work (prompting confirmation), and rewriting Stage 2's own history would
+// violate the "never silently rewrite historical definitions" principle
+// this table itself was built to uphold.
 // =======================================================================
 
 function eventFieldExists(field: string): AutomationConditionGroup["conditions"][number] {
@@ -359,8 +374,8 @@ export const CONTRACT_SIGNED_ACTIONS: AutomationRuleAction[] = [
       taskKey: "CAPTURE_CONTRACT_CONDITION_DATES",
       title: "Capture finance / building-pest / cooling-off / other condition dates",
       detail:
-        "The triggering event does not yet carry structured condition dates (deferred — see " +
-        "docs/stage-wf/WF3_STAGE2_CONTROLLED_WORKFLOWS.md). Capture and confirm each applicable condition date manually.",
+        "Review and confirm each applicable condition's due date carried forward from the accepted offer — see the " +
+        "transaction's Conditions list. Add or correct any dates that were not captured at offer stage.",
       originatingEventId: "$event.eventId",
     },
   },
@@ -669,7 +684,14 @@ export async function installSettlementCompletedTemplate(input: {
 // for one brokerage in one call. Still requires a separate, explicit
 // approveAndActivateRuleVersion() per version (rules.ts) before any of them
 // evaluate live traffic — installation and activation stay distinct
-// privileges, exactly as Stage 1 established.
+// privileges, exactly as Stage 1 established. NOTE: this convenience
+// function is NOT safe to call more than once per brokerage (each
+// install*() call below unconditionally creates a new rule/version) — the
+// production call site (lib/automation/catalogueBootstrap.ts) does NOT use
+// this function; it calls the individual install*() functions directly,
+// each guarded by its own getAutomationRuleByTemplateKey() existence
+// check. This function remains for tests and one-off manual seeding of a
+// brand-new brokerage where "already installed" is known not to apply.
 // ---------------------------------------------------------------------
 
 export async function installStage2WorkflowCatalogue(input: { brokerageId: number; createdByUserId: number }) {

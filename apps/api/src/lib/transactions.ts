@@ -1,4 +1,4 @@
-import { eq, and, ne } from "drizzle-orm";
+import { eq, and, ne, inArray } from "drizzle-orm";
 import {
   db,
   offers,
@@ -8,11 +8,16 @@ import {
   workflows,
   workflowSteps,
   agencyAgreementTerms,
+  transactionConditions,
+  amlVerifications,
+  automationAttentionItems,
+  automationTasks,
 } from "@aee/db";
 import type { Transaction, Offer } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
+import { initiateAmlIfNeeded } from "./aml.js";
 
 const TRANSACTION_STEPS = [
   { stepKey: "ContractSigning", label: "Contract Signing", sequence: 1 },
@@ -28,16 +33,44 @@ export interface AcceptOfferResult {
   created: boolean;
 }
 
+interface OfferConditionsPayload {
+  depositCents?: number;
+  settlementDate?: string;
+  conditions?: string;
+  additionalTerms?: string;
+}
+
+interface AcceptOfferTxOutcome {
+  offer: Offer;
+  transaction: Transaction;
+  created: boolean;
+  propertyId: number;
+  declinedSiblingIds: number[];
+}
+
 /**
  * Idempotent chokepoint (Build Brief §21 pattern, same shape as
  * initiateAmlIfNeeded / chargeServiceOrder): accepting an already-Accepted
  * offer just returns the existing Transaction rather than creating a
  * second one. Accepting also auto-declines every other still-Received
  * offer on the same property — a property can only have one accepted
- * offer at a time in this build (multiple concurrent transactions per
- * property, e.g. a fallen-through contract followed by a fresh sale, is
- * real future scope, documented rather than silently mishandled — see the
- * comment on refreshTransactionSteps).
+ * offer at a time in this build.
+ *
+ * Run Transaction Vertical Slice (#117) — this codebase's first use of
+ * db.transaction(). "One accepted offer per property" is a per-property
+ * invariant, not a per-offer one — two different agents accepting two
+ * different offers on the same property at the same instant is a real
+ * race an offer-row-level check alone cannot close (each request sees its
+ * own offer row as still Received). Locking the PROPERTY row
+ * (SELECT ... FOR UPDATE) for the duration of the accept serialises any
+ * concurrent accept attempt on the same property, so the second request to
+ * reach the lock always sees state that already reflects the first.
+ *
+ * #117 also closes a confirmed data-loss gap: the conditions captured on
+ * the offer (deposit, settlement date, free-text conditions/additional
+ * terms — see PropertyWorkspace.tsx's OffersBlock capture form) were
+ * previously discarded at acceptance. They are now carried forward onto
+ * the Transaction's structured fields and into a transactionConditions row.
  */
 export async function acceptOffer(input: { offerId: number; userId: number; brokerageId: number }): Promise<AcceptOfferResult> {
   const [offer] = await db.select().from(offers).where(eq(offers.id, input.offerId));
@@ -50,83 +83,138 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
     if (existingTransaction) {
       return { offer, transaction: existingTransaction, created: false };
     }
-    // Offer says Accepted but no Transaction exists (shouldn't happen outside
-    // a prior crash mid-acceptance) — fall through and create it below.
+    // Offer says Accepted but no Transaction exists (shouldn't happen
+    // outside a prior crash mid-acceptance) — fall through and create it.
   } else if (offer.status !== "Received") {
     throw new Error(`Offer ${input.offerId} cannot be accepted from status ${offer.status}`);
   }
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, offer.propertyId));
-  if (!property) {
-    throw new Error(`Property ${offer.propertyId} not found`);
+  const outcome = await db.transaction(async (tx): Promise<AcceptOfferTxOutcome> => {
+    const [property] = await tx.select().from(properties).where(eq(properties.id, offer.propertyId)).for("update");
+    if (!property) {
+      throw new Error(`Property ${offer.propertyId} not found`);
+    }
+
+    // Re-read the offer under the property lock — a concurrent accept on a
+    // sibling offer for this property may have auto-declined this one, or
+    // another request may have already accepted this exact offer, between
+    // the pre-lock read above and acquiring the lock.
+    const [lockedOffer] = await tx.select().from(offers).where(eq(offers.id, offer.id));
+    if (!lockedOffer) {
+      throw new Error(`Offer ${input.offerId} not found`);
+    }
+    if (lockedOffer.status === "Accepted") {
+      const [existingTransaction] = await tx.select().from(transactions).where(eq(transactions.acceptedOfferId, lockedOffer.id));
+      if (existingTransaction) {
+        return { offer: lockedOffer, transaction: existingTransaction, created: false, propertyId: lockedOffer.propertyId, declinedSiblingIds: [] };
+      }
+    } else if (lockedOffer.status !== "Received") {
+      throw new Error(`Offer ${input.offerId} cannot be accepted from status ${lockedOffer.status}`);
+    }
+
+    const siblingOffers = await tx
+      .select()
+      .from(offers)
+      .where(and(eq(offers.propertyId, lockedOffer.propertyId), eq(offers.status, "Received"), ne(offers.id, lockedOffer.id)));
+    for (const sibling of siblingOffers) {
+      await tx.update(offers).set({ status: "Declined" }).where(eq(offers.id, sibling.id));
+    }
+
+    if (lockedOffer.status !== "Accepted") {
+      await tx.update(offers).set({ status: "Accepted" }).where(eq(offers.id, lockedOffer.id));
+    }
+
+    const sellerLinks = await tx
+      .select()
+      .from(propertyParties)
+      .where(and(eq(propertyParties.propertyId, lockedOffer.propertyId), eq(propertyParties.role, "Seller")));
+
+    const offerConditions = (lockedOffer.conditions ?? {}) as OfferConditionsPayload;
+    const depositCents = typeof offerConditions.depositCents === "number" ? offerConditions.depositCents : null;
+    const parsedSettlementDate = offerConditions.settlementDate ? new Date(offerConditions.settlementDate) : null;
+    const settlementDate = parsedSettlementDate && !Number.isNaN(parsedSettlementDate.getTime()) ? parsedSettlementDate : null;
+
+    const [transaction] = await tx
+      .insert(transactions)
+      .values({
+        propertyId: lockedOffer.propertyId,
+        acceptedOfferId: lockedOffer.id,
+        sellerPartyIds: sellerLinks.map((l) => l.partyId),
+        buyerPartyIds: lockedOffer.buyerPartyId ? [lockedOffer.buyerPartyId] : [],
+        purchasePriceCents: lockedOffer.offerPriceCents,
+        depositCents,
+        settlementDate,
+        status: "ContractPreparation",
+      })
+      .returning();
+
+    if (offerConditions.conditions && offerConditions.conditions.trim().length > 0) {
+      await tx.insert(transactionConditions).values({
+        transactionId: transaction.id,
+        description: offerConditions.conditions.trim(),
+        dueDateHistory: [],
+        status: "Pending",
+        notes: offerConditions.additionalTerms?.trim() ? `Additional terms from offer: ${offerConditions.additionalTerms.trim()}` : null,
+      });
+    }
+
+    let [workflow] = await tx
+      .select()
+      .from(workflows)
+      .where(and(eq(workflows.propertyId, lockedOffer.propertyId), eq(workflows.workflowType, "Transaction")));
+    if (!workflow) {
+      [workflow] = await tx.insert(workflows).values({ propertyId: lockedOffer.propertyId, workflowType: "Transaction" }).returning();
+      await tx.insert(workflowSteps).values(TRANSACTION_STEPS.map((step) => ({ workflowId: workflow.id, ...step })));
+    }
+
+    await tx.update(properties).set({ workflowStage: "Under Offer", updatedAt: new Date() }).where(eq(properties.id, lockedOffer.propertyId));
+
+    const [finalOffer] = await tx.select().from(offers).where(eq(offers.id, lockedOffer.id));
+    return {
+      offer: finalOffer,
+      transaction,
+      created: true,
+      propertyId: lockedOffer.propertyId,
+      declinedSiblingIds: siblingOffers.map((s) => s.id),
+    };
+  });
+
+  if (!outcome.created) {
+    return { offer: outcome.offer, transaction: outcome.transaction, created: false };
   }
 
-  // Auto-decline every other still-open offer on this property — you can't
-  // accept two offers on the same sale.
-  const siblingOffers = await db
-    .select()
-    .from(offers)
-    .where(and(eq(offers.propertyId, offer.propertyId), eq(offers.status, "Received"), ne(offers.id, offer.id)));
-  for (const sibling of siblingOffers) {
-    await db.update(offers).set({ status: "Declined" }).where(eq(offers.id, sibling.id));
+  // Side effects that must only run once the accepting transaction has
+  // actually committed: refreshTransactionSteps re-reads committed state,
+  // and logAudit/publishDomainEvent must never fire for a change that got
+  // rolled back.
+  for (const siblingId of outcome.declinedSiblingIds) {
     await logAudit({
       userId: input.userId,
       action: "offer_auto_declined",
       recordType: "offer",
-      recordId: String(sibling.id),
-      propertyId: offer.propertyId,
-      updatedValue: `Auto-declined: offer ${offer.id} was accepted instead.`,
+      recordId: String(siblingId),
+      propertyId: outcome.propertyId,
+      updatedValue: `Auto-declined: offer ${outcome.offer.id} was accepted instead.`,
     });
   }
 
-  if (offer.status !== "Accepted") {
-    await db.update(offers).set({ status: "Accepted" }).where(eq(offers.id, offer.id));
-  }
-
-  const sellerLinks = await db
-    .select()
-    .from(propertyParties)
-    .where(and(eq(propertyParties.propertyId, offer.propertyId), eq(propertyParties.role, "Seller")));
-
-  const [transaction] = await db
-    .insert(transactions)
-    .values({
-      propertyId: offer.propertyId,
-      acceptedOfferId: offer.id,
-      sellerPartyIds: sellerLinks.map((l) => l.partyId),
-      buyerPartyIds: offer.buyerPartyId ? [offer.buyerPartyId] : [],
-      purchasePriceCents: offer.offerPriceCents,
-      status: "ContractPreparation",
-    })
-    .returning();
-
-  let [workflow] = await db
-    .select()
-    .from(workflows)
-    .where(and(eq(workflows.propertyId, offer.propertyId), eq(workflows.workflowType, "Transaction")));
-  if (!workflow) {
-    [workflow] = await db.insert(workflows).values({ propertyId: offer.propertyId, workflowType: "Transaction" }).returning();
-    await db.insert(workflowSteps).values(TRANSACTION_STEPS.map((step) => ({ workflowId: workflow.id, ...step })));
-  }
-
-  await db.update(properties).set({ workflowStage: "Under Offer", updatedAt: new Date() }).where(eq(properties.id, offer.propertyId));
-  await refreshTransactionSteps(offer.propertyId);
+  await refreshTransactionSteps(outcome.propertyId);
 
   await logAudit({
     userId: input.userId,
     action: "offer_accepted",
     recordType: "offer",
-    recordId: String(offer.id),
-    propertyId: offer.propertyId,
+    recordId: String(outcome.offer.id),
+    propertyId: outcome.propertyId,
   });
 
   try {
     await publishDomainEvent({
       eventType: "OFFER_ACCEPTED",
       occurredAt: new Date(),
-      propertyId: offer.propertyId,
-      transactionId: transaction.id,
-      partyId: offer.buyerPartyId,
+      propertyId: outcome.propertyId,
+      transactionId: outcome.transaction.id,
+      partyId: outcome.offer.buyerPartyId,
       brokerageId: input.brokerageId,
       agentId: input.userId,
       actorType: "USER",
@@ -134,16 +222,15 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
       source: "api:offers:accept",
       correlationId: newCorrelationId(),
       causationId: null,
-      idempotencyKey: `offer-accepted:${offer.id}`,
-      payload: { offerId: offer.id, transactionId: transaction.id, purchasePriceCents: transaction.purchasePriceCents },
+      idempotencyKey: `offer-accepted:${outcome.offer.id}`,
+      payload: { offerId: outcome.offer.id, transactionId: outcome.transaction.id, purchasePriceCents: outcome.transaction.purchasePriceCents },
       metadata: {},
     });
   } catch (err) {
     console.error("publishDomainEvent(OFFER_ACCEPTED) failed", err);
   }
 
-  const [finalOffer] = await db.select().from(offers).where(eq(offers.id, offer.id));
-  return { offer: finalOffer, transaction, created: true };
+  return { offer: outcome.offer, transaction: outcome.transaction, created: true };
 }
 
 async function loadTransaction(transactionId: number): Promise<Transaction> {
@@ -207,6 +294,21 @@ export async function recordContractSigned(input: {
 
   await db.update(properties).set({ workflowStage: "Contract", updatedAt: new Date() }).where(eq(properties.id, transaction.propertyId));
   await refreshTransactionSteps(transaction.propertyId);
+
+  // Stage F (#119) — AML/CTF buyer-party linkage. Sellers are AML-checked
+  // at Ready to List (routes/properties.ts); buyers were never initiated
+  // anywhere in this codebase — a confirmed gap. Contract signing is the
+  // first point a buyer is a committed party to a real transaction, so
+  // that's where their check starts. Idempotent — initiateAmlIfNeeded
+  // (lib/aml.ts) is a no-op for a party that already has a verification row.
+  const buyerPartyIds = Array.isArray(updated.buyerPartyIds) ? (updated.buyerPartyIds as number[]) : [];
+  for (const partyId of buyerPartyIds) {
+    try {
+      await initiateAmlIfNeeded({ propertyId: updated.propertyId, partyId, userId: input.userId, brokerageId: input.brokerageId });
+    } catch (err) {
+      console.error(`initiateAmlIfNeeded failed for buyer party ${partyId}`, err);
+    }
+  }
 
   await logAudit({
     userId: input.userId,
@@ -474,12 +576,139 @@ export async function recordAgentPaid(input: { transactionId: number; userId: nu
   return updated;
 }
 
+/**
+ * Stage D/F (#117) — sets/updates the transaction's legal representatives.
+ * Either side can be set/cleared independently (undefined leaves the
+ * existing value untouched; explicit null clears it) so a solicitor change
+ * mid-transaction never loses the other side's value. References parties
+ * already linked to the property with role "Solicitor" — this reuses the
+ * existing party-capture UI, it does not invent a second solicitor entry
+ * path.
+ */
+export async function recordLegalRepresentatives(input: {
+  transactionId: number;
+  userId: number;
+  brokerageId: number;
+  sellerSolicitorPartyId?: number | null;
+  buyerSolicitorPartyId?: number | null;
+}): Promise<Transaction> {
+  const transaction = await loadTransaction(input.transactionId);
+  const existing = (transaction.legalRepresentatives ?? {}) as {
+    sellerSolicitorPartyId?: number | null;
+    buyerSolicitorPartyId?: number | null;
+  };
+
+  const legalRepresentatives = {
+    sellerSolicitorPartyId:
+      input.sellerSolicitorPartyId !== undefined ? input.sellerSolicitorPartyId : (existing.sellerSolicitorPartyId ?? null),
+    buyerSolicitorPartyId:
+      input.buyerSolicitorPartyId !== undefined ? input.buyerSolicitorPartyId : (existing.buyerSolicitorPartyId ?? null),
+  };
+
+  const [updated] = await db
+    .update(transactions)
+    .set({ legalRepresentatives, updatedAt: new Date() })
+    .where(eq(transactions.id, transaction.id))
+    .returning();
+
+  await logAudit({
+    userId: input.userId,
+    action: "transaction_legal_representatives_updated",
+    recordType: "transaction",
+    recordId: String(transaction.id),
+    propertyId: transaction.propertyId,
+    updatedValue: JSON.stringify(legalRepresentatives),
+  });
+
+  return updated;
+}
+
+/** Thrown by closeTransaction when real, unresolved blockers exist and the caller did not pass `force`. */
+export class TransactionClosureBlockedError extends Error {
+  blockers: string[];
+  constructor(blockers: string[]) {
+    super(`Transaction cannot be closed: ${blockers.join("; ")}`);
+    this.name = "TransactionClosureBlockedError";
+    this.blockers = blockers;
+  }
+}
+
+/**
+ * Stage H (#121) — closure preconditions. Closure previously only checked
+ * `status === "Settled"`; it did not check that the transaction had
+ * actually become unconditional, that every tracked condition was
+ * resolved, that buyer AML/CTF verification had cleared, or that no open
+ * WAE attention item / active WAE task remained outstanding for this
+ * transaction — a genuine "close the file with real work still open" gap.
+ * `force` (role-gated at the route layer to Brokerage Administrator, same
+ * as this whole endpoint) remains available for a deliberate override, and
+ * is always audited distinctly from an ordinary close.
+ */
+async function collectClosureBlockers(transaction: Transaction): Promise<string[]> {
+  const blockers: string[] = [];
+
+  if (!transaction.unconditionalAt) {
+    blockers.push("The transaction has not become unconditional yet.");
+  }
+
+  const openConditions = await db
+    .select()
+    .from(transactionConditions)
+    .where(and(eq(transactionConditions.transactionId, transaction.id), eq(transactionConditions.status, "Pending")));
+  if (openConditions.length > 0) {
+    blockers.push(`${openConditions.length} contract condition(s) are still Pending.`);
+  }
+
+  const buyerIds = Array.isArray(transaction.buyerPartyIds) ? (transaction.buyerPartyIds as number[]) : [];
+  if (buyerIds.length > 0) {
+    const buyerVerifications = await db
+      .select()
+      .from(amlVerifications)
+      .where(and(eq(amlVerifications.propertyId, transaction.propertyId), inArray(amlVerifications.partyId, buyerIds)));
+    const unresolved = buyerIds.filter((id) => {
+      const verification = buyerVerifications.find((row) => row.partyId === id);
+      return !verification || verification.status !== "Complete";
+    });
+    if (unresolved.length > 0) {
+      blockers.push(`AML/CTF verification is not complete for ${unresolved.length} buyer part${unresolved.length === 1 ? "y" : "ies"}.`);
+    }
+  }
+
+  const openAttentionItems = await db
+    .select()
+    .from(automationAttentionItems)
+    .where(and(eq(automationAttentionItems.transactionId, transaction.id), eq(automationAttentionItems.status, "OPEN")));
+  if (openAttentionItems.length > 0) {
+    blockers.push(`${openAttentionItems.length} open attention item(s) require review.`);
+  }
+
+  const activeTasks = await db
+    .select()
+    .from(automationTasks)
+    .where(and(eq(automationTasks.transactionId, transaction.id), eq(automationTasks.status, "ACTIVE"), eq(automationTasks.kind, "TASK")));
+  if (activeTasks.length > 0) {
+    blockers.push(`${activeTasks.length} active task(s) have not been completed.`);
+  }
+
+  return blockers;
+}
+
 /** Idempotent chokepoint — role-gated at the route layer (Brokerage Administrator), the final sign-off. */
-export async function closeTransaction(input: { transactionId: number; userId: number; brokerageId: number }): Promise<Transaction> {
+export async function closeTransaction(input: {
+  transactionId: number;
+  userId: number;
+  brokerageId: number;
+  force?: boolean;
+}): Promise<Transaction> {
   const transaction = await loadTransaction(input.transactionId);
   if (transaction.status === "Closed") return transaction;
   if (transaction.status !== "Settled") {
     throw new Error(`Transaction ${transaction.id} cannot be closed before settlement is completed.`);
+  }
+
+  const blockers = await collectClosureBlockers(transaction);
+  if (blockers.length > 0 && !input.force) {
+    throw new TransactionClosureBlockedError(blockers);
   }
 
   const [updated] = await db
@@ -493,10 +722,11 @@ export async function closeTransaction(input: { transactionId: number; userId: n
 
   await logAudit({
     userId: input.userId,
-    action: "transaction_closed",
+    action: blockers.length > 0 ? "transaction_closed_forced" : "transaction_closed",
     recordType: "transaction",
     recordId: String(transaction.id),
     propertyId: transaction.propertyId,
+    updatedValue: blockers.length > 0 ? blockers.join("; ") : undefined,
   });
   await publishTransactionEvent("TRANSACTION_CLOSED", updated, {
     userId: input.userId,

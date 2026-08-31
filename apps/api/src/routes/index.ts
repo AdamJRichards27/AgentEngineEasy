@@ -15,6 +15,8 @@ import { billingRouter } from "./billing.js";
 import { growRouter } from "./grow.js";
 import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
+import { appraisalsRouter } from "./appraisals.js";
+import { tasksRouter } from "./tasks.js";
 
 export const apiRouter = Router();
 
@@ -34,6 +36,9 @@ apiRouter.use("/billing", billingRouter);
 apiRouter.use("/grow", growRouter);
 apiRouter.use("/import", importRouter);
 apiRouter.use("/automation/ops", automationOpsRouter);
+// Agent Engine 2.0 — Run Transaction Vertical Slice.
+apiRouter.use("/appraisals", appraisalsRouter);
+apiRouter.use("/tasks", tasksRouter);
 
 // Phase 8 (Agent command experience: Home screen, exceptions surfaced) is
 // built. Phase 9 (Contextual AI Architecture - see ARCHITECTURE.md) adds a

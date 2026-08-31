@@ -16,6 +16,10 @@ import {
   agencyAgreementTerms,
   offers,
   transactions,
+  transactionConditions,
+  appraisals,
+  automationTasks,
+  automationAttentionItems,
   auditLogs,
   domainEvents,
   entitlementGrants,
@@ -183,6 +187,58 @@ export async function createListedProperty(
   return { propertyId, sellerPartyId: sellerParty.id, packageId };
 }
 
+/**
+ * Run Transaction Vertical Slice (#124) — extends createListedProperty by
+ * recording a buyer offer and accepting it through the real acceptOffer
+ * chokepoint (POST /offers/:id/accept), producing a real Transaction. Used
+ * by every Stage D+ test (contract, conditions, exchange/unconditional,
+ * settlement, closure) so each one doesn't have to re-derive the same
+ * property -> offer -> accepted-transaction path.
+ */
+export async function createTransactionFromListedProperty(
+  baseUrl: string,
+  cookie: string,
+  opts?: {
+    address?: string;
+    sellerEmail?: string;
+    state?: string;
+    offerPriceCents?: number;
+    depositCents?: number;
+    settlementDate?: string;
+    conditionsText?: string;
+  },
+): Promise<{ propertyId: number; sellerPartyId: number; offerId: number; transactionId: number }> {
+  const { propertyId, sellerPartyId } = await createListedProperty(baseUrl, cookie, opts);
+  const headers = { "content-type": "application/json", cookie };
+
+  const offerRes = await fetch(`${baseUrl}/api/offers/by-property/${propertyId}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      offerPriceCents: opts?.offerPriceCents ?? 80000000,
+      conditions: {
+        depositCents: opts?.depositCents ?? 4000000,
+        settlementDate: opts?.settlementDate ?? "2027-01-15",
+        conditions: opts?.conditionsText ?? "Subject to finance",
+        additionalTerms: "Standard terms",
+      },
+      buyer: {
+        firstName: "Bob",
+        lastName: "Buyer",
+        email: `buyer-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com`,
+      },
+    }),
+  });
+  if (offerRes.status !== 201) throw new Error(`create offer failed: ${offerRes.status} ${await offerRes.text()}`);
+  const { offer } = await json<{ offer: { id: number } }>(offerRes);
+
+  const acceptRes = await fetch(`${baseUrl}/api/offers/${offer.id}/accept`, { method: "POST", headers });
+  if (acceptRes.status !== 201) throw new Error(`accept offer failed: ${acceptRes.status} ${await acceptRes.text()}`);
+  const { transaction } = await json<{ transaction: { id: number } }>(acceptRes);
+
+  return { propertyId, sellerPartyId, offerId: offer.id, transactionId: transaction.id };
+}
+
 export async function getDomainEventsForProperty(propertyId: number, eventType?: string) {
   const rows = await db.select().from(domainEvents).where(eq(domainEvents.propertyId, propertyId));
   return eventType ? rows.filter((r) => r.eventType === eventType) : rows;
@@ -194,6 +250,15 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * every table Stage 4's new tests touch. Deletion order respects the FK
  * graph (children before parents). Never touches rows outside the given
  * brokerage ids, so the two pre-existing real users/brokerage are untouched.
+ *
+ * Run Transaction Vertical Slice (#124): extended to also delete
+ * appraisals, transactionConditions, automationTasks, and
+ * automationAttentionItems — all four carry non-cascading ("ON DELETE no
+ * action") FKs onto properties/transactions (see
+ * packages/db/src/schema/appraisal.ts, migration 0003, and
+ * packages/db/src/schema/automation.ts), so a test that exercises any of
+ * Stage A/E/#122 and then relies on this cleanup would otherwise fail with
+ * a foreign key violation on the transactions/properties delete below.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -222,10 +287,28 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(growOpportunities).where(inArray(growOpportunities.brokerageId, ids));
   await db.delete(growRelationships).where(inArray(growRelationships.brokerageId, ids));
 
+  // #122 — both tables carry brokerageId directly, and their FKs onto
+  // properties/transactions are non-cascading, so this must run before the
+  // properties/transactions deletes below.
+  await db.delete(automationTasks).where(inArray(automationTasks.brokerageId, ids));
+  await db.delete(automationAttentionItems).where(inArray(automationAttentionItems.brokerageId, ids));
+
   const propertyRows = await db.select().from(properties).where(inArray(properties.brokerageId, ids));
   const propertyIds = propertyRows.map((p) => p.id);
 
   if (propertyIds.length > 0) {
+    // Stage A (#114) — appraisals.propertyId -> properties.id, non-cascading.
+    await db.delete(appraisals).where(inArray(appraisals.propertyId, propertyIds));
+
+    // Stage E (#118) — transaction_conditions.transaction_id ->
+    // transactions.id, non-cascading (migration 0003). Must run before the
+    // transactions delete further down.
+    const transactionRows = await db.select({ id: transactions.id }).from(transactions).where(inArray(transactions.propertyId, propertyIds));
+    const transactionIds = transactionRows.map((t) => t.id);
+    if (transactionIds.length > 0) {
+      await db.delete(transactionConditions).where(inArray(transactionConditions.transactionId, transactionIds));
+    }
+
     const packageRows = await db.select().from(documentPackages).where(inArray(documentPackages.propertyId, propertyIds));
     const packageIds = packageRows.map((p) => p.id);
     if (packageIds.length > 0) {

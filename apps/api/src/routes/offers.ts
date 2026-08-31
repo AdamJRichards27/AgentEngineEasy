@@ -1,12 +1,21 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, offers } from "@aee/db";
+import { db, offers, properties } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
 export const offersRouter = Router();
+
+// #123 — tenant scoping. None of these routes previously verified that the
+// offer's (or property's) brokerage matched the caller's — a property id
+// or offer id from any brokerage worked as long as the caller was
+// authenticated at all.
+async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
+  const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
+  return !!property && property.brokerageId === brokerageId;
+}
 
 const createOfferSchema = z.object({
   offerPriceCents: z.number().int().positive(),
@@ -30,6 +39,10 @@ offersRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
     return;
   }
   const user = req.authedUser!;
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
 
   try {
     const offer = await createOffer({
@@ -49,14 +62,20 @@ offersRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
 
 offersRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
+  const user = req.authedUser!;
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   const rows = await listOffersForProperty(propertyId);
   res.json({ offers: rows });
 });
 
 offersRouter.get("/:id", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
+  const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
-  if (!offer) {
+  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
     res.status(404).json({ error: "Not found" });
     return;
   }
@@ -69,6 +88,11 @@ offersRouter.get("/:id", requireAuth, async (req, res) => {
 offersRouter.post("/:id/accept", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
+  const [offer] = await db.select().from(offers).where(eq(offers.id, id));
+  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   try {
     const result = await acceptOffer({ offerId: id, userId: user.id, brokerageId: user.brokerageId });
     res.status(result.created ? 201 : 200).json(result);
@@ -80,9 +104,14 @@ offersRouter.post("/:id/accept", requireAuth, async (req, res) => {
 offersRouter.post("/:id/decline", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
+  const [offer] = await db.select().from(offers).where(eq(offers.id, id));
+  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   try {
-    const offer = await declineOffer(id, user.id);
-    res.json({ offer });
+    const updated = await declineOffer(id, user.id);
+    res.json({ offer: updated });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -91,9 +120,14 @@ offersRouter.post("/:id/decline", requireAuth, async (req, res) => {
 offersRouter.post("/:id/withdraw", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
+  const [offer] = await db.select().from(offers).where(eq(offers.id, id));
+  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   try {
-    const offer = await withdrawOffer(id, user.id);
-    res.json({ offer });
+    const updated = await withdrawOffer(id, user.id);
+    res.json({ offer: updated });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }

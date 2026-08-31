@@ -1,7 +1,9 @@
 import { pgTable, serial, integer, text, numeric, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { properties, parties } from "./property";
+import { users } from "./users";
 
 // Offers are never overwritten in place — each change is a new row
 // (revision-chain pattern proven in Agent Engine Staging's offers.ts).
@@ -41,7 +43,21 @@ export const transactions = pgTable("transactions", {
   settlementDate: timestamp("settlement_date"), // scheduled date
   settlementCompletedAt: timestamp("settlement_completed_at"), // actual completion
 
-  legalRepresentatives: jsonb("legal_representatives"), // { sellerSolicitor, buyerSolicitor }
+  // Stage E — Contract & Conditions (Agent Engine 2.0 — Run Transaction
+  // Vertical Slice). Ordering follows the governing spec's stage list:
+  // Contract Prep -> Exchange -> Unconditional. Both idempotent (see
+  // lib/transactionConditions.ts), both null until recorded, both feed the
+  // canonical CONTRACT_EXCHANGED / TRANSACTION_UNCONDITIONAL domain events,
+  // which existed in the event registry with zero publishers before this.
+  exchangedAt: timestamp("exchanged_at"),
+  unconditionalAt: timestamp("unconditional_at"),
+
+  // { sellerSolicitorPartyId, buyerSolicitorPartyId } — references parties
+  // already linked to the property with role "Solicitor" (reuses the
+  // existing party-capture UI; this column had zero real writers before
+  // the Run Transaction Vertical Slice added lib/transactions.ts's
+  // recordLegalRepresentatives()).
+  legalRepresentatives: jsonb("legal_representatives"),
 
   status: text("status").notNull().default("ContractPreparation"),
 
@@ -63,10 +79,39 @@ export const transactions = pgTable("transactions", {
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
+export const CONTRACT_CONDITION_STATUSES = ["Pending", "Satisfied", "Waived", "Failed", "NotApplicable"] as const;
+export type ContractConditionStatus = (typeof CONTRACT_CONDITION_STATUSES)[number];
+
+// Stage E — Contract & Conditions (Agent Engine 2.0 — Run Transaction
+// Vertical Slice). One row per tracked condition — finance, building &
+// pest, cooling-off, or a special condition carried forward from the
+// accepted offer's free-form conditions text (see
+// lib/transactions.ts's acceptOffer) — with a due date and a
+// satisfied/waived/failed/not-applicable state, per the governing spec's
+// Section 10. dueDateHistory is appended to, never rewritten in place, so
+// every prior due date survives a reschedule (Section 16: "date changes
+// must preserve audit history").
+export const transactionConditions = pgTable("transaction_conditions", {
+  id: serial("id").primaryKey(),
+  transactionId: integer("transaction_id").notNull().references(() => transactions.id),
+  description: text("description").notNull(),
+  dueDate: timestamp("due_date"),
+  dueDateHistory: jsonb("due_date_history").notNull().default(sql`'[]'::jsonb`), // Array<{ previousDueDate: string | null; changedAt: string; changedByUserId: number }>
+  status: text("status").notNull().default("Pending"), // Pending | Satisfied | Waived | Failed | NotApplicable
+  resolvedAt: timestamp("resolved_at"),
+  resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
 export const insertOfferSchema = createInsertSchema(offers).omit({ id: true, createdAt: true });
 export const insertTransactionSchema = createInsertSchema(transactions).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertTransactionConditionSchema = createInsertSchema(transactionConditions).omit({ id: true, createdAt: true, updatedAt: true });
 
 export type InsertOffer = z.infer<typeof insertOfferSchema>;
 export type InsertTransaction = z.infer<typeof insertTransactionSchema>;
+export type InsertTransactionCondition = z.infer<typeof insertTransactionConditionSchema>;
 export type Offer = typeof offers.$inferSelect;
 export type Transaction = typeof transactions.$inferSelect;
+export type TransactionCondition = typeof transactionConditions.$inferSelect;

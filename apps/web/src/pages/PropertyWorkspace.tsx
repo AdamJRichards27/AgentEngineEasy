@@ -99,6 +99,8 @@ interface TransactionBlock {
   purchasePriceCents: number;
   contractDate: string | null;
   financeApprovedAt: string | null;
+  exchangedAt: string | null;
+  unconditionalAt: string | null;
   settlementDate: string | null;
   settlementCompletedAt: string | null;
   status: string;
@@ -109,6 +111,7 @@ interface TransactionBlock {
   fundsReceivedAt: string | null;
   agentPaidAt: string | null;
   closedAt: string | null;
+  legalRepresentatives: { sellerSolicitorPartyId?: number | null; buyerSolicitorPartyId?: number | null } | null;
 }
 
 interface TimelineEntry {
@@ -117,13 +120,61 @@ interface TimelineEntry {
   label: string;
 }
 
+// Stage A (#114) — Appraisals. priceRangeLow/High come back as numeric
+// strings (drizzle's convention for numeric(precision,scale) columns —
+// see schema/appraisal.ts), not cents-integers like offers/transactions.
+interface AppraisalBlock {
+  id: number;
+  propertyId: number;
+  priceRangeLow: string | null;
+  priceRangeHigh: string | null;
+  comparableSales: unknown;
+  isFinalised: boolean;
+  finalisedSnapshot: unknown;
+}
+
+// Stage E (#118) — contract conditions.
+interface ConditionBlock {
+  id: number;
+  transactionId: number;
+  description: string;
+  dueDate: string | null;
+  status: string;
+  notes: string | null;
+  resolvedAt: string | null;
+}
+
+// #122 — agent-facing WAE task/attention-item visibility.
+interface AutomationTaskBlock {
+  id: string;
+  kind: "TASK" | "REMINDER";
+  title: string;
+  detail: string | null;
+  assignedRole: string | null;
+  dueAt: string | null;
+  status: string;
+}
+
+interface AttentionItemBlock {
+  id: string;
+  reasonCode: string;
+  detail: string | null;
+  status: string;
+}
+
 interface WorkspaceResponse {
-  property: PropertyOverview;
+  property: PropertyOverview & {
+    salesMethod?: string | null;
+    priceDisplay?: string | null;
+    campaignStartDate?: string | null;
+    campaignEndDate?: string | null;
+  };
   ownership: OwnershipBlock;
   parties: PartyLink[];
   nextActions: Array<{ label: string; status: string; blockedReason?: string | null }>;
   documentPackage: DocumentPackageBlock | null;
   agencyAgreementTerms: AgencyAgreementTermsBlock | null;
+  appraisal: AppraisalBlock | null;
   timeline: TimelineEntry[];
 }
 
@@ -357,6 +408,69 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     },
   });
 
+  // Stage A (#114) — Appraisals. Additive/independent of workflowStage; an
+  // unstarted appraisal shows as null and never blocks anything else.
+  const startAppraisal = useMutation({
+    mutationFn: () => apiFetch(`/appraisals/by-property/${propertyId}/start`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const saveAppraisal = useMutation({
+    mutationFn: (input: Record<string, unknown>) =>
+      apiFetch(`/appraisals/by-property/${propertyId}`, { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+  const finaliseAppraisalMut = useMutation({
+    mutationFn: () => apiFetch(`/appraisals/by-property/${propertyId}/finalise`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+
+  // Stage C (#116) — listing preparation fields.
+  const saveListingDetails = useMutation({
+    mutationFn: (input: Record<string, unknown>) =>
+      apiFetch(`/properties/${propertyId}/listing-details`, { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidate,
+  });
+
+  // Stage E (#118) — contract conditions + exchange/unconditional.
+  const { data: conditionsData } = useQuery({
+    queryKey: ["conditions", transactionData?.transaction?.id],
+    queryFn: () => apiFetch<{ conditions: ConditionBlock[] }>(`/transactions/${transactionData!.transaction!.id}/conditions`),
+    enabled: !!transactionData?.transaction,
+  });
+  const invalidateConditions = () => queryClient.invalidateQueries({ queryKey: ["conditions", transactionData?.transaction?.id] });
+
+  const addCondition = useMutation({
+    mutationFn: (input: Record<string, unknown>) =>
+      apiFetch(`/transactions/${transactionData!.transaction!.id}/conditions`, { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: invalidateConditions,
+  });
+  const rescheduleCondition = useMutation({
+    mutationFn: ({ conditionId, newDueDate }: { conditionId: number; newDueDate: string | null }) =>
+      apiFetch(`/transactions/conditions/${conditionId}/reschedule`, { method: "POST", body: JSON.stringify({ newDueDate }) }),
+    onSuccess: invalidateConditions,
+  });
+  const resolveConditionMut = useMutation({
+    mutationFn: ({ conditionId, status, notes }: { conditionId: number; status: string; notes?: string }) =>
+      apiFetch(`/transactions/conditions/${conditionId}/resolve`, { method: "POST", body: JSON.stringify({ status, notes }) }),
+    onSuccess: invalidateConditions,
+  });
+
+  // #122 — agent-facing WAE task/attention-item visibility.
+  const { data: tasksData } = useQuery({
+    queryKey: ["tasks", propertyId],
+    queryFn: () => apiFetch<{ tasks: AutomationTaskBlock[]; attentionItems: AttentionItemBlock[] }>(`/tasks/by-property/${propertyId}`),
+  });
+  const invalidateTasks = () => queryClient.invalidateQueries({ queryKey: ["tasks", propertyId] });
+
+  const completeTask = useMutation({
+    mutationFn: (taskId: string) => apiFetch(`/tasks/${taskId}/complete`, { method: "POST" }),
+    onSuccess: invalidateTasks,
+  });
+  const resolveAttentionItemMut = useMutation({
+    mutationFn: (itemId: string) => apiFetch(`/tasks/attention-items/${itemId}/resolve`, { method: "POST" }),
+    onSuccess: invalidateTasks,
+  });
+
   const [preview, setPreview] = useState<{ documentId: number; content: string } | null>(null);
   const previewDocument = async (documentId: number) => {
     const res = await fetch(`/api/documents/${documentId}/content`, { credentials: "include" });
@@ -371,12 +485,15 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
   const sellers = data.parties.filter((p) => p.role === "Seller");
   const others = data.parties.filter((p) => p.role !== "Seller");
+  const solicitors = data.parties.filter((p) => p.role === "Solicitor");
   const pendingServiceOrders = (serviceOrdersData?.serviceOrders ?? []).filter(
     (so) => so.paymentStatus === "Pending" || so.paymentStatus === "Failed",
   );
   const defaultPaymentMethod = paymentMethodsData?.mine.find((m) => m.isDefault) ?? paymentMethodsData?.mine[0] ?? null;
   const transaction = transactionData?.transaction ?? null;
   const offers = offersData?.offers ?? [];
+  const activeTasks = tasksData?.tasks ?? [];
+  const openAttentionItems = tasksData?.attentionItems ?? [];
 
   // "What happens next?" (staging brief's Next Action Design) — one
   // prominent primary action, derived from live state, instead of a grid of
@@ -478,6 +595,13 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           </button>
         ),
       };
+    } else if (!transaction.unconditionalAt) {
+      primary = {
+        title: transaction.exchangedAt ? "Resolve outstanding conditions" : "Exchange contracts",
+        description: transaction.exchangedAt
+          ? "See Transaction below to resolve remaining conditions and mark the contract unconditional."
+          : "See Transaction below to record exchange of contracts.",
+      };
     } else if (!transaction.settlementDate) {
       primary = { title: "Schedule settlement", description: "See Transaction below to set a date." };
     } else if (!transaction.settlementCompletedAt) {
@@ -544,6 +668,23 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <h2>{primary.title}</h2>
           {primary.description && <p className="muted">{primary.description}</p>}
           {primary.action}
+        </section>
+      )}
+
+      {/* #122 — agent-facing WAE task/reminder + attention-item
+          visibility. Shown up top, next to the primary action, since these
+          are exactly the kind of "what needs to happen" items the primary
+          action slot can't always capture (WAE-originated, not
+          workflow-stage-derived). */}
+      {(activeTasks.length > 0 || openAttentionItems.length > 0) && (
+        <section className="card">
+          <h2>Tasks & Attention</h2>
+          <TasksAttentionBlock
+            tasks={activeTasks}
+            attentionItems={openAttentionItems}
+            onCompleteTask={(id) => completeTask.mutate(id)}
+            onResolveAttentionItem={(id) => resolveAttentionItemMut.mutate(id)}
+          />
         </section>
       )}
 
@@ -650,7 +791,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         </section>
       )}
 
-      {/* Transaction (Phase 7) */}
+      {/* Transaction (Phase 7; Stage D/E/F/H additions this build) */}
       {transaction && (
         <section className="card">
           <h2>Transaction</h2>
@@ -658,6 +799,20 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             transaction={transaction}
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
             error={transactionAction.isError ? (transactionAction.error as ApiError).friendly : null}
+            conditions={conditionsData?.conditions ?? []}
+            onAddCondition={(input) => addCondition.mutate(input)}
+            addConditionError={addCondition.isError ? (addCondition.error as ApiError).friendly : null}
+            onRescheduleCondition={(conditionId, newDueDate) => rescheduleCondition.mutate({ conditionId, newDueDate })}
+            onResolveCondition={(conditionId, status, notes) => resolveConditionMut.mutate({ conditionId, status, notes })}
+            onExchange={() => transactionAction.mutate({ transactionId: transaction.id, action: "exchange" })}
+            onMarkUnconditional={() => transactionAction.mutate({ transactionId: transaction.id, action: "unconditional" })}
+            unconditionalError={
+              transactionAction.isError && transactionAction.variables?.action === "unconditional"
+                ? (transactionAction.error as ApiError).friendly
+                : null
+            }
+            solicitors={solicitors}
+            onSaveLegalReps={(input) => transactionAction.mutate({ transactionId: transaction.id, action: "legal-representatives", body: input })}
           />
         </section>
       )}
@@ -681,6 +836,36 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
       {/* Everything below is detail, not the current action — tucked
           behind progressive disclosure (staging brief: "avoid tabs unless
           genuinely required"). */}
+
+      {/* Stage A (#114) — Appraisal. Independent of workflowStage; purely
+          additive valuation capture, never a blocker to any other stage. */}
+      <details className="section">
+        <summary>Appraisal</summary>
+        <AppraisalSection
+          appraisal={data.appraisal}
+          onStart={() => startAppraisal.mutate()}
+          onSave={(input) => saveAppraisal.mutate(input)}
+          onFinalise={() => finaliseAppraisalMut.mutate()}
+          saveError={saveAppraisal.isError ? (saveAppraisal.error as ApiError).friendly : null}
+          finaliseError={finaliseAppraisalMut.isError ? (finaliseAppraisalMut.error as ApiError).friendly : null}
+        />
+      </details>
+
+      {/* Stage C (#116) — listing preparation. Purely descriptive; never
+          publishes a listing or incurs a cost. */}
+      <details className="section">
+        <summary>Listing details</summary>
+        <ListingDetailsForm
+          initial={{
+            salesMethod: data.property.salesMethod ?? null,
+            priceDisplay: data.property.priceDisplay ?? null,
+            campaignStartDate: data.property.campaignStartDate ?? null,
+            campaignEndDate: data.property.campaignEndDate ?? null,
+          }}
+          onSave={(input) => saveListingDetails.mutate(input)}
+          error={saveListingDetails.isError ? (saveListingDetails.error as ApiError).friendly : null}
+        />
+      </details>
 
       {data.documentPackage && (
         <details className="section">
@@ -1239,16 +1424,38 @@ function OffersBlock({
   );
 }
 
-// Transaction lifecycle (Phase 7) — shown as a checklist with upcoming
-// dates, matching the staging brief's Transaction Workspace example.
+// Transaction lifecycle (Phase 7; Stage D/E/F/H this build) — shown as a
+// checklist with upcoming dates, matching the staging brief's Transaction
+// Workspace example. Now also carries contract conditions, exchange /
+// unconditional (#118), and legal representative capture (#117).
 function TransactionBlockView({
   transaction,
   onAction,
   error,
+  conditions,
+  onAddCondition,
+  addConditionError,
+  onRescheduleCondition,
+  onResolveCondition,
+  onExchange,
+  onMarkUnconditional,
+  unconditionalError,
+  solicitors,
+  onSaveLegalReps,
 }: {
   transaction: TransactionBlock;
   onAction: (action: string, body?: Record<string, unknown>) => void;
   error: string | null;
+  conditions: ConditionBlock[];
+  onAddCondition: (input: Record<string, unknown>) => void;
+  addConditionError: string | null;
+  onRescheduleCondition: (conditionId: number, newDueDate: string | null) => void;
+  onResolveCondition: (conditionId: number, status: string, notes?: string) => void;
+  onExchange: () => void;
+  onMarkUnconditional: () => void;
+  unconditionalError: string | null;
+  solicitors: PartyLink[];
+  onSaveLegalReps: (input: Record<string, unknown>) => void;
 }) {
   const [settlementDate, setSettlementDate] = useState("");
   const [fundsAmount, setFundsAmount] = useState("");
@@ -1276,6 +1483,44 @@ function TransactionBlockView({
           </button>
         )}
       </div>
+
+      {/* Stage E (#118) — contract conditions + exchange/unconditional. */}
+      <ConditionsBlock
+        conditions={conditions}
+        onAdd={onAddCondition}
+        addError={addConditionError}
+        onReschedule={onRescheduleCondition}
+        onResolve={onResolveCondition}
+      />
+
+      <div>
+        Exchange: {transaction.exchangedAt ? `exchanged ${transaction.exchangedAt}` : "not yet exchanged"}
+        {!transaction.exchangedAt && (
+          <button className="btn btn-small" onClick={onExchange} style={{ marginLeft: "0.5rem" }}>
+            Mark Contracts Exchanged
+          </button>
+        )}
+      </div>
+
+      <div>
+        Unconditional:{" "}
+        {transaction.unconditionalAt
+          ? `became unconditional ${transaction.unconditionalAt}`
+          : "not yet unconditional"}
+        {!transaction.unconditionalAt && (
+          <button className="btn btn-small" onClick={onMarkUnconditional} style={{ marginLeft: "0.5rem" }}>
+            Mark Unconditional
+          </button>
+        )}
+        {unconditionalError && <p className="error-text">{unconditionalError}</p>}
+      </div>
+
+      {/* Stage D/F (#117) — legal representatives. */}
+      <LegalRepresentativesForm
+        initial={transaction.legalRepresentatives}
+        solicitors={solicitors}
+        onSave={onSaveLegalReps}
+      />
 
       <div>
         Settlement:{" "}
@@ -1351,6 +1596,372 @@ function TransactionBlockView({
       </div>
 
       {error && <p className="error-text">{error}</p>}
+    </div>
+  );
+}
+
+const CONDITION_RESOLUTIONS = ["Satisfied", "Waived", "Failed", "NotApplicable"] as const;
+
+// Stage E (#118) — a condition list with reschedule/resolve actions, plus a
+// small add-condition form. Mirrors the offer-conditions free-text field's
+// discipline: no invented finance/building-inspection integration, purely
+// agent-recorded tracking.
+function ConditionsBlock({
+  conditions,
+  onAdd,
+  addError,
+  onReschedule,
+  onResolve,
+}: {
+  conditions: ConditionBlock[];
+  onAdd: (input: Record<string, unknown>) => void;
+  addError: string | null;
+  onReschedule: (conditionId: number, newDueDate: string | null) => void;
+  onResolve: (conditionId: number, status: string, notes?: string) => void;
+}) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [description, setDescription] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [rescheduleDrafts, setRescheduleDrafts] = useState<Record<number, string>>({});
+  const [resolveNotes, setResolveNotes] = useState<Record<number, string>>({});
+
+  const submitAdd = () => {
+    if (!description.trim()) return;
+    onAdd({ description: description.trim(), dueDate: dueDate || undefined });
+    setShowAdd(false);
+    setDescription("");
+    setDueDate("");
+  };
+
+  return (
+    <div>
+      <h3 style={{ marginBottom: "0.4rem" }}>Contract conditions</h3>
+      {conditions.length === 0 ? (
+        <p className="muted">No conditions tracked.</p>
+      ) : (
+        <ul className="item-list">
+          {conditions.map((c) => (
+            <li key={c.id}>
+              <div>
+                {c.description}{" "}
+                <span className={c.status === "Satisfied" || c.status === "Waived" || c.status === "NotApplicable" ? "pill pill-success" : c.status === "Failed" ? "pill pill-danger" : "pill"}>
+                  {c.status}
+                </span>
+                {c.dueDate && ` · due ${new Date(c.dueDate).toLocaleDateString()}`}
+              </div>
+              {c.status === "Pending" && (
+                <div className="inline-form" style={{ marginTop: "0.3rem" }}>
+                  <input
+                    type="date"
+                    value={rescheduleDrafts[c.id] ?? ""}
+                    onChange={(e) => setRescheduleDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                  />
+                  <button
+                    className="btn btn-small"
+                    onClick={() => onReschedule(c.id, rescheduleDrafts[c.id] || null)}
+                    disabled={!rescheduleDrafts[c.id]}
+                  >
+                    Reschedule
+                  </button>
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      const status = e.target.value;
+                      if (!status) return;
+                      onResolve(c.id, status, resolveNotes[c.id] || undefined);
+                      e.target.value = "";
+                    }}
+                  >
+                    <option value="" disabled>
+                      Resolve as…
+                    </option>
+                    {CONDITION_RESOLUTIONS.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    value={resolveNotes[c.id] ?? ""}
+                    onChange={(e) => setResolveNotes((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                    placeholder="Note (optional)"
+                  />
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!showAdd ? (
+        <button className="btn btn-link" onClick={() => setShowAdd(true)}>
+          + Add Condition
+        </button>
+      ) : (
+        <div className="inline-form">
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. Subject to building & pest inspection" />
+          <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+          <button className="btn btn-small" onClick={submitAdd} disabled={!description.trim()}>
+            Save
+          </button>
+          <button className="btn btn-link" onClick={() => setShowAdd(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {addError && <p className="error-text">{addError}</p>}
+    </div>
+  );
+}
+
+// Stage D/F (#117) — legal representatives, picked from parties already
+// linked to the property with role "Solicitor" (reuses the existing
+// party-capture UI/flow rather than inventing a second solicitor entry
+// path).
+function LegalRepresentativesForm({
+  initial,
+  solicitors,
+  onSave,
+}: {
+  initial: { sellerSolicitorPartyId?: number | null; buyerSolicitorPartyId?: number | null } | null;
+  solicitors: PartyLink[];
+  onSave: (input: Record<string, unknown>) => void;
+}) {
+  const [sellerSolicitorPartyId, setSellerSolicitorPartyId] = useState(
+    initial?.sellerSolicitorPartyId ? String(initial.sellerSolicitorPartyId) : "",
+  );
+  const [buyerSolicitorPartyId, setBuyerSolicitorPartyId] = useState(
+    initial?.buyerSolicitorPartyId ? String(initial.buyerSolicitorPartyId) : "",
+  );
+
+  if (solicitors.length === 0 && !initial?.sellerSolicitorPartyId && !initial?.buyerSolicitorPartyId) {
+    return (
+      <p className="muted">
+        No solicitors captured yet — add one under Sellers/Other parties above (role: Solicitor) to record legal representatives here.
+      </p>
+    );
+  }
+
+  const submit = () => {
+    onSave({
+      sellerSolicitorPartyId: sellerSolicitorPartyId ? Number(sellerSolicitorPartyId) : null,
+      buyerSolicitorPartyId: buyerSolicitorPartyId ? Number(buyerSolicitorPartyId) : null,
+    });
+  };
+
+  return (
+    <div>
+      <h3 style={{ marginBottom: "0.4rem" }}>Legal representatives</h3>
+      <div className="inline-form">
+        <label>
+          Seller's solicitor
+          <select value={sellerSolicitorPartyId} onChange={(e) => setSellerSolicitorPartyId(e.target.value)}>
+            <option value="">— none —</option>
+            {solicitors.map((s) => (
+              <option key={s.partyId} value={s.partyId}>
+                {partyName(s.party)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Buyer's solicitor
+          <select value={buyerSolicitorPartyId} onChange={(e) => setBuyerSolicitorPartyId(e.target.value)}>
+            <option value="">— none —</option>
+            {solicitors.map((s) => (
+              <option key={s.partyId} value={s.partyId}>
+                {partyName(s.party)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="btn btn-small" onClick={submit}>
+          Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Stage A (#114) — appraisal capture. priceRangeLow/High are numeric
+// strings server-side; this form treats them as plain decimal text rather
+// than cents, matching that convention.
+function AppraisalSection({
+  appraisal,
+  onStart,
+  onSave,
+  onFinalise,
+  saveError,
+  finaliseError,
+}: {
+  appraisal: AppraisalBlock | null;
+  onStart: () => void;
+  onSave: (input: Record<string, unknown>) => void;
+  onFinalise: () => void;
+  saveError: string | null;
+  finaliseError: string | null;
+}) {
+  const [priceRangeLow, setPriceRangeLow] = useState(appraisal?.priceRangeLow ?? "");
+  const [priceRangeHigh, setPriceRangeHigh] = useState(appraisal?.priceRangeHigh ?? "");
+  const [notes, setNotes] = useState(
+    typeof appraisal?.comparableSales === "string" ? (appraisal.comparableSales as string) : "",
+  );
+
+  if (!appraisal) {
+    return (
+      <div>
+        <p className="muted">No appraisal started yet.</p>
+        <button className="btn btn-secondary" onClick={onStart}>
+          Start Appraisal
+        </button>
+      </div>
+    );
+  }
+
+  const submit = () => {
+    onSave({ priceRangeLow: priceRangeLow || undefined, priceRangeHigh: priceRangeHigh || undefined, comparableSales: notes || undefined });
+  };
+
+  return (
+    <div className="stack">
+      {appraisal.isFinalised ? (
+        <p>
+          <span className="pill pill-success">Finalised</span> {priceRangeLow && priceRangeHigh ? `${priceRangeLow} – ${priceRangeHigh}` : ""}
+        </p>
+      ) : (
+        <>
+          <div className="inline-form">
+            <label>
+              Price range low ($)
+              <input value={priceRangeLow} onChange={(e) => setPriceRangeLow(e.target.value)} />
+            </label>
+            <label>
+              Price range high ($)
+              <input value={priceRangeHigh} onChange={(e) => setPriceRangeHigh(e.target.value)} />
+            </label>
+          </div>
+          <label>
+            Comparable sales / notes
+            <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Free-text comparable sales notes" />
+          </label>
+          <div className="inline-form">
+            <button className="btn btn-secondary" onClick={submit}>
+              Save
+            </button>
+            <button className="btn btn-primary" onClick={onFinalise} disabled={!priceRangeLow || !priceRangeHigh}>
+              Finalise Appraisal
+            </button>
+          </div>
+          {saveError && <p className="error-text">{saveError}</p>}
+          {finaliseError && <p className="error-text">{finaliseError}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Stage C (#116) — listing preparation fields. Purely descriptive; never
+// publishes a listing, orders a supplier, or incurs a cost.
+function ListingDetailsForm({
+  initial,
+  onSave,
+  error,
+}: {
+  initial: {
+    salesMethod: string | null;
+    priceDisplay: string | null;
+    campaignStartDate: string | null;
+    campaignEndDate: string | null;
+  };
+  onSave: (input: Record<string, unknown>) => void;
+  error: string | null;
+}) {
+  const [salesMethod, setSalesMethod] = useState(initial.salesMethod ?? "");
+  const [priceDisplay, setPriceDisplay] = useState(initial.priceDisplay ?? "");
+  const [campaignStartDate, setCampaignStartDate] = useState(initial.campaignStartDate ? initial.campaignStartDate.slice(0, 10) : "");
+  const [campaignEndDate, setCampaignEndDate] = useState(initial.campaignEndDate ? initial.campaignEndDate.slice(0, 10) : "");
+
+  const submit = () => {
+    onSave({
+      salesMethod: salesMethod || undefined,
+      priceDisplay: priceDisplay || undefined,
+      campaignStartDate: campaignStartDate || undefined,
+      campaignEndDate: campaignEndDate || undefined,
+    });
+  };
+
+  return (
+    <div className="stack">
+      <div className="inline-form">
+        <label>
+          Sales method
+          <input value={salesMethod} onChange={(e) => setSalesMethod(e.target.value)} placeholder="e.g. Auction, Private Treaty" />
+        </label>
+        <label>
+          Price display
+          <input value={priceDisplay} onChange={(e) => setPriceDisplay(e.target.value)} placeholder="e.g. Contact Agent, $800,000+" />
+        </label>
+      </div>
+      <div className="inline-form">
+        <label>
+          Campaign start
+          <input type="date" value={campaignStartDate} onChange={(e) => setCampaignStartDate(e.target.value)} />
+        </label>
+        <label>
+          Campaign end
+          <input type="date" value={campaignEndDate} onChange={(e) => setCampaignEndDate(e.target.value)} />
+        </label>
+      </div>
+      <button className="btn btn-secondary" onClick={submit}>
+        Save Listing Details
+      </button>
+      {error && <p className="error-text">{error}</p>}
+    </div>
+  );
+}
+
+// #122 — agent-facing WAE task/reminder + attention-item surface. Plain
+// completion/resolution actions; no invented workflow-builder UI.
+function TasksAttentionBlock({
+  tasks,
+  attentionItems,
+  onCompleteTask,
+  onResolveAttentionItem,
+}: {
+  tasks: AutomationTaskBlock[];
+  attentionItems: AttentionItemBlock[];
+  onCompleteTask: (taskId: string) => void;
+  onResolveAttentionItem: (itemId: string) => void;
+}) {
+  return (
+    <div className="stack">
+      {tasks.length > 0 && (
+        <ul className="item-list">
+          {tasks.map((t) => (
+            <li key={t.id}>
+              <span className={t.kind === "REMINDER" ? "pill" : "pill pill-success"}>{t.kind === "REMINDER" ? "Reminder" : "Task"}</span>{" "}
+              {t.title}
+              {t.dueAt && ` · due ${new Date(t.dueAt).toLocaleDateString()}`}
+              {t.assignedRole && ` · ${t.assignedRole}`}
+              <button className="btn btn-link" onClick={() => onCompleteTask(t.id)}>
+                Mark Complete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {attentionItems.length > 0 && (
+        <ul className="item-list">
+          {attentionItems.map((item) => (
+            <li key={item.id}>
+              <span className="pill pill-danger">Needs attention</span> {item.reasonCode}
+              {item.detail && ` — ${item.detail}`}
+              <button className="btn btn-link" onClick={() => onResolveAttentionItem(item.id)}>
+                Resolve
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
