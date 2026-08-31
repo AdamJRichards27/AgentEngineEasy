@@ -1,1 +1,38 @@
-PLACEHOLDER
+{
+  "name": "@aee/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --packages=external",
+    "start": "node dist/index.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/ai/__tests__/*.test.ts src/lib/entitlements/__tests__/*.test.ts src/lib/billing/__tests__/*.test.ts src/middlewares/__tests__/*.test.ts src/lib/import/__tests__/*.test.ts src/lib/__tests__/*.test.ts src/routes/__tests__/*.test.ts src/lib/automation/__tests__/*.test.ts src/lib/exceptions/__tests__/*.test.ts src/lib/launch/__tests__/*.test.ts"
+  },
+  "dependencies": {
+    "@aee/db": "workspace:*",
+    "@aee/events": "workspace:*",
+    "@aee/integration-aml": "workspace:*",
+    "@aee/integration-billing": "workspace:*",
+    "@aee/integration-esign": "workspace:*",
+    "@aee/integration-object-storage": "workspace:*",
+    "@aee/integration-payments": "workspace:*",
+    "@aee/integration-property-data": "workspace:*",
+    "cors": "^2.8.5",
+    "csv-parse": "^7.0.2",
+    "drizzle-orm": "^0.45.2",
+    "express": "^4.21.0",
+    "multer": "^2.2.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.27.0",
+    "tsx": "^4.21.0"
+  }
+}
