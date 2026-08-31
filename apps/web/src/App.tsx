@@ -5,6 +5,7 @@ import StartProperty from "./pages/StartProperty";
 import PropertyWorkspace from "./pages/PropertyWorkspace";
 import Grow from "./pages/Grow";
 import GrowImport from "./pages/GrowImport";
+import Exceptions from "./pages/Exceptions";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import { useSession, useLogout } from "./lib/session";
@@ -13,8 +14,12 @@ function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
 }
 
-// Shallow route table by design (Build Brief §26): 5 top-level destinations,
-// not 15. Almost everything else lives inside the Property Workspace.
+// Shallow route table by design (Build Brief §26): almost everything lives
+// inside the Property Workspace. One exception, added deliberately (#145,
+// Build Instructions §18): "Exceptions" is a cross-property operational
+// view — by definition not something that can live inside a single
+// property's workspace — explicitly scoped as a foundation for the future
+// Agent Daily Command Centre, not that dashboard itself.
 //
 // Sidebar navigation (dark #424242, orange active pill) matches the
 // reference Agent Engine app's design system rather than the earlier plain
@@ -59,6 +64,7 @@ function SidebarLayout({
   const links: Array<{ path: string; label: string }> = [
     { path: "/", label: "Home" },
     { path: "/properties", label: "Properties" },
+    { path: "/exceptions", label: "Exceptions" },
     { path: "/grow", label: "Grow" },
     { path: "/settings", label: "Settings" },
   ];
@@ -111,6 +117,7 @@ function SidebarLayout({
             <Route path="/properties" component={PropertiesList} />
             <Route path="/properties/start" component={StartProperty} />
             <Route path="/properties/:id" component={PropertyWorkspace} />
+            <Route path="/exceptions" component={Exceptions} />
             <Route path="/grow" component={Grow} />
             <Route path="/grow/import" component={GrowImport} />
             <Route path="/settings" component={Settings} />
