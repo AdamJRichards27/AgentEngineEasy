@@ -7,8 +7,10 @@ import {
   amlVerifications,
   offers,
   properties,
+  riskExceptions,
   type AuditLogRow,
   type DomainEventRow,
+  type RiskException,
 } from "@aee/db";
 
 // Property Timeline (#131 design doc). Originally specified (ARCHITECTURE.md
@@ -70,6 +72,11 @@ interface EntryTypeConfig {
 // reads from, what category it groups under, and whether it carries a
 // dollar figure that must be redacted for a non-Brokerage-Administrator
 // viewer. Both the query layer and the label/redaction layer read this.
+//
+// Exception & Risk Engine (Priority 4): the ten risk_exception_* actions
+// below are the one entry-type family in this table whose `sensitive` flag
+// here is only a floor, not the final answer — see the risk-exception
+// branch inside getPropertyTimeline's auditItems.map below for why.
 const TIMELINE_ENTRY_TYPES: Record<string, EntryTypeConfig> = {
   PROPERTY_CREATED: { source: "domain_event", category: "Property", sensitive: false },
   party_added: { source: "audit_log", category: "Party", sensitive: false },
@@ -127,6 +134,30 @@ const TIMELINE_ENTRY_TYPES: Record<string, EntryTypeConfig> = {
   automation_task_completed: { source: "audit_log", category: "Task", sensitive: false },
   automation_attention_item_raised: { source: "audit_log", category: "Task", sensitive: false },
   automation_attention_item_resolved: { source: "audit_log", category: "Task", sensitive: false },
+
+  // Agent Engine 2.0 — Exception & Risk Engine (Priority 4, §16). Every
+  // action below is logged by lib/exceptions/model.ts — the sole writer of
+  // risk_exceptions/risk_exception_transitions — with recordType
+  // "risk_exception" and recordId = riskExceptions.id, so they slot into
+  // this same audit_log-sourced path with no schema change. Grouped under
+  // "Compliance" (this table's existing bucket for risk/override actions —
+  // transaction_closed_forced, the payment_* rows) rather than a new
+  // category: TimelineCategory is a fixed union already read elsewhere in
+  // this codebase, and widening it is deferred to the dedicated property-
+  // level Exceptions panel build (§16-18) where the consuming UI is
+  // actually in view, rather than guessed at here. `sensitive: false` here
+  // is a static floor, not the final word — see the row-level override
+  // below.
+  risk_exception_opened: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_reopened: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_severity_changed: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_acknowledged: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_remediation_started: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_awaiting_external: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_resolved: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_auto_resolved: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_dismissed: { source: "audit_log", category: "Compliance", sensitive: false },
+  risk_exception_reassigned: { source: "audit_log", category: "Compliance", sensitive: false },
 };
 
 const DOMAIN_EVENT_ENTRY_TYPES = Object.entries(TIMELINE_ENTRY_TYPES)
@@ -216,6 +247,71 @@ function redactedLabel(entryType: string): string {
   }
 }
 
+// Title-free version of a risk_exception_* label — parallel to
+// redactedLabel() above but kept separate because these entries redact
+// per-ROW (see the auditItems.map override below), never per-entry-type, so
+// this can't just be another case inside redactedLabel's switch (that
+// function only ever receives the entry type string, never the row).
+function redactedRiskExceptionLabel(action: string): string {
+  switch (action) {
+    case "risk_exception_opened":
+      return "Exception opened";
+    case "risk_exception_reopened":
+      return "Exception reopened";
+    case "risk_exception_severity_changed":
+      return "Exception severity changed";
+    case "risk_exception_acknowledged":
+      return "Exception acknowledged";
+    case "risk_exception_remediation_started":
+      return "Remediation started on an exception";
+    case "risk_exception_awaiting_external":
+      return "Exception marked awaiting external action";
+    case "risk_exception_resolved":
+      return "Exception resolved";
+    case "risk_exception_auto_resolved":
+      return "Exception automatically resolved";
+    case "risk_exception_dismissed":
+      return "Exception dismissed";
+    case "risk_exception_reassigned":
+      return "Exception reassigned";
+    default:
+      return "Exception updated";
+  }
+}
+
+// Full (non-redacted) label for a risk_exception_* audit row. Takes the
+// linked riskExceptions row (may be missing if the exception was since hard
+// deleted, which model.ts's own contract says never happens — Build
+// Instructions §7: "never delete resolved/dismissed exceptions" — but a
+// lookup miss is handled gracefully anyway rather than assumed impossible).
+function riskExceptionLabel(row: AuditLogRow, exception: RiskException | undefined): string {
+  const title = exception?.title ?? "an exception";
+  switch (row.action) {
+    case "risk_exception_opened":
+      return `Exception opened: ${title}`;
+    case "risk_exception_reopened":
+      return `Exception reopened: ${title}`;
+    case "risk_exception_severity_changed":
+      return `Exception severity changed to ${row.updatedValue ?? exception?.severity ?? "unknown"}: ${title}`;
+    case "risk_exception_acknowledged":
+      return `Exception acknowledged: ${title}`;
+    case "risk_exception_remediation_started":
+      return `Remediation started: ${title}`;
+    case "risk_exception_awaiting_external":
+      return `Exception marked awaiting external action: ${title}`;
+    case "risk_exception_resolved":
+      return `Exception resolved: ${title}`;
+    case "risk_exception_auto_resolved":
+      return `Exception automatically resolved: ${title}`;
+    case "risk_exception_dismissed":
+      return `Exception dismissed: ${title}`;
+    case "risk_exception_reassigned":
+      return `Exception reassigned: ${title}`;
+    default:
+      return SIMPLE_AUDIT_LABELS[row.action] ?? row.action;
+  }
+}
+
 // #123-precedent tenant chokepoint for the Timeline query — resolves
 // propertyId -> brokerageId once, uniform "not found" on mismatch, before
 // either source query below ever runs.
@@ -257,12 +353,16 @@ export async function getPropertyTimeline(
   const auditPartyAddedIds = auditRows.filter((r) => r.recordType === "party").map((r) => Number(r.recordId));
   const amlIds = auditRows.filter((r) => r.recordType === "aml_verification").map((r) => Number(r.recordId));
   const offerIds = auditRows.filter((r) => r.recordType === "offer").map((r) => Number(r.recordId));
+  // Exception & Risk Engine (Priority 4): riskExceptions.id is a uuid, not
+  // a numeric id like the three lookups above, so no Number() coercion here.
+  const riskExceptionIds = auditRows.filter((r) => r.recordType === "risk_exception").map((r) => String(r.recordId));
 
-  const [eventPartyRows, auditPartyRows, amlRows, offerRows] = await Promise.all([
+  const [eventPartyRows, auditPartyRows, amlRows, offerRows, riskExceptionRows] = await Promise.all([
     eventPartyIds.length ? db.select().from(parties).where(inArray(parties.id, eventPartyIds)) : Promise.resolve([]),
     auditPartyAddedIds.length ? db.select().from(parties).where(inArray(parties.id, auditPartyAddedIds)) : Promise.resolve([]),
     amlIds.length ? db.select().from(amlVerifications).where(inArray(amlVerifications.id, amlIds)) : Promise.resolve([]),
     offerIds.length ? db.select().from(offers).where(inArray(offers.id, offerIds)) : Promise.resolve([]),
+    riskExceptionIds.length ? db.select().from(riskExceptions).where(inArray(riskExceptions.id, riskExceptionIds)) : Promise.resolve([]),
   ]);
 
   const offerBuyerIds = offerRows.map((o) => o.buyerPartyId).filter((id): id is number => id != null);
@@ -270,6 +370,7 @@ export async function getPropertyTimeline(
   const extraPartyIds = [...offerBuyerIds, ...amlPartyIds].filter((id) => !auditPartyAddedIds.includes(id));
   const extraPartyRows = extraPartyIds.length ? await db.select().from(parties).where(inArray(parties.id, extraPartyIds)) : [];
   const auditParties = [...auditPartyRows, ...extraPartyRows];
+  const exceptionsById = new Map<string, RiskException>(riskExceptionRows.map((e) => [e.id, e]));
 
   function domainEventLabel(row: DomainEventRow): string {
     if (row.eventType === "AML_REQUESTED" || row.eventType === "AML_COMPLETED") {
@@ -308,6 +409,9 @@ export async function getPropertyTimeline(
   }
 
   function auditLabel(row: AuditLogRow): string {
+    if (row.recordType === "risk_exception") {
+      return riskExceptionLabel(row, exceptionsById.get(String(row.recordId)));
+    }
     if (row.recordType === "party" && row.action === "party_added") {
       const party = auditParties.find((p) => p.id === Number(row.recordId));
       return `${partyDisplayName(party)} added`;
@@ -354,7 +458,19 @@ export async function getPropertyTimeline(
 
   const auditItems: TimelineItem[] = auditRows.map((row) => {
     const config = TIMELINE_ENTRY_TYPES[row.action];
-    const sensitive = config?.sensitive ?? false;
+    const linkedException = row.recordType === "risk_exception" ? exceptionsById.get(String(row.recordId)) : undefined;
+    // Exception & Risk Engine (Priority 4, §20-21): a risk_exception_*
+    // entry type's sensitivity is a property of the SPECIFIC exception it
+    // describes (riskExceptions.requiresFinancialEntitlement), not a
+    // constant for the entry type — unlike every other row in
+    // TIMELINE_ENTRY_TYPES, where sensitive is unconditionally true or
+    // unconditionally false for every row of that type. The static
+    // config.sensitive above is therefore only the floor; a linked
+    // exception that itself requires financial entitlement raises it,
+    // mirroring the exact redaction rule queries.ts's redact() already
+    // applies to the Exceptions API so the Timeline can never leak the
+    // same information through a second, less careful path.
+    const sensitive = (config?.sensitive ?? false) || linkedException?.requiresFinancialEntitlement === true;
     const redact = sensitive && !canViewFinancials;
     return {
       id: `audit_log:${row.id}`,
@@ -365,7 +481,7 @@ export async function getPropertyTimeline(
       actor: row.userId
         ? { type: "USER", userId: row.userId, label: row.userEmail ?? "A user" }
         : { type: "SYSTEM", userId: null, label: "System" },
-      label: redact ? redactedLabel(row.action) : auditLabel(row),
+      label: redact ? (row.recordType === "risk_exception" ? redactedRiskExceptionLabel(row.action) : redactedLabel(row.action)) : auditLabel(row),
       sensitivity: sensitive ? "SENSITIVE" : "STANDARD",
       detail: redact ? undefined : row.updatedValue ? { updatedValue: row.updatedValue } : undefined,
       refs: [{ recordType: row.recordType, recordId: row.recordId }],

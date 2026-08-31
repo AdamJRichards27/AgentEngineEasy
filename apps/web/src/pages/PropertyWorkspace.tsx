@@ -2,6 +2,16 @@ import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 import { apiFetch, ApiError } from "../lib/api";
+import {
+  type PropertyExceptionsResponse,
+  type RiskExceptionRow,
+  severityLabel,
+  severityPillClass,
+  statusLabel,
+  categoryLabel,
+  formatDueDate,
+  isOverdue,
+} from "../lib/riskExceptions";
 
 interface PropertyOverview {
   id: number;
@@ -515,6 +525,47 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     onSuccess: invalidateTasks,
   });
 
+  // #145 — property-level Exception & Risk Engine panel (§16-18). This
+  // panel only ever displays what GET /properties/:id/exceptions returns
+  // and calls the same lifecycle routes every other client would — the
+  // engine (never this UI) is the sole place a transition is decided;
+  // model.ts re-validates the current status server-side regardless of
+  // what state this panel shows (Build Instructions §19).
+  const { data: exceptionsData } = useQuery({
+    queryKey: ["property-exceptions", propertyId],
+    queryFn: () => apiFetch<PropertyExceptionsResponse>(`/properties/${propertyId}/exceptions`),
+  });
+  const invalidateExceptions = () => queryClient.invalidateQueries({ queryKey: ["property-exceptions", propertyId] });
+
+  const acknowledgeExceptionMut = useMutation({
+    mutationFn: (id: string) => apiFetch(`/exceptions/${id}/acknowledge`, { method: "POST" }),
+    onSuccess: invalidateExceptions,
+  });
+  const startRemediationMut = useMutation({
+    mutationFn: (id: string) => apiFetch(`/exceptions/${id}/start-remediation`, { method: "POST" }),
+    onSuccess: invalidateExceptions,
+  });
+  const awaitingExternalMut = useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) =>
+      apiFetch(`/exceptions/${id}/awaiting-external`, { method: "POST", body: JSON.stringify({ note }) }),
+    onSuccess: invalidateExceptions,
+  });
+  const resolveExceptionMut = useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) =>
+      apiFetch(`/exceptions/${id}/resolve`, { method: "POST", body: JSON.stringify({ note }) }),
+    onSuccess: invalidateExceptions,
+  });
+  const dismissExceptionMut = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiFetch(`/exceptions/${id}/dismiss`, { method: "POST", body: JSON.stringify({ reason }) }),
+    onSuccess: invalidateExceptions,
+  });
+  const reassignExceptionMut = useMutation({
+    mutationFn: ({ id, ownerType, reason }: { id: string; ownerType: string; reason: string }) =>
+      apiFetch(`/exceptions/${id}/reassign`, { method: "POST", body: JSON.stringify({ ownerType, ownerUserId: null, reason }) }),
+    onSuccess: invalidateExceptions,
+  });
+
   const [preview, setPreview] = useState<{ documentId: number; content: string } | null>(null);
   const previewDocument = async (documentId: number) => {
     const res = await fetch(`/api/documents/${documentId}/content`, { credentials: "include" });
@@ -712,6 +763,31 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <h2>{primary.title}</h2>
           {primary.description && <p className="muted">{primary.description}</p>}
           {primary.action}
+        </section>
+      )}
+
+      {/* #145 — Exception & Risk Engine (§16-18). Shown above Tasks &
+          Attention: an open exception is the more authoritative signal
+          (deterministic rule + authoritative evidence, Build Instructions
+          §19) rather than a WAE-derived reminder, so it leads. Only
+          rendered once there's something to show — an empty engine result
+          adds no visual weight to a property with nothing open. */}
+      {exceptionsData && exceptionsData.exceptions.length > 0 && (
+        <section className="card">
+          <h2>Exceptions</h2>
+          <p className="muted">
+            {exceptionsData.summary.openCount} open
+            {exceptionsData.summary.highestSeverity && ` · highest severity: ${severityLabel(exceptionsData.summary.highestSeverity)}`}
+          </p>
+          <ExceptionsBlock
+            exceptions={exceptionsData.exceptions}
+            onAcknowledge={(id) => acknowledgeExceptionMut.mutate(id)}
+            onStartRemediation={(id) => startRemediationMut.mutate(id)}
+            onMarkAwaitingExternal={(id, note) => awaitingExternalMut.mutate({ id, note })}
+            onResolve={(id, note) => resolveExceptionMut.mutate({ id, note })}
+            onDismiss={(id, reason) => dismissExceptionMut.mutate({ id, reason })}
+            onReassign={(id, ownerType, reason) => reassignExceptionMut.mutate({ id, ownerType, reason })}
+          />
         </section>
       )}
 
@@ -2014,6 +2090,163 @@ function ListingDetailsForm({
       </button>
       {error && <p className="error-text">{error}</p>}
     </div>
+  );
+}
+
+// #145 — Exception & Risk Engine property panel (§16-18). One row per
+// exception, collapsed detail behind "View Details" (same convention as
+// the AML exception block above), with only the lifecycle actions valid
+// for that exception's *current* status ever rendered — this UI narrows
+// which button appears, but never which transition the server accepts;
+// model.ts re-checks the status itself either way (Build Instructions
+// §19/§21).
+function ExceptionsBlock({
+  exceptions,
+  onAcknowledge,
+  onStartRemediation,
+  onMarkAwaitingExternal,
+  onResolve,
+  onDismiss,
+  onReassign,
+}: {
+  exceptions: RiskExceptionRow[];
+  onAcknowledge: (id: string) => void;
+  onStartRemediation: (id: string) => void;
+  onMarkAwaitingExternal: (id: string, note: string) => void;
+  onResolve: (id: string, note: string) => void;
+  onDismiss: (id: string, reason: string) => void;
+  onReassign: (id: string, ownerType: string, reason: string) => void;
+}) {
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [reassignOwnerType, setReassignOwnerType] = useState<Record<string, string>>({});
+  const [reassignReason, setReassignReason] = useState<Record<string, string>>({});
+
+  return (
+    <ul className="item-list">
+      {exceptions.map((e) => {
+        const closed = e.status === "RESOLVED" || e.status === "DISMISSED";
+        const canStartRemediation = e.status === "ACKNOWLEDGED" || e.status === "REOPENED";
+        const canResolveOrDismiss = e.status === "IN_PROGRESS" || e.status === "AWAITING_EXTERNAL";
+        return (
+          <li key={e.id}>
+            <div>
+              <span className={severityPillClass(e.severity)}>{severityLabel(e.severity)}</span>{" "}
+              <span className="pill">{statusLabel(e.status)}</span>{" "}
+              <strong>{e.title}</strong>
+              {e.dueAt && (
+                <span className={isOverdue(e.dueAt) && !closed ? "pill pill-danger" : "muted"} style={{ marginLeft: "0.5rem" }}>
+                  {isOverdue(e.dueAt) && !closed ? "Overdue " : "Due "}
+                  {formatDueDate(e.dueAt)}
+                </span>
+              )}
+            </div>
+            <p className="muted" style={{ marginBottom: "0.4rem" }}>
+              {categoryLabel(e.category)} · {e.problemDescription}
+            </p>
+
+            {e.status === "OPEN" && (
+              <button className="btn btn-small" onClick={() => onAcknowledge(e.id)}>
+                Acknowledge
+              </button>
+            )}
+            {canStartRemediation && (
+              <button className="btn btn-small" onClick={() => onStartRemediation(e.id)}>
+                Start Remediation
+              </button>
+            )}
+
+            <details style={{ marginTop: "0.5rem" }}>
+              <summary className="muted">View Details</summary>
+              <p className="muted">Business impact: {e.businessImpact}</p>
+              <p className="muted">Recommended action: {e.recommendedAction}</p>
+              {e.resolutionRequirements && <p className="muted">To resolve: {e.resolutionRequirements}</p>}
+              {e.occurrenceCount > 1 && <p className="muted">Detected {e.occurrenceCount} times, most recently {formatDueDate(e.lastDetectedAt)}.</p>}
+
+              {closed ? (
+                <p className="muted">
+                  {e.status === "RESOLVED"
+                    ? `Resolved${e.resolutionMethod ? ` (${e.resolutionMethod === "AUTO" ? "automatically" : "manually"})` : ""}${e.resolvedAt ? ` on ${formatDueDate(e.resolvedAt)}` : ""}.`
+                    : `Dismissed${e.dismissalReason ? `: ${e.dismissalReason}` : "."}`}
+                </p>
+              ) : (
+                <>
+                  {canResolveOrDismiss && (
+                    <div className="stack">
+                      <input
+                        value={notes[e.id] ?? ""}
+                        onChange={(ev) => setNotes((prev) => ({ ...prev, [e.id]: ev.target.value }))}
+                        placeholder="Resolution note (required)"
+                      />
+                      <button
+                        className="btn btn-small"
+                        onClick={() => onResolve(e.id, (notes[e.id] ?? "").trim())}
+                        disabled={!(notes[e.id] ?? "").trim()}
+                      >
+                        Mark Resolved
+                      </button>
+                      <button
+                        className="btn btn-small"
+                        onClick={() => onMarkAwaitingExternal(e.id, (notes[e.id] ?? "").trim())}
+                        disabled={!(notes[e.id] ?? "").trim()}
+                      >
+                        Awaiting External Action
+                      </button>
+                      {e.dismissible && (
+                        <>
+                          <input
+                            value={reasons[e.id] ?? ""}
+                            onChange={(ev) => setReasons((prev) => ({ ...prev, [e.id]: ev.target.value }))}
+                            placeholder="Dismissal reason (required)"
+                          />
+                          <button
+                            className="btn btn-small btn-danger"
+                            onClick={() => onDismiss(e.id, (reasons[e.id] ?? "").trim())}
+                            disabled={!(reasons[e.id] ?? "").trim()}
+                          >
+                            Dismiss
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="inline-form" style={{ marginTop: "0.5rem" }}>
+                    <select
+                      value={reassignOwnerType[e.id] ?? ""}
+                      onChange={(ev) => setReassignOwnerType((prev) => ({ ...prev, [e.id]: ev.target.value }))}
+                    >
+                      <option value="">Reassign to…</option>
+                      <option value="LISTING_AGENT">Listing Agent</option>
+                      <option value="TRANSACTION_OWNER">Transaction Owner</option>
+                      <option value="BROKERAGE_ADMINISTRATOR">Brokerage Administrator</option>
+                      <option value="PIT_CREW">Pit Crew</option>
+                      <option value="UNASSIGNED_QUEUE">Unassigned Queue</option>
+                    </select>
+                    <input
+                      value={reassignReason[e.id] ?? ""}
+                      onChange={(ev) => setReassignReason((prev) => ({ ...prev, [e.id]: ev.target.value }))}
+                      placeholder="Reason for reassignment"
+                    />
+                    <button
+                      className="btn btn-small"
+                      onClick={() => {
+                        onReassign(e.id, reassignOwnerType[e.id]!, (reassignReason[e.id] ?? "").trim());
+                        setReassignOwnerType((prev) => ({ ...prev, [e.id]: "" }));
+                        setReassignReason((prev) => ({ ...prev, [e.id]: "" }));
+                      }}
+                      disabled={!reassignOwnerType[e.id] || !(reassignReason[e.id] ?? "").trim()}
+                    >
+                      Reassign
+                    </button>
+                  </div>
+                </>
+              )}
+            </details>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

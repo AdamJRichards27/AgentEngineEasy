@@ -4,6 +4,7 @@ import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
+import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -18,6 +19,13 @@ configureEvents();
 // configureEvents() so the event dispatch map already exists, and before
 // the app starts accepting traffic so no early event is missed.
 registerAutomationEngine();
+
+// Agent Engine 2.0 — Exception & Risk Engine (Priority 4). Registers the
+// event-driven exception handler and starts the periodic scan scheduler —
+// same "after configureEvents(), before the app accepts traffic" ordering
+// requirement as registerAutomationEngine() above, for the same reason (no
+// canonical event fired between boot and registration should be missed).
+registerExceptionEngine();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.

@@ -29,6 +29,13 @@
       "when": 1788071486526,
       "tag": "0003_perpetual_blockbuster",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788158437079,
+      "tag": "0004_white_shaman",
+      "breakpoints": true
     }
   ]
 }

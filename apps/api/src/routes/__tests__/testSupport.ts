@@ -29,6 +29,8 @@ import {
   growOpportunities,
   importJobs,
   importRecords,
+  riskExceptions,
+  riskExceptionTransitions,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -259,6 +261,13 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * packages/db/src/schema/automation.ts), so a test that exercises any of
  * Stage A/E/#122 and then relies on this cleanup would otherwise fail with
  * a foreign key violation on the transactions/properties delete below.
+ *
+ * Exception & Risk Engine (Priority 4): extended again for
+ * riskExceptionTransitions/riskExceptions — riskExceptionTransitions.exceptionId
+ * -> riskExceptions.id and riskExceptions.propertyId/transactionId ->
+ * properties.id/transactions.id are all non-cascading (see
+ * packages/db/src/schema/exceptions.ts), so both must be deleted before the
+ * transactions delete and the properties delete further down this block.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -297,6 +306,18 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const propertyIds = propertyRows.map((p) => p.id);
 
   if (propertyIds.length > 0) {
+    // Exception & Risk Engine (Priority 4) — see this function's own doc
+    // comment above. Scoped by propertyId alone (every riskExceptions row
+    // has a non-null propertyId, per packages/db/src/schema/exceptions.ts)
+    // rather than needing the transactionIds lookup further down, since
+    // riskExceptions.transactionId is nullable.
+    const riskExceptionRows = await db.select({ id: riskExceptions.id }).from(riskExceptions).where(inArray(riskExceptions.propertyId, propertyIds));
+    const riskExceptionIds = riskExceptionRows.map((r) => r.id);
+    if (riskExceptionIds.length > 0) {
+      await db.delete(riskExceptionTransitions).where(inArray(riskExceptionTransitions.exceptionId, riskExceptionIds));
+    }
+    await db.delete(riskExceptions).where(inArray(riskExceptions.propertyId, propertyIds));
+
     // Stage A (#114) — appraisals.propertyId -> properties.id, non-cascading.
     await db.delete(appraisals).where(inArray(appraisals.propertyId, propertyIds));
 
