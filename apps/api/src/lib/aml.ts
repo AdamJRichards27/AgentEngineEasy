@@ -1,6 +1,6 @@
 import { eq, and } from "drizzle-orm";
-import { db, amlVerifications, parties, properties, serviceOrders, AML_STATUSES } from "@aee/db";
-import type { AmlVerification } from "@aee/db";
+import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
+import type { AmlVerification, Party } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
@@ -20,6 +20,45 @@ export interface InitiateAmlResult {
 }
 
 /**
+ * Tenant + linkage guard shared by every entry point into
+ * initiateAmlIfNeeded() — Ready to List (routes/properties.ts), a seller
+ * added after Ready to List already ran (routes/parties.ts), and the
+ * direct /api/aml/request path used by the Property Timeline's
+ * buyer/other-party AML action (routes/aml.ts). A caller who supplies a
+ * propertyId or partyId from a different brokerage — or a real partyId
+ * that simply isn't linked to this property — gets the same "not found"
+ * as a nonexistent id, never a distinguishing error that would confirm
+ * another tenant's record exists. Mirrors the #123 requireTransactionAccess
+ * precedent in routes/transactions.ts and loadTransactionInBrokerage in
+ * lib/transactionConditions.ts.
+ */
+async function assertPartyOnPropertyInBrokerage(input: {
+  propertyId: number;
+  partyId: number;
+  brokerageId: number;
+}): Promise<{ party: Party }> {
+  const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
+  if (!property || property.brokerageId !== input.brokerageId) {
+    throw new Error(`Property ${input.propertyId} not found`);
+  }
+
+  const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
+  if (!party || party.brokerageId !== input.brokerageId) {
+    throw new Error(`Party ${input.partyId} not found`);
+  }
+
+  const [link] = await db
+    .select()
+    .from(propertyParties)
+    .where(and(eq(propertyParties.propertyId, input.propertyId), eq(propertyParties.partyId, input.partyId)));
+  if (!link) {
+    throw new Error(`Party ${input.partyId} not found on property ${input.propertyId}`);
+  }
+
+  return { party };
+}
+
+/**
  * Idempotent AML initiation — this is the one place that ever calls
  * AMLProvider.requestVerification(). One AMLVerification row per
  * (propertyId, partyId): if one already exists in any status, it's
@@ -30,6 +69,12 @@ export interface InitiateAmlResult {
  * request. Retry-after-failure is a deliberately separate path — see
  * retryAmlVerification() below — so this function's idempotency guarantee
  * never gets confused with "start over".
+ *
+ * Tenant isolation is enforced here too (assertPartyOnPropertyInBrokerage,
+ * above) rather than only at the route layer, so every current and future
+ * caller gets the same guarantee the idempotency check already provides
+ * centrally — a caller can never initiate, retrieve, or discover the
+ * existence of another brokerage's AML verification through this path.
  */
 export async function initiateAmlIfNeeded(input: {
   propertyId: number;
@@ -38,17 +83,14 @@ export async function initiateAmlIfNeeded(input: {
   userId: number;
   brokerageId: number;
 }): Promise<InitiateAmlResult> {
+  const { party } = await assertPartyOnPropertyInBrokerage(input);
+
   const [existing] = await db
     .select()
     .from(amlVerifications)
     .where(and(eq(amlVerifications.propertyId, input.propertyId), eq(amlVerifications.partyId, input.partyId)));
   if (existing) {
     return { verification: existing, created: false };
-  }
-
-  const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
-  if (!party) {
-    throw new Error(`Party ${input.partyId} not found`);
   }
 
   const verificationType = input.verificationType ?? "Individual";

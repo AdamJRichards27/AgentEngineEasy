@@ -291,6 +291,19 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     },
   });
 
+  // Buyer/other-party AML/CTF (Property Timeline prerequisite): sellers get
+  // AML initiated automatically via Ready to List, but that's a Seller-only
+  // workflow concept — non-Seller parties have no equivalent automatic
+  // trigger, so they need an explicit, authorised way to start the same
+  // check. Reuses the identical generic backend path (POST /aml/request ->
+  // initiateAmlIfNeeded) rather than a new AML request service; the same
+  // idempotency and tenant/linkage checks sellers' automatic path already
+  // relies on apply here too.
+  const requestAml = useMutation({
+    mutationFn: (partyId: number) => apiFetch("/aml/request", { method: "POST", body: JSON.stringify({ propertyId, partyId }) }),
+    onSuccess: invalidate,
+  });
+
   const addParty = useMutation({
     mutationFn: (input: Record<string, unknown>) =>
       apiFetch("/parties", { method: "POST", body: JSON.stringify({ propertyId, ...input }) }),
@@ -756,10 +769,58 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             <ul className="item-list">
               {others.map((p) => (
                 <li key={p.linkId}>
-                  {p.role}: {partyName(p.party)}
-                  <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
-                    Remove
-                  </button>
+                  <div>
+                    {p.role}: {partyName(p.party)}
+                    {p.amlStatus && <span className={amlPillClass(p.amlStatus)} style={{ marginLeft: "0.5rem" }}>{amlStatusCopy(p.amlStatus)}</span>}
+                    <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
+                      Remove
+                    </button>
+                  </div>
+
+                  {!p.amlStatus && (
+                    <button className="btn btn-small" onClick={() => requestAml.mutate(p.partyId)} disabled={requestAml.isPending}>
+                      Request AML Verification
+                    </button>
+                  )}
+
+                  {/* Same AML exception handling sellers get above (Resend /
+                      View Details / Mark Resolved) — identical mutations,
+                      identical exceptionNotes state, keyed by
+                      amlVerificationId rather than role. */}
+                  {p.amlException && p.amlVerificationId && (
+                    <div className="cost-summary">
+                      <p className="muted" style={{ marginBottom: "0.4rem" }}>
+                        We'll update this property automatically when {partyName(p.party)} completes verification.
+                      </p>
+                      <button className="btn btn-small" onClick={() => retryAml.mutate(p.amlVerificationId!)}>
+                        Resend
+                      </button>
+                      <details style={{ marginTop: "0.5rem" }}>
+                        <summary className="muted">View Details</summary>
+                        <p className="muted">
+                          {p.amlException.outcome ? `Outcome: ${p.amlException.outcome}` : ""}
+                          {p.amlException.riskLevel ? ` · Risk: ${p.amlException.riskLevel}` : ""}
+                        </p>
+                        <input
+                          value={exceptionNotes[p.amlVerificationId] ?? ""}
+                          onChange={(e) => setExceptionNotes((prev) => ({ ...prev, [p.amlVerificationId!]: e.target.value }))}
+                          placeholder="Compliance note (required to resolve)"
+                        />
+                        <button
+                          className="btn btn-small"
+                          onClick={() =>
+                            resolveAmlException.mutate({
+                              verificationId: p.amlVerificationId!,
+                              notes: exceptionNotes[p.amlVerificationId!] ?? "",
+                            })
+                          }
+                          disabled={!(exceptionNotes[p.amlVerificationId] ?? "").trim()}
+                        >
+                          Mark Resolved
+                        </button>
+                      </details>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
