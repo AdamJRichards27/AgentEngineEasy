@@ -52,6 +52,7 @@ import {
   pcFeeCalculations,
   financialPaymentRequests,
   financialPaymentProviderEvents,
+  financialPaymentOutbox,
   financialDisputes,
   marketingPaymentRecords,
   financialDeposits,
@@ -328,11 +329,12 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * financialPaymentRequests, financialDeposits, financialLedgerEvents), so
  * this whole block must run (like the communications block above) before
  * the properties/transactions deletes further down. Internal ordering:
- * financialPaymentProviderEvents and financialDisputes both reference
- * financialPaymentRequests.id (must go first); financialPaymentRequests
- * references pcFeeCalculations.id/pcFeeAuthorities.id (must go before
- * those); pcFeeCalculations references commissionCalculations.id (must go
- * before commissionCalculations); commissionCalculations references
+ * financialPaymentProviderEvents, financialDisputes, AND (Stage D)
+ * financialPaymentOutbox all reference financialPaymentRequests.id (must
+ * go first); financialPaymentRequests references
+ * pcFeeCalculations.id/pcFeeAuthorities.id (must go before those);
+ * pcFeeCalculations references commissionCalculations.id (must go before
+ * commissionCalculations); commissionCalculations references
  * commissionAgreements.id (must go before commissionAgreements); and
  * pcFeeAuthorities.agentUserId -> users.id (non-cascading), so it must be
  * cleared before the users delete near the end of this function too.
@@ -352,6 +354,11 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   if (financialPaymentRequestIds.length > 0) {
     await db.delete(financialPaymentProviderEvents).where(inArray(financialPaymentProviderEvents.paymentRequestId, financialPaymentRequestIds));
     await db.delete(financialDisputes).where(inArray(financialDisputes.paymentRequestId, financialPaymentRequestIds));
+    // Stage D (Section 31) — financial_payment_outbox.payment_request_id ->
+    // financial_payment_requests.id, non-cascading. Must be cleared before
+    // the financialPaymentRequests delete just below, exactly like the two
+    // siblings above.
+    await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
   }
   await db.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids));
   await db.delete(pcFeeCalculations).where(inArray(pcFeeCalculations.brokerageId, ids));
