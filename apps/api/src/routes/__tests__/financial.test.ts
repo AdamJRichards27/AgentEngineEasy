@@ -10,7 +10,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { createBrokerageWithUsers, createTransactionFromListedProperty, devLogin, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers, createTransactionFromListedProperty, addSecondBrokerageAdmin, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -48,11 +48,18 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 
   A = await createBrokerageWithUsers(baseUrl, `Financial Routes Test ${suffix}`);
-  secondAdmin = await devLogin(baseUrl, {
+  // A genuine second Brokerage Administrator inside A's own brokerage (not
+  // just a second signed-in identity) — dev-login only ever makes the
+  // FIRST sign-in to a brokerage name an admin (see
+  // addSecondBrokerageAdmin's own doc comment in testSupport.ts), and every
+  // separation-of-duties assertion below needs an approver/activator who
+  // both passes requireRole(...BROKERAGE_ADMIN_ROLES) and is not the
+  // drafter.
+  secondAdmin = await addSecondBrokerageAdmin(baseUrl, A.brokerageId, {
     email: `fin-routes-admin2-${suffix}@example.com`,
     firstName: "Second",
     lastName: "Admin",
-    brokerageName: `Financial Routes Test ${suffix}`,
+    ownBrokerageName: `Financial Routes Second Admin Test ${suffix}`,
   });
   otherBrokerage = await createBrokerageWithUsers(baseUrl, `Financial Routes Other Test ${suffix}`);
   const created = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, { address: `1 Financial Routes Test St ${suffix}` });

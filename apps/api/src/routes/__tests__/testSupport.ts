@@ -127,6 +127,40 @@ export async function createBrokerageWithUsers(
   return { admin, agent, brokerageId: admin.user.brokerageId };
 }
 
+/**
+ * A second, independent Brokerage Administrator inside an ALREADY-EXISTING
+ * brokerage. dev-login's own rule (routes/auth.ts) makes only the FIRST
+ * ever sign-in to a given brokerage name a "Brokerage Administrator" --
+ * every later sign-in to that same name becomes an "Agent" instead (see
+ * createBrokerageWithUsers above, whose own doc comment names this exact
+ * behaviour). Real separation-of-duties scenarios (Agent Engine 2.0 --
+ * Financial Transaction Engine, Section 32/33: the same person cannot
+ * both draft and approve/activate a financial authorisation) need a
+ * second genuine admin account inside the SAME brokerage as an existing
+ * admin, so this dev-logs the new user into a brand-new brokerage of
+ * their own (making them that brokerage's first user, and therefore its
+ * admin) and then moves them into the target brokerage directly in the
+ * database, preserving their "Brokerage Administrator" role.
+ * middlewares/auth.ts's loadSession re-derives req.authedUser from a
+ * fresh per-request DB lookup rather than from anything cached in the
+ * session cookie, so the move takes effect starting with this user's very
+ * next request.
+ */
+export async function addSecondBrokerageAdmin(
+  baseUrl: string,
+  targetBrokerageId: number,
+  input: { email: string; firstName: string; lastName: string; ownBrokerageName: string },
+): Promise<DevLoginResult> {
+  const result = await devLogin(baseUrl, {
+    email: input.email,
+    firstName: input.firstName,
+    lastName: input.lastName,
+    brokerageName: input.ownBrokerageName,
+  });
+  await db.update(users).set({ brokerageId: targetBrokerageId }).where(eq(users.id, result.user.id));
+  return { cookie: result.cookie, user: { ...result.user, brokerageId: targetBrokerageId } };
+}
+
 async function json<T>(res: Response): Promise<T> {
   const text = await res.text();
   try {
