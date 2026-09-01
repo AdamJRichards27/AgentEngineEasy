@@ -39,6 +39,7 @@ import {
   vendorApprovalStatusPillClass,
 } from "../lib/launchPlan";
 import { CommunicationsSection } from "../components/CommunicationsSection";
+import { FinancialSummarySection } from "../components/FinancialSummarySection";
 
 interface PropertyOverview {
   id: number;
@@ -1220,6 +1221,12 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           </>
         )}
       </details>
+
+      {/* Agent Engine 2.0 — Financial Transaction Engine (Priority 9,
+          Stage G, Section 28). Self-gates on Brokerage Administrator
+          internally (this component's own header comment explains why) —
+          see components/FinancialSummarySection.tsx. */}
+      <FinancialSummarySection propertyId={propertyId} />
 
       {/* Ready to List / Go Live fallback controls — normally reached via
           the primary action above; kept here too so nothing is lost if the
