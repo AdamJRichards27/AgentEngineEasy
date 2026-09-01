@@ -19,6 +19,7 @@ import { appraisalsRouter } from "./appraisals.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
+import { commandCentreRouter } from "./commandCentre.js";
 
 export const apiRouter = Router();
 
@@ -54,6 +55,11 @@ apiRouter.use(exceptionsRouter);
 // own paths span both /properties/:propertyId/launch and a top-level
 // /launch/... namespace.
 apiRouter.use(launchRouter);
+// Agent Engine 2.0 — Agent Daily Command Centre (Priority 6). Built from
+// staging after Exception & Risk Engine (Priority 4) and Property Launch &
+// Campaign Coordination (Priority 5) were merged in. Prefixed mount, unlike
+// exceptionsRouter/launchRouter above — this router's own paths are relative.
+apiRouter.use("/command-centre", commandCentreRouter);
 
 // Phase 8 (Agent command experience: Home screen, exceptions surfaced) is
 // built. Phase 9 (Contextual AI Architecture - see ARCHITECTURE.md) adds a

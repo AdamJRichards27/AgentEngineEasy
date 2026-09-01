@@ -3,6 +3,7 @@ import Home from "./pages/Home";
 import PropertiesList from "./pages/PropertiesList";
 import StartProperty from "./pages/StartProperty";
 import PropertyWorkspace from "./pages/PropertyWorkspace";
+import CommandCentre from "./pages/CommandCentre";
 import Grow from "./pages/Grow";
 import GrowImport from "./pages/GrowImport";
 import Exceptions from "./pages/Exceptions";
@@ -63,6 +64,7 @@ function SidebarLayout({
 
   const links: Array<{ path: string; label: string }> = [
     { path: "/", label: "Home" },
+    { path: "/today", label: "Today" },
     { path: "/properties", label: "Properties" },
     { path: "/exceptions", label: "Exceptions" },
     { path: "/grow", label: "Grow" },
@@ -114,6 +116,7 @@ function SidebarLayout({
         <main>
           <Switch>
             <Route path="/" component={Home} />
+            <Route path="/today" component={CommandCentre} />
             <Route path="/properties" component={PropertiesList} />
             <Route path="/properties/start" component={StartProperty} />
             <Route path="/properties/:id" component={PropertyWorkspace} />
