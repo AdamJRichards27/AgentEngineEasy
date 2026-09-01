@@ -1,13 +1,28 @@
 // Agent Engine 2.0 — Financial Transaction Engine (Priority 9), Stage E.
 //
 // HTTP surface over the financial control-and-evidence layer (Section 32).
-// The ENTIRE router requires Brokerage Administrator — this app's existing,
+// EVERY route requires Brokerage Administrator — this app's existing,
 // twice-established precedent for "who can see financial data at all"
 // (routes/exceptions.ts's canViewFinancials, reused unchanged by
 // routes/commandCentre.ts) is BROKERAGE_ADMIN_ROLES only, and this build
 // follows that precedent exactly rather than inventing a second, competing
 // definition of financial visibility (mandatory starting procedure,
 // Section 2 item 9: reuse, don't duplicate).
+//
+// requireAuth/requireRole are applied PER ROUTE (as handler arguments)
+// rather than once via `financialRouter.use(...)` at the top of the file.
+// financialRouter is mounted unprefixed at apiRouter's root (see
+// routes/index.ts's own comment on why), and Express's Router.use()
+// without a path matches every request that reaches this router instance
+// — not just ones a route declared below will end up matching. A blanket
+// `.use(requireAuth, ...)` here would therefore 401 any request that
+// merely passes through financialRouter on its way to a later-mounted
+// sibling, including financialWebhooksRouter's own
+// POST /financial/webhooks/mandate-payments (a provider callback that
+// carries no session cookie by design — see that router's own comment).
+// Gating each route individually, matching exceptions.ts/pitCrew.ts's own
+// established convention, keeps financialRouter from ever intercepting a
+// path it doesn't itself own.
 //
 // Every handler re-derives brokerageId from req.authedUser and, for any
 // route taking a transactionId, re-derives propertyId from the
@@ -16,11 +31,12 @@
 // cross-tenant id reads as 404, never 403, so it never reveals whether
 // the row exists (same convention as routes/exceptions.ts/pitCrew.ts).
 //
-// Section 33 sensitive-data protection: PC fee authority responses always
-// go through queries.ts's redaction (hasMandate boolean, never the raw
-// mandateProviderRef). This router never exposes
-// financialPaymentProviderEvents (raw provider webhook payloads) at all —
-// financialLedgerEvents is the evidence surface external readers get.
+// Section 33 sensitive-data protection: every PC fee authority response
+// (create/get/list/activate/revoke) goes through redactPcFeeAuthority()
+// (hasMandate boolean, never the raw mandateProviderRef). This router
+// never exposes financialPaymentProviderEvents (raw provider webhook
+// payloads) at all — financialLedgerEvents is the evidence surface
+// external readers get.
 
 import { Router, type Response } from "express";
 import { z } from "zod";
@@ -37,6 +53,7 @@ import {
   createPcFeeAuthority,
   activatePcFeeAuthority,
   revokePcFeeAuthority,
+  redactPcFeeAuthority,
 } from "../lib/financial/pcFeeAuthorities.js";
 import { createCommissionCalculation } from "../lib/financial/calculations.js";
 import { createPcFeeCalculation } from "../lib/financial/pcFeeCalculations.js";
@@ -69,7 +86,7 @@ import {
 } from "../lib/financial/queries.js";
 
 export const financialRouter = Router();
-financialRouter.use(requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES));
+const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES)] as const;
 
 function handleFinancialControlError(err: unknown, res: Response): boolean {
   if (err instanceof FinancialControlError) {
@@ -103,7 +120,7 @@ async function agentBelongsToBrokerage(agentUserId: number, brokerageId: number)
 // per-property route living alongside its top-level ones.
 // ---------------------------------------------------------------------
 
-financialRouter.get("/properties/:propertyId/financial/summary", async (req, res) => {
+financialRouter.get("/properties/:propertyId/financial/summary", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const propertyId = Number(req.params.propertyId);
   const summary = await getPropertyFinancialSummary(propertyId, user.brokerageId);
@@ -134,20 +151,20 @@ const createAgreementSchema = z.object({
   notes: z.string().max(2000).optional(),
 });
 
-financialRouter.get("/financial/commission-agreements", async (req, res) => {
+financialRouter.get("/financial/commission-agreements", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const transactionId = req.query.transactionId ? Number(req.query.transactionId) : undefined;
   res.json({ agreements: await listCommissionAgreements(user.brokerageId, transactionId) });
 });
 
-financialRouter.get("/financial/commission-agreements/:id", async (req, res) => {
+financialRouter.get("/financial/commission-agreements/:id", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const row = await getCommissionAgreement(Number(req.params.id), user.brokerageId);
   if (!row) return void res.status(404).json({ error: "Not found" });
   res.json({ agreement: row });
 });
 
-financialRouter.post("/financial/commission-agreements", async (req, res) => {
+financialRouter.post("/financial/commission-agreements", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createAgreementSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -175,7 +192,7 @@ financialRouter.post("/financial/commission-agreements", async (req, res) => {
   res.status(201).json({ agreement });
 });
 
-financialRouter.post("/financial/commission-agreements/:id/approve", async (req, res) => {
+financialRouter.post("/financial/commission-agreements/:id/approve", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   try {
     const agreement = await approveCommissionAgreement(Number(req.params.id), user.brokerageId, user.id);
@@ -187,7 +204,7 @@ financialRouter.post("/financial/commission-agreements/:id/approve", async (req,
 
 const cancelAgreementSchema = z.object({ reason: z.string().min(1).max(2000) });
 
-financialRouter.post("/financial/commission-agreements/:id/cancel", async (req, res) => {
+financialRouter.post("/financial/commission-agreements/:id/cancel", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = cancelAgreementSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -214,13 +231,13 @@ const createCalculationSchema = z.object({
   supersededReason: z.string().max(2000).optional(),
 });
 
-financialRouter.get("/financial/commission-calculations", async (req, res) => {
+financialRouter.get("/financial/commission-calculations", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const transactionId = req.query.transactionId ? Number(req.query.transactionId) : undefined;
   res.json({ calculations: await listCommissionCalculations(user.brokerageId, transactionId) });
 });
 
-financialRouter.post("/financial/commission-calculations", async (req, res) => {
+financialRouter.post("/financial/commission-calculations", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createCalculationSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -246,7 +263,7 @@ financialRouter.post("/financial/commission-calculations", async (req, res) => {
 
 const finalizeSettlementSchema = z.object({ transactionId: z.coerce.number().int(), salePriceCentsOverride: z.number().int().nonnegative().optional() });
 
-financialRouter.post("/financial/settlement/finalize-commission", async (req, res) => {
+financialRouter.post("/financial/settlement/finalize-commission", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = finalizeSettlementSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -281,20 +298,20 @@ const createAuthoritySchema = z.object({
   signedEvidenceRef: z.string().max(500).optional(),
 });
 
-financialRouter.get("/financial/pc-fee-authorities", async (req, res) => {
+financialRouter.get("/financial/pc-fee-authorities", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const agentUserId = req.query.agentUserId ? Number(req.query.agentUserId) : undefined;
   res.json({ authorities: await listPcFeeAuthorities(user.brokerageId, agentUserId) });
 });
 
-financialRouter.get("/financial/pc-fee-authorities/:id", async (req, res) => {
+financialRouter.get("/financial/pc-fee-authorities/:id", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const row = await getPcFeeAuthority(Number(req.params.id), user.brokerageId);
   if (!row) return void res.status(404).json({ error: "Not found" });
   res.json({ authority: row });
 });
 
-financialRouter.post("/financial/pc-fee-authorities", async (req, res) => {
+financialRouter.post("/financial/pc-fee-authorities", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createAuthoritySchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -302,18 +319,18 @@ financialRouter.post("/financial/pc-fee-authorities", async (req, res) => {
     return void res.status(404).json({ error: "Agent not found" });
   }
   const authority = await createPcFeeAuthority({ ...parsed.data, brokerageId: user.brokerageId, createdByUserId: user.id });
-  res.status(201).json({ authority });
+  res.status(201).json({ authority: redactPcFeeAuthority(authority) });
 });
 
 const activateAuthoritySchema = z.object({ mandateProviderRef: z.string().min(1).max(500), mandateProvider: z.string().min(1).max(200) });
 
-financialRouter.post("/financial/pc-fee-authorities/:id/activate", async (req, res) => {
+financialRouter.post("/financial/pc-fee-authorities/:id/activate", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = activateAuthoritySchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
   try {
     const authority = await activatePcFeeAuthority(Number(req.params.id), user.brokerageId, user.id, parsed.data.mandateProviderRef, parsed.data.mandateProvider);
-    res.json({ authority });
+    res.json({ authority: redactPcFeeAuthority(authority) });
   } catch (err) {
     if (!handleFinancialControlError(err, res)) throw err;
   }
@@ -321,13 +338,13 @@ financialRouter.post("/financial/pc-fee-authorities/:id/activate", async (req, r
 
 const revokeAuthoritySchema = z.object({ reason: z.string().min(1).max(2000) });
 
-financialRouter.post("/financial/pc-fee-authorities/:id/revoke", async (req, res) => {
+financialRouter.post("/financial/pc-fee-authorities/:id/revoke", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = revokeAuthoritySchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
   try {
     const authority = await revokePcFeeAuthority(Number(req.params.id), user.brokerageId, user.id, parsed.data.reason);
-    res.json({ authority });
+    res.json({ authority: redactPcFeeAuthority(authority) });
   } catch (err) {
     if (!handleFinancialControlError(err, res)) throw err;
   }
@@ -346,13 +363,13 @@ const createPcCalculationSchema = z.object({
   state: z.enum(["ESTIMATE", "PROVISIONAL", "CONFIRMED", "FINALISED"]).optional(),
 });
 
-financialRouter.get("/financial/pc-fee-calculations", async (req, res) => {
+financialRouter.get("/financial/pc-fee-calculations", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const transactionId = req.query.transactionId ? Number(req.query.transactionId) : undefined;
   res.json({ calculations: await listPcFeeCalculations(user.brokerageId, transactionId) });
 });
 
-financialRouter.post("/financial/pc-fee-calculations", async (req, res) => {
+financialRouter.post("/financial/pc-fee-calculations", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createPcCalculationSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -376,7 +393,7 @@ financialRouter.post("/financial/pc-fee-calculations", async (req, res) => {
 
 const ensurePcRequestSchema = z.object({ transactionId: z.coerce.number().int(), pcFeeCalculationId: z.number().int(), payeeUserId: z.number().int().optional(), payerUserId: z.number().int().optional() });
 
-financialRouter.post("/financial/settlement/ensure-pc-success-fee", async (req, res) => {
+financialRouter.post("/financial/settlement/ensure-pc-success-fee", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = ensurePcRequestSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -405,14 +422,14 @@ financialRouter.post("/financial/settlement/ensure-pc-success-fee", async (req, 
 // re-check tenancy themselves.
 // ---------------------------------------------------------------------
 
-financialRouter.get("/financial/payment-requests", async (req, res) => {
+financialRouter.get("/financial/payment-requests", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const transactionId = req.query.transactionId ? Number(req.query.transactionId) : undefined;
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   res.json({ paymentRequests: await listPaymentRequests(user.brokerageId, { transactionId, status }) });
 });
 
-financialRouter.get("/financial/payment-requests/:id", async (req, res) => {
+financialRouter.get("/financial/payment-requests/:id", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const row = await getPaymentRequest(Number(req.params.id), user.brokerageId);
   if (!row) return void res.status(404).json({ error: "Not found" });
@@ -420,7 +437,7 @@ financialRouter.get("/financial/payment-requests/:id", async (req, res) => {
   res.json({ paymentRequest: row, disputes });
 });
 
-financialRouter.post("/financial/payment-requests/:id/notice-sent", async (req, res) => {
+financialRouter.post("/financial/payment-requests/:id/notice-sent", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const existing = await getPaymentRequest(Number(req.params.id), user.brokerageId);
   if (!existing) return void res.status(404).json({ error: "Not found" });
@@ -432,7 +449,7 @@ financialRouter.post("/financial/payment-requests/:id/notice-sent", async (req, 
   }
 });
 
-financialRouter.post("/financial/payment-requests/:id/schedule-debit", async (req, res) => {
+financialRouter.post("/financial/payment-requests/:id/schedule-debit", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const existing = await getPaymentRequest(Number(req.params.id), user.brokerageId);
   if (!existing) return void res.status(404).json({ error: "Not found" });
@@ -446,7 +463,7 @@ financialRouter.post("/financial/payment-requests/:id/schedule-debit", async (re
 
 const cancelDebitSchema = z.object({ reason: z.string().min(1).max(2000) });
 
-financialRouter.post("/financial/payment-requests/:id/cancel-debit", async (req, res) => {
+financialRouter.post("/financial/payment-requests/:id/cancel-debit", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = cancelDebitSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -462,7 +479,7 @@ financialRouter.post("/financial/payment-requests/:id/cancel-debit", async (req,
 
 const reverseDebitSchema = z.object({ reason: z.string().min(1).max(2000) });
 
-financialRouter.post("/financial/payment-requests/:id/reverse", async (req, res) => {
+financialRouter.post("/financial/payment-requests/:id/reverse", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const parsed = reverseDebitSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
@@ -480,38 +497,38 @@ financialRouter.post("/financial/payment-requests/:id/reverse", async (req, res)
 // Evidence + reporting reads (Sections 17-20, 23) and settings.
 // ---------------------------------------------------------------------
 
-financialRouter.get("/financial/ledger-events", async (req, res) => {
+financialRouter.get("/financial/ledger-events", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const transactionId = req.query.transactionId ? Number(req.query.transactionId) : undefined;
   const propertyId = req.query.propertyId ? Number(req.query.propertyId) : undefined;
   res.json({ events: await listLedgerEvents(user.brokerageId, { transactionId, propertyId }) });
 });
 
-financialRouter.get("/financial/marketing-payment-records", async (req, res) => {
+financialRouter.get("/financial/marketing-payment-records", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const propertyId = req.query.propertyId ? Number(req.query.propertyId) : undefined;
   res.json({ records: await listMarketingPaymentRecords(user.brokerageId, propertyId) });
 });
 
-financialRouter.get("/financial/deposits", async (req, res) => {
+financialRouter.get("/financial/deposits", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const transactionId = req.query.transactionId ? Number(req.query.transactionId) : undefined;
   res.json({ deposits: await listFinancialDeposits(user.brokerageId, transactionId) });
 });
 
-financialRouter.get("/financial/reconciliations", async (req, res) => {
+financialRouter.get("/financial/reconciliations", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   const recordType = typeof req.query.recordType === "string" ? req.query.recordType : undefined;
   const recordId = typeof req.query.recordId === "string" ? req.query.recordId : undefined;
   res.json({ reconciliations: await listFinancialReconciliations(user.brokerageId, recordType, recordId) });
 });
 
-financialRouter.get("/financial/audit-return-reminders", async (req, res) => {
+financialRouter.get("/financial/audit-return-reminders", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   res.json({ reminders: await listAuditReturnReminders(user.brokerageId) });
 });
 
-financialRouter.get("/financial/settings", async (req, res) => {
+financialRouter.get("/financial/settings", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;
   res.json({ settings: await getOrCreateFinancialSettings(user.brokerageId) });
 });
@@ -523,7 +540,7 @@ financialRouter.get("/financial/settings", async (req, res) => {
 // scan endpoint provides ahead of/alongside its own scheduler.
 // ---------------------------------------------------------------------
 
-financialRouter.post("/financial/ops/dispatch-outbox", async (_req, res) => {
+financialRouter.post("/financial/ops/dispatch-outbox", ...requireFinancialAdmin, async (_req, res) => {
   const result = await dispatchPendingPaymentOutbox();
   res.json({ result });
 });
