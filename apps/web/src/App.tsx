@@ -6,6 +6,7 @@ import PropertyWorkspace from "./pages/PropertyWorkspace";
 import Grow from "./pages/Grow";
 import GrowImport from "./pages/GrowImport";
 import Exceptions from "./pages/Exceptions";
+import PitCrewCommandCentre from "./pages/PitCrewCommandCentre";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import { useSession, useLogout } from "./lib/session";
@@ -61,10 +62,17 @@ function SidebarLayout({
 }) {
   const [location] = useLocation();
 
+  // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7, Section 26):
+  // only Pit Crew and Brokerage Administrator ever see this link. Agents
+  // keep their existing nav unchanged. The API enforces the same gate
+  // independently (requireRole in routes/pitCrew.ts) -- this is a UX
+  // nicety, not the security boundary.
+  const canSeePitCrew = user?.role === "Pit Crew" || user?.role === "Brokerage Administrator";
   const links: Array<{ path: string; label: string }> = [
     { path: "/", label: "Home" },
     { path: "/properties", label: "Properties" },
     { path: "/exceptions", label: "Exceptions" },
+    ...(canSeePitCrew ? [{ path: "/pit-crew", label: "Pit Crew" }] : []),
     { path: "/grow", label: "Grow" },
     { path: "/settings", label: "Settings" },
   ];
@@ -118,6 +126,7 @@ function SidebarLayout({
             <Route path="/properties/start" component={StartProperty} />
             <Route path="/properties/:id" component={PropertyWorkspace} />
             <Route path="/exceptions" component={Exceptions} />
+            <Route path="/pit-crew" component={PitCrewCommandCentre} />
             <Route path="/grow" component={Grow} />
             <Route path="/grow/import" component={GrowImport} />
             <Route path="/settings" component={Settings} />
