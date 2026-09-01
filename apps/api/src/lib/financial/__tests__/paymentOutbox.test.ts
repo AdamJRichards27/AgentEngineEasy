@@ -49,6 +49,12 @@ interface Fixture {
   authorityId: number;
 }
 
+// pc_fee_authorities has a unique (agentUserId, version) index, and every
+// fixture below deliberately shares the SAME agent (there is only one
+// agent in this file's brokerage) — so each fixture's authority needs its
+// own version number rather than every one hardcoding version: 1.
+let authorityVersionCounter = 0;
+
 async function buildFixture(input: { addressSuffix: string; noticeRequiredDays: number; withMandateRef: boolean }): Promise<Fixture> {
   const created = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
     address: `1 Payment Outbox Test St ${suffix} ${input.addressSuffix}`,
@@ -74,7 +80,7 @@ async function buildFixture(input: { addressSuffix: string; noticeRequiredDays: 
     .values({
       brokerageId: A.brokerageId,
       agentUserId: A.agent.user.id,
-      version: 1,
+      version: ++authorityVersionCounter,
       status: "ACTIVE",
       rateBps: 690,
       noticeRequiredDays: input.noticeRequiredDays,

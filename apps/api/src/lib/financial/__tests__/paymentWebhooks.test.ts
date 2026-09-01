@@ -55,6 +55,12 @@ interface ScheduledFixture {
   providerRequestRef: string;
 }
 
+// pc_fee_authorities has a unique (agentUserId, version) index, and every
+// fixture below deliberately shares the SAME agent (there is only one
+// agent in this file's brokerage) — so each fixture's authority needs its
+// own version number rather than every one hardcoding version: 1.
+let authorityVersionCounter = 0;
+
 async function buildScheduledFixture(addressSuffix: string): Promise<ScheduledFixture> {
   const created = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
     address: `1 Payment Webhooks Test St ${suffix} ${addressSuffix}`,
@@ -80,7 +86,7 @@ async function buildScheduledFixture(addressSuffix: string): Promise<ScheduledFi
     .values({
       brokerageId: A.brokerageId,
       agentUserId: A.agent.user.id,
-      version: 1,
+      version: ++authorityVersionCounter,
       status: "ACTIVE",
       rateBps: 690,
       noticeRequiredDays: 0,
