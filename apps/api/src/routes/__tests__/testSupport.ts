@@ -37,6 +37,15 @@ import {
   vendorApprovals,
   launchPlanTransitions,
   pitCrewAssignments,
+  communicationThreads,
+  communicationParticipants,
+  communicationMessages,
+  communicationDeliveryAttempts,
+  communicationTemplates,
+  communicationConsent,
+  communicationCostLedger,
+  communicationSettings,
+  communicationWebhookEvents,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -281,10 +290,47 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * onto properties.id (launch_plans directly; the other four transitively
  * via launch_plans.id — see packages/db/src/schema/launch.ts), so all must
  * be deleted before the properties delete further down this block.
+ *
+ * Agent Engine 2.0 — Communications Hub (Priority 8): extended again for
+ * every communications table. All of them carry brokerageId directly
+ * (packages/db/src/schema/communications.ts) so this new block is scoped
+ * by `ids` alone, independent of propertyIds — but the internal ordering
+ * still matters: communicationWebhookEvents.relatedMessageId and
+ * communicationDeliveryAttempts.messageId both reference
+ * communicationMessages.id (non-cascading), and communicationMessages
+ * itself references communicationParticipants.id/communicationTemplates.id
+ * (also non-cascading), so both must be cleared before communicationMessages
+ * is deleted, which itself must be cleared before
+ * communicationParticipants/communicationThreads/communicationTemplates.
+ * Placed early (before the properties/transactions block) since
+ * communicationThreads.propertyId is a required, non-cascading FK onto
+ * properties.id.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
   if (ids.length === 0) return;
+
+  // Agent Engine 2.0 — Communications Hub (Priority 8). See this function's
+  // own doc comment above for the FK ordering this block depends on.
+  const communicationMessageRows = await db.select({ id: communicationMessages.id }).from(communicationMessages).where(inArray(communicationMessages.brokerageId, ids));
+  const communicationMessageIds = communicationMessageRows.map((m) => m.id);
+  if (communicationMessageIds.length > 0) {
+    await db.delete(communicationWebhookEvents).where(inArray(communicationWebhookEvents.relatedMessageId, communicationMessageIds));
+    await db.delete(communicationDeliveryAttempts).where(inArray(communicationDeliveryAttempts.messageId, communicationMessageIds));
+  }
+  await db.delete(communicationMessages).where(inArray(communicationMessages.brokerageId, ids));
+
+  const communicationThreadRows = await db.select({ id: communicationThreads.id }).from(communicationThreads).where(inArray(communicationThreads.brokerageId, ids));
+  const communicationThreadIds = communicationThreadRows.map((t) => t.id);
+  if (communicationThreadIds.length > 0) {
+    await db.delete(communicationParticipants).where(inArray(communicationParticipants.threadId, communicationThreadIds));
+  }
+  await db.delete(communicationThreads).where(inArray(communicationThreads.brokerageId, ids));
+
+  await db.delete(communicationTemplates).where(inArray(communicationTemplates.brokerageId, ids));
+  await db.delete(communicationConsent).where(inArray(communicationConsent.brokerageId, ids));
+  await db.delete(communicationCostLedger).where(inArray(communicationCostLedger.brokerageId, ids));
+  await db.delete(communicationSettings).where(inArray(communicationSettings.brokerageId, ids));
 
   // F-05: Import (import_records / import_jobs) rows are deleted first, ahead
   // of both the Grow tables below and the existing property cascade --

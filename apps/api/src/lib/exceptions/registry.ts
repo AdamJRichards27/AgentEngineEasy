@@ -45,6 +45,11 @@ import { WORKFLOW_OPERATIONAL_RULES } from "./rules/workflowOperational.js";
 // separate Launch warning system — see rules/launchCampaign.ts's own
 // module comment.
 import { LAUNCH_CAMPAIGN_RULES } from "./rules/launchCampaign.js";
+// Agent Engine 2.0 — Communications Hub (Priority 8). Delivery failures and
+// blocked sends (consent/cost) surface through this same registry, under
+// their own COMMUNICATION category — see rules/communicationDelivery.ts's
+// own module comment.
+import { COMMUNICATION_DELIVERY_RULES } from "./rules/communicationDelivery.js";
 
 export const RISK_RULES: RiskRule[] = [
   ...APPRAISAL_AGREEMENT_RULES,
@@ -55,6 +60,7 @@ export const RISK_RULES: RiskRule[] = [
   ...SETTLEMENT_CLOSURE_RULES,
   ...WORKFLOW_OPERATIONAL_RULES,
   ...LAUNCH_CAMPAIGN_RULES,
+  ...COMMUNICATION_DELIVERY_RULES,
 ];
 
 // Fail loudly at import time on a duplicate ruleId — a copy-paste error in

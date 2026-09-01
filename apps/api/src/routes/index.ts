@@ -21,6 +21,8 @@ import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
 import { pitCrewRouter } from "./pitCrew.js";
 import { commandCentreRouter } from "./commandCentre.js";
+import { communicationsRouter } from "./communications.js";
+import { communicationsWebhooksRouter } from "./communicationsWebhooks.js";
 
 export const apiRouter = Router();
 
@@ -73,3 +75,12 @@ apiRouter.use("/command-centre", commandCentreRouter);
 // same reasoning as exceptionsRouter/launchRouter above -- pitCrewRouter
 // declares its own full "/pit-crew/..." paths.
 apiRouter.use(pitCrewRouter);
+// Agent Engine 2.0 — Communications Hub (Priority 8): unprefixed mount,
+// same reasoning as exceptionsRouter/launchRouter/pitCrewRouter above —
+// communicationsRouter's own paths span both /properties/:propertyId/
+// communications/... and a top-level /communications/... namespace.
+// communicationsWebhooksRouter is mounted separately (and NOT behind
+// requireAuth — see its own module comment) since a provider callback
+// carries no session cookie.
+apiRouter.use(communicationsRouter);
+apiRouter.use(communicationsWebhooksRouter);

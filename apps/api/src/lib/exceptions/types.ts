@@ -49,6 +49,12 @@ export const RISK_EXCEPTION_METADATA_ALLOW_LIST = [
   "daysUntilDue",
   "partyRole",
   "missingFields",
+  // Agent Engine 2.0 — Communications Hub (Priority 8). Delivery-failure
+  // and blocked-send findings (rules/communicationDelivery.ts) need to
+  // name which message/channel/failure they're about.
+  "communicationMessageId",
+  "communicationChannel",
+  "communicationFailureCategory",
 ] as const;
 export type RiskExceptionMetadataKey = (typeof RISK_EXCEPTION_METADATA_ALLOW_LIST)[number];
 
