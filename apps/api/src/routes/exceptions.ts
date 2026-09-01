@@ -41,16 +41,15 @@ function actorFrom(user: AuthedUser): ActorRef {
   return { id: user.id, role: user.role };
 }
 
-function canViewFinancials(user: AuthedUser): boolean {
+export function canViewFinancials(user: AuthedUser): boolean {
   return BROKERAGE_ADMIN_ROLES.includes(user.role);
 }
 
 /** Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7): Pit Crew now
  * gets whole-tenant visibility here too, same as Brokerage Administrator --
  * the pit_crew_assignments overlay table (lib/pitCrew) is the service-
- * assignment record this comment used to say didn't exist. Agents remain
- * scoped to properties they're the agent for. */
-async function restrictedPropertyIdsFor(user: AuthedUser): Promise<number[] | null> {
+ * assignment record. Agents remain scoped to properties they are the agent for. */
+export async function restrictedPropertyIdsFor(user: AuthedUser): Promise<number[] | null> {
   if (BROKERAGE_ADMIN_ROLES.includes(user.role) || PIT_CREW_ROLES.includes(user.role)) return null;
   const rows = await db.select({ id: properties.id }).from(properties).where(and(eq(properties.brokerageId, user.brokerageId), eq(properties.agentId, user.id)));
   return rows.map((r) => r.id);
