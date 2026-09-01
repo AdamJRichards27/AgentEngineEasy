@@ -129,6 +129,17 @@ export type PaymentRequestStatus = (typeof PAYMENT_REQUEST_STATUSES)[number];
 export const PAYMENT_REQUEST_KINDS = ["PC_SUCCESS_FEE"] as const; // extensible: kept singular-purpose for this build
 export type PaymentRequestKind = (typeof PAYMENT_REQUEST_KINDS)[number];
 
+// Stage D (Section 31): the durable payment outbox's own action/status
+// vocabulary — distinct from PAYMENT_REQUEST_STATUSES above. A payment
+// request's status describes the PC success fee's business lifecycle; an
+// outbox row describes the narrower, mechanical question of whether ONE
+// specific call to the external provider has been reliably delivered yet.
+export const OUTBOX_ACTIONS = ["SCHEDULE_DEBIT", "CANCEL_DEBIT", "REVERSE_DEBIT"] as const;
+export type OutboxAction = (typeof OUTBOX_ACTIONS)[number];
+
+export const OUTBOX_STATUSES = ["PENDING", "DISPATCHED", "FAILED"] as const;
+export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
+
 export const DISPUTE_STATUSES = ["OPEN", "UNDER_REVIEW", "RESOLVED_PAYABLE", "RESOLVED_ADJUSTED", "RESOLVED_WAIVED", "CLOSED"] as const;
 export type DisputeStatus = (typeof DISPUTE_STATUSES)[number];
 
@@ -463,6 +474,40 @@ export const financialPaymentProviderEvents = pgTable(
   }),
 );
 
+// Stage D (Section 31): the durable payment outbox. One row per
+// (paymentRequestId, action) — the unique index is both the dedup
+// backstop AND the retry state: a failed dispatch attempt updates THIS
+// row's attempts/nextAttemptAt/lastError rather than inserting a new one,
+// so the row's own history is a complete record of every attempt. See
+// lib/financial/paymentOutbox.ts's module header for the full rationale.
+export const financialPaymentOutbox = pgTable(
+  "financial_payment_outbox",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    paymentRequestId: integer("payment_request_id").notNull().references(() => financialPaymentRequests.id),
+
+    action: text("action").notNull(), // OUTBOX_ACTIONS
+    status: text("status").notNull().default("PENDING"), // OUTBOX_STATUSES
+
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+    lastError: text("last_error"),
+    dispatchedAt: timestamp("dispatched_at"),
+
+    idempotencyKey: text("idempotency_key").notNull(),
+    correlationId: text("correlation_id"),
+
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    paymentRequestActionIdx: uniqueIndex("financial_payment_outbox_payment_request_action_idx").on(table.paymentRequestId, table.action),
+    statusNextAttemptIdx: index("financial_payment_outbox_status_next_attempt_idx").on(table.status, table.nextAttemptAt),
+  }),
+);
+
 // ---------------------------------------------------------------------
 // E. Disputes (Section 16)
 // ---------------------------------------------------------------------
@@ -637,6 +682,12 @@ export const FINANCIAL_LEDGER_EVENT_TYPES = [
   "PC_FEE_PAYMENT_PROCESSING",
   "PC_FEE_PAID",
   "PC_FEE_PAYMENT_FAILED",
+  // Stage D addition: no dedicated "reversed" ledger event existed from
+  // Stage B — a REVERSED payment request (either provider-reported via a
+  // webhook, or admin-initiated via reverseDebit) is a genuinely distinct,
+  // auditable outcome from a plain PAYMENT_FAILED, so it gets its own
+  // additive vocabulary entry rather than overloading that one.
+  "PC_FEE_PAYMENT_REVERSED",
   "PC_FEE_DISPUTED",
   "PC_FEE_DISPUTE_RESOLVED",
   "PC_FEE_WAIVED",
@@ -761,6 +812,7 @@ export const insertPcFeeAuthoritySchema = createInsertSchema(pcFeeAuthorities).o
 export const insertPcFeeCalculationSchema = createInsertSchema(pcFeeCalculations).omit({ id: true, calculatedAt: true });
 export const insertFinancialPaymentRequestSchema = createInsertSchema(financialPaymentRequests).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertFinancialPaymentProviderEventSchema = createInsertSchema(financialPaymentProviderEvents).omit({ id: true, receivedAt: true });
+export const insertFinancialPaymentOutboxSchema = createInsertSchema(financialPaymentOutbox).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertFinancialDisputeSchema = createInsertSchema(financialDisputes).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertMarketingPaymentRecordSchema = createInsertSchema(marketingPaymentRecords).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertFinancialDepositSchema = createInsertSchema(financialDeposits).omit({ id: true, createdAt: true, updatedAt: true });
@@ -775,6 +827,7 @@ export type InsertPcFeeAuthority = z.infer<typeof insertPcFeeAuthoritySchema>;
 export type InsertPcFeeCalculation = z.infer<typeof insertPcFeeCalculationSchema>;
 export type InsertFinancialPaymentRequest = z.infer<typeof insertFinancialPaymentRequestSchema>;
 export type InsertFinancialPaymentProviderEvent = z.infer<typeof insertFinancialPaymentProviderEventSchema>;
+export type InsertFinancialPaymentOutbox = z.infer<typeof insertFinancialPaymentOutboxSchema>;
 export type InsertFinancialDispute = z.infer<typeof insertFinancialDisputeSchema>;
 export type InsertMarketingPaymentRecord = z.infer<typeof insertMarketingPaymentRecordSchema>;
 export type InsertFinancialDeposit = z.infer<typeof insertFinancialDepositSchema>;
@@ -795,6 +848,7 @@ export type PcFeeAuthority = typeof pcFeeAuthorities.$inferSelect;
 export type PcFeeCalculation = typeof pcFeeCalculations.$inferSelect;
 export type FinancialPaymentRequest = typeof financialPaymentRequests.$inferSelect;
 export type FinancialPaymentProviderEvent = typeof financialPaymentProviderEvents.$inferSelect;
+export type FinancialPaymentOutbox = typeof financialPaymentOutbox.$inferSelect;
 export type FinancialDispute = typeof financialDisputes.$inferSelect;
 export type MarketingPaymentRecord = typeof marketingPaymentRecords.$inferSelect;
 export type FinancialDeposit = typeof financialDeposits.$inferSelect;
