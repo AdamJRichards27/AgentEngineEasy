@@ -9,6 +9,7 @@ import GrowImport from "./pages/GrowImport";
 import Exceptions from "./pages/Exceptions";
 import PitCrewCommandCentre from "./pages/PitCrewCommandCentre";
 import CommunicationsHub from "./pages/CommunicationsHub";
+import FinancialOperations from "./pages/FinancialOperations";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import { useSession, useLogout } from "./lib/session";
@@ -31,6 +32,15 @@ function initials(firstName?: string, lastName?: string): string {
 // property's communication threads still lives inside the Property
 // Workspace (Section 10) -- this route is the summary feed, not a second
 // composer.
+//
+// Agent Engine 2.0 -- Financial Transaction Engine (Priority 9, Stage G,
+// Section 29) adds a third such cross-property view -- the Brokerage
+// Financial Operations queue -- for the same "can't live inside one
+// property's workspace" reason. Unlike Exceptions/Communications, this
+// one is Brokerage Administrator only (every /financial/* route is gated
+// that way server-side -- see routes/financial.ts's own header comment),
+// so canSeeFinancial below mirrors canSeePitCrew's existing role-gate
+// pattern rather than inventing a new one.
 //
 // Sidebar navigation (dark #424242, orange active pill) matches the
 // reference Agent Engine app's design system rather than the earlier plain
@@ -78,12 +88,20 @@ function SidebarLayout({
   // independently (requireRole in routes/pitCrew.ts) -- this is a UX
   // nicety, not the security boundary.
   const canSeePitCrew = user?.role === "Pit Crew" || user?.role === "Brokerage Administrator";
+  // Agent Engine 2.0 -- Financial Transaction Engine (Priority 9, Stage G):
+  // only Brokerage Administrator ever sees this link -- every /financial/*
+  // route is gated requireRole(...BROKERAGE_ADMIN_ROLES) server-side
+  // (routes/financial.ts's own header comment), so a Pit Crew or Agent
+  // session would get a 403 from every call this page makes. Same
+  // "UX nicety, not the security boundary" reasoning as canSeePitCrew.
+  const canSeeFinancial = user?.role === "Brokerage Administrator";
   const links: Array<{ path: string; label: string }> = [
     { path: "/", label: "Home" },
     { path: "/today", label: "Today" },
     { path: "/properties", label: "Properties" },
     { path: "/exceptions", label: "Exceptions" },
     { path: "/communications", label: "Communications" },
+    ...(canSeeFinancial ? [{ path: "/financial", label: "Financial" }] : []),
     ...(canSeePitCrew ? [{ path: "/pit-crew", label: "Pit Crew" }] : []),
     { path: "/grow", label: "Grow" },
     { path: "/settings", label: "Settings" },
@@ -140,6 +158,7 @@ function SidebarLayout({
             <Route path="/properties/:id" component={PropertyWorkspace} />
             <Route path="/exceptions" component={Exceptions} />
             <Route path="/communications" component={CommunicationsHub} />
+            <Route path="/financial" component={FinancialOperations} />
             <Route path="/pit-crew" component={PitCrewCommandCentre} />
             <Route path="/grow" component={Grow} />
             <Route path="/grow/import" component={GrowImport} />
