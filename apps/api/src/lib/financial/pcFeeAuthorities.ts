@@ -20,10 +20,17 @@
 // binding financial authorisation Section 32/33's "control" language is
 // about, and a single actor unilaterally self-authorising their own debit
 // mandate defeats the point of an authority record existing at all.
+//
+// Stage F: activatePcFeeAuthority/revokePcFeeAuthority additionally
+// publish PC_FEE_AUTHORITY_ACTIVATED/PC_FEE_AUTHORITY_REVOKED to the
+// canonical event bus (events.ts) — never the mandateProviderRef itself
+// in the payload, consistent with this module's own Section 33 posture
+// above.
 
 import { eq, and } from "drizzle-orm";
 import { db, pcFeeAuthorities, financialLedgerEvents, type PcFeeAuthority, type PcFeeBasis } from "@aee/db";
 import { FinancialControlError } from "./agreements.js";
+import { emitFinancialEvent } from "./events.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -152,6 +159,17 @@ export async function activatePcFeeAuthority(
     actorUserId,
   });
 
+  await emitFinancialEvent({
+    eventType: "PC_FEE_AUTHORITY_ACTIVATED",
+    brokerageId: updated.brokerageId,
+    propertyId: null,
+    agentId: updated.agentUserId,
+    actorType: "USER",
+    actorId: actorUserId,
+    source: "api:financial:activatePcFeeAuthority",
+    payload: { pcFeeAuthorityId: updated.id, agentUserId: updated.agentUserId, feeBasis: updated.feeBasis },
+  });
+
   return updated;
 }
 
@@ -179,6 +197,17 @@ export async function revokePcFeeAuthority(id: number, brokerageId: number, acto
     actorType: "USER",
     actorUserId,
     reason,
+  });
+
+  await emitFinancialEvent({
+    eventType: "PC_FEE_AUTHORITY_REVOKED",
+    brokerageId: updated.brokerageId,
+    propertyId: null,
+    agentId: updated.agentUserId,
+    actorType: "USER",
+    actorId: actorUserId,
+    source: "api:financial:revokePcFeeAuthority",
+    payload: { pcFeeAuthorityId: updated.id, agentUserId: updated.agentUserId, reason },
   });
 
   return updated;

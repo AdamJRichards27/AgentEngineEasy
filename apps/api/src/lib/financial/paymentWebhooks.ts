@@ -18,6 +18,15 @@
 // webhook (nearly every real provider redelivers at least once) fails the
 // insert's unique constraint and is a guaranteed no-op rather than a
 // double-applied state transition.
+//
+// Stage F: the Paid/terminal-Failed/Reversed branches additionally publish
+// FINANCIAL_PAYMENT_PAID/FINANCIAL_PAYMENT_FAILED/FINANCIAL_PAYMENT_REVERSED
+// to the canonical event bus (events.ts), and a terminal Failed outcome
+// additionally leaves an internal note on the property's Financial notices
+// thread (communications.ts) — the one financial-webhook outcome that
+// genuinely needs a human to notice and act, per Section 15's "a human has
+// to intervene past exhausted retries" posture (paymentOutbox.ts's own
+// module comment says the same for its own exhausted-retries path).
 
 import { eq, and } from "drizzle-orm";
 import {
@@ -26,10 +35,13 @@ import {
   financialPaymentProviderEvents,
   financialDisputes,
   financialLedgerEvents,
+  properties,
   type FinancialPaymentRequest,
 } from "@aee/db";
 import type { MandateWebhookResult } from "@aee/integration-mandate-payments";
 import { mandatePaymentProvider } from "./provider.js";
+import { emitFinancialEvent } from "./events.js";
+import { notifyFinancialEvent } from "./communications.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -159,6 +171,15 @@ async function applyMandateWebhookResult(request: FinancialPaymentRequest, resul
         sourceRecordId: String(updated.id),
         actorType: "SYSTEM",
       });
+      await emitFinancialEvent({
+        eventType: "FINANCIAL_PAYMENT_PAID",
+        brokerageId: updated.brokerageId,
+        propertyId: updated.propertyId,
+        transactionId: updated.transactionId,
+        actorType: "SYSTEM",
+        source: "webhook:financial:mandate-payments",
+        payload: { paymentRequestId: updated.id, amountCents: updated.amountCents },
+      });
       return updated;
     }
 
@@ -191,6 +212,40 @@ async function applyMandateWebhookResult(request: FinancialPaymentRequest, resul
         actorType: "SYSTEM",
         reason: `${result.failureReason ?? "Payment failed"} (attempt ${retryCount}/${request.maxRetries}${willRetry ? ", will retry" : ", exhausted"})`,
       });
+
+      if (!willRetry) {
+        await emitFinancialEvent({
+          eventType: "FINANCIAL_PAYMENT_FAILED",
+          brokerageId: updated.brokerageId,
+          propertyId: updated.propertyId,
+          transactionId: updated.transactionId,
+          actorType: "SYSTEM",
+          source: "webhook:financial:mandate-payments",
+          payload: { paymentRequestId: updated.id, amountCents: updated.amountCents, reason: updated.failureReason },
+        });
+
+        // Section 25: a permanently failed PC success-fee debit needs a
+        // human to notice — the payment outbox has already exhausted its
+        // own retries by this point (Section 15), so nothing further will
+        // happen automatically. propertyId is nullable on
+        // financialPaymentRequests in principle but always set for a
+        // PC_SUCCESS_FEE request in practice; skip the note rather than
+        // guess a recipient if it's ever missing.
+        if (updated.propertyId != null) {
+          const [property] = await db.select({ agentId: properties.agentId }).from(properties).where(eq(properties.id, updated.propertyId));
+          if (property?.agentId) {
+            await notifyFinancialEvent({
+              brokerageId: updated.brokerageId,
+              propertyId: updated.propertyId,
+              transactionId: updated.transactionId,
+              createdByUserId: property.agentId,
+              subject: "PC success fee payment failed",
+              bodyText: `Payment request #${updated.id} (${(updated.amountCents / 100).toFixed(2)} AUD) failed permanently after ${retryCount} attempt(s): ${updated.failureReason ?? "no reason given"}. This will not retry automatically — review the mandate and payment request.`,
+            });
+          }
+        }
+      }
+
       return updated;
     }
 
@@ -216,6 +271,15 @@ async function applyMandateWebhookResult(request: FinancialPaymentRequest, resul
         sourceRecordId: String(updated.id),
         actorType: "SYSTEM",
         reason: `Reversed by provider: ${result.failureReason ?? "no reason given"}`,
+      });
+      await emitFinancialEvent({
+        eventType: "FINANCIAL_PAYMENT_REVERSED",
+        brokerageId: updated.brokerageId,
+        propertyId: updated.propertyId,
+        transactionId: updated.transactionId,
+        actorType: "SYSTEM",
+        source: "webhook:financial:mandate-payments",
+        payload: { paymentRequestId: updated.id, amountCents: updated.amountCents, reason: updated.reversalReason },
       });
       return updated;
     }

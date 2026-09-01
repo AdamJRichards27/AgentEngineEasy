@@ -14,9 +14,19 @@
 // restricted to Brokerage Administrator by the route layer's
 // requireRole(...BROKERAGE_ADMIN_ROLES) — separation-of-duties is an
 // ADDITIONAL control on top of that, not a substitute for it.
+//
+// Stage F: approveCommissionAgreement additionally publishes
+// COMMISSION_AGREEMENT_APPROVED to the canonical event bus (see
+// events.ts) — the one commission-agreement milestone another engine
+// (Timeline, Exception & Risk, Command Centre) might care about.
+// createCommissionAgreement/cancelCommissionAgreement stay ledger-only
+// (financialLedgerEvents already records both, via recordLedgerEvent
+// below) — a draft or a cancellation isn't the kind of cross-engine-
+// relevant milestone events.ts's own module comment scopes this bus to.
 
 import { eq, and } from "drizzle-orm";
 import { db, commissionAgreements, financialLedgerEvents, type CommissionAgreement, type CommissionTier, type CommissionMethod } from "@aee/db";
+import { emitFinancialEvent } from "./events.js";
 
 export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES";
 
@@ -169,6 +179,17 @@ export async function approveCommissionAgreement(id: number, brokerageId: number
     sourceRecordId: String(updated.id),
     actorType: "USER",
     actorUserId,
+  });
+
+  await emitFinancialEvent({
+    eventType: "COMMISSION_AGREEMENT_APPROVED",
+    brokerageId: updated.brokerageId,
+    propertyId: updated.propertyId,
+    transactionId: updated.transactionId,
+    actorType: "USER",
+    actorId: actorUserId,
+    source: "api:financial:approveCommissionAgreement",
+    payload: { commissionAgreementId: updated.id, method: updated.method, rateBps: updated.rateBps, fixedAmountCents: updated.fixedAmountCents },
   });
 
   return updated;

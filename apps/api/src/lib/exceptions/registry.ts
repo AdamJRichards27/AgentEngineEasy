@@ -50,6 +50,11 @@ import { LAUNCH_CAMPAIGN_RULES } from "./rules/launchCampaign.js";
 // their own COMMUNICATION category — see rules/communicationDelivery.ts's
 // own module comment.
 import { COMMUNICATION_DELIVERY_RULES } from "./rules/communicationDelivery.js";
+// Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F,
+// Section 22). Commission-agreement/PC-fee-payment/marketing-invoice/
+// dispute findings surface through this same registry, under their own
+// FINANCIAL category — see rules/financial.ts's own module comment.
+import { FINANCIAL_RULES } from "./rules/financial.js";
 
 export const RISK_RULES: RiskRule[] = [
   ...APPRAISAL_AGREEMENT_RULES,
@@ -61,6 +66,7 @@ export const RISK_RULES: RiskRule[] = [
   ...WORKFLOW_OPERATIONAL_RULES,
   ...LAUNCH_CAMPAIGN_RULES,
   ...COMMUNICATION_DELIVERY_RULES,
+  ...FINANCIAL_RULES,
 ];
 
 // Fail loudly at import time on a duplicate ruleId — a copy-paste error in

@@ -2,9 +2,12 @@
 //
 // Settlement-triggered finalisation (Section 21). This module is the pure
 // service layer Stage F's registerFinancialEngine() event subscriber
-// calls when a SETTLEMENT_COMPLETED domain event arrives — it is not
-// itself wired to the event bus (that wiring is Stage F's job), so it can
-// be exercised directly and deterministically in tests.
+// calls when a SETTLEMENT_COMPLETED domain event arrives (see
+// lib/financial/bootstrap.ts) — it is not itself wired to the event bus
+// for INBOUND dispatch, so it can still be exercised directly and
+// deterministically in tests. It does, however, publish its own
+// COMMISSION_FINALISED event OUTBOUND once finalisation actually produces
+// a new calculation (Stage F) — see events.ts.
 //
 // Settlement idempotency guarantee: a repeated SETTLEMENT_COMPLETED for
 // the same transaction must never create a second PC_SUCCESS_FEE payment
@@ -29,6 +32,7 @@ import {
   type FinancialPaymentRequest,
 } from "@aee/db";
 import { createCommissionCalculation } from "./calculations.js";
+import { emitFinancialEvent } from "./events.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -146,6 +150,17 @@ export async function finalizeCommissionForSettlement(input: FinalizeCommissionF
     sourceRecordId: String(calculation.id),
     actorType: "SYSTEM",
     correlationId: input.correlationId ?? null,
+  });
+
+  await emitFinancialEvent({
+    eventType: "COMMISSION_FINALISED",
+    brokerageId: input.brokerageId,
+    propertyId: input.propertyId,
+    transactionId: input.transactionId,
+    actorType: "SYSTEM",
+    source: "api:financial:finalizeCommissionForSettlement",
+    correlationId: input.correlationId,
+    payload: { commissionCalculationId: calculation.id, grossCommissionCents: calculation.grossCommissionCents, gstCents: calculation.gstCents },
   });
 
   return { calculation };

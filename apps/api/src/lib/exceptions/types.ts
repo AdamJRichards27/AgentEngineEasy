@@ -55,6 +55,20 @@ export const RISK_EXCEPTION_METADATA_ALLOW_LIST = [
   "communicationMessageId",
   "communicationChannel",
   "communicationFailureCategory",
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F,
+  // Section 22). Commission-agreement/PC-fee-payment/marketing-invoice/
+  // dispute findings (rules/financial.ts) need to name which financial
+  // record they're about. No dollar figures are added here — a
+  // FinancialControlError-worthy amount already lives on the underlying
+  // financial record itself (readable via its sourceRecordType/
+  // sourceRecordId, same as every other category) — these are IDs only,
+  // same posture as offerId/documentId/etc above.
+  "commissionAgreementId",
+  "pcFeeAuthorityId",
+  "paymentRequestId",
+  "marketingPaymentRecordId",
+  "campaignItemId",
+  "financialDisputeId",
 ] as const;
 export type RiskExceptionMetadataKey = (typeof RISK_EXCEPTION_METADATA_ALLOW_LIST)[number];
 

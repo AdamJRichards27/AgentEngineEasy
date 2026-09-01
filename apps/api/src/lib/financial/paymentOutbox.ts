@@ -21,8 +21,12 @@
 // at which Section 13's noticeRequiredDays cooling-off period has already
 // started — and is the one place in the whole engine that actually calls
 // a payment provider. Stage F wires a recurring caller for
-// dispatchPendingPaymentOutbox; this module only provides the sweep
-// itself, not its schedule.
+// dispatchPendingPaymentOutbox (see lib/financial/bootstrap.ts); this
+// module only provides the sweep itself, not its schedule. Stage F also
+// adds FINANCIAL_PAYMENT_SCHEDULED/FINANCIAL_PAYMENT_FAILED/
+// FINANCIAL_PAYMENT_REVERSED canonical-bus publishing at the three points
+// below where a payment request's OWN outcome (not just an outbox
+// mechanics detail) changes — see events.ts.
 
 import { eq, and, lte } from "drizzle-orm";
 import {
@@ -35,6 +39,7 @@ import {
   type FinancialPaymentOutbox,
 } from "@aee/db";
 import { mandatePaymentProvider } from "./provider.js";
+import { emitFinancialEvent } from "./events.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -301,6 +306,17 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
       correlationId: outboxEntry.correlationId,
     });
 
+    await emitFinancialEvent({
+      eventType: "FINANCIAL_PAYMENT_SCHEDULED",
+      brokerageId: updatedRequest.brokerageId,
+      propertyId: updatedRequest.propertyId,
+      transactionId: updatedRequest.transactionId,
+      actorType: "SYSTEM",
+      source: "api:financial:dispatchOutboxEntry",
+      correlationId: outboxEntry.correlationId,
+      payload: { paymentRequestId: updatedRequest.id, amountCents: updatedRequest.amountCents, kind: updatedRequest.kind },
+    });
+
     return { outboxEntry: dispatchedEntry, paymentRequest: updatedRequest };
   } catch (err) {
     const attempts = outboxEntry.attempts + 1;
@@ -344,6 +360,17 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
           reason: `Outbox dispatch exhausted after ${attempts} attempts: ${(err as Error).message}`,
           correlationId: outboxEntry.correlationId,
         });
+
+        await emitFinancialEvent({
+          eventType: "FINANCIAL_PAYMENT_FAILED",
+          brokerageId: saved.brokerageId,
+          propertyId: saved.propertyId,
+          transactionId: saved.transactionId,
+          actorType: "SYSTEM",
+          source: "api:financial:dispatchOutboxEntry",
+          correlationId: outboxEntry.correlationId,
+          payload: { paymentRequestId: saved.id, amountCents: saved.amountCents, reason: saved.failureReason },
+        });
       }
     }
 
@@ -360,9 +387,10 @@ export interface DispatchSweepResult {
 
 /**
  * The actual durability mechanism: call this from a recurring job (Stage F
- * wires the schedule; this module only provides the sweep itself) to retry
- * every outbox entry whose backoff window has elapsed. Processes entries
- * one at a time and never lets one entry's error stop the sweep.
+ * wires the schedule — lib/financial/bootstrap.ts's registerFinancialEngine;
+ * this module only provides the sweep itself) to retry every outbox entry
+ * whose backoff window has elapsed. Processes entries one at a time and
+ * never lets one entry's error stop the sweep.
  */
 export async function dispatchPendingPaymentOutbox(limit = 20): Promise<DispatchSweepResult> {
   const due = await db
@@ -459,6 +487,17 @@ export async function reverseDebit(input: { paymentRequestId: number; reason: st
     actorType: "USER",
     actorUserId: input.actorUserId ?? null,
     reason: input.reason,
+  });
+
+  await emitFinancialEvent({
+    eventType: "FINANCIAL_PAYMENT_REVERSED",
+    brokerageId: updated.brokerageId,
+    propertyId: updated.propertyId,
+    transactionId: updated.transactionId,
+    actorType: "USER",
+    actorId: input.actorUserId ?? null,
+    source: "api:financial:reverseDebit",
+    payload: { paymentRequestId: updated.id, amountCents: updated.amountCents, reason: input.reason },
   });
 
   return updated;
