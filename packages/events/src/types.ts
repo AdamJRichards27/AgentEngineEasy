@@ -112,6 +112,23 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "MARKET_READY_OVERRIDDEN",
   "LAUNCH_PAUSED",
   "LAUNCH_CANCELLED",
+  // Agent Engine 2.0 — Communications Hub (Priority 8). Section 23:
+  // COMMUNICATION_* domain events, reusing this same correlation/
+  // causation/idempotency/audit machinery rather than a parallel one.
+  // Deliberately message-lifecycle only (drafted/queued/sent/delivered/
+  // failed/blocked/received) plus one consent event — there is no
+  // COMMUNICATION_THREAD_CREATED or similar record-shape event because no
+  // existing consumer needs to react to a thread's mere existence, only to
+  // what happens to a message within it (mirrors EXCEPTION_CREATED/
+  // EXCEPTION_RESOLVED's own "react to state changes that matter" scope).
+  "COMMUNICATION_MESSAGE_DRAFTED",
+  "COMMUNICATION_MESSAGE_QUEUED",
+  "COMMUNICATION_MESSAGE_SENT",
+  "COMMUNICATION_MESSAGE_DELIVERED",
+  "COMMUNICATION_MESSAGE_FAILED",
+  "COMMUNICATION_MESSAGE_RECEIVED",
+  "COMMUNICATION_MESSAGE_BLOCKED",
+  "COMMUNICATION_CONSENT_UPDATED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -204,6 +221,15 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   MARKET_READY_OVERRIDDEN: { version: 1, description: "A Brokerage Administrator overrode one or more outstanding Market Ready blockers." },
   LAUNCH_PAUSED: { version: 1, description: "A Launch Plan was paused." },
   LAUNCH_CANCELLED: { version: 1, description: "A Launch Plan was cancelled." },
+  // Agent Engine 2.0 — Communications Hub (Priority 8).
+  COMMUNICATION_MESSAGE_DRAFTED: { version: 1, description: "A communication message was created as a draft, not yet sent." },
+  COMMUNICATION_MESSAGE_QUEUED: { version: 1, description: "A communication message passed validation/consent/cost checks and was queued for dispatch." },
+  COMMUNICATION_MESSAGE_SENT: { version: 1, description: "A communication message was handed to its provider (sent, not yet confirmed delivered)." },
+  COMMUNICATION_MESSAGE_DELIVERED: { version: 1, description: "A provider confirmed delivery of a previously sent communication message." },
+  COMMUNICATION_MESSAGE_FAILED: { version: 1, description: "A communication message failed to send or deliver, after exhausting retries where retryable." },
+  COMMUNICATION_MESSAGE_RECEIVED: { version: 1, description: "An inbound communication (reply or new message) was recorded against a thread." },
+  COMMUNICATION_MESSAGE_BLOCKED: { version: 1, description: "A communication message was blocked before sending, by consent/opt-out or a cost control threshold." },
+  COMMUNICATION_CONSENT_UPDATED: { version: 1, description: "A destination's consent/opt-out record was created or changed." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {

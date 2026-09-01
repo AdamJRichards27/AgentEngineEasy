@@ -15,6 +15,12 @@ import {
   type DevLoginResult,
 } from "./testSupport.js";
 
+// devLogin() below requires ALLOW_DEV_AUTH=true. Most suites in this repo
+// set this themselves at module load (see e.g. transactionConditions.test.ts)
+// rather than relying on an ambient value that may not be set, and this
+// suite should too.
+process.env.ALLOW_DEV_AUTH = "true";
+
 let server: Server;
 let baseUrl: string;
 let admin: DevLoginResult;

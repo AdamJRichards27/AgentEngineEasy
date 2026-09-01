@@ -69,6 +69,11 @@ export const RISK_EXCEPTION_CATEGORIES = [
   // adding a value here is a one-line, non-breaking change — no migration
   // required for this column itself.
   "LAUNCH_CAMPAIGN",
+  // Agent Engine 2.0 — Communications Hub (Priority 8). Delivery failures
+  // and blocked sends (consent/cost) need their own category so they route
+  // and dedup separately from every other kind of finding — see
+  // apps/api/src/lib/exceptions/rules/communicationDelivery.ts.
+  "COMMUNICATION",
 ] as const;
 export type RiskExceptionCategory = (typeof RISK_EXCEPTION_CATEGORIES)[number];
 

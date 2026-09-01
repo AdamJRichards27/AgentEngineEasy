@@ -8,6 +8,7 @@ import Grow from "./pages/Grow";
 import GrowImport from "./pages/GrowImport";
 import Exceptions from "./pages/Exceptions";
 import PitCrewCommandCentre from "./pages/PitCrewCommandCentre";
+import CommunicationsHub from "./pages/CommunicationsHub";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import { useSession, useLogout } from "./lib/session";
@@ -22,6 +23,14 @@ function initials(firstName?: string, lastName?: string): string {
 // view — by definition not something that can live inside a single
 // property's workspace — explicitly scoped as a foundation for the future
 // Agent Daily Command Centre, not that dashboard itself.
+//
+// Agent Engine 2.0 -- Communications Hub (Priority 8, Section 32) adds a
+// second such cross-property view for the same reason Exceptions needed
+// one: "what needs attention across every property" cannot live inside a
+// single property's workspace. Composing and reading an individual
+// property's communication threads still lives inside the Property
+// Workspace (Section 10) -- this route is the summary feed, not a second
+// composer.
 //
 // Sidebar navigation (dark #424242, orange active pill) matches the
 // reference Agent Engine app's design system rather than the earlier plain
@@ -74,6 +83,7 @@ function SidebarLayout({
     { path: "/today", label: "Today" },
     { path: "/properties", label: "Properties" },
     { path: "/exceptions", label: "Exceptions" },
+    { path: "/communications", label: "Communications" },
     ...(canSeePitCrew ? [{ path: "/pit-crew", label: "Pit Crew" }] : []),
     { path: "/grow", label: "Grow" },
     { path: "/settings", label: "Settings" },
@@ -129,6 +139,7 @@ function SidebarLayout({
             <Route path="/properties/start" component={StartProperty} />
             <Route path="/properties/:id" component={PropertyWorkspace} />
             <Route path="/exceptions" component={Exceptions} />
+            <Route path="/communications" component={CommunicationsHub} />
             <Route path="/pit-crew" component={PitCrewCommandCentre} />
             <Route path="/grow" component={Grow} />
             <Route path="/grow/import" component={GrowImport} />
