@@ -197,6 +197,17 @@ describe("commissionCalculations — immutable snapshots (Sections 10-11)", () =
           propertyId,
           transactionId,
           commissionAgreementId: 999999999,
+          // calculationVersion defaults to 1 at the DB level (it is not
+          // auto-incremented — that will be Stage C's service-layer job),
+          // and this file's whole transactionId is shared across every
+          // describe block. Without an explicit, not-yet-used version
+          // here, this insert would collide with this test's own first
+          // (successful) row on the (transactionId, calculationVersion)
+          // unique index and fail with 23505 before the FK violation this
+          // test is actually checking ever gets evaluated. This insert
+          // fails anyway (that's the point), so no row is ever persisted
+          // under version 2 regardless.
+          calculationVersion: 2,
           salePriceCentsInput: 80000000,
           methodUsed: "PERCENTAGE",
           grossCommissionCents: 1760000,
@@ -238,6 +249,12 @@ describe("pcFeeAuthorities and pcFeeCalculations (Sections 12-14)", () => {
         propertyId,
         transactionId,
         commissionAgreementId: agreement.id,
+        // See the matching comment in the commissionCalculations describe
+        // block above: calculationVersion has a static DB default of 1
+        // and this transactionId is shared across the whole file, so a
+        // third distinct version is needed here to avoid colliding with
+        // the earlier describe block's rows on the same unique index.
+        calculationVersion: 3,
         salePriceCentsInput: 80000000,
         methodUsed: "PERCENTAGE",
         grossCommissionCents: 1760000,
