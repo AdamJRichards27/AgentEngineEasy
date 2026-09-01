@@ -293,9 +293,9 @@ function timelineCategoryPillClass(category: TimelineItem["category"]): string {
 }
 
 // The Property Action Screen (Build Brief §13 / ARCHITECTURE.md §4) — the
-// screen the whole build orients around. Answers "what needs to happen
-// next?" with one primary action up top, then a compact People/Timeline
-// view, then everything else tucked behind progressive-disclosure sections
+// screen the whole build orients around. Answers "what happens next?"
+// with one primary action up top, then a compact People/Timeline view,
+// then everything else tucked behind progressive-disclosure sections
 // (staging brief: "avoid tabs... prioritise the current action").
 export default function PropertyWorkspace({ params }: { params: { id: string } }) {
   const propertyId = Number(params.id);
@@ -398,6 +398,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     queryKey: ["service-orders", propertyId],
     queryFn: () => apiFetch<{ serviceOrders: ServiceOrderBlock[] }>(`/aml/service-orders/by-property/${propertyId}`),
   });
+
   const { data: paymentMethodsData } = useQuery({
     queryKey: ["payment-methods"],
     queryFn: () => apiFetch<{ mine: PaymentMethodBlock[]; brokerage: PaymentMethodBlock[] }>("/payments/payment-methods"),
