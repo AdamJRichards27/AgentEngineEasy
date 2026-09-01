@@ -22,3 +22,5 @@ export * from "./exceptions";
 export * from "./launch";
 // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7).
 export * from "./pitCrew";
+// Agent Engine 2.0 — Communications Hub (Priority 8).
+export * from "./communications";
