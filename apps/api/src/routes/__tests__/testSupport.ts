@@ -36,6 +36,7 @@ import {
   portalDestinations,
   vendorApprovals,
   launchPlanTransitions,
+  pitCrewAssignments,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -313,6 +314,12 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   // properties/transactions deletes below.
   await db.delete(automationTasks).where(inArray(automationTasks.brokerageId, ids));
   await db.delete(automationAttentionItems).where(inArray(automationAttentionItems.brokerageId, ids));
+
+  // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7). pit_crew_assignments
+  // carries brokerageId directly and FKs onto brokerages/properties/users, all
+  // non-cascading, so (like automationTasks/automationAttentionItems above) it
+  // must be cleared before those tables are deleted below.
+  await db.delete(pitCrewAssignments).where(inArray(pitCrewAssignments.brokerageId, ids));
 
   const propertyRows = await db.select().from(properties).where(inArray(properties.brokerageId, ids));
   const propertyIds = propertyRows.map((p) => p.id);

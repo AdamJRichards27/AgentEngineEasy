@@ -831,3 +831,80 @@ details.section > *:not(summary) {
   padding-top: 0.75rem;
   margin-top: 0.75rem;
 }
+
+/* Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7) */
+.pc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+}
+
+.pc-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pc-tab.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.pc-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3em;
+  padding: 0 0.35em;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+  font-size: 0.75em;
+}
+
+.pc-tab.active .pc-tab-count {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+ul.pc-item-list li {
+  padding: 0.9rem 0;
+}
+
+.pc-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+
+.pc-item-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pc-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.pc-inline-form {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: var(--color-bg);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}

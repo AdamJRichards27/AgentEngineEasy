@@ -20,3 +20,5 @@ export * from "./exceptions";
 // exceptions.ts is exported above this line so launch.ts's re-export of it
 // has already been defined by the time anything imports from the barrel.
 export * from "./launch";
+// Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7).
+export * from "./pitCrew";

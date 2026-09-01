@@ -43,6 +43,13 @@
       "when": 1788169448605,
       "tag": "0005_wonderful_pet_avengers",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788247517741,
+      "tag": "0006_classy_deathstrike",
+      "breakpoints": true
     }
   ]
 }

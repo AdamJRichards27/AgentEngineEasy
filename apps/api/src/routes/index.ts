@@ -19,6 +19,7 @@ import { appraisalsRouter } from "./appraisals.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
+import { pitCrewRouter } from "./pitCrew.js";
 import { commandCentreRouter } from "./commandCentre.js";
 
 export const apiRouter = Router();
@@ -68,3 +69,7 @@ apiRouter.use("/command-centre", commandCentreRouter);
 // out of scope, and the AI build's own explicit stop point (ARCHITECTURE.md
 // Phase 9) rules out Grow, prospecting AI, autonomous workflows, and every
 // other capability the AI build instructions deferred.
+// Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7): unprefixed mount,
+// same reasoning as exceptionsRouter/launchRouter above -- pitCrewRouter
+// declares its own full "/pit-crew/..." paths.
+apiRouter.use(pitCrewRouter);
