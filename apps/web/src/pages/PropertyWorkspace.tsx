@@ -38,6 +38,7 @@ import {
   vendorApprovalStatusLabel,
   vendorApprovalStatusPillClass,
 } from "../lib/launchPlan";
+import { CommunicationsSection } from "../components/CommunicationsSection";
 
 interface PropertyOverview {
   id: number;
@@ -397,7 +398,6 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     queryKey: ["service-orders", propertyId],
     queryFn: () => apiFetch<{ serviceOrders: ServiceOrderBlock[] }>(`/aml/service-orders/by-property/${propertyId}`),
   });
-
   const { data: paymentMethodsData } = useQuery({
     queryKey: ["payment-methods"],
     queryFn: () => apiFetch<{ mine: PaymentMethodBlock[]; brokerage: PaymentMethodBlock[] }>("/payments/payment-methods"),
@@ -855,6 +855,14 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           />
         </section>
       )}
+
+      {/* Agent Engine 2.0 -- Communications Hub (Priority 8, Section 32):
+          the property-centred communication record -- WHO needs to hear
+          WHAT, from WHOM, by WHEN, and did it happen. Self-contained (owns
+          its own data fetching) so it drops in here without adding more
+          state to this already-large component -- see
+          components/CommunicationsSection.tsx. */}
+      <CommunicationsSection propertyId={propertyId} />
 
       {/* Sellers — the property-workspace example in the staging brief
           shows the seller list front and centre, not tucked away. */}
