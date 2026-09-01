@@ -7,6 +7,7 @@ import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
 import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
+import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -38,6 +39,12 @@ registerLaunchEngine();
 // sweep scheduler (quiet-hours-deferred sends, retry backoff) — same
 // ordering requirement as the engines above.
 registerCommunicationsEngine();
+
+// Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F).
+// Registers the SETTLEMENT_COMPLETED handler (commission finalisation +
+// PC success-fee billing) and starts the payment outbox sweep scheduler —
+// same ordering requirement as the engines above.
+registerFinancialEngine();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.

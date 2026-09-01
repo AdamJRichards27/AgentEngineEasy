@@ -191,6 +191,31 @@ const TIMELINE_ENTRY_TYPES: Record<string, EntryTypeConfig> = {
   LAUNCH_CANCELLED: { source: "domain_event", category: "Listing", sensitive: false },
   launch_market_ready_achieved: { source: "audit_log", category: "Listing", sensitive: false },
   launch_resumed: { source: "audit_log", category: "Listing", sensitive: false },
+
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F,
+  // Section 27). All ten canonical financial domain events this stage adds
+  // are grouped under the existing "Transaction" category (where their
+  // non-financial siblings COMMISSION_CALCULATED/FUNDS_RECEIVED/AGENT_PAID
+  // already live) or "Listing" (where the marketing-invoice pair sits
+  // alongside the Launch/campaign entries, since they're about a
+  // campaignItem's invoice, not the transaction) rather than widening
+  // TimelineCategory, for the same "don't widen a fixed union
+  // speculatively" reasoning risk_exception_* and LAUNCH_* above already
+  // give. sensitive: true throughout — every one of these carries or
+  // implies a real dollar figure (a commission rate/amount, a PC fee
+  // payment amount, an actual invoiced/paid marketing amount), so all ten
+  // redact for a non-Brokerage-Administrator viewer exactly like their
+  // commission/funds/payout siblings already do.
+  COMMISSION_AGREEMENT_APPROVED: { source: "domain_event", category: "Transaction", sensitive: true },
+  COMMISSION_FINALISED: { source: "domain_event", category: "Transaction", sensitive: true },
+  PC_FEE_AUTHORITY_ACTIVATED: { source: "domain_event", category: "Transaction", sensitive: true },
+  PC_FEE_AUTHORITY_REVOKED: { source: "domain_event", category: "Transaction", sensitive: true },
+  FINANCIAL_PAYMENT_SCHEDULED: { source: "domain_event", category: "Transaction", sensitive: true },
+  FINANCIAL_PAYMENT_PAID: { source: "domain_event", category: "Transaction", sensitive: true },
+  FINANCIAL_PAYMENT_FAILED: { source: "domain_event", category: "Transaction", sensitive: true },
+  FINANCIAL_PAYMENT_REVERSED: { source: "domain_event", category: "Transaction", sensitive: true },
+  MARKETING_INVOICE_RECORDED: { source: "domain_event", category: "Listing", sensitive: true },
+  MARKETING_PAYMENT_RECONCILED: { source: "domain_event", category: "Listing", sensitive: true },
 };
 
 const DOMAIN_EVENT_ENTRY_TYPES = Object.entries(TIMELINE_ENTRY_TYPES)
@@ -243,6 +268,19 @@ const SIMPLE_DOMAIN_EVENT_LABELS: Record<string, string> = {
   MARKET_READY_OVERRIDDEN: "Market Ready overridden",
   LAUNCH_PAUSED: "Launch paused",
   LAUNCH_CANCELLED: "Launch cancelled",
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F).
+  // Also the redacted form for these ten (redactedLabel()'s default case
+  // below falls back to this table when no figure-bearing branch applies).
+  COMMISSION_AGREEMENT_APPROVED: "Commission agreement approved",
+  COMMISSION_FINALISED: "Commission finalised",
+  PC_FEE_AUTHORITY_ACTIVATED: "PC fee authority activated",
+  PC_FEE_AUTHORITY_REVOKED: "PC fee authority revoked",
+  FINANCIAL_PAYMENT_SCHEDULED: "PC fee payment scheduled",
+  FINANCIAL_PAYMENT_PAID: "PC fee payment paid",
+  FINANCIAL_PAYMENT_FAILED: "PC fee payment failed",
+  FINANCIAL_PAYMENT_REVERSED: "PC fee payment reversed",
+  MARKETING_INVOICE_RECORDED: "Marketing invoice recorded",
+  MARKETING_PAYMENT_RECONCILED: "Marketing payment reconciled",
 };
 
 const SIMPLE_AUDIT_LABELS: Record<string, string> = {
@@ -473,6 +511,23 @@ export async function getPropertyTimeline(
     if (row.eventType === "PORTAL_SUBMISSION_FAILED") {
       const payload = (row.payload ?? {}) as { portalName?: string };
       return payload.portalName ? `Portal submission failed: ${payload.portalName}` : "Portal submission failed";
+    }
+    // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F).
+    if (row.eventType === "COMMISSION_FINALISED") {
+      const payload = (row.payload ?? {}) as { grossCommissionCents?: number; gstCents?: number };
+      if (typeof payload.grossCommissionCents === "number") {
+        const gst = typeof payload.gstCents === "number" ? ` (+ ${formatCents(payload.gstCents)} GST)` : "";
+        return `Commission finalised: ${formatCents(payload.grossCommissionCents)}${gst}`;
+      }
+      return "Commission finalised";
+    }
+    if (row.eventType === "MARKETING_INVOICE_RECORDED") {
+      const payload = (row.payload ?? {}) as { invoicedAmountCents?: number };
+      return typeof payload.invoicedAmountCents === "number" ? `Marketing invoice recorded (${formatCents(payload.invoicedAmountCents)})` : "Marketing invoice recorded";
+    }
+    if (row.eventType === "MARKETING_PAYMENT_RECONCILED") {
+      const payload = (row.payload ?? {}) as { reportedPaidAmountCents?: number };
+      return typeof payload.reportedPaidAmountCents === "number" ? `Marketing payment reconciled (${formatCents(payload.reportedPaidAmountCents)})` : "Marketing payment reconciled";
     }
     return (
       SIMPLE_DOMAIN_EVENT_LABELS[row.eventType] ??
