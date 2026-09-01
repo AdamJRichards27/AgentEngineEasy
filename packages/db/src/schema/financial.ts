@@ -73,6 +73,18 @@ import { transactions } from "./transaction";
 // Shared vocabularies
 // ---------------------------------------------------------------------
 
+export interface CommissionTier {
+  upToCents: number | null;
+  rateBps: number;
+}
+
+export interface RoundingAdjustment {
+  step: string;
+  exactCents: number;
+  roundedCents: number;
+  adjustmentCents: number;
+}
+
 export const COMMISSION_METHODS = ["FIXED_AMOUNT", "PERCENTAGE", "TIERED", "MANUAL_WITH_REASON"] as const;
 export type CommissionMethod = (typeof COMMISSION_METHODS)[number];
 
@@ -182,7 +194,7 @@ export const commissionAgreements = pgTable(
     // TIERED: [{ upToCents: number | null, rateBps: number }], evaluated in
     // order; upToCents: null means "and above". MANUAL_WITH_REASON stores
     // its resulting amount directly in fixedAmountCents plus manualReason.
-    tiers: jsonb("tiers"),
+    tiers: jsonb("tiers").$type<CommissionTier[]>(),
     minimumAmountCents: integer("minimum_amount_cents"),
     manualReason: text("manual_reason"),
 
@@ -245,7 +257,7 @@ export const commissionCalculations = pgTable(
     salePriceCentsInput: integer("sale_price_cents_input").notNull(),
     methodUsed: text("method_used").notNull(),
     rateBpsUsed: integer("rate_bps_used"),
-    tiersUsed: jsonb("tiers_used"),
+    tiersUsed: jsonb("tiers_used").$type<CommissionTier[]>(),
 
     grossCommissionCents: integer("gross_commission_cents").notNull(),
     minimumAppliedCents: integer("minimum_applied_cents"), // set only when the minimum overrode the formula result
@@ -260,7 +272,7 @@ export const commissionCalculations = pgTable(
     // Deterministic-rounding evidence (Section 8/10): every cents-level
     // rounding adjustment this calculation made, so the total is always
     // traceable back to its unrounded inputs.
-    roundingAdjustments: jsonb("rounding_adjustments").notNull().default(sql`'[]'::jsonb`),
+    roundingAdjustments: jsonb("rounding_adjustments").$type<RoundingAdjustment[]>().notNull().default(sql`'[]'::jsonb`),
 
     calculationRuleVersion: integer("calculation_rule_version").notNull().default(1),
 
@@ -773,6 +785,12 @@ export type InsertFinancialSettings = z.infer<typeof insertFinancialSettingsSche
 
 export type CommissionAgreement = typeof commissionAgreements.$inferSelect;
 export type CommissionCalculation = typeof commissionCalculations.$inferSelect;
+// Native drizzle insert type (NOT the zod-derived InsertCommissionCalculation
+// above) -- used wherever a caller assigns tiersUsed/roundingAdjustments
+// directly, because drizzle-zod's createInsertSchema does not honour a
+// jsonb column's .$type<>() override and would otherwise widen both
+// fields back to its own generic recursive Json type.
+export type NewCommissionCalculation = typeof commissionCalculations.$inferInsert;
 export type PcFeeAuthority = typeof pcFeeAuthorities.$inferSelect;
 export type PcFeeCalculation = typeof pcFeeCalculations.$inferSelect;
 export type FinancialPaymentRequest = typeof financialPaymentRequests.$inferSelect;

@@ -22,16 +22,16 @@
 
 import { eq, and } from "drizzle-orm";
 import { db, commissionAgreements, commissionCalculations } from "@aee/db";
-import type { CommissionAgreement, InsertCommissionCalculation, CommissionCalculation } from "@aee/db";
+import type { CommissionAgreement, NewCommissionCalculation, CommissionCalculation, RoundingAdjustment } from "@aee/db";
 
 export const CALCULATION_RULE_VERSION = 1;
 
-export interface RoundingAdjustment {
-  step: string;
-  exactCents: number;
-  roundedCents: number;
-  adjustmentCents: number;
-}
+// RoundingAdjustment is declared once, in packages/db's schema (as the
+// $type<>() the commissionCalculations.roundingAdjustments jsonb column
+// carries) -- imported and re-exported here rather than redeclared, so
+// the persisted shape and this module's own return type can never drift
+// apart. pcFeeCalculations.ts imports it from this module.
+export type { RoundingAdjustment };
 
 export interface CommissionCalculationResult {
   grossCommissionCents: number;
@@ -222,7 +222,7 @@ export async function createCommissionCalculation(input: CreateCommissionCalcula
     }
   }
 
-  const values: InsertCommissionCalculation = {
+  const values: NewCommissionCalculation = {
     brokerageId: input.brokerageId,
     propertyId: input.propertyId,
     transactionId: input.transactionId,
