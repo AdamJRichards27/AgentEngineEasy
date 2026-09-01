@@ -27,6 +27,8 @@
 // still written provider-neutral (an env var selects the implementation)
 // so swapping in a real adapter later is a config change, not a rewrite.
 
+import { randomUUID } from "node:crypto";
+
 export interface DebitRequest {
   mandateProviderRef: string;
   amountCents: number;
@@ -80,12 +82,25 @@ export interface MandatePaymentProvider {
  * the local DB write is retried safely, because retrying calls
  * scheduleDebit again with the SAME key and gets the SAME providerRequestRef
  * back rather than a duplicate debit or a thrown error.
+ *
+ * providerRequestRef is generated with randomUUID() rather than an
+ * incrementing in-process counter. This class is a fresh singleton every
+ * time the Node process restarts (see ./provider.js), so a counter that
+ * starts back at 1 on every run is only unique WITHIN one process's
+ * lifetime — against the same shared dev database every local/test run
+ * reuses, two different process runs' first scheduleDebit() call would
+ * both mint "sandbox-debit-1", and lib/financial/paymentWebhooks.ts's
+ * `where(eq(financialPaymentRequests.providerRequestRef, ...))` lookup
+ * has no way to tell those two rows apart — a webhook for THIS run's
+ * debit could silently update a stale row left over from an earlier run
+ * instead, leaving the real row stuck and the webhook falsely reporting
+ * processed:true. A random ref removes the possibility of that collision
+ * outright, matching how a real provider's opaque request ids behave.
  */
 export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
   name = "sandbox";
   private scheduled = new Map<string, { mandateProviderRef: string; amountCents: number; status: MandateDebitStatus }>();
   private idempotencyIndex = new Map<string, string>(); // idempotencyKey -> providerRequestRef
-  private counter = 0;
 
   async scheduleDebit(input: DebitRequest): Promise<DebitResult> {
     const existingRef = this.idempotencyIndex.get(input.idempotencyKey);
@@ -96,8 +111,7 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
       }
     }
 
-    this.counter += 1;
-    const providerRequestRef = `sandbox-debit-${this.counter}`;
+    const providerRequestRef = `sandbox-debit-${randomUUID()}`;
     // A real AU direct-debit scheme never clears same-day — a few business
     // days' notice-to-clearing lag is modelled deterministically here so
     // sandbox timing has the same shape as what it stands in for.
