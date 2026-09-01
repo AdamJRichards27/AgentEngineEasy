@@ -23,6 +23,8 @@ import { pitCrewRouter } from "./pitCrew.js";
 import { commandCentreRouter } from "./commandCentre.js";
 import { communicationsRouter } from "./communications.js";
 import { communicationsWebhooksRouter } from "./communicationsWebhooks.js";
+import { financialRouter } from "./financial.js";
+import { financialWebhooksRouter } from "./financialWebhooks.js";
 
 export const apiRouter = Router();
 
@@ -84,3 +86,12 @@ apiRouter.use(pitCrewRouter);
 // carries no session cookie.
 apiRouter.use(communicationsRouter);
 apiRouter.use(communicationsWebhooksRouter);
+// Agent Engine 2.0 — Financial Transaction Engine (Priority 9), Stage E:
+// unprefixed mount, same reasoning as exceptionsRouter/launchRouter/
+// pitCrewRouter/communicationsRouter above — financialRouter's own paths
+// span both /properties/:propertyId/financial/... and a top-level
+// /financial/... namespace. financialWebhooksRouter is mounted separately
+// (and NOT behind financialRouter's requireRole gate — see its own module
+// comment) since a provider callback carries no session cookie.
+apiRouter.use(financialRouter);
+apiRouter.use(financialWebhooksRouter);
