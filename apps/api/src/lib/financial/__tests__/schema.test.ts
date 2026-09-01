@@ -49,6 +49,25 @@ import {
 // see that function's comment for why financial rows must be deleted
 // before the transactions/properties block inside cleanupBrokerages runs.
 
+// drizzle-orm@0.45.2's node-postgres driver wraps a failed query in an
+// error whose own `.message` is "Failed query: <sql>\nparams: ..." — the
+// original Postgres DatabaseError (with `.code`/`.message`, e.g. '23505'
+// unique_violation, '23503' foreign_key_violation) is nested as `.cause`.
+// Empirically confirmed against this repo's live dev DB (err.cause was a
+// DatabaseError with `.code`/`.message` set as expected) before writing
+// this helper. Assert against `.cause.code` rather than regex-matching
+// `.message`, which never contains the real Postgres error text.
+function rejectsWithPgCode(code: "23505" | "23503") {
+  return (err: any) => {
+    assert.equal(
+      err?.cause?.code,
+      code,
+      `expected Postgres error code ${code}, got ${err?.cause?.code ?? "(no cause)"} — message: ${err?.message}`,
+    );
+    return true;
+  };
+}
+
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
     ? process.env.SESSION_SECRET
@@ -141,7 +160,7 @@ describe("commissionAgreements — versioning (Section 9)", () => {
           method: "PERCENTAGE",
           rateBps: 300,
         }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
   });
 });
@@ -183,7 +202,7 @@ describe("commissionCalculations — immutable snapshots (Sections 10-11)", () =
           grossCommissionCents: 1760000,
           commissionExGstCents: 1760000,
         }),
-      /violates foreign key constraint/i,
+      rejectsWithPgCode("23503"),
     );
   });
 });
@@ -200,7 +219,7 @@ describe("pcFeeAuthorities and pcFeeCalculations (Sections 12-14)", () => {
 
     await assert.rejects(
       () => db.insert(pcFeeAuthorities).values({ brokerageId: A.brokerageId, agentUserId: A.agent.user.id, version: 1 }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
 
     const [auth2] = await db
@@ -272,7 +291,7 @@ describe("financialPaymentRequests — settlement idempotency (Section 21)", () 
           transactionId,
           amountCents: 133584,
         }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
 
     const dedupKey = `sandbox-evt-${suffix}`;
@@ -290,7 +309,7 @@ describe("financialPaymentRequests — settlement idempotency (Section 21)", () 
           paymentRequestId: request.id,
           eventType: "PROCESSING",
         }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
 
     const [dispute] = await db
@@ -312,7 +331,7 @@ describe("financialPaymentRequests — settlement idempotency (Section 21)", () 
           disputedAmountCents: 1,
           reason: "should fail — unknown payment request",
         }),
-      /violates foreign key constraint/i,
+      rejectsWithPgCode("23503"),
     );
   });
 });
@@ -335,7 +354,7 @@ describe("marketingPaymentRecords — overlay on launch.campaignItems (Section 1
           campaignItemId,
           supplierName: "Different Supplier",
         }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
   });
 });
@@ -352,7 +371,7 @@ describe("financialDeposits — one evidentiary record per transaction (Section 
 
     await assert.rejects(
       () => db.insert(financialDeposits).values({ brokerageId: A.brokerageId, propertyId, transactionId }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
   });
 });
@@ -427,7 +446,7 @@ describe("auditReturnReminders (Section 23)", () => {
           reportingPeriodEnd: periodEnd,
           dueDate,
         }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
   });
 });
@@ -441,7 +460,7 @@ describe("financialSettings — one lazily-created row per brokerage", () => {
 
     await assert.rejects(
       () => db.insert(financialSettings).values({ brokerageId: A.brokerageId }),
-      /duplicate key value violates unique constraint/i,
+      rejectsWithPgCode("23505"),
     );
   });
 });
