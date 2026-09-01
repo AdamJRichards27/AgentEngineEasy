@@ -132,6 +132,30 @@ export async function scheduleDebitForPaymentRequest(input: {
 }): Promise<ScheduleDebitResult> {
   const [request] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, input.paymentRequestId));
   if (!request) throw new Error(`Payment request ${input.paymentRequestId} not found.`);
+
+  // Idempotent short-circuit, checked BEFORE the NOTICE_SENT guard below:
+  // once a SCHEDULE_DEBIT outbox entry has actually DISPATCHED, the debit
+  // has already been scheduled with the provider and the payment request
+  // has already moved on to DEBIT_SCHEDULED — a repeated call (the exact
+  // scenario the (paymentRequestId, action) unique index and this
+  // function's own idempotent-chokepoint design are for) must return that
+  // same completed result rather than fail the NOTICE_SENT precondition,
+  // which no longer holds precisely BECAUSE the first call already
+  // succeeded.
+  const [existingDispatched] = await db
+    .select()
+    .from(financialPaymentOutbox)
+    .where(
+      and(
+        eq(financialPaymentOutbox.paymentRequestId, input.paymentRequestId),
+        eq(financialPaymentOutbox.action, "SCHEDULE_DEBIT"),
+        eq(financialPaymentOutbox.status, "DISPATCHED"),
+      ),
+    );
+  if (existingDispatched) {
+    return { paymentRequest: request, outboxEntry: existingDispatched, dispatched: true };
+  }
+
   if (request.status !== "NOTICE_SENT") {
     throw new Error(`Payment request ${input.paymentRequestId} is ${request.status}, not NOTICE_SENT — call advancePaymentRequestToNoticeSent first.`);
   }
