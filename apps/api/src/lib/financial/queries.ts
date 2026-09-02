@@ -28,6 +28,7 @@ import {
   type FinancialSettingsRow,
 } from "@aee/db";
 import { redactPcFeeAuthority, type RedactedPcFeeAuthority } from "./pcFeeAuthorities.js";
+import { getLegacyCommissionContext, getExistingLegacyReconciliation, type LegacyCommissionContext } from "./legacyReconciliation.js";
 
 export async function listCommissionAgreements(brokerageId: number, transactionId?: number) {
   const conditions = [eq(commissionAgreements.brokerageId, brokerageId)];
@@ -184,11 +185,42 @@ export async function resolveTransactionScope(transactionId: number, brokerageId
 }
 
 /**
+ * Financial Transaction Engine Verification (Step 2), COHERENCE-001
+ * remediation: the property's most recent transaction — the same row
+ * getPropertyFinancialSummary would otherwise have no way to reach when
+ * there is no Financial Engine agreement/calculation yet to key off of.
+ * Only ever used to look up the LEGACY grossCommissionCents/gstCents
+ * fields below — never to infer a Financial Engine calculation.
+ */
+async function getMostRecentTransactionForProperty(propertyId: number) {
+  const rows = await db.select({ id: transactions.id }).from(transactions).where(eq(transactions.propertyId, propertyId)).orderBy(desc(transactions.id)).limit(1);
+  return rows[0] ?? null;
+}
+
+export interface LegacyCommissionSummary extends LegacyCommissionContext {
+  alreadyFlaggedForReconciliation: boolean;
+}
+
+/**
  * Section 28 preview: the Property Financial Summary's bundled read — the
  * latest commission agreement/calculation, PC fee authority/calculation,
  * and payment request for a single property's transaction(s), in one
  * round trip. Full progressive-disclosure detail views (Stage G) call the
  * more granular list functions above; this is the summary card's data.
+ *
+ * COHERENCE-001 remediation (Financial Transaction Engine Verification,
+ * Step 2): when this property has no Financial Engine commissionAgreement
+ * at all, `legacyCommission` surfaces the pre-existing legacy
+ * transactions.grossCommissionCents/gstCents figure (if the transaction
+ * has reached Settled/Closed and one was recorded) so the UI can show a
+ * single, labelled, coherent explanation instead of a bare "No commission
+ * agreement recorded yet" sitting beside a contradicting figure elsewhere
+ * on the same page (see FinancialSummarySection.tsx). This field is
+ * additive and read-only — computing it never writes anything; writing
+ * only happens via the explicit "Flag for reconciliation" action
+ * (routes/financial.ts's POST .../legacy-commission/reconcile), which
+ * this function also reports the current status of via
+ * alreadyFlaggedForReconciliation.
  */
 export async function getPropertyFinancialSummary(propertyId: number, brokerageId: number) {
   const [property] = await db.select({ id: properties.id }).from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
@@ -222,12 +254,31 @@ export async function getPropertyFinancialSummary(propertyId: number, brokerageI
       .orderBy(desc(financialDeposits.createdAt)),
   ]);
 
+  const currentCommissionAgreement = agreements.find((a) => a.status === "APPROVED") ?? agreements[0] ?? null;
+
+  // Only look for a legacy figure when the Financial Engine has NOTHING
+  // for this property yet — an in-progress agreement (DRAFT/AWAITING_
+  // APPROVAL) is the normal, non-contradictory "being set up" state, not
+  // the coherence gap the audit found.
+  let legacyCommission: LegacyCommissionSummary | null = null;
+  if (!currentCommissionAgreement) {
+    const mostRecentTransaction = await getMostRecentTransactionForProperty(propertyId);
+    if (mostRecentTransaction) {
+      const context = await getLegacyCommissionContext(mostRecentTransaction.id, brokerageId);
+      if (context) {
+        const existingReconciliation = await getExistingLegacyReconciliation(mostRecentTransaction.id, brokerageId);
+        legacyCommission = { ...context, alreadyFlaggedForReconciliation: Boolean(existingReconciliation) };
+      }
+    }
+  }
+
   return {
     propertyId,
-    currentCommissionAgreement: agreements.find((a) => a.status === "APPROVED") ?? agreements[0] ?? null,
+    currentCommissionAgreement,
     latestCommissionCalculation: calculations.find((c) => c.state === "FINALISED") ?? calculations[0] ?? null,
     latestPcFeeCalculation: pcCalculations.find((c) => c.state === "FINALISED" || c.state === "CONFIRMED") ?? pcCalculations[0] ?? null,
     paymentRequests,
     deposit: deposits[0] ?? null,
+    legacyCommission,
   };
 }
