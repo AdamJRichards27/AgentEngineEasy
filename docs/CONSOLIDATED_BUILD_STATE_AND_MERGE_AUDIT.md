@@ -230,6 +230,16 @@ It is not the stronger "READY FOR BROKERAGE RULES & INTEGRATION FOUNDATION" labe
 
 ---
 
+## 11. Addendum — cross-check against a prior self-report
+
+After §1–10 above were finalized, this audit located and read a separate, prior self-report (`feat/financial-transaction-engine`'s own "Vertical Slice Completion Report — Section 41," dated 2 September 2026, authored by an earlier Claude session working directly on that branch, concluding *"Decision: GO — ready to merge to `staging`"*). Per the governing brief's explicit instruction not to rely solely on previous Claude reports, its claims were spot-checked against this audit's own [LIVE] evidence rather than accepted at face value. Two results:
+
+**Corroborated:** the prior report's description of `App.tsx`'s `canSeeFinancial` gate (Brokerage-Administrator-only sidebar link, `/financial` route, a comment citing `routes/financial.ts`'s per-route `requireRole` gating as the real security boundary) was checked directly against a fresh [LIVE] read of `apps/App.tsx` on the branch. It matches exactly. This strengthens confidence in capability #20's Connected/Enforced/User-accessible columns in §7.
+
+**Contradicted — recorded, not resolved, per this audit's own rule.** The prior report's "lessons carried forward" section lists, among items carried forward from earlier stages: *"a pre-existing test bug (C13) fixed in an earlier window."* That directly conflicts with this audit's own [LIVE] finding in §3: a fresh, from-zero worktree build of `staging` itself (not the feature branch), run independently in this session, reproduced the C13 test failing, with the exact stack trace shown in §3, root-caused to the test's own `createOffer()` helper hitting the real 400-returning safeguard in `lib/offers.ts`. The prior report separately states its own branch's suite ran "501/502 passing, 0 failing, 1 skipped" — no C13 failure shown there either — but its text never identifies the 1 skipped test as C13, nor states the C13 fixture was touched, re-enabled, or fixed on that branch. So this is logged as an unresolved conflict rather than repaired: either the "fixed in an earlier window" claim was itself inherited from a yet-earlier, unverified report — precisely the trap this audit's own methodology exists to catch (a direct parallel to the `merged`-field trap in §1.1) — or the feature branch's suite skips/handles this test in a way this session did not independently re-examine (this audit's own fresh baseline in §2 deliberately ran against `staging` only, per the rule that a feature branch's self-reported numbers don't substitute for a staging baseline). Either reading leaves RISK-001 exactly as stated in §6: independently verified this session, on `staging`, right now, the C13 CRITICAL-severity test does not exercise its own assertion. This addendum does not change §10's Final Decision; if anything it is further evidence for "READY FOR CONSOLIDATION REMEDIATION" over the stronger label, since it is a second, independent instance of a prior report's claim not holding up against direct re-verification.
+
+---
+
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
 https://claude.ai/code/session_01C6398UV8VKXaKSVDRpLsQh
