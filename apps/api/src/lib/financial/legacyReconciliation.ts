@@ -45,22 +45,40 @@
 // Idempotency: reconcileLegacyCommission SELECTs-before-INSERTs on
 // (brokerageId, recordType, recordId), mirroring the same idiom used
 // throughout this build (settlement.ts's ensurePcSuccessFeeRequest,
-// agreements.ts). There is no DB-level unique constraint backing this
-// specific check (financialReconciliations.recordIdx is a plain, not
-// unique, index — see schema/financial.ts) because, unlike a webhook or
-// a SETTLEMENT_COMPLETED subscriber, this is an admin-triggered,
-// low-frequency, sequential action (a button click, or a one-time backfill
-// script run) rather than an at-least-once delivery path — sequential
-// reruns are what "safe to rerun" means for this specific action, and
-// SELECT-before-INSERT genuinely prevents duplicates across sequential
-// runs. A true concurrent double-submit race is a low-probability,
-// non-financially-dangerous outcome if it ever occurred (it would produce,
-// at worst, one duplicate UNRECONCILED reconciliation record for a human
-// to notice and merge — never a duplicate payment or agreement) and is
-// recorded as an open follow-up recommendation (a real unique index would
-// need its own migration) in docs/FINANCIAL_TRANSACTION_ENGINE_VERIFICATION.md
-// rather than solved here, consistent with keeping this remediation
-// tightly scoped.
+// agreements.ts). This was originally documented here as "safe enough"
+// on the reasoning that this is an admin-triggered, low-frequency,
+// sequential action (a button click, or a one-time backfill script run)
+// rather than an at-least-once delivery path.
+//
+// FIN-001 (Step 3 integration-readiness brief, Section 4) revisited that
+// reasoning and found it incomplete: the backfill script
+// (runLegacyCommissionReconciliationBackfill /
+// scripts/reconcileLegacyCommissions.ts) can be run by more than one
+// operator, and the single-transaction "Flag for reconciliation" route is
+// reachable directly (see the hasFinancialEngineAgreement comment below)
+// independent of any UI serialisation — so a genuine concurrent
+// double-submit for the same (brokerageId, transactionId) is possible, not
+// just theoretical. The fix follows ensurePcSuccessFeeRequest's exact
+// pattern below: SELECT-before-INSERT, `.onConflictDoNothing()` on the
+// INSERT, and a re-SELECT on a race so the caller never has to catch a
+// unique-violation error itself.
+//
+// IMPORTANT — this fix is currently code-only. It is fully protective only
+// once financial_reconciliations_legacy_commission_unique_idx (the new
+// partial unique index declared on financialReconciliations in
+// schema/financial.ts, directly above the table's index block) exists as a
+// real Postgres constraint. That index has NOT yet been applied as a
+// migration — see the extensive comment at that declaration for why (no
+// drizzle-kit/DATABASE_URL access in the environment that authored this
+// change) and the exact next steps to generate and apply it. Until that
+// migration lands, `.onConflictDoNothing()` below has NO effect (Postgres
+// ignores an ON CONFLICT clause when no matching constraint exists yet —
+// it is not an error, it is simply a no-op), so this is a genuinely
+// zero-behavior-change-today, forward-compatible change: the SELECT-before-
+// INSERT check keeps behaving exactly as before for sequential callers,
+// and the new re-select-on-conflict branch below is unreachable until the
+// constraint exists, at which point it activates automatically with no
+// further code change required.
 
 import { eq, and, isNull } from "drizzle-orm";
 import {
@@ -228,7 +246,23 @@ export async function reconcileLegacyCommission(input: ReconcileLegacyCommission
         `No commissionAgreement/commissionCalculation exists for this transaction and none was fabricated by this process — the original calculation method and rate were never captured by the legacy schema. ` +
         `Resolve by drafting and approving a real commission agreement (Financial Summary → Commission Agreement) if the historical terms are known, or by manually marking this record RECONCILED with a note if no further action is warranted.`,
     })
+    // FIN-001: no-op today (no matching constraint exists yet — see the
+    // module header above and the index declaration in schema/financial.ts),
+    // becomes the real race guard automatically once that migration lands.
+    .onConflictDoNothing()
     .returning();
+
+  if (!inserted) {
+    // Someone else's insert won the race between our SELECT and our INSERT
+    // — re-select rather than error, exactly mirroring
+    // settlement.ts's ensurePcSuccessFeeRequest. Unreachable until the
+    // financial_reconciliations_legacy_commission_unique_idx migration
+    // (see schema/financial.ts) exists, at which point it activates with
+    // no further code change.
+    const raceWinner = await getExistingLegacyReconciliation(input.transactionId, input.brokerageId);
+    if (!raceWinner) throw new Error("Failed to create or find a legacy commission reconciliation record.");
+    return { created: false, dryRun: false, reconciliation: raceWinner, skippedReason: "Already created (concurrent reconcile request)." };
+  }
 
   await db.insert(financialLedgerEvents).values({
     brokerageId: input.brokerageId,
@@ -237,13 +271,13 @@ export async function reconcileLegacyCommission(input: ReconcileLegacyCommission
     eventType: "LEGACY_COMMISSION_FLAGGED_FOR_RECONCILIATION",
     amountCents: context.grossCommissionCents,
     sourceRecordType: LEGACY_RECONCILIATION_RECORD_TYPE,
-    sourceRecordId: String(inserted!.id),
+    sourceRecordId: String(inserted.id),
     actorType: input.actorUserId != null ? "USER" : "SYSTEM",
     actorUserId: input.actorUserId ?? null,
     reason: LEGACY_RECONCILIATION_SOURCE,
   });
 
-  return { created: true, dryRun: false, reconciliation: inserted! };
+  return { created: true, dryRun: false, reconciliation: inserted };
 }
 
 // ---------------------------------------------------------------------

@@ -16,6 +16,13 @@
 //     manual vertical-slice walkthrough (Section 27 Scenario E), not by
 //     a server-side test.
 //
+// One additional scenario beyond the original 14 was added later, for
+// FIN-001 (Step 3 integration-readiness brief, Section 4): a genuine
+// concurrent-request test (Promise.all, not the sequential "run twice"
+// scenario 5/9 below) — see its own comment at the point it appears below
+// for why it exists and what it can and cannot prove without a live
+// database in the environment that runs it.
+//
 // Same fixture shape and harness as this directory's sibling files
 // (agreements.test.ts, settlement.test.ts): a real database, a real
 // property/transaction created through the actual API routes via
@@ -190,6 +197,62 @@ describe("reconcileLegacyCommission — run twice", () => {
 
     const rows = await db.select().from(financialReconciliations).where(eq(financialReconciliations.recordId, String(transactionId)));
     assert.equal(rows.length, 1, "exactly one reconciliation row must exist however many times this is called");
+  });
+});
+
+// FIN-001 (Step 3 integration-readiness brief, Section 4) — NOT one of the
+// original Section 8 scenarios. The "run twice" test above calls
+// reconcileLegacyCommission SEQUENTIALLY (await, then await again), which
+// only exercises the SELECT-before-INSERT check on its own — it can never
+// observe the actual race the SELECT-before-INSERT idiom is vulnerable to.
+// This test instead fires two calls concurrently (Promise.all) for the
+// same (brokerageId, transactionId) so both SELECTs can genuinely run
+// before either INSERT commits.
+//
+// Today, in this environment, this test is expected to PASS for the wrong
+// reason: this repo's sqlite/postgres test harness serialises overlapping
+// writes to the same row closely enough in practice that the race is hard
+// to hit reliably in an automated single-process test run even without a
+// DB-level constraint — so this test's real job is not proving today's
+// safety, it is being the acceptance test for the fix. It asserts the
+// property that must hold regardless of timing (exactly one reconciliation
+// row, and every returned result points at that same row) — the same
+// assertion this test would make before AND after the
+// financial_reconciliations_legacy_commission_unique_idx migration lands
+// (see schema/financial.ts). Once that migration is applied, this test
+// additionally becomes a genuine regression guard against the race
+// reappearing (e.g. if the constraint were ever accidentally dropped) — a
+// value it cannot fully deliver without a real database and migration
+// pipeline in the environment that runs it, which is exactly the gap
+// documented in docs/FINANCIAL_TRANSACTION_ENGINE_VERIFICATION.md.
+describe("reconcileLegacyCommission — concurrent requests for the same transaction (FIN-001)", () => {
+  test("two simultaneous calls create exactly one reconciliation row between them", async () => {
+    const { propertyId, transactionId } = await createClosedLegacyTransaction(A.agent.cookie, { addressSuffix: "14" });
+
+    const [first, second] = await Promise.all([
+      reconcileLegacyCommission({ transactionId, brokerageId: A.brokerageId, propertyId, actorUserId: A.admin.user.id }),
+      reconcileLegacyCommission({ transactionId, brokerageId: A.brokerageId, propertyId, actorUserId: A.admin.user.id }),
+    ]);
+
+    const rows = await db.select().from(financialReconciliations).where(eq(financialReconciliations.recordId, String(transactionId)));
+    assert.equal(rows.length, 1, "a concurrent double-submit must never create two reconciliation rows for the same transaction");
+
+    // Exactly one of the two calls did the creating; the other observed it
+    // (either via its own SELECT finding the winner's row, or via the
+    // onConflictDoNothing + re-select race-loser path once the unique
+    // index exists) — both outcomes are correct, "both created" is not.
+    assert.notEqual(first.created, second.created, "exactly one of the two concurrent calls must report created:true");
+    const winner = first.created ? first : second;
+    const loser = first.created ? second : first;
+    assert.ok(winner.reconciliation);
+    assert.ok(loser.reconciliation);
+    assert.equal(loser.reconciliation!.id, winner.reconciliation!.id, "the losing call must resolve to the same row the winner created, never a duplicate");
+
+    const ledgerRows = await db
+      .select()
+      .from(financialLedgerEvents)
+      .where(and(eq(financialLedgerEvents.transactionId, transactionId), eq(financialLedgerEvents.eventType, "LEGACY_COMMISSION_FLAGGED_FOR_RECONCILIATION")));
+    assert.equal(ledgerRows.length, 1, "exactly one ledger event must be recorded, matching the single reconciliation row");
   });
 });
 
