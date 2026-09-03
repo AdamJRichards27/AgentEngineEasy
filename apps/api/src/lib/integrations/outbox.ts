@@ -160,7 +160,15 @@ async function failCommand(command: IntegrationOutboxRow, attemptNumber: number,
     source: "integrations:outbox",
     correlationId: command.correlationId ?? newCorrelationId(),
     causationId: command.causationId ?? null,
-    idempotencyKey: `INTEGRATION_COMMAND_DEAD_LETTERED:${command.id}`,
+    // Includes attemptNumber, not just the outbox row id: a replay
+    // (replayDeadLetteredCommand below) that fails again permanently calls
+    // failCommand a second time for the SAME outbox row. attempts is never
+    // reset across a replay (only status/nextAttemptAt are), so
+    // attemptNumber strictly increases across the row's whole lifetime —
+    // using it here keeps each real dead-lettering occurrence as its own
+    // event instead of silently colliding with (and losing) the first one
+    // on domain_events' idempotency-key uniqueness constraint.
+    idempotencyKey: `INTEGRATION_COMMAND_DEAD_LETTERED:${command.id}:${attemptNumber}`,
     payload: { outboxId: command.id, connectionId: command.connectionId, capability: command.capability, reason },
     metadata: {},
   }).catch((err) => console.error("publishDomainEvent(INTEGRATION_COMMAND_DEAD_LETTERED) failed", err));

@@ -105,9 +105,9 @@ export interface ResolvedConnection {
  * The fail-closed resolver (Section 4). Returns the connection ONLY if
  * every one of these is true, checked in this exact order so the error
  * reason is always the first real blocker, never a later, more confusing one:
- *   1. Brokerage-level integrations.enabled setting is on.
- *   2. The actor's brokerage holds the integrations.access entitlement.
- *   3. A connection matching connectionId exists AND belongs to this brokerage.
+ *   1. A connection matching connectionId exists AND belongs to this brokerage.
+ *   2. Brokerage-level integrations.enabled setting is on.
+ *   3. The actor's brokerage holds the integrations.access entitlement.
  *   4. Its status is ACTIVE (the only usable status — Section 4).
  *   5. Its environmentClassification is "MOCK" (defence in depth — this
  *      build never activates anything else; see integrations.ts schema's
@@ -116,8 +116,29 @@ export interface ResolvedConnection {
  *   7. The provider itself still declares that capability and is active.
  * Any DB error is caught and treated as a fail-closed denial, never surfaced
  * as an ambiguous 500 that might be mistaken for "try again and it'll work."
+ *
+ * The tenant/existence check (1) deliberately runs BEFORE every other
+ * check. Section 4.6 requires tenant isolation to be airtight, and Section
+ * 14's acceptance scenario #8 requires that a caller from another brokerage
+ * gets an identical NOT_FOUND for any operation on a connection that was
+ * never theirs — never a different error derived from THEIR OWN brokerage's
+ * settings/entitlement state (e.g. "your brokerage lacks the entitlement"),
+ * which would still let a caller distinguish "this connectionId exists
+ * somewhere" from "it doesn't" by comparing error reasons across two of
+ * their own requests. Tenant scoping is the outermost boundary; only once a
+ * connection is confirmed to belong to the caller's own brokerage do the
+ * brokerage-level settings/entitlement checks (which are otherwise cheaper
+ * and independent of connectionId) get evaluated.
  */
 export async function resolveActiveConnection(brokerageId: number, connectionId: string, capability: IntegrationCapability): Promise<ResolvedConnection> {
+  const [connection] = await db.select().from(integrationConnections).where(eq(integrationConnections.id, connectionId));
+  if (!connection || connection.brokerageId !== brokerageId) {
+    // Identical NOT_FOUND whether the row is missing or belongs to another
+    // tenant — mirrors exceptions/model.ts / launch/model.ts's own
+    // "never reveal cross-tenant existence" discipline.
+    throw new IntegrationError("NOT_FOUND", "Integration connection not found.");
+  }
+
   let settings;
   try {
     settings = await getOrCreateIntegrationSettings(brokerageId);
@@ -133,13 +154,6 @@ export async function resolveActiveConnection(brokerageId: number, connectionId:
     throw new IntegrationError("ENTITLEMENT_DENIED", "This brokerage does not hold the integrations.access entitlement.");
   }
 
-  const [connection] = await db.select().from(integrationConnections).where(eq(integrationConnections.id, connectionId));
-  if (!connection || connection.brokerageId !== brokerageId) {
-    // Identical NOT_FOUND whether the row is missing or belongs to another
-    // tenant — mirrors exceptions/model.ts / launch/model.ts's own
-    // "never reveal cross-tenant existence" discipline.
-    throw new IntegrationError("NOT_FOUND", "Integration connection not found.");
-  }
   if (connection.status !== "ACTIVE") {
     throw new IntegrationError("CONNECTION_NOT_USABLE", `Connection is ${connection.status}, not ACTIVE.`);
   }

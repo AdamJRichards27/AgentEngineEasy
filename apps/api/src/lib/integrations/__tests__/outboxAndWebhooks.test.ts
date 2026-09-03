@@ -27,6 +27,7 @@ let server: Server;
 let baseUrl: string;
 const suffix = Date.now();
 let A: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
+let B: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
 
 before(async () => {
   const { configureEvents } = await import("../../events.js");
@@ -41,10 +42,11 @@ before(async () => {
 
   await bootstrapIntegrationsForTesting();
   A = await createBrokerageWithUsers(baseUrl, `Integrations Outbox ${suffix}`);
+  B = await createBrokerageWithUsers(baseUrl, `Integrations Outbox B ${suffix}`);
 });
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId].filter((id): id is number => typeof id === "number"));
+  await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
@@ -292,4 +294,62 @@ test("credential references are opaque mock pointers, never anything shaped like
   // Defensive shape checks: not a JWT, not a typical API-key/bearer-token shape.
   assert.equal(secret!.split(".").length, 1, "must not resemble a JWT (three dot-separated segments)");
   assert.doesNotMatch(secret!, /^(sk|pk|Bearer)[-_]/i, "must not resemble a real provider API-key/bearer-token prefix convention");
+});
+
+// ---------------------------------------------------------------------
+// Cross-tenant dead-letter access (Section 14, acceptance scenario #8 —
+// the "view, operate, or replay" guarantee, specifically for replay).
+// connectionLifecycle.test.ts already proves cross-tenant load/resolve/
+// suspend on a CONNECTION are rejected identically; this proves the same
+// holds for a dead letter and its replay, for both an OUTBOX- and an
+// INBOX-sourced letter.
+// ---------------------------------------------------------------------
+
+test("cross-tenant: brokerage B cannot view or replay a dead letter that belongs to brokerage A", async () => {
+  const { connection } = await createActiveMockPortalConnection(A.brokerageId, actor());
+
+  const outboxCommand = await enqueueCommand({
+    brokerageId: A.brokerageId,
+    connectionId: connection.id,
+    capability: INTEGRATION_CAPABILITIES.PORTAL_PUBLISH_LISTING,
+    commandPayload: { destination: "cross-tenant-case", __forcePermanentRejection: true },
+    idempotencyKey: mintIdempotencyKey("test-cross-tenant-outbox"),
+    sourceRecordType: "test",
+    sourceRecordId: "cross-tenant-case",
+  });
+  await dispatchCommand(outboxCommand.id);
+  const outboxLetter = (await listDeadLettersForBrokerage(A.brokerageId)).find((d) => d.sourceId === outboxCommand.id)!;
+  assert.ok(outboxLetter, "expected an OUTBOX dead letter for brokerage A");
+
+  registerWebhookEffectHandler("mock_portal_v1", "CROSS_TENANT_ALWAYS_THROWS", async () => {
+    throw new Error("Simulated processing failure.");
+  });
+  const failedWebhook = await processInboundWebhook({
+    connectionId: connection.id,
+    provider: "mock_portal_v1",
+    providerEventId: `evt-cross-tenant-${Date.now()}`,
+    eventType: "CROSS_TENANT_ALWAYS_THROWS",
+    payload: {},
+    signatureValid: true,
+  });
+  assert.equal(failedWebhook.status, "FAILED");
+  const inboxLetter = (await listDeadLettersForBrokerage(A.brokerageId)).find((d) => d.sourceType === "INBOX" && d.sourceId === String(failedWebhook.inboxId))!;
+  assert.ok(inboxLetter, "expected an INBOX dead letter for brokerage A");
+
+  const bActor = { id: B.admin.user.id, role: B.admin.user.role };
+
+  // View: brokerage B's own dead-letter list never contains brokerage A's letters.
+  const bList = await listDeadLettersForBrokerage(B.brokerageId);
+  assert.ok(!bList.some((d) => d.id === outboxLetter.id || d.id === inboxLetter.id), "brokerage B's dead-letter list must never include brokerage A's letters");
+
+  // Operate/replay: brokerage B cannot replay either of brokerage A's letters.
+  await assert.rejects(() => replayDeadLetteredCommand(outboxLetter.id, B.brokerageId, bActor));
+  await assert.rejects(() => replayDeadLetteredWebhook(inboxLetter.id, B.brokerageId, bActor));
+
+  // Confirm brokerage A can still replay its own letters — the rejection
+  // above is tenant-scoping, not a broken replay path.
+  const ownReplay = await replayDeadLetteredCommand(outboxLetter.id, A.brokerageId, actor());
+  assert.equal(ownReplay.status, "DEAD_LETTERED");
+
+  registerLaunchIntegrationHandlers();
 });
