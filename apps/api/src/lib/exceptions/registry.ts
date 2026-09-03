@@ -53,8 +53,14 @@ import { COMMUNICATION_DELIVERY_RULES } from "./rules/communicationDelivery.js";
 // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F,
 // Section 22). Commission-agreement/PC-fee-payment/marketing-invoice/
 // dispute findings surface through this same registry, under their own
-// FINANCIAL category — see rules/financial.ts's own module comment.
+// FINANCIAL category — see rules/financial.js's own module comment.
 import { FINANCIAL_RULES } from "./rules/financial.js";
+// Part B Stage 4 — closes the two open items Stage 2's
+// docs/LEGACY_DATA_CLASSIFICATION.md handed to this stage (Findings 3/4):
+// Transaction workflow projection drift and property AML status summary
+// drift, under their own DATA_CONSISTENCY category — see
+// rules/dataConsistency.ts's own module comment.
+import { DATA_CONSISTENCY_RULES } from "./rules/dataConsistency.js";
 
 export const RISK_RULES: RiskRule[] = [
   ...APPRAISAL_AGREEMENT_RULES,
@@ -67,6 +73,7 @@ export const RISK_RULES: RiskRule[] = [
   ...LAUNCH_CAMPAIGN_RULES,
   ...COMMUNICATION_DELIVERY_RULES,
   ...FINANCIAL_RULES,
+  ...DATA_CONSISTENCY_RULES,
 ];
 
 // Fail loudly at import time on a duplicate ruleId — a copy-paste error in
