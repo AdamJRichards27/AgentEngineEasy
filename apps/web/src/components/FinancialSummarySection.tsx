@@ -19,6 +19,18 @@
 // requireRole(...BROKERAGE_ADMIN_ROLES) on every route this component
 // calls, which 403s an unauthorised request independently of anything
 // rendered (or not rendered) client-side.
+//
+// Financial Transaction Engine Verification (Step 2), COHERENCE-001
+// remediation: the Commission Agreement / Commission Calculation
+// subsections below now render a `legacyCommission` branch (see
+// lib/financial.ts's LegacyCommissionSummary) instead of a bare "No
+// commission agreement/calculation recorded yet." whenever the API
+// reports a pre-existing legacy commission figure for this property with
+// no Financial Engine agreement to explain it — the exact contradiction
+// the audit found (a real commission amount in the legacy Transaction
+// section next to "no commission" here). That branch never invents an
+// agreement or a calculation; it labels the legacy figure by its source
+// and offers the single authorised next step ("Flag for Reconciliation").
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -31,6 +43,7 @@ import {
   depositStatusLabel,
   depositStatusPillClass,
   fetchPropertyFinancialSummary,
+  flagLegacyCommissionForReconciliation,
   formatBps,
   formatCents,
   formatDate,
@@ -38,6 +51,7 @@ import {
   paymentRequestStatusPillClass,
   snapshotStateLabel,
   snapshotStatePillClass,
+  type LegacyCommissionSummary,
   type PropertyFinancialSummaryResponse,
 } from "../lib/financial";
 
@@ -84,6 +98,7 @@ function FinancialSummaryBody({
 }) {
   const queryClient = useQueryClient();
   const [approveError, setApproveError] = useState<string | null>(null);
+  const [flagError, setFlagError] = useState<string | null>(null);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["financial-summary", propertyId] });
 
@@ -96,15 +111,22 @@ function FinancialSummaryBody({
     onError: (err: unknown) => setApproveError(err instanceof ApiError ? err.friendly : "Couldn't approve this agreement."),
   });
 
-  const { currentCommissionAgreement, latestCommissionCalculation, latestPcFeeCalculation, paymentRequests, deposit } = summary;
+  const flagMut = useMutation({
+    mutationFn: (transactionId: number) => flagLegacyCommissionForReconciliation(transactionId),
+    onSuccess: () => {
+      setFlagError(null);
+      invalidate();
+    },
+    onError: (err: unknown) => setFlagError(err instanceof ApiError ? err.friendly : "Couldn't flag this commission for reconciliation."),
+  });
+
+  const { currentCommissionAgreement, latestCommissionCalculation, latestPcFeeCalculation, paymentRequests, deposit, legacyCommission } = summary;
 
   return (
     <div className="stack">
       <div>
         <h3>Commission Agreement</h3>
-        {!currentCommissionAgreement ? (
-          <p className="muted">No commission agreement recorded yet.</p>
-        ) : (
+        {currentCommissionAgreement ? (
           <>
             <p>
               <span className={commissionAgreementStatusPillClass(currentCommissionAgreement.status)}>
@@ -131,14 +153,21 @@ function FinancialSummaryBody({
               </>
             )}
           </>
+        ) : legacyCommission ? (
+          <LegacyCommissionCard
+            legacyCommission={legacyCommission}
+            isPending={flagMut.isPending}
+            error={flagError}
+            onFlag={() => flagMut.mutate(legacyCommission.transactionId)}
+          />
+        ) : (
+          <p className="muted">No commission agreement recorded yet.</p>
         )}
       </div>
 
       <div>
         <h3>Commission Calculation</h3>
-        {!latestCommissionCalculation ? (
-          <p className="muted">No commission calculation recorded yet.</p>
-        ) : (
+        {latestCommissionCalculation ? (
           <>
             <p>
               <span className={snapshotStatePillClass(latestCommissionCalculation.state)}>{snapshotStateLabel(latestCommissionCalculation.state)}</span>{" "}
@@ -151,6 +180,12 @@ function FinancialSummaryBody({
               {latestCommissionCalculation.finalisedAt && ` · finalised ${formatDate(latestCommissionCalculation.finalisedAt)}`}
             </p>
           </>
+        ) : legacyCommission ? (
+          <p className="muted">
+            No Financial Engine calculation exists for this property — see the legacy commission record above under Commission Agreement.
+          </p>
+        ) : (
+          <p className="muted">No commission calculation recorded yet.</p>
         )}
       </div>
 
@@ -201,6 +236,49 @@ function FinancialSummaryBody({
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+// COHERENCE-001 remediation. Deliberately does not reuse the
+// commissionAgreementStatusPillClass/-Label helpers — a legacy figure has
+// no CommissionAgreementStatus at all (it is not DRAFT/AWAITING_APPROVAL/
+// APPROVED/SUPERSEDED/CANCELLED, it is simply a number carried over from
+// before the Financial Engine existed), so this renders its own
+// unambiguous "Legacy" pill rather than forcing it into that vocabulary.
+function LegacyCommissionCard({
+  legacyCommission,
+  isPending,
+  error,
+  onFlag,
+}: {
+  legacyCommission: LegacyCommissionSummary;
+  isPending: boolean;
+  error: string | null;
+  onFlag: () => void;
+}) {
+  return (
+    <div>
+      <p>
+        <span className="pill">Legacy · pre-Financial Engine</span>{" "}
+        {formatCents(legacyCommission.grossCommissionCents)}
+        {legacyCommission.gstCents != null && ` (incl. ${formatCents(legacyCommission.gstCents)} GST)`}
+      </p>
+      <p className="muted">
+        Recorded on this property's transaction (status {legacyCommission.transactionStatus.toLowerCase()})
+        {legacyCommission.commissionCalculatedAt && ` on ${formatDate(legacyCommission.commissionCalculatedAt)}`}. No Financial Engine commission
+        agreement exists for this property — the original calculation method and rate were never captured, so none has been created or inferred here.
+      </p>
+      {legacyCommission.alreadyFlaggedForReconciliation ? (
+        <p className="muted">Already flagged for reconciliation — see Financial Operations → Reconciliation.</p>
+      ) : (
+        <>
+          <button className="btn btn-secondary btn-small" disabled={isPending} onClick={onFlag}>
+            Flag for Reconciliation
+          </button>
+          {error && <p className="error-text">{error}</p>}
+        </>
+      )}
     </div>
   );
 }

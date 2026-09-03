@@ -65,6 +65,7 @@ import {
   reverseDebit,
   dispatchPendingPaymentOutbox,
 } from "../lib/financial/paymentOutbox.js";
+import { reconcileLegacyCommission } from "../lib/financial/legacyReconciliation.js";
 import {
   listCommissionAgreements,
   getCommissionAgreement,
@@ -277,6 +278,34 @@ financialRouter.post("/financial/settlement/finalize-commission", ...requireFina
       salePriceCentsOverride: parsed.data.salePriceCentsOverride,
     });
     res.json(result);
+  } catch (err) {
+    if (!handlePlainError(err, res)) throw err;
+  }
+});
+
+// ---------------------------------------------------------------------
+// Legacy commission reconciliation (Financial Transaction Engine
+// Verification, Step 2, COHERENCE-001 remediation). Never writes to
+// commissionAgreements/commissionCalculations — see lib/financial/
+// legacyReconciliation.ts's module header for the full rationale. This is
+// the "authorised reconciliation action" behind FinancialSummarySection.
+// tsx's "Flag for reconciliation" button.
+// ---------------------------------------------------------------------
+
+financialRouter.post("/financial/transactions/:transactionId/legacy-commission/reconcile", ...requireFinancialAdmin, async (req, res) => {
+  const user = req.authedUser!;
+  const transactionId = Number(req.params.transactionId);
+  const scope = await resolveTransactionScope(transactionId, user.brokerageId);
+  if (!scope) return void res.status(404).json({ error: "Transaction not found" });
+  try {
+    const result = await reconcileLegacyCommission({
+      transactionId: scope.transactionId,
+      brokerageId: user.brokerageId,
+      propertyId: scope.propertyId,
+      actorUserId: user.id,
+    });
+    if (!result.reconciliation) return void res.status(409).json({ error: result.skippedReason ?? "Nothing to reconcile." });
+    res.status(result.created ? 201 : 200).json({ reconciliation: result.reconciliation, created: result.created });
   } catch (err) {
     if (!handlePlainError(err, res)) throw err;
   }

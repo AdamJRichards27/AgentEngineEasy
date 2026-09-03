@@ -246,6 +246,29 @@ export interface FinancialDeposit {
   reconciledAt: string | null;
 }
 
+// Section 19 — mirrors schema/financial.ts's financialReconciliations
+// table exactly. Polymorphic over recordType/recordId (a legacy
+// commission, a deposit, a PC fee, ...) rather than one interface per
+// domain, same as the table itself.
+export interface FinancialReconciliation {
+  id: number;
+  brokerageId: number;
+  recordType: string;
+  recordId: string;
+  expectedAmountCents: number | null;
+  reportedAmountCents: number | null;
+  evidenceAmountCents: number | null;
+  differenceCents: number | null;
+  status: ReconciliationStatus;
+  source: string | null;
+  externalReference: string | null;
+  evidenceRef: string | null;
+  notes: string | null;
+  reconciledByUserId: number | null;
+  reconciledAt: string | null;
+  createdAt: string;
+}
+
 export interface AuditReturnReminder {
   id: number;
   brokerageId: number;
@@ -260,6 +283,27 @@ export interface AuditReturnReminder {
   submittedAt: string | null;
 }
 
+// Financial Transaction Engine Verification (Step 2), COHERENCE-001
+// remediation — mirrors lib/financial/queries.ts's LegacyCommissionSummary
+// (API) exactly. Populated on PropertyFinancialSummaryResponse only when
+// the property has no Financial Engine commissionAgreement at all, so the
+// UI has a single coherent explanation instead of a bare "no commission
+// agreement" state sitting beside the legacy Transaction section's own
+// commission figure. This is a read-only, labelled surface of the
+// pre-existing legacy transactions.grossCommissionCents/gstCents figure —
+// it is never a Financial Engine calculation, and no commissionAgreement
+// or commissionCalculation is inferred from it.
+export interface LegacyCommissionSummary {
+  transactionId: number;
+  propertyId: number;
+  brokerageId: number;
+  transactionStatus: string;
+  grossCommissionCents: number;
+  gstCents: number | null;
+  commissionCalculatedAt: string | null;
+  alreadyFlaggedForReconciliation: boolean;
+}
+
 // ---------------------------------------------------------------------
 // Fetchers
 // ---------------------------------------------------------------------
@@ -271,6 +315,7 @@ export interface PropertyFinancialSummaryResponse {
   latestPcFeeCalculation: PcFeeCalculation | null;
   paymentRequests: FinancialPaymentRequest[];
   deposit: FinancialDeposit | null;
+  legacyCommission: LegacyCommissionSummary | null;
 }
 
 /** Section 28: the Property Financial Summary's single bundled read. */
@@ -280,6 +325,24 @@ export function fetchPropertyFinancialSummary(propertyId: number) {
 
 export function approveCommissionAgreement(agreementId: number) {
   return apiFetch<{ agreement: CommissionAgreement }>(`/financial/commission-agreements/${agreementId}/approve`, { method: "POST" });
+}
+
+// COHERENCE-001 remediation: the "Flag for reconciliation" action behind
+// FinancialSummarySection.tsx's legacy-commission card — the single
+// authorised way this build lets a Brokerage Administrator acknowledge a
+// legacy commission that predates the Financial Engine. Never creates a
+// commissionAgreement/commissionCalculation; only ever creates (or
+// returns the existing) financialReconciliations row via
+// lib/financial/legacyReconciliation.ts's reconcileLegacyCommission.
+export interface FlagLegacyCommissionForReconciliationResponse {
+  reconciliation: FinancialReconciliation;
+  created: boolean;
+}
+
+export function flagLegacyCommissionForReconciliation(transactionId: number) {
+  return apiFetch<FlagLegacyCommissionForReconciliationResponse>(`/financial/transactions/${transactionId}/legacy-commission/reconcile`, {
+    method: "POST",
+  });
 }
 
 export interface PaymentRequestsResponse {

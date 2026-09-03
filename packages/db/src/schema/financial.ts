@@ -165,6 +165,16 @@ export type ReconciliationStatus = (typeof RECONCILIATION_STATUSES)[number];
 
 // What a reconciliation or a ledger event is about — polymorphic pointer,
 // mirroring riskExceptions.sourceRecordType/sourceRecordId exactly.
+//
+// LEGACY_TRANSACTION_COMMISSION (Financial Transaction Engine Verification,
+// Step 2, COHERENCE-001 remediation): a legacy transactions.grossCommissionCents
+// figure that predates this brokerage's first commissionAgreement/
+// commissionCalculation row and therefore has no Financial Engine record to
+// reconcile against. Added additively (this is a `text` column, not a
+// Postgres enum type, so no migration is required) — see
+// lib/financial/legacyReconciliation.ts's module header for the full
+// rationale and lib/financial/queries.ts's getPropertyFinancialSummary for
+// where it surfaces.
 export const FINANCIAL_RECORD_TYPES = [
   "COMMISSION_AGREEMENT",
   "COMMISSION_CALCULATION",
@@ -173,6 +183,7 @@ export const FINANCIAL_RECORD_TYPES = [
   "PAYMENT_REQUEST",
   "MARKETING_PAYMENT_RECORD",
   "DEPOSIT",
+  "LEGACY_TRANSACTION_COMMISSION",
 ] as const;
 export type FinancialRecordType = (typeof FINANCIAL_RECORD_TYPES)[number];
 
@@ -631,6 +642,61 @@ export const financialDeposits = pgTable(
 // H. Reconciliation records (Section 19) — polymorphic over the record
 //    types above, generic rather than one reconciliation table per domain.
 // ---------------------------------------------------------------------
+//
+// FIN-001 (Step 3 integration-readiness brief, Section 4): reconcileLegacyCommission
+// (lib/financial/legacyReconciliation.ts) currently does a SELECT-before-INSERT
+// with no backing DB-level uniqueness constraint, so two concurrent calls for
+// the same (brokerageId, transactionId) can both pass the SELECT check before
+// either INSERT commits, producing duplicate LEGACY_TRANSACTION_COMMISSION
+// reconciliation rows for one transaction. This is the same class of race
+// ensurePcSuccessFeeRequest (lib/financial/settlement.ts) already closed via
+// financial_payment_requests_transaction_kind_idx.
+//
+// legacyCommissionUniqueIdx below declares the fix at the schema level: a
+// PARTIAL unique index, scoped to recordType = 'LEGACY_TRANSACTION_COMMISSION'
+// only, on (brokerageId, recordId) where recordId holds the transaction's id
+// (as text). A partial index is deliberate, not a blanket unique index across
+// all FINANCIAL_RECORD_TYPES:
+//   - Every OTHER row shape stored in this table via recordType (COMMISSION_
+//     AGREEMENT, PC_FEE_AUTHORITY, PAYMENT_REQUEST, ...) reconciles rows that
+//     point at an underlying table which is itself already versioned
+//     (commissionAgreements/commissionCalculations/pcFeeAuthorities all carry
+//     version/supersedesId). More than one financial_reconciliations row per
+//     (brokerageId, recordId) is expected and legitimate there — e.g. a
+//     re-reconciliation after a superseding version is calculated.
+//   - financial_reconciliations itself has no version/supersedesId columns of
+//     its own, and the LEGACY_TRANSACTION_COMMISSION recordType exists
+//     specifically as a one-shot "flag this legacy transaction for review"
+//     marker (see legacyReconciliation.ts's module header) — for THIS record
+//     type only, more than one row per (brokerageId, transactionId) is never
+//     a legitimate second version, it is always a duplicate of the same flag.
+//
+// NOT YET APPLIED AS A MIGRATION. This session has no drizzle-kit/DATABASE_URL
+// access (see docs/FINANCIAL_TRANSACTION_ENGINE_VERIFICATION.md and the Step 3
+// completion report for the full environment-limitation evidence), so the raw
+// SQL migration file and its meta/_journal.json + snapshot entries have
+// deliberately NOT been hand-authored here — doing so blind, without being
+// able to run `drizzle-kit generate`/`drizzle-kit check` against the real
+// schema, risks producing a migration that silently diverges from what
+// drizzle-kit would itself generate (wrong index name, wrong operator class,
+// a missed snapshot field) and that no one in this session could catch.
+// Exact next steps for a session with real DB access:
+//   1. `pnpm --filter @agent-engine/db exec drizzle-kit generate` — should
+//      produce exactly one new migration adding this partial unique index
+//      (and no other diff, if this is the only schema change).
+//   2. `pnpm --filter @agent-engine/db exec drizzle-kit check` — confirm no
+//      drift between schema and the generated migration history.
+//   3. Apply the migration to a scratch/staging database and re-run
+//      apps/api/src/lib/financial/__tests__/legacyReconciliation.test.ts's
+//      "concurrent reconcile requests" scenario (added alongside this
+//      change) to confirm the constraint actually serialises the race that
+//      test documents as a known gap today.
+// Until that migration lands, this index declaration has NO runtime effect —
+// Drizzle's schema module does not itself apply DDL — so this is a
+// zero-behavior-change-today, schema-first declaration of intent, paired
+// with a forward-compatible `.onConflictDoNothing()` guard already added to
+// reconcileLegacyCommission (see legacyReconciliation.ts) that is inert until
+// this constraint exists and becomes actively protective the moment it does.
 
 export const financialReconciliations = pgTable(
   "financial_reconciliations",
@@ -659,6 +725,15 @@ export const financialReconciliations = pgTable(
   (table) => ({
     recordIdx: index("financial_reconciliations_record_idx").on(table.recordType, table.recordId),
     brokerageStatusIdx: index("financial_reconciliations_brokerage_status_idx").on(table.brokerageId, table.status),
+    // FIN-001 fix — see the module comment directly above this table for
+    // full rationale. Scoped (partial) unique index: only enforces
+    // uniqueness of (brokerageId, recordId) among rows where recordType is
+    // the legacy one-shot flag, leaving every other recordType free to have
+    // multiple reconciliation rows per record (expected for versioned
+    // financial records). NOT YET migrated — see the rationale above.
+    legacyCommissionUniqueIdx: uniqueIndex("financial_reconciliations_legacy_commission_unique_idx")
+      .on(table.brokerageId, table.recordId)
+      .where(sql`${table.recordType} = 'LEGACY_TRANSACTION_COMMISSION'`),
   }),
 );
 
@@ -703,6 +778,13 @@ export const FINANCIAL_LEDGER_EVENT_TYPES = [
   "SETTLEMENT_FINANCIALS_FINALISED",
   "AUDIT_RETURN_REMINDER_SENT",
   "AUDIT_RETURN_SUBMITTED",
+  // Financial Transaction Engine Verification, Step 2, COHERENCE-001
+  // remediation: recorded when a Brokerage Administrator (or the
+  // idempotent backfill script) flags a pre-existing legacy transaction
+  // commission for reconciliation because it predates this brokerage's
+  // first Financial Engine commissionAgreement — see
+  // lib/financial/legacyReconciliation.ts.
+  "LEGACY_COMMISSION_FLAGGED_FOR_RECONCILIATION",
 ] as const;
 export type FinancialLedgerEventType = (typeof FINANCIAL_LEDGER_EVENT_TYPES)[number];
 
