@@ -51,18 +51,15 @@ after(async () => {
 
 // Retries a scheduled scan when it's transiently refused because another
 // scan (from a concurrently-running test file against the same shared test
-// database) currently holds the scan_runs lock — same precedent as
-// engine.test.ts's own scanOrRetry. This file's budget is wider than
-// engine.test.ts's own (8 attempts): engine.test.ts's __tests__ file starts
-// up with a burst of its own back-to-back scans (its synthetic
-// TEST_THROWING_RULE case alone sweeps a couple dozen brokerages), and this
-// file's very first scanOrRetry call tends to land inside that startup
-// burst when both files are run together — observed empirically to
-// occasionally outlast an 8x500ms (4s) budget. 30x500ms (15s) comfortably
-// clears it without masking a genuinely stuck lock (this file's own two
-// scans finish in well under that either way).
+// database) currently holds the scan_runs lock — same precedent, and same
+// budget, as engine.test.ts's own scanOrRetry. (A wider budget was tried
+// here and rejected: it didn't remove contention under heavy concurrent
+// load, it just shifted which file's scans lost the race, while also
+// issuing more retried scan attempts of its own — matching the existing
+// file's precedent exactly is the least surprising, least invasive
+// choice.)
 async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL"): Promise<ScanSummary> {
-  for (let attempt = 0; attempt < 30; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     const result = await runScheduledScan(trigger);
     if (result.ok) return result.summary;
     await new Promise((resolve) => setTimeout(resolve, 500));
