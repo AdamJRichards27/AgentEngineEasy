@@ -129,6 +129,31 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "COMMUNICATION_MESSAGE_RECEIVED",
   "COMMUNICATION_MESSAGE_BLOCKED",
   "COMMUNICATION_CONSENT_UPDATED",
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F).
+  // The financial engine's own domain events (Sections 9/13-15/17/21/31),
+  // added once Stage F wires the engine to this canonical event bus for
+  // the first time — Stages B-E built and exercised every financial
+  // service function directly, with financialLedgerEvents (a domain-
+  // specific, append-only table of its OWN — see routes/financial.ts's
+  // header comment) as the audit trail, but never published to this bus.
+  // These ten cover only the material, cross-engine-relevant milestones
+  // (an approval, a settlement-triggered finalisation, an authority
+  // activation/revocation, a payment's terminal outcomes, a marketing
+  // invoice/reconciliation milestone) — every finer-grained state
+  // transition stays exactly where it already lived, in
+  // financialLedgerEvents, mirroring how AUTOMATION_EXECUTION_COMPLETED's
+  // own comment above reasons about AI_ACTION_EXECUTED already covering
+  // action-level success without a second, duplicate event.
+  "COMMISSION_AGREEMENT_APPROVED",
+  "COMMISSION_FINALISED",
+  "PC_FEE_AUTHORITY_ACTIVATED",
+  "PC_FEE_AUTHORITY_REVOKED",
+  "FINANCIAL_PAYMENT_SCHEDULED",
+  "FINANCIAL_PAYMENT_PAID",
+  "FINANCIAL_PAYMENT_FAILED",
+  "FINANCIAL_PAYMENT_REVERSED",
+  "MARKETING_INVOICE_RECORDED",
+  "MARKETING_PAYMENT_RECONCILED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -230,6 +255,17 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   COMMUNICATION_MESSAGE_RECEIVED: { version: 1, description: "An inbound communication (reply or new message) was recorded against a thread." },
   COMMUNICATION_MESSAGE_BLOCKED: { version: 1, description: "A communication message was blocked before sending, by consent/opt-out or a cost control threshold." },
   COMMUNICATION_CONSENT_UPDATED: { version: 1, description: "A destination's consent/opt-out record was created or changed." },
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F).
+  COMMISSION_AGREEMENT_APPROVED: { version: 1, description: "A commission agreement was approved by a second Brokerage Administrator (separation of duties from its drafter)." },
+  COMMISSION_FINALISED: { version: 1, description: "A transaction's commission was finalised against an approved commission agreement, typically triggered by SETTLEMENT_COMPLETED." },
+  PC_FEE_AUTHORITY_ACTIVATED: { version: 1, description: "A Pit Crew success-fee authority was activated once its debit mandate was externally authorised." },
+  PC_FEE_AUTHORITY_REVOKED: { version: 1, description: "A Pit Crew success-fee authority was revoked." },
+  FINANCIAL_PAYMENT_SCHEDULED: { version: 1, description: "A mandate debit was successfully scheduled with the payment provider for a financial payment request." },
+  FINANCIAL_PAYMENT_PAID: { version: 1, description: "A financial payment request's debit cleared (provider-confirmed Paid)." },
+  FINANCIAL_PAYMENT_FAILED: { version: 1, description: "A financial payment request failed permanently, after exhausting retries where retryable." },
+  FINANCIAL_PAYMENT_REVERSED: { version: 1, description: "A previously paid financial payment request was reversed, either by an administrator or the provider." },
+  MARKETING_INVOICE_RECORDED: { version: 1, description: "A marketing invoice was recorded against a Launch campaign item's payment overlay." },
+  MARKETING_PAYMENT_RECONCILED: { version: 1, description: "A marketing payment record was reconciled against brokerage financial records." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {

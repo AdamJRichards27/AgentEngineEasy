@@ -24,3 +24,8 @@ export * from "./launch";
 export * from "./pitCrew";
 // Agent Engine 2.0 — Communications Hub (Priority 8).
 export * from "./communications";
+// Agent Engine 2.0 — Financial Transaction Engine (Priority 9). Reuses
+// transaction.ts, documents.ts (agencyAgreementTerms), launch.ts
+// (campaignItems) and exceptions.ts (a new "FINANCIAL" category) rather
+// than duplicating any of them — see financial.ts's own header comment.
+export * from "./financial";

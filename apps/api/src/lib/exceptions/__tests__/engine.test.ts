@@ -74,21 +74,6 @@ async function createProperty(cookie: string, address: string): Promise<number> 
   return property.id;
 }
 
-async function createOffer(propertyId: number, cookie: string, offerPriceCents: number): Promise<number> {
-  const res = await fetch(`${baseUrl}/api/offers/by-property/${propertyId}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({
-      offerPriceCents,
-      conditions: { depositCents: 4000000, settlementDate: "2027-01-15", conditions: "Subject to finance", additionalTerms: "Standard terms" },
-      buyer: { firstName: "Extra", lastName: "Buyer", email: `extra-buyer-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com` },
-    }),
-  });
-  if (res.status !== 201) throw new Error(`create offer failed: ${res.status} ${await res.text()}`);
-  const { offer } = (await res.json()) as { offer: { id: number } };
-  return offer.id;
-}
-
 // Retries a scheduled scan when it's transiently refused because another
 // scan (from a concurrently-running test file against the same shared test
 // database) currently holds the scan_runs lock — a real, correct outcome
@@ -186,12 +171,24 @@ test("AT_RISK scenario: a live listing missing required address fields is detect
 test("CRITICAL scenario: two offers independently marked Accepted for one property is detected, cannot be manually overridden, and auto-resolves once corrected", async () => {
   const { propertyId, offerId: firstOfferId } = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, { address: "1 Critical Scenario Rd" });
 
-  const secondOfferId = await createOffer(propertyId, A.agent.cookie, 81000000);
-  // Simulate the anomaly directly — the real POST /offers/:id/accept route
-  // auto-declines sibling offers, so this condition can currently only
-  // arise from a data-integrity gap outside that chokepoint, which is
-  // exactly what C13 exists to catch (Build Instructions §10).
-  await db.update(offers).set({ status: "Accepted" }).where(eq(offers.id, secondOfferId));
+  // Insert the second "Accepted" offer directly at the data layer rather
+  // than through POST /api/offers/by-property/:id. By this point the
+  // property has already moved out of "Listed" (the first offer's
+  // acceptance advanced its workflowStage), so the real route's own guard
+  // — "Offers can only be recorded while the property is live and not
+  // already under an accepted offer" (src/lib/offers.ts) — correctly
+  // refuses a second offer there, the same way POST /offers/:id/accept
+  // auto-declines sibling offers. Both of those app-level chokepoints
+  // exist to prevent exactly this state, which is exactly what makes it a
+  // data-integrity anomaly outside the app's normal write paths — the
+  // class of condition C13 exists to catch — so this fixture simulates it
+  // with a direct DB write for both offer creation and its Accepted
+  // status, standing in for that gap (Build Instructions §10).
+  const [secondOffer] = await db
+    .insert(offers)
+    .values({ propertyId, offerPriceCents: 81000000, status: "Accepted" })
+    .returning();
+  const secondOfferId = secondOffer!.id;
 
   await scanOrRetry("MANUAL");
 

@@ -74,6 +74,13 @@ export const RISK_EXCEPTION_CATEGORIES = [
   // and dedup separately from every other kind of finding — see
   // apps/api/src/lib/exceptions/rules/communicationDelivery.ts.
   "COMMUNICATION",
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F,
+  // Section 22). Commission-agreement/PC-fee-payment/marketing-invoice/
+  // dispute findings need their own category so they route, dedup, and
+  // (via requiresFinancialEntitlement below) redact separately from every
+  // other kind of finding — see rules/financial.ts. Additive, same as
+  // LAUNCH_CAMPAIGN/COMMUNICATION above: no migration required.
+  "FINANCIAL",
 ] as const;
 export type RiskExceptionCategory = (typeof RISK_EXCEPTION_CATEGORIES)[number];
 

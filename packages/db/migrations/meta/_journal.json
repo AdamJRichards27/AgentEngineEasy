@@ -57,6 +57,13 @@
       "when": 1788271522993,
       "tag": "0007_furry_moonstone",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788288196348,
+      "tag": "0008_striped_reaper",
+      "breakpoints": true
     }
   ]
 }

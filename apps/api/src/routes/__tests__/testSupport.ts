@@ -46,6 +46,20 @@ import {
   communicationCostLedger,
   communicationSettings,
   communicationWebhookEvents,
+  commissionAgreements,
+  commissionCalculations,
+  pcFeeAuthorities,
+  pcFeeCalculations,
+  financialPaymentRequests,
+  financialPaymentProviderEvents,
+  financialPaymentOutbox,
+  financialDisputes,
+  marketingPaymentRecords,
+  financialDeposits,
+  financialReconciliations,
+  financialLedgerEvents,
+  auditReturnReminders,
+  financialSettings,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -111,6 +125,40 @@ export async function createBrokerageWithUsers(
     brokerageName,
   });
   return { admin, agent, brokerageId: admin.user.brokerageId };
+}
+
+/**
+ * A second, independent Brokerage Administrator inside an ALREADY-EXISTING
+ * brokerage. dev-login's own rule (routes/auth.ts) makes only the FIRST
+ * ever sign-in to a given brokerage name a "Brokerage Administrator" --
+ * every later sign-in to that same name becomes an "Agent" instead (see
+ * createBrokerageWithUsers above, whose own doc comment names this exact
+ * behaviour). Real separation-of-duties scenarios (Agent Engine 2.0 --
+ * Financial Transaction Engine, Section 32/33: the same person cannot
+ * both draft and approve/activate a financial authorisation) need a
+ * second genuine admin account inside the SAME brokerage as an existing
+ * admin, so this dev-logs the new user into a brand-new brokerage of
+ * their own (making them that brokerage's first user, and therefore its
+ * admin) and then moves them into the target brokerage directly in the
+ * database, preserving their "Brokerage Administrator" role.
+ * middlewares/auth.ts's loadSession re-derives req.authedUser from a
+ * fresh per-request DB lookup rather than from anything cached in the
+ * session cookie, so the move takes effect starting with this user's very
+ * next request.
+ */
+export async function addSecondBrokerageAdmin(
+  baseUrl: string,
+  targetBrokerageId: number,
+  input: { email: string; firstName: string; lastName: string; ownBrokerageName: string },
+): Promise<DevLoginResult> {
+  const result = await devLogin(baseUrl, {
+    email: input.email,
+    firstName: input.firstName,
+    lastName: input.lastName,
+    brokerageName: input.ownBrokerageName,
+  });
+  await db.update(users).set({ brokerageId: targetBrokerageId }).where(eq(users.id, result.user.id));
+  return { cookie: result.cookie, user: { ...result.user, brokerageId: targetBrokerageId } };
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -305,10 +353,58 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * Placed early (before the properties/transactions block) since
  * communicationThreads.propertyId is a required, non-cascading FK onto
  * properties.id.
+ *
+ * Agent Engine 2.0 — Financial Transaction Engine (Priority 9): extended
+ * again for every financial.ts table. All of them carry brokerageId
+ * directly (packages/db/src/schema/financial.ts) so this block is scoped
+ * by `ids` alone, independent of propertyIds/transactionIds — but several
+ * also carry non-cascading FKs onto transactions.id/properties.id
+ * (commissionAgreements, commissionCalculations, pcFeeCalculations,
+ * financialPaymentRequests, financialDeposits, financialLedgerEvents), so
+ * this whole block must run (like the communications block above) before
+ * the properties/transactions deletes further down. Internal ordering:
+ * financialPaymentProviderEvents, financialDisputes, AND (Stage D)
+ * financialPaymentOutbox all reference financialPaymentRequests.id (must
+ * go first); financialPaymentRequests references
+ * pcFeeCalculations.id/pcFeeAuthorities.id (must go before those);
+ * pcFeeCalculations references commissionCalculations.id (must go before
+ * commissionCalculations); commissionCalculations references
+ * commissionAgreements.id (must go before commissionAgreements); and
+ * pcFeeAuthorities.agentUserId -> users.id (non-cascading), so it must be
+ * cleared before the users delete near the end of this function too.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
   if (ids.length === 0) return;
+
+  // Agent Engine 2.0 — Financial Transaction Engine (Priority 9). See this
+  // function's own doc comment above for the FK ordering this block
+  // depends on.
+  const financialPaymentRequestRows = await db
+    .select({ id: financialPaymentRequests.id })
+    .from(financialPaymentRequests)
+    .where(inArray(financialPaymentRequests.brokerageId, ids));
+  const financialPaymentRequestIds = financialPaymentRequestRows.map((r) => r.id);
+  if (financialPaymentRequestIds.length > 0) {
+    await db.delete(financialPaymentProviderEvents).where(inArray(financialPaymentProviderEvents.paymentRequestId, financialPaymentRequestIds));
+    await db.delete(financialDisputes).where(inArray(financialDisputes.paymentRequestId, financialPaymentRequestIds));
+    // Stage D (Section 31) — financial_payment_outbox.payment_request_id ->
+    // financial_payment_requests.id, non-cascading. Must be cleared before
+    // the financialPaymentRequests delete just below, exactly like the two
+    // siblings above.
+    await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
+  }
+  await db.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids));
+  await db.delete(pcFeeCalculations).where(inArray(pcFeeCalculations.brokerageId, ids));
+  await db.delete(pcFeeAuthorities).where(inArray(pcFeeAuthorities.brokerageId, ids));
+  await db.delete(commissionCalculations).where(inArray(commissionCalculations.brokerageId, ids));
+  await db.delete(commissionAgreements).where(inArray(commissionAgreements.brokerageId, ids));
+  await db.delete(marketingPaymentRecords).where(inArray(marketingPaymentRecords.brokerageId, ids));
+  await db.delete(financialDeposits).where(inArray(financialDeposits.brokerageId, ids));
+  await db.delete(financialReconciliations).where(inArray(financialReconciliations.brokerageId, ids));
+  await db.delete(financialLedgerEvents).where(inArray(financialLedgerEvents.brokerageId, ids));
+  await db.delete(auditReturnReminders).where(inArray(auditReturnReminders.brokerageId, ids));
+  await db.delete(financialSettings).where(inArray(financialSettings.brokerageId, ids));
 
   // Agent Engine 2.0 — Communications Hub (Priority 8). See this function's
   // own doc comment above for the FK ordering this block depends on.
