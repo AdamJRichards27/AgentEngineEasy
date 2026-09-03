@@ -19,8 +19,8 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { db, properties, riskExceptionScanRuns } from "@aee/db";
-import { eq, and, desc } from "drizzle-orm";
+import { db, properties, riskExceptionScanRuns, auditLogs } from "@aee/db";
+import { eq, and, desc, gte, sql } from "drizzle-orm";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import {
   acknowledgeException,
@@ -266,7 +266,30 @@ exceptionsRouter.post("/exceptions/:id/reassign", requireAuth, async (req, res) 
 
 exceptionsRouter.get("/exceptions/ops/health", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (_req, res) => {
   const recentRuns = await db.select().from(riskExceptionScanRuns).orderBy(desc(riskExceptionScanRuns.startedAt)).limit(5);
-  res.json({ recentRuns });
+
+  // Part B Stage 4 (open item: "a metric for how often the
+  // refreshReadyToListSteps .catch() branches actually fire" — Stage 2's
+  // Finding 4). lib/workflowSteps.ts's logRefreshReadyToListStepsFailure()
+  // writes one auditLogs row per failure; this is the "count query" half
+  // of that remediation — a real number instead of a log-grep guess. Not
+  // brokerage-scoped, matching recentRuns above (the engine's own scan
+  // runs aren't per-brokerage either — see engine.ts's runScheduledScan).
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const failureAction = eq(auditLogs.action, "ready_to_list_steps_refresh_failed");
+  const [last24h] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(auditLogs)
+    .where(and(failureAction, gte(auditLogs.createdAt, since24h)));
+  const [last7d] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(auditLogs)
+    .where(and(failureAction, gte(auditLogs.createdAt, since7d)));
+
+  res.json({
+    recentRuns,
+    readyToListStepsRefreshFailures: { last24h: last24h?.count ?? 0, last7d: last7d?.count ?? 0 },
+  });
 });
 
 exceptionsRouter.post("/exceptions/ops/scan", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (_req, res) => {
