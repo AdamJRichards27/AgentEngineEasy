@@ -147,7 +147,8 @@ async function loadCampaignItemInBrokerage(campaignItemId: string, brokerageId: 
   return item;
 }
 
-async function loadPortalDestinationInBrokerage(portalDestinationId: string, brokerageId: number): Promise<PortalDestination> {
+/** Step 5: exported (was module-private) so lib/integrations/launchProof.ts's webhook effect handler can read a destination's current status for its own out-of-order guard — a read-only reuse, never a second writer. */
+export async function loadPortalDestinationInBrokerage(portalDestinationId: string, brokerageId: number): Promise<PortalDestination> {
   const [row] = await db.select().from(portalDestinations).where(eq(portalDestinations.id, portalDestinationId));
   if (!row || row.brokerageId !== brokerageId) throw new LaunchError("NOT_FOUND", "Portal destination not found");
   return row;
@@ -751,43 +752,73 @@ export async function addPortalDestination(launchPlanId: string, brokerageId: nu
   return dest;
 }
 
-export async function recordPortalSubmission(portalDestinationId: string, brokerageId: number, actor: ActorRef, listingUrl?: string): Promise<PortalDestination> {
+/**
+ * Step 5 (Integration and Data Exchange Foundation): actor is now
+ * ActorRef | null, widened from the original agent-only ActorRef, so
+ * lib/integrations/launchProof.ts's webhook-driven effect handler can call
+ * this exact function (never a parallel copy of it) when a mock portal
+ * confirms a submission asynchronously — mirroring how getOrCreateLaunchPlan
+ * above already accepts a null actor for its own system-triggered caller
+ * (the AGENCY_AGREEMENT_SIGNED handler). A null actor records
+ * actorType "SYSTEM" throughout (emit/afterLaunchMutation already handle
+ * this), and submittedBy/logAudit's userId are simply omitted rather than
+ * fabricating a human attribution for a system-driven event. This is purely
+ * a widening (no existing caller passes null today), so no existing route
+ * is affected.
+ */
+export async function recordPortalSubmission(portalDestinationId: string, brokerageId: number, actor: ActorRef | null, listingUrl?: string): Promise<PortalDestination> {
   const dest = await loadPortalDestinationInBrokerage(portalDestinationId, brokerageId);
   const [updated] = await db
     .update(portalDestinations)
-    .set({ status: "SUBMITTED", submittedAt: new Date(), submittedBy: actor.id, listingUrl: listingUrl ?? dest.listingUrl, failureReason: null, updatedAt: new Date() })
+    .set({ status: "SUBMITTED", submittedAt: new Date(), submittedBy: actor?.id ?? null, listingUrl: listingUrl ?? dest.listingUrl, failureReason: null, updatedAt: new Date() })
     .where(eq(portalDestinations.id, portalDestinationId))
     .returning();
-  await logAudit({ userId: actor.id, action: "portal_submission_recorded", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
+  await logAudit({ userId: actor?.id, action: "portal_submission_recorded", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
   await emit("PORTAL_SUBMISSION_RECORDED", { propertyId: dest.propertyId, brokerageId }, actor, "api:launch:record-portal-submission", { portalDestinationId, portalName: dest.portalName });
 
   await afterLaunchMutation(dest.launchPlanId, brokerageId, actor);
   return updated;
 }
 
-export async function recordPortalFailure(portalDestinationId: string, brokerageId: number, actor: ActorRef, failureReason: string): Promise<PortalDestination> {
+/** Step 5: actor is ActorRef | null — see recordPortalSubmission's own comment above for why. */
+export async function recordPortalFailure(portalDestinationId: string, brokerageId: number, actor: ActorRef | null, failureReason: string): Promise<PortalDestination> {
   const dest = await loadPortalDestinationInBrokerage(portalDestinationId, brokerageId);
   const [updated] = await db
     .update(portalDestinations)
     .set({ status: "FAILED", failureReason, updatedAt: new Date() })
     .where(eq(portalDestinations.id, portalDestinationId))
     .returning();
-  await logAudit({ userId: actor.id, action: "portal_submission_failed", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: failureReason });
+  await logAudit({ userId: actor?.id, action: "portal_submission_failed", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: failureReason });
   await emit("PORTAL_SUBMISSION_FAILED", { propertyId: dest.propertyId, brokerageId }, actor, "api:launch:record-portal-failure", { portalDestinationId, portalName: dest.portalName, failureReason });
 
   await afterLaunchMutation(dest.launchPlanId, brokerageId, actor);
   return updated;
 }
 
-/** Not itself one of the 23 named WAE events — a per-portal "confirmed live" is an internal operational detail; the property-level moment that matters (LISTING_LIVE) is published once, by confirmLaunchLive -> goLiveProperty, never duplicated here. */
-export async function confirmPortalLive(portalDestinationId: string, brokerageId: number, actor: ActorRef, listingUrl?: string): Promise<PortalDestination> {
+/**
+ * Not itself one of the 23 named WAE events — a per-portal "confirmed live"
+ * is an internal operational detail; the property-level moment that
+ * matters (LISTING_LIVE) is published once, by confirmLaunchLive ->
+ * goLiveProperty, never duplicated here. Step 5: actor is ActorRef | null
+ * (see recordPortalSubmission's own comment) — deliberately this function,
+ * and ONLY this function, is what a mock portal's "listing is live"
+ * webhook is allowed to call. It flips this one destination's own record
+ * to LIVE and nothing else: it never calls confirmLaunchLive, never
+ * touches launchPlans.status's LISTING_LIVE value, and never bypasses
+ * evaluateListingLive's Market Ready / at-least-one-LIVE-destination gate
+ * that confirmLaunchLive still enforces on its own, separate, human-
+ * or-explicit-action-only path — see
+ * apps/api/src/lib/integrations/__tests__/launchProof.test.ts's own
+ * "cannot bypass Market Ready" assertion.
+ */
+export async function confirmPortalLive(portalDestinationId: string, brokerageId: number, actor: ActorRef | null, listingUrl?: string): Promise<PortalDestination> {
   const dest = await loadPortalDestinationInBrokerage(portalDestinationId, brokerageId);
   const [updated] = await db
     .update(portalDestinations)
-    .set({ status: "LIVE", liveConfirmedAt: new Date(), liveConfirmedBy: actor.id, listingUrl: listingUrl ?? dest.listingUrl, updatedAt: new Date() })
+    .set({ status: "LIVE", liveConfirmedAt: new Date(), liveConfirmedBy: actor?.id ?? null, listingUrl: listingUrl ?? dest.listingUrl, updatedAt: new Date() })
     .where(eq(portalDestinations.id, portalDestinationId))
     .returning();
-  await logAudit({ userId: actor.id, action: "portal_confirmed_live", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
+  await logAudit({ userId: actor?.id, action: "portal_confirmed_live", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
 
   await afterLaunchMutation(dest.launchPlanId, brokerageId, actor);
   return updated;
