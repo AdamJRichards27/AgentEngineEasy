@@ -14,6 +14,7 @@ import {
   recordAgentPaid,
   closeTransaction,
   recordLegalRepresentatives,
+  resyncTransactionProjection,
   TransactionClosureBlockedError,
 } from "../lib/transactions.js";
 import { listConditions, addCondition, rescheduleConditionDueDate, resolveCondition, recordExchange, maybeRecordUnconditional } from "../lib/transactionConditions.js";
@@ -172,6 +173,30 @@ transactionsRouter.post(
     const user = req.authedUser!;
     const force = req.body?.force === true;
     await handle(() => closeTransaction({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force }), res);
+  },
+);
+
+// Part B Stage 4 — manual remediation surface for
+// DC01_TRANSACTION_PROJECTION_DRIFT (lib/exceptions/rules/dataConsistency.ts),
+// the recommendedAction that exception's finding points operators at.
+// Brokerage Administrator only, same gate as agent-paid/close above — this
+// is operational data-repair, not a normal transaction action. Safe to
+// call even when nothing has drifted (see resyncTransactionProjection's
+// own doc comment in lib/transactions.ts).
+transactionsRouter.post(
+  "/:id/resync-projection",
+  requireAuth,
+  requireTransactionAccess,
+  requireRole(...BROKERAGE_ADMIN_ROLES),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    const user = req.authedUser!;
+    try {
+      const result = await resyncTransactionProjection({ transactionId: id, userId: user.id, brokerageId: user.brokerageId });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   },
 );
 
