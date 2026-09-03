@@ -28,6 +28,16 @@ interface StepUpdate {
 }
 
 /**
+ * Part B Stage 2 remediation: lets refreshTransactionSteps run inside the
+ * same db.transaction() as the canonical write that triggered it (see
+ * completeSettlement/closeTransaction in lib/transactions.ts), instead of
+ * always opening its own implicit statements against the module-level
+ * `db`. Every existing caller that doesn't pass a second argument is
+ * unaffected -- it still defaults to `db` and behaves exactly as before.
+ */
+type TxClient = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
  * WorkflowStep orchestration (ARCHITECTURE.md §10 Phase 3): recomputes the
  * Ready to List workflow's step statuses from live state (seller AML
  * verifications, document package) rather than leaving them static once
@@ -157,18 +167,24 @@ export async function refreshReadyToListSteps(propertyId: number): Promise<void>
  * being accepted later is real future scope, not handled here, same as
  * Phase 6 documented its payer-resolution gap rather than silently
  * mishandling it).
+ *
+ * `executor` defaults to the module-level `db` (unchanged behaviour for
+ * every pre-existing caller). Pass the `tx` handle from an in-progress
+ * db.transaction() to make this refresh commit atomically with whatever
+ * canonical write triggered it -- see completeSettlement/closeTransaction
+ * in lib/transactions.ts for the motivating case (Part B Stage 2).
  */
-export async function refreshTransactionSteps(propertyId: number): Promise<void> {
-  const [workflow] = await db
+export async function refreshTransactionSteps(propertyId: number, executor: TxClient = db): Promise<void> {
+  const [workflow] = await executor
     .select()
     .from(workflows)
     .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "Transaction")));
   if (!workflow) return;
 
-  const [transaction] = await db.select().from(transactions).where(eq(transactions.propertyId, propertyId));
+  const [transaction] = await executor.select().from(transactions).where(eq(transactions.propertyId, propertyId));
   if (!transaction) return;
 
-  const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
+  const steps = await executor.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
   const stepByKey = new Map(steps.map((s) => [s.stepKey, s]));
 
   let contractSigning: StepUpdate;
@@ -209,6 +225,6 @@ export async function refreshTransactionSteps(propertyId: number): Promise<void>
   for (const [key, update] of updates) {
     const step = stepByKey.get(key);
     if (!step) continue;
-    await db.update(workflowSteps).set(update).where(eq(workflowSteps.id, step.id));
+    await executor.update(workflowSteps).set(update).where(eq(workflowSteps.id, step.id));
   }
 }
