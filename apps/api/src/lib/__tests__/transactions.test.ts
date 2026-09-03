@@ -8,11 +8,30 @@
 // buyer AML/CTF linkage now actually fires on contract signing; and
 // closeTransaction's new real preconditions (#121) report every genuine
 // blocker and force:true is a deliberate, distinctly-audited override.
+//
+// Also covers Part B Stage 2 remediation: completeSettlement and
+// closeTransaction now wrap their transactions/properties/workflowSteps
+// writes in a single db.transaction() instead of several separate
+// statements, so a crash partway through rolls everything back instead of
+// leaving workflowSteps permanently stale behind an idempotent guard that
+// would otherwise make a retry silently short-circuit. See the two
+// "rolls back atomically ... and a retry converges" tests below, and the
+// commit/PR description for the full incident this closes.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { and, eq } from "drizzle-orm";
-import { db, transactions, amlVerifications, auditLogs, automationAttentionItems, automationTasks } from "@aee/db";
+import { and, eq, sql } from "drizzle-orm";
+import {
+  db,
+  transactions,
+  properties,
+  workflows,
+  workflowSteps,
+  amlVerifications,
+  auditLogs,
+  automationAttentionItems,
+  automationTasks,
+} from "@aee/db";
 import {
   acceptOffer,
   recordContractSigned,
@@ -67,6 +86,39 @@ async function createOfferOnProperty(cookie: string, propertyId: number, offerPr
   if (res.status !== 201) throw new Error(`create offer failed: ${res.status} ${await res.text()}`);
   const { offer } = await json<{ offer: { id: number } }>(res);
   return offer.id;
+}
+
+// Part B Stage 2 remediation test support: simulates the exact failure mode
+// completeSettlement/closeTransaction's new db.transaction() wrapping
+// protects against -- a crash partway through the write sequence -- by
+// installing a one-shot Postgres trigger that raises on the workflow_steps
+// row refreshTransactionSteps would otherwise update. `stepId` is always a
+// real workflowSteps.id read back from the database in the test itself, so
+// this is safe string interpolation, not user input.
+async function installFaultTrigger(stepId: number): Promise<void> {
+  await db.execute(
+    sql.raw(`
+      create or replace function fault_fn_${stepId}() returns trigger as $body$
+      begin
+        raise exception 'stage2_fault_injected: simulated crash mid db.transaction() (workflow_steps.id=${stepId})';
+      end;
+      $body$ language plpgsql;
+    `),
+  );
+  await db.execute(
+    sql.raw(`
+      create trigger fault_trg_${stepId}
+      before update on workflow_steps
+      for each row
+      when (old.id = ${stepId})
+      execute function fault_fn_${stepId}();
+    `),
+  );
+}
+
+async function removeFaultTrigger(stepId: number): Promise<void> {
+  await db.execute(sql.raw(`drop trigger if exists fault_trg_${stepId} on workflow_steps;`));
+  await db.execute(sql.raw(`drop function if exists fault_fn_${stepId}();`));
 }
 
 before(async () => {
@@ -249,4 +301,126 @@ test("closeTransaction reports every real blocker (unconditional, pending condit
     .from(auditLogs)
     .where(and(eq(auditLogs.recordId, String(transactionId)), eq(auditLogs.action, "transaction_closed_forced")));
   assert.ok(forcedAuditRows.length > 0, "a forced close must be distinctly audited as transaction_closed_forced, not an ordinary transaction_closed");
+});
+
+test("completeSettlement rolls back atomically on a mid-transaction failure, and a retry converges every write (Part B Stage 2 remediation)", async () => {
+  const { transactionId, propertyId } = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
+    address: "7 Atomic Settlement Ln",
+  });
+  await recordContractSigned({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
+  await scheduleSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, settlementDate: new Date("2027-05-01") });
+
+  const [workflow] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "Transaction")));
+  assert.ok(workflow, "accepting the offer must have created the Transaction workflow");
+  const [settlementStep] = await db
+    .select()
+    .from(workflowSteps)
+    .where(and(eq(workflowSteps.workflowId, workflow.id), eq(workflowSteps.stepKey, "Settlement")));
+  assert.ok(settlementStep, "the Transaction workflow must have a Settlement step");
+  assert.equal(settlementStep.status, "InProgress", "sanity check: contract is signed and settlement is scheduled but not yet completed");
+
+  // Force the workflowSteps write inside completeSettlement's db.transaction()
+  // to fail, simulating the crash this remediation protects against (see
+  // completeSettlement in lib/transactions.ts and refreshTransactionSteps in
+  // lib/workflowSteps.ts).
+  await installFaultTrigger(settlementStep.id);
+  try {
+    await assert.rejects(
+      () => completeSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId }),
+      /stage2_fault_injected/,
+    );
+
+    // Pre-fix, the transactions write and the workflowSteps refresh were two
+    // separate statements: the first would already have committed here,
+    // leaving settlementCompletedAt set while workflowSteps stayed stale
+    // forever (the idempotent guard `if (transaction.settlementCompletedAt)
+    // return transaction;` would then make every retry a silent no-op).
+    // With the fix, both writes live in one db.transaction(), so the failed
+    // workflowSteps write must roll back the transactions write too.
+    const [afterFailure] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+    assert.equal(afterFailure.status, "SettlementScheduled", "a failed completeSettlement must not leave the transaction Settled");
+    assert.equal(afterFailure.settlementCompletedAt, null, "a failed completeSettlement must not leave settlementCompletedAt set");
+
+    const [stepAfterFailure] = await db.select().from(workflowSteps).where(eq(workflowSteps.id, settlementStep.id));
+    assert.equal(stepAfterFailure.status, "InProgress", "the Settlement step must be unchanged by the rolled-back attempt");
+  } finally {
+    await removeFaultTrigger(settlementStep.id);
+  }
+
+  // Retry now that the transient fault is gone. Because the failed attempt
+  // actually rolled back, settlementCompletedAt is still null, so the
+  // idempotent guard does not short-circuit -- the retry re-runs the write
+  // for real instead of silently returning stale state.
+  const retried = await completeSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
+  assert.equal(retried.status, "Settled");
+  assert.ok(retried.settlementCompletedAt, "the retry must actually complete settlement");
+
+  const [stepAfterRetry] = await db.select().from(workflowSteps).where(eq(workflowSteps.id, settlementStep.id));
+  assert.equal(stepAfterRetry.status, "Complete", "the retry must converge the Settlement step to Complete, not leave it stale");
+});
+
+test("closeTransaction rolls back atomically on a mid-transaction failure, and a retry converges every write (Part B Stage 2 remediation)", async () => {
+  const { transactionId, propertyId } = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
+    address: "8 Atomic Closure Pl",
+  });
+  await recordContractSigned({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
+  await scheduleSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, settlementDate: new Date("2027-06-01") });
+  await completeSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
+
+  const [propertyBefore] = await db.select().from(properties).where(eq(properties.id, propertyId));
+  assert.notEqual(propertyBefore.workflowStage, "Closed", "sanity check: the property must not already read Closed before this test's close attempt");
+
+  const [workflow] = await db
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "Transaction")));
+  assert.ok(workflow, "accepting the offer must have created the Transaction workflow");
+  const [payoutStep] = await db
+    .select()
+    .from(workflowSteps)
+    .where(and(eq(workflowSteps.workflowId, workflow.id), eq(workflowSteps.stepKey, "Payout")));
+  assert.ok(payoutStep, "the Transaction workflow must have a Payout step");
+
+  // Force the workflowSteps write inside closeTransaction's db.transaction()
+  // to fail. Pre-fix, this was the third of three separate statements
+  // (transactions, then properties.workflowStage, then workflowSteps) -- a
+  // crash here would already have committed the first two, leaving the
+  // transaction Closed in the database while the property still read its
+  // old workflow stage, with no way for a retry to notice or fix it (the
+  // guard `if (transaction.status === "Closed") return transaction;` would
+  // make the retry return immediately).
+  await installFaultTrigger(payoutStep.id);
+  try {
+    await assert.rejects(
+      () => closeTransaction({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, force: true }),
+      /stage2_fault_injected/,
+    );
+
+    const [transactionAfterFailure] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+    assert.equal(transactionAfterFailure.status, "Settled", "a failed closeTransaction must not leave the transaction Closed");
+    assert.equal(transactionAfterFailure.closedAt, null, "a failed closeTransaction must not leave closedAt set");
+
+    const [propertyAfterFailure] = await db.select().from(properties).where(eq(properties.id, propertyId));
+    assert.equal(
+      propertyAfterFailure.workflowStage,
+      propertyBefore.workflowStage,
+      "the properties.workflowStage write must roll back together with the transactions write, not commit alone",
+    );
+  } finally {
+    await removeFaultTrigger(payoutStep.id);
+  }
+
+  // Retry now that the transient fault is gone. Because the failed attempt
+  // actually rolled back, transaction.status is still "Settled", so the
+  // idempotent guard does not short-circuit -- the retry re-runs all three
+  // writes for real.
+  const retried = await closeTransaction({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, force: true });
+  assert.equal(retried.status, "Closed");
+  assert.ok(retried.closedAt, "the retry must actually close the transaction");
+
+  const [propertyAfterRetry] = await db.select().from(properties).where(eq(properties.id, propertyId));
+  assert.equal(propertyAfterRetry.workflowStage, "Closed", "the retry must converge properties.workflowStage to Closed, not leave it stale");
 });
