@@ -14,7 +14,7 @@ import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { createESignProvider, type ESignWebhookResult } from "@aee/integration-esign";
 import { createObjectStorageProvider } from "@aee/integration-object-storage";
 import { populateTemplate } from "./documentTemplates.js";
-import { refreshReadyToListSteps } from "./workflowSteps.js";
+import { refreshReadyToListSteps, logRefreshReadyToListStepsFailure } from "./workflowSteps.js";
 
 const esignProvider = createESignProvider();
 const objectStorage = createObjectStorageProvider();
@@ -163,7 +163,7 @@ export async function populateDocumentPackage(packageId: number): Promise<Popula
     .where(eq(documentPackages.id, packageId))
     .returning();
 
-  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => logRefreshReadyToListStepsFailure(docPackage.propertyId, err));
 
   return { documentPackage: updatedPackage, documents: refreshedDocuments, skipped };
 }
@@ -268,7 +268,7 @@ export async function sendPackageForSignature(input: {
     }
   }
 
-  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => logRefreshReadyToListStepsFailure(docPackage.propertyId, err));
 
   return { signatureRequest, created: true };
 }
@@ -376,7 +376,7 @@ export async function processEsignWebhook(
   }
 
   if (docPackage) {
-    await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+    await refreshReadyToListSteps(docPackage.propertyId).catch((err) => logRefreshReadyToListStepsFailure(docPackage.propertyId, err));
   }
 
   return { processed: true, signatureRequest: updated };
