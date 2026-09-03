@@ -8,6 +8,7 @@ import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
 import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
+import { registerIntegrationsEngine } from "./lib/integrations/bootstrap.js";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -45,6 +46,12 @@ registerCommunicationsEngine();
 // PC success-fee billing) and starts the payment outbox sweep scheduler —
 // same ordering requirement as the engines above.
 registerFinancialEngine();
+
+// Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+// Registers the one mock adapter/domain-proof handler this build ships and
+// starts the outbox retry-sweep scheduler — same ordering requirement as
+// the engines above.
+registerIntegrationsEngine();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.

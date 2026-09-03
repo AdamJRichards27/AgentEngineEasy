@@ -25,6 +25,8 @@ import { communicationsRouter } from "./communications.js";
 import { communicationsWebhooksRouter } from "./communicationsWebhooks.js";
 import { financialRouter } from "./financial.js";
 import { financialWebhooksRouter } from "./financialWebhooks.js";
+import { integrationsRouter } from "./integrations.js";
+import { integrationsWebhooksRouter } from "./integrationsWebhooks.js";
 
 export const apiRouter = Router();
 
@@ -95,3 +97,13 @@ apiRouter.use(communicationsWebhooksRouter);
 // comment) since a provider callback carries no session cookie.
 apiRouter.use(financialRouter);
 apiRouter.use(financialWebhooksRouter);
+// Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+// Unprefixed mount, same reasoning as exceptionsRouter/launchRouter/
+// pitCrewRouter/communicationsRouter/financialRouter above —
+// integrationsRouter's own paths are all under a top-level
+// /integrations/... namespace already. integrationsWebhooksRouter is
+// mounted separately (and NOT behind requireAuth) since a provider
+// callback carries no session cookie — same reasoning as
+// communicationsWebhooksRouter/financialWebhooksRouter.
+apiRouter.use(integrationsRouter);
+apiRouter.use(integrationsWebhooksRouter);

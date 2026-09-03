@@ -29,3 +29,8 @@ export * from "./communications";
 // (campaignItems) and exceptions.ts (a new "FINANCIAL" category) rather
 // than duplicating any of them — see financial.ts's own header comment.
 export * from "./financial";
+// Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+// Reuses packages/events (the one canonical event bus) and audit.ts
+// (logAudit) rather than duplicating either — see integrations.ts's own
+// header comment for the full list of deliberate reuse decisions.
+export * from "./integrations";

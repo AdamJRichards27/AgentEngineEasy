@@ -159,6 +159,20 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "FINANCIAL_PAYMENT_REVERSED",
   "MARKETING_INVOICE_RECORDED",
   "MARKETING_PAYMENT_RECONCILED",
+  // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+  // Deliberately minimal: an inbound webhook's actual domain effect is
+  // published by the existing domain service it calls through (e.g.
+  // Launch's PORTAL_SUBMISSION_RECORDED/PORTAL_SUBMISSION_FAILED, published
+  // unchanged by lib/launch/model.ts) — these four cover only the
+  // integration layer's OWN lifecycle milestones (a connection becoming
+  // usable/unusable, a command exhausting retries, a webhook rejected
+  // outright), the same "don't duplicate an event another layer already
+  // owns" reasoning AUTOMATION_EXECUTION_COMPLETED's own comment above uses.
+  "INTEGRATION_CONNECTION_ACTIVATED",
+  "INTEGRATION_CONNECTION_SUSPENDED",
+  "INTEGRATION_CONNECTION_REVOKED",
+  "INTEGRATION_COMMAND_DEAD_LETTERED",
+  "INTEGRATION_WEBHOOK_REJECTED",
 ] as const;
 
 export type AgentEngineEasyEventType = (typeof AGENT_ENGINE_EASY_EVENT_TYPES)[number];
@@ -271,6 +285,12 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   FINANCIAL_PAYMENT_REVERSED: { version: 1, description: "A previously paid financial payment request was reversed, either by an administrator or the provider." },
   MARKETING_INVOICE_RECORDED: { version: 1, description: "A marketing invoice was recorded against a Launch campaign item's payment overlay." },
   MARKETING_PAYMENT_RECONCILED: { version: 1, description: "A marketing payment record was reconciled against brokerage financial records." },
+  // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+  INTEGRATION_CONNECTION_ACTIVATED: { version: 1, description: "An integration connection completed approval and validation and became usable (mock adapters only in this build)." },
+  INTEGRATION_CONNECTION_SUSPENDED: { version: 1, description: "An integration connection was suspended, immediately making it unusable without revoking it permanently." },
+  INTEGRATION_CONNECTION_REVOKED: { version: 1, description: "An integration connection was permanently revoked." },
+  INTEGRATION_COMMAND_DEAD_LETTERED: { version: 1, description: "An outbound integration command exhausted its retry budget (or failed permanently) and was moved to the dead-letter queue for authorised review/replay." },
+  INTEGRATION_WEBHOOK_REJECTED: { version: 1, description: "An inbound integration webhook was rejected before processing (invalid signature, unresolvable/mismatched tenant, oversized payload, or malformed envelope)." },
 };
 
 export interface DomainEvent<TPayload = Record<string, unknown>> {
