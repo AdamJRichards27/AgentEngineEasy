@@ -1,5 +1,10 @@
-// The 19 canonical AgentEngineEasy domain events (Build Brief §17).
-// Never hardcode these strings elsewhere — import this type.
+// The canonical AgentEngineEasy domain event types. This array (and
+// EVENT_TYPE_REGISTRY below) is the single source of truth for which
+// event types exist and how many there are -- never restate a count in a
+// comment, here or elsewhere, and never hardcode these strings elsewhere
+// either; import this type. See docs/EVENT_CONTRACTS.md for the full
+// catalogue grouped by domain area, the envelope contract, and how
+// publishing/consumption actually work.
 export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "PROPERTY_CREATED",
   "APPRAISAL_COMPLETED",
