@@ -17,7 +17,7 @@ import {
 } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
-import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/documentRules.js";
@@ -532,6 +532,29 @@ propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
   }
 
   res.json({ property: result.property });
+});
+
+// Part B Stage 4 — manual remediation surface for
+// DC02_AML_STATUS_SUMMARY_DRIFT (lib/exceptions/rules/dataConsistency.ts),
+// the recommendedAction that exception's finding points operators at.
+// Brokerage Administrator only, mirroring the Exception & Risk Engine's own
+// ops-gated manual-trigger precedent (POST /exceptions/ops/scan) — this is
+// operational data-repair, not a normal property action. Just re-runs the
+// same idempotent refreshReadyToListSteps() every real AML/document change
+// already calls, so it's safe to call on a property that has NOT drifted.
+propertiesRouter.post("/:id/resync-aml-summary", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const id = Number(req.params.id);
+  const user = req.authedUser!;
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  await refreshReadyToListSteps(id);
+
+  const [updated] = await db.select().from(properties).where(eq(properties.id, id));
+  res.json({ property: updated });
 });
 
 export const _internal = { insertPropertySchema }; // re-export for tests

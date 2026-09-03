@@ -69,6 +69,18 @@ export const RISK_EXCEPTION_METADATA_ALLOW_LIST = [
   "marketingPaymentRecordId",
   "campaignItemId",
   "financialDisputeId",
+  // Part B Stage 4 — DATA_CONSISTENCY findings (rules/dataConsistency.ts)
+  // need to name the expected vs. actual value they detected drift
+  // between, so an operator (or a future report) can see what was wrong
+  // without re-deriving it. Scalar strings only, same posture as every
+  // other key here — driftedWorkflowSteps is a comma-joined step-key list
+  // rather than an array, since RiskFinding.metadata values are
+  // string | number only (see RiskFinding below).
+  "expectedWorkflowStage",
+  "actualWorkflowStage",
+  "driftedWorkflowSteps",
+  "expectedAmlStatusSummary",
+  "actualAmlStatusSummary",
 ] as const;
 export type RiskExceptionMetadataKey = (typeof RISK_EXCEPTION_METADATA_ALLOW_LIST)[number];
 

@@ -9,12 +9,24 @@ import {
   documentPackages,
   documents,
   transactions,
+  type Transaction,
 } from "@aee/db";
+import { logAudit } from "./audit.js";
 
 const AML_TERMINAL_OK = ["Complete"];
 const AML_NEEDS_REVIEW = ["Review Required", "Failed"];
 
-function summariseAmlStatuses(statuses: string[]): string {
+/**
+ * Exported (Part B Stage 4) so apps/api/src/lib/exceptions/rules/
+ * dataConsistency.ts's DC02_AML_STATUS_SUMMARY_DRIFT rule can recompute
+ * "what properties.amlStatusSummary should currently be" using the exact
+ * same derivation refreshReadyToListSteps uses to WRITE it — one function,
+ * not two, so the detection rule's notion of "correct" can never itself
+ * drift from what this module actually computes (same discipline
+ * engine.ts/model.ts already apply between the event-driven and
+ * time-driven dispatch paths).
+ */
+export function summariseAmlStatuses(statuses: string[]): string {
   if (statuses.length === 0) return "Not Started";
   if (statuses.some((s) => AML_NEEDS_REVIEW.includes(s))) return "Review Required";
   if (statuses.every((s) => AML_TERMINAL_OK.includes(s))) return "Complete";
@@ -25,6 +37,34 @@ interface StepUpdate {
   status: string;
   blockedReason: string | null;
   completedAt: Date | null;
+}
+
+/**
+ * Part B Stage 4 remediation (open item: "a metric for how often the
+ * refreshReadyToListSteps .catch() branches actually fire" — Stage 2's
+ * Finding 4). Every `.catch((err) => console.error("refreshReadyToListSteps
+ * failed", err))` call site in lib/aml.ts / lib/documents.ts now calls this
+ * instead: keeps the exact same console.error visibility (nothing
+ * regresses for anyone watching logs today) and ALSO writes a queryable
+ * auditLogs row (action: "ready_to_list_steps_refresh_failed") so "how
+ * often does this actually happen" is a real SQL count rather than a
+ * log-grep guess — see routes/exceptions.ts's GET /exceptions/ops/health,
+ * which now reports this count. Deliberately reuses auditLogs rather than
+ * adding a new table or a new canonical domain event: this is an
+ * operational diagnostic, not a business fact any other consumer needs to
+ * react to (logAudit is itself already internally resilient — see
+ * lib/audit.ts — so this can never be what breaks the caller's own
+ * best-effort catch).
+ */
+export async function logRefreshReadyToListStepsFailure(propertyId: number, err: unknown): Promise<void> {
+  console.error("refreshReadyToListSteps failed", err);
+  await logAudit({
+    action: "ready_to_list_steps_refresh_failed",
+    recordType: "property",
+    recordId: String(propertyId),
+    propertyId,
+    updatedValue: err instanceof Error ? err.message : String(err),
+  });
 }
 
 /**
@@ -158,35 +198,26 @@ export async function refreshReadyToListSteps(propertyId: number): Promise<void>
     .where(eq(properties.id, propertyId));
 }
 
+// Part B Stage 4: the three Transaction workflow step keys, exported so
+// DC01_TRANSACTION_PROJECTION_DRIFT (rules/dataConsistency.ts) can iterate
+// them without re-declaring the literal list a second place it could drift
+// out of sync with computeTransactionStepUpdates below.
+export const TRANSACTION_STEP_KEYS = ["ContractSigning", "Settlement", "Payout"] as const;
+export type TransactionStepKey = (typeof TRANSACTION_STEP_KEYS)[number];
+
 /**
- * WorkflowStep orchestration for the Transaction workflow (Phase 7,
- * ARCHITECTURE.md §10) — same "recompute from live state after every
- * mutation" shape as refreshReadyToListSteps above, keyed off the single
- * Transaction a property has (this build assumes one active Transaction per
- * property at a time — a prior contract falling through and a fresh offer
- * being accepted later is real future scope, not handled here, same as
- * Phase 6 documented its payer-resolution gap rather than silently
- * mishandling it).
- *
- * `executor` defaults to the module-level `db` (unchanged behaviour for
- * every pre-existing caller). Pass the `tx` handle from an in-progress
- * db.transaction() to make this refresh commit atomically with whatever
- * canonical write triggered it -- see completeSettlement/closeTransaction
- * in lib/transactions.ts for the motivating case (Part B Stage 2).
+ * Part B Stage 4: the pure "what should each Transaction workflow step
+ * currently be" derivation, extracted out of refreshTransactionSteps below
+ * so it has exactly one implementation that both the real write path
+ * (refreshTransactionSteps) AND DC01_TRANSACTION_PROJECTION_DRIFT
+ * (rules/dataConsistency.ts) call — the same "one function, not two"
+ * discipline engine.ts/model.ts already apply between the event-driven and
+ * time-driven dispatch paths, applied here so a detection rule's notion of
+ * "correct" can never itself drift from what this module actually
+ * computes. No DB access, no side effects — takes a Transaction row,
+ * returns what its three steps should be.
  */
-export async function refreshTransactionSteps(propertyId: number, executor: TxClient = db): Promise<void> {
-  const [workflow] = await executor
-    .select()
-    .from(workflows)
-    .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "Transaction")));
-  if (!workflow) return;
-
-  const [transaction] = await executor.select().from(transactions).where(eq(transactions.propertyId, propertyId));
-  if (!transaction) return;
-
-  const steps = await executor.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
-  const stepByKey = new Map(steps.map((s) => [s.stepKey, s]));
-
+export function computeTransactionStepUpdates(transaction: Transaction): Record<TransactionStepKey, StepUpdate> {
   let contractSigning: StepUpdate;
   if (transaction.contractDate) {
     contractSigning = { status: "Complete", blockedReason: null, completedAt: transaction.contractDate };
@@ -216,15 +247,47 @@ export async function refreshTransactionSteps(propertyId: number, executor: TxCl
     payout = { status: "Ready", blockedReason: "Awaiting funds received.", completedAt: null };
   }
 
-  const updates: Array<[string, StepUpdate]> = [
-    ["ContractSigning", contractSigning],
-    ["Settlement", settlement],
-    ["Payout", payout],
-  ];
+  return { ContractSigning: contractSigning, Settlement: settlement, Payout: payout };
+}
 
-  for (const [key, update] of updates) {
-    const step = stepByKey.get(key);
+/**
+ * WorkflowStep orchestration for the Transaction workflow (Phase 7,
+ * ARCHITECTURE.md §10) — same "recompute from live state after every
+ * mutation" shape as refreshReadyToListSteps above, keyed off the single
+ * Transaction a property has (this build assumes one active Transaction per
+ * property at a time — a prior contract falling through and a fresh offer
+ * being accepted later is real future scope, not handled here, same as
+ * Phase 6 documented its payer-resolution gap rather than silently
+ * mishandling it).
+ *
+ * `executor` defaults to the module-level `db` (unchanged behaviour for
+ * every pre-existing caller). Pass the `tx` handle from an in-progress
+ * db.transaction() to make this refresh commit atomically with whatever
+ * canonical write triggered it -- see completeSettlement/closeTransaction
+ * in lib/transactions.ts for the motivating case (Part B Stage 2).
+ *
+ * Part B Stage 4: the per-step derivation itself now lives in
+ * computeTransactionStepUpdates above — this function's job is just
+ * loading the workflow/transaction/steps rows and applying whatever that
+ * pure function returns.
+ */
+export async function refreshTransactionSteps(propertyId: number, executor: TxClient = db): Promise<void> {
+  const [workflow] = await executor
+    .select()
+    .from(workflows)
+    .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "Transaction")));
+  if (!workflow) return;
+
+  const [transaction] = await executor.select().from(transactions).where(eq(transactions.propertyId, propertyId));
+  if (!transaction) return;
+
+  const steps = await executor.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));
+  const stepByKey = new Map(steps.map((s) => [s.stepKey, s]));
+
+  const computed = computeTransactionStepUpdates(transaction);
+  for (const stepKey of TRANSACTION_STEP_KEYS) {
+    const step = stepByKey.get(stepKey);
     if (!step) continue;
-    await executor.update(workflowSteps).set(update).where(eq(workflowSteps.id, step.id));
+    await executor.update(workflowSteps).set(computed[stepKey]).where(eq(workflowSteps.id, step.id));
   }
 }

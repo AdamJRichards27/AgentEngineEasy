@@ -81,6 +81,19 @@ export const RISK_EXCEPTION_CATEGORIES = [
   // other kind of finding — see rules/financial.ts. Additive, same as
   // LAUNCH_CAMPAIGN/COMMUNICATION above: no migration required.
   "FINANCIAL",
+  // Part B Stage 4 — closes the two concrete checks Part B Stage 2
+  // (docs/LEGACY_DATA_CLASSIFICATION.md) named as "handed to Stage 4": a
+  // canonical record (a transaction, a set of AML verifications) drifting
+  // out of sync with a denormalised projection derived from it
+  // (properties.workflowStage/workflowSteps, properties.amlStatusSummary)
+  // because the projection's refresh isn't atomic with — or, per Finding
+  // 4, is only best-effort after — the write that changed the source of
+  // truth. No existing category fits: WORKFLOW_OPERATIONAL is stalled
+  // automation, AML_CTF is the AML business process itself, not the
+  // denormalised summary field drifting from it. Additive, same as
+  // LAUNCH_CAMPAIGN/COMMUNICATION/FINANCIAL above: no migration required
+  // for this column itself — see apps/api/src/lib/exceptions/rules/dataConsistency.ts.
+  "DATA_CONSISTENCY",
 ] as const;
 export type RiskExceptionCategory = (typeof RISK_EXCEPTION_CATEGORIES)[number];
 

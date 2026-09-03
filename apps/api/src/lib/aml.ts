@@ -3,7 +3,7 @@ import { db, amlVerifications, parties, properties, propertyParties, serviceOrde
 import type { AmlVerification, Party } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
-import { refreshReadyToListSteps } from "./workflowSteps.js";
+import { refreshReadyToListSteps, logRefreshReadyToListStepsFailure } from "./workflowSteps.js";
 
 const amlProvider = createAMLProvider();
 
@@ -276,9 +276,7 @@ export async function processAmlWebhook(
     console.error("publishDomainEvent(AML_COMPLETED) failed", err);
   }
 
-  await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
-  );
+  await refreshReadyToListSteps(updated.propertyId).catch((err) => logRefreshReadyToListStepsFailure(updated.propertyId, err));
 
   return { processed: true, verification: updated };
 }
@@ -341,9 +339,7 @@ export async function retryAmlVerification(verificationId: number): Promise<AmlV
       .where(eq(serviceOrders.id, updated.serviceOrderId));
   }
 
-  await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
-  );
+  await refreshReadyToListSteps(updated.propertyId).catch((err) => logRefreshReadyToListStepsFailure(updated.propertyId, err));
 
   return updated;
 }
@@ -384,9 +380,7 @@ export async function resolveAmlException(input: {
     .where(eq(amlVerifications.id, input.verificationId))
     .returning();
 
-  await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
-  );
+  await refreshReadyToListSteps(updated.propertyId).catch((err) => logRefreshReadyToListStepsFailure(updated.propertyId, err));
 
   return updated;
 }

@@ -13,7 +13,7 @@ import {
   automationAttentionItems,
   automationTasks,
 } from "@aee/db";
-import type { Transaction, Offer } from "@aee/db";
+import type { Transaction, Offer, Property } from "@aee/db";
 import { publishDomainEvent, newCorrelationId } from "@aee/events";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
@@ -761,6 +761,83 @@ export async function closeTransaction(input: {
   });
 
   return updated;
+}
+
+/**
+ * Part B Stage 4 remediation surface for DC01_TRANSACTION_PROJECTION_DRIFT
+ * (rules/dataConsistency.ts, closing Part B Stage 2's Finding 3): the
+ * operator-facing "fix it" action for a transaction whose
+ * properties.workflowStage and/or Transaction workflowSteps rows have
+ * drifted out of sync with this transaction's own canonical fields (the
+ * crash-window risk left open by acceptOffer/recordContractSigned/
+ * scheduleSettlement/recordFundsReceived/recordAgentPaid, none of which
+ * commit those two writes atomically with the transactions write — see
+ * each function's own call sites above; refactoring those five remains
+ * out of scope for this stage). Recomputes and writes both projections
+ * atomically (same db.transaction() pattern completeSettlement/
+ * closeTransaction already use, from PR #21) — safe to call on a
+ * transaction that has NOT drifted, since it just rewrites the same
+ * correct values idempotently.
+ *
+ * The workflowStage derivation below is keyed off transaction.status
+ * rather than raw field presence (e.g. settlementDate) deliberately:
+ * settlementDate can already be populated at offer-acceptance time (carried
+ * forward from the offer's own captured conditions, above) well before
+ * scheduleSettlement is ever called, so branching on "settlementDate is
+ * set" would misclassify a perfectly healthy Under-Offer/Contract
+ * transaction as drifted. status, by contrast, only ever advances at the
+ * exact four call sites that also write workflowStage in the same
+ * statement (acceptOffer -> ContractPreparation/"Under Offer",
+ * recordContractSigned -> UnderContract/"Contract", scheduleSettlement ->
+ * SettlementScheduled/"Settlement", closeTransaction -> Closed/"Closed") —
+ * Settled (completeSettlement) intentionally still maps to "Settlement",
+ * since completing settlement does not itself advance the property's
+ * workflowStage any further. This mapping is deliberately duplicated
+ * (not a shared function) in DC01_TRANSACTION_PROJECTION_DRIFT's own
+ * expectedWorkflowStageFor — if a future change touches which stage any of
+ * those four call sites writes, both this function and that rule need the
+ * matching update in the same PR, or detection and remediation will
+ * disagree with the app's real behaviour.
+ */
+function expectedWorkflowStageForStatus(status: string): string {
+  switch (status) {
+    case "Closed":
+      return "Closed";
+    case "Settled":
+    case "SettlementScheduled":
+      return "Settlement";
+    case "UnderContract":
+      return "Contract";
+    case "ContractPreparation":
+    default:
+      return "Under Offer";
+  }
+}
+
+export async function resyncTransactionProjection(input: {
+  transactionId: number;
+  userId: number;
+  brokerageId: number;
+}): Promise<{ property: Property; transaction: Transaction }> {
+  const transaction = await loadTransaction(input.transactionId);
+  const expectedStage = expectedWorkflowStageForStatus(transaction.status);
+
+  await db.transaction(async (tx) => {
+    await tx.update(properties).set({ workflowStage: expectedStage, updatedAt: new Date() }).where(eq(properties.id, transaction.propertyId));
+    await refreshTransactionSteps(transaction.propertyId, tx);
+  });
+
+  await logAudit({
+    userId: input.userId,
+    action: "transaction_projection_resynced",
+    recordType: "transaction",
+    recordId: String(transaction.id),
+    propertyId: transaction.propertyId,
+    updatedValue: expectedStage,
+  });
+
+  const [property] = await db.select().from(properties).where(eq(properties.id, transaction.propertyId));
+  return { property, transaction };
 }
 
 export async function getTransactionByProperty(propertyId: number): Promise<Transaction | null> {
