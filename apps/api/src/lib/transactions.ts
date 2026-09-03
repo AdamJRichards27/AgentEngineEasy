@@ -469,13 +469,26 @@ export async function completeSettlement(input: {
   }
 
   const completedAt = input.completedAt ?? new Date();
-  const [updated] = await db
-    .update(transactions)
-    .set({ settlementCompletedAt: completedAt, status: "Settled", updatedAt: new Date() })
-    .where(eq(transactions.id, transaction.id))
-    .returning();
 
-  await refreshTransactionSteps(transaction.propertyId);
+  // Part B Stage 2 remediation (open item: "synchronously refreshed
+  // projection, non-atomic"): the transactions write and the workflowSteps
+  // refresh now commit together. Previously these were two separate
+  // statements, and the idempotent guard above
+  // (`if (transaction.settlementCompletedAt) return transaction;`) meant a
+  // crash between them left workflowSteps permanently stale — a retry
+  // would see settlementCompletedAt already set and return immediately,
+  // never re-running the refresh. Same db.transaction() pattern acceptOffer
+  // already uses elsewhere in this file.
+  const updated = await db.transaction(async (tx): Promise<Transaction> => {
+    const [row] = await tx
+      .update(transactions)
+      .set({ settlementCompletedAt: completedAt, status: "Settled", updatedAt: new Date() })
+      .where(eq(transactions.id, transaction.id))
+      .returning();
+
+    await refreshTransactionSteps(transaction.propertyId, tx);
+    return row;
+  });
 
   await logAudit({
     userId: input.userId,
@@ -711,14 +724,27 @@ export async function closeTransaction(input: {
     throw new TransactionClosureBlockedError(blockers);
   }
 
-  const [updated] = await db
-    .update(transactions)
-    .set({ status: "Closed", closedAt: new Date(), updatedAt: new Date() })
-    .where(eq(transactions.id, transaction.id))
-    .returning();
+  // Part B Stage 2 remediation (open item: "synchronously refreshed
+  // projection, non-atomic"): all three writes -- transactions,
+  // properties.workflowStage, and the workflowSteps refresh -- now commit
+  // together. Previously these were three separate statements, and the
+  // idempotent guard above (`if (transaction.status === "Closed") return
+  // transaction;`) meant a crash between them left properties/workflowSteps
+  // permanently behind a transaction the database already considered
+  // Closed — a retry would return immediately without ever finishing the
+  // stalled writes. Same db.transaction() pattern acceptOffer already uses
+  // elsewhere in this file.
+  const updated = await db.transaction(async (tx): Promise<Transaction> => {
+    const [row] = await tx
+      .update(transactions)
+      .set({ status: "Closed", closedAt: new Date(), updatedAt: new Date() })
+      .where(eq(transactions.id, transaction.id))
+      .returning();
 
-  await db.update(properties).set({ workflowStage: "Closed", updatedAt: new Date() }).where(eq(properties.id, transaction.propertyId));
-  await refreshTransactionSteps(transaction.propertyId);
+    await tx.update(properties).set({ workflowStage: "Closed", updatedAt: new Date() }).where(eq(properties.id, transaction.propertyId));
+    await refreshTransactionSteps(transaction.propertyId, tx);
+    return row;
+  });
 
   await logAudit({
     userId: input.userId,
