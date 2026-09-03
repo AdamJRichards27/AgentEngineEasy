@@ -121,6 +121,31 @@ async function removeFaultTrigger(stepId: number): Promise<void> {
   await db.execute(sql.raw(`drop function if exists fault_fn_${stepId}();`));
 }
 
+// drizzle-orm's node-postgres driver wraps a failing query in its own
+// "Failed query: ..." error rather than surfacing the raised Postgres
+// exception text at the top level, so matching err.message against the
+// raw RAISE EXCEPTION string is unreliable. The wrapped message does
+// include the failing query's bind params, though -- and workflow_steps.id
+// is always the last one -- so asserting the rejection is actually our
+// fault-injected trigger (not some unrelated bug) means checking for
+// either the raw message (in case a driver upgrade changes the wrapping)
+// or the target row id.
+async function assertFaultRejection(action: () => Promise<unknown>, stepId: number): Promise<void> {
+  let caught: unknown;
+  try {
+    await action();
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught instanceof Error, "expected the fault-injected trigger to make this call reject, but it resolved");
+  const cause = (caught as { cause?: unknown }).cause;
+  const combined = `${(caught as Error).message} | ${cause instanceof Error ? cause.message : String(cause ?? "")}`;
+  assert.ok(
+    combined.includes("stage2_fault_injected") || combined.includes(String(stepId)),
+    `expected the rejection to be caused by the fault-injected trigger on workflow_steps.id=${stepId}, got: ${combined}`,
+  );
+}
+
 before(async () => {
   const { configureEvents } = await import("../../lib/events.js");
   configureEvents();
@@ -328,9 +353,9 @@ test("completeSettlement rolls back atomically on a mid-transaction failure, and
   // lib/workflowSteps.ts).
   await installFaultTrigger(settlementStep.id);
   try {
-    await assert.rejects(
+    await assertFaultRejection(
       () => completeSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId }),
-      /stage2_fault_injected/,
+      settlementStep.id,
     );
 
     // Pre-fix, the transactions write and the workflowSteps refresh were two
@@ -394,9 +419,9 @@ test("closeTransaction rolls back atomically on a mid-transaction failure, and a
   // make the retry return immediately).
   await installFaultTrigger(payoutStep.id);
   try {
-    await assert.rejects(
+    await assertFaultRejection(
       () => closeTransaction({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, force: true }),
-      /stage2_fault_injected/,
+      payoutStep.id,
     );
 
     const [transactionAfterFailure] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
