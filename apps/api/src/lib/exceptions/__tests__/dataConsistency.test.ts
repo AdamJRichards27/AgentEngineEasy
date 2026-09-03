@@ -52,9 +52,17 @@ after(async () => {
 // Retries a scheduled scan when it's transiently refused because another
 // scan (from a concurrently-running test file against the same shared test
 // database) currently holds the scan_runs lock — same precedent as
-// engine.test.ts's own scanOrRetry.
+// engine.test.ts's own scanOrRetry. This file's budget is wider than
+// engine.test.ts's own (8 attempts): engine.test.ts's __tests__ file starts
+// up with a burst of its own back-to-back scans (its synthetic
+// TEST_THROWING_RULE case alone sweeps a couple dozen brokerages), and this
+// file's very first scanOrRetry call tends to land inside that startup
+// burst when both files are run together — observed empirically to
+// occasionally outlast an 8x500ms (4s) budget. 30x500ms (15s) comfortably
+// clears it without masking a genuinely stuck lock (this file's own two
+// scans finish in well under that either way).
 async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL"): Promise<ScanSummary> {
-  for (let attempt = 0; attempt < 8; attempt++) {
+  for (let attempt = 0; attempt < 30; attempt++) {
     const result = await runScheduledScan(trigger);
     if (result.ok) return result.summary;
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -108,7 +116,13 @@ test("DC01: a transaction whose contract was signed without its properties.workf
     method: "POST",
     headers: { cookie: A.admin.cookie },
   });
-  assert.equal(resyncRes.status, 200, `resync-projection failed: ${await resyncRes.text()}`);
+  // A Response body can only be read once — .text() inside an assert
+  // message argument is evaluated unconditionally (JS evaluates call
+  // arguments before the call), which would consume the body even on the
+  // success path and leave the .json() below throwing "Body is unusable".
+  // Only read it as text on the failure path, matching the
+  // routes/__tests__ convention (e.g. exceptions.test.ts's createProperty).
+  if (resyncRes.status !== 200) throw new Error(`resync-projection failed: ${resyncRes.status} ${await resyncRes.text()}`);
   const { property: resyncedProperty } = (await resyncRes.json()) as { property: { workflowStage: string } };
   assert.equal(resyncedProperty.workflowStage, "Contract");
 
@@ -154,7 +168,9 @@ test("DC02: a seller AML verification that regresses to Review Required without 
     method: "POST",
     headers: { cookie: A.admin.cookie },
   });
-  assert.equal(resyncRes.status, 200, `resync-aml-summary failed: ${await resyncRes.text()}`);
+  // See the matching comment in the DC01 test above: only read the body as
+  // text on the failure path so .json() below can still read it on success.
+  if (resyncRes.status !== 200) throw new Error(`resync-aml-summary failed: ${resyncRes.status} ${await resyncRes.text()}`);
   const { property: resyncedProperty } = (await resyncRes.json()) as { property: { amlStatusSummary: string } };
   assert.equal(resyncedProperty.amlStatusSummary, "Review Required");
 
