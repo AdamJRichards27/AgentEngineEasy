@@ -13,20 +13,31 @@ one of a small set of AE-defined capability verbs:
 export const INTEGRATION_CAPABILITIES = {
   PORTAL_PUBLISH_LISTING: "portal.publishListing",
   PORTAL_UPDATE_LISTING_STATUS: "portal.updateListingStatus",
+  // AE Step 5 remediation — Proof B (Communications Hub): an outbound SMS
+  // send routed through the integration foundation's own outbox/adapter/
+  // mapping/webhook machinery, instead of Communications' synchronous
+  // sandbox provider. See lib/integrations/commsProof.ts.
+  COMMS_SEND_SMS: "comms.sendSms",
+  // AE Step 5 remediation — Proof C (Financial Transaction Engine): inbound
+  // mock payment-STATUS sync only (never a debit/transfer capability — see
+  // lib/financial/mockPaymentStatusSync.ts's own header comment).
+  PAYMENTS_STATUS_SYNC: "payments.statusSync",
 } as const;
 ```
 
-This is deliberately small in this build — exactly the two capabilities the Property
-Launch proof needs. Adding a capability for a future domain (e.g.
-`esign.requestSignature`, `payments.retrieveStatus`) means adding one more entry here and
-having the relevant adapter declare it; nothing about the registry, resolver, outbox, or
-webhook gateway changes shape to support a new capability.
+This grew from two capabilities (the original pass, covering only the Property Launch
+proof) to four once the remediation pass added Proofs B and C — each new domain proof
+added exactly one verb for the one action it actually needed, nothing speculative. Adding
+a capability for a still-later domain (e.g. `esign.requestSignature`) means adding one
+more entry here and having the relevant adapter declare it; nothing about the registry,
+resolver, outbox, or webhook gateway changes shape to support a new capability — this was
+proven twice more by the remediation pass doing exactly that.
 
-`apps/api/src/lib/integrations/launchProof.ts` and `routes/integrations.ts` are the only
-places outside `registry.ts`/`outbox.ts` that reference `INTEGRATION_CAPABILITIES` — every
-call is against the verb, never `mock_portal_v1` by name except where the code is
-explicitly registering or resolving a provider (`registry.ts`, `bootstrap.ts`,
-`testHelpers.ts`).
+`apps/api/src/lib/integrations/launchProof.ts` (Proof A), `commsProof.ts` (Proof B),
+`financialProof.ts` (Proof C), and `routes/integrations.ts` are the only places outside
+`registry.ts`/`outbox.ts` that reference `INTEGRATION_CAPABILITIES` — every call is against
+the verb, never a provider id by name except where the code is explicitly registering or
+resolving a provider (`registry.ts`, `bootstrap.ts`, `testHelpers.ts`).
 
 ## 2. The provider catalogue
 
@@ -35,7 +46,8 @@ code-change array (the same discipline `lib/exceptions/registry.ts`'s `RISK_RULE
 uses) — not a database table an operator edits freely. `seedProviderCatalogue()` upserts
 it into `integration_providers` at boot (`bootstrap.ts`), idempotently.
 
-This build ships exactly one entry:
+This build ships exactly three entries — one per domain proof, still nowhere close to
+every category the brief names:
 
 ```ts
 {
@@ -44,16 +56,31 @@ This build ships exactly one entry:
   displayName: "Mock Property Portal (Sandbox)",
   capabilities: ["portal.publishListing", "portal.updateListingStatus"],
   environmentClassification: "MOCK",
+},
+{
+  id: "mock_sms_v1",
+  category: "COMMUNICATIONS",
+  displayName: "Mock SMS Gateway (Sandbox)",
+  capabilities: ["comms.sendSms"],
+  environmentClassification: "MOCK",
+},
+{
+  id: "mock_payment_status_v1",
+  category: "FINANCIAL",
+  displayName: "Mock Payment Status Feed (Sandbox)",
+  capabilities: ["payments.statusSync"],
+  environmentClassification: "MOCK",
 }
 ```
 
-An empty-but-for-one catalogue is deliberate (Section 3 of the foundation overview
-document): the brief explicitly warns against suggesting providers are available that
-aren't actually implemented, and against building every provider category now. Every
-other category the brief names (real estate portals beyond this one, accounting, banking,
-email/SMS beyond what Communications Hub already owns directly, calendar, e-sign, AML,
-conveyancing, document services, CRM/migration, marketing, signage/photography/brochure,
-utility/moving referrals) has zero catalogue rows in this build.
+A small, still-deliberately-incomplete catalogue remains the design (Section 3 of the
+foundation overview document): the brief explicitly warns against suggesting providers are
+available that aren't actually implemented, and against building every provider category
+now. Each of these three exists because a specific required domain proof needed it — no
+"just in case" catalogue rows were added. Every other category the brief names (real
+estate portals beyond this one, accounting, banking, calendar, e-sign, AML, conveyancing,
+document services, CRM/migration, marketing, signage/photography/brochure, utility/moving
+referrals) still has zero catalogue rows in this build.
 
 ## 3. `ProviderDefinition`
 
@@ -132,17 +159,20 @@ processing failure as distinct categories). The five here are exactly what
 `dispatchCommand`'s retry/dead-letter decision actually needs to branch on; the broader
 list mixes true adapter-outcome categories with resolver-level failures that are already
 handled as distinct `IntegrationError` reasons before an adapter is ever invoked (see
-`INTEGRATION_SECURITY_BOUNDARY.md` Section 1 for that list). Extending this taxonomy is a
-natural next step once a second, real adapter's actual failure modes are known — inventing
-finer categories now, with only one mock adapter to validate them against, risks a
-taxonomy that doesn't match anything real.
+`INTEGRATION_SECURITY_BOUNDARY.md` Section 1 for that list). This same five-category
+taxonomy was reused, unchanged, by the two mock adapters the remediation pass added
+(`mockSms.ts`, `mockPaymentStatus.ts`) — three adapters now validate against it without
+needing it to grow, which is some evidence (not proof) that it is reasonably shaped.
+Extending it further is still a natural next step once a *real* adapter's actual failure
+modes are known — inventing finer categories now, with only mock adapters to validate them
+against, risks a taxonomy that doesn't match anything real.
 
 The brief's Section 5.3 also lists `validateConfiguration`, `testConnection`, `getHealth`,
 `verifyWebhook`, `parseWebhook`, `normaliseEvent`, `reconcile`, `disconnect`, and
 `redactForLogging` as adapter methods. This build's `IntegrationAdapter` has `send()` only.
 `validateConnection()` in `model.ts` calls `adapter.send()` with a
 `{ __validationProbe: true }` payload rather than a separate `testConnection()` method —
-the mock adapter treats that flag as an always-succeeding probe. Webhook signature
+every mock adapter treats that flag as an always-succeeding probe. Webhook signature
 verification is implemented directly in `webhooks.ts`'s `verifyWebhookSignature()` (HMAC,
 provider-agnostic) rather than per-adapter, because the one real gateway this build has
 only needs one verification scheme; a provider needing a different scheme would extend

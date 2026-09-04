@@ -33,14 +33,19 @@ what is intentionally left for later, controlled stages.
 
 The Step 5 brief (reproduced in full in the PR this ships with) describes a very large
 foundation — 19 capability areas, a 22-step build order, four full domain proofs, and an
-admin UI. Building and *verifying* the entire literal brief in one pass is not something
-that can honestly be claimed complete; a document asserting otherwise would be exactly the
-"document-only implementation" the brief itself rules out as insufficient (Section 17).
+admin UI. This document originally described a first pass that built the common plumbing
+and one of the four required domain proofs; a subsequent, targeted remediation pass
+completed the remaining three proofs and the administration UI on top of that same,
+unchanged foundation. Both passes are reflected below as the current, combined state —
+`INTEGRATION_FOUNDATION_COMPLETION_REPORT.md` §J has the exact delta if you want to see
+what the remediation pass added on its own.
 
 What was actually built, end to end, with real code and real tests run against a real
-Postgres database, is:
+Postgres database (and, for the admin UI, a real browser session), is:
 
 - The schema (10 new tables — Section 3 below, and `INTEGRATION_ADAPTER_CONTRACTS.md`).
+  Unchanged since the first pass — the remediation pass needed zero new tables, columns,
+  or migrations to build three more domain proofs and an admin UI on top of it.
 - Typed adapter contracts and a fail-closed provider registry/resolver.
 - The full connection lifecycle (11 states) with an approval chain, transition-table
   enforcement, and an append-only audit ledger.
@@ -49,27 +54,56 @@ Postgres database, is:
 - External identity mapping with conflict detection.
 - A credential-reference boundary (opaque secret identifiers only — see
   `INTEGRATION_SECURITY_BOUNDARY.md`).
-- One deterministic mock adapter (`mock_portal_v1`) covering all ten required mock
-  scenarios (Section 6 of the build brief) through the real adapter/registry/outbox/
-  webhook path — no shortcuts.
-- One complete domain integration proof: **Property Launch** (Proof A in the brief). It
-  proves a mock portal event can flow all the way from an approved connection through the
-  outbox, the adapter, a signed webhook, and Launch's own service boundary
-  (`recordPortalSubmission` / `confirmPortalLive`) — and that it cannot flip a Launch
-  Plan's `LISTING_LIVE` status, which stays gated behind Market Ready and an explicit
-  human action.
-- 21 automated tests, all passing against a real database, plus a full run of every
-  existing relevant regression suite (538 tests total across the whole `apps/api` test
-  script) with zero failures.
+- Three deterministic mock adapters — `mock_portal_v1` (portal), `mock_sms_v1`
+  (communications), `mock_payment_status_v1` (financial) — each covering its own domain's
+  required mock scenarios through the real adapter/registry/outbox/webhook path, no
+  shortcuts.
+- All four complete domain integration proofs the brief requires:
+  - **Proof A — Property Launch.** A mock portal event flows from an approved connection
+    through the outbox, the adapter, a signed webhook, and Launch's own service boundary
+    (`recordPortalSubmission` / `confirmPortalLive`) — and cannot flip a Launch Plan's
+    `LISTING_LIVE` status, which stays gated behind Market Ready and an explicit human
+    action.
+  - **Proof B — Communications Hub.** An outbound SMS routed through the integration
+    foundation still passes through Communications' own consent, cost-control, and
+    quiet-hours checks *before* it ever becomes an outbox row — those controls cannot be
+    bypassed by going through this foundation instead of Communications' existing
+    synchronous sandbox path.
+  - **Proof C — Financial Transaction Engine.** An inbound mock payment-status webhook can
+    only produce evidence (a variance flag, or a partial-match record) against an AE
+    payment request — never a completed reconciliation, which remains a human Financial
+    Engine authority action.
+  - **Proof D — Workflow and Risk.** A command that exhausts its retry budget and is
+    dead-lettered is picked up by a new, generic Exception and Risk Engine rule (covering
+    every capability and provider, not just one proof) and becomes a properly-owned,
+    severity-laddered, provenance-carrying Exception/Risk case — which auto-resolves once
+    an authorised replay genuinely succeeds.
+- The Settings → Integrations administration UI: all 6 required views (overview,
+  connection detail, activity, dead-letter/recovery, reconciliation, connection controls —
+  the last two consolidated with connection detail into one inline-expand surface, per
+  this codebase's existing "no separate detail screen" convention), distinguishing all 9
+  required connection-related states, never implying a catalogue entry is connected when
+  it isn't, never displaying a secret, and enforcing access independently at both the
+  presentation layer and the API layer.
+- 57 integration-specific automated tests (22 from the original pass, 35 from the
+  remediation pass — including a 4-test file added to close a real, self-found gap in a
+  second new risk rule's coverage, see `INTEGRATION_FOUNDATION_COMPLETION_REPORT.md` §D.3),
+  all passing against a real database, plus a full run of every existing relevant
+  regression suite across the whole `apps/api` test script with zero failures (one
+  unrelated pre-existing skip), plus a full monorepo typecheck (now including `apps/web`)
+  and a clean `apps/web` production build, plus a live end-to-end Playwright browser
+  session driving the entire admin UI and a real connection through its full lifecycle.
 
-What was **not** built in this step: Proofs B (Communications), C (Financial), and D
-(Workflow/Risk); the sync-cursor and reconciliation frameworks (schema concepts documented
-but no service code); the import/export job foundation; the administration UI
-(Section 10 of the brief); and most of the specific error-taxonomy/observability
-instrumentation beyond what the outbox/webhook/dead-letter path already needed to be real.
+What remains **not** built, honestly: the sync-cursor and reconciliation-run *frameworks*
+as reusable, general-purpose services (schema concepts documented, and Proof C's
+reconciliation snapshot is computed live/on-demand rather than through a standing
+framework); the import/export job foundation; and most of the specific error-taxonomy/
+observability instrumentation beyond what the outbox/webhook/dead-letter path already
+needed to be real. None of these were required by any of the four domain proofs or the
+admin UI, and none are silently implied to exist.
 `INTEGRATION_FOUNDATION_COMPLETION_REPORT.md` gives the exact PASS/FAIL/NOT EXECUTED
-status of every one of the brief's 17 required acceptance scenarios — this is the honest
-account of what's proven versus what remains.
+status of every one of the brief's required acceptance scenarios — this is the honest
+account of what's proven versus what remains, and it now shows all of them passing.
 
 ## 3. What's new in the database
 
@@ -131,11 +165,17 @@ These map directly to Section 4 of the build brief, with the concrete mechanism 
   belongs to the calling brokerage *before* any other check, and returns an identical
   `NOT_FOUND` whether the row is missing or belongs to another tenant. Proven directly by
   a dedicated cross-tenant test (see `INTEGRATION_SECURITY_BOUNDARY.md` Section 2).
-- **Existing domain controls aren't bypassed.** The Launch proof is precisely the
-  demonstration of this: a mock external event reaches Launch only through Launch's own
-  guarded service functions, and the property-level `LISTING_LIVE` status — gated by
-  Market Ready and a human `confirmLaunchLive` call — never moves as a side effect of a
-  portal webhook.
+- **Existing domain controls aren't bypassed.** The Launch proof (A) demonstrates this for
+  Launch: a mock external event reaches Launch only through Launch's own guarded service
+  functions, and the property-level `LISTING_LIVE` status — gated by Market Ready and a
+  human `confirmLaunchLive` call — never moves as a side effect of a portal webhook. Proofs
+  B, C, and D demonstrate the same discipline for their own domains: an integration-routed
+  SMS still passes through Communications' own consent/cost-control/quiet-hours checks
+  before it can be sent; an inbound payment-status event can only produce reconciliation
+  *evidence*, never a completed reconciliation, which remains the Financial Transaction
+  Engine's own human-authority action; and a dead-lettered command becomes a risk case
+  through the Exception and Risk Engine's own existing rule/scan machinery, not a new,
+  parallel notification path.
 
 ## 5. Where to read next
 

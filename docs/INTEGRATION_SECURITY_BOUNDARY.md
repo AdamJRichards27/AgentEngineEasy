@@ -112,10 +112,46 @@ they are never held anywhere but the opaque reference described above. Full-payl
 redaction for sensitive inbound webhook content beyond the credential boundary (e.g. a
 future provider payload containing PII or financial account numbers) is not yet
 implemented as a general mechanism — `integration_inbox.payload` currently stores
-whatever the webhook sent, in full, for audit/replay. For the one mock provider this
-build has, that payload never contains anything sensitive (portal destination id and a
-status string). This is a real gap for a future real provider whose payloads might carry
-PII or account data — flagged in the completion report, not silently left unaddressed.
+whatever the webhook sent, in full, for audit/replay. For the three mock providers this
+build has, that payload never contains anything sensitive (a portal destination id and
+status string; an SMS delivery status and message reference; a payment-status event with
+amount/currency and a reference id — no account numbers, no PII beyond what AE's own
+canonical records already hold). This is a real gap for a future real provider whose
+payloads might carry PII or account data — flagged in the completion report, not silently
+left unaddressed.
+
+## 5a. The administration UI's own access boundary (Step 5 remediation)
+
+The Settings → Integrations admin UI (`apps/web/src/pages/SettingsIntegrations.tsx` and
+its backend routes in `routes/integrations.ts`, built during the remediation pass) is
+subject to the exact same boundary described above, checked independently at two layers:
+
+- **Presentation layer**: `SettingsIntegrations.tsx`'s top-level component checks
+  `user?.role === "Brokerage Administrator"` before rendering anything integration-related
+  — the same raw-string role check every other admin-only page in this codebase already
+  uses (e.g. `FinancialOperations.tsx`). This is a UX nicety, not the actual boundary.
+- **API layer, independently**: every route under `/integrations/*` — including the three
+  new admin read-model routes (`GET /integrations/overview`, `/activity`,
+  `/reconciliation`) — sits behind the router-level `requireAuth, requireRole(...
+  BROKERAGE_ADMIN_ROLES)` gate. A request that somehow reached these routes without going
+  through the UI at all (a non-admin user calling the API directly) is rejected the same
+  way. `integrationsAdmin.test.ts` proves this by calling the routes directly as a
+  non-admin Agent-role user and asserting HTTP 403 on all three, and by a dedicated
+  cross-tenant test on the overview route. `integrationOperational.test.ts` separately
+  proves the same 403 on the dead-letter replay route.
+- **No connection is ever implied where none exists.** The overview read-model
+  (`getIntegrationOverview` in `adminViews.ts`) returns `connectionId: null` and every
+  connection-dependent field (`connectionStatus`, `approvalStatus`, `health`) as `null` —
+  never a default value that could be misread as a real state — for a catalogue provider
+  the brokerage has not connected to, with `reconciliationStatus: "NOT_APPLICABLE"`.
+  Proven by test and confirmed visually in a live browser session (see
+  `INTEGRATION_FOUNDATION_COMPLETION_REPORT.md` §D.1): the frontend's separate
+  `NOT_CONNECTED_LABEL`/`NOT_CONNECTED_PILL_CLASS` constants are used only for this case,
+  distinct from all 11 real lifecycle-state labels.
+- **No secret is ever returned by an admin-UI endpoint.** None of the three new read-model
+  functions, nor any existing connection/credential endpoint, includes `secretIdentifier`
+  in its response shape — confirmed by direct reading of `adminViews.ts` and
+  `routes/integrations.ts`, consistent with Section 4 above.
 
 ## 6. What's out of scope for this step
 

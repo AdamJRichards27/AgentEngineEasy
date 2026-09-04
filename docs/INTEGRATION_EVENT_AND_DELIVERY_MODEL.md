@@ -21,6 +21,19 @@ event types to `AGENT_ENGINE_EASY_EVENT_TYPES`:
 | `INTEGRATION_COMMAND_DEAD_LETTERED` | An outbound outbox command exhausts retries or fails permanently. |
 | `INTEGRATION_WEBHOOK_REJECTED` | An inbound webhook fails signature verification or resolves to no connection. |
 
+**Unchanged by the Step 5 remediation pass.** Proofs B, C, and D — built after this
+document was first written — reuse this exact same five-event list and the same
+outbox/inbox/dead-letter row-as-envelope model described below; none of them needed a
+sixth event type or a second delivery mechanism. Concretely: Proof B's SMS delivery-status
+webhook (`SMS_DELIVERY_STATUS_UPDATE`, an *inbound webhook event type*, not one of the five
+canonical `AGENT_ENGINE_EASY_EVENT_TYPES` above) and Proof C's payment-status webhook
+(`MOCK_PAYMENT_STATUS_UPDATE`) both flow through the same `processInboundWebhook()`
+gateway described in Section 3, registering their own `WebhookEffectHandler` the same way
+the Launch proof's handler already did. Proof D doesn't add a new event type at all — its
+Exception and Risk Engine rule simply *subscribes to* the existing
+`INTEGRATION_COMMAND_DEAD_LETTERED` event this document already lists, the same way any
+other AE engine can subscribe to any other domain event.
+
 This list is deliberately minimal, following the same reasoning
 `AUTOMATION_EXECUTION_COMPLETED`'s own history in `EVENT_CONTRACTS.md` §2.4 documents: an
 inbound webhook's actual **domain** effect is published by the existing domain service it
@@ -132,7 +145,12 @@ Launch proof's handler (`applyListingStatusUpdate` in `launchProof.ts`) demonstr
 pattern: it treats `LIVE`/`FAILED` as terminal (`LIVE_TERMINAL_STATUSES`) and refuses to
 let a later-arriving, earlier-state event (e.g. a stale `SUBMITTED` webhook delivered
 after the destination is already `LIVE`) regress state — proven directly by
-`launchProof.test.ts`'s final assertion.
+`launchProof.test.ts`'s final assertion. `commsProof.ts`'s and `financialProof.ts`'s own
+webhook effect handlers (registered via `registerCommsIntegrationHandlers()` and
+`registerFinancialIntegrationHandlers()` in `bootstrap.ts`, alongside the Launch proof's
+own registration) follow the same "gateway guarantees exactly-once delivery, handler owns
+its own domain invariants" division of responsibility — neither introduces a second
+delivery guarantee mechanism.
 
 ## 4. Durability of idempotency
 
