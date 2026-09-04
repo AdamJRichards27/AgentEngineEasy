@@ -60,6 +60,15 @@ import {
   financialLedgerEvents,
   auditReturnReminders,
   financialSettings,
+  integrationConnections,
+  integrationConnectionTransitions,
+  integrationOutbox,
+  integrationOutboxAttempts,
+  integrationInbox,
+  integrationExternalMappings,
+  integrationDeadLetters,
+  integrationCredentials,
+  integrationSettings,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -405,6 +414,33 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(financialLedgerEvents).where(inArray(financialLedgerEvents.brokerageId, ids));
   await db.delete(auditReturnReminders).where(inArray(auditReturnReminders.brokerageId, ids));
   await db.delete(financialSettings).where(inArray(financialSettings.brokerageId, ids));
+
+  // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+  // Every integration_* table carries brokerageId directly EXCEPT
+  // integration_outbox_attempts (only outboxId -> integration_outbox.id)
+  // and integration_credentials (only connectionId -> integration_connections.id
+  // — see packages/db/src/schema/integrations.ts). integration_inbox must
+  // be cleared before integration_outbox (inbox.relatedOutboxId ->
+  // outbox.id, non-cascading); integration_connections.requestedBy ->
+  // users.id NOT NULL non-cascading, so this whole block must run (like
+  // every block above) before the users delete near the end of this function.
+  const integrationConnectionRows = await db.select({ id: integrationConnections.id }).from(integrationConnections).where(inArray(integrationConnections.brokerageId, ids));
+  const integrationConnectionIds = integrationConnectionRows.map((c) => c.id);
+  const integrationOutboxRows = await db.select({ id: integrationOutbox.id }).from(integrationOutbox).where(inArray(integrationOutbox.brokerageId, ids));
+  const integrationOutboxIds = integrationOutboxRows.map((o) => o.id);
+  if (integrationOutboxIds.length > 0) {
+    await db.delete(integrationOutboxAttempts).where(inArray(integrationOutboxAttempts.outboxId, integrationOutboxIds));
+  }
+  await db.delete(integrationInbox).where(inArray(integrationInbox.brokerageId, ids));
+  await db.delete(integrationDeadLetters).where(inArray(integrationDeadLetters.brokerageId, ids));
+  await db.delete(integrationExternalMappings).where(inArray(integrationExternalMappings.brokerageId, ids));
+  await db.delete(integrationOutbox).where(inArray(integrationOutbox.brokerageId, ids));
+  if (integrationConnectionIds.length > 0) {
+    await db.delete(integrationCredentials).where(inArray(integrationCredentials.connectionId, integrationConnectionIds));
+  }
+  await db.delete(integrationConnectionTransitions).where(inArray(integrationConnectionTransitions.brokerageId, ids));
+  await db.delete(integrationConnections).where(inArray(integrationConnections.brokerageId, ids));
+  await db.delete(integrationSettings).where(inArray(integrationSettings.brokerageId, ids));
 
   // Agent Engine 2.0 — Communications Hub (Priority 8). See this function's
   // own doc comment above for the FK ordering this block depends on.

@@ -44,7 +44,22 @@ export function daysBetween(a: Date, b: Date): number {
  * through explicit rules").
  */
 export function severityForDeadline(now: Date, dueDate: Date, approachingDays: number, criticalAfterDays: number | null): RiskExceptionSeverity {
-  const daysUntilDue = daysBetween(dueDate, now) * -1; // positive = still time left
+  // AE Step 5 remediation — Proof D surfaced this: daysBetween(dueDate, now)
+  // is already "days until due, positive = still time left" on its own
+  // (dueDate later than now => positive) — the extra `* -1` that used to be
+  // here inverted that, so every deadline-based rule in this catalogue
+  // (offers/listing/contractConditions/amlCtf/appraisalAgreement/
+  // launchCampaign/workflowOperational/financial FIN03-FIN04, and this
+  // build's new integrationOperational H01) was assigning severity on the
+  // WRONG side of "approaching" and "overdue": a brand-new deadline days in
+  // the future could read as AT_RISK, and a genuinely overdue one could
+  // read as ATTENTION or even INFORMATION. Verified against every existing
+  // caller's own inline comments/tests (e.g. offers.ts's C12 "still within
+  // the normal handoff window" skip, which the inverted sign silently
+  // defeated) before removing the negation — no caller's own dueDate
+  // convention needed to change, this was purely the shared helper's own
+  // sign bug.
+  const daysUntilDue = daysBetween(dueDate, now);
   if (daysUntilDue > approachingDays) return "INFORMATION";
   if (daysUntilDue > 0) return "ATTENTION";
   const daysOverdue = -daysUntilDue;
