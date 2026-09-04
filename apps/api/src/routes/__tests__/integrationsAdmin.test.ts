@@ -13,8 +13,10 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
-import { db, financialPaymentRequests } from "@aee/db";
+import { eq } from "drizzle-orm";
+import { db, financialPaymentRequests, integrationCredentials } from "@aee/db";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 import { bootstrapIntegrationsForTesting, createActiveMockPortalConnection, createActiveMockPaymentStatusConnection } from "../../lib/integrations/__tests__/testHelpers.js";
 import { enqueueCommand, dispatchCommand, mintIdempotencyKey } from "../../lib/integrations/outbox.js";
@@ -22,6 +24,7 @@ import { processInboundWebhook } from "../../lib/integrations/webhooks.js";
 import { PAYMENT_STATUS_WEBHOOK_EVENT_TYPE } from "../../lib/integrations/financialProof.js";
 import { MOCK_PAYMENT_STATUS_PROVIDER_ID } from "../../lib/integrations/adapters/mockPaymentStatus.js";
 import { linkPaymentRequestToExternalReference } from "../../lib/financial/mockPaymentStatusSync.js";
+import { createDraftConnection } from "../../lib/integrations/model.js";
 import { INTEGRATION_CAPABILITIES } from "../../lib/integrations/types.js";
 
 let server: Server;
@@ -81,6 +84,16 @@ interface ReconciliationSnapshot {
 
 async function getJson<T>(path: string, cookie: string): Promise<{ status: number; body: T }> {
   const res = await fetch(`${baseUrl}/api${path}`, { headers: { cookie } });
+  const body = (await res.json()) as T;
+  return { status: res.status, body };
+}
+
+async function postJson<T>(path: string, cookie: string, payload?: unknown): Promise<{ status: number; body: T }> {
+  const res = await fetch(`${baseUrl}/api${path}`, {
+    method: "POST",
+    headers: { cookie, "content-type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+  });
   const body = (await res.json()) as T;
   return { status: res.status, body };
 }
@@ -221,4 +234,58 @@ test("a non-admin (Agent) receives 403 from every admin-view endpoint — enforc
     const res = await fetch(`${baseUrl}/api${path}`, { headers: { cookie: A.agent.cookie } });
     assert.equal(res.status, 403, `expected ${path} to refuse a non-admin Agent`);
   }
+});
+
+// ---------------------------------------------------------------------
+// AE 2.0 Step 2 hardening — POST /integrations/connections/:id/mint-credential
+// previously minted/reactivated a credential reference keyed only on the
+// client-supplied :id, with no brokerage check at all (a cross-tenant IDOR:
+// any Brokerage Administrator could mint a credential against ANY other
+// brokerage's connection by guessing its id). mintMockAuthFlow now runs
+// the same loadConnectionInBrokerage tenant chokepoint every other mutating
+// handler on this router already goes through, before touching
+// integration_credentials at all.
+// ---------------------------------------------------------------------
+
+test("cross-tenant: brokerage B cannot mint a credential against brokerage A's connection — identical NOT_FOUND to a nonexistent connection id, never a distinguishable 403", async () => {
+  const actorA = actorOf(A.admin);
+  const draft = await createDraftConnection(A.brokerageId, actorA, {
+    providerId: "mock_portal_v1",
+    displayName: "Cross-tenant mint-credential target",
+    purpose: "Verify mint-credential is tenant-scoped.",
+    requestedScopes: [INTEGRATION_CAPABILITIES.PORTAL_PUBLISH_LISTING],
+  });
+
+  const crossTenant = await postJson<{ error: string; reason: string }>(`/integrations/connections/${draft.id}/mint-credential`, B.admin.cookie);
+  const nonexistent = await postJson<{ error: string; reason: string }>(`/integrations/connections/${randomUUID()}/mint-credential`, B.admin.cookie);
+
+  assert.equal(crossTenant.status, 404, "cross-tenant mint attempt must be refused, not silently succeed");
+  assert.equal(crossTenant.body.reason, "NOT_FOUND");
+  assert.equal(crossTenant.status, nonexistent.status, "cross-tenant connection must be indistinguishable from a nonexistent one");
+  assert.equal(crossTenant.body.reason, nonexistent.body.reason);
+  assert.equal(crossTenant.body.error, nonexistent.body.error);
+
+  // And brokerage A's own draft must be completely unaffected — no credential minted by the attacker's attempt.
+  const rows = await db.select().from(integrationCredentials).where(eq(integrationCredentials.connectionId, draft.id));
+  assert.equal(rows.length, 0, "the cross-tenant attempt must not have created any integration_credentials row");
+});
+
+test("happy path: minting a credential for a connection that belongs to the caller's own brokerage still works", async () => {
+  const actorA = actorOf(A.admin);
+  const draft = await createDraftConnection(A.brokerageId, actorA, {
+    providerId: "mock_portal_v1",
+    displayName: "Same-tenant mint-credential target",
+    purpose: "Verify mint-credential still works for the owning brokerage.",
+    requestedScopes: [INTEGRATION_CAPABILITIES.PORTAL_PUBLISH_LISTING],
+  });
+
+  const { status, body } = await postJson<{ credential: { id: string; referenceType: string; status: string; createdAt: string } }>(
+    `/integrations/connections/${draft.id}/mint-credential`,
+    A.admin.cookie,
+  );
+
+  assert.equal(status, 201);
+  assert.equal(body.credential.referenceType, "MOCK_AUTH_FLOW");
+  assert.equal(body.credential.status, "ACTIVE");
+  assert.equal("secretIdentifier" in body.credential, false, "the response must never include the secret identifier");
 });
