@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, amlVerifications, serviceOrders } from "@aee/db";
+import { db, amlVerifications, serviceOrders, properties } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
@@ -66,8 +66,16 @@ amlRouter.post("/request", requireAuth, async (req, res) => {
 
 amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
-  const rows = await db.select().from(amlVerifications).where(eq(amlVerifications.propertyId, propertyId));
-  res.json({ verifications: rows });
+  const user = req.authedUser!;
+  // Joined onto properties and filtered by the caller's brokerageId in the
+  // same query — a propertyId from another brokerage returns no rows here,
+  // never another tenant's AML verification records.
+  const rows = await db
+    .select({ verification: amlVerifications })
+    .from(amlVerifications)
+    .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
+    .where(and(eq(amlVerifications.propertyId, propertyId), eq(properties.brokerageId, user.brokerageId)));
+  res.json({ verifications: rows.map((r) => r.verification) });
 });
 
 // Provider webhook — reports the outcome of a verification requested via
@@ -115,7 +123,12 @@ amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(..
   const user = req.authedUser!;
 
   try {
-    const verification = await resolveAmlException({ verificationId, userId: user.id, notes: parsed.data.notes });
+    const verification = await resolveAmlException({
+      verificationId,
+      userId: user.id,
+      notes: parsed.data.notes,
+      brokerageId: user.brokerageId,
+    });
     await logAudit({
       userId: user.id,
       action: "aml_exception_resolved",
@@ -139,7 +152,7 @@ amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
   const user = req.authedUser!;
 
   try {
-    const verification = await retryAmlVerification(verificationId);
+    const verification = await retryAmlVerification(verificationId, user.brokerageId);
     await logAudit({
       userId: user.id,
       action: "aml_verification_retried",
@@ -158,9 +171,15 @@ amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
 // charging is Phase 6.
 amlRouter.get("/service-orders/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
+  const user = req.authedUser!;
+  // Same brokerage-scoped join as GET /by-property above — serviceOrders
+  // carries no brokerageId of its own, and this is billing data, so a
+  // cross-tenant propertyId must return nothing rather than another
+  // tenant's cost/price records.
   const rows = await db
-    .select()
+    .select({ serviceOrder: serviceOrders })
     .from(serviceOrders)
-    .where(eq(serviceOrders.propertyId, propertyId));
-  res.json({ serviceOrders: rows });
+    .innerJoin(properties, eq(serviceOrders.propertyId, properties.id))
+    .where(and(eq(serviceOrders.propertyId, propertyId), eq(properties.brokerageId, user.brokerageId)));
+  res.json({ serviceOrders: rows.map((r) => r.serviceOrder) });
 });

@@ -84,6 +84,56 @@ async function defaultPaymentMethodFor(payerType: "Agent" | "Brokerage", payerId
   return pm ?? null;
 }
 
+/**
+ * Tenant chokepoint for ServiceOrder loads — every ServiceOrder lookup by
+ * raw numeric id in this file funnels through here rather than querying
+ * `serviceOrders` directly, matching the assertTenantAndLoad /
+ * loadLaunchPlanInBrokerage precedent (lib/exceptions/model.ts,
+ * lib/launch/model.ts). serviceOrders itself carries no brokerageId column
+ * (see packages/db/src/schema/commerce.ts), so tenancy is derived via its
+ * propertyId -> properties.brokerageId, joined in the SAME query as the id
+ * lookup — never a separate post-fetch check, so there is no window where a
+ * row is read before its tenant is known. Returns null identically whether
+ * the id doesn't exist at all or belongs to another brokerage — callers
+ * must never be able to distinguish the two.
+ */
+async function selectServiceOrderInBrokerage(serviceOrderId: number, brokerageId: number): Promise<ServiceOrder | null> {
+  const [row] = await db
+    .select({ serviceOrder: serviceOrders })
+    .from(serviceOrders)
+    .innerJoin(properties, eq(properties.id, serviceOrders.propertyId))
+    .where(and(eq(serviceOrders.id, serviceOrderId), eq(properties.brokerageId, brokerageId)));
+  return row?.serviceOrder ?? null;
+}
+
+/**
+ * Read-only tenant-scoped ServiceOrder fetch — backs GET
+ * /service-orders/:id. Exported (rather than kept module-private like
+ * selectServiceOrderInBrokerage) because the route itself owns the
+ * not-found -> 404 translation, same shape as every other "load in
+ * brokerage" read in this app.
+ */
+export async function getServiceOrderForBrokerage(serviceOrderId: number, brokerageId: number): Promise<ServiceOrder | null> {
+  return selectServiceOrderInBrokerage(serviceOrderId, brokerageId);
+}
+
+/**
+ * Tenant chokepoint for Payment loads — mirrors
+ * selectServiceOrderInBrokerage above, one join further out: payments has
+ * no brokerageId of its own either, so tenancy is derived via
+ * payments.serviceOrderId -> serviceOrders.propertyId ->
+ * properties.brokerageId, all in the one query.
+ */
+async function selectPaymentInBrokerage(paymentId: number, brokerageId: number): Promise<Payment | null> {
+  const [row] = await db
+    .select({ payment: payments })
+    .from(payments)
+    .innerJoin(serviceOrders, eq(serviceOrders.id, payments.serviceOrderId))
+    .innerJoin(properties, eq(properties.id, serviceOrders.propertyId))
+    .where(and(eq(payments.id, paymentId), eq(properties.brokerageId, brokerageId)));
+  return row?.payment ?? null;
+}
+
 export interface ChargeServiceOrderResult {
   payment: Payment;
   serviceOrder: ServiceOrder;
@@ -106,12 +156,19 @@ export interface ChargeServiceOrderResult {
  * if the process crashes between the provider call succeeding and this
  * function returning, the Pending row is still a durable record that a
  * charge may have gone through, rather than nothing at all.
+ *
+ * brokerageId is the authenticated caller's OWN brokerage (never a
+ * client-supplied tenant id — see routes/payments.ts) and scopes the
+ * ServiceOrder load below so brokerage B can never charge, by guessing or
+ * incrementing a serviceOrderId, a stored payment method belonging to
+ * brokerage A.
  */
 export async function chargeServiceOrder(input: {
   serviceOrderId: number;
   userId: number;
+  brokerageId: number;
 }): Promise<ChargeServiceOrderResult> {
-  const [serviceOrder] = await db.select().from(serviceOrders).where(eq(serviceOrders.id, input.serviceOrderId));
+  const serviceOrder = await selectServiceOrderInBrokerage(input.serviceOrderId, input.brokerageId);
   if (!serviceOrder) {
     throw new Error(`ServiceOrder ${input.serviceOrderId} not found`);
   }
@@ -268,9 +325,14 @@ export async function processPaymentWebhook(
  * exists too) — role-gated at the route layer to Brokerage Administrators,
  * matching the AML exception-resolution precedent for anything that reverses
  * a recorded financial/compliance outcome.
+ *
+ * brokerageId is the authenticated caller's OWN brokerage, scoping the
+ * Payment load below (selectPaymentInBrokerage) so a Brokerage
+ * Administrator can never refund another brokerage's payment by guessing or
+ * incrementing a paymentId.
  */
-export async function refundPayment(input: { paymentId: number; amountCents?: number }): Promise<Payment> {
-  const [payment] = await db.select().from(payments).where(eq(payments.id, input.paymentId));
+export async function refundPayment(input: { paymentId: number; amountCents?: number; brokerageId: number }): Promise<Payment> {
+  const payment = await selectPaymentInBrokerage(input.paymentId, input.brokerageId);
   if (!payment) {
     throw new Error(`Payment ${input.paymentId} not found`);
   }
@@ -295,6 +357,20 @@ export async function refundPayment(input: { paymentId: number; amountCents?: nu
   return updated;
 }
 
-export async function listPaymentsForServiceOrder(serviceOrderId: number): Promise<Payment[]> {
-  return db.select().from(payments).where(eq(payments.serviceOrderId, serviceOrderId)).orderBy(desc(payments.id));
+/**
+ * brokerageId scopes the join back through serviceOrders -> properties (see
+ * selectPaymentInBrokerage above), so brokerage B listing payments for
+ * brokerage A's serviceOrderId gets the same empty list it would for a
+ * serviceOrderId that doesn't exist at all — never a peek at another
+ * brokerage's payment rows.
+ */
+export async function listPaymentsForServiceOrder(serviceOrderId: number, brokerageId: number): Promise<Payment[]> {
+  const rows = await db
+    .select({ payment: payments })
+    .from(payments)
+    .innerJoin(serviceOrders, eq(serviceOrders.id, payments.serviceOrderId))
+    .innerJoin(properties, eq(properties.id, serviceOrders.propertyId))
+    .where(and(eq(payments.serviceOrderId, serviceOrderId), eq(properties.brokerageId, brokerageId)))
+    .orderBy(desc(payments.id));
+  return rows.map((r) => r.payment);
 }

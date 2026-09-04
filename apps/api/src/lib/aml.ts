@@ -290,12 +290,23 @@ export async function processAmlWebhook(
  * reusing the same AmlVerification row (and ServiceOrder) rather than
  * creating a second one, so (propertyId, partyId) still maps to exactly
  * one verification row.
+ *
+ * Tenant-scoped the same way assertPartyOnPropertyInBrokerage is above:
+ * amlVerifications carries no brokerageId of its own, so the lookup joins
+ * onto properties and filters by brokerageId in that same query, not a
+ * check bolted on after the fetch — a verificationId from another
+ * brokerage is indistinguishable from a nonexistent one.
  */
-export async function retryAmlVerification(verificationId: number): Promise<AmlVerification> {
-  const [verification] = await db.select().from(amlVerifications).where(eq(amlVerifications.id, verificationId));
-  if (!verification) {
+export async function retryAmlVerification(verificationId: number, brokerageId: number): Promise<AmlVerification> {
+  const [row] = await db
+    .select({ aml: amlVerifications })
+    .from(amlVerifications)
+    .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
+    .where(and(eq(amlVerifications.id, verificationId), eq(properties.brokerageId, brokerageId)));
+  if (!row) {
     throw new Error(`AmlVerification ${verificationId} not found`);
   }
+  const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
     throw new Error(`AmlVerification ${verificationId} is not in a retryable state (status: ${verification.status})`);
   }
@@ -357,16 +368,28 @@ export async function retryAmlVerification(verificationId: number): Promise<AmlV
  * ownership review-not-block pattern already used elsewhere. Mandatory,
  * non-empty notes are enforced at the route layer so this can never be a
  * silent one-click bypass.
+ *
+ * Tenant-scoped like retryAmlVerification above: this clears a genuine
+ * AML/CTF compliance exception, so a Brokerage Administrator from one
+ * brokerage must never be able to resolve another brokerage's flagged
+ * verification. The brokerage filter lives in the same fetch query (a
+ * join onto properties), not a check performed after the row is loaded.
  */
 export async function resolveAmlException(input: {
   verificationId: number;
   userId: number;
   notes: string;
+  brokerageId: number;
 }): Promise<AmlVerification> {
-  const [verification] = await db.select().from(amlVerifications).where(eq(amlVerifications.id, input.verificationId));
-  if (!verification) {
+  const [row] = await db
+    .select({ aml: amlVerifications })
+    .from(amlVerifications)
+    .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
+    .where(and(eq(amlVerifications.id, input.verificationId), eq(properties.brokerageId, input.brokerageId)));
+  if (!row) {
     throw new Error(`AmlVerification ${input.verificationId} not found`);
   }
+  const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
     throw new Error(`AmlVerification ${input.verificationId} has no exception to resolve (status: ${verification.status})`);
   }
