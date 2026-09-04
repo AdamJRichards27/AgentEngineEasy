@@ -116,7 +116,7 @@ export async function createActiveMockPortalConnection(brokerageId: number, acto
     actor.id,
     "Approved for automated test coverage.",
   );
-  await mintMockAuthFlow(draft.id, actor);
+  await mintMockAuthFlow(draft.id, brokerageId, actor);
   const configuring = await beginConfiguration(draft.id, brokerageId, actor, approved.version);
   const active = await validateConnection(draft.id, brokerageId, actor, configuring.version);
 
@@ -160,7 +160,7 @@ export async function createActiveMockSmsConnection(
     actor.id,
     "Approved for automated test coverage.",
   );
-  await mintMockAuthFlow(draft.id, actor);
+  await mintMockAuthFlow(draft.id, brokerageId, actor);
   const configuring = await beginConfiguration(draft.id, brokerageId, actor, approved.version);
   const active = await validateConnection(draft.id, brokerageId, actor, configuring.version);
 
@@ -198,7 +198,7 @@ export async function createActiveMockPaymentStatusConnection(
     actor.id,
     "Approved for automated test coverage.",
   );
-  await mintMockAuthFlow(draft.id, actor);
+  await mintMockAuthFlow(draft.id, brokerageId, actor);
   const configuring = await beginConfiguration(draft.id, brokerageId, actor, approved.version);
   const active = await validateConnection(draft.id, brokerageId, actor, configuring.version);
 

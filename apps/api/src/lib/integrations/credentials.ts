@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, integrationCredentials, type IntegrationCredential } from "@aee/db";
 import { logAudit } from "../audit.js";
+import { loadConnectionInBrokerage } from "./model.js";
 import { IntegrationError, type ActorRef } from "./types.js";
 
 /**
@@ -25,7 +26,14 @@ import { IntegrationError, type ActorRef } from "./types.js";
  */
 export const SECRET_IDENTIFIER_PREFIX = "mock-secret-ref:";
 
-export async function mintMockAuthFlow(connectionId: string, actor: ActorRef): Promise<IntegrationCredential> {
+export async function mintMockAuthFlow(connectionId: string, brokerageId: number, actor: ActorRef): Promise<IntegrationCredential> {
+  // Tenant chokepoint — same loadConnectionInBrokerage every other mutating
+  // handler in routes/integrations.ts already goes through, called BEFORE
+  // touching integration_credentials at all, so a cross-tenant connectionId
+  // fails with the identical NOT_FOUND this throws for a nonexistent one
+  // (see model.ts's own comment on loadConnectionInBrokerage).
+  await loadConnectionInBrokerage(connectionId, brokerageId);
+
   const [existing] = await db.select().from(integrationCredentials).where(eq(integrationCredentials.connectionId, connectionId));
   if (existing && existing.status === "ACTIVE") {
     throw new IntegrationError("VALIDATION", "This connection already has an active credential reference.");

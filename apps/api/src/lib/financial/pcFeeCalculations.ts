@@ -6,7 +6,7 @@
 // deterministically. Like commissionCalculations, every result is a new,
 // immutable pcFeeCalculations row — never an edit of a prior one.
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, pcFeeAuthorities, pcFeeCalculations, commissionCalculations } from "@aee/db";
 import type { PcFeeAuthority, CommissionCalculation, InsertPcFeeCalculation, PcFeeCalculation } from "@aee/db";
 import type { RoundingAdjustment } from "./calculations.js";
@@ -112,7 +112,13 @@ export interface CreatePcFeeCalculationInput {
  * this transaction. Never edits a prior row.
  */
 export async function createPcFeeCalculation(input: CreatePcFeeCalculationInput): Promise<PcFeeCalculation> {
-  const [authority] = await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, input.pcFeeAuthorityId));
+  const [authority] = await db
+    .select()
+    .from(pcFeeAuthorities)
+    .where(and(eq(pcFeeAuthorities.id, input.pcFeeAuthorityId), eq(pcFeeAuthorities.brokerageId, input.brokerageId)));
+  // Deliberately identical to a nonexistent id — a foreign brokerage's
+  // authority (and its confidential mandate terms) must never be
+  // distinguishable from one that simply doesn't exist.
   if (!authority) throw new Error(`PC fee authority ${input.pcFeeAuthorityId} not found.`);
   if (authority.status !== "ACTIVE") {
     throw new Error(`PC fee authority ${input.pcFeeAuthorityId} is ${authority.status}, not ACTIVE — cannot calculate a fee against it.`);

@@ -12,7 +12,7 @@
 // table -- see the comment at the top of packages/db/src/schema/pitCrew.ts.
 
 import { eq, and } from "drizzle-orm";
-import { db, pitCrewAssignments, properties, type PitCrewAssignment } from "@aee/db";
+import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
 import { logAudit } from "../audit.js";
 import { isValidPitCrewTransition, type PitCrewItemStatus } from "./types.js";
 
@@ -37,6 +37,18 @@ export class PitCrewPropertyMismatchError extends Error {
   }
 }
 
+// Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7), STEP 2 security
+// hardening: a client-supplied assigneeUserId (assignWorkItem) that
+// doesn't belong to the caller's own brokerage. Same "not found" posture
+// as PitCrewPropertyMismatchError -- a userId from another brokerage
+// reads identically to one that doesn't exist.
+export class PitCrewAssigneeMismatchError extends Error {
+  constructor(message = "Assignee not found in this brokerage.") {
+    super(message);
+    this.name = "PitCrewAssigneeMismatchError";
+  }
+}
+
 interface WorkItemRef {
   brokerageId: number;
   propertyId: number;
@@ -47,6 +59,62 @@ interface WorkItemRef {
 interface Actor {
   actorUserId: number;
   actorEmail?: string;
+}
+
+// Loose UUID-shape guard, used only to short-circuit
+// assertSourceRecordOnPropertyInBrokerage below before it ever reaches the
+// database. risk_exceptions.id is a native Postgres uuid column, so
+// handing a non-UUID-shaped string to `eq(riskExceptions.id, ...)` doesn't
+// just fail to match a row -- it makes the driver throw an "invalid input
+// syntax for type uuid" error, which would surface as an unhandled 500
+// instead of the same PitCrewPropertyMismatchError every other kind of
+// mismatch produces here. Checking the shape first keeps a malformed
+// sourceRecordId behaving exactly like a well-formed one that simply isn't
+// found -- never a different, more revealing failure mode.
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7), STEP 2 security
+// hardening (cross-tenant IDOR fix). ref.propertyId is already checked
+// against ref.brokerageId by loadOrCreateOverlay below, but
+// ref.sourceRecordId is ALSO client-supplied -- it comes straight off the
+// URL (see routes/pitCrew.ts's itemParamsSchema) -- and was never checked
+// against either of them. Without this, a caller in brokerage A could
+// supply one of ITS OWN valid propertyIds alongside ANY exception UUID,
+// including one it guessed or enumerated that actually belongs to
+// brokerage B, and loadOrCreateOverlay would happily create/load a
+// pit_crew_assignments overlay row keyed only on (sourceType,
+// sourceRecordId) -- stamped with brokerage A's own brokerageId/
+// propertyId, never brokerage B's. Because queries.ts's
+// getPitCrewWorkspace later joins that overlay back onto the CALLER's own
+// real exceptions by sourceRecordId alone (no brokerageId filter on the
+// overlay side), a forged row like that lands directly on brokerage B's
+// own workspace the next time B loads it, the moment B's real exception id
+// happens to be the UUID A guessed. This closes that gap by requiring
+// sourceRecordId to name a real exception that belongs to BOTH
+// ref.propertyId AND ref.brokerageId before any overlay row is ever
+// touched. PIT_CREW_WORK_SOURCE_TYPES (types.ts) currently has exactly one
+// member, "EXCEPTION" -- this check is scoped to that; a second source
+// type, if one is ever added, needs its own branch here rather than
+// silently falling through unchecked.
+async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promise<void> {
+  if (ref.sourceType !== "EXCEPTION") return;
+  if (!UUID_SHAPE.test(ref.sourceRecordId)) {
+    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+  }
+  const [exception] = await db
+    .select({ id: riskExceptions.id })
+    .from(riskExceptions)
+    .where(
+      and(
+        eq(riskExceptions.id, ref.sourceRecordId),
+        eq(riskExceptions.brokerageId, ref.brokerageId),
+        eq(riskExceptions.propertyId, ref.propertyId),
+      ),
+    )
+    .limit(1);
+  if (!exception) {
+    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+  }
 }
 
 // version 0 is the sentinel PcWorkItem uses for "no overlay row exists yet"
@@ -71,6 +139,13 @@ async function loadOrCreateOverlay(ref: WorkItemRef): Promise<PitCrewAssignment>
   if (!property || property.brokerageId !== ref.brokerageId) {
     throw new PitCrewPropertyMismatchError();
   }
+
+  // See assertSourceRecordOnPropertyInBrokerage's own doc comment above --
+  // this is the second half of the tenant-isolation check this function
+  // needs before it ever touches pit_crew_assignments: the property check
+  // above proves ref.propertyId is really brokerage A's, but says nothing
+  // about whether ref.sourceRecordId is too.
+  await assertSourceRecordOnPropertyInBrokerage(ref);
 
   const [existing] = await db
     .select()
@@ -164,12 +239,33 @@ export async function claimWorkItem(input: MutationInput): Promise<PitCrewAssign
   );
 }
 
+// Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7), STEP 2 security
+// hardening. input.assigneeUserId (assignWorkItem, below) is client-
+// supplied and was never checked against input.brokerageId before being
+// written to pit_crew_assignments.assignedToUserId -- a caller could name
+// a userId belonging to a different brokerage entirely (or one that
+// doesn't exist) and have it recorded as the claimant. Same lookup shape
+// as the payment-method ownership checks in routes/payments.ts: the
+// candidate id and the caller's own brokerageId are checked together in
+// one query, never as two separate facts assembled after the fact.
+async function assertUserInBrokerage(userId: number, brokerageId: number): Promise<void> {
+  const [assignee] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, userId), eq(users.brokerageId, brokerageId)))
+    .limit(1);
+  if (!assignee) {
+    throw new PitCrewAssigneeMismatchError();
+  }
+}
+
 // A team lead (or another Pit Crew member) assigning an unclaimed item to a
 // specific person, distinct from that person claiming it themselves --
 // same CLAIMED destination, different actor recorded as the claimant.
 export async function assignWorkItem(
   input: MutationInput & { assigneeUserId: number },
 ): Promise<PitCrewAssignment> {
+  await assertUserInBrokerage(input.assigneeUserId, input.brokerageId);
   const row = await loadOrCreateOverlay(input);
   return applyTransition(
     row,
