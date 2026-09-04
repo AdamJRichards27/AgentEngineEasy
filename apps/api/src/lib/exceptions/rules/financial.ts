@@ -33,7 +33,7 @@
 //   creator can never clear this themselves — it needs a different
 //   Brokerage Administrator to act.
 
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, desc } from "drizzle-orm";
 import {
   db,
   properties,
@@ -41,6 +41,7 @@ import {
   financialDisputes,
   marketingPaymentRecords,
   commissionAgreements,
+  financialReconciliations,
 } from "@aee/db";
 import type { RiskRule } from "../registry.js";
 import type { RiskFinding } from "../types.js";
@@ -301,9 +302,100 @@ const FIN04_COMMISSION_AGREEMENT_APPROVAL_STALLED: RiskRule = {
   },
 };
 
+// ---------------------------------------------------------------------
+// FIN05 — AE Step 5 remediation, Proof C: an unresolved reconciliation
+// variance/ambiguity from a mock payment-status sync event. Purely
+// time-driven (financial_reconciliations rows are written by
+// lib/financial/mockPaymentStatusSync.ts, which publishes no domain event
+// of its own — see that file's own header comment on staying inside the
+// Financial Engine's existing authority rather than inventing a new one).
+// Only the MOST RECENT financial_reconciliations row per (recordType,
+// recordId) is considered "current" — an earlier VARIANCE superseded by a
+// later MATCHED evidence row for the same payment request is not still an
+// open problem.
+// ---------------------------------------------------------------------
+
+async function loadVarianceReconciliations(brokerageId: number) {
+  return db
+    .select()
+    .from(financialReconciliations)
+    .where(
+      and(
+        eq(financialReconciliations.brokerageId, brokerageId),
+        eq(financialReconciliations.recordType, "financial_payment_request"),
+        eq(financialReconciliations.status, "VARIANCE"),
+      ),
+    );
+}
+
+const FIN05_RECONCILIATION_VARIANCE_UNRESOLVED: RiskRule = {
+  ruleId: "FIN05_RECONCILIATION_VARIANCE_UNRESOLVED",
+  version: 1,
+  category: "FINANCIAL",
+  name: "Payment reconciliation variance needs manual review",
+  description:
+    "A reconciliation evidence event (e.g. a mock payment-status sync — lib/financial/mockPaymentStatusSync.ts) reported an amount/currency mismatch, or an ambiguous mapping, against an existing payment request. The Financial Engine never resolves this on its own — a human reviews the variance and either corrects the record or records a manual reconciliation decision.",
+  triggerEventTypes: [],
+  async scanBrokerage(brokerageId) {
+    const variances = await loadVarianceReconciliations(brokerageId);
+    const findings: RiskFinding[] = [];
+
+    for (const reconciliation of variances) {
+      const paymentRequestId = Number(reconciliation.recordId);
+      if (!Number.isFinite(paymentRequestId)) continue;
+
+      // Only the latest reconciliation row for this payment request counts
+      // — a variance later superseded by a matching event is not still open.
+      const [latest] = await db
+        .select()
+        .from(financialReconciliations)
+        .where(and(eq(financialReconciliations.brokerageId, brokerageId), eq(financialReconciliations.recordType, "financial_payment_request"), eq(financialReconciliations.recordId, reconciliation.recordId)))
+        .orderBy(desc(financialReconciliations.createdAt))
+        .limit(1);
+      if (latest && latest.id !== reconciliation.id) continue;
+
+      const [request] = await db.select().from(financialPaymentRequests).where(and(eq(financialPaymentRequests.id, paymentRequestId), eq(financialPaymentRequests.brokerageId, brokerageId)));
+      if (!request) continue;
+      const [property] = await db.select().from(properties).where(eq(properties.id, request.propertyId));
+      if (!property) continue;
+
+      const owner = resolveDefaultOwner(property, true);
+      findings.push({
+        ruleId: FIN05_RECONCILIATION_VARIANCE_UNRESOLVED.ruleId,
+        ruleVersion: FIN05_RECONCILIATION_VARIANCE_UNRESOLVED.version,
+        category: "FINANCIAL",
+        severity: "ATTENTION",
+        title: `Reconciliation variance on payment request #${request.id}`,
+        problemDescription: `A reconciliation evidence event reported ${reconciliation.reportedAmountCents != null ? (reconciliation.reportedAmountCents / 100).toFixed(2) : "an unknown amount"} against payment request #${request.id}, which expects ${(request.amountCents / 100).toFixed(2)} ${request.currency}. ${reconciliation.notes ?? ""}`.trim(),
+        businessImpact: "An unresolved reconciliation variance means the Financial Engine cannot treat this payment request's external evidence as trustworthy until a human reviews it.",
+        detectedCause: `financial_reconciliations.status = VARIANCE (source: ${reconciliation.source ?? "unknown"}).`,
+        ...owner,
+        propertyId: property.id,
+        transactionId: request.transactionId,
+        dueAt: null,
+        escalatesAt: null,
+        recommendedAction: "Review the reconciliation evidence against the payment request and correct whichever record is wrong, or record a manual reconciliation decision.",
+        resolutionRequirements: "A new reconciliation evidence event for this payment request matches (financial_reconciliations.status other than VARIANCE), or a human resolves this exception with a note.",
+        dismissible: true,
+        sourceRecordType: "financial_reconciliation",
+        sourceRecordId: String(reconciliation.id),
+        dedupKey: dedupKey(FIN05_RECONCILIATION_VARIANCE_UNRESOLVED.ruleId, brokerageId, request.id),
+        recurrenceMode: "REOPEN",
+        requiresFinancialEntitlement: true,
+        metadata: {
+          financialReconciliationId: reconciliation.id,
+          paymentRequestId: request.id,
+        },
+      });
+    }
+    return findings;
+  },
+};
+
 export const FINANCIAL_RULES: RiskRule[] = [
   FIN01_PC_FEE_PAYMENT_FAILED,
   FIN02_FINANCIAL_DISPUTE_OPEN,
   FIN03_MARKETING_INVOICE_OVERDUE,
   FIN04_COMMISSION_AGREEMENT_APPROVAL_STALLED,
+  FIN05_RECONCILIATION_VARIANCE_UNRESOLVED,
 ];

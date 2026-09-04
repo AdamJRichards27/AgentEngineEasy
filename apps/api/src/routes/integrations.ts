@@ -12,7 +12,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
-import { listProviderCatalogue } from "../lib/integrations/registry.js";
+import { listProviderCatalogue, resolveActiveConnection } from "../lib/integrations/registry.js";
 import {
   createDraftConnection,
   requestApproval,
@@ -31,8 +31,12 @@ import { listDeadLettersForBrokerage, loadDeadLetterInBrokerage } from "../lib/i
 import { replayDeadLetteredCommand } from "../lib/integrations/outbox.js";
 import { replayDeadLetteredWebhook } from "../lib/integrations/webhooks.js";
 import { publishListingToMockPortal } from "../lib/integrations/launchProof.js";
+import { sendSmsViaIntegration } from "../lib/integrations/commsProof.js";
+import { linkPaymentRequestToExternalReference, MockPaymentStatusSyncError, MappingConflictError } from "../lib/financial/mockPaymentStatusSync.js";
+import { getIntegrationOverview, getIntegrationActivity, getReconciliationSnapshot } from "../lib/integrations/adminViews.js";
 import { getOrCreateIntegrationSettings, updateIntegrationSettings } from "../lib/integrations/settings.js";
 import { IntegrationError, INTEGRATION_CAPABILITIES } from "../lib/integrations/types.js";
+import { CommunicationTenancyError, CommunicationTransitionError } from "../lib/communications/types.js";
 
 export const integrationsRouter = Router();
 
@@ -97,6 +101,45 @@ integrationsRouter.put("/integrations/settings", async (req, res) => {
 integrationsRouter.get("/integrations/providers", async (_req, res) => {
   const providers = await listProviderCatalogue();
   res.json({ providers });
+});
+
+// ---------------------------------------------------------------------
+// AE Step 5 remediation — admin UI read models (12.1/12.3/12.5). Each is a
+// thin pass-through to lib/integrations/adminViews.ts — see that file's own
+// header comment for why the reconciliation view is on-demand/live-computed
+// rather than a persisted "run".
+// ---------------------------------------------------------------------
+
+integrationsRouter.get("/integrations/overview", async (req, res) => {
+  const overview = await getIntegrationOverview(req.authedUser!.brokerageId);
+  res.json({ overview });
+});
+
+const activityQuerySchema = z.object({
+  connectionId: z.string().optional(),
+  direction: z.enum(["OUTBOUND", "INBOUND"]).optional(),
+  status: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+integrationsRouter.get("/integrations/activity", async (req, res) => {
+  const parsed = activityQuerySchema.safeParse(req.query);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const activity = await getIntegrationActivity(req.authedUser!.brokerageId, {
+    connectionId: parsed.data.connectionId,
+    direction: parsed.data.direction,
+    status: parsed.data.status,
+    from: parsed.data.from ? new Date(parsed.data.from) : undefined,
+    to: parsed.data.to ? new Date(parsed.data.to) : undefined,
+    limit: parsed.data.limit,
+  });
+  res.json({ activity });
+});
+
+integrationsRouter.get("/integrations/reconciliation", async (req, res) => {
+  const snapshot = await getReconciliationSnapshot(req.authedUser!.brokerageId);
+  res.json({ snapshot });
 });
 
 // ---------------------------------------------------------------------
@@ -271,6 +314,60 @@ integrationsRouter.post("/integrations/connections/:id/actions/publish-listing",
     res.json({ result });
   } catch (err) {
     if (handleIntegrationError(err, res)) return;
+    throw err;
+  }
+});
+
+// ---------------------------------------------------------------------
+// AE Step 5 remediation — Proof B action (Communications Hub): send an
+// existing DRAFT/APPROVED SMS message through an ACTIVE mock SMS
+// connection. Brokerage-Administrator-only, same weight class as every
+// other action on this router — see commsProof.ts's own header comment on
+// why the communications.sms entitlement check inside sendSmsViaIntegration
+// is a SEPARATE authority from this route's own requireRole gate.
+// ---------------------------------------------------------------------
+
+const sendSmsSchema = z.object({ messageId: z.number().int() });
+integrationsRouter.post("/integrations/connections/:id/actions/send-sms", async (req, res) => {
+  const parsed = sendSmsSchema.safeParse(req.body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const result = await sendSmsViaIntegration({
+      messageId: parsed.data.messageId,
+      brokerageId: req.authedUser!.brokerageId,
+      connectionId: req.params.id,
+      actor: actorFrom(req.authedUser!),
+    });
+    res.json({ result: { outcome: result.outcome, messageId: result.message.id, status: result.message.status } });
+  } catch (err) {
+    if (handleIntegrationError(err, res)) return;
+    if (err instanceof CommunicationTenancyError) return void res.status(404).json({ error: "Message not found." });
+    if (err instanceof CommunicationTransitionError) return void res.status(409).json({ error: err.message });
+    throw err;
+  }
+});
+
+// ---------------------------------------------------------------------
+// AE Step 5 remediation — Proof C action (Financial Transaction Engine):
+// link an existing payment request to the mock processor's own external
+// reference — the bookkeeping half of Proof C's mapping (see
+// mockPaymentStatusSync.ts's own header comment: there is no outbound
+// "submit a payment" call in this build, only this reference-linking action
+// plus the inbound mock status webhook).
+// ---------------------------------------------------------------------
+
+const linkPaymentReferenceSchema = z.object({ paymentRequestId: z.number().int(), externalReference: z.string().min(1).max(200) });
+integrationsRouter.post("/integrations/connections/:id/actions/link-payment-reference", async (req, res) => {
+  const parsed = linkPaymentReferenceSchema.safeParse(req.body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    await resolveActiveConnection(req.authedUser!.brokerageId, req.params.id, INTEGRATION_CAPABILITIES.PAYMENTS_STATUS_SYNC);
+    await linkPaymentRequestToExternalReference(parsed.data.paymentRequestId, req.authedUser!.brokerageId, req.params.id, parsed.data.externalReference, actorFrom(req.authedUser!));
+    res.status(201).json({ linked: true });
+  } catch (err) {
+    if (handleIntegrationError(err, res)) return;
+    if (err instanceof MappingConflictError) return void res.status(409).json({ error: err.message });
+    if (err instanceof MockPaymentStatusSyncError) return void res.status(err.reason === "NOT_FOUND" ? 404 : 400).json({ error: err.message });
     throw err;
   }
 });
