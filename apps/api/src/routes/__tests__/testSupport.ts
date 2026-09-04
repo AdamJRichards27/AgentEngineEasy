@@ -1,4 +1,4 @@
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and } from "drizzle-orm";
 import {
   db,
   users,
@@ -10,6 +10,8 @@ import {
   workflowSteps,
   amlVerifications,
   serviceOrders,
+  payments,
+  paymentMethods,
   documentPackages,
   documents,
   signatureRequests,
@@ -550,6 +552,18 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(documents).where(inArray(documents.propertyId, propertyIds));
     await db.delete(documentPackages).where(inArray(documentPackages.propertyId, propertyIds));
     await db.delete(amlVerifications).where(inArray(amlVerifications.propertyId, propertyIds));
+
+    // Payments IDOR fix regression coverage (routes/payments.ts,
+    // lib/payments.ts): payments.serviceOrderId -> serviceOrders.id is a
+    // required, non-cascading FK (packages/db/src/schema/commerce.ts), so
+    // any payment row a test created against one of this brokerage's
+    // service orders must be cleared before the serviceOrders delete just
+    // below, or that delete fails with a foreign key violation.
+    const serviceOrderRows = await db.select({ id: serviceOrders.id }).from(serviceOrders).where(inArray(serviceOrders.propertyId, propertyIds));
+    const serviceOrderIds = serviceOrderRows.map((s) => s.id);
+    if (serviceOrderIds.length > 0) {
+      await db.delete(payments).where(inArray(payments.serviceOrderId, serviceOrderIds));
+    }
     await db.delete(serviceOrders).where(inArray(serviceOrders.propertyId, propertyIds));
 
     const workflowRows = await db.select().from(workflows).where(inArray(workflows.propertyId, propertyIds));
@@ -572,6 +586,21 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(aiActionRequests).where(inArray(aiActionRequests.brokerageId, ids));
   await db.delete(domainEvents).where(inArray(domainEvents.brokerageId, ids));
   await db.delete(parties).where(inArray(parties.brokerageId, ids));
+
+  // Payments IDOR fix regression coverage: paymentMethods.payerId is
+  // polymorphic (a userId for payerType "Agent", a brokerageId for
+  // payerType "Brokerage" — see packages/db/src/schema/commerce.ts), not a
+  // real FK, so nothing forces this cleanup before the users/brokerages
+  // deletes below the way payments/serviceOrders did above. Still done here
+  // (userIds captured before the users delete, right below) purely so
+  // repeated local test runs don't accumulate stray rows.
+  const userRows = await db.select({ id: users.id }).from(users).where(inArray(users.brokerageId, ids));
+  const userIds = userRows.map((u) => u.id);
+  if (userIds.length > 0) {
+    await db.delete(paymentMethods).where(and(eq(paymentMethods.payerType, "Agent"), inArray(paymentMethods.payerId, userIds)));
+  }
+  await db.delete(paymentMethods).where(and(eq(paymentMethods.payerType, "Brokerage"), inArray(paymentMethods.payerId, ids)));
+
   await db.delete(users).where(inArray(users.brokerageId, ids));
   await db.delete(brokerages).where(inArray(brokerages.id, ids));
 }

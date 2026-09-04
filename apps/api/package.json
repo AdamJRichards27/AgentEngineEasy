@@ -24,6 +24,8 @@
     "csv-parse": "^7.0.2",
     "drizzle-orm": "^0.45.2",
     "express": "^4.21.0",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
     "multer": "^2.2.0",
     "xlsx": "^0.18.5",
     "zod": "^3.25.76"
