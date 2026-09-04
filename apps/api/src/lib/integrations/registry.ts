@@ -1,4 +1,4 @@
-// Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+// Agent Engine 2.0 — AE Step 5 remediation.
 //
 // Two things live here: PROVIDER_CATALOGUE (a controlled, code-defined
 // list of provider definitions — same "reviewed and shipped like any other
@@ -54,6 +54,28 @@ export const PROVIDER_CATALOGUE: ProviderDefinition[] = [
     description:
       "A deterministic, in-process mock of a real-estate portal integration — used to prove the adapter contract, connection lifecycle, outbox, and webhook gateway end to end without any live third-party connection.",
     capabilities: ["portal.publishListing", "portal.updateListingStatus"],
+    environmentClassification: "MOCK",
+  },
+  // AE Step 5 remediation — Proof B (Communications Hub).
+  {
+    id: "mock_sms_v1",
+    category: "COMMUNICATIONS",
+    displayName: "Mock SMS Gateway (Sandbox)",
+    description:
+      "A deterministic, in-process mock of an SMS gateway integration — proves an outbound SMS can travel through the same registry/outbox/adapter/mapping/webhook foundation as Proof A, for a genuinely different domain (Communications Hub) and transport shape (send + an asynchronous inbound delivery webhook). No real network call, no real destination is ever contacted.",
+    capabilities: ["comms.sendSms"],
+    environmentClassification: "MOCK",
+  },
+  // AE Step 5 remediation — Proof C (Financial Transaction Engine). Status
+  // sync only — this provider never gains a debit/transfer capability, in
+  // this catalogue or any other (see mockPaymentStatusSync.ts).
+  {
+    id: "mock_payment_status_v1",
+    category: "FINANCIAL",
+    displayName: "Mock Payment Status Feed (Sandbox)",
+    description:
+      "A deterministic, in-process mock of a payment processor's status-reporting feed — proves an inbound mock payment-status event can be verified, mapped, and submitted through the Financial Engine's own reconciliation authority without ever moving money or reaching a bank/trust/payment-processor connection.",
+    capabilities: ["payments.statusSync"],
     environmentClassification: "MOCK",
   },
 ];

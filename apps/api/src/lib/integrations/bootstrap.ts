@@ -11,7 +11,13 @@
 
 import { registerAdapter, seedProviderCatalogue } from "./registry.js";
 import { mockPortalAdapter } from "./adapters/mockPortal.js";
+import { mockSmsAdapter } from "./adapters/mockSms.js";
+import { mockPaymentStatusAdapter } from "./adapters/mockPaymentStatus.js";
 import { registerLaunchIntegrationHandlers } from "./launchProof.js";
+// AE Step 5 remediation — Proof B/C: registered alongside Proof A's own
+// handler, same idempotent-latch template.
+import { registerCommsIntegrationHandlers } from "./commsProof.js";
+import { registerFinancialIntegrationHandlers } from "./financialProof.js";
 import { dispatchDueOutbox } from "./outbox.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
@@ -24,7 +30,11 @@ export function registerIntegrationsEngine(): void {
   registered = true;
 
   registerAdapter(mockPortalAdapter);
+  registerAdapter(mockSmsAdapter);
+  registerAdapter(mockPaymentStatusAdapter);
   registerLaunchIntegrationHandlers();
+  registerCommsIntegrationHandlers();
+  registerFinancialIntegrationHandlers();
   seedProviderCatalogue().catch((err) => console.error("seedProviderCatalogue failed", err));
 
   intervalHandle = setInterval(() => {

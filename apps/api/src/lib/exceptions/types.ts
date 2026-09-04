@@ -69,6 +69,19 @@ export const RISK_EXCEPTION_METADATA_ALLOW_LIST = [
   "marketingPaymentRecordId",
   "campaignItemId",
   "financialDisputeId",
+  // AE Step 5 remediation — Proof D (Workflow and Risk). A dead-lettered
+  // integration command finding (rules/integrationOperational.ts) needs to
+  // name which outbox command/connection/capability/source-record it's
+  // about — IDs only, same posture as every other key above.
+  "integrationOutboxId",
+  "integrationConnectionId",
+  "integrationCapability",
+  "integrationSourceRecordType",
+  "integrationSourceRecordId",
+  // AE Step 5 remediation — Proof C (Financial Transaction Engine). A
+  // reconciliation-variance finding (rules/financial.ts's FIN05) needs to
+  // name which financial_reconciliations evidence row it's about.
+  "financialReconciliationId",
 ] as const;
 export type RiskExceptionMetadataKey = (typeof RISK_EXCEPTION_METADATA_ALLOW_LIST)[number];
 

@@ -53,8 +53,14 @@ import { COMMUNICATION_DELIVERY_RULES } from "./rules/communicationDelivery.js";
 // Agent Engine 2.0 — Financial Transaction Engine (Priority 9, Stage F,
 // Section 22). Commission-agreement/PC-fee-payment/marketing-invoice/
 // dispute findings surface through this same registry, under their own
-// FINANCIAL category — see rules/financial.ts's own module comment.
+// FINANCIAL category — see rules/financial.js's own module comment.
 import { FINANCIAL_RULES } from "./rules/financial.js";
+// AE Step 5 remediation — Proof D (Workflow and Risk). Dead-lettered
+// integration commands (any capability/provider — generic across Proof
+// A/B/C's mock adapters) surface through this same registry, under the
+// existing WORKFLOW_OPERATIONAL category — see rules/integrationOperational.js's
+// own module comment.
+import { INTEGRATION_OPERATIONAL_RULES } from "./rules/integrationOperational.js";
 
 export const RISK_RULES: RiskRule[] = [
   ...APPRAISAL_AGREEMENT_RULES,
@@ -67,6 +73,7 @@ export const RISK_RULES: RiskRule[] = [
   ...LAUNCH_CAMPAIGN_RULES,
   ...COMMUNICATION_DELIVERY_RULES,
   ...FINANCIAL_RULES,
+  ...INTEGRATION_OPERATIONAL_RULES,
 ];
 
 // Fail loudly at import time on a duplicate ruleId — a copy-paste error in

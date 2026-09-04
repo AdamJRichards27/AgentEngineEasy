@@ -73,6 +73,16 @@ export function isValidConnectionTransition(from: IntegrationConnectionStatus, t
 export const INTEGRATION_CAPABILITIES = {
   PORTAL_PUBLISH_LISTING: "portal.publishListing",
   PORTAL_UPDATE_LISTING_STATUS: "portal.updateListingStatus",
+  // AE Step 5 remediation — Proof B (Communications Hub): an outbound SMS
+  // send routed through the integration foundation's own outbox/adapter/
+  // mapping/webhook machinery, instead of Communications' synchronous
+  // sandbox provider. See lib/integrations/commsProof.ts.
+  COMMS_SEND_SMS: "comms.sendSms",
+  // AE Step 5 remediation — Proof C (Financial Transaction Engine): inbound
+  // mock payment-STATUS sync only (never a debit/transfer capability — see
+  // lib/financial/mockPaymentStatusSync.ts's own header comment on the
+  // explicit money-movement boundary).
+  PAYMENTS_STATUS_SYNC: "payments.statusSync",
 } as const;
 export type IntegrationCapability = (typeof INTEGRATION_CAPABILITIES)[keyof typeof INTEGRATION_CAPABILITIES];
 

@@ -71,7 +71,19 @@ export async function recordMapping(input: RecordMappingInput): Promise<Integrat
       .returning();
     return created;
   } catch (err: any) {
-    if (err?.code === "23505") {
+    // AE Step 5 remediation — Proof C surfaced this: this codebase's actual
+    // driver (drizzle-orm over postgres.js) wraps the real Postgres error on
+    // `err.cause`, not `err` itself (see routes/__tests__ and
+    // lib/financial/__tests__/schema.test.ts's own rejectsWithPgCode helper,
+    // which asserts against `err.cause.code` for exactly this reason) — a
+    // bare `err?.code` check here never matched, so a genuine externalId
+    // collision (two different internal records mapped to the same external
+    // id on one connection) fell through to a raw, unhandled DB error
+    // instead of the intended MappingConflictError. Checking both shapes is
+    // the safe fix: never a false negative on either driver behaviour, and
+    // no downstream caller needed to change (they already only ever check
+    // `instanceof MappingConflictError`).
+    if (err?.code === "23505" || err?.cause?.code === "23505") {
       throw new MappingConflictError(input.entityType, "externalId");
     }
     throw err;
