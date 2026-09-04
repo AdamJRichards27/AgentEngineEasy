@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
 import { useSession } from "../lib/session";
 
@@ -128,7 +129,17 @@ export default function Settings() {
         )}
       </section>
 
-      <p className="muted">Integrations and Pit Crew configuration land here as later phases build them out.</p>
+      {isAdmin && (
+        <section className="card">
+          <h2>Integrations</h2>
+          <p className="muted">Connect and manage provider integrations — portals, communications, and financial status feeds (mock/sandbox providers only in this build).</p>
+          <Link href="/settings/integrations" className="btn btn-secondary btn-small">
+            Manage Integrations →
+          </Link>
+        </section>
+      )}
+
+      <p className="muted">Pit Crew configuration lands here as later phases build it out.</p>
     </div>
   );
 }

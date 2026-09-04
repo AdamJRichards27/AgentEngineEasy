@@ -11,6 +11,7 @@ import PitCrewCommandCentre from "./pages/PitCrewCommandCentre";
 import CommunicationsHub from "./pages/CommunicationsHub";
 import FinancialOperations from "./pages/FinancialOperations";
 import Settings from "./pages/Settings";
+import SettingsIntegrations from "./pages/SettingsIntegrations";
 import Login from "./pages/Login";
 import { useSession, useLogout } from "./lib/session";
 
@@ -163,6 +164,7 @@ function SidebarLayout({
             <Route path="/grow" component={Grow} />
             <Route path="/grow/import" component={GrowImport} />
             <Route path="/settings" component={Settings} />
+            <Route path="/settings/integrations" component={SettingsIntegrations} />
             <Route>
               <p>Page not found.</p>
             </Route>
