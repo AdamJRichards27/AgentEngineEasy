@@ -89,11 +89,17 @@ timestamps. **There is no column capable of holding a secret value** — no `val
 `token`, `apiKey`, or similar. This is a structural guarantee, not a convention someone
 could accidentally violate by adding data to an existing column.
 
-`credentials.ts`'s `mintMockAuthFlow(connectionId, actor)` mints an opaque identifier of
+`credentials.ts`'s `mintMockAuthFlow(connectionId, brokerageId, actor)` mints an opaque identifier of
 the form `mock-secret-ref:<uuid>` (`SECRET_IDENTIFIER_PREFIX`) — it does not look like a
 real API key, JWT, or any recognisable secret format, and a dedicated test
 (`outboxAndWebhooks.test.ts`) asserts exactly that: the identifier starts with the mock
-prefix and does not match JWT shape or common real-provider key prefixes.
+prefix and does not match JWT shape or common real-provider key prefixes. **Updated this
+step (Step 2):** `mintMockAuthFlow` now requires and uses `brokerageId` as its second
+parameter — it calls `loadConnectionInBrokerage(connectionId, brokerageId)` before any
+read/write of `integration_credentials`, closing a tenant-isolation gap where the function
+previously accepted only `(connectionId, actor)` with no brokerage check at all. See
+`AUTHENTICATION_AUTHORISATION_AND_TENANT_ISOLATION.md` finding #6 and
+`SECURE_INTEGRATION_BOUNDARY.md` §2 for the full before/after and test evidence.
 
 `getSecretIdentifierForSigning(connectionId)` is the only function that reads
 `secretIdentifier` back out, and it is called from exactly two places: the webhook route
@@ -160,7 +166,10 @@ this one's: a full security-hardening program; SSRF protection for a *configurab
 provider endpoint (none exists yet to protect); a formalised secrets-manager integration
 (the reference boundary above is designed to make that a clean drop-in later, not a
 rework); rate-limiting/abuse controls on the admin API; and comprehensive
-sensitive-payload redaction for real provider content. None of these were silently skipped
-— they're absent because nothing in this build yet has the surface area (a real provider,
-a configurable endpoint, a real secret) that would make them meaningful to build now
-rather than decorative.
+sensitive-payload redaction for real provider content. **Update (Step 2):** rate-limiting
+is no longer entirely absent — the global `rateLimiter` (300/min/IP) applies to every
+route including `/integrations/*`, though no integration-admin-specific tighter limit was
+added this step. The remaining items above are still genuinely unaddressed — none of these
+were silently skipped — they're absent because nothing in this build yet has the surface
+area (a real provider, a configurable endpoint, a real secret) that would make them
+meaningful to build now rather than decorative.
