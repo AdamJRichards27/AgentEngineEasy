@@ -210,13 +210,48 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
     return;
   }
 
+  const partyId = typeof req.body?.partyId === "number" ? req.body.partyId : null;
+  const propertyId = typeof req.body?.propertyId === "number" ? req.body.propertyId : null;
+  const opportunityId = typeof req.body?.opportunityId === "number" ? req.body.opportunityId : null;
+
+  // Tenant isolation on the referenced rows, not just the new row: mirrors the same check in
+  // POST /relationships above. All three are optional here (unlike partyId/propertyId on
+  // /relationships), so only the ids actually supplied are looked up -- but any one of them that
+  // IS supplied must belong to this brokerage, or a Grow activity could be used to attach a
+  // dangling/cross-tenant reference onto another brokerage's real party/property/opportunity.
+  if (partyId !== null) {
+    const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
+    if (!party) {
+      res.status(404).json({ error: "Party not found in this brokerage" });
+      return;
+    }
+  }
+  if (propertyId !== null) {
+    const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
+    if (!property) {
+      res.status(404).json({ error: "Property not found in this brokerage" });
+      return;
+    }
+  }
+  if (opportunityId !== null) {
+    const [opportunity] = await db
+      .select()
+      .from(growOpportunities)
+      .where(and(eq(growOpportunities.id, opportunityId), eq(growOpportunities.brokerageId, user.brokerageId)))
+      .limit(1);
+    if (!opportunity) {
+      res.status(404).json({ error: "Opportunity not found in this brokerage" });
+      return;
+    }
+  }
+
   const [inserted] = await db
     .insert(growActivities)
     .values({
       brokerageId: user.brokerageId,
-      partyId: typeof req.body?.partyId === "number" ? req.body.partyId : null,
-      propertyId: typeof req.body?.propertyId === "number" ? req.body.propertyId : null,
-      opportunityId: typeof req.body?.opportunityId === "number" ? req.body.opportunityId : null,
+      partyId,
+      propertyId,
+      opportunityId,
       activityType,
       occurredAt: req.body?.occurredAt ? new Date(req.body.occurredAt) : new Date(),
       summary,

@@ -227,7 +227,7 @@ integrationsRouter.post("/integrations/connections/:id/decide-approval", async (
 
 integrationsRouter.post("/integrations/connections/:id/mint-credential", async (req, res) => {
   try {
-    const credential = await mintMockAuthFlow(req.params.id, actorFrom(req.authedUser!));
+    const credential = await mintMockAuthFlow(req.params.id, req.authedUser!.brokerageId, actorFrom(req.authedUser!));
     // Deliberately omit secretIdentifier from the response (Section 10).
     res.status(201).json({ credential: { id: credential.id, referenceType: credential.referenceType, status: credential.status, createdAt: credential.createdAt } });
   } catch (err) {

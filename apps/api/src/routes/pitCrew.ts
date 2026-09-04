@@ -24,6 +24,7 @@ import {
   PitCrewTransitionError,
   PitCrewConcurrencyError,
   PitCrewPropertyMismatchError,
+  PitCrewAssigneeMismatchError,
 } from "../lib/pitCrew/assignment.js";
 import { addPropertyNote } from "../lib/propertyNotes.js";
 
@@ -45,6 +46,12 @@ function handlePitCrewError(err: unknown, res: Response): boolean {
     // exceptions.ts, parties.ts): a cross-brokerage propertyId reads to the
     // caller as "not found," not as a permissions error, so it doesn't leak
     // whether the id belongs to someone else's brokerage.
+    res.status(404).json({ error: err.message });
+    return true;
+  }
+  if (err instanceof PitCrewAssigneeMismatchError) {
+    // Same posture as PitCrewPropertyMismatchError above -- an
+    // assigneeUserId belonging to another brokerage reads as "not found."
     res.status(404).json({ error: err.message });
     return true;
   }
