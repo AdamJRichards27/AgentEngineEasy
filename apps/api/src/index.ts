@@ -2,6 +2,7 @@ import { createApp } from "./app.js";
 import { configureEvents } from "./lib/events.js";
 import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
+import { assertCorsConfigured } from "./lib/cors.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
@@ -14,6 +15,12 @@ import { registerIntegrationsEngine } from "./lib/integrations/bootstrap.js";
 // request, if SESSION_SECRET is missing or too weak. A process that
 // can't sign trustworthy sessions must not accept traffic at all.
 assertSessionSecretConfigured();
+
+// Same fail-closed shape as above: refuse to start in production if
+// CORS_ALLOWED_ORIGINS is unset (see lib/cors.ts) rather than quietly
+// booting a cookie-authenticated API with no operator-decided cross-origin
+// policy.
+assertCorsConfigured();
 
 configureEvents();
 

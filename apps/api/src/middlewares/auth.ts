@@ -47,7 +47,13 @@ export async function loadSession(req: Request, _res: Response, next: NextFuncti
       return;
     }
     const [row] = await db.select().from(users).where(eq(users.id, verified.uid));
-    if (row && row.isActive && row.brokerageId) {
+    // Foundation Remediation - server-side session revocation: a token
+    // whose embedded epoch (lib/session.ts) no longer matches the user's
+    // current sessionEpoch was issued before their last logout (POST
+    // /auth/logout increments it) and must be treated exactly like a
+    // missing/invalid session - just don't populate req.authedUser, same
+    // as the isActive/brokerageId checks already do below.
+    if (row && row.isActive && row.brokerageId && row.sessionEpoch === verified.epoch) {
       req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
     }
   } catch (err) {

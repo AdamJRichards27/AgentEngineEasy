@@ -57,12 +57,21 @@ function sign(payload: string): string {
   return createHmac("sha256", secret()).update(payload).digest("base64url");
 }
 
-export function createSessionToken(userId: number): string {
-  const payload = base64url(JSON.stringify({ uid: userId, iat: Date.now() }));
+// Foundation Remediation - server-side session revocation: `epoch` mirrors
+// the signed-in user's `sessionEpoch` column (packages/db/src/schema/
+// users.ts) as of sign-time. This token is otherwise stateless (no
+// server-side session store - see the module comment above), so embedding
+// the epoch is what lets a per-user "revoke everything issued before now"
+// (logout - see routes/auth.ts's POST /logout) actually take effect against
+// a token that is still cryptographically valid and unexpired. The epoch
+// itself is just an integer counter, never a secret, so it rides in the
+// payload unencrypted like uid/iat.
+export function createSessionToken(userId: number, epoch = 0): string {
+  const payload = base64url(JSON.stringify({ uid: userId, iat: Date.now(), epoch }));
   return `${payload}.${sign(payload)}`;
 }
 
-export function verifySessionToken(token: string | undefined | null): { uid: number } | null {
+export function verifySessionToken(token: string | undefined | null): { uid: number; epoch: number } | null {
   if (!token) return null;
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
@@ -80,7 +89,15 @@ export function verifySessionToken(token: string | undefined | null): { uid: num
     // presented outside the browser's own cookie-expiry enforcement.
     const ageSeconds = (Date.now() - decoded.iat) / 1000;
     if (!Number.isFinite(ageSeconds) || ageSeconds < 0 || ageSeconds > MAX_AGE_SECONDS) return null;
-    return { uid: decoded.uid };
+    // A token signed before this field existed simply carries no epoch,
+    // which is indistinguishable from - and correctly treated the same as
+    // - epoch 0, the column's own default. The actual revocation check
+    // (does this match the user's CURRENT epoch?) happens in
+    // middlewares/auth.ts's loadSession, which already re-reads the user
+    // row from the DB on every request; this function only decodes and
+    // shape-validates what the token itself claims.
+    const epoch = typeof decoded?.epoch === "number" ? decoded.epoch : 0;
+    return { uid: decoded.uid, epoch };
   } catch {
     return null;
   }
@@ -103,8 +120,8 @@ export function readSessionCookie(cookieHeader: string | undefined): string | un
   return parseCookies(cookieHeader)[COOKIE_NAME];
 }
 
-export function setSessionCookie(res: Response, userId: number): void {
-  const token = createSessionToken(userId);
+export function setSessionCookie(res: Response, userId: number, epoch = 0): void {
+  const token = createSessionToken(userId, epoch);
   const secureAttr = isInsecureCookieExplicitlyAllowed() ? "" : "; Secure";
   res.setHeader(
     "Set-Cookie",

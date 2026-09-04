@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, users, brokerages } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
@@ -84,7 +84,14 @@ authRouter.post("/dev-login", async (req, res) => {
       res.status(403).json({ error: "This account has been deactivated." });
       return;
     }
-    setSessionCookie(res, existing.id);
+    setSessionCookie(res, existing.id, existing.sessionEpoch);
+    await logAudit({
+      userId: existing.id,
+      userEmail: existing.email,
+      action: "user_signed_in",
+      recordType: "user",
+      recordId: String(existing.id),
+    });
     const [b] = existing.brokerageId ? await db.select().from(brokerages).where(eq(brokerages.id, existing.brokerageId)) : [];
     res.json({ user: userView(existing, b?.name) });
     return;
@@ -120,7 +127,7 @@ authRouter.post("/dev-login", async (req, res) => {
     recordId: String(created.id),
   });
 
-  setSessionCookie(res, created.id);
+  setSessionCookie(res, created.id, created.sessionEpoch);
   res.status(201).json({ user: userView(created, brokerage.name) });
 });
 
@@ -135,7 +142,40 @@ authRouter.get("/me", requireAuth, async (req, res) => {
   res.json({ user: userView(row, b?.name) });
 });
 
-authRouter.post("/logout", (_req, res) => {
+// Foundation Remediation - server-side session revocation: this session
+// mechanism has no server-side session state (lib/session.ts's module
+// comment), so merely clearing the cookie leaves every other token already
+// issued to this user - captured via XSS, synced to another device,
+// whatever - cryptographically valid and accepted for the rest of its
+// MAX_AGE_SECONDS lifetime if it's ever replayed directly. Bumping the
+// user's sessionEpoch here invalidates ALL of that user's outstanding
+// tokens at once (logout-everywhere semantics): loadSession (middlewares/
+// auth.ts) rejects any token whose embedded epoch no longer matches on the
+// very next request, the same way a role change or deactivation already
+// takes effect immediately there. req.authedUser is populated by the
+// global loadSession middleware (app.ts) ahead of this route, so a request
+// with no valid session just clears the (already-not-useful) cookie with
+// nothing to revoke or audit.
+authRouter.post("/logout", async (req, res) => {
+  const authed = req.authedUser;
+  if (authed) {
+    const [updated] = await db
+      .update(users)
+      .set({ sessionEpoch: sql`${users.sessionEpoch} + 1` })
+      .where(eq(users.id, authed.id))
+      .returning();
+    if (updated) {
+      await logAudit({
+        userId: updated.id,
+        userEmail: updated.email,
+        action: "user_signed_out",
+        recordType: "user",
+        recordId: String(updated.id),
+        previousValue: String(updated.sessionEpoch - 1),
+        updatedValue: String(updated.sessionEpoch),
+      });
+    }
+  }
   clearSessionCookie(res);
   res.status(204).end();
 });

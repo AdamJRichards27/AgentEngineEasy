@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, paymentMethods, serviceOrders } from "@aee/db";
+import { db, paymentMethods } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import {
@@ -12,6 +12,7 @@ import {
   processPaymentWebhook,
   refundPayment,
   listPaymentsForServiceOrder,
+  getServiceOrderForBrokerage,
 } from "../lib/payments.js";
 
 // Phase 6 (ARCHITECTURE.md §10): stored payment methods, ServiceOrder
@@ -113,7 +114,7 @@ paymentsRouter.post("/service-orders/:id/charge", requireAuth, async (req, res) 
   const serviceOrderId = Number(req.params.id);
   const user = req.authedUser!;
   try {
-    const { payment, serviceOrder, created } = await chargeServiceOrder({ serviceOrderId, userId: user.id });
+    const { payment, serviceOrder, created } = await chargeServiceOrder({ serviceOrderId, userId: user.id, brokerageId: user.brokerageId });
     await logAudit({
       userId: user.id,
       action: "service_order_charged",
@@ -130,7 +131,8 @@ paymentsRouter.post("/service-orders/:id/charge", requireAuth, async (req, res) 
 
 paymentsRouter.get("/service-orders/:id/payments", requireAuth, async (req, res) => {
   const serviceOrderId = Number(req.params.id);
-  const rows = await listPaymentsForServiceOrder(serviceOrderId);
+  const user = req.authedUser!;
+  const rows = await listPaymentsForServiceOrder(serviceOrderId, user.brokerageId);
   res.json({ payments: rows });
 });
 
@@ -163,7 +165,7 @@ paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_
   const amountCents = typeof req.body?.amountCents === "number" ? req.body.amountCents : undefined;
   const user = req.authedUser!;
   try {
-    const payment = await refundPayment({ paymentId, amountCents });
+    const payment = await refundPayment({ paymentId, amountCents, brokerageId: user.brokerageId });
     await logAudit({
       userId: user.id,
       action: "payment_refunded",
@@ -182,7 +184,8 @@ paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_
 // charging without refetching the whole property's list).
 paymentsRouter.get("/service-orders/:id", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
-  const [serviceOrder] = await db.select().from(serviceOrders).where(eq(serviceOrders.id, id));
+  const user = req.authedUser!;
+  const serviceOrder = await getServiceOrderForBrokerage(id, user.brokerageId);
   if (!serviceOrder) {
     res.status(404).json({ error: "Not found" });
     return;

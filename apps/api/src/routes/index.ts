@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { authRateLimiter } from "../middlewares/rateLimit.js";
 import { authRouter } from "./auth.js";
 import { healthRouter } from "./health.js";
 import { propertiesRouter } from "./properties.js";
@@ -30,7 +31,10 @@ import { integrationsWebhooksRouter } from "./integrationsWebhooks.js";
 
 export const apiRouter = Router();
 
-apiRouter.use("/auth", authRouter);
+// Stricter rate limit than the app-wide default (see middlewares/rateLimit.ts)
+// — sign-in/session endpoints are the highest-value target for
+// credential-stuffing / brute-force-style abuse.
+apiRouter.use("/auth", authRateLimiter, authRouter);
 apiRouter.use("/health", healthRouter);
 apiRouter.use("/properties", propertiesRouter);
 apiRouter.use("/parties", partiesRouter);

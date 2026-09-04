@@ -25,6 +25,14 @@ export const users = pgTable("users", {
   role: text("role").notNull().default("Agent"),
   brokerageId: integer("brokerage_id").references(() => brokerages.id),
   isActive: boolean("is_active").notNull().default(true),
+  // Foundation Remediation — server-side session revocation: bumped on
+  // every logout (routes/auth.ts). The session token (lib/session.ts)
+  // embeds the epoch that was current when it was signed; loadSession
+  // (middlewares/auth.ts) rejects a token whose embedded epoch no longer
+  // matches this column, so a captured/replayed token issued before the
+  // user's last logout stops authenticating on the very next request even
+  // though the HMAC signature itself is still cryptographically valid.
+  sessionEpoch: integer("session_epoch").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
