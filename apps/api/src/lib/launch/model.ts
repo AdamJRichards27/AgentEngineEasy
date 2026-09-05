@@ -34,7 +34,7 @@ import {
   type LaunchPlanTransition,
   type Property,
 } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { resolveDefaultOwner } from "../exceptions/rules/shared.js";
 import { goLiveProperty } from "../goLive.js";
@@ -95,7 +95,7 @@ async function emit(
       metadata: {},
     });
   } catch (err) {
-    console.error(`publishDomainEvent(${eventType}) failed`, err);
+    logger.error("publish_domain_event_failed", { eventType, error: err });
   }
 }
 
