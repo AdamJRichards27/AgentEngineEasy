@@ -15,7 +15,7 @@ import {
   agencyAgreementTerms,
   insertPropertySchema,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
@@ -90,7 +90,7 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
     })
     .returning();
 
-  const correlationId = newCorrelationId();
+  const correlationId = currentCorrelationId();
 
   await logAudit({
     userId: user.id,
@@ -460,7 +460,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
         actorType: "USER",
         actorId: user.id,
         source: "api:properties:ready-to-list",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `document-package-created:${docPackage.id}`,
         payload: { packageId: docPackage.id, documentTypes: required.map((r) => r.documentType) },
@@ -487,7 +487,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
       actorType: "USER",
       actorId: user.id,
       source: "api:properties:ready-to-list",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `ready-to-list:${id}`,
       payload: { propertyId: id, workflowId: workflow.id },

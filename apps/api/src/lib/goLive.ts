@@ -1,6 +1,6 @@
 import { eq, and } from "drizzle-orm";
 import { db, properties, workflows, workflowSteps, type Property } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 export type GoLiveResult =
@@ -71,7 +71,7 @@ export async function goLiveProperty(
       actorType: "USER",
       actorId: actor.id,
       source,
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `listing-live:${propertyId}`,
       payload: { propertyId },

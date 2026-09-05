@@ -11,7 +11,7 @@ import {
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
-import { newCorrelationId, publishDomainEvent } from "@aee/events";
+import { currentCorrelationId, publishDomainEvent } from "@aee/events";
 
 export const growRouter = Router();
 
@@ -123,7 +123,7 @@ growRouter.post(
         actorType: "USER",
         actorId: user.id,
         source: "api:grow:relationships:create",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `relationship-created:${inserted.id}`,
         payload: { relationshipId: inserted.id, relationshipType, role: inserted.role },
@@ -176,7 +176,7 @@ growRouter.patch(
         actorType: "USER",
         actorId: user.id,
         source: "api:grow:relationships:update",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `relationship-updated:${id}:${Date.now()}`,
         payload: { relationshipId: id, status, role },
@@ -322,7 +322,7 @@ growRouter.post(
         actorType: "USER",
         actorId: user.id,
         source: "api:grow:opportunities:create",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `opportunity-created:${inserted.id}`,
         payload: { opportunityId: inserted.id, opportunityType, reason },
