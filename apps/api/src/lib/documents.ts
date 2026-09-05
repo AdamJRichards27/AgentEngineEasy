@@ -10,7 +10,7 @@ import {
   parties,
 } from "@aee/db";
 import type { DocumentPackage, Document, SignatureRequest, AgencyAgreementTerms } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createESignProvider, type ESignWebhookResult } from "@aee/integration-esign";
 import { createObjectStorageProvider } from "@aee/integration-object-storage";
 import { populateTemplate } from "./documentTemplates.js";
@@ -200,7 +200,9 @@ export async function populateDocumentPackage(packageId: number, brokerageId: nu
     .where(eq(documentPackages.id, packageId))
     .returning();
 
-  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+  await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId, error: err }),
+  );
 
   return { documentPackage: updatedPackage, documents: refreshedDocuments, skipped };
 }
@@ -305,11 +307,13 @@ export async function sendPackageForSignature(input: {
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(AGENCY_AGREEMENT_SENT) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "AGENCY_AGREEMENT_SENT", packageId: input.packageId, propertyId: docPackage.propertyId, error: err });
     }
   }
 
-  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+  await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId: input.packageId, error: err }),
+  );
 
   return { signatureRequest, created: true };
 }
@@ -466,13 +470,15 @@ export async function processEsignWebhook(
           metadata: {},
         });
       } catch (err) {
-        console.error("publishDomainEvent(AGENCY_AGREEMENT_SIGNED) failed", err);
+        logger.error("publish_domain_event_failed", { eventType: "AGENCY_AGREEMENT_SIGNED", packageId: updated.packageId, propertyId: docPackage.propertyId, error: err });
       }
     }
   }
 
   if (docPackage) {
-    await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+    await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
+      logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId: docPackage.id, error: err }),
+    );
   }
 
   return { processed: true, signatureRequest: updated };
