@@ -14,7 +14,7 @@ import {
   automationTasks,
 } from "@aee/db";
 import type { Transaction, Offer } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
 import { initiateAmlIfNeeded } from "./aml.js";
@@ -220,7 +220,7 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
       actorType: "USER",
       actorId: input.userId,
       source: "api:offers:accept",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `offer-accepted:${outcome.offer.id}`,
       payload: { offerId: outcome.offer.id, transactionId: outcome.transaction.id, purchasePriceCents: outcome.transaction.purchasePriceCents },
@@ -264,7 +264,7 @@ async function publishTransactionEvent(
       actorType: "USER",
       actorId: input.userId,
       source: "api:transactions",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: input.idempotencyKey,
       payload: input.payload ?? {},
