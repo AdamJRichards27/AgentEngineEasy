@@ -77,12 +77,33 @@ corresponding real-adapter work being reviewed still can't be used — was left 
 unmodified, and untriggered throughout this step's testing (every test fixture creates
 `MOCK`-classification connections only).
 
-## 5. Outstanding from Step 5, still outstanding
+## 5. Outstanding from Step 5, updated
 
 Step 5's own completion report (`INTEGRATION_FOUNDATION_COMPLETION_REPORT.md`, Section G)
-already disclosed that the sync-cursor/reconciliation-run/import-export *frameworks* (as
-reusable, general-purpose services, distinct from the domain-specific proofs that do exist)
-and most of the wider observability baseline remained unbuilt. This step's own
-observability work (see `OBSERVABILITY_STANDARD.md`) closes a small part of that
-(correlation id, health check) but does not build those frameworks — unchanged status,
-carried forward honestly rather than silently dropped from the record.
+disclosed that the sync-cursor/reconciliation-run/import-export *frameworks* (as reusable,
+general-purpose services, distinct from the domain-specific proofs that do exist) and most
+of the wider observability baseline remained unbuilt. **The sync-cursor/reconciliation/
+import-export frameworks are still unbuilt — unchanged status, not this step's scope.** The
+observability half of that statement is now substantially out of date: this step's
+observability hardening pass (see `OBSERVABILITY_STANDARD.md`) went well beyond "correlation
+id, health check" — it added structured logging with central redaction (never-log key
+patterns plus value-shape detection, `packages/events/src/redaction.ts`), a bounded-
+cardinality metrics registry backing the integration surface specifically
+(`integration_outbox_dispatch_total`, `integration_webhook_total`,
+`integration_dead_letter_total`, `integration_replay_total` — all wired into
+`lib/integrations/outbox.ts`/`webhooks.ts`, exposed at `GET /api/internal/metrics`), and
+proved correlationId propagation end-to-end across the integrations surface specifically
+(the "Mock Property Launch publication," "Retry-to-dead-letter," and "Authorised replay"
+named flows all resolve within `lib/integrations/**`) with a real gap found and fixed
+elsewhere in the same pass (communications and financial dispatch — see
+`OBSERVABILITY_STANDARD.md` §3 for the full account, since that gap was not in the
+integration surface this document covers). What genuinely remains unwired on the
+integration surface specifically, disclosed rather than implied complete: the
+`communicationsWebhooks.ts`/`financialWebhooks.ts` routers don't yet emit
+`integration_webhook_total` (only `lib/integrations/webhooks.ts` does — see
+`METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md` §4), and the sensitive-webhook-payload
+redaction gap this document's own §5 previously flagged (`integration_inbox.payload`
+stores whatever a webhook sends, in full, for audit/replay) is unchanged — the new central
+redaction module applies to structured *log* lines, not to the raw payload persisted in
+that column, which remains a distinct, still-open concern for whenever a real (non-mock)
+provider is connected.

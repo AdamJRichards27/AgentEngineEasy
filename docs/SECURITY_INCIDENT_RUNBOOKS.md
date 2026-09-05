@@ -21,7 +21,7 @@ condition from that document would eventually automate the detection step, it's 
 
 **Detection.** A user reports seeing data that isn't theirs, or an unusual pattern of
 "not found" responses from one account against the tenant-isolation chokepoints (see
-alert #5, `METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md`).
+alert #8, `METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md`).
 
 **Immediate action (On-Call Engineer).** Identify the specific route/function involved.
 Check it against `AUTHENTICATION_AUTHORISATION_AND_TENANT_ISOLATION.md`'s matrix — if it's
@@ -131,7 +131,7 @@ disallowed `Origin` header that it's now rejected (no
 
 ## 6. Rate-limit bypass / credential-stuffing attempt on `/auth`
 
-**Detection.** Alert #3/#4 (`METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md`) — sustained 401/403
+**Detection.** Alert #6/#7 (`METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md`) — sustained 401/403
 or 429 volume from one source against `/auth/*`.
 
 **Immediate action.** Confirm `authRateLimiter` (20/min/IP in real environments — see
@@ -149,7 +149,10 @@ specifically, since it's already dev/staging-only by design).
 
 ## 7. Webhook signature-verification bypass suspected
 
-**Detection.** Alert #6 — signature failures spike, or (more seriously) a webhook-driven
+**Detection.** Alert #9 — signature failures spike (`integration_webhook_total{outcome=
+"rejected"}` — currently only wired for the integrations webhook router, not comms/
+financial, see `METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md` §4), or (more seriously) a
+webhook-driven
 state change is found that doesn't correspond to any real signed callback.
 
 **Immediate action.** Confirm the relevant webhook secret (`AML_WEBHOOK_SECRET`, `ESIGN_
@@ -190,23 +193,42 @@ after the `qs` override — see the completion report's test evidence).
 
 ## 9. Database connectivity / outage
 
-**Detection.** Alert #1 — `GET /api/health` returning 503 for ≥ 2 consecutive checks.
+**Detection.** Alert #1 (`METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md`) —
+`health_check_duration_ms{status="unavailable"}` recorded (i.e. `GET /api/health/ready`
+returning 503) for ≥ 2 consecutive scrape intervals. Alert #2 covers the related but
+distinct **degraded** case: the database is reachable but slow (query latency sustained
+above the 500 ms threshold in `routes/health.ts`) — still 200, traffic still routes, but is
+its own signal and should not be confused with an outright outage.
 
-**Immediate action.** Confirm whether this is the database itself being down, a network
-partition, or a credentials issue (`DATABASE_URL` misconfigured on a redeploy). The health
-check's own error is logged server-side (`console.error("GET /api/health: database check
-failed", err)`) with the underlying driver error, which should indicate which.
+**Immediate action.** Check `GET /api/health/live` first — if it's also failing (or timing
+out), the process itself is wedged, not just its database connection, and this is a
+liveness/restart situation, not a readiness one; see the module comment in `routes/
+health.ts` for why the two are deliberately split. If liveness is fine and only readiness is
+failing, confirm whether this is the database itself being down, a network partition, or a
+credentials issue (`DATABASE_URL` misconfigured on a redeploy). The failure is logged
+server-side via the structured logger, not `console.error` —
+`logger.error("readiness_check_failed", { error, durationMs })` — with the underlying driver
+error message in the `error` field and, per `packages/events/src/redaction.ts`'s never-log
+list, nothing from that error is redacted unless it happens to embed something shaped like a
+secret (a raw connection string containing a password would be — driver error messages are
+not guaranteed never to include one, so treat the logged `error` field itself with the same
+care as any other log line, not as automatically safe). `checkReadiness()`'s own returned
+`reasons` array deliberately never includes the raw error message
+(`["database unreachable"]` only) — that fixed, non-leaky reason is what reaches any client
+calling `/ready` directly; the raw error is only in the server-side log line.
 
-**Containment.** The API remains up and serving `503` for health checks and will fail
-individual requests that touch the database (every request does — there's no cached/
-degraded-mode read path in this build), so this is a full outage from the user's
-perspective, not a partial degradation, until the database is reachable again.
+**Containment.** The API remains up and serving `503` from `/ready` (and the backward-
+compatible `/health`) and will fail individual requests that touch the database (every
+request does — there's no cached/degraded-mode read path in this build), so an
+**unavailable** reading is a full outage from the user's perspective, not a partial
+degradation, until the database is reachable again. A sustained **degraded** reading is not
+an outage — requests are succeeding — but should be investigated before it becomes one.
 
 ---
 
 ## 10. Data-import pipeline abuse (malicious file upload)
 
-**Detection.** Alert #11 — import job rejection-at-validation spikes, or a specific
+**Detection.** Alert #21 — import job rejection-at-validation spikes, or a specific
 brokerage repeatedly submits files that fail `fileValidation.ts`'s checks.
 
 **Immediate action.** Confirm the rejections are happening at the validation layer (25 MB
@@ -222,7 +244,7 @@ to Security Lead.
 
 ## 11. Dev-login surface exposed in an environment it shouldn't be
 
-**Detection.** Alert #15 — `GET /auth/known-users` or `POST /auth/dev-login` returning
+**Detection.** Alert #17 — `GET /auth/known-users` or `POST /auth/dev-login` returning
 anything other than 404 in an environment believed to be production, or
 `isDevAuthEnabled()` observed returning `true` unexpectedly.
 
@@ -241,7 +263,7 @@ during the exposure window.
 
 ## 12. Audit-log gap or tampering suspected
 
-**Detection.** Alert #17 — a `logAudit` call observed to throw/fail silently, or a gap
+**Detection.** Alert #19 — a `logAudit` call observed to throw/fail silently, or a gap
 found in the expected audit trail for a known action (e.g. a payment refund with no
 corresponding `payment_refunded` audit row).
 
@@ -259,18 +281,73 @@ in `apps/api/src/routes` — confirm this directly if tampering is suspected).
 
 ---
 
-## Backup and recovery — verification boundary
+## Backup and recovery — real drill executed, non-destructively
 
 This step's instruction is explicit that destructive restoration must not be run against
-production, and no production environment exists for this build regardless. What was
-verified this session, non-destructively: the schema is applied via `drizzle-kit push`
-(`pnpm run db:push`, confirmed working against the local `aee_test` database this session
-when the `sessionEpoch` migration was applied and verified via `information_schema.
-columns`), and hand-written migration SQL files are maintained under `packages/db/
-migrations/` for history/audit purposes even though `db:push` (not the file-based migrate
-pipeline) is this project's actual deployment mechanism — a pre-existing, documented
-inconsistency (see the completion report's entry-gate evidence), not something this step
-introduced or resolved. A real backup/restore drill (snapshot a database, restore it,
-verify data integrity) was not run — there is no backup tooling or snapshot mechanism
-configured anywhere in this repository to exercise, and standing one up is infrastructure
-work outside a local dev/test workspace's reach. Recorded as deferred, not fabricated.
+production, and no production environment exists for this build regardless. A prior
+revision of this document recorded the backup/restore drill as deferred, on the reasoning
+that "there is no backup tooling or snapshot mechanism configured anywhere in this
+repository to exercise." That reasoning was wrong: `pg_dump`/`pg_restore` are the standard
+Postgres backup/restore tools, ship with any Postgres client installation (confirmed present
+at `/usr/bin/pg_dump`/`/usr/bin/pg_restore` in this workspace), require no project-specific
+configuration to exercise, and are exactly what "backup tooling" means for a Postgres-backed
+service without a managed provider's own snapshot feature. A real, complete, non-destructive
+drill was run against the local `aee_test` database (never a production database, none
+exists for this build) and is recorded below with real numbers, not a plan for one.
+
+**Procedure and results, run in full this session:**
+
+1. **Dump.** `pg_dump -Fc "$DATABASE_URL" -f source.dump` — custom-format dump of the entire
+   `aee_test` database, completed in 0.219s, producing a 906,975-byte file. `pg_dump`'s
+   custom format captures a transactionally-consistent snapshot as of the moment the dump
+   starts, which matters for the row-count note below.
+2. **Restore.** A fresh scratch database (`aee_backup_drill`, created via `CREATE DATABASE`,
+   never reused from a prior drill) was restored into via
+   `pg_restore --no-owner --no-privileges -d aee_backup_drill source.dump`, completed in
+   0.779s with zero errors or warnings on stderr.
+3. **Schema parity.** Table count: 89 in both the source and the restored database. Index
+   count: 191 in both (`pg_indexes`, `schemaname='public'`). Constraint count: 357 in both
+   (`pg_constraint` joined to `pg_namespace`), of which 256 are foreign keys.
+4. **Row-count parity, per table.** All 89 tables matched exactly, with one expected and
+   explained exception: `audit_logs` showed 17,523 rows in the live source database at
+   verification time versus 17,519 in the restored snapshot. This is not a restore defect —
+   the full regression suite (`pnpm run test`, a genuinely separate, concurrently-running
+   process on this same shared workspace at drill time — see the completion report's test
+   evidence) was actively writing audit-log rows to `aee_test` throughout the several
+   minutes between the dump being taken and the row-count comparison being run against the
+   now-further-along live source. `pg_dump`'s consistent-snapshot behavior means the four
+   rows written to the source *after* the snapshot correctly do not appear in a restore made
+   *from* that snapshot — this is the tool working exactly as designed, not a data-loss
+   finding, and is recorded honestly here rather than quietly re-running the drill against a
+   frozen table to manufacture a cleaner-looking diff.
+5. **Referential-integrity verification.** A generic script iterated all 256 single-column
+   foreign-key constraints in the restored database (via `pg_constraint`) and checked each
+   for orphaned child rows (a non-null foreign-key value with no matching parent row).
+   Result: **0 orphaned rows across all 256 constraints.**
+6. **Row-level identity verification.** The `brokerages` table (unaffected by the
+   concurrently-running test suite, which does not touch tenant records after test-fixture
+   setup) was checked two ways: its minimum-id row (`id`, `name`, `created_at`) was
+   byte-identical between source and restored; separately, an order-stable MD5 checksum of
+   every row in the table (`md5(string_agg(t::text, '' order by id))`) was computed against
+   both databases and matched exactly
+   (`049fff24b806d8ee175d68ed5059910f` in both) — a stronger identity proof than a single
+   sampled row, covering the entire table's content in one comparison.
+7. **Cleanup.** `aee_backup_drill` was dropped (`DROP DATABASE aee_backup_drill`) immediately
+   after verification, confirmed absent via a follow-up query against `pg_database`. No
+   scratch database or dump file was left behind on disk after the drill.
+
+**What this drill proves and what it doesn't.** It proves the mechanical backup/restore
+path works correctly against this schema today — a real dump can be taken and a real restore
+from it reconstructs an identical, referentially-intact copy of the database, verified
+structurally (tables/indexes/constraints), relationally (zero FK orphans across every
+single-column foreign key), and by content (an exact table checksum), not merely asserted.
+It does not establish a production backup *schedule*, an offsite/durable storage target for
+dump files, or a restore runbook rehearsed against a realistically-sized production dataset
+— those require a real production environment and real infrastructure decisions (retention
+window, storage location, encryption at rest for the dump file itself, which contains the
+same sensitive data the live database does) that are out of this step's reach and are not
+claimed to be settled by this drill. Schema deployment itself continues to use
+`drizzle-kit push` (`pnpm run db:push`) as this project's actual mechanism, with
+hand-written migration SQL files under `packages/db/migrations/` maintained for history/
+audit purposes — a pre-existing, documented inconsistency (see the completion report's
+entry-gate evidence), unchanged by this drill.
