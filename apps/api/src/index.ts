@@ -1,8 +1,10 @@
+import { logger } from "@aee/events";
 import { createApp } from "./app.js";
 import { configureEvents } from "./lib/events.js";
 import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
 import { assertCorsConfigured } from "./lib/cors.js";
+import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
@@ -21,6 +23,13 @@ assertSessionSecretConfigured();
 // booting a cookie-authenticated API with no operator-decided cross-origin
 // policy.
 assertCorsConfigured();
+
+// Step 2 hardening: same fail-closed shape as the two checks above — a
+// production process must not silently expose GET /api/internal/metrics
+// (request volumes, integration failure rates, which providers are
+// configured) with no authentication because an operator forgot to set
+// METRICS_TOKEN. See lib/metricsAuth.ts.
+assertMetricsAuthConfigured();
 
 configureEvents();
 
@@ -62,18 +71,18 @@ registerIntegrationsEngine();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.
-ensureCatalogueSeeded().catch((err) => console.error("ensureCatalogueSeeded failed", err));
+ensureCatalogueSeeded().catch((err) => logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
 
 // Agent Engine 2.0 — Run Transaction Vertical Slice. Idempotent per-brokerage
 // install+activate sweep for the WAE Stage 2 workflow catalogue (see
 // lib/automation/catalogueBootstrap.ts) — closes the confirmed gap where
 // templates.ts's five workflow templates had zero production call sites.
 // Fire-and-forget, non-blocking, same pattern as ensureCatalogueSeeded above.
-ensureStage2CatalogueSeeded().catch((err) => console.error("ensureStage2CatalogueSeeded failed", err));
+ensureStage2CatalogueSeeded().catch((err) => logger.error("boot_ensure_stage2_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
 
 const app = createApp();
 const port = Number(process.env.PORT ?? 8080);
 
 app.listen(port, () => {
-  console.log(`AgentEngineEasy API listening on :${port}`);
+  logger.info("api_listening", { port });
 });

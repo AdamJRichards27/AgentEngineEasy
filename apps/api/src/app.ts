@@ -4,6 +4,7 @@ import helmet from "helmet";
 import { apiRouter } from "./routes/index.js";
 import { loadSession } from "./middlewares/auth.js";
 import { requestId } from "./middlewares/requestId.js";
+import { httpMetrics } from "./middlewares/httpMetrics.js";
 import { globalRateLimiter } from "./middlewares/rateLimit.js";
 import { corsOriginCallback } from "./lib/cors.js";
 
@@ -26,6 +27,12 @@ export function createApp() {
   // middlewares/requestId.ts. Mounted right after helmet, ahead of
   // anything that can short-circuit a request.
   app.use(requestId);
+
+  // Step 2 hardening: records http_requests_total / http_request_duration_ms
+  // for every response (see middlewares/httpMetrics.ts) — mounted
+  // immediately after requestId, ahead of anything that can reject a
+  // request, for the same reason requestId itself is mounted this early.
+  app.use(httpMetrics);
 
   // credentials: true + an explicit allowlist (no longer a blanket
   // origin: true reflection of any requesting Origin) is required for the

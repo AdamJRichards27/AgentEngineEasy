@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authRateLimiter } from "../middlewares/rateLimit.js";
 import { authRouter } from "./auth.js";
 import { healthRouter } from "./health.js";
+import { metricsRouter } from "./metrics.js";
 import { propertiesRouter } from "./properties.js";
 import { partiesRouter } from "./parties.js";
 import { amlRouter } from "./aml.js";
@@ -36,6 +37,11 @@ export const apiRouter = Router();
 // credential-stuffing / brute-force-style abuse.
 apiRouter.use("/auth", authRateLimiter, authRouter);
 apiRouter.use("/health", healthRouter);
+// Step 2 hardening — see routes/metrics.ts and lib/metricsAuth.ts. Mounted
+// under /internal (never under /health) so it's trivially distinguishable
+// in access logs and reverse-proxy rules from the public, unauthenticated
+// liveness/readiness probes above.
+apiRouter.use("/internal/metrics", metricsRouter);
 apiRouter.use("/properties", propertiesRouter);
 apiRouter.use("/parties", partiesRouter);
 apiRouter.use("/aml", amlRouter);
