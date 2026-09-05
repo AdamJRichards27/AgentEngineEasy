@@ -34,7 +34,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, communicationMessages, communicationDeliveryAttempts, type CommunicationMessage } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { resolveActiveConnection } from "./registry.js";
 import { enqueueCommand, dispatchCommand, mintIdempotencyKey } from "./outbox.js";
 import { recordMapping, resolveByExternalId } from "./mapping.js";
@@ -113,7 +113,7 @@ async function publishCommsProofEvent(eventType: CommsProofEventType, message: C
       failureCategory: message.failureCategory,
     },
     metadata: {},
-  }).catch((err) => console.error(`publishDomainEvent(${eventType}) failed`, err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType, messageId: message.id, brokerageId: message.brokerageId, error: err }));
 }
 
 export interface SendSmsViaIntegrationInput {
