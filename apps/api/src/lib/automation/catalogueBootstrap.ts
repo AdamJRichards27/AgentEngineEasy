@@ -29,6 +29,7 @@
 
 import { eq, and, asc, desc } from "drizzle-orm";
 import { db, brokerages, users, automationRuleVersions, type AutomationRule } from "@aee/db";
+import { logger } from "@aee/events";
 import { getAutomationRuleByTemplateKey, approveAndActivateRuleVersion } from "./rules.js";
 import {
   installAgencyAgreementSignedStage2Version,
@@ -54,7 +55,7 @@ async function activateLatestVersionIfNeeded(rule: AutomationRule, brokerageId: 
     .limit(1);
   if (!latest || latest.status === "ACTIVE" || latest.status === "SUPERSEDED" || latest.status === "ARCHIVED") return;
   await approveAndActivateRuleVersion({ versionId: latest.id, brokerageId, approvedByUserId: adminUserId }).catch((err) =>
-    console.error(`catalogueBootstrap: failed to activate rule ${rule.id} for brokerage ${brokerageId}`, err),
+    logger.error("catalogue_bootstrap_activate_rule_failed", { ruleId: rule.id, brokerageId, error: err }),
   );
 }
 
@@ -68,7 +69,7 @@ async function ensureRuleInstalledAndActive(
   if (!existingRule) {
     const { version } = await install();
     await approveAndActivateRuleVersion({ versionId: version.id, brokerageId, approvedByUserId: adminUserId }).catch((err) =>
-      console.error(`catalogueBootstrap: failed to activate newly installed ${templateKey} for brokerage ${brokerageId}`, err),
+      logger.error("catalogue_bootstrap_activate_newly_installed_template_failed", { templateKey, brokerageId, error: err }),
     );
     return;
   }
@@ -112,10 +113,10 @@ export async function ensureStage2CatalogueSeededForBrokerage(brokerageId: numbe
   if (!prepareRule && !missingDateRule) {
     const { prepare, missingDateFailsafe } = await installSettlementScheduledTemplates(installInput);
     await approveAndActivateRuleVersion({ versionId: prepare.version.id, brokerageId, approvedByUserId: admin.id }).catch((err) =>
-      console.error(`catalogueBootstrap: failed to activate settlement-scheduled prepare rule for brokerage ${brokerageId}`, err),
+      logger.error("catalogue_bootstrap_activate_settlement_scheduled_prepare_rule_failed", { brokerageId, error: err }),
     );
     await approveAndActivateRuleVersion({ versionId: missingDateFailsafe.version.id, brokerageId, approvedByUserId: admin.id }).catch((err) =>
-      console.error(`catalogueBootstrap: failed to activate settlement-scheduled missing-date rule for brokerage ${brokerageId}`, err),
+      logger.error("catalogue_bootstrap_activate_settlement_scheduled_missing_date_rule_failed", { brokerageId, error: err }),
     );
   } else {
     if (prepareRule) await activateLatestVersionIfNeeded(prepareRule, brokerageId, admin.id);
@@ -130,7 +131,7 @@ export async function ensureStage2CatalogueSeeded(): Promise<void> {
     try {
       await ensureStage2CatalogueSeededForBrokerage(brokerage.id);
     } catch (err) {
-      console.error(`catalogueBootstrap: failed for brokerage ${brokerage.id}`, err);
+      logger.error("catalogue_bootstrap_seed_for_brokerage_failed", { brokerageId: brokerage.id, error: err });
     }
   }
 }

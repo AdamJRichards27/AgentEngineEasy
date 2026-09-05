@@ -10,7 +10,7 @@ import {
   subscriptions,
   type EntitlementKey,
 } from "@aee/db";
-import { newCorrelationId, publishDomainEvent, type AgentEngineEasyEventType } from "@aee/events";
+import { currentCorrelationId, publishDomainEvent, logger, type AgentEngineEasyEventType } from "@aee/events";
 import type { NormalizedSubscriptionSnapshot } from "@aee/integration-billing";
 import { invalidateEntitlementCache } from "../entitlements/resolver.js";
 
@@ -36,7 +36,7 @@ export async function applySubscriptionSnapshot(
 ): Promise<void> {
   const [product] = await db.select().from(products).where(eq(products.code, snapshot.productCode)).limit(1);
   if (!product) {
-    console.error(`applySubscriptionSnapshot: unknown product code "${snapshot.productCode}" - snapshot ignored`);
+    logger.warn("apply_subscription_snapshot_unknown_product_code", { productCode: snapshot.productCode, brokerageId: snapshot.brokerageId, subscriptionRef: snapshot.subscriptionRef });
     return;
   }
 
@@ -46,7 +46,7 @@ export async function applySubscriptionSnapshot(
     .where(and(eq(prices.productId, product.id), eq(prices.status, "Active")))
     .limit(1);
 
-  const correlationId = newCorrelationId();
+  const correlationId = currentCorrelationId();
   const shouldBeActive = ACTIVE_SUBSCRIPTION_STATUSES.has(snapshot.status);
   const isTerminal = snapshot.status === "Cancelled" || snapshot.status === "Ended";
 
@@ -119,9 +119,7 @@ export async function applySubscriptionSnapshot(
     // subscriptionItems.priceId is NOT NULL - without a seeded Active price for this product we
     // cannot safely write a line item, so we record the subscription (above, for audit/billing
     // history) but deliberately skip item + entitlement sync rather than insert broken data.
-    console.error(
-      `applySubscriptionSnapshot: no Active price for product "${snapshot.productCode}" - subscription ${subscriptionId} recorded, entitlement sync skipped`,
-    );
+    logger.warn("apply_subscription_snapshot_no_active_price", { productCode: snapshot.productCode, subscriptionId, brokerageId: snapshot.brokerageId });
     await invalidateEntitlementCache(snapshot.brokerageId);
     return;
   }
@@ -275,6 +273,6 @@ async function safePublish(
       metadata: {},
     });
   } catch (err) {
-    console.error(`publishDomainEvent(${event.eventType}) failed`, err);
+    logger.error("publish_domain_event_failed", { eventType: event.eventType, brokerageId: event.brokerageId, error: err });
   }
 }

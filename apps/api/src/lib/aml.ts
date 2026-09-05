@@ -1,7 +1,7 @@
 import { eq, and } from "drizzle-orm";
 import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
 import type { AmlVerification, Party } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 
@@ -157,14 +157,20 @@ export async function initiateAmlIfNeeded(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:aml:initiate",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `aml-requested:${verification.id}`,
       payload: { verificationId: verification.id, providerReference, serviceOrderId: serviceOrder.id },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(AML_REQUESTED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "AML_REQUESTED",
+      propertyId: input.propertyId,
+      partyId: input.partyId,
+      verificationId: verification.id,
+      error: err,
+    });
   }
 
   return { verification, created: true };
@@ -266,18 +272,24 @@ export async function processAmlWebhook(
       actorType: "INTEGRATION",
       actorId: null,
       source: `webhook:aml:${updated.provider}`,
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `aml-completed:${updated.id}:${newStatus}`,
       payload: { verificationId: updated.id, outcome: result.outcome, riskLevel: result.riskLevel ?? null, reviewRequired: result.reviewRequired },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(AML_COMPLETED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "AML_COMPLETED",
+      propertyId: updated.propertyId,
+      partyId: updated.partyId,
+      verificationId: updated.id,
+      error: err,
+    });
   }
 
   await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: updated.propertyId, error: err }),
   );
 
   return { processed: true, verification: updated };
@@ -290,12 +302,23 @@ export async function processAmlWebhook(
  * reusing the same AmlVerification row (and ServiceOrder) rather than
  * creating a second one, so (propertyId, partyId) still maps to exactly
  * one verification row.
+ *
+ * Tenant-scoped the same way assertPartyOnPropertyInBrokerage is above:
+ * amlVerifications carries no brokerageId of its own, so the lookup joins
+ * onto properties and filters by brokerageId in that same query, not a
+ * check bolted on after the fetch — a verificationId from another
+ * brokerage is indistinguishable from a nonexistent one.
  */
-export async function retryAmlVerification(verificationId: number): Promise<AmlVerification> {
-  const [verification] = await db.select().from(amlVerifications).where(eq(amlVerifications.id, verificationId));
-  if (!verification) {
+export async function retryAmlVerification(verificationId: number, brokerageId: number): Promise<AmlVerification> {
+  const [row] = await db
+    .select({ aml: amlVerifications })
+    .from(amlVerifications)
+    .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
+    .where(and(eq(amlVerifications.id, verificationId), eq(properties.brokerageId, brokerageId)));
+  if (!row) {
     throw new Error(`AmlVerification ${verificationId} not found`);
   }
+  const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
     throw new Error(`AmlVerification ${verificationId} is not in a retryable state (status: ${verification.status})`);
   }
@@ -342,7 +365,7 @@ export async function retryAmlVerification(verificationId: number): Promise<AmlV
   }
 
   await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: updated.propertyId, verificationId, error: err }),
   );
 
   return updated;
@@ -357,16 +380,28 @@ export async function retryAmlVerification(verificationId: number): Promise<AmlV
  * ownership review-not-block pattern already used elsewhere. Mandatory,
  * non-empty notes are enforced at the route layer so this can never be a
  * silent one-click bypass.
+ *
+ * Tenant-scoped like retryAmlVerification above: this clears a genuine
+ * AML/CTF compliance exception, so a Brokerage Administrator from one
+ * brokerage must never be able to resolve another brokerage's flagged
+ * verification. The brokerage filter lives in the same fetch query (a
+ * join onto properties), not a check performed after the row is loaded.
  */
 export async function resolveAmlException(input: {
   verificationId: number;
   userId: number;
   notes: string;
+  brokerageId: number;
 }): Promise<AmlVerification> {
-  const [verification] = await db.select().from(amlVerifications).where(eq(amlVerifications.id, input.verificationId));
-  if (!verification) {
+  const [row] = await db
+    .select({ aml: amlVerifications })
+    .from(amlVerifications)
+    .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
+    .where(and(eq(amlVerifications.id, input.verificationId), eq(properties.brokerageId, input.brokerageId)));
+  if (!row) {
     throw new Error(`AmlVerification ${input.verificationId} not found`);
   }
+  const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
     throw new Error(`AmlVerification ${input.verificationId} has no exception to resolve (status: ${verification.status})`);
   }
@@ -385,7 +420,7 @@ export async function resolveAmlException(input: {
     .returning();
 
   await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: updated.propertyId, verificationId: input.verificationId, error: err }),
   );
 
   return updated;

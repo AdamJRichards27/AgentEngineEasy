@@ -1,19 +1,31 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, documents, documentPackages, signatureRequests, agencyAgreementTerms } from "@aee/db";
-import { createObjectStorageProvider } from "@aee/integration-object-storage";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
-import { upsertAgencyAgreementTerms, populateDocumentPackage, sendPackageForSignature, processEsignWebhook } from "../lib/documents.js";
+import {
+  upsertAgencyAgreementTerms,
+  getAgencyAgreementTerms,
+  populateDocumentPackage,
+  sendPackageForSignature,
+  processEsignWebhook,
+  getDocumentContent,
+  getPackageByProperty,
+} from "../lib/documents.js";
 
 // Phase 5 (ARCHITECTURE.md §10): agency-agreement terms capture, template
 // population, send-for-signature, and the e-sign webhook. Ready to List
 // (routes/properties.ts) already creates the DocumentPackage/Document rows
 // via lib/documentRules.ts — this router is what turns those Draft rows
 // into generated, sendable, and eventually signed documents.
+//
+// #131/#135 cross-tenant IDOR fix: every handler below that loads a
+// document/document-package/agency-agreement-terms record by a raw
+// client-supplied id now passes req.authedUser.brokerageId into the
+// lib/documents.ts function that does the actual tenant-scoped fetch —
+// never a client-supplied tenant id, matching every other router in this
+// app. See lib/documents.ts's own "Tenant chokepoints" comment for the
+// fetch-time discipline this relies on.
 export const documentsRouter = Router();
-const objectStorage = createObjectStorageProvider();
 
 const agencyTermsSchema = z
   .object({
@@ -41,31 +53,41 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, async (r
   }
   const user = req.authedUser!;
 
-  const terms = await upsertAgencyAgreementTerms({ propertyId, userId: user.id, ...parsed.data });
+  try {
+    const terms = await upsertAgencyAgreementTerms({ propertyId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data });
 
-  await logAudit({
-    userId: user.id,
-    action: "agency_agreement_terms_updated",
-    recordType: "agency_agreement_terms",
-    recordId: String(terms.id),
-    propertyId,
-  });
+    await logAudit({
+      userId: user.id,
+      action: "agency_agreement_terms_updated",
+      recordType: "agency_agreement_terms",
+      recordId: String(terms.id),
+      propertyId,
+    });
 
-  res.json({ terms });
+    res.json({ terms });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
 });
 
 documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
-  const [terms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, propertyId));
-  res.json({ terms: terms ?? null });
+  const user = req.authedUser!;
+  try {
+    const terms = await getAgencyAgreementTerms(propertyId, user.brokerageId);
+    res.json({ terms });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
 });
 
 // Template population — idempotent/incremental, safe to call again after
 // agency terms are captured or a prior partial run (see lib/documents.ts).
 documentsRouter.post("/packages/:packageId/populate", requireAuth, async (req, res) => {
   const packageId = Number(req.params.packageId);
+  const user = req.authedUser!;
   try {
-    const result = await populateDocumentPackage(packageId);
+    const result = await populateDocumentPackage(packageId, user.brokerageId);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
@@ -120,14 +142,14 @@ documentsRouter.post("/webhook", async (req, res) => {
 // document storage" needs to be genuinely retrievable, not just a key).
 documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
   const documentId = Number(req.params.documentId);
-  const [doc] = await db.select().from(documents).where(eq(documents.id, documentId));
-  if (!doc || !doc.objectStorageKey) {
-    res.status(404).json({ error: "No stored content for this document" });
-    return;
-  }
+  const user = req.authedUser!;
   try {
-    const content = await objectStorage.getObject(doc.objectStorageKey);
-    res.type("text/plain").send(content);
+    const result = await getDocumentContent(documentId, user.brokerageId);
+    if (!result) {
+      res.status(404).json({ error: "No stored content for this document" });
+      return;
+    }
+    res.type("text/plain").send(result.content);
   } catch (err) {
     res.status(404).json({ error: "Stored content could not be read" });
   }
@@ -135,15 +157,7 @@ documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
 
 documentsRouter.get("/packages/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
-  const [docPackage] = await db
-    .select()
-    .from(documentPackages)
-    .where(eq(documentPackages.propertyId, propertyId));
-  if (!docPackage) {
-    res.json({ documentPackage: null, documents: [], signatureRequest: null });
-    return;
-  }
-  const packageDocuments = await db.select().from(documents).where(eq(documents.packageId, docPackage.id));
-  const [signatureRequest] = await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, docPackage.id));
-  res.json({ documentPackage: docPackage, documents: packageDocuments, signatureRequest: signatureRequest ?? null });
+  const user = req.authedUser!;
+  const result = await getPackageByProperty(propertyId, user.brokerageId);
+  res.json(result);
 });

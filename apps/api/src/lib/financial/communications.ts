@@ -29,6 +29,7 @@
 //    emitFinancialEvent, for the same reason).
 
 import { createThread, createDraftMessage, listThreadsForProperty } from "../communications/messages.js";
+import { logger } from "@aee/events";
 
 const FINANCIAL_NOTICES_SUBJECT = "Financial notices";
 
@@ -80,6 +81,6 @@ export async function notifyFinancialEvent(input: NotifyFinancialEventInput): Pr
       createdByUserId: input.createdByUserId,
     });
   } catch (err) {
-    console.error("notifyFinancialEvent failed", err);
+    logger.error("notify_financial_event_failed", { error: err });
   }
 }

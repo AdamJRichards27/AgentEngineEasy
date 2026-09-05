@@ -1,8 +1,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { eq } from "drizzle-orm";
-import { db, users, brokerages } from "@aee/db";
+import { and, eq } from "drizzle-orm";
+import { db, users, brokerages, auditLogs } from "@aee/db";
 
 // Foundation Remediation Stage 1.5: end-to-end proof, over real HTTP against
 // the real Express app, that:
@@ -159,4 +159,120 @@ test("GET /api/auth/me rejects a well-formed but wrongly-signed session cookie w
     headers: { cookie: `aee_session=${forgedPayload}.not-a-real-signature` },
   });
   assert.equal(res.status, 401);
+});
+
+// Foundation Remediation - server-side session revocation (Gap 1): logout
+// (POST /api/auth/logout) has no server-side session store to delete from -
+// the session cookie is just an HMAC-signed { uid, epoch, iat } (lib/
+// session.ts). Revocation works by bumping the user's sessionEpoch column
+// (packages/db/src/schema/users.ts) so any token minted before that bump -
+// including the very one just used to log out, replayed directly here
+// rather than relying on the browser to have discarded it - fails
+// loadSession's epoch check (middlewares/auth.ts) on its very next use.
+test("a session token that was valid before logout is rejected as unauthenticated afterward, and a fresh dev-login after logout still works", async () => {
+  const previous = process.env.ALLOW_DEV_AUTH;
+  process.env.ALLOW_DEV_AUTH = "true";
+  const email = "revocation-target@example.com";
+  const credentials = { email, firstName: "Revoke", lastName: "Target", brokerageName: testBrokerageName };
+  try {
+    const loginRes = await fetch(`${baseUrl}/api/auth/dev-login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    assert.equal(loginRes.status, 201);
+    const oldCookie = loginRes.headers.get("set-cookie")?.match(/aee_session=[^;]+/)?.[0];
+    assert.ok(oldCookie, "expected a session cookie from dev-login");
+
+    // The freshly issued token authenticates normally.
+    const meBeforeLogout = await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie: oldCookie! } });
+    assert.equal(meBeforeLogout.status, 200);
+
+    const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, { method: "POST", headers: { cookie: oldCookie! } });
+    assert.equal(logoutRes.status, 204);
+
+    // Replaying that SAME token after logout - it never expired and its
+    // signature is still valid - must now be rejected. This is the core
+    // new behaviour: without epoch-based revocation this request would
+    // still succeed for the token's full 30-day lifetime.
+    const meAfterLogout = await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie: oldCookie! } });
+    assert.equal(meAfterLogout.status, 401);
+
+    // Logging out bumps the epoch for the whole user, not just "this"
+    // token - so a brand new dev-login for the SAME user right after
+    // logout must mint a token against the new epoch and authenticate
+    // fine. Logout must not lock the user out of signing back in.
+    const reLoginRes = await fetch(`${baseUrl}/api/auth/dev-login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    assert.equal(reLoginRes.status, 200);
+    const newCookie = reLoginRes.headers.get("set-cookie")?.match(/aee_session=[^;]+/)?.[0];
+    assert.ok(newCookie, "expected a session cookie from the post-logout dev-login");
+    assert.notEqual(newCookie, oldCookie, "the re-issued token must differ from the revoked one");
+
+    const meAfterReLogin = await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie: newCookie! } });
+    assert.equal(meAfterReLogin.status, 200);
+    const meBody = (await meAfterReLogin.json()) as { user: { email: string } };
+    assert.equal(meBody.user.email, email);
+  } finally {
+    if (previous === undefined) delete process.env.ALLOW_DEV_AUTH;
+    else process.env.ALLOW_DEV_AUTH = previous;
+  }
+});
+
+// Foundation Remediation - auth event auditing (Gap 2): only first-time
+// signup (user_signed_up) was previously audited; an existing user signing
+// in, and logout, were not.
+test("dev-login by an existing user and logout each write their own audit log entry", async () => {
+  const previous = process.env.ALLOW_DEV_AUTH;
+  process.env.ALLOW_DEV_AUTH = "true";
+  const email = "audit-target@example.com";
+  const credentials = { email, firstName: "Audit", lastName: "Target", brokerageName: testBrokerageName };
+  try {
+    // First dev-login for this email creates the account (user_signed_up -
+    // already covered by existing coverage above). The SECOND dev-login is
+    // the "existing user signs in" branch this test targets.
+    await fetch(`${baseUrl}/api/auth/dev-login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    const signInRes = await fetch(`${baseUrl}/api/auth/dev-login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    assert.equal(signInRes.status, 200);
+    const cookie = signInRes.headers.get("set-cookie")?.match(/aee_session=[^;]+/)?.[0];
+    const { user } = (await signInRes.json()) as { user: { id: number } };
+
+    const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, { method: "POST", headers: { cookie: cookie! } });
+    assert.equal(logoutRes.status, 204);
+
+    const signInAudit = await db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.userId, user.id), eq(auditLogs.action, "user_signed_in")));
+    assert.equal(signInAudit.length, 1, "expected exactly one user_signed_in audit entry");
+    assert.equal(signInAudit[0].recordType, "user");
+    assert.equal(signInAudit[0].recordId, String(user.id));
+    assert.equal(signInAudit[0].userEmail, email);
+
+    const signOutAudit = await db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.userId, user.id), eq(auditLogs.action, "user_signed_out")));
+    assert.equal(signOutAudit.length, 1, "expected exactly one user_signed_out audit entry");
+    assert.equal(signOutAudit[0].recordType, "user");
+    assert.equal(signOutAudit[0].recordId, String(user.id));
+    // Never the token/cookie value itself - only the epoch counter, which
+    // is not a credential.
+    assert.equal(signOutAudit[0].previousValue, "0");
+    assert.equal(signOutAudit[0].updatedValue, "1");
+  } finally {
+    if (previous === undefined) delete process.env.ALLOW_DEV_AUTH;
+    else process.env.ALLOW_DEV_AUTH = previous;
+  }
 });

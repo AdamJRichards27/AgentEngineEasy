@@ -1,5 +1,6 @@
 import { db, entitlementGrants } from "@aee/db";
 import type { EntitlementGrant } from "@aee/db";
+import { logger } from "@aee/events";
 import { and, eq } from "drizzle-orm";
 import type { EntitlementActor, EntitlementDecision, DenialReasonCode } from "./types.js";
 import { EntitlementError } from "./types.js";
@@ -58,7 +59,7 @@ export async function resolveEntitlements(actor: EntitlementActor | null | undef
   try {
     grants = await loadGrantsForBrokerage(actor.brokerageId);
   } catch (err) {
-    console.error("resolveEntitlements: grant lookup failed, failing closed", err);
+    logger.error("resolve_entitlements_grant_lookup_failed", { brokerageId: actor.brokerageId, actorId: actor.id, error: err });
     return new Set();
   }
   const now = new Date();
@@ -125,7 +126,7 @@ export async function explainEntitlementDecision(
     }
     return { ...base, allowed: false, reason: "ENTITLEMENT_MISSING" };
   } catch (err) {
-    console.error("explainEntitlementDecision failed, failing closed", err);
+    logger.error("explain_entitlement_decision_failed", { brokerageId: actor.brokerageId, entitlementKey, error: err });
     return { ...base, allowed: false, reason: "ENTITLEMENT_MISSING" };
   }
 }

@@ -22,6 +22,8 @@
 // "skip a row whose triggering event has no propertyId" discipline rather
 // than guessing.
 
+import { logger } from "@aee/events";
+
 export interface IntegrationSourceRecordResolution {
   propertyId: number;
   transactionId: number | null;
@@ -45,7 +47,7 @@ export async function resolveIntegrationSourceRecord(
   try {
     return await resolver(brokerageId, sourceRecordId);
   } catch (err) {
-    console.error(`resolveIntegrationSourceRecord: resolver for ${sourceRecordType} threw`, err);
+    logger.error("resolve_integration_source_record_resolver_threw", { sourceRecordType, brokerageId, sourceRecordId, error: err });
     return null;
   }
 }

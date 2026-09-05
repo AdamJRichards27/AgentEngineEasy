@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db, transactionConditions, transactions, properties } from "@aee/db";
 import type { TransactionCondition, Transaction, ContractConditionStatus } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 // Stage E — Contract & Conditions (Agent Engine 2.0 — Run Transaction
@@ -143,7 +143,12 @@ export async function resolveCondition(input: {
   });
 
   await maybeRecordUnconditional({ transactionId: transaction.id, userId: input.userId, brokerageId: input.brokerageId }).catch((err) =>
-    console.error("maybeRecordUnconditional failed", err),
+    logger.error("maybe_record_unconditional_after_condition_resolved_failed", {
+      transactionId: transaction.id,
+      conditionId: condition.id,
+      status: input.status,
+      error: err,
+    }),
   );
 
   return updated;
@@ -179,14 +184,14 @@ export async function recordExchange(input: { transactionId: number; userId: num
       actorType: "USER",
       actorId: input.userId,
       source: "api:transactions:exchange",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `contract-exchanged:${transaction.id}`,
       payload: { transactionId: transaction.id },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(CONTRACT_EXCHANGED) failed", err);
+    logger.error("publish_domain_event_failed", { eventType: "CONTRACT_EXCHANGED", propertyId: transaction.propertyId, transactionId: transaction.id, error: err });
   }
 
   const afterUnconditionalCheck = await maybeRecordUnconditional({
@@ -194,7 +199,7 @@ export async function recordExchange(input: { transactionId: number; userId: num
     userId: input.userId,
     brokerageId: input.brokerageId,
   }).catch((err) => {
-    console.error("maybeRecordUnconditional failed", err);
+    logger.error("maybe_record_unconditional_after_exchange_failed", { transactionId: transaction.id, error: err });
     return null;
   });
 
@@ -253,14 +258,14 @@ export async function maybeRecordUnconditional(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:transactions:unconditional",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `transaction-unconditional:${transaction.id}`,
       payload: { transactionId: transaction.id },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(TRANSACTION_UNCONDITIONAL) failed", err);
+    logger.error("publish_domain_event_failed", { eventType: "TRANSACTION_UNCONDITIONAL", propertyId: transaction.propertyId, transactionId: transaction.id, error: err });
   }
 
   return updated;

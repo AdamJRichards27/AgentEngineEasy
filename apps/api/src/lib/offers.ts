@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq, and } from "drizzle-orm";
 import { db, offers, parties, propertyParties, properties } from "@aee/db";
 import type { Offer } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 /**
@@ -115,14 +115,20 @@ export async function createOffer(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:offers:create",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `offer-received:${offer.id}`,
       payload: { offerId: offer.id, offerPriceCents: offer.offerPriceCents },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(OFFER_RECEIVED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "OFFER_RECEIVED",
+      propertyId: input.propertyId,
+      partyId: buyerPartyId,
+      offerId: offer.id,
+      error: err,
+    });
   }
 
   return offer;

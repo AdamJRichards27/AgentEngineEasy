@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { db, users, type UserRole } from "@aee/db";
 import { eq } from "drizzle-orm";
+import { logger, incrementCounter } from "@aee/events";
 import { readSessionCookie, verifySessionToken } from "../lib/session.js";
 
 // AgentEngineEasy's 3-role model (Build Brief §22) — deliberately small.
@@ -43,15 +44,33 @@ export async function loadSession(req: Request, _res: Response, next: NextFuncti
     const token = readSessionCookie(req.headers.cookie);
     const verified = verifySessionToken(token);
     if (!verified) {
+      // AE Step 2 closure — Part B: only a PRESENT-but-invalid token is a
+      // security-relevant signal (tampered/expired/malformed — a proxy for
+      // session-forgery attempts) — a request with no cookie at all is
+      // ordinary unauthenticated traffic (most webhook/public routes) and
+      // must not inflate this counter. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+      if (token) incrementCounter("auth_security_event_total", { event: "invalid_session_token" });
       next();
       return;
     }
     const [row] = await db.select().from(users).where(eq(users.id, verified.uid));
-    if (row && row.isActive && row.brokerageId) {
+    // Foundation Remediation - server-side session revocation: a token
+    // whose embedded epoch (lib/session.ts) no longer matches the user's
+    // current sessionEpoch was issued before their last logout (POST
+    // /auth/logout increments it) and must be treated exactly like a
+    // missing/invalid session - just don't populate req.authedUser, same
+    // as the isActive/brokerageId checks already do below.
+    if (row && row.isActive && row.brokerageId && row.sessionEpoch === verified.epoch) {
       req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
+    } else if (row && row.sessionEpoch !== verified.epoch) {
+      // A cryptographically valid, non-expired token whose embedded epoch
+      // is stale — exactly the "captured via XSS, replayed after the
+      // legitimate user logged out" scenario logout-everywhere semantics
+      // exist to close off (see the epoch comment above).
+      incrementCounter("auth_security_event_total", { event: "revoked_session_reused" });
     }
   } catch (err) {
-    console.error("loadSession failed", err);
+    logger.error("load_session_failed", { error: err });
   }
   next();
 }

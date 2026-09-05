@@ -18,6 +18,7 @@
 
 import { Router } from "express";
 import { z } from "zod";
+import { incrementCounter, observeHistogram } from "@aee/events";
 import { processInboundWebhook, verifyWebhookSignature } from "../lib/communications/webhooks.js";
 
 declare global {
@@ -46,21 +47,43 @@ const inboundWebhookSchema = z
   })
   .passthrough();
 
+// AE Step 2 closure — Part B: every inbound request is tracked through the
+// SAME bounded outcome vocabulary the metrics catalogue declares
+// (packages/events/src/metrics.ts's WEBHOOK_ROUTER_OUTCOMES) — never a
+// providerEventId/brokerageId/destination label, so this can never become
+// a cardinality or PII leak no matter how many tenants/providers send
+// webhooks here. "received" and "accepted" are funnel counters; exactly
+// one terminal outcome (invalid_signature/schema_rejected/replay_rejected/
+// success/failure) is recorded per request, alongside its duration.
 communicationsWebhooksRouter.post("/communications/webhooks/:brokerageId/:provider", async (req, res) => {
+  const startedAt = Date.now();
+  incrementCounter("communications_webhook_total", { outcome: "received" });
+  const finish = (outcome: "invalid_signature" | "schema_rejected" | "replay_rejected" | "success" | "failure") => {
+    incrementCounter("communications_webhook_total", { outcome });
+    observeHistogram("communications_webhook_duration_ms", Date.now() - startedAt, { outcome });
+  };
+
   const brokerageId = Number(req.params.brokerageId);
   const provider = req.params.provider;
   if (!Number.isInteger(brokerageId) || brokerageId <= 0) {
+    finish("schema_rejected");
     return void res.status(400).json({ error: "Invalid brokerage id." });
   }
 
   const signatureHeader = req.header("x-communications-signature");
   const rawBody = req.rawBody;
   if (!rawBody || !verifyWebhookSignature({ rawBody, signatureHeader, secret: WEBHOOK_SECRET })) {
+    finish("invalid_signature");
     return void res.status(401).json({ error: "Invalid or missing webhook signature." });
   }
 
   const parsed = inboundWebhookSchema.safeParse(req.body);
-  if (!parsed.success) return void res.status(400).json({ error: "Invalid webhook payload." });
+  if (!parsed.success) {
+    finish("schema_rejected");
+    return void res.status(400).json({ error: "Invalid webhook payload." });
+  }
+
+  incrementCounter("communications_webhook_total", { outcome: "accepted" });
 
   const result = await processInboundWebhook({
     brokerageId,
@@ -73,5 +96,6 @@ communicationsWebhooksRouter.post("/communications/webhooks/:brokerageId/:provid
     destinationChannel: parsed.data.destinationChannel ?? null,
   });
 
+  finish(result.status === "PROCESSED" ? "success" : result.status === "DUPLICATE" ? "replay_rejected" : "failure");
   res.status(result.status === "FAILED" ? 500 : 200).json(result);
 });

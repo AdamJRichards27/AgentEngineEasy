@@ -11,7 +11,7 @@ import {
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
-import { newCorrelationId, publishDomainEvent } from "@aee/events";
+import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
 
 export const growRouter = Router();
 
@@ -123,14 +123,14 @@ growRouter.post(
         actorType: "USER",
         actorId: user.id,
         source: "api:grow:relationships:create",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `relationship-created:${inserted.id}`,
         payload: { relationshipId: inserted.id, relationshipType, role: inserted.role },
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(RELATIONSHIP_CREATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "RELATIONSHIP_CREATED", error: err });
     }
 
     res.status(201).json({ relationship: inserted });
@@ -176,14 +176,14 @@ growRouter.patch(
         actorType: "USER",
         actorId: user.id,
         source: "api:grow:relationships:update",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `relationship-updated:${id}:${Date.now()}`,
         payload: { relationshipId: id, status, role },
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(RELATIONSHIP_UPDATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "RELATIONSHIP_UPDATED", error: err });
     }
 
     res.json({ relationship: updated });
@@ -210,13 +210,48 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
     return;
   }
 
+  const partyId = typeof req.body?.partyId === "number" ? req.body.partyId : null;
+  const propertyId = typeof req.body?.propertyId === "number" ? req.body.propertyId : null;
+  const opportunityId = typeof req.body?.opportunityId === "number" ? req.body.opportunityId : null;
+
+  // Tenant isolation on the referenced rows, not just the new row: mirrors the same check in
+  // POST /relationships above. All three are optional here (unlike partyId/propertyId on
+  // /relationships), so only the ids actually supplied are looked up -- but any one of them that
+  // IS supplied must belong to this brokerage, or a Grow activity could be used to attach a
+  // dangling/cross-tenant reference onto another brokerage's real party/property/opportunity.
+  if (partyId !== null) {
+    const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
+    if (!party) {
+      res.status(404).json({ error: "Party not found in this brokerage" });
+      return;
+    }
+  }
+  if (propertyId !== null) {
+    const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
+    if (!property) {
+      res.status(404).json({ error: "Property not found in this brokerage" });
+      return;
+    }
+  }
+  if (opportunityId !== null) {
+    const [opportunity] = await db
+      .select()
+      .from(growOpportunities)
+      .where(and(eq(growOpportunities.id, opportunityId), eq(growOpportunities.brokerageId, user.brokerageId)))
+      .limit(1);
+    if (!opportunity) {
+      res.status(404).json({ error: "Opportunity not found in this brokerage" });
+      return;
+    }
+  }
+
   const [inserted] = await db
     .insert(growActivities)
     .values({
       brokerageId: user.brokerageId,
-      partyId: typeof req.body?.partyId === "number" ? req.body.partyId : null,
-      propertyId: typeof req.body?.propertyId === "number" ? req.body.propertyId : null,
-      opportunityId: typeof req.body?.opportunityId === "number" ? req.body.opportunityId : null,
+      partyId,
+      propertyId,
+      opportunityId,
       activityType,
       occurredAt: req.body?.occurredAt ? new Date(req.body.occurredAt) : new Date(),
       summary,
@@ -287,14 +322,14 @@ growRouter.post(
         actorType: "USER",
         actorId: user.id,
         source: "api:grow:opportunities:create",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `opportunity-created:${inserted.id}`,
         payload: { opportunityId: inserted.id, opportunityType, reason },
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(OPPORTUNITY_CREATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "OPPORTUNITY_CREATED", error: err });
     }
 
     res.status(201).json({ opportunity: inserted });

@@ -20,7 +20,7 @@ import {
   type CommunicationParticipant,
   type CommunicationMessage,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import {
   CommunicationTenancyError,
@@ -261,6 +261,20 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
       templateId: input.templateId ?? null,
       templateVersion,
       createdByUserId: input.createdByUserId,
+      // Step 2 hardening: persist the drafting request's correlationId on
+      // the row itself, not just on the COMMUNICATION_MESSAGE_DRAFTED event
+      // below. Without this, outbox.ts's dispatch path (`message.correlationId
+      // ?? currentCorrelationId()`) always fell through to a FRESH id when
+      // dispatch happened outside the original request — which is the
+      // common case: dispatchDueMessages() is a boot-time scheduler sweep
+      // with no HTTP request (and therefore no ambient context) at all, so
+      // every scheduled/retried send was silently starting its own,
+      // disconnected correlation chain instead of continuing the one this
+      // message was drafted under. Storing it here is what makes
+      // "Mock Communications delivery" a provable single-correlationId
+      // flow end-to-end regardless of whether dispatch is immediate
+      // (same request) or deferred (a later, contextless sweep).
+      correlationId: currentCorrelationId(),
     })
     .returning();
 
@@ -286,12 +300,12 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
     actorType: "USER",
     actorId: input.createdByUserId,
     source: "communications:composer",
-    correlationId: newCorrelationId(),
+    correlationId: row.correlationId ?? currentCorrelationId(),
     causationId: null,
     idempotencyKey: null,
     payload: { messageId: row.id, threadId: row.threadId, channel: row.channel, classification: row.classification },
     metadata: {},
-  }).catch((err) => console.error("publishDomainEvent(COMMUNICATION_MESSAGE_DRAFTED) failed", err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "COMMUNICATION_MESSAGE_DRAFTED", messageId: row.id, error: err instanceof Error ? err.message : String(err) }));
 
   return row;
 }

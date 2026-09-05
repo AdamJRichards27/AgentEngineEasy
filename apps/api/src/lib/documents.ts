@@ -10,7 +10,7 @@ import {
   parties,
 } from "@aee/db";
 import type { DocumentPackage, Document, SignatureRequest, AgencyAgreementTerms } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createESignProvider, type ESignWebhookResult } from "@aee/integration-esign";
 import { createObjectStorageProvider } from "@aee/integration-object-storage";
 import { populateTemplate } from "./documentTemplates.js";
@@ -25,6 +25,36 @@ async function partyName(partyId: number): Promise<string> {
   return p.organisationName || `${p.firstName ?? ""} ${p.lastName ?? ""}`.trim() || "Unknown";
 }
 
+// --- Tenant chokepoints -----------------------------------------------
+//
+// #131/#135-class cross-tenant IDOR fix. documents/documentPackages/
+// agencyAgreementTerms carry propertyId but (unlike e.g. communications'
+// tables) no brokerageId of their own, so the tenant check has to resolve
+// through properties — mirrors lib/transactionConditions.ts's
+// loadTransactionInBrokerage and lib/aml.ts's assertPartyOnPropertyInBrokerage
+// exactly: a cross-tenant id gets the SAME "not found" as a nonexistent
+// one, never a distinguishing error. Where the id being loaded belongs to
+// a table that itself has no brokerageId, the property join is folded into
+// the SAME query that fetches by id (not a separate check performed after)
+// so there is only one possible throw site — it cannot drift into two
+// differently-worded errors over time.
+
+/** Tenant + property chokepoint — matches assertPropertyInBrokerage in lib/launch/model.ts, lib/exceptions/model.ts, lib/timeline.ts. */
+async function assertPropertyInBrokerage(propertyId: number, brokerageId: number): Promise<void> {
+  const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
+  if (!property) throw new Error(`Property ${propertyId} not found`);
+}
+
+async function loadDocumentPackageInBrokerage(packageId: number, brokerageId: number): Promise<DocumentPackage> {
+  const [row] = await db
+    .select({ documentPackage: documentPackages })
+    .from(documentPackages)
+    .innerJoin(properties, eq(documentPackages.propertyId, properties.id))
+    .where(and(eq(documentPackages.id, packageId), eq(properties.brokerageId, brokerageId)));
+  if (!row) throw new Error(`DocumentPackage ${packageId} not found`);
+  return row.documentPackage;
+}
+
 /**
  * Real structured agency-agreement terms capture (ARCHITECTURE.md §3 —
  * explicitly not the legacy app's opaque-JSON commission storage). One
@@ -34,6 +64,7 @@ async function partyName(partyId: number): Promise<string> {
  */
 export async function upsertAgencyAgreementTerms(input: {
   propertyId: number;
+  brokerageId: number;
   commissionType: "Percentage" | "FlatFee";
   commissionRateBps?: number | null;
   flatFeeCents?: number | null;
@@ -41,6 +72,8 @@ export async function upsertAgencyAgreementTerms(input: {
   agreementTermDays: number;
   userId: number;
 }): Promise<AgencyAgreementTerms> {
+  await assertPropertyInBrokerage(input.propertyId, input.brokerageId);
+
   const [existing] = await db
     .select()
     .from(agencyAgreementTerms)
@@ -78,6 +111,13 @@ export async function upsertAgencyAgreementTerms(input: {
   return created;
 }
 
+/** Tenant-scoped read of a property's agency-agreement terms — `null` covers both "not captured yet" and (after the tenant check) is unreachable for a cross-tenant propertyId, which throws instead. */
+export async function getAgencyAgreementTerms(propertyId: number, brokerageId: number): Promise<AgencyAgreementTerms | null> {
+  await assertPropertyInBrokerage(propertyId, brokerageId);
+  const [terms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, propertyId));
+  return terms ?? null;
+}
+
 export interface PopulateResult {
   documentPackage: DocumentPackage;
   documents: Document[];
@@ -93,11 +133,8 @@ export interface PopulateResult {
  * than rendering a commission clause full of placeholders as if it were
  * real content ready to send.
  */
-export async function populateDocumentPackage(packageId: number): Promise<PopulateResult> {
-  const [docPackage] = await db.select().from(documentPackages).where(eq(documentPackages.id, packageId));
-  if (!docPackage) {
-    throw new Error(`DocumentPackage ${packageId} not found`);
-  }
+export async function populateDocumentPackage(packageId: number, brokerageId: number): Promise<PopulateResult> {
+  const docPackage = await loadDocumentPackageInBrokerage(packageId, brokerageId);
 
   const [property] = await db.select().from(properties).where(eq(properties.id, docPackage.propertyId));
   if (!property) {
@@ -163,7 +200,9 @@ export async function populateDocumentPackage(packageId: number): Promise<Popula
     .where(eq(documentPackages.id, packageId))
     .returning();
 
-  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+  await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId, error: err }),
+  );
 
   return { documentPackage: updatedPackage, documents: refreshedDocuments, skipped };
 }
@@ -177,16 +216,20 @@ export interface SendForSignatureResult {
  * Idempotent send-for-signature — mirrors lib/aml.ts's initiateAmlIfNeeded
  * chokepoint pattern: an existing non-Voided SignatureRequest for the
  * package is returned as-is rather than creating a second envelope.
+ *
+ * input.brokerageId used to be forwarded only into the outgoing
+ * AGENCY_AGREEMENT_SENT event payload below — never actually checked
+ * against the package, a false sense of safety rather than a real tenant
+ * guard (#131/#135). loadDocumentPackageInBrokerage now makes it the real
+ * chokepoint: a packageId from another brokerage is rejected identically
+ * to one that doesn't exist, before anything else in this function runs.
  */
 export async function sendPackageForSignature(input: {
   packageId: number;
   userId: number;
   brokerageId: number;
 }): Promise<SendForSignatureResult> {
-  const [docPackage] = await db.select().from(documentPackages).where(eq(documentPackages.id, input.packageId));
-  if (!docPackage) {
-    throw new Error(`DocumentPackage ${input.packageId} not found`);
-  }
+  const docPackage = await loadDocumentPackageInBrokerage(input.packageId, input.brokerageId);
 
   const [existing] = await db
     .select()
@@ -257,20 +300,77 @@ export async function sendPackageForSignature(input: {
         actorType: "USER",
         actorId: input.userId,
         source: "api:documents:send-for-signature",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `agency-agreement-sent:${signatureRequest.id}`,
         payload: { packageId: input.packageId, signatureRequestId: signatureRequest.id, providerReference },
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(AGENCY_AGREEMENT_SENT) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "AGENCY_AGREEMENT_SENT", packageId: input.packageId, propertyId: docPackage.propertyId, error: err });
     }
   }
 
-  await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+  await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId: input.packageId, error: err }),
+  );
 
   return { signatureRequest, created: true };
+}
+
+export interface DocumentContentResult {
+  content: string | Buffer;
+}
+
+/**
+ * Loads a document's stored content, scoped to the caller's brokerage —
+ * previously a raw, unscoped `db.select` + object-storage read directly in
+ * the route (the most severe of the confirmed cross-tenant IDOR findings:
+ * real signed contract/agreement content, readable by any authenticated
+ * user from any brokerage). The id+brokerageId join below is the same
+ * single query used to fetch the document at all, so a cross-tenant
+ * documentId comes back `null` — identical to the pre-existing "not
+ * generated yet" case (`!doc.objectStorageKey`) the route already handled.
+ * Only a genuine object-storage read failure (key present, tenant already
+ * verified) still throws.
+ */
+export async function getDocumentContent(documentId: number, brokerageId: number): Promise<DocumentContentResult | null> {
+  const [row] = await db
+    .select({ document: documents })
+    .from(documents)
+    .innerJoin(properties, eq(documents.propertyId, properties.id))
+    .where(and(eq(documents.id, documentId), eq(properties.brokerageId, brokerageId)));
+  const doc = row?.document;
+  if (!doc || !doc.objectStorageKey) return null;
+  const content = await objectStorage.getObject(doc.objectStorageKey);
+  return { content };
+}
+
+export interface PackageByPropertyResult {
+  documentPackage: DocumentPackage | null;
+  documents: Document[];
+  signatureRequest: SignatureRequest | null;
+}
+
+/**
+ * Property-scoped package lookup for the Property Card's document panel —
+ * joined onto properties and filtered by the caller's brokerageId in the
+ * same query (mirrors routes/aml.ts's GET /by-property), so a propertyId
+ * belonging to another brokerage returns the identical empty shape as a
+ * property that simply hasn't had Ready to List run yet, never another
+ * tenant's document package/documents/signature request.
+ */
+export async function getPackageByProperty(propertyId: number, brokerageId: number): Promise<PackageByPropertyResult> {
+  const [row] = await db
+    .select({ documentPackage: documentPackages })
+    .from(documentPackages)
+    .innerJoin(properties, eq(documentPackages.propertyId, properties.id))
+    .where(and(eq(documentPackages.propertyId, propertyId), eq(properties.brokerageId, brokerageId)));
+  if (!row) return { documentPackage: null, documents: [], signatureRequest: null };
+
+  const packageDocuments = await db.select().from(documents).where(eq(documents.packageId, row.documentPackage.id));
+  const [signatureRequest] = await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, row.documentPackage.id));
+  return { documentPackage: row.documentPackage, documents: packageDocuments, signatureRequest: signatureRequest ?? null };
 }
 
 export interface ProcessEsignWebhookResult {
@@ -363,20 +463,22 @@ export async function processEsignWebhook(
           actorType: "INTEGRATION",
           actorId: null,
           source: `webhook:esign:${updated.provider}`,
-          correlationId: newCorrelationId(),
+          correlationId: currentCorrelationId(),
           causationId: null,
           idempotencyKey: `agency-agreement-signed:${updated.id}`,
           payload: { packageId: updated.packageId, signatureRequestId: updated.id },
           metadata: {},
         });
       } catch (err) {
-        console.error("publishDomainEvent(AGENCY_AGREEMENT_SIGNED) failed", err);
+        logger.error("publish_domain_event_failed", { eventType: "AGENCY_AGREEMENT_SIGNED", packageId: updated.packageId, propertyId: docPackage.propertyId, error: err });
       }
     }
   }
 
   if (docPackage) {
-    await refreshReadyToListSteps(docPackage.propertyId).catch((err) => console.error("refreshReadyToListSteps failed", err));
+    await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
+      logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId: docPackage.id, error: err }),
+    );
   }
 
   return { processed: true, signatureRequest: updated };

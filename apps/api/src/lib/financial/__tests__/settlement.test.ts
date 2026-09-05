@@ -40,6 +40,7 @@ let server: Server;
 let baseUrl: string;
 const suffix = Date.now();
 let A: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
+let otherBrokerage: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
 let propertyId: number;
 let transactionId: number;
 
@@ -55,6 +56,7 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 
   A = await createBrokerageWithUsers(baseUrl, `Financial Settlement Test ${suffix}`);
+  otherBrokerage = await createBrokerageWithUsers(baseUrl, `Financial Settlement Other Test ${suffix}`);
   const created = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
     address: `1 Financial Settlement Test St ${suffix}`,
   });
@@ -63,7 +65,7 @@ before(async () => {
 });
 
 after(async () => {
-  const ids = [A?.brokerageId].filter((id): id is number => typeof id === "number");
+  const ids = [A?.brokerageId, otherBrokerage?.brokerageId].filter((id): id is number => typeof id === "number");
   await cleanupBrokerages(ids);
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
@@ -185,6 +187,89 @@ describe("createPcFeeCalculation — requires ACTIVE authority", () => {
       state: "FINALISED",
     });
     assert.equal(pcFeeCalc.feeBasisUsed, "PERCENTAGE_OF_GCI");
+    assert.equal(pcFeeCalc.isProvisional, false);
+  });
+});
+
+describe("createPcFeeCalculation — cross-tenant pcFeeAuthorityId is rejected (IDOR fix)", () => {
+  test("a foreign brokerage's authority cannot be used, and is indistinguishable from a nonexistent id", async () => {
+    const calcRows = await db
+      .select()
+      .from(commissionCalculations)
+      .where(and(eq(commissionCalculations.transactionId, transactionId), eq(commissionCalculations.state, "FINALISED")));
+    const finalisedCalc = calcRows.sort((a, b) => b.calculationVersion - a.calculationVersion)[0];
+    assert.ok(finalisedCalc, "expected a FINALISED commission calculation from an earlier describe block in this file");
+
+    // An ACTIVE authority, but it belongs to a completely different
+    // brokerage — the confidential mandate terms (feeBasis/rateBps/
+    // gciDefinition) below must never be readable from A's brokerage.
+    const [foreignAuthority] = await db
+      .insert(pcFeeAuthorities)
+      .values({ brokerageId: otherBrokerage.brokerageId, agentUserId: otherBrokerage.agent.user.id, version: 1, status: "ACTIVE", rateBps: 9999 })
+      .returning();
+
+    const foreignMessage = `PC fee authority ${foreignAuthority.id} not found.`;
+    await assert.rejects(
+      () =>
+        createPcFeeCalculation({
+          brokerageId: A.brokerageId,
+          propertyId,
+          transactionId,
+          pcFeeAuthorityId: foreignAuthority.id,
+          commissionCalculationId: finalisedCalc.id,
+        }),
+      (err: unknown) => err instanceof Error && err.message === foreignMessage,
+    );
+
+    // Same message, same shape, for a genuinely nonexistent id — a caller
+    // must never be able to tell "exists in another brokerage" apart from
+    // "doesn't exist at all".
+    const bogusId = foreignAuthority.id + 1_000_000;
+    await assert.rejects(
+      () =>
+        createPcFeeCalculation({
+          brokerageId: A.brokerageId,
+          propertyId,
+          transactionId,
+          pcFeeAuthorityId: bogusId,
+          commissionCalculationId: finalisedCalc.id,
+        }),
+      (err: unknown) => err instanceof Error && err.message === `PC fee authority ${bogusId} not found.`,
+    );
+
+    // And no row was ever persisted onto A's transaction referencing the
+    // foreign authority.
+    const leaked = await db
+      .select()
+      .from(pcFeeCalculations)
+      .where(and(eq(pcFeeCalculations.transactionId, transactionId), eq(pcFeeCalculations.pcFeeAuthorityId, foreignAuthority.id)));
+    assert.equal(leaked.length, 0);
+  });
+
+  test("an authority belonging to the caller's own brokerage still works (happy path preserved)", async () => {
+    const calcRows = await db
+      .select()
+      .from(commissionCalculations)
+      .where(and(eq(commissionCalculations.transactionId, transactionId), eq(commissionCalculations.state, "FINALISED")));
+    const finalisedCalc = calcRows.sort((a, b) => b.calculationVersion - a.calculationVersion)[0];
+    assert.ok(finalisedCalc, "expected a FINALISED commission calculation from an earlier describe block in this file");
+
+    const [ownAuthority] = await db
+      .insert(pcFeeAuthorities)
+      .values({ brokerageId: A.brokerageId, agentUserId: A.agent.user.id, version: 3, status: "ACTIVE", rateBps: 500 })
+      .returning();
+
+    const pcFeeCalc = await createPcFeeCalculation({
+      brokerageId: A.brokerageId,
+      propertyId,
+      transactionId,
+      pcFeeAuthorityId: ownAuthority.id,
+      commissionCalculationId: finalisedCalc.id,
+      state: "FINALISED",
+    });
+    assert.equal(pcFeeCalc.pcFeeAuthorityId, ownAuthority.id);
+    assert.equal(pcFeeCalc.feeBasisUsed, "PERCENTAGE_OF_GCI");
+    assert.equal(pcFeeCalc.rateBpsUsed, 500);
     assert.equal(pcFeeCalc.isProvisional, false);
   });
 });

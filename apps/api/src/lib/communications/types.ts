@@ -16,6 +16,7 @@ import {
   type CommunicationDirection,
   type CommunicationMessageStatus,
 } from "@aee/db";
+import { incrementCounter } from "@aee/events";
 
 export {
   COMMUNICATION_CHANNELS,
@@ -146,9 +147,18 @@ export class CommunicationCostControlError extends Error {
   }
 }
 
+// AE Step 2 closure — Part B: every throw site in this domain resolves a
+// record scoped to the caller's brokerageId and treats "doesn't exist" and
+// "belongs to another tenant" identically (this class's own name/message —
+// never a hint which case it was, by design). Incrementing here, at the
+// one constructor every one of those throw sites shares, gives a real,
+// bounded-cardinality signal for the whole domain without touching each
+// call site individually. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md for the
+// tenant_isolation_rejection_total SLI this feeds.
 export class CommunicationTenancyError extends Error {
   constructor(message = "Not found.") {
     super(message);
     this.name = "CommunicationTenancyError";
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "communications" });
   }
 }

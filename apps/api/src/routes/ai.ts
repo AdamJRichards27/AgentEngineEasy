@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { askCopilot } from "../lib/ai/orchestrator.js";
 import { isRoleEnabled } from "../lib/ai/featureFlags.js";
@@ -44,7 +45,7 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
       res.status(403).json({ error: err.message });
       return;
     }
-    console.error("POST /ai/ask failed", err);
+    logger.error("ai_ask_route_failed", { error: err });
     res.status(500).json({ error: "The AI Copilot could not answer that right now. Try again in a moment." });
   }
 });

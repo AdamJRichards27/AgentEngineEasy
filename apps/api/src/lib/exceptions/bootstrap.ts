@@ -13,6 +13,7 @@
 // e.g. eventProcessingReceipts's own comment on being an outbox-consumer
 // ledger, not a message queue).
 
+import { logger } from "@aee/events";
 import { registerExceptionEventHandlers, runScheduledScan } from "./engine.js";
 
 let registered = false;
@@ -47,7 +48,7 @@ export function registerExceptionEngine(options: RegisterExceptionEngineOptions 
   if (!startScheduler) return;
 
   intervalHandle = setInterval(() => {
-    runScheduledScan("SCHEDULED").catch((err) => console.error("exception engine: scheduled scan failed", err));
+    runScheduledScan("SCHEDULED").catch((err) => logger.error("exception_engine_scheduled_scan_failed", { error: err }));
   }, SCAN_INTERVAL_MS);
   // Never hold the process open just for this timer (matches Node's own
   // convention for background/best-effort intervals; a graceful shutdown

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, appraisals, properties } from "@aee/db";
 import type { Appraisal } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 /**
@@ -62,14 +62,19 @@ export async function getOrCreateAppraisal(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:appraisals:create",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `appraisal-created:${appraisal.id}`,
       payload: { appraisalId: appraisal.id },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(APPRAISAL_CREATED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "APPRAISAL_CREATED",
+      propertyId: input.propertyId,
+      appraisalId: appraisal.id,
+      error: err,
+    });
   }
 
   return { appraisal, created: true };
@@ -159,14 +164,19 @@ export async function finaliseAppraisal(input: { propertyId: number; userId: num
       actorType: "USER",
       actorId: input.userId,
       source: "api:appraisals:finalise",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `appraisal-completed:${existing.id}`,
       payload: { appraisalId: existing.id, priceRangeLow: existing.priceRangeLow, priceRangeHigh: existing.priceRangeHigh },
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(APPRAISAL_COMPLETED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "APPRAISAL_COMPLETED",
+      propertyId: input.propertyId,
+      appraisalId: existing.id,
+      error: err,
+    });
   }
 
   return updated;

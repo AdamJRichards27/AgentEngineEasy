@@ -32,6 +32,7 @@ import {
 } from "./actions/registry.js";
 import { isAutoExecuteEligible, riskTierForLevel, type RiskTier } from "./authority.js";
 import type { RiskLevel } from "./types.js";
+import { logger, incrementCounter } from "@aee/events";
 
 export type PolicyDenialReason =
   | "ACTION_NOT_FOUND"
@@ -81,14 +82,26 @@ function denyWith(actionKey: string, reason: PolicyDenialReason, extra: Partial<
   };
 }
 
+// AE Step 2 closure — Part B: a thin, additive wrapper around the actual
+// (unmodified) policy evaluation below, so every one of its many early
+// "deny" returns and its one "allow" return are all covered by a single
+// increment at one exit point, without touching any of the existing
+// branch logic. A sustained shift toward "denied" is the ai_action_denial
+// signal Part B names — see docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
 export async function evaluateAIAction(input: EvaluateAIActionInput): Promise<PolicyDecision> {
+  const decision = await evaluateAIActionCore(input);
+  incrementCounter("ai_action_decision_total", { outcome: decision.allowed ? "allowed" : "denied" });
+  return decision;
+}
+
+async function evaluateAIActionCore(input: EvaluateAIActionInput): Promise<PolicyDecision> {
   const { actionKey } = input;
 
   let definition;
   try {
     definition = getActionDefinition(actionKey);
   } catch (err) {
-    console.error("evaluateAIAction: registry lookup threw, failing closed", err);
+    logger.error("evaluate_ai_action_registry_lookup_failed_closed", { actionKey, error: err });
     return denyWith(actionKey, "ACTION_NOT_FOUND");
   }
 
@@ -160,7 +173,7 @@ export async function evaluateAIAction(input: EvaluateAIActionInput): Promise<Po
     try {
       entitlementDecision = await explainEntitlementDecision(entitlementActor, definition.requiredEntitlementKey);
     } catch (err) {
-      console.error("evaluateAIAction: entitlement check threw, failing closed", err);
+      logger.error("evaluate_ai_action_entitlement_check_failed_closed", { actionKey, error: err });
       return denyWith(actionKey, "ENTITLEMENT_DENIED", {
         authorityLevel: definition.authorityLevel,
         riskLevel: definition.riskLevel,

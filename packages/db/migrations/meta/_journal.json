@@ -64,6 +64,13 @@
       "when": 1788288196348,
       "tag": "0008_striped_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788640016290,
+      "tag": "0009_flimsy_norrin_radd",
+      "breakpoints": true
     }
   ]
 }

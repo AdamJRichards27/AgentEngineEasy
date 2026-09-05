@@ -23,6 +23,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { db, automationExecutions, automationActions, domainEvents } from "@aee/db";
+import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { retryAutomationAction } from "../lib/automation/engine.js";
 import {
@@ -65,7 +66,7 @@ automationOpsRouter.get("/health", async (req, res) => {
     const report = await getAutomationHealth();
     res.json(report);
   } catch (err) {
-    console.error("GET /automation/ops/health failed", err);
+    logger.error("automation_ops_health_route_failed", { error: err });
     res.status(500).json({ error: "Could not load automation health right now. Try again in a moment." });
   }
 });
@@ -132,7 +133,7 @@ automationOpsRouter.get("/executions", async (req, res) => {
       offset: q.offset,
     });
   } catch (err) {
-    console.error("GET /automation/ops/executions failed", err);
+    logger.error("automation_ops_list_executions_route_failed", { error: err });
     res.status(500).json({ error: "Could not load executions right now. Try again in a moment." });
   }
 });
@@ -184,7 +185,7 @@ automationOpsRouter.get("/executions/:id", async (req, res) => {
       actions: actionRows.map(detailActionForOps),
     });
   } catch (err) {
-    console.error("GET /automation/ops/executions/:id failed", err);
+    logger.error("automation_ops_get_execution_route_failed", { error: err });
     res.status(500).json({ error: "Could not load this execution right now. Try again in a moment." });
   }
 });
@@ -222,7 +223,7 @@ automationOpsRouter.post("/actions/:id/retry", async (req, res) => {
     }
     res.json({ status: result.status });
   } catch (err) {
-    console.error("POST /automation/ops/actions/:id/retry failed", err);
+    logger.error("automation_ops_retry_action_route_failed", { error: err });
     res.status(500).json({ error: "Could not retry this action right now. Try again in a moment." });
   }
 });
@@ -267,7 +268,7 @@ automationOpsRouter.post("/executions/:id/cancel", async (req, res) => {
     }
     res.json({ execution: result.execution });
   } catch (err) {
-    console.error("POST /automation/ops/executions/:id/cancel failed", err);
+    logger.error("automation_ops_cancel_execution_route_failed", { error: err });
     res.status(500).json({ error: "Could not cancel this execution right now. Try again in a moment." });
   }
 });
@@ -295,7 +296,7 @@ automationOpsRouter.post("/actions/:id/cancel", async (req, res) => {
     }
     res.json({ action: result.action });
   } catch (err) {
-    console.error("POST /automation/ops/actions/:id/cancel failed", err);
+    logger.error("automation_ops_cancel_action_route_failed", { error: err });
     res.status(500).json({ error: "Could not cancel this action right now. Try again in a moment." });
   }
 });
@@ -329,7 +330,7 @@ automationOpsRouter.post("/executions/:id/notes", async (req, res) => {
     }
     res.json({ execution: result.execution });
   } catch (err) {
-    console.error("POST /automation/ops/executions/:id/notes failed", err);
+    logger.error("automation_ops_add_execution_note_route_failed", { error: err });
     res.status(500).json({ error: "Could not add this note right now. Try again in a moment." });
   }
 });
@@ -367,7 +368,7 @@ automationOpsRouter.post("/rules/:id/pause", async (req, res) => {
       res.status(404).json({ error: err.message });
       return;
     }
-    console.error("POST /automation/ops/rules/:id/pause failed", err);
+    logger.error("automation_ops_pause_rule_route_failed", { error: err });
     res.status(500).json({ error: "Could not pause this rule right now. Try again in a moment." });
   }
 });
@@ -396,7 +397,7 @@ automationOpsRouter.post("/rules/:id/resume", async (req, res) => {
       res.status(404).json({ error: err.message });
       return;
     }
-    console.error("POST /automation/ops/rules/:id/resume failed", err);
+    logger.error("automation_ops_resume_rule_route_failed", { error: err });
     res.status(500).json({ error: "Could not resume this rule right now. Try again in a moment." });
   }
 });

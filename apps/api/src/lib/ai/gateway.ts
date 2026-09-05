@@ -3,6 +3,7 @@ import { AnthropicAiProvider } from "./providers/anthropicProvider.js";
 import type { AiProvider } from "./providers/provider.js";
 import { AiProviderError } from "./types.js";
 import type { AiProviderRequest, AiProviderResponse } from "./types.js";
+import { logger } from "@aee/events";
 
 // AI Gateway: the one place that knows how to reach a model provider. Config is
 // env-driven today (AI_PROVIDER, AI_MODEL, ... - see .env.example), mirroring
@@ -51,7 +52,7 @@ function buildProvider(name: string): AiProvider {
     if (typeof apiKey === "string" && apiKey.length > 0) {
       return new AnthropicAiProvider(apiKey);
     }
-    console.error("AI_PROVIDER=anthropic but ANTHROPIC_API_KEY is missing - falling back to the mock provider.");
+    logger.warn("ai_provider_anthropic_api_key_missing_fallback_to_mock", {});
     return new MockAiProvider();
   }
   return new MockAiProvider();

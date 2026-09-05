@@ -22,7 +22,7 @@ import {
   properties,
   type RiskException,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, newCorrelationId, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import {
   RISK_EXCEPTION_METADATA_ALLOW_LIST,
@@ -158,7 +158,7 @@ async function applyPostCommitEffects(
       idempotencyKey: null,
       payload: { exceptionId: exception.id, ruleId: finding.ruleId, severity: finding.severity, category: finding.category },
       metadata: {},
-    }).catch((err) => console.error("publishDomainEvent(EXCEPTION_CREATED) failed", err));
+    }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "EXCEPTION_CREATED", error: err }));
     return;
   }
 
@@ -467,7 +467,7 @@ async function finalizeResolution(existing: RiskException, method: "AUTO" | "MAN
     idempotencyKey: null,
     payload: { exceptionId: existing.id, ruleId: existing.ruleId, method },
     metadata: {},
-  }).catch((err) => console.error("publishDomainEvent(EXCEPTION_RESOLVED) failed", err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "EXCEPTION_RESOLVED", error: err }));
 
   return updated;
 }
@@ -595,4 +595,4 @@ export async function assertPropertyInBrokerage(propertyId: number, brokerageId:
   if (!property) throw new RiskExceptionError("NOT_FOUND", `Property ${propertyId} not found`);
 }
 
-export { newCorrelationId };
+export { newCorrelationId, currentCorrelationId };

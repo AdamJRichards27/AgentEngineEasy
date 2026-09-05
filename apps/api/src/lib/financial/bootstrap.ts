@@ -12,7 +12,7 @@
 
 import { eq, and } from "drizzle-orm";
 import { db, properties, pcFeeAuthorities } from "@aee/db";
-import { registerHandler, type DomainEvent } from "@aee/events";
+import { registerHandler, logger, type DomainEvent } from "@aee/events";
 import { finalizeCommissionForSettlement, ensurePcSuccessFeeRequest } from "./settlement.js";
 import { createPcFeeCalculation } from "./pcFeeCalculations.js";
 import { dispatchPendingPaymentOutbox } from "./paymentOutbox.js";
@@ -114,7 +114,7 @@ export function registerFinancialEngine(options: RegisterFinancialEngineOptions 
   if (!startScheduler) return;
 
   intervalHandle = setInterval(() => {
-    dispatchPendingPaymentOutbox().catch((err) => console.error("financial engine: payment outbox sweep failed", err));
+    dispatchPendingPaymentOutbox().catch((err) => logger.error("financial_engine_payment_outbox_sweep_failed", { error: err }));
   }, OUTBOX_SWEEP_INTERVAL_MS);
   // Never hold the process open just for this timer (matches
   // registerExceptionEngine's own intervalHandle.unref?.() convention).

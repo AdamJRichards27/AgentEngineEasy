@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { DomainEvent, EventStore, PublishEventInput } from "./types.js";
 import { EVENT_TYPE_REGISTRY } from "./types.js";
 import { dispatchToHandlers } from "./registry.js";
+import { incrementCounter } from "./metrics.js";
+import { logger } from "./logger.js";
 
 let store: EventStore | null = null;
 
@@ -34,7 +36,9 @@ export async function publishDomainEvent<TPayload = Record<string, unknown>>(
   const { ok, errors } = await dispatchToHandlers(persisted as DomainEvent);
   if (!ok) {
     await store.updateProcessingStatus(persisted.id, "PARTIAL_FAILURE", errors);
+    logger.warn("domain_event_dispatch_partial_failure", { eventId: persisted.id, eventType: persisted.eventType, errorCount: errors.length });
   }
+  incrementCounter("domain_event_publish_total", { outcome: ok ? "ok" : "partial_failure" });
 
   return persisted;
 }

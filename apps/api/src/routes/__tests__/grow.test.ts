@@ -20,7 +20,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, domainEvents, entitlementGrants } from "@aee/db";
+import { db, domainEvents, entitlementGrants, growActivities } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -346,4 +346,93 @@ test("GET /relationships and GET /opportunities never return another brokerage's
     !oppBody.opportunities.some((o) => o.id === createdOpportunityId),
     "Brokerage B's opportunity list must never include Brokerage A's rows",
   );
+});
+
+// Confirmed MEDIUM: tenant-isolation gap on POST /activities (AGENT ENGINE 2.0 -- STEP 2).
+// partyId/propertyId/opportunityId were inserted straight from the request body with no check
+// that they belong to the caller's brokerageId, unlike the sibling POST /relationships and
+// POST /opportunities handlers in this same file. These two tests prove the fix mirrors that
+// same established per-file convention: reject a cross-tenant reference for whichever of the
+// three (all optional) fields is supplied, insert nothing when rejected, and otherwise behave
+// exactly as before.
+test("POST /activities enforces tenant isolation independently on partyId, propertyId, and opportunityId", async () => {
+  // Real party/property/opportunity rows that genuinely exist -- but in Brokerage B -- prove the
+  // check inspects the referenced rows themselves, not merely whether *a* row with that id exists
+  // anywhere. Mirrors the same cross-tenant proof already used for POST /relationships above.
+  const bPropertyId = await createProperty(B.agent.cookie, "5 Cross Tenant Activity Ave");
+  const bPartyId = await createParty(B.agent.cookie, bPropertyId);
+
+  await grant(B.brokerageId, "grow.opportunities.manage");
+  const bOppRes = await fetch(growUrl("/opportunities"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: B.agent.cookie },
+    body: JSON.stringify({ partyId: bPartyId, opportunityType: "Appraisal", reason: "Brokerage B's own opportunity" }),
+  });
+  const bOppBody = (await bOppRes.json()) as { opportunity: { id: number } };
+  assert.equal(bOppRes.status, 201, JSON.stringify(bOppBody));
+  const bOpportunityId = bOppBody.opportunity.id;
+
+  const attempts: Array<[string, Record<string, unknown>]> = [
+    ["partyId", { activityType: "note", summary: "CROSS-TENANT partyId must be rejected", partyId: bPartyId }],
+    ["propertyId", { activityType: "note", summary: "CROSS-TENANT propertyId must be rejected", propertyId: bPropertyId }],
+    ["opportunityId", { activityType: "note", summary: "CROSS-TENANT opportunityId must be rejected", opportunityId: bOpportunityId }],
+  ];
+  for (const [field, body] of attempts) {
+    const res = await fetch(growUrl("/activities"), {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: A.agent.cookie },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 404, `${field} belonging to Brokerage B must be rejected, got ${res.status}`);
+    const resBody = (await res.json()) as { error: string };
+    assert.match(resBody.error, /not found in this brokerage/i);
+  }
+
+  const dangling = await db
+    .select()
+    .from(growActivities)
+    .where(
+      and(
+        eq(growActivities.brokerageId, A.brokerageId),
+        eq(growActivities.summary, "CROSS-TENANT partyId must be rejected"),
+      ),
+    );
+  assert.equal(dangling.length, 0, "a rejected cross-tenant reference must never be inserted, even as a dangling row");
+});
+
+test("POST /activities still creates successfully when partyId/propertyId/opportunityId belong to the caller's own brokerage, or are omitted entirely", async () => {
+  const aPropertyId = await createProperty(A.agent.cookie, "6 Grow Activity Close");
+  const aPartyId = await createParty(A.agent.cookie, aPropertyId);
+
+  const ownIdsRes = await fetch(growUrl("/activities"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      activityType: "note",
+      summary: "Own-brokerage references should still be accepted",
+      partyId: aPartyId,
+      propertyId: aPropertyId,
+      opportunityId: createdOpportunityId,
+    }),
+  });
+  const ownIdsBody = (await ownIdsRes.json()) as {
+    activity: { id: number; partyId: number | null; propertyId: number | null; opportunityId: number | null };
+  };
+  assert.equal(ownIdsRes.status, 201, JSON.stringify(ownIdsBody));
+  assert.equal(ownIdsBody.activity.partyId, aPartyId);
+  assert.equal(ownIdsBody.activity.propertyId, aPropertyId);
+  assert.equal(ownIdsBody.activity.opportunityId, createdOpportunityId);
+
+  const noRefsRes = await fetch(growUrl("/activities"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ activityType: "note", summary: "No party, property, or opportunity references at all" }),
+  });
+  const noRefsBody = (await noRefsRes.json()) as {
+    activity: { id: number; partyId: number | null; propertyId: number | null; opportunityId: number | null };
+  };
+  assert.equal(noRefsRes.status, 201, JSON.stringify(noRefsBody));
+  assert.equal(noRefsBody.activity.partyId, null);
+  assert.equal(noRefsBody.activity.propertyId, null);
+  assert.equal(noRefsBody.activity.opportunityId, null);
 });

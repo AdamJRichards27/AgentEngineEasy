@@ -2,6 +2,7 @@ import { Router } from "express";
 import { eq, and, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { db, parties, propertyParties, properties, workflows } from "@aee/db";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
@@ -44,7 +45,17 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
   }
   const user = req.authedUser!;
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, parsed.data.propertyId));
+  // Tenant-scoped in the same fetch that loads the property, not a check
+  // bolted on after — a propertyId from another brokerage is
+  // indistinguishable from a nonexistent one, matching
+  // assertPropertyInBrokerage (lib/launch/model.ts) and
+  // assertPartyOnPropertyInBrokerage (lib/aml.ts). Without this, a party
+  // could be linked (and AML/ownership-review side effects triggered) on
+  // an arbitrary cross-brokerage property.
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, parsed.data.propertyId), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     res.status(404).json({ error: "Property not found" });
     return;
@@ -87,7 +98,7 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
     // Re-run the ownership review-not-block check now that a seller exists
     // to compare against (Build Brief §8) — see apps/api/src/lib/ownership.ts.
     await reviewOwnershipForProperty(parsed.data.propertyId).catch((err) =>
-      console.error("reviewOwnershipForProperty failed", err),
+      logger.error("review_ownership_for_property_failed", { propertyId: parsed.data.propertyId, error: err }),
     );
 
     // If Ready to List already ran for this property, a seller added
@@ -100,9 +111,9 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
         partyId: party.id,
         userId: user.id,
         brokerageId: user.brokerageId,
-      }).catch((err) => console.error("initiateAmlIfNeeded failed", err));
+      }).catch((err) => logger.error("initiate_aml_if_needed_failed", { propertyId: parsed.data.propertyId, partyId: party.id, error: err }));
       await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
-        console.error("refreshReadyToListSteps failed", err),
+        logger.error("refresh_ready_to_list_steps_failed", { propertyId: parsed.data.propertyId, error: err }),
       );
     }
   }
@@ -112,6 +123,20 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
 
 partiesRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
+  const user = req.authedUser!;
+
+  // Same tenant chokepoint as POST / above — without it this route leaks
+  // another brokerage's party PII (name/email/mobile) to any authenticated
+  // caller who guesses/enumerates a propertyId.
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId)));
+  if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
   const links = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
   const partyIds = links.map((l) => l.partyId);
   const partyRows = partyIds.length ? await db.select().from(parties).where(inArray(parties.id, partyIds)) : [];
@@ -133,11 +158,23 @@ partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
 
-  const [link] = await db.select().from(propertyParties).where(eq(propertyParties.id, linkId));
-  if (!link) {
+  // propertyParties carries no brokerageId of its own, so the lookup joins
+  // onto properties and filters by brokerageId in that same query — not a
+  // check performed after the row is loaded — mirroring
+  // retryAmlVerification/resolveAmlException in lib/aml.ts. Without this, any
+  // authenticated user could delete another brokerage's party-property link
+  // (and trigger the ownership-review/workflow-refresh side effects below on
+  // that brokerage's property) just by guessing/enumerating a linkId.
+  const [row] = await db
+    .select({ link: propertyParties })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .where(and(eq(propertyParties.id, linkId), eq(properties.brokerageId, user.brokerageId)));
+  if (!row) {
     res.status(404).json({ error: "Not found" });
     return;
   }
+  const link = row.link;
 
   await db.delete(propertyParties).where(eq(propertyParties.id, linkId));
 
@@ -151,14 +188,14 @@ partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
 
   if (link.role === "Seller") {
     await reviewOwnershipForProperty(link.propertyId).catch((err) =>
-      console.error("reviewOwnershipForProperty failed", err),
+      logger.error("review_ownership_for_property_failed", { propertyId: link.propertyId, error: err }),
     );
     if (await readyToListWorkflowExists(link.propertyId)) {
       // The seller's existing AML verification record is left in place —
       // it's history, not deleted — but the workflow steps need to reflect
       // the current seller list.
       await refreshReadyToListSteps(link.propertyId).catch((err) =>
-        console.error("refreshReadyToListSteps failed", err),
+        logger.error("refresh_ready_to_list_steps_failed", { propertyId: link.propertyId, error: err }),
       );
     }
   }

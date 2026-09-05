@@ -15,7 +15,7 @@
 // swallowed, never thrown back at the caller.
 
 import type { AiActionRequest } from "@aee/db";
-import { publishDomainEvent, newCorrelationId, type AgentEngineEasyEventType } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger, type AgentEngineEasyEventType } from "@aee/events";
 
 export async function publishAiActionEvent(
   row: AiActionRequest,
@@ -34,13 +34,19 @@ export async function publishAiActionEvent(
       brokerageId: row.brokerageId,
       agentId: null,
       source: "api:ai-action-requests",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `ai_action_request:${row.id}:${eventType}`,
       metadata: { actionKey: row.actionKey, requestId: row.id, status: row.status },
       payload,
     });
   } catch (err) {
-    console.error(`publishAiActionEvent: failed to publish ${eventType}, continuing`, err);
+    logger.error("publish_ai_action_event_failed", {
+      eventType,
+      requestId: row.id,
+      actionKey: row.actionKey,
+      brokerageId: row.brokerageId,
+      error: err,
+    });
   }
 }

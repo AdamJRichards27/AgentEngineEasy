@@ -520,7 +520,18 @@ test("duplicate delivery of a real acceptOffer()-published OFFER_ACCEPTED event 
   await approveAndActivateRuleVersion({ versionId: version.id, brokerageId, approvedByUserId: adminId });
 
   await acceptOffer({ offerId, userId: agentId, brokerageId });
-  const [event] = await db.select().from(domainEvents).where(eq(domainEvents.brokerageId, brokerageId));
+  // Filtered by eventType, not just brokerageId: acceptOffer's own execution
+  // publishes follow-on AI_ACTION_PROPOSED/AI_ACTION_EXECUTED/
+  // AUTOMATION_EXECUTION_COMPLETED events for this same brokerage as a
+  // direct consequence of the automation run this test is about to
+  // re-deliver — an unfiltered, unordered `where(brokerageId)` query can
+  // return any of those rows first depending on Postgres's physical row
+  // order, which is not guaranteed by insertion order and was observed to
+  // vary under concurrent load (see the completion report's test-evidence
+  // section). Filtering by eventType makes the intended target
+  // deterministic regardless of how many side-effect events acceptOffer's
+  // own automation run has already produced by this point.
+  const [event] = await db.select().from(domainEvents).where(and(eq(domainEvents.brokerageId, brokerageId), eq(domainEvents.eventType, "OFFER_ACCEPTED")));
   const triggeringEvent = { ...event, handlerErrors: event.handlerErrors as DomainEvent["handlerErrors"] } as DomainEvent;
 
   await assert.doesNotReject(() => handleAutomationDomainEvent(triggeringEvent));

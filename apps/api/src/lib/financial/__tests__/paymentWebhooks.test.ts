@@ -1,8 +1,8 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { eq } from "drizzle-orm";
-import { db, commissionAgreements, pcFeeAuthorities, financialPaymentRequests, financialDisputes, financialLedgerEvents } from "@aee/db";
+import { eq, and, desc } from "drizzle-orm";
+import { db, commissionAgreements, pcFeeAuthorities, financialPaymentRequests, financialDisputes, financialLedgerEvents, domainEvents } from "@aee/db";
 import {
   createBrokerageWithUsers,
   createTransactionFromListedProperty,
@@ -196,6 +196,50 @@ describe("processMandatePaymentWebhook — Paid", () => {
       .from(financialLedgerEvents)
       .where(eq(financialLedgerEvents.sourceRecordId, String(fixturePaid.paymentRequestId)));
     assert.ok(events.some((e) => e.eventType === "PC_FEE_PAID"));
+  });
+});
+
+describe("processMandatePaymentWebhook — correlationId propagation (Step 2 hardening, named proof flow \"Mock Financial status processing\")", () => {
+  test("a Paid webhook delivered over REAL HTTP publishes FINANCIAL_PAYMENT_PAID under the SAME correlationId as the webhook request itself", async () => {
+    // Deliberately goes through the actual route (routes/financialWebhooks.ts)
+    // rather than calling processMandatePaymentWebhook directly, as every
+    // other test in this file does — this is the one thing a direct call
+    // cannot prove: that emitFinancialEvent's `currentCorrelationId()`
+    // fallback (paymentWebhooks.ts never passes an explicit correlationId)
+    // correctly resolves to THIS INBOUND WEBHOOK REQUEST's own ambient
+    // context (established by middlewares/requestId.ts), not a disconnected
+    // fresh id, given the whole verify -> parse -> dedup -> apply chain runs
+    // synchronously inside the one route handler.
+    const fixture = await buildScheduledFixture("correlation-proof");
+
+    const webhookRes = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mandate-payment-signature": "sig" },
+      body: JSON.stringify({
+        providerEventId: `evt-correlation-proof-${suffix}`,
+        providerRequestRef: fixture.providerRequestRef,
+        status: "Paid",
+      }),
+    });
+    assert.equal(webhookRes.status, 200);
+    const requestCorrelationId = webhookRes.headers.get("x-correlation-id");
+    assert.ok(requestCorrelationId, "the webhook request must echo an X-Correlation-Id response header");
+    const body = (await webhookRes.json()) as { processed: boolean; paymentRequest?: { status: string } };
+    assert.equal(body.processed, true);
+    assert.equal(body.paymentRequest?.status, "PAID");
+
+    const [paidEvent] = await db
+      .select()
+      .from(domainEvents)
+      .where(and(eq(domainEvents.eventType, "FINANCIAL_PAYMENT_PAID"), eq(domainEvents.transactionId, fixture.transactionId)))
+      .orderBy(desc(domainEvents.occurredAt))
+      .limit(1);
+    assert.ok(paidEvent, "expected FINANCIAL_PAYMENT_PAID to have been published");
+    assert.equal(
+      paidEvent.correlationId,
+      requestCorrelationId,
+      "FINANCIAL_PAYMENT_PAID must carry the triggering webhook request's own correlationId — the whole inbound-webhook-processing flow is one traceable unit",
+    );
   });
 });
 

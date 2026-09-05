@@ -15,6 +15,10 @@ import { getPitCrewWorkspace, getPitCrewTeam } from "../queries.js";
 import { claimWorkItem } from "../assignment.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
+process.env.SESSION_SECRET =
+  process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
+    ? process.env.SESSION_SECRET
+    : "test-only-session-secret-not-for-real-use-0123456789";
 // devLogin() below requires ALLOW_DEV_AUTH=true. Most suites in this repo
 // set this themselves at module load (see e.g. transactionConditions.test.ts)
 // rather than relying on an ambient value that may not be set, and this

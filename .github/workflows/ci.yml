@@ -37,6 +37,18 @@ jobs:
     name: Typecheck, test, build, migration validation
     runs-on: ubuntu-latest
 
+    # Least-privilege GITHUB_TOKEN permissions (AE Step 2 closure, CI
+    # unblocking pass). This job only checks out the repository, installs
+    # dependencies, and runs local typecheck/test/build/migration commands
+    # — it never calls the GitHub API, never pushes, and never creates or
+    # updates any repository resource. `contents: read` is the only
+    # permission any step below actually uses (actions/checkout requires
+    # it to fetch the ref being tested); every other default token scope
+    # is explicitly denied by omission. No step in this job needs write
+    # access to anything, so no non-read permission is granted.
+    permissions:
+      contents: read
+
     services:
       postgres:
         image: postgres:16

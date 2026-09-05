@@ -1,6 +1,8 @@
 import { Router } from "express";
+import { authRateLimiter } from "../middlewares/rateLimit.js";
 import { authRouter } from "./auth.js";
 import { healthRouter } from "./health.js";
+import { metricsRouter } from "./metrics.js";
 import { propertiesRouter } from "./properties.js";
 import { partiesRouter } from "./parties.js";
 import { amlRouter } from "./aml.js";
@@ -30,8 +32,16 @@ import { integrationsWebhooksRouter } from "./integrationsWebhooks.js";
 
 export const apiRouter = Router();
 
-apiRouter.use("/auth", authRouter);
+// Stricter rate limit than the app-wide default (see middlewares/rateLimit.ts)
+// — sign-in/session endpoints are the highest-value target for
+// credential-stuffing / brute-force-style abuse.
+apiRouter.use("/auth", authRateLimiter, authRouter);
 apiRouter.use("/health", healthRouter);
+// Step 2 hardening — see routes/metrics.ts and lib/metricsAuth.ts. Mounted
+// under /internal (never under /health) so it's trivially distinguishable
+// in access logs and reverse-proxy rules from the public, unauthenticated
+// liveness/readiness probes above.
+apiRouter.use("/internal/metrics", metricsRouter);
 apiRouter.use("/properties", propertiesRouter);
 apiRouter.use("/parties", partiesRouter);
 apiRouter.use("/aml", amlRouter);
@@ -105,5 +115,32 @@ apiRouter.use(financialWebhooksRouter);
 // mounted separately (and NOT behind requireAuth) since a provider
 // callback carries no session cookie — same reasoning as
 // communicationsWebhooksRouter/financialWebhooksRouter.
-apiRouter.use(integrationsRouter);
+//
+// AE Step 2 closure — Part C (typed-error-handling audit): integrationsWebhooksRouter
+// MUST be mounted BEFORE integrationsRouter, unlike the communications/
+// financial pairs above. Unlike financialRouter/communicationsRouter
+// (which apply requireAuth/requireRole PER ROUTE, precisely to avoid this),
+// integrationsRouter applies its auth gate via a single unprefixed
+// `integrationsRouter.use(requireAuth, requireRole(...))` — see that
+// file's own module comment. Express dispatches routers mounted with
+// `apiRouter.use(...)` (no path) in registration order, over every request
+// that reaches apiRouter, regardless of whether that request's path
+// matches any route the router itself declares. With the previous
+// ordering (integrationsRouter mounted first), an unauthenticated inbound
+// webhook request to /integrations/webhooks/:connectionId/:provider was
+// intercepted and rejected 401 by integrationsRouter's blanket gate before
+// it ever reached integrationsWebhooksRouter — meaning this endpoint was
+// completely unreachable by its real, unauthenticated caller (a provider
+// callback carries no session cookie, by design) despite every one of
+// this router's own comments describing it as mounted outside requireAuth.
+// Confirmed via a real HTTP-level test that previously had no coverage at
+// all (routes/__tests__/integrationsWebhooks.test.ts) — every request to
+// this path returned 401 regardless of body shape, proving the route
+// handler itself never ran. Swapping the mount order below fixes this:
+// integrationsWebhooksRouter's own routes are matched and handled first,
+// so a real webhook request never reaches integrationsRouter's gate at
+// all. This does not change integrationsRouter's own behaviour for any of
+// its own /integrations/connections|dead-letters|settings|overview/...
+// paths, none of which overlap with /integrations/webhooks/....
 apiRouter.use(integrationsWebhooksRouter);
+apiRouter.use(integrationsRouter);
