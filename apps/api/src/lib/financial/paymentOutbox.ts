@@ -29,6 +29,7 @@
 // mechanics detail) changes — see events.ts.
 
 import { eq, and, lte } from "drizzle-orm";
+import { incrementCounter } from "@aee/events";
 import {
   db,
   financialPaymentRequests,
@@ -335,6 +336,12 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
 
     let updatedRequest: FinancialPaymentRequest | null = null;
     if (exhausted) {
+      // AE Step 2 closure — Part B: this outbox entry has exhausted its
+      // retry budget (attempts >= maxAttempts) and just moved to terminal
+      // FAILED above — the generalised, cross-domain version of what
+      // lib/integrations/outbox.ts's own dead-letter path already tracks
+      // as integration_dead_letter_total. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+      incrementCounter("job_repeated_failure_total", { job: "financial_payment_outbox_command" });
       const [failedRequest] = await db
         .select()
         .from(financialPaymentRequests)

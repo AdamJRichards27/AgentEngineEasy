@@ -37,7 +37,7 @@
 import { and, eq, isNotNull, lte, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db, communicationDeliveryAttempts, communicationMessages, type CommunicationMessage } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger, incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
 import {
   CommunicationConcurrencyError,
@@ -413,6 +413,12 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
   });
 
   if (!retryable) {
+    // AE Step 2 closure — Part B: a non-retryable failure or one that has
+    // exhausted maxRetries is this domain's version of the same
+    // "repeated/exhausted job failure" signal lib/integrations/outbox.ts's
+    // dead-letter path and lib/financial/paymentOutbox.ts's exhausted path
+    // already track. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+    incrementCounter("job_repeated_failure_total", { job: "communications_outbox_message" });
     await publishCommunicationEvent("COMMUNICATION_MESSAGE_FAILED", failed, null);
     return failed;
   }

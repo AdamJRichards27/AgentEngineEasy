@@ -1,4 +1,5 @@
 import rateLimit from "express-rate-limit";
+import { incrementCounter } from "@aee/events";
 
 /**
  * Same NODE_ENV==="test" carve-out already used elsewhere in this codebase
@@ -43,4 +44,13 @@ export const authRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many authentication requests, please try again later." },
+  // AE Step 2 closure — Part B: the auth surface is the highest-value
+  // target for credential-stuffing/brute-force-style abuse (this file's
+  // own module comment) — a sustained rate of hits here is exactly the
+  // auth-attack-pattern signal Part B names. See
+  // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+  handler: (_req, res, _next, options) => {
+    incrementCounter("auth_security_event_total", { event: "auth_rate_limited" });
+    res.status(options.statusCode).json(options.message);
+  },
 });

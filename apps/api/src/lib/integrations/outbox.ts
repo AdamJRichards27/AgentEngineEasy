@@ -131,6 +131,15 @@ async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutbox
     errorDetail: result.status === "FAILED" ? result.failureDetail : null,
   });
 
+  // AE Step 2 closure — Part B: a transient-provider-error classification
+  // (the adapter threw, or reported one directly) is sustained provider-side
+  // degradation, distinct from the "did this one item eventually succeed or
+  // dead-letter" outcome already tracked above/below. See
+  // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+  if (result.status === "FAILED" && result.failureCategory === "TRANSIENT_PROVIDER_ERROR") {
+    incrementCounter("integration_connection_degraded_total", { provider: resolved.connection.providerId });
+  }
+
   if (result.status === "SENT") {
     const [sent] = await db.update(integrationOutbox).set({ status: "SENT", attempts: attemptNumber, dispatchedAt: new Date(), lastError: null, updatedAt: new Date() }).where(eq(integrationOutbox.id, outboxId)).returning();
     logger.info("integration_outbox_dispatch_sent", { outboxId, attemptNumber });
@@ -194,6 +203,10 @@ async function failCommand(command: IntegrationOutboxRow, attemptNumber: number,
   logger.error("integration_outbox_dead_lettered", { outboxId: command.id, attemptNumber, reason, detail });
   incrementCounter("integration_outbox_dispatch_total", { capability: command.capability as string, outcome: "failure" });
   incrementCounter("integration_dead_letter_total", { source_type: "OUTBOX" });
+  // AE Step 2 closure — Part B: the cross-domain generalisation of the
+  // integration-specific counter just above — see
+  // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+  incrementCounter("job_repeated_failure_total", { job: "integration_outbox_command" });
   return failed;
 }
 

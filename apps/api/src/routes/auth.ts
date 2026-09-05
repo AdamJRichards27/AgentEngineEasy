@@ -6,6 +6,7 @@ import { requireAuth } from "../middlewares/auth.js";
 import { setSessionCookie, clearSessionCookie } from "../lib/session.js";
 import { logAudit } from "../lib/audit.js";
 import { isDevAuthEnabled } from "../lib/env.js";
+import { incrementCounter } from "@aee/events";
 
 export const authRouter = Router();
 
@@ -32,6 +33,7 @@ authRouter.get("/known-users", async (_req, res) => {
   // environment. Returns 404 (not 403) so a disabled environment gives
   // no signal that this route exists at all.
   if (!isDevAuthEnabled()) {
+    incrementCounter("auth_security_event_total", { event: "dev_login_disabled_attempt" });
     res.status(404).end();
     return;
   }
@@ -67,6 +69,7 @@ authRouter.post("/dev-login", async (req, res) => {
   // 404, matching /known-users above, rather than a 403 that would
   // confirm the route exists.
   if (!isDevAuthEnabled()) {
+    incrementCounter("auth_security_event_total", { event: "dev_login_disabled_attempt" });
     res.status(404).end();
     return;
   }
