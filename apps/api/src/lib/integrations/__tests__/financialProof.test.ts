@@ -29,6 +29,16 @@ import { MOCK_PAYMENT_STATUS_PROVIDER_ID } from "../adapters/mockPaymentStatus.j
 import { linkPaymentRequestToExternalReference, MappingConflictError, PAYMENT_REQUEST_SOURCE_RECORD_TYPE } from "../../financial/mockPaymentStatusSync.js";
 import { IntegrationError } from "../types.js";
 
+process.env.SESSION_SECRET =
+  process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
+    ? process.env.SESSION_SECRET
+    : "test-only-session-secret-not-for-real-use-0123456789";
+// devLogin() below requires ALLOW_DEV_AUTH=true. Most suites in this repo
+// set this themselves at module load (see e.g. transactionConditions.test.ts)
+// rather than relying on an ambient value that may not be set, and this
+// suite should too.
+process.env.ALLOW_DEV_AUTH = "true";
+
 let server: Server;
 let baseUrl: string;
 const suffix = Date.now();
