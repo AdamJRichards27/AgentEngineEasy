@@ -11,7 +11,7 @@
 import { and, eq, isNull, lte, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db, integrationOutbox, integrationOutboxAttempts, type IntegrationOutboxRow } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, runWithCorrelationId, logger, incrementCounter } from "@aee/events";
 import { resolveActiveConnection, getAdapter } from "./registry.js";
 import { writeDeadLetter, markReplayed, loadDeadLetterInBrokerage } from "./deadLetters.js";
 import { isRetryableIntegrationFailure, IntegrationError, type IntegrationCapability } from "./types.js";
@@ -46,7 +46,7 @@ export async function enqueueCommand(input: EnqueueCommandInput): Promise<Integr
         idempotencyKey: input.idempotencyKey,
         sourceRecordType: input.sourceRecordType,
         sourceRecordId: input.sourceRecordId,
-        correlationId: input.correlationId ?? newCorrelationId(),
+        correlationId: input.correlationId ?? currentCorrelationId(),
         causationId: input.causationId ?? null,
       })
       .returning();
@@ -65,16 +65,31 @@ function backoffMs(attemptNumber: number): number {
   return Math.min(MAX_BACKOFF_MS, 60_000 * 2 ** (attemptNumber - 1));
 }
 
-/** One dispatch attempt for a PENDING/RETRY_SCHEDULED command. */
+/**
+ * One dispatch attempt for a PENDING/RETRY_SCHEDULED command. Step 2
+ * hardening: re-establishes the command's OWN stored correlationId (set at
+ * enqueue time — see enqueueCommand above) as the ambient context for this
+ * entire attempt, via runWithCorrelationId. This is what makes the
+ * "Retry-to-dead-letter" and "Authorised replay" proof flows work: a
+ * command enqueued under correlationId X keeps that same X on every
+ * retry attempt and on its eventual dead-letter/replay outcome, however
+ * many attempts and however much backoff happens in between — the whole
+ * lifecycle of one command is one traceable chain, not a new disconnected
+ * id per attempt.
+ */
 export async function dispatchCommand(outboxId: string): Promise<IntegrationOutboxRow> {
   const [existing] = await db.select().from(integrationOutbox).where(eq(integrationOutbox.id, outboxId));
   if (!existing) throw new IntegrationError("NOT_FOUND", "Outbox command not found.");
   if (existing.status !== "PENDING" && existing.status !== "RETRY_SCHEDULED") {
     throw new IntegrationError("INVALID_STATUS", `Cannot dispatch a command in status ${existing.status}.`);
   }
+  return runWithCorrelationId(existing.correlationId, () => dispatchCommandInner(outboxId));
+}
 
+async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutboxRow> {
   const [dispatching] = await db.update(integrationOutbox).set({ status: "DISPATCHING", updatedAt: new Date() }).where(eq(integrationOutbox.id, outboxId)).returning();
   const attemptNumber = dispatching.attempts + 1;
+  logger.info("integration_outbox_dispatch_attempt_started", { outboxId, attemptNumber, capability: dispatching.capability, connectionId: dispatching.connectionId, brokerageId: dispatching.brokerageId });
 
   let resolved;
   try {
@@ -118,6 +133,8 @@ export async function dispatchCommand(outboxId: string): Promise<IntegrationOutb
 
   if (result.status === "SENT") {
     const [sent] = await db.update(integrationOutbox).set({ status: "SENT", attempts: attemptNumber, dispatchedAt: new Date(), lastError: null, updatedAt: new Date() }).where(eq(integrationOutbox.id, outboxId)).returning();
+    logger.info("integration_outbox_dispatch_sent", { outboxId, attemptNumber });
+    incrementCounter("integration_outbox_dispatch_total", { capability: dispatching.capability as string, outcome: "success" });
     return sent;
   }
 
@@ -128,6 +145,8 @@ export async function dispatchCommand(outboxId: string): Promise<IntegrationOutb
       .set({ status: "RETRY_SCHEDULED", attempts: attemptNumber, lastError: result.failureDetail, nextAttemptAt: new Date(Date.now() + backoffMs(attemptNumber)), updatedAt: new Date() })
       .where(eq(integrationOutbox.id, outboxId))
       .returning();
+    logger.warn("integration_outbox_retry_scheduled", { outboxId, attemptNumber, nextAttemptAt: rescheduled.nextAttemptAt, failureCategory: result.failureCategory, failureDetail: result.failureDetail });
+    incrementCounter("integration_outbox_dispatch_total", { capability: dispatching.capability as string, outcome: "retry_scheduled" });
     return rescheduled;
   }
 
@@ -158,7 +177,7 @@ async function failCommand(command: IntegrationOutboxRow, attemptNumber: number,
     actorType: "SYSTEM",
     actorId: null,
     source: "integrations:outbox",
-    correlationId: command.correlationId ?? newCorrelationId(),
+    correlationId: command.correlationId ?? currentCorrelationId(),
     causationId: command.causationId ?? null,
     // Includes attemptNumber, not just the outbox row id: a replay
     // (replayDeadLetteredCommand below) that fails again permanently calls
@@ -171,7 +190,10 @@ async function failCommand(command: IntegrationOutboxRow, attemptNumber: number,
     idempotencyKey: `INTEGRATION_COMMAND_DEAD_LETTERED:${command.id}:${attemptNumber}`,
     payload: { outboxId: command.id, connectionId: command.connectionId, capability: command.capability, reason },
     metadata: {},
-  }).catch((err) => console.error("publishDomainEvent(INTEGRATION_COMMAND_DEAD_LETTERED) failed", err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "INTEGRATION_COMMAND_DEAD_LETTERED", error: err instanceof Error ? err.message : String(err) }));
+  logger.error("integration_outbox_dead_lettered", { outboxId: command.id, attemptNumber, reason, detail });
+  incrementCounter("integration_outbox_dispatch_total", { capability: command.capability as string, outcome: "failure" });
+  incrementCounter("integration_dead_letter_total", { source_type: "OUTBOX" });
   return failed;
 }
 
@@ -190,7 +212,7 @@ export async function dispatchDueOutbox(now: Date = new Date()): Promise<{ dispa
       dispatchedCount++;
     } catch (err) {
       errorCount++;
-      console.error(`dispatchDueOutbox: failed to dispatch ${command.id}`, err);
+      logger.error("integration_outbox_dispatch_due_failed", { outboxId: command.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
   return { dispatchedCount, errorCount };
@@ -215,11 +237,21 @@ export async function replayDeadLetteredCommand(deadLetterId: string, brokerageI
   if (!reset) throw new IntegrationError("INVALID_STATUS", "The original outbox command is not currently dead-lettered.");
 
   try {
+    // dispatchCommand re-establishes reset.correlationId (== the original
+    // command's correlationId, untouched by the DEAD_LETTERED -> PENDING
+    // reset above) as the ambient context for this attempt — so this
+    // replay's dispatch, and its SENT/DEAD_LETTERED outcome, land under the
+    // exact same correlationId as the command's original enqueue and every
+    // prior attempt. See dispatchCommand's own comment.
     const result = await dispatchCommand(reset.id);
     await markReplayed(deadLetterId, actor.id, result.status === "SENT" ? "SUCCESS" : "FAILED", result.status === "SENT" ? null : result.lastError);
+    logger.info("integration_outbox_replayed", { deadLetterId, outboxId: reset.id, actorId: actor.id, outcome: result.status === "SENT" ? "SUCCESS" : "FAILED", correlationId: reset.correlationId });
+    incrementCounter("integration_replay_total", { outcome: result.status === "SENT" ? "success" : "failure" });
     return result;
   } catch (err) {
     await markReplayed(deadLetterId, actor.id, "FAILED", err instanceof Error ? err.message : "Replay threw an unexpected error.");
+    logger.error("integration_outbox_replay_failed", { deadLetterId, outboxId: reset.id, actorId: actor.id, error: err instanceof Error ? err.message : String(err), correlationId: reset.correlationId });
+    incrementCounter("integration_replay_total", { outcome: "failure" });
     throw err;
   }
 }

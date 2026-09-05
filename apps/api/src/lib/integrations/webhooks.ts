@@ -22,7 +22,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db, integrationInbox, integrationConnections, type IntegrationInboxRow, type IntegrationConnection } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger, incrementCounter } from "@aee/events";
 import { writeDeadLetter, markReplayed, loadDeadLetterInBrokerage } from "./deadLetters.js";
 import { IntegrationError, type InboundIntegrationWebhookInput, type ProcessIntegrationWebhookResult } from "./types.js";
 
@@ -71,7 +71,15 @@ export function clearWebhookEffectHandlersForTesting(): void {
 }
 
 async function publishWebhookRejectedEvent(brokerageId: number | null, provider: string, providerEventId: string, reason: string): Promise<void> {
+  logger.warn("integration_webhook_rejected", { provider, providerEventId, reason, brokerageId });
+  incrementCounter("integration_webhook_total", { outcome: "rejected" });
   if (brokerageId == null) return; // unresolvable tenant — nothing to scope the event to; the caller's own audit log is the record
+  // currentCorrelationId(): this runs synchronously inside the HTTP request
+  // that delivered the webhook (routes/integrationsWebhooks.ts, downstream
+  // of middlewares/requestId.ts's ambient context) — Step 2 hardening
+  // replaces what used to be a fresh, disconnected newCorrelationId() here
+  // with that request's own id, so a rejected/quarantined delivery can be
+  // tied back to the exact inbound HTTP call that produced it.
   await publishDomainEvent({
     eventType: "INTEGRATION_WEBHOOK_REJECTED" as any,
     occurredAt: new Date(),
@@ -83,12 +91,12 @@ async function publishWebhookRejectedEvent(brokerageId: number | null, provider:
     actorType: "SYSTEM",
     actorId: null,
     source: "integrations:webhooks",
-    correlationId: newCorrelationId(),
+    correlationId: currentCorrelationId(),
     causationId: null,
     idempotencyKey: `INTEGRATION_WEBHOOK_REJECTED:${provider}:${providerEventId}`,
     payload: { provider, providerEventId, reason },
     metadata: {},
-  }).catch((err) => console.error("publishDomainEvent(INTEGRATION_WEBHOOK_REJECTED) failed", err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "INTEGRATION_WEBHOOK_REJECTED", error: err instanceof Error ? err.message : String(err) }));
 }
 
 /**
@@ -184,6 +192,8 @@ export async function processInboundWebhook(input: InboundIntegrationWebhookInpu
     }
     const effect = await handler({ connection, inboxRow: event });
     await db.update(integrationInbox).set({ processedAt: new Date(), processingStatus: "PROCESSED", relatedOutboxId: effect.relatedOutboxId ?? null }).where(eq(integrationInbox.id, event.id));
+    logger.info("integration_webhook_processed", { provider: input.provider, eventType: input.eventType, inboxId: event.id, connectionId: connection.id, brokerageId: connection.brokerageId });
+    incrementCounter("integration_webhook_total", { outcome: "processed" });
     return { status: "PROCESSED", inboxId: event.id, detail: effect.summary };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error processing webhook.";
@@ -196,6 +206,9 @@ export async function processInboundWebhook(input: InboundIntegrationWebhookInpu
       reason: message,
       payloadSnapshot: { provider: input.provider, eventType: input.eventType, payload: input.payload },
     });
+    logger.error("integration_webhook_dead_lettered", { provider: input.provider, eventType: input.eventType, inboxId: event.id, connectionId: connection.id, brokerageId: connection.brokerageId, reason: message });
+    incrementCounter("integration_webhook_total", { outcome: "failed" });
+    incrementCounter("integration_dead_letter_total", { source_type: "INBOX" });
     return { status: "FAILED", inboxId: event.id, detail: message };
   }
 }
@@ -220,10 +233,20 @@ export async function replayDeadLetteredWebhook(deadLetterId: string, brokerageI
     const effect = await handler({ connection, inboxRow });
     await db.update(integrationInbox).set({ processedAt: new Date(), processingStatus: "PROCESSED", processingError: null, relatedOutboxId: effect.relatedOutboxId ?? null }).where(eq(integrationInbox.id, inboxRow.id));
     await markReplayed(deadLetterId, actor.id, "SUCCESS", null);
+    // currentCorrelationId() here is the REPLAY request's own id (this
+    // function runs inside the admin's HTTP request to trigger a replay,
+    // under the same requestId ambient context) — deliberately distinct
+    // from the original inboxRow delivery's id, since integration_inbox has
+    // no persisted correlationId column to re-establish that original chain
+    // from (see docs/OBSERVABILITY_STANDARD.md's known-limitations note).
+    logger.info("integration_webhook_replayed", { deadLetterId, inboxId: inboxRow.id, actorId: actor.id, outcome: "SUCCESS", correlationId: currentCorrelationId() });
+    incrementCounter("integration_replay_total", { outcome: "success" });
     return { result: { status: "PROCESSED", inboxId: inboxRow.id, detail: effect.summary } };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Replay threw an unexpected error.";
     await markReplayed(deadLetterId, actor.id, "FAILED", message);
+    logger.error("integration_webhook_replay_failed", { deadLetterId, inboxId: inboxRow.id, actorId: actor.id, error: message, correlationId: currentCorrelationId() });
+    incrementCounter("integration_replay_total", { outcome: "failure" });
     throw err;
   }
 }
