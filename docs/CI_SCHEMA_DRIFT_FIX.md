@@ -91,7 +91,7 @@ diff against, confirmed empirically (see verification below), so
 intermediate snapshots are not required for `generate` to work correctly
 going forward.
 
-## Verification performed
+## Verification performed (locally — see "Why this fix is not yet on the branch" below for why it isn't pushed)
 
 1. `pnpm --filter @aee/db exec drizzle-kit generate` against the
    existing long-lived local test database, after the journal/snapshot
@@ -114,11 +114,78 @@ going forward.
    freshly-migrated database as a spot check that nothing about a
    from-scratch database (as opposed to the long-lived local one) changes
    application behavior. 56/56 passed.
-4. After pushing this fix, an actual green CI run was confirmed via
-   GitHub's own Actions UI before this pass's final decision was written —
-   see the completion report and PR description for the run number and
-   result. This fix is not claimed as successful anywhere in this pass's
-   documentation without that confirmation.
+
+## Why this fix is not yet on the branch
+
+This closure pass tried to push the fix and hit two independent, confirmed
+blockers — so it is documented here, fully verified, rather than landed
+and claimed:
+
+1. **`.github/workflows/ci.yml` cannot be modified by this integration.**
+   A direct attempt via `push_files` to update it (to add the
+   `permissions:` block and the two reconciled steps described in that
+   file's own header comment, which this pass drafted) returned
+   `403 Resource not accessible by integration`. An isolated test — the
+   same push mechanism, same branch, a different, non-workflow path —
+   succeeded immediately, isolating the cause to GitHub's own
+   `workflow` OAuth/App permission scope specifically, which this
+   integration does not hold. This is a distinct permission from the
+   `checks`/`statuses` read-scope gap this pass found earlier (see the
+   "What was observed" section above) — that one blocked *reading* CI
+   results via the API (worked around via a direct browser check); this
+   one blocks *writing* to `.github/workflows/**` by any means available
+   in this session, with no workaround available. Note that this gap does
+   **not** block the actual root-cause fix below, since that fix touches
+   only `packages/db/migrations/meta/`, not the workflow file.
+2. **The accompanying `meta/0011_snapshot.json` (421,545 bytes) could not
+   be transmitted intact.** A first attempt (a dedicated subagent, four
+   tries) produced corrupted or fabricated JSON rather than the real
+   content and was caught before being left on the branch (see below).
+   This was then independently reproduced and confirmed directly: asked to
+   reproduce a *much smaller* 53KB / 2,000-line slice of the same file
+   verbatim into a new file, only 468 of the 2,000 lines (23%) were
+   actually reproduced before the output truncated itself early —
+   confirmed by a direct `diff` against the source. This is a genuine
+   limitation of reproducing large exact-byte content through this
+   session's tool-call interface, not a one-off mistake by a careless
+   attempt or a fixable process error — no chunking strategy avoids it,
+   because every method available here (`push_files`,
+   `create_or_update_file`) requires the complete final file content to be
+   supplied in a single call, and a valid drizzle-kit snapshot for an
+   89-table schema cannot be made meaningfully smaller than this one already
+   is (snapshots are full-state, not diffs).
+
+**What was actually pushed, and what was safely reverted:** the first
+attempt above landed a corrupted placeholder `0011_snapshot.json` and a
+`meta/_journal.json` that referenced it. Both were caught immediately
+after being pushed (before any CI run reflected them) and reverted in two
+follow-up commits: the placeholder file was deleted, and `_journal.json`
+was restored to its exact prior 9-entry (idx 0–8) content — the same
+state this fix started from. The branch is left exactly as it would be
+if this fix had never been attempted; `docs/CI_SCHEMA_DRIFT_FIX.md` (this
+file) is the only trace, by design, so the next person (human or agent)
+with real `git push` access has the diagnosis, the verified fix, and the
+exact reason it couldn't be applied through this session's tools —
+without also having to untangle a half-applied state first.
+
+**To actually apply this fix:** from a real local clone with normal git
+push access, run `pnpm --filter @aee/db exec drizzle-kit generate` against
+the current `packages/db/src/schema` (it will reproduce the same
+0009/0010/0011 journal-entry gap described above and generate a correct
+`meta/0011_snapshot.json`), commit `packages/db/migrations/meta/` (only —
+no `.sql` file changes are expected), and push. Separately, a repo
+maintainer with `.github/workflows/**` write access should apply the
+`permissions:` block and the two reconciled steps this pass drafted: a
+top-level `permissions:\n  contents: read` block; a non-blocking
+`pnpm audit --audit-level=high || true` step (`continue-on-error: true`,
+since Part F below documents two currently-unfixable advisories a
+blocking gate would turn into a permanent failure); and a dependency-free
+`grep`-based hardcoded-credential pattern scan step (excluding
+`__tests__`, since this repo's own redaction test fixtures deliberately
+contain fake PEM-shaped strings). See
+`docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md` and
+`docs/TYPED_ERROR_HANDLING_AUDIT.md` for this pass's own precedent for
+disclosing a lost/reconstructed list in the same spirit.
 
 ## What this fix did not do
 
