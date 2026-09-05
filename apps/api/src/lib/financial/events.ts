@@ -18,7 +18,7 @@
 // state transition, all of which have ALREADY been committed to the
 // database by the time this is called (publish-after-persist, rule 1).
 
-import { publishDomainEvent, newCorrelationId, type AgentEngineEasyEventType } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, type AgentEngineEasyEventType } from "@aee/events";
 
 export interface EmitFinancialEventInput {
   eventType: AgentEngineEasyEventType;
@@ -47,7 +47,7 @@ export async function emitFinancialEvent(input: EmitFinancialEventInput): Promis
       brokerageId: input.brokerageId,
       agentId: input.agentId ?? null,
       source: input.source,
-      correlationId: input.correlationId ?? newCorrelationId(),
+      correlationId: input.correlationId ?? currentCorrelationId(),
       causationId: null,
       idempotencyKey: input.idempotencyKey ?? null,
       metadata: {},

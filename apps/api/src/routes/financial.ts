@@ -40,6 +40,7 @@
 
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { currentCorrelationId } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { db, users } from "@aee/db";
 import { eq, and } from "drizzle-orm";
@@ -483,7 +484,14 @@ financialRouter.post("/financial/payment-requests/:id/schedule-debit", ...requir
   const existing = await getPaymentRequest(Number(req.params.id), user.brokerageId);
   if (!existing) return void res.status(404).json({ error: "Not found" });
   try {
-    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: existing.id });
+    // Step 2 hardening: without this, paymentOutbox.ts's stored
+    // correlationId was always null (nothing upstream ever passed one),
+    // so dispatchOutboxEntry's later background sweep re-established a
+    // fresh, disconnected id per attempt instead of continuing this
+    // request's chain — same bug class as communications/outbox.ts's
+    // dispatch gap, fixed the same way: capture it once, at the point the
+    // outbox row is created, and store it on the row.
+    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: existing.id, correlationId: currentCorrelationId() });
     res.json(result);
   } catch (err) {
     if (!handlePlainError(err, res)) throw err;
