@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   incrementCounter,
   observeHistogram,
+  setGauge,
   renderMetricsText,
   resetMetricsForTesting,
   httpStatusClass,
@@ -128,5 +129,79 @@ test("every metric's label value sets are non-empty (a metric declared with no a
     for (const [label, allowed] of Object.entries(def.labels)) {
       assert.ok(allowed.length > 0, `${name}.${label} must declare at least one allowed value`);
     }
+  }
+});
+
+// AE Step 2 closure — Part B: gauge support (setGauge) and the new
+// webhook-router / critical-metric-gap definitions added alongside it.
+
+test("setGauge throws for a metric not declared as a gauge — it must not silently coerce a counter/histogram into overwrite semantics", () => {
+  assert.throws(() => setGauge("http_requests_total" as never, 5, { method: "GET", status_class: "2xx" }), /is not declared in GAUGE_METRICS/);
+});
+
+test("setGauge OVERWRITES the series value rather than accumulating it — the defining difference from incrementCounter", () => {
+  setGauge("queue_backlog_size", 12, { queue: "integration_outbox" });
+  setGauge("queue_backlog_size", 3, { queue: "integration_outbox" });
+  const text = renderMetricsText();
+  assert.match(text, /queue_backlog_size\{queue="integration_outbox"\} 3/);
+  assert.doesNotMatch(text, /queue_backlog_size\{queue="integration_outbox"\} 12/);
+});
+
+test("setGauge keeps distinct label combinations as separate series, like a counter does", () => {
+  setGauge("queue_backlog_size", 7, { queue: "integration_outbox" });
+  setGauge("queue_backlog_size", 40, { queue: "financial_payment_outbox" });
+  const text = renderMetricsText();
+  assert.match(text, /queue_backlog_size\{queue="integration_outbox"\} 7/);
+  assert.match(text, /queue_backlog_size\{queue="financial_payment_outbox"\} 40/);
+});
+
+test("setGauge throws on a label value outside the declared set, same fail-fast contract as incrementCounter/observeHistogram", () => {
+  assert.throws(() => setGauge("queue_backlog_size", 1, { queue: "not_a_real_queue" }), /not in the declared allowed set/);
+});
+
+test("renderMetricsText marks a gauge metric's TYPE as 'gauge', distinct from 'counter' and 'summary'", () => {
+  const text = renderMetricsText();
+  assert.match(text, /# TYPE queue_backlog_size gauge/);
+  assert.match(text, /# TYPE queue_oldest_item_age_ms gauge/);
+  assert.match(text, /# TYPE unresolved_critical_risk_gauge gauge/);
+});
+
+test("resetMetricsForTesting also clears gauge series", () => {
+  setGauge("queue_backlog_size", 99, { queue: "integration_outbox" });
+  resetMetricsForTesting();
+  const text = renderMetricsText();
+  assert.doesNotMatch(text, /queue_backlog_size\{/);
+});
+
+test("communications_webhook_total and financial_webhook_total accept the full shared WEBHOOK_ROUTER_OUTCOMES funnel vocabulary", () => {
+  for (const outcome of METRIC_DEFINITIONS.communications_webhook_total.labels.outcome) {
+    assert.doesNotThrow(() => incrementCounter("communications_webhook_total", { outcome }));
+  }
+  for (const outcome of METRIC_DEFINITIONS.financial_webhook_total.labels.outcome) {
+    assert.doesNotThrow(() => incrementCounter("financial_webhook_total", { outcome }));
+  }
+});
+
+test("auth_security_event_total, tenant_isolation_rejection_total, ai_action_decision_total, workflow_execution_failure_total, job_repeated_failure_total, and integration_connection_degraded_total all accept their full declared label sets without throwing", () => {
+  for (const event of METRIC_DEFINITIONS.auth_security_event_total.labels.event) {
+    assert.doesNotThrow(() => incrementCounter("auth_security_event_total", { event }));
+  }
+  for (const boundary of METRIC_DEFINITIONS.tenant_isolation_rejection_total.labels.boundary) {
+    assert.doesNotThrow(() => incrementCounter("tenant_isolation_rejection_total", { boundary }));
+  }
+  for (const outcome of METRIC_DEFINITIONS.ai_action_decision_total.labels.outcome) {
+    assert.doesNotThrow(() => incrementCounter("ai_action_decision_total", { outcome }));
+  }
+  for (const workflow of METRIC_DEFINITIONS.workflow_execution_failure_total.labels.workflow) {
+    assert.doesNotThrow(() => incrementCounter("workflow_execution_failure_total", { workflow }));
+  }
+  for (const job of METRIC_DEFINITIONS.job_repeated_failure_total.labels.job) {
+    assert.doesNotThrow(() => incrementCounter("job_repeated_failure_total", { job }));
+  }
+  for (const provider of METRIC_DEFINITIONS.integration_connection_degraded_total.labels.provider) {
+    assert.doesNotThrow(() => incrementCounter("integration_connection_degraded_total", { provider }));
+  }
+  for (const source of METRIC_DEFINITIONS.financial_reconciliation_variance_total.labels.source) {
+    assert.doesNotThrow(() => incrementCounter("financial_reconciliation_variance_total", { source }));
   }
 });

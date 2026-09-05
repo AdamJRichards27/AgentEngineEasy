@@ -39,6 +39,15 @@ const OUTCOME = ["success", "failure"] as const;
 const INTEGRATION_CAPABILITIES = ["portal.publishListing", "portal.updateListingStatus", "comms.sendSms", "payments.statusSync", "other"] as const;
 const WEBHOOK_OUTCOMES = ["processed", "rejected", "duplicate", "failed"] as const;
 const READINESS_STATUS = ["ok", "degraded", "unavailable"] as const;
+// AE Step 2 closure — Part B: the funnel every inbound domain-webhook HTTP
+// router (communications, financial) is tracked through. "received"/
+// "accepted" are non-terminal funnel counters (every request that reaches
+// the handler, then every request that clears signature+schema
+// validation); the rest are terminal outcomes. Deliberately just ONE
+// bounded label — never a providerEventId, brokerageId, phone/email, or
+// raw provider error string — so this can never become a cardinality or
+// PII leak no matter how many distinct providers/tenants send webhooks.
+const WEBHOOK_ROUTER_OUTCOMES = ["received", "accepted", "invalid_signature", "schema_rejected", "replay_rejected", "success", "failure"] as const;
 
 /** The authoritative, bounded-cardinality metric catalogue for this process. Adding a new metric means adding an entry here with its full label-value sets — never adding a recordCounter/observeHistogram call for a name that isn't declared. */
 export const METRIC_DEFINITIONS = {
@@ -77,6 +86,70 @@ export const METRIC_DEFINITIONS = {
   domain_event_publish_total: {
     help: "Domain events published, by dispatch outcome.",
     labels: { outcome: ["ok", "partial_failure"] },
+  },
+  communications_webhook_total: {
+    help: "Inbound communications provider webhook requests at the HTTP router boundary (routes/communicationsWebhooks.ts), by outcome.",
+    labels: { outcome: WEBHOOK_ROUTER_OUTCOMES },
+  },
+  communications_webhook_duration_ms: {
+    help: "Inbound communications provider webhook request handling duration in milliseconds, by terminal outcome.",
+    labels: { outcome: WEBHOOK_ROUTER_OUTCOMES },
+  },
+  financial_webhook_total: {
+    help: "Inbound financial mandate-payment provider webhook requests at the HTTP router boundary (routes/financialWebhooks.ts), by outcome.",
+    labels: { outcome: WEBHOOK_ROUTER_OUTCOMES },
+  },
+  financial_webhook_duration_ms: {
+    help: "Inbound financial mandate-payment provider webhook request handling duration in milliseconds, by terminal outcome.",
+    labels: { outcome: WEBHOOK_ROUTER_OUTCOMES },
+  },
+  // AE Step 2 closure — Part B critical metric gaps. Every label set below
+  // is as small and non-identifying as the existing catalogue above —
+  // never a userId/brokerageId/email/correlationId. See
+  // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md for the SLI/alert definition that goes
+  // with each of these (this process has no deployed Prometheus/Grafana —
+  // the alert rules are documented as the design contract a real
+  // Alertmanager/Grafana deployment would consume, not wired to a live
+  // alerting backend that doesn't exist in this build).
+  auth_security_event_total: {
+    help: "Security-relevant authentication events (never successful logins) — a proxy for credential-stuffing / session-replay / dev-auth-probing attack patterns.",
+    labels: { event: ["invalid_session_token", "revoked_session_reused", "dev_login_disabled_attempt", "auth_rate_limited"] },
+  },
+  tenant_isolation_rejection_total: {
+    help: "A request or lookup was rejected because the resolved record belongs to a different brokerage than the caller's — every occurrence is a cross-tenant access attempt, whether malicious or a stale/incorrect id.",
+    labels: { boundary: ["property", "party", "transaction", "financial", "communications", "integrations", "pit_crew", "other"] },
+  },
+  queue_backlog_size: {
+    help: "Current count of not-yet-dispatched items in a background processing queue, sampled at read time.",
+    labels: { queue: ["integration_outbox", "financial_payment_outbox", "communications_outbox"] },
+  },
+  queue_oldest_item_age_ms: {
+    help: "Age in milliseconds of the oldest not-yet-dispatched item in a background processing queue, sampled at read time.",
+    labels: { queue: ["integration_outbox", "financial_payment_outbox", "communications_outbox"] },
+  },
+  job_repeated_failure_total: {
+    help: "A background job/command exhausted its retry budget and was dead-lettered (a repeated, non-transient failure) — see integration_dead_letter_total for the integration-specific version this generalises.",
+    labels: { job: ["integration_outbox_command", "financial_payment_outbox_command", "communications_outbox_message"] },
+  },
+  ai_action_decision_total: {
+    help: "AI action policy decisions, by allow/deny outcome — a sustained shift toward denied is a signal of either a misconfigured entitlement or an AI attempting actions outside its granted scope.",
+    labels: { outcome: ["allowed", "denied"] },
+  },
+  workflow_execution_failure_total: {
+    help: "A workflow step or automation-engine rule execution failed (threw or could not complete), by workflow family.",
+    labels: { workflow: ["ready_to_list", "automation_rule", "launch_plan", "other"] },
+  },
+  unresolved_critical_risk_gauge: {
+    help: "Current count of OPEN risk_exceptions rows at CRITICAL severity, sampled at read time — the Exception & Risk Engine's own definition of a critical unresolved risk.",
+    labels: { status: ["open"] },
+  },
+  integration_connection_degraded_total: {
+    help: "An integration connection's health check or dispatch path reported degraded/unavailable provider behaviour (distinct from a single failed webhook/outbox item — this tracks sustained provider-side degradation).",
+    labels: { provider: ["mock_portal_v1", "mock_sms_v1", "mock_payment_status_v1", "other"] },
+  },
+  financial_reconciliation_variance_total: {
+    help: "A financial_reconciliations row was recorded with status VARIANCE — reported evidence (e.g. a mock payment-status webhook) disagrees with the payment request's expected amount/currency and needs human review (see FIN05_RECONCILIATION_VARIANCE_UNRESOLVED).",
+    labels: { source: ["mock_integration_payment_status", "other"] },
   },
 } as const satisfies Record<string, MetricDefinition>;
 
@@ -119,9 +192,18 @@ function sanitiseLabels(metric: MetricName, labels: LabelValues): LabelValues {
 
 interface CounterSeries { value: number; labels: LabelValues }
 interface HistogramSeries { count: number; sum: number; labels: LabelValues }
+interface GaugeSeries { value: number; labels: LabelValues }
 
 const counters = new Map<string, CounterSeries>();
 const histograms = new Map<string, HistogramSeries>();
+const gauges = new Map<string, GaugeSeries>();
+
+// Explicit shape classification — deliberately NOT inferred from the
+// metric's name (a suffix-guessing scheme silently misclassifies the next
+// metric someone adds with an unexpected name). A metric not listed in
+// either set below is a counter, the default and most common shape.
+const HISTOGRAM_METRICS = new Set<MetricName>(["http_request_duration_ms", "health_check_duration_ms", "communications_webhook_duration_ms", "financial_webhook_duration_ms"]);
+const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge"]);
 
 export function incrementCounter(metric: MetricName, labels: LabelValues = {}, by = 1): void {
   const safeLabels = sanitiseLabels(metric, labels);
@@ -129,6 +211,16 @@ export function incrementCounter(metric: MetricName, labels: LabelValues = {}, b
   const existing = counters.get(key);
   if (existing) existing.value += by;
   else counters.set(key, { value: by, labels: safeLabels });
+}
+
+/** Overwrites (never accumulates) a gauge's current sampled value — for a metric in GAUGE_METRICS only (e.g. a queue depth or an open-risk-count sampled at read time), where the caller re-derives the true current value each time rather than tracking a running total. */
+export function setGauge(metric: MetricName, value: number, labels: LabelValues = {}): void {
+  if (!GAUGE_METRICS.has(metric)) {
+    throw new Error(`metrics: setGauge() called for "${metric}", which is not declared in GAUGE_METRICS — use incrementCounter or observeHistogram instead, or add it to GAUGE_METRICS if it's genuinely a sampled current value.`);
+  }
+  const safeLabels = sanitiseLabels(metric, labels);
+  const key = seriesKey(metric, safeLabels);
+  gauges.set(key, { value, labels: safeLabels });
 }
 
 export function observeHistogram(metric: MetricName, valueMs: number, labels: LabelValues = {}): void {
@@ -147,15 +239,23 @@ export function observeHistogram(metric: MetricName, valueMs: number, labels: La
 export function renderMetricsText(): string {
   const lines: string[] = [];
   for (const [name, def] of Object.entries(METRIC_DEFINITIONS)) {
-    const isHistogram = name.endsWith("_duration_ms");
+    const metricName = name as MetricName;
+    const isHistogram = HISTOGRAM_METRICS.has(metricName);
+    const isGauge = GAUGE_METRICS.has(metricName);
     lines.push(`# HELP ${name} ${def.help}`);
-    lines.push(`# TYPE ${name} ${isHistogram ? "summary" : "counter"}`);
+    lines.push(`# TYPE ${name} ${isHistogram ? "summary" : isGauge ? "gauge" : "counter"}`);
     if (isHistogram) {
       for (const [key, series] of histograms) {
         if (!key.startsWith(`${name}{`)) continue;
         const labelStr = Object.entries(series.labels).map(([k, v]) => `${k}="${v}"`).join(",");
         lines.push(`${name}_count{${labelStr}} ${series.count}`);
         lines.push(`${name}_sum{${labelStr}} ${series.sum}`);
+      }
+    } else if (isGauge) {
+      for (const [key, series] of gauges) {
+        if (!key.startsWith(`${name}{`)) continue;
+        const labelStr = Object.entries(series.labels).map(([k, v]) => `${k}="${v}"`).join(",");
+        lines.push(`${name}{${labelStr}} ${series.value}`);
       }
     } else {
       for (const [key, series] of counters) {
@@ -172,6 +272,7 @@ export function renderMetricsText(): string {
 export function resetMetricsForTesting(): void {
   counters.clear();
   histograms.clear();
+  gauges.clear();
   warnedOnce.clear();
 }
 
