@@ -34,7 +34,7 @@ import {
   type LaunchPlanTransition,
   type Property,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { resolveDefaultOwner } from "../exceptions/rules/shared.js";
 import { goLiveProperty } from "../goLive.js";
@@ -88,7 +88,7 @@ async function emit(
       actorType: actor ? "USER" : "SYSTEM",
       actorId: actor ? actor.id : null,
       source,
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey,
       payload,
@@ -966,5 +966,3 @@ export async function getLaunchPlanTransitions(launchPlanId: string, brokerageId
   await loadLaunchPlanInBrokerage(launchPlanId, brokerageId);
   return db.select().from(launchPlanTransitions).where(eq(launchPlanTransitions.launchPlanId, launchPlanId)).orderBy(asc(launchPlanTransitions.occurredAt));
 }
-
-export { newCorrelationId };
