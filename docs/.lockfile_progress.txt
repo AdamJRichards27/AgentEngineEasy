@@ -1,1 +1,0 @@
-in progress: pnpm-lock.yaml committed through ~line 800 of 3084 as of commit 56ef86a78a9b902d009d7c195ea66605ce95c540. Continuing with lines 801-2000 next, then 2001-3084 to finish. Source of truth: /home/claude/work/AgentEngineEasy/pnpm-lock.yaml (sha256 7ffca27affb7777093bb3bd0aaf125a3fa486d7169a8492c0604ab724d40a476).
