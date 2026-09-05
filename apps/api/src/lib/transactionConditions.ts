@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db, transactionConditions, transactions, properties } from "@aee/db";
 import type { TransactionCondition, Transaction, ContractConditionStatus } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 // Stage E — Contract & Conditions (Agent Engine 2.0 — Run Transaction
@@ -179,7 +179,7 @@ export async function recordExchange(input: { transactionId: number; userId: num
       actorType: "USER",
       actorId: input.userId,
       source: "api:transactions:exchange",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `contract-exchanged:${transaction.id}`,
       payload: { transactionId: transaction.id },
@@ -253,7 +253,7 @@ export async function maybeRecordUnconditional(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:transactions:unconditional",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `transaction-unconditional:${transaction.id}`,
       payload: { transactionId: transaction.id },

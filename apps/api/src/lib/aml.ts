@@ -1,7 +1,7 @@
 import { eq, and } from "drizzle-orm";
 import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
 import type { AmlVerification, Party } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 
@@ -157,7 +157,7 @@ export async function initiateAmlIfNeeded(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:aml:initiate",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `aml-requested:${verification.id}`,
       payload: { verificationId: verification.id, providerReference, serviceOrderId: serviceOrder.id },
@@ -266,7 +266,7 @@ export async function processAmlWebhook(
       actorType: "INTEGRATION",
       actorId: null,
       source: `webhook:aml:${updated.provider}`,
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `aml-completed:${updated.id}:${newStatus}`,
       payload: { verificationId: updated.id, outcome: result.outcome, riskLevel: result.riskLevel ?? null, reviewRequired: result.reviewRequired },

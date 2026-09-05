@@ -15,7 +15,7 @@
 // swallowed, never thrown back at the caller.
 
 import type { AiActionRequest } from "@aee/db";
-import { publishDomainEvent, newCorrelationId, type AgentEngineEasyEventType } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, type AgentEngineEasyEventType } from "@aee/events";
 
 export async function publishAiActionEvent(
   row: AiActionRequest,
@@ -34,7 +34,7 @@ export async function publishAiActionEvent(
       brokerageId: row.brokerageId,
       agentId: null,
       source: "api:ai-action-requests",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `ai_action_request:${row.id}:${eventType}`,
       metadata: { actionKey: row.actionKey, requestId: row.id, status: row.status },

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, appraisals, properties } from "@aee/db";
 import type { Appraisal } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 /**
@@ -62,7 +62,7 @@ export async function getOrCreateAppraisal(input: {
       actorType: "USER",
       actorId: input.userId,
       source: "api:appraisals:create",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `appraisal-created:${appraisal.id}`,
       payload: { appraisalId: appraisal.id },
@@ -159,7 +159,7 @@ export async function finaliseAppraisal(input: { propertyId: number; userId: num
       actorType: "USER",
       actorId: input.userId,
       source: "api:appraisals:finalise",
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `appraisal-completed:${existing.id}`,
       payload: { appraisalId: existing.id, priceRangeLow: existing.priceRangeLow, priceRangeHigh: existing.priceRangeHigh },
