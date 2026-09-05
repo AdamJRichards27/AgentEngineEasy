@@ -27,6 +27,10 @@ import { db, users, communicationMessages, communicationWebhookEvents } from "@a
 import { dispatchMessage } from "../../lib/communications/outbox.js";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
+process.env.SESSION_SECRET =
+  process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
+    ? process.env.SESSION_SECRET
+    : "test-only-session-secret-not-for-real-use-0123456789";
 // devLogin() below requires ALLOW_DEV_AUTH=true. Most suites in this repo
 // set this themselves at module load (see e.g. transactionConditions.test.ts)
 // rather than relying on an ambient value that may not be set, and this
