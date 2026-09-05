@@ -14,7 +14,7 @@ import {
   automationTasks,
 } from "@aee/db";
 import type { Transaction, Offer } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
 import { initiateAmlIfNeeded } from "./aml.js";
@@ -227,7 +227,13 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(OFFER_ACCEPTED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "OFFER_ACCEPTED",
+      propertyId: outcome.propertyId,
+      transactionId: outcome.transaction.id,
+      partyId: outcome.offer.buyerPartyId,
+      error: err,
+    });
   }
 
   return { offer: outcome.offer, transaction: outcome.transaction, created: true };
@@ -271,7 +277,12 @@ async function publishTransactionEvent(
       metadata: {},
     });
   } catch (err) {
-    console.error(`publishDomainEvent(${eventType}) failed`, err);
+    logger.error("publish_domain_event_failed", {
+      eventType,
+      propertyId: transaction.propertyId,
+      transactionId: transaction.id,
+      error: err,
+    });
   }
 }
 
@@ -306,7 +317,7 @@ export async function recordContractSigned(input: {
     try {
       await initiateAmlIfNeeded({ propertyId: updated.propertyId, partyId, userId: input.userId, brokerageId: input.brokerageId });
     } catch (err) {
-      console.error(`initiateAmlIfNeeded failed for buyer party ${partyId}`, err);
+      logger.error("initiate_aml_if_needed_failed", { propertyId: updated.propertyId, partyId, error: err });
     }
   }
 
@@ -506,7 +517,7 @@ export async function completeSettlement(input: {
   try {
     return await calculateCommission({ transactionId: transaction.id, userId: input.userId, brokerageId: input.brokerageId });
   } catch (err) {
-    console.error("calculateCommission after settlement failed", err);
+    logger.error("calculate_commission_after_settlement_failed", { transactionId: transaction.id, propertyId: transaction.propertyId, error: err });
     return updated;
   }
 }
