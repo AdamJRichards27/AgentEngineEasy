@@ -21,7 +21,7 @@ findings, resolving to 4 distinct advisories across 2 packages:
 | high | xlsx | Prototype Pollution in SheetJS ([GHSA-4r6h-8v6p-xvw6](https://github.com/advisories/GHSA-4r6h-8v6p-xvw6)) | <0.19.3 | **none published** | `apps/api` direct dependency, `xlsx@0.18.5` |
 | high | xlsx | SheetJS ReDoS ([GHSA-5pgg-2g8v-p4x9](https://github.com/advisories/GHSA-5pgg-2g8v-p4x9)) | <0.20.2 | **none published** | `apps/api` direct dependency, `xlsx@0.18.5` |
 | moderate | esbuild | Dev-server allows any site to read/send requests ([GHSA-67mh-4wv8-2f99](https://github.com/advisories/GHSA-67mh-4wv8-2f99)) | ≤0.24.2 | ≥0.25.0 | Transitive, entirely inside `packages/db > drizzle-kit@0.30.6`'s own dependency tree (two separate paths through it) |
-| low | esbuild | Dev-server arbitrary file read on Windows | ≥0.27.3 <0.28.1 | ≥0.28.1 | `apps/api`'s own direct devDependency (`esbuild@0.27.7`), and transitively via `apps/web`'s `vite`/`@vitejs/plugin-react` |
+| low | esbuild | Dev-server path traversal / arbitrary file read on Windows ([GHSA-g7r4-m6w7-qqqr](https://github.com/advisories/GHSA-g7r4-m6w7-qqqr)) | ≥0.27.3 <0.28.1 | ≥0.28.1 | `apps/api`'s own direct devDependency (`esbuild@0.27.7`), and transitively via `apps/web`'s `vite`/`@vitejs/plugin-react` |
 
 ## What was fixed (verified locally; see "Why this isn't pushed" below)
 
@@ -46,11 +46,11 @@ This was verified, not just attempted:
 
 This is a devDependency-only, build-tool-only change. `esbuild` is never
 part of the runtime bundle it produces (`--packages=external` in
-`apps/api`'s own build script), and the specific vulnerability (arbitrary
-file read via esbuild's *development* server, on Windows) does not apply
-to how this repository actually invokes esbuild (`esbuild ... --outfile=...`,
-a one-shot build command — not `esbuild serve`) — so this fix is genuinely
-low-risk on top of being narrow in scope.
+`apps/api`'s own build script), and the specific vulnerability (path
+traversal via esbuild's *development* server, Windows-only) does not
+apply to how this repository actually invokes esbuild (`esbuild ...
+--outfile=...`, a one-shot build command — not `esbuild serve`) — so this
+fix is genuinely low-risk on top of being narrow in scope.
 
 ## What was not fixed, and why (PENDING HUMAN RISK ACCEPTANCE)
 
