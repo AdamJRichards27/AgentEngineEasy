@@ -37,7 +37,7 @@
 import { and, eq, isNotNull, lte, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db, communicationDeliveryAttempts, communicationMessages, type CommunicationMessage } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import {
   CommunicationConcurrencyError,
@@ -120,8 +120,15 @@ export async function applyMessageTransition(input: ApplyMessageTransitionInput)
   return row;
 }
 
-/** A same-status patch (no transition) with the same optimistic-concurrency guarantee — used to push scheduledAt out for a quiet-hours deferral. */
-async function patchQueuedSchedule(messageId: number, brokerageId: number, expectedVersion: number, scheduledAt: Date): Promise<CommunicationMessage> {
+/**
+ * A same-status patch (no transition) with the same optimistic-concurrency
+ * guarantee — used to push scheduledAt out for a quiet-hours deferral.
+ * Exported (AE Step 5 remediation, Proof B) so commsProof.ts's integration-
+ * backed send path can defer past quiet hours using the exact same
+ * primitive this file's own evaluateAndDispatchQueuedMessage uses, rather
+ * than a second copy of the same raw update.
+ */
+export async function patchQueuedSchedule(messageId: number, brokerageId: number, expectedVersion: number, scheduledAt: Date): Promise<CommunicationMessage> {
   const [row] = await db
     .update(communicationMessages)
     .set({ scheduledAt, version: expectedVersion + 1, updatedAt: new Date() })
@@ -149,7 +156,7 @@ async function publishCommunicationEvent(eventType: CommunicationOutboxEventType
     actorType: actorUserId ? "USER" : "SYSTEM",
     actorId: actorUserId,
     source: "communications:outbox",
-    correlationId: message.correlationId ?? newCorrelationId(),
+    correlationId: message.correlationId ?? currentCorrelationId(),
     causationId: message.causationId ?? null,
     idempotencyKey: `${eventType}:${message.id}:${message.version}`,
     payload: {
@@ -161,7 +168,7 @@ async function publishCommunicationEvent(eventType: CommunicationOutboxEventType
       failureCategory: message.failureCategory,
     },
     metadata: {},
-  }).catch((err) => console.error(`publishDomainEvent(${eventType}) failed`, err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType, messageId: message.id, error: err instanceof Error ? err.message : String(err) }));
 }
 
 export interface QueueMessageResult {
@@ -452,7 +459,7 @@ export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dis
       dispatchedCount++;
     } catch (err) {
       errorCount++;
-      console.error(`dispatchDueMessages: failed to dispatch communication message ${message.id}`, err);
+      logger.error("communications_dispatch_due_failed", { messageId: message.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
   return { dispatchedCount, errorCount };
