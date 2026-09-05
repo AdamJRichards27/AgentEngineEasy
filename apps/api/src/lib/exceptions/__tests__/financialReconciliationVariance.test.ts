@@ -18,11 +18,12 @@
 // to backfill coverage for FIN01-04, which pre-date this step and are out of
 // its scope.
 
-import { test, before, after } from "node:test";
+import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
 import { db, financialPaymentRequests, financialReconciliations, riskExceptions } from "@aee/db";
+import { resetMetricsForTesting, renderMetricsText } from "@aee/events";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 import { bootstrapIntegrationsForTesting, createActiveMockPaymentStatusConnection } from "../../integrations/__tests__/testHelpers.js";
 import { processInboundWebhook } from "../../integrations/webhooks.js";
@@ -105,6 +106,10 @@ async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL"): Promise<
   throw new Error("runScheduledScan did not succeed after retries — another scan kept the lock held throughout");
 }
 
+beforeEach(() => {
+  resetMetricsForTesting();
+});
+
 async function findFin05Exception(brokerageId: number, paymentRequestId: number) {
   const rows = await db
     .select()
@@ -137,6 +142,12 @@ test("FIN05: an amount-mismatch VARIANCE from a real mock payment-status webhook
     signatureValid: true,
   });
   assert.equal(mismatched.status, "PROCESSED");
+
+  // AE Step 2 closure — Part B named critical gap: financial reconciliation
+  // mismatch. The VARIANCE evidence just recorded above, over the real
+  // inbound webhook path (not a bare model-function call), must have
+  // incremented financial_reconciliation_variance_total exactly once.
+  assert.match(renderMetricsText(), /financial_reconciliation_variance_total\{source="mock_integration_payment_status"\} 1/);
 
   // --- VARIANCE evidence -> FIN05 opens a real risk exception on the next scan. ---
   await scanOrRetry();
@@ -173,6 +184,10 @@ test("FIN05: an amount-mismatch VARIANCE from a real mock payment-status webhook
     signatureValid: true,
   });
   assert.equal(matched.status, "PROCESSED");
+
+  // A correctly-matching event must NOT increment the variance counter —
+  // still exactly the one occurrence recorded above.
+  assert.match(renderMetricsText(), /financial_reconciliation_variance_total\{source="mock_integration_payment_status"\} 1/);
 
   await scanOrRetry();
   const resolved = await findFin05Exception(A.brokerageId, request.id);

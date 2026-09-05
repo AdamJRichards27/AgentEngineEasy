@@ -19,7 +19,7 @@
 //
 // Money-movement boundary (explicit, load-bearing): this file imports
 // nothing from lib/financial/paymentOutbox.ts, paymentWebhooks.ts,
-// provider.ts, or @aee/integration-mandate-payments. It cannot schedule,
+// provider.ts, or @aee/integration-mandate-payments — it cannot schedule,
 // submit, retry, or reverse a debit. It only ever reads a
 // financialPaymentRequests row (to validate against) and writes
 // financial_reconciliations + financial_ledger_events rows (evidence/audit).
@@ -45,6 +45,7 @@ import {
 } from "@aee/db";
 import { logAudit } from "../audit.js";
 import { recordMapping, resolveByExternalId, MappingConflictError } from "../integrations/mapping.js";
+import { incrementCounter } from "@aee/events";
 
 export const PAYMENT_REQUEST_SOURCE_RECORD_TYPE = "financial_payment_request";
 export const MOCK_PAYMENT_STATUS_RECONCILIATION_SOURCE = "mock_integration_payment_status";
@@ -224,6 +225,14 @@ export async function applyMockPaymentStatusEvent(brokerageId: number, event: Mo
         : `Mock payment-status event (${event.providerStatus}) reported ${event.amountCents} ${event.currency}, but this payment request expects ${request.amountCents} ${request.currency}. Requires manual review.`,
     })
     .returning();
+
+  if (!matched) {
+    // AE Step 2 closure — Part B named critical gap: financial reconciliation
+    // mismatch. This is the one and only place a VARIANCE reconciliation row
+    // is recorded (this file's own header comment) — see
+    // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+    incrementCounter("financial_reconciliation_variance_total", { source: MOCK_PAYMENT_STATUS_RECONCILIATION_SOURCE });
+  }
 
   await recordLedgerEvent({
     brokerageId,
