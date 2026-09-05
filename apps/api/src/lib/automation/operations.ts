@@ -27,7 +27,7 @@ import {
   type AutomationExecution,
   type AutomationAction,
 } from "@aee/db";
-import { publishDomainEvent } from "@aee/events";
+import { publishDomainEvent, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { setAutomationRuleStatus } from "./rules.js";
 
@@ -487,7 +487,7 @@ export async function getAutomationHealth(staleThresholdMs = DEFAULT_STALE_RUNNI
     const degraded = checks.staleRunningActions > 0 || checks.retryBacklog > 10 || checks.approvalBacklog > 25;
     return { healthy: true, degraded, checks };
   } catch (err) {
-    console.error("getAutomationHealth: database unreachable", err);
+    logger.error("get_automation_health_database_unreachable", { error: err });
     return {
       healthy: false,
       degraded: true,
@@ -564,6 +564,11 @@ async function publishOpsEvent(
       payload: {},
     });
   } catch (err) {
-    console.error(`automation ops: failed to publish ${eventType}, continuing`, err);
+    logger.error("automation_ops_publish_domain_event_failed", {
+      eventType,
+      executionId: execution.id,
+      brokerageId: execution.brokerageId,
+      error: err,
+    });
   }
 }

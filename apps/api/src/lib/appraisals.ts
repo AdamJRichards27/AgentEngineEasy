@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, appraisals, properties } from "@aee/db";
 import type { Appraisal } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 /**
@@ -69,7 +69,12 @@ export async function getOrCreateAppraisal(input: {
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(APPRAISAL_CREATED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "APPRAISAL_CREATED",
+      propertyId: input.propertyId,
+      appraisalId: appraisal.id,
+      error: err,
+    });
   }
 
   return { appraisal, created: true };
@@ -166,7 +171,12 @@ export async function finaliseAppraisal(input: { propertyId: number; userId: num
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(APPRAISAL_COMPLETED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "APPRAISAL_COMPLETED",
+      propertyId: input.propertyId,
+      appraisalId: existing.id,
+      error: err,
+    });
   }
 
   return updated;

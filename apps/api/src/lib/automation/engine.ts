@@ -64,7 +64,7 @@ import {
   type AutomationExecution,
   type AutomationAction,
 } from "@aee/db";
-import { publishDomainEvent, type DomainEvent } from "@aee/events";
+import { publishDomainEvent, logger, type DomainEvent } from "@aee/events";
 import { getActionDefinition } from "../ai/actions/registry.js";
 import { proposeAIAction } from "../ai/actionRequests.js";
 import { executeAIAction } from "../ai/executionGateway.js";
@@ -162,7 +162,14 @@ export async function handleAutomationDomainEvent(event: DomainEvent): Promise<v
         // packages/events/src/registry.ts's dispatchToHandlers already
         // applies between handlers, reproduced here between rules within
         // this one handler.
-        console.error(`automation engine: rule ${rule.id} version ${version.id} threw during evaluation`, err);
+        logger.error("automation_rule_evaluation_threw", {
+          ruleId: rule.id,
+          ruleVersionId: version.id,
+          eventId: event.id,
+          eventType: event.eventType,
+          brokerageId: event.brokerageId,
+          error: err,
+        });
       }
     }
     await markReceiptProcessed(claim.receiptId);
@@ -204,7 +211,12 @@ async function publishAutomationEvent(
       payload: {},
     });
   } catch (err) {
-    console.error(`automation engine: failed to publish ${eventType}, continuing`, err);
+    logger.error("automation_publish_domain_event_failed", {
+      eventType,
+      triggeringEventId: triggeringEvent.id,
+      brokerageId: triggeringEvent.brokerageId,
+      error: err,
+    });
   }
 }
 
