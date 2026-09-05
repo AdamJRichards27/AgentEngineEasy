@@ -15,6 +15,7 @@
 // Engine scheduler picks it up on its own next scan; Communications does
 // not run a second copy of that machinery.
 
+import { logger } from "@aee/events";
 import { dispatchDueMessages } from "./outbox.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
@@ -27,7 +28,7 @@ export function registerCommunicationsEngine(): void {
   registered = true;
 
   intervalHandle = setInterval(() => {
-    dispatchDueMessages().catch((err) => console.error("Communications outbox sweep failed", err));
+    dispatchDueMessages().catch((err) => logger.error("communications_outbox_sweep_failed", { error: err instanceof Error ? err.message : String(err) }));
   }, SWEEP_INTERVAL_MS);
   intervalHandle.unref();
 }

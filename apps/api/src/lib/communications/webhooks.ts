@@ -24,7 +24,7 @@ import {
   type CommunicationWebhookEvent,
   type CommunicationMessage,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { applyMessageTransition } from "./outbox.js";
 import { recordConsent, normalizeDestination } from "./consent.js";
 
@@ -175,7 +175,7 @@ async function publishCommunicationMessageEvent(
     actorType: "SYSTEM",
     actorId: null,
     source: "communications:webhooks",
-    correlationId: message.correlationId ?? newCorrelationId(),
+    correlationId: message.correlationId ?? currentCorrelationId(),
     causationId: message.causationId ?? null,
     idempotencyKey: `${eventType}:${message.id}:${message.version}`,
     payload: {
@@ -187,7 +187,7 @@ async function publishCommunicationMessageEvent(
       failureCategory: message.failureCategory,
     },
     metadata: {},
-  }).catch((err) => console.error(`publishDomainEvent(${eventType}) failed`, err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType, messageId: message.id, error: err instanceof Error ? err.message : String(err) }));
 }
 
 /**
@@ -207,7 +207,7 @@ async function publishInboundMessageReceivedEvent(input: InboundWebhookInput): P
     actorType: "SYSTEM",
     actorId: null,
     source: "communications:webhooks",
-    correlationId: newCorrelationId(),
+    correlationId: currentCorrelationId(),
     causationId: null,
     idempotencyKey: `COMMUNICATION_MESSAGE_RECEIVED:${input.provider}:${input.providerEventId}`,
     payload: {
@@ -217,7 +217,7 @@ async function publishInboundMessageReceivedEvent(input: InboundWebhookInput): P
       destinationChannel: input.destinationChannel ?? null,
     },
     metadata: {},
-  }).catch((err) => console.error("publishDomainEvent(COMMUNICATION_MESSAGE_RECEIVED) failed", err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "COMMUNICATION_MESSAGE_RECEIVED", provider: input.provider, error: err instanceof Error ? err.message : String(err) }));
 }
 
 /** Tenant-safe lookup: only ever matches a message that already belongs to the webhook's own (URL-resolved) brokerage. */

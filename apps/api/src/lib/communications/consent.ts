@@ -18,7 +18,7 @@
 
 import { and, eq } from "drizzle-orm";
 import { db, communicationConsent, type CommunicationConsent } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { getOrCreateCommunicationSettings } from "./settings.js";
 import type { CommunicationChannel, CommunicationClassification } from "./types.js";
@@ -136,12 +136,12 @@ export async function recordConsent(input: RecordConsentInput): Promise<Communic
     actorType: input.source === "WEBHOOK_REPLY_STOP" ? "SYSTEM" : "USER",
     actorId: input.recordedByUserId ?? null,
     source: `communications:consent:${input.source.toLowerCase()}`,
-    correlationId: newCorrelationId(),
+    correlationId: currentCorrelationId(),
     causationId: null,
     idempotencyKey: null,
     payload: { consentId: row.id, channel: row.channel, marketingOptIn: row.marketingOptIn, transactionalOptOut: row.transactionalOptOut },
     metadata: {},
-  }).catch((err) => console.error("publishDomainEvent(COMMUNICATION_CONSENT_UPDATED) failed", err));
+  }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "COMMUNICATION_CONSENT_UPDATED", consentId: row.id, error: err instanceof Error ? err.message : String(err) }));
 
   return row;
 }
