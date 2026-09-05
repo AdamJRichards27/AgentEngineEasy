@@ -1,5 +1,6 @@
 run = "pnpm install && (pnpm run dev:api &) && bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
 entrypoint = "apps/api/src/index.ts"
+modules = ["nodejs-24"]
 
 [env]
 PORT = "8080"
