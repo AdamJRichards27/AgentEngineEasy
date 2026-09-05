@@ -9,6 +9,7 @@
 // which moves between them are legal.
 
 import type { IntegrationConnectionStatus } from "@aee/db";
+import { incrementCounter } from "@aee/events";
 
 export interface ActorRef {
   id: number;
@@ -34,6 +35,16 @@ export class IntegrationError extends Error {
     super(message);
     this.name = "IntegrationError";
     this.reason = reason;
+    // AE Step 2 closure — Part B: every NOT_FOUND/TENANT_MISMATCH throw
+    // site in this domain resolves a record scoped to the caller's
+    // brokerageId and — like every other domain in this app — treats
+    // "doesn't exist" and "belongs to another tenant" identically (never a
+    // hint which case it was). Incrementing here, at the one constructor
+    // every throw site shares, covers the whole domain without touching
+    // each call site individually. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
+    if (reason === "NOT_FOUND" || reason === "TENANT_MISMATCH") {
+      incrementCounter("tenant_isolation_rejection_total", { boundary: "integrations" });
+    }
   }
 }
 

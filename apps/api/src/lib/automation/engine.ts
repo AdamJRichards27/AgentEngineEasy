@@ -64,7 +64,7 @@ import {
   type AutomationExecution,
   type AutomationAction,
 } from "@aee/db";
-import { publishDomainEvent, logger, type DomainEvent } from "@aee/events";
+import { publishDomainEvent, logger, incrementCounter, type DomainEvent } from "@aee/events";
 import { getActionDefinition } from "../ai/actions/registry.js";
 import { proposeAIAction } from "../ai/actionRequests.js";
 import { executeAIAction } from "../ai/executionGateway.js";
@@ -170,6 +170,7 @@ export async function handleAutomationDomainEvent(event: DomainEvent): Promise<v
           brokerageId: event.brokerageId,
           error: err,
         });
+        incrementCounter("workflow_execution_failure_total", { workflow: "automation_rule" });
       }
     }
     await markReceiptProcessed(claim.receiptId);

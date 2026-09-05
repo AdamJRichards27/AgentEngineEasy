@@ -13,6 +13,7 @@
 
 import { eq, and } from "drizzle-orm";
 import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
+import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { isValidPitCrewTransition, type PitCrewItemStatus } from "./types.js";
 
@@ -30,10 +31,15 @@ export class PitCrewConcurrencyError extends Error {
   }
 }
 
+// AE Step 2 closure — Part B: incrementing tenant_isolation_rejection_total
+// at the shared constructor these two error classes' throw sites all use
+// (rather than at each individual call site) — see
+// docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
 export class PitCrewPropertyMismatchError extends Error {
   constructor(message = "Property not found in this brokerage.") {
     super(message);
     this.name = "PitCrewPropertyMismatchError";
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
   }
 }
 
@@ -46,6 +52,7 @@ export class PitCrewAssigneeMismatchError extends Error {
   constructor(message = "Assignee not found in this brokerage.") {
     super(message);
     this.name = "PitCrewAssigneeMismatchError";
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
   }
 }
 
