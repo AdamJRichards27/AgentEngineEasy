@@ -594,7 +594,24 @@ export async function exportRejectedRecordsCsv(importJobId: number, brokerageId:
     .where(and(eq(importRecords.importJobId, importJobId), eq(importRecords.status, "error")))
     .orderBy(asc(importRecords.sourceRowNumber));
 
-  const csvEscape = (value: string): string => (/[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+  // AE Step 2 closure — Part E (static analysis). A CSV cell whose value
+  // starts with =, +, -, @, a tab, or a carriage return is interpreted as
+  // a formula by Excel/Sheets/LibreOffice when this file is opened, not
+  // as plain text — the classic "CSV/formula injection" class. `headers`
+  // (arbitrary user-supplied import column names) and every `raw[h]` cell
+  // value both originate from an uploaded import file this route lets an
+  // agent re-download, so both need the same OWASP-recommended mitigation:
+  // prefix a leading `'` on any value starting with one of those
+  // characters, which every mainstream spreadsheet application renders as
+  // a literal leading quote / forces text interpretation, before this
+  // function's own pre-existing comma/quote/newline quoting is applied.
+  const FORMULA_INJECTION_PREFIX_PATTERN = /^[=+\-@\t\r]/;
+  const neutralizeFormulaInjection = (value: string): string =>
+    FORMULA_INJECTION_PREFIX_PATTERN.test(value) ? `'${value}` : value;
+  const csvEscape = (value: string): string => {
+    const neutralized = neutralizeFormulaInjection(value);
+    return /[",\n]/.test(neutralized) ? `"${neutralized.replace(/"/g, '""')}"` : neutralized;
+  };
 
   const headerSet = new Set<string>();
   for (const r of rows) Object.keys((r.rawData as Record<string, string>) ?? {}).forEach((h) => headerSet.add(h));

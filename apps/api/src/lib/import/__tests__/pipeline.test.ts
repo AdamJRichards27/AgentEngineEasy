@@ -371,6 +371,50 @@ test("rejects unidentifiable rows and surfaces them through the rejected-rows CS
   }
 });
 
+// AE Step 2 closure -- Part E (static analysis). exportRejectedRecordsCsv
+// preserves an uploaded row's original values verbatim so an agent can fix
+// and re-upload them -- which, before this pass, meant a cell value
+// starting with =, +, -, or @ would round-trip straight into the exported
+// CSV unmodified, and be interpreted as a formula (not plain text) by
+// Excel/Sheets/LibreOffice when that file is opened. This is the standard
+// "CSV/formula injection" class: an uploaded import file is exactly the
+// kind of file an external, untrusted party (a vendor, a buyer, anyone
+// whose data an agent imports on their behalf) can shape. Confirms the
+// fix: any such value is now re-emitted with a leading `'`, which every
+// mainstream spreadsheet application treats as forcing plain-text
+// interpretation, instead of being passed through unmodified.
+test("neutralises formula-injection-shaped values in the rejected-rows CSV export", async () => {
+  const brokerage = await makeBrokerage("Import Test - CSV formula injection");
+  const user = await makeUser(brokerage.id, "csv-injection");
+  try {
+    const csv = toCsv([
+      {
+        "First Name": "",
+        "Last Name": "",
+        Email: "",
+        Mobile: "",
+        "Property Address": "=1+1",
+        "Relationship Type": "Owner",
+      },
+    ]);
+    const { job } = await createImportJobFromFile(brokerage.id, user.id, csvFile(csv));
+    const validation = await runMappingAndValidation(job.id, brokerage.id, MAPPING);
+    assert.equal(validation.rejectedRows, 1);
+
+    const rejectedCsv = await exportRejectedRecordsCsv(job.id, brokerage.id);
+    assert.ok(
+      rejectedCsv.includes("'=1+1"),
+      "a formula-shaped cell value must be re-emitted with a neutralising leading quote",
+    );
+    assert.ok(
+      !/(?<!')=1\+1/.test(rejectedCsv),
+      "the raw, un-neutralised formula-shaped value must never appear in the export",
+    );
+  } finally {
+    await cleanupBrokerage(brokerage.id);
+  }
+});
+
 test("keeps warning-level rows importable -- an unrecognised relationship type and an invalid email do not block the row", async () => {
   const brokerage = await makeBrokerage("Import Test - warnings");
   const user = await makeUser(brokerage.id, "warnings");
