@@ -64,6 +64,27 @@
       "when": 1788288196348,
       "tag": "0008_striped_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788288197348,
+      "tag": "0009_tired_warbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788288198348,
+      "tag": "0010_integration_and_data_exchange_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788288199348,
+      "tag": "0011_session_epoch_revocation",
+      "breakpoints": true
     }
   ]
 }
