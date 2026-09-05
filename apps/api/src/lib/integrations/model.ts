@@ -22,7 +22,7 @@ import {
   type IntegrationConnection,
   type IntegrationConnectionStatus,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, newCorrelationId, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { getAdapter, getProvider } from "./registry.js";
 import { IntegrationError, isValidConnectionTransition, type ActorRef, type IntegrationCapability } from "./types.js";
@@ -66,7 +66,7 @@ async function emit(eventType: string, connection: IntegrationConnection, actor:
       metadata: {},
     });
   } catch (err) {
-    console.error(`publishDomainEvent(${eventType}) failed`, err);
+    logger.error("publish_domain_event_failed", { eventType, connectionId: connection.id, brokerageId: connection.brokerageId, error: err });
   }
 }
 
