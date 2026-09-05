@@ -385,8 +385,8 @@ Every item this step's instruction would treat as release-blocking on its own �
 cross-tenant (IDOR) exposure — remains fixed and verified (§4/§5); this is **not**
 `BLOCKED — TENANT ISOLATION FAILURE`. Parts B (metrics), C (typed-error-handling audit), E
 (static analysis + live dynamic checks, plus a real CSV-injection fix), and G (full
-regression verification) are complete, pushed, and independently verified this pass (§6–
-§8, §10). Part F's dependency re-audit produced one genuinely safe, fully-verified fix and a
+regression verification) are complete, pushed, and independently verified this pass (§6–§8,
+§10). Part F's dependency re-audit produced one genuinely safe, fully-verified fix and a
 proper risk-acceptance record for what remains (§9) — no risk was self-accepted.
 
 What forces this decision label is Part D. This pass tried, for the first time, to actually
