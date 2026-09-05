@@ -12,8 +12,10 @@
 
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { getSecretIdentifierForSigning } from "../lib/integrations/credentials.js";
 import { verifyWebhookSignature, processInboundWebhook, MAX_WEBHOOK_PAYLOAD_BYTES } from "../lib/integrations/webhooks.js";
+import { IntegrationError } from "../lib/integrations/types.js";
 
 export const integrationsWebhooksRouter = Router();
 
@@ -38,10 +40,25 @@ integrationsWebhooksRouter.post("/integrations/webhooks/:connectionId/:provider"
     return;
   }
 
-  const secret = await getSecretIdentifierForSigning(connectionId);
-  const signatureValid = secret != null && verifyWebhookSignature({ rawBody, signatureHeader: req.header("x-integration-signature"), secret });
-
   try {
+    // AE Step 2 closure — Part C (typed-error-handling audit): this
+    // signature/secret lookup used to sit OUTSIDE this try block, awaited
+    // directly in the async handler with nothing catching a rejection.
+    // connectionId comes straight from the URL path with no format
+    // pre-check, and both this lookup and processInboundWebhook's own
+    // first query compare it against a `uuid` column — a non-UUID-shaped
+    // connectionId (trivially sent by any caller, since this route is
+    // deliberately unauthenticated) makes Postgres throw
+    // "invalid input syntax for type uuid", and with nothing to catch
+    // that rejection, the request hung forever: the exact same bug class
+    // this closure pass already found and fixed once in
+    // routes/financialWebhooks.ts's parseWebhook() call. Moving this
+    // inside the try block closes it here too — proven by
+    // routes/__tests__/integrationsWebhooks.test.ts's non-UUID-connectionId
+    // test, which hung indefinitely against the pre-fix code.
+    const secret = await getSecretIdentifierForSigning(connectionId);
+    const signatureValid = secret != null && verifyWebhookSignature({ rawBody, signatureHeader: req.header("x-integration-signature"), secret });
+
     const result = await processInboundWebhook({
       connectionId,
       provider,
@@ -57,9 +74,26 @@ integrationsWebhooksRouter.post("/integrations/webhooks/:connectionId/:provider"
     // regardless (Section 6).
     res.status(200).json({ status: result.status, detail: result.detail });
   } catch (err) {
-    // NOT_FOUND (unknown connectionId) and VALIDATION (oversized payload)
-    // are the only throws processInboundWebhook makes before recording
-    // anything — safe to answer with a real error status for those.
-    res.status(400).json({ error: err instanceof Error ? err.message : "Webhook processing failed." });
+    // AE Step 2 closure — Part C (typed-error-handling audit): this
+    // previously logged nothing and returned ANY caught Error's own
+    // `.message` to the (unauthenticated, provider-facing) caller — safe
+    // for the two documented, deliberate IntegrationError throws
+    // (NOT_FOUND for an unknown connectionId, VALIDATION for an oversized
+    // payload), but processInboundWebhook also has at least one plain
+    // `throw new Error(...)` defensive assertion (lib/integrations/
+    // webhooks.ts, the "Failed to record inbound integration webhook
+    // event" race-condition guard) that isn't an IntegrationError, and any
+    // future unanticipated throw in that function would have leaked its
+    // raw message here too, to a caller this route doesn't even
+    // authenticate. Now: full detail always logged server-side (redacted,
+    // like every other structured log line); only a recognised
+    // IntegrationError's own deliberately-safe message is echoed back —
+    // everything else gets a generic message instead.
+    logger.error("integration_webhook_route_failed", { error: err });
+    if (err instanceof IntegrationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: "Webhook processing failed." });
   }
 });
