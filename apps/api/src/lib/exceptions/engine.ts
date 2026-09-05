@@ -32,9 +32,9 @@
 
 import { and, desc, eq, gt, inArray } from "drizzle-orm";
 import { db, riskExceptions, riskExceptionScanRuns, brokerages, type RiskException } from "@aee/db";
-import { registerHandler, type DomainEvent, type AgentEngineEasyEventType } from "@aee/events";
+import { registerHandler, runWithCorrelationId, logger, incrementCounter, type DomainEvent, type AgentEngineEasyEventType } from "@aee/events";
 import { RISK_RULES, getRulesForEventType, type RiskRule } from "./registry.js";
-import { createOrUpdateException, autoResolveException, recordEvaluationFailure, newCorrelationId } from "./model.js";
+import { createOrUpdateException, autoResolveException, recordEvaluationFailure, currentCorrelationId } from "./model.js";
 import { OPEN_RISK_EXCEPTION_STATUSES, type RiskFinding } from "./types.js";
 
 // ---------------------------------------------------------------------
@@ -55,6 +55,7 @@ export async function handleExceptionDomainEvent(event: DomainEvent): Promise<vo
   if (!event.brokerageId) return; // no canonical event today omits it, but nothing enforces that at the type level — fail closed rather than guess
   const rules = getRulesForEventType(event.eventType);
   if (rules.length === 0) return;
+  incrementCounter("exceptions_scan_total", { trigger: "EVENT_DRIVEN" });
 
   const now = new Date();
   for (const rule of rules) {
@@ -67,7 +68,7 @@ export async function handleExceptionDomainEvent(event: DomainEvent): Promise<vo
       // applies between handlers, reproduced here between rules within
       // this one handler (mirrors automation/engine.ts's own per-rule
       // try/catch for the identical reason).
-      console.error(`exception engine: rule ${rule.ruleId} threw during event-driven scan (event ${event.id})`, err);
+      logger.error("exceptions_rule_threw_event_driven", { ruleId: rule.ruleId, eventId: event.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }
@@ -183,10 +184,16 @@ export async function runScheduledScan(trigger: "SCHEDULED" | "MANUAL" = "SCHEDU
   return { ok: true, summary };
 }
 
-/** One brokerage, every rule, plus auto-resolution — see the module comment for the full contract. */
+/** One brokerage, every rule, plus auto-resolution — see the module comment for the full contract. Runs under its own fresh ambient correlation context (Step 2 hardening) — this is a time-driven sweep with no originating HTTP request, so every finding/event this brokerage's pass produces gets ONE consistent id, and any log lines emitted underneath (including by rule.scanBrokerage implementations) automatically carry it via @aee/events's currentCorrelationId()/logger, without this function needing to pass it down explicitly. */
 async function scanBrokerageForExceptions(brokerageId: number, summary: ScanSummary): Promise<void> {
+  return runWithCorrelationId(currentCorrelationId(), () => scanBrokerageForExceptionsInner(brokerageId, summary));
+}
+
+async function scanBrokerageForExceptionsInner(brokerageId: number, summary: ScanSummary): Promise<void> {
   const now = new Date();
-  const correlationId = newCorrelationId();
+  const correlationId = currentCorrelationId();
+  logger.debug("exceptions_scan_brokerage_started", { brokerageId });
+  incrementCounter("exceptions_scan_total", { trigger: "SCHEDULED" });
 
   const openRows = await db
     .select()
@@ -209,9 +216,9 @@ async function scanBrokerageForExceptions(brokerageId: number, summary: ScanSumm
     } catch (err) {
       summary.errors += 1;
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`exception engine: rule ${rule.ruleId} threw during scheduled scan for brokerage ${brokerageId}`, err);
+      logger.error("exceptions_rule_threw_scheduled_scan", { ruleId: rule.ruleId, brokerageId, error: message });
       for (const exception of openForRule) {
-        await recordEvaluationFailure(exception.id, brokerageId, message).catch((e) => console.error("exception engine: recordEvaluationFailure itself failed", e));
+        await recordEvaluationFailure(exception.id, brokerageId, message).catch((e) => logger.error("exceptions_record_evaluation_failure_failed", { exceptionId: exception.id, brokerageId, error: e instanceof Error ? e.message : String(e) }));
       }
       continue; // absence of evidence from a failed evaluation is never treated as proof the condition cleared
     }

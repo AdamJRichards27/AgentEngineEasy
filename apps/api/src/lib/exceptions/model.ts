@@ -22,7 +22,7 @@ import {
   properties,
   type RiskException,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, newCorrelationId, currentCorrelationId } from "@aee/events";
 import { logAudit } from "../audit.js";
 import {
   RISK_EXCEPTION_METADATA_ALLOW_LIST,
@@ -595,4 +595,4 @@ export async function assertPropertyInBrokerage(propertyId: number, brokerageId:
   if (!property) throw new RiskExceptionError("NOT_FOUND", `Property ${propertyId} not found`);
 }
 
-export { newCorrelationId };
+export { newCorrelationId, currentCorrelationId };

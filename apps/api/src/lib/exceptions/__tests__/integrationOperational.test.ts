@@ -26,8 +26,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { and, eq } from "drizzle-orm";
-import { db, integrationOutbox, integrationOutboxAttempts, riskExceptions } from "@aee/db";
+import { and, eq, desc } from "drizzle-orm";
+import { db, integrationOutbox, integrationOutboxAttempts, riskExceptions, domainEvents } from "@aee/db";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 import { bootstrapIntegrationsForTesting, createActiveMockSmsConnection } from "../../integrations/__tests__/testHelpers.js";
 import { enqueueCommand, dispatchCommand, mintIdempotencyKey, replayDeadLetteredCommand } from "../../integrations/outbox.js";
@@ -166,6 +166,28 @@ test("Proof D: dead-lettered integration command creates a risk exception at AT_
   const attemptsAfterDeadLetter = await db.select().from(integrationOutboxAttempts).where(eq(integrationOutboxAttempts.outboxId, command.id));
   assert.equal(attemptsAfterDeadLetter.length, 5, "every dispatch attempt, including the ones that failed, is preserved in the attempt history");
 
+  // --- Named proof flow "Retry-to-dead-letter": one correlationId across
+  // every attempt and the dead-letter event itself. dispatchCommand
+  // re-establishes the command's OWN stored correlationId (captured once,
+  // at enqueue) around every dispatch attempt (outbox.ts line ~86), so
+  // this is not merely "the same DB row never changes its own column" —
+  // it is proof that the DOMAIN EVENT published on dead-letter (a
+  // genuinely separate write, from inside that re-established context)
+  // carries the identical value, not one freshly minted mid-flow.
+  assert.ok(command.correlationId, "the enqueued command must have a correlationId");
+  const [deadLetterEvent] = await db
+    .select()
+    .from(domainEvents)
+    .where(and(eq(domainEvents.eventType, "INTEGRATION_COMMAND_DEAD_LETTERED"), eq(domainEvents.brokerageId, A.brokerageId)))
+    .orderBy(desc(domainEvents.occurredAt))
+    .limit(1);
+  assert.ok(deadLetterEvent, "expected INTEGRATION_COMMAND_DEAD_LETTERED to have been published");
+  assert.equal(
+    deadLetterEvent.correlationId,
+    command.correlationId,
+    "the dead-letter domain event must carry the SAME correlationId the command was originally enqueued under, proving the retry-to-dead-letter chain is one traceable unit, not five+one disconnected ids",
+  );
+
   // --- Dead-letter -> risk exception, no premature CRITICAL. ---
   await scanOrRetry();
   const opened = await findH01Exception(A.brokerageId, command.id);
@@ -214,6 +236,20 @@ test("Proof D: dead-lettered integration command creates a risk exception at AT_
 
   const attemptsAfterReplay = await db.select().from(integrationOutboxAttempts).where(eq(integrationOutboxAttempts.outboxId, command.id));
   assert.equal(attemptsAfterReplay.length, 6, "the recovery attempt is appended to history — the 5 prior failures are never erased or overwritten");
+
+  // --- Named proof flow "Authorised replay": the recovered command still
+  // carries the SAME correlationId it was originally enqueued under (and
+  // that the dead-letter event above was proven to carry), five attempts,
+  // one dead-letter, and one authorised replay later — replayDeadLetteredCommand
+  // resets DEAD_LETTERED -> PENDING and calls dispatchCommand exactly as
+  // above, which re-establishes reset.correlationId (== command.correlationId)
+  // around the recovery attempt rather than letting it default to a fresh
+  // ambient id. ---
+  assert.equal(
+    replayed.correlationId,
+    command.correlationId,
+    "an authorised replay must continue the original command's correlation chain, not start an unrelated one",
+  );
 
   // --- Next sweep: the command is no longer DEAD_LETTERED, so H01's
   // scanBrokerage no longer reports it -> authoritative evidence the
