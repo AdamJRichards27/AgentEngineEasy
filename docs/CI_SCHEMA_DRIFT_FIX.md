@@ -1,5 +1,144 @@
 # CI schema-drift fix — Agent Engine 2.0, Step 2 closure (Part D)
 
+## Update (CI Unblocking and Final Merge-Readiness pass)
+
+This pass re-diagnosed the failure directly from a live run rather than
+relying on the record above, and the fix below **supersedes** the
+"meta/0011_snapshot.json" approach described earlier in this document —
+same root cause, same underlying schema content, a cleaner and more fully
+tool-verified fix.
+
+### Fresh CI evidence (this pass)
+
+Workflow `CI`, run **#127** (run ID `33976931377`, job ID `101335170875`),
+triggered by this PR's own most recent commit,
+`ba9d86980bea8379e055a54c3dbe008561bcc51d` (the completion-report-only
+commit from the prior pass — no code changed, so this reconfirms the
+pre-existing failure, not a new one). Job "Typecheck, test, build,
+migration validation" failed in 1m12s at the **Schema drift check** step,
+identical symptom to every prior run:
+
+```
+[✓] Your SQL migration file ➜ migrations/0009_awesome_shen.sql 🚀
+... (diff of meta/_journal.json adding one new idx-9 entry) ...
+Error: packages/db/migrations is out of date with packages/db/src/schema.
+Run 'pnpm --filter @aee/db run db:generate' locally and commit the result.
+Error: Process completed with exit code 1.
+```
+
+### Correction to the fix approach described above
+
+The fix section above proposed hand-registering the three already-committed
+legacy files (`0009_tired_warbird.sql`, `0010_integration_and_data_exchange_foundation.sql`,
+`0011_session_epoch_revocation.sql`) as journal entries 9/10/11, with a
+single final snapshot (`meta/0011_snapshot.json`) whose `prevId` was set to
+point directly at 0008's snapshot id — skipping past what would normally be
+9's and 10's own snapshots. That snapshot was **not** produced by asking
+`drizzle-kit generate` to fill journal position 11; it was produced by
+running `generate` against a journal still sitting at idx 8 (which
+necessarily yields one cumulative migration, exactly like this pass's
+finding below) and then hand-relabelling the result as idx 11. That is a
+form of manually-assembled migration metadata, not tool-generated output
+for the position it claims to represent — this pass's own governing
+instruction for this closure step is explicit that generated migration
+metadata should not be hand-fabricated, so this document now records the
+correction plainly rather than carrying the earlier approach forward
+silently. (To be precise about what is proven versus reasoned: this pass
+did not find or reproduce an actual downstream failure caused by the
+earlier approach — `db:migrate` only reads journal entries plus their
+matching `.sql` files, which are correct and already committed, and
+`drizzle-kit generate` only reads the *last* journal entry's snapshot to
+diff against, which the earlier approach did supply. It likely would have
+made both CI checks pass. The correction here is about not relying on
+hand-assembled tool metadata when the tool itself can produce the
+equivalent output cleanly — not a claim that the earlier version was
+broken.)
+
+### This pass's fix — re-derived from a clean, tool-only run
+
+With the local working copy first confirmed to match the branch's actual
+committed state (a stray, previously-generated local-only
+`meta/0011_snapshot.json` from an earlier session was found and removed —
+its presence had been silently masking the real drift, since drizzle-kit
+picks up any snapshot file in `meta/` as the diff baseline regardless of
+whether the journal references it, and that file made a fresh `generate`
+report "No schema changes" incorrectly), `pnpm --filter @aee/db exec
+drizzle-kit generate` was re-run. It reproduces exactly what CI's own
+generate step does: **one** new, tool-generated, consolidated migration —
+`migrations/0009_flimsy_norrin_radd.sql` locally (drizzle-kit names each
+generated file randomly; CI's own attempt on this same schema state named
+it `0009_awesome_shen.sql` — the SQL content is what matters, and it is
+identical either way) — plus a properly tool-produced `meta/0009_snapshot.json`
+and an updated `meta/_journal.json` with one new entry.
+
+**Verified this is a pure consolidation, introducing no unintended schema
+change:** every one of the new migration's 57 SQL statements was diffed,
+as a normalized set, against the concatenation of the three legacy files'
+statements. Zero statements differ in either direction — the new single
+migration and the three legacy files describe exactly the same schema
+delta.
+
+**Verified end-to-end against a real, disposable Postgres 16 database:**
+- `pnpm --filter @aee/db run db:migrate` against a brand-new, empty
+  database succeeds; `drizzle.__drizzle_migrations` shows all 10 entries
+  applied (0000 through the new consolidated 0009).
+- Resulting database: 89 tables (matches CI's own schema listing exactly),
+  `users.session_epoch` present, all 10 `integration_*` tables present,
+  `financial_reconciliations_legacy_commission_unique_idx` present.
+- Re-running `db:migrate` a second time is a safe no-op (idempotent, per
+  `migrate.ts`'s own documented design).
+- Re-running `drizzle-kit generate` afterward reports **"No schema
+  changes, nothing to migrate"** — confirming the Schema drift check would
+  now pass.
+
+**Recommendation for the three now-superseded legacy files:** since the
+new single migration's content is proven identical to their combined
+content, and none of the three was ever actually applied to any tracked
+database (none appears in any environment's `__drizzle_migrations` table,
+because they were never in the journal), this pass recommends removing
+them as part of applying this fix, to avoid two competing on-disk
+descriptions of the same schema change. This is a recommendation, not a
+requirement — leaving them in place as inert, unregistered files is also
+safe and does not affect either CI check.
+
+### Why this still cannot be pushed from this session
+
+Both blockers described in the original section above were re-confirmed
+live, this pass, rather than assumed to still hold:
+
+1. **Workflow-scope permission** — a fresh, isolated push attempt of the
+   drafted `permissions:` hardening to `.github/workflows/ci.yml` (see the
+   "CI workflow permission hardening" work in the completion report) was
+   made this pass and returned the same class of error, verbatim:
+   `403 refusing to allow a GitHub App to create or update workflow
+   '.github/workflows/ci.yml' without 'workflows' permission`. Unchanged
+   from the prior pass; this session's GitHub App installation still lacks
+   the `workflow` scope.
+2. **Large-file transmission** — the new `meta/0009_snapshot.json` is
+   421,545 bytes, the same order of magnitude as the file that failed to
+   transmit intact in the prior pass. This pass did not re-attempt pushing
+   it through the GitHub API tooling at all — the governing instruction for
+   this pass explicitly directs against attempting to transmit generated
+   migration snapshots through that mechanism, given the already-demonstrated
+   corruption risk. Instead, the fix is delivered as an exact file bundle
+   (see the completion report's maintainer-patch section) for a human with
+   real `git push` access to apply directly — no API transmission involved,
+   no size risk.
+
+### Exact files delivered this pass (maintainer patch bundle)
+
+- `migrations/0009_flimsy_norrin_radd.sql` — 15,974 bytes,
+  git-blob-sha1 `86e3784c78d8aab3e2ffbc24671a249c92993895`
+- `migrations/meta/0009_snapshot.json` — 421,545 bytes,
+  git-blob-sha1 `f33bf6b3db2bf222d977ec87973297ae5a33bb33`
+- `migrations/meta/_journal.json` (replacement) — 1,517 bytes,
+  git-blob-sha1 `098f146fb8f2f85ce5ea02ef0446730308ddefcc`
+
+See the completion report and the delivered `pr25_maintainer_patch.zip` for
+exact apply instructions and validation commands.
+
+---
+
 ## Why this document exists
 
 Part D of this closure pass ("stand up CI") required observing an actual
@@ -76,7 +215,7 @@ that was originally provisioned via `drizzle-kit push`, not
 Only a genuinely fresh, from-scratch database — exactly what CI's ephemeral
 Postgres service is — exposes it.
 
-## The fix
+## The fix (original diagnosis pass — see the correction and re-derivation in the update section above)
 
 No migration SQL content was changed. `packages/db/migrations/meta/_journal.json`
 had three entries appended (idx 9/10/11, tags `0009_tired_warbird`,
@@ -115,7 +254,7 @@ going forward.
    from-scratch database (as opposed to the long-lived local one) changes
    application behavior. 56/56 passed.
 
-## Why this fix is not yet on the branch
+## Why this fix was not pushed in the prior pass (still unresolved — see the update section above for this pass's fresh re-confirmation)
 
 This closure pass tried to push the fix and hit two independent, confirmed
 blockers — so it is documented here, fully verified, rather than landed
@@ -168,33 +307,29 @@ with real `git push` access has the diagnosis, the verified fix, and the
 exact reason it couldn't be applied through this session's tools —
 without also having to untangle a half-applied state first.
 
-**To actually apply this fix:** from a real local clone with normal git
-push access, run `pnpm --filter @aee/db exec drizzle-kit generate` against
-the current `packages/db/src/schema` (it will reproduce the same
-0009/0010/0011 journal-entry gap described above and generate a correct
-`meta/0011_snapshot.json`), commit `packages/db/migrations/meta/` (only —
-no `.sql` file changes are expected), and push. Separately, a repo
-maintainer with `.github/workflows/**` write access should apply the
-`permissions:` block and the two reconciled steps this pass drafted: a
-top-level `permissions:\n  contents: read` block; a non-blocking
-`pnpm audit --audit-level=high || true` step (`continue-on-error: true`,
-since Part F below documents two currently-unfixable advisories a
-blocking gate would turn into a permanent failure); and a dependency-free
-`grep`-based hardcoded-credential pattern scan step (excluding
-`__tests__`, since this repo's own redaction test fixtures deliberately
-contain fake PEM-shaped strings). See
-`docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md` and
-`docs/TYPED_ERROR_HANDLING_AUDIT.md` for this pass's own precedent for
-disclosing a lost/reconstructed list in the same spirit.
+**To actually apply this fix:** see the update section at the top of this
+document for the current, re-derived, fully tool-verified fix and its
+exact delivered files — supersedes the plan described in this
+paragraph in the original pass. A repo maintainer with
+`.github/workflows/**` write access should also still apply the
+`permissions:` block this pass (re-)drafted and delivered (see the
+completion report's maintainer-patch section); the previously-proposed
+"two reconciled steps" (a non-blocking dependency audit step and a
+secret-pattern-scan step) were an idea from the original pass, not part of
+either pass's actual permissions-hardening deliverable, and remain an
+optional future enhancement, not something either pass implemented.
 
 ## What this fix did not do
 
-- It did not touch any of the three existing migration SQL files, and it
-  did not change the actual database schema in any environment.
+- It did not touch any of the three existing migration SQL files' content
+  (though this pass recommends removing them once superseded — see the
+  update section above), and it did not change the actual database schema
+  in any environment.
 - It did not attempt to reconstruct historical snapshot files for idx 9
-  or idx 10 — only the latest (idx 11) was needed, and inventing
-  plausible-but-unverifiable intermediate snapshots would have added risk
-  without any corresponding benefit.
+  or idx 10 in the original pass's approach; this pass's re-derived fix
+  instead lets `drizzle-kit generate` produce the correct single
+  consolidated migration and its own snapshot directly, with no manual
+  snapshot construction at all.
 - It did not investigate whether staging's actual database (built via
   `drizzle-kit push`, per `packages/db/src/migrate.ts`'s own module
   comment) is missing anything — that script is explicitly documented as
