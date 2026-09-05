@@ -188,6 +188,53 @@ test("passes through null and non-object primitives unchanged", () => {
   assert.equal(redactForLog(42 as unknown as object), 42);
 });
 
+// AE Step 2 closure — Part C (typed-error-handling audit): a plain
+// `new Error(...)`'s `message`/`stack` are non-enumerable own properties,
+// so `Object.entries(err)` (and a bare `JSON.stringify(err)`) produce `{}`
+// — meaning every `logger.error("...", { error: err })` call site across
+// this codebase was silently logging an empty object instead of the actual
+// diagnostic detail, until redactValue special-cased Error instances.
+test("an Error value logs its name/message/stack, not an empty object", () => {
+  const err = new Error("payment provider returned a 502");
+  const out = redactForLog({ error: err }) as { error: { name: string; message: string; stack: string } };
+  assert.equal(out.error.name, "Error");
+  assert.equal(out.error.message, "payment provider returned a 502");
+  assert.ok(out.error.stack && out.error.stack.length > 0, "expected a non-empty stack trace");
+  assert.notDeepEqual(out.error, {}, "must not regress to logging an empty object for an Error value");
+});
+
+test("an Error's own additional enumerable properties (e.g. a typed error's .reason/.type/.status) are preserved alongside name/message/stack", () => {
+  const err = Object.assign(new Error("integration lookup failed"), { reason: "TENANT_MISMATCH", status: 404 });
+  const out = redactForLog({ error: err }) as { error: { message: string; reason: string; status: number } };
+  assert.equal(out.error.message, "integration lookup failed");
+  assert.equal(out.error.reason, "TENANT_MISMATCH");
+  assert.equal(out.error.status, 404);
+});
+
+test("an Error's message embedding (not exactly matching) a secret-shaped value is passed through unredacted — documents the existing whole-string-match limitation of value-shape detection, not a new gap this fix introduces", () => {
+  const err = new Error("Bearer sk_live_abcdefghijklmnopqrstuvwxyz leaked into an error message");
+  const out = redactForLog({ error: err }) as { error: { message: string } };
+  // The whole message string doesn't match the exact Bearer-token shape
+  // pattern (it has surrounding text), so this documents the existing,
+  // pre-established boundary of value-shape detection (whole-string match,
+  // not substring extraction) rather than claiming a stronger guarantee
+  // than the redaction layer actually provides for embedded-not-whole
+  // secret shapes.
+  assert.equal(out.error.message, err.message);
+});
+
+test("an Error's message that is ITSELF exactly a secret-shaped value is redacted", () => {
+  const err = new Error("Bearer sk_live_abcdefghijklmnopqrstuvwxyz1234567890");
+  const out = redactForLog({ error: err }) as { error: { message: string } };
+  assert.equal(out.error.message, "[REDACTED]");
+});
+
+test("a never-log-named field on an Error instance (e.g. a custom .password property) is still redacted", () => {
+  const err = Object.assign(new Error("should never happen"), { password: "hunter2" });
+  const out = redactForLog({ error: err }) as { error: { password: string } };
+  assert.equal(out.error.password, "[REDACTED]");
+});
+
 test("NEVER_LOG_KEY_PATTERNS is non-empty and every pattern is case-insensitive", () => {
   assert.ok(NEVER_LOG_KEY_PATTERNS.length > 0);
   for (const pattern of NEVER_LOG_KEY_PATTERNS) {

@@ -12,6 +12,7 @@
 
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import {
   createThread,
@@ -213,7 +214,16 @@ communicationsRouter.post("/communications/threads/:threadId/participants/manual
     res.status(201).json(participant);
   } catch (err) {
     if (handleCommunicationsError(err, res)) return;
-    if (err instanceof Error) return void res.status(422).json({ error: err.message });
+    // AE Step 2 closure — Part C: same fix as routes/financial.ts's
+    // handlePlainError — this fallback trusts an unrecognised Error to be a
+    // deliberate, safe-to-disclose validation message (addManualParticipant
+    // has no other typed error class of its own), but previously logged
+    // nothing before responding, leaving zero diagnostic trail if that
+    // assumption is ever wrong. The response contract is unchanged.
+    if (err instanceof Error) {
+      logger.warn("communications_add_manual_participant_plain_error", { error: err });
+      return void res.status(422).json({ error: err.message });
+    }
     throw err;
   }
 });

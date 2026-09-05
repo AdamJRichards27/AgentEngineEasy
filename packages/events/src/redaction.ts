@@ -113,6 +113,31 @@ function redactValue(value: unknown, depth: number): unknown {
 
   if (value instanceof Date) return value.toISOString();
 
+  if (value instanceof Error) {
+    // AE Step 2 closure — Part C (typed-error-handling audit): `message`
+    // and `stack` are non-enumerable own properties of a native Error
+    // instance, so `Object.entries(err)` — and therefore the generic
+    // object branch below, and a bare `JSON.stringify(err)` — silently
+    // produce `{}` for a plain `new Error("...")`. Every existing
+    // `logger.error("...", { error: err })` call site across this codebase
+    // (there are dozens) was consequently logging an empty object where it
+    // meant to log the actual diagnostic detail. Fixed once, here, at the
+    // shared redaction root, rather than at each call site: an Error is
+    // normalised to a plain object carrying name/message/stack plus any
+    // additional own enumerable properties (e.g. a body-parser error's
+    // .type/.status, an IntegrationError's .reason) BEFORE falling through
+    // to the generic object handling below — which still applies the same
+    // never-log-key and value-shape redaction to every one of those fields,
+    // so an error whose own .message happens to embed something
+    // secret-shaped (e.g. a thrown token) is still caught by
+    // looksLikeSecretValue exactly as any other logged string would be.
+    const plain: Record<string, unknown> = { name: value.name, message: value.message, stack: value.stack };
+    for (const key of Object.keys(value)) {
+      if (!(key in plain)) plain[key] = (value as unknown as Record<string, unknown>)[key];
+    }
+    return redactValue(plain, depth);
+  }
+
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {

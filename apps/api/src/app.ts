@@ -7,6 +7,7 @@ import { requestId } from "./middlewares/requestId.js";
 import { httpMetrics } from "./middlewares/httpMetrics.js";
 import { globalRateLimiter } from "./middlewares/rateLimit.js";
 import { corsOriginCallback } from "./lib/cors.js";
+import { globalErrorHandler } from "./middlewares/errorHandler.js";
 
 export function createApp() {
   const app = express();
@@ -69,5 +70,12 @@ export function createApp() {
   // (see middlewares/auth.ts) — requireAuth then just checks it's present.
   app.use(loadSession);
   app.use("/api", apiRouter);
+
+  // AE Step 2 closure — Part C: safety-net error handler, mounted last per
+  // Express's own requirement (an error-handling middleware is only ever
+  // invoked for requests that reach this point via next(err) or a
+  // synchronous throw earlier in the chain). See middlewares/errorHandler.ts
+  // for what this closes and why it's scoped the way it is.
+  app.use(globalErrorHandler);
   return app;
 }

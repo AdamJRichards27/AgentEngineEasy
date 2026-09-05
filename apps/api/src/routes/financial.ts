@@ -40,7 +40,7 @@
 
 import { Router, type Response } from "express";
 import { z } from "zod";
-import { currentCorrelationId } from "@aee/events";
+import { currentCorrelationId, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { db, users } from "@aee/db";
 import { eq, and } from "drizzle-orm";
@@ -103,8 +103,24 @@ function handleFinancialControlError(err: unknown, res: Response): boolean {
 // failures (wrong state, missing prerequisite row, etc.) — never a raw
 // 500 for a caller mistake, but honest that this isn't a schema-validation
 // 400 either.
+//
+// AE Step 2 closure — Part C (typed-error-handling audit): this function
+// trusts every `Error` reaching it to be one of those deliberate,
+// safe-to-disclose precondition messages — a real assumption, not
+// something this bounded pass re-verified against every "Stage C/D
+// service function" call site (that would mean re-auditing this file's
+// entire dependency graph, out of this pass's scope). What WAS a genuine,
+// fixable gap: unlike the equivalent fallback in routes/pitCrew.ts,
+// routes/import.ts, and routes/automationOps.ts (each of which logs the
+// full error before responding), this one previously logged nothing at
+// all — so if that assumption is ever wrong (a genuine bug or
+// infrastructure error surfaces here instead of a deliberate precondition
+// message), there would be zero server-side diagnostic trail. Fixed here,
+// without changing the response contract any caller already depends on
+// (still 409 with err.message, exactly as before).
 function handlePlainError(err: unknown, res: Response): boolean {
   if (err instanceof Error) {
+    logger.warn("financial_route_plain_error", { error: err });
     res.status(409).json({ error: err.message });
     return true;
   }
