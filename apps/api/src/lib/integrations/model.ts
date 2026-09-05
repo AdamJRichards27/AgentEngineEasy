@@ -22,7 +22,7 @@ import {
   type IntegrationConnection,
   type IntegrationConnectionStatus,
 } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, newCorrelationId, currentCorrelationId } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { getAdapter, getProvider } from "./registry.js";
 import { IntegrationError, isValidConnectionTransition, type ActorRef, type IntegrationCapability } from "./types.js";
@@ -59,7 +59,7 @@ async function emit(eventType: string, connection: IntegrationConnection, actor:
       actorType: actor ? "USER" : "SYSTEM",
       actorId: actor ? actor.id : null,
       source,
-      correlationId: newCorrelationId(),
+      correlationId: currentCorrelationId(),
       causationId: null,
       idempotencyKey: `${eventType}:${connection.id}:${connection.version}`,
       payload,
@@ -295,4 +295,4 @@ export async function getConnectionTransitions(connectionId: string, brokerageId
   return db.select().from(integrationConnectionTransitions).where(eq(integrationConnectionTransitions.connectionId, connectionId));
 }
 
-export { newCorrelationId };
+export { newCorrelationId, currentCorrelationId };

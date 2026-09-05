@@ -34,7 +34,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, communicationMessages, communicationDeliveryAttempts, type CommunicationMessage } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { resolveActiveConnection } from "./registry.js";
 import { enqueueCommand, dispatchCommand, mintIdempotencyKey } from "./outbox.js";
 import { recordMapping, resolveByExternalId } from "./mapping.js";
@@ -101,7 +101,7 @@ async function publishCommsProofEvent(eventType: CommsProofEventType, message: C
     actorType: actorUserId ? "USER" : "SYSTEM",
     actorId: actorUserId,
     source: "integrations:commsProof",
-    correlationId: message.correlationId ?? newCorrelationId(),
+    correlationId: message.correlationId ?? currentCorrelationId(),
     causationId: message.causationId ?? null,
     idempotencyKey: `${eventType}:${message.id}:${message.version}`,
     payload: {
