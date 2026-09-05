@@ -9,6 +9,7 @@ import {
   subscriptions,
 } from "@aee/db";
 import { MockBillingProvider } from "@aee/integration-billing";
+import { logger } from "@aee/events";
 import { BROKERAGE_ADMIN_ROLES, requireAuth, requireRole } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { getBillingProvider } from "../lib/billing/gateway.js";
@@ -219,7 +220,7 @@ billingRouter.post("/webhook", async (req, res) => {
       .where(eq(billingWebhookEvents.id, row.id));
     res.status(200).json({ received: true, processed: true });
   } catch (err) {
-    console.error("billing webhook processing failed", err);
+    logger.error("billing_webhook_processing_failed", { billingWebhookEventId: row.id, error: err });
     await db
       .update(billingWebhookEvents)
       .set({ status: "Failed", error: String(err) })

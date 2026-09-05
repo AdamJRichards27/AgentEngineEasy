@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { db, users, type UserRole } from "@aee/db";
 import { eq } from "drizzle-orm";
+import { logger } from "@aee/events";
 import { readSessionCookie, verifySessionToken } from "../lib/session.js";
 
 // AgentEngineEasy's 3-role model (Build Brief §22) — deliberately small.
@@ -57,7 +58,7 @@ export async function loadSession(req: Request, _res: Response, next: NextFuncti
       req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
     }
   } catch (err) {
-    console.error("loadSession failed", err);
+    logger.error("load_session_failed", { error: err });
   }
   next();
 }

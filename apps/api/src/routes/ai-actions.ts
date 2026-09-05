@@ -15,6 +15,7 @@
 
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { listActionDefinitions } from "../lib/ai/actions/registry.js";
 import { proposeAIAction, getAIActionRequest, approveAIActionRequest, rejectAIActionRequest } from "../lib/ai/actionRequests.js";
@@ -84,7 +85,7 @@ aiActionsRouter.post("/:actionKey/propose", requireAuth, async (req, res) => {
     }
     res.status(201).json({ request });
   } catch (err) {
-    console.error("POST /ai/actions/:actionKey/propose failed", err);
+    logger.error("ai_action_propose_route_failed", { error: err });
     res.status(500).json({ error: "Could not propose this action right now. Try again in a moment." });
   }
 });
@@ -196,7 +197,7 @@ aiActionsRouter.post("/requests/:id/execute", requireAuth, async (req, res) => {
     }
     res.json({ request: result.request, result: result.result });
   } catch (err) {
-    console.error("POST /ai/actions/requests/:id/execute failed", err);
+    logger.error("ai_action_execute_route_failed", { error: err });
     res.status(500).json({ error: "Could not execute this request right now. Try again in a moment." });
   }
 });

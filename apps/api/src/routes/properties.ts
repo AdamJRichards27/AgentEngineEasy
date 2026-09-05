@@ -15,7 +15,7 @@ import {
   agencyAgreementTerms,
   insertPropertySchema,
 } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
@@ -119,7 +119,7 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(PROPERTY_CREATED) failed", err);
+    logger.error("publish_domain_event_failed", { eventType: "PROPERTY_CREATED", error: err });
   }
 
   res.status(201).json({ property });
@@ -416,7 +416,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
         brokerageId: user.brokerageId,
       });
     } catch (err) {
-      console.error(`initiateAmlIfNeeded failed for party ${link.partyId}`, err);
+      logger.error("initiate_aml_if_needed_failed", { partyId: link.partyId, error: err });
     }
   }
 
@@ -467,7 +467,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(DOCUMENT_PACKAGE_CREATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "DOCUMENT_PACKAGE_CREATED", error: err });
     }
   }
 
@@ -494,7 +494,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(READY_TO_LIST) failed", err);
+    logger.error("publish_domain_event_failed", { eventType: "READY_TO_LIST", error: err });
   }
 
   const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));

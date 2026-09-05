@@ -11,7 +11,7 @@ import {
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
-import { currentCorrelationId, publishDomainEvent } from "@aee/events";
+import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
 
 export const growRouter = Router();
 
@@ -130,7 +130,7 @@ growRouter.post(
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(RELATIONSHIP_CREATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "RELATIONSHIP_CREATED", error: err });
     }
 
     res.status(201).json({ relationship: inserted });
@@ -183,7 +183,7 @@ growRouter.patch(
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(RELATIONSHIP_UPDATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "RELATIONSHIP_UPDATED", error: err });
     }
 
     res.json({ relationship: updated });
@@ -329,7 +329,7 @@ growRouter.post(
         metadata: {},
       });
     } catch (err) {
-      console.error("publishDomainEvent(OPPORTUNITY_CREATED) failed", err);
+      logger.error("publish_domain_event_failed", { eventType: "OPPORTUNITY_CREATED", error: err });
     }
 
     res.status(201).json({ opportunity: inserted });

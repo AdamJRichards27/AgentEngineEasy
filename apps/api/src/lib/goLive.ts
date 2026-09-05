@@ -1,6 +1,6 @@
 import { eq, and } from "drizzle-orm";
 import { db, properties, workflows, workflowSteps, type Property } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 export type GoLiveResult =
@@ -78,7 +78,7 @@ export async function goLiveProperty(
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(LISTING_LIVE) failed", err);
+    logger.error("publish_domain_event_failed", { eventType: "LISTING_LIVE", error: err });
   }
 
   await logAudit({ userId: actor.id, action: "listing_live", recordType: "property", recordId: String(propertyId), propertyId });

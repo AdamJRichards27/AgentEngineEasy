@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import type { EntitlementKey } from "@aee/db";
+import { logger } from "@aee/events";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 
 /**
@@ -26,7 +27,7 @@ export function requireEntitlement(entitlementKey: EntitlementKey) {
       }
       next();
     } catch (err) {
-      console.error("requireEntitlement middleware failed, failing closed", err);
+      logger.error("require_entitlement_middleware_failed_closed", { entitlementKey, userId: req.authedUser.id, error: err });
       res.status(403).json({ error: "Not entitled", reason: "ENTITLEMENT_MISSING", entitlementKey });
     }
   };

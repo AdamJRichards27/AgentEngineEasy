@@ -8,7 +8,7 @@
 // unlike that module there is no scheduler to start here — Launch has
 // nothing time-driven, everything else is a direct route action.
 
-import { registerHandler, type DomainEvent } from "@aee/events";
+import { registerHandler, logger, type DomainEvent } from "@aee/events";
 import { getOrCreateLaunchPlan } from "./model.js";
 
 let registered = false;
@@ -27,7 +27,7 @@ async function handleAgencyAgreementSigned(event: DomainEvent): Promise<void> {
   try {
     await getOrCreateLaunchPlan(event.propertyId, event.brokerageId, null);
   } catch (err) {
-    console.error(`launch engine: auto-propose launch plan failed for property ${event.propertyId}`, err);
+    logger.error("launch_auto_propose_failed", { propertyId: event.propertyId, error: err });
   }
 }
 

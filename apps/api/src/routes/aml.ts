@@ -2,6 +2,7 @@ import { Router } from "express";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, amlVerifications, serviceOrders, properties } from "@aee/db";
+import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
@@ -51,7 +52,7 @@ amlRouter.post("/request", requireAuth, async (req, res) => {
     });
 
     await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
-      console.error("refreshReadyToListSteps failed", err),
+      logger.error("refresh_ready_to_list_steps_failed", { propertyId: parsed.data.propertyId, error: err }),
     );
 
     res.status(created ? 201 : 200).json({ verification, created });

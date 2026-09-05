@@ -10,6 +10,7 @@ import { Router } from "express";
 import multer from "multer";
 import { and, eq } from "drizzle-orm";
 import { db, importJobs, type ImportResolution } from "@aee/db";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
@@ -35,7 +36,7 @@ function handleError(res: import("express").Response, err: unknown) {
     res.status(400).json({ error: err.message });
     return;
   }
-  console.error("import route error", err);
+  logger.error("import_route_failed", { error: err });
   res.status(500).json({ error: "Something went wrong processing this import." });
 }
 
