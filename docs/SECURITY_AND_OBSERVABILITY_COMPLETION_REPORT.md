@@ -21,12 +21,135 @@ follow-on instruction this report's top section covers — its own verbatim phas
 retained in full for that pass (it arrived in this session's active context), so no
 reconstruction was needed there.
 
-**This revision** covers a subsequent "CI Unblocking and Final Merge-Readiness" closure
-pass — see the update section immediately below — on top of the Parts B–H closure work
-already recorded in the rest of this document, which itself sat on top of the original
-Part A tenant-isolation/perimeter work. **The current decision is in the update section
-below; the "## 1. Decision" section further down is the prior revision's decision and is
-superseded.**
+**This revision** covers a further "Human Risk Sign-Off, Merge and Closure" pass — see the
+update section immediately below — on top of the "CI Unblocking and Final Merge-Readiness"
+closure pass recorded in the next section, which itself sat on top of the Parts B–H closure
+work recorded in the rest of this document, which itself sat on top of the original Part A
+tenant-isolation/perimeter work. **The current decision is in this newest update section
+below; both the "## Update — CI Unblocking and Final Merge-Readiness pass" section's own
+decision and the "## 1. Decision" section further down are prior revisions' decisions and
+are superseded.**
+
+## Update — Human Risk Sign-Off, Merge and Closure pass
+
+This pass's own governing instruction provided explicit AE Project Owner
+authorization for the two outstanding dependency-risk items, and directed
+verifying PR #25's final state, recording those decisions, merging the PR
+into `staging`, verifying post-merge CI, and issuing a final Step 2
+closure report — explicitly forbidding self-accepting either risk on
+Claude's own authority, reopening completed security work, or beginning
+the next named phase.
+
+### Current decision (this section)
+
+**`READY TO MERGE`** as of Phase 3 below. (Phase 4 merge execution and
+Phase 5/6 post-merge verification and closure follow in a subsequent
+update to this same section, appended once each completes — this report
+is not being replaced or duplicated.)
+
+### Phase 1 — final PR state verification
+
+- Head SHA confirmed via `pull_request_read`: `14b45391a45d57faa2d84859735a88eb155066e1`
+  — exactly matching this pass's own "Expected head."
+- `mergeable_state`: `clean` (no conflicts), confirmed via the GitHub API
+  and independently via GitHub's own PR UI ("Ready to merge").
+- The three expected commits are present, in order, with commit messages
+  and file-level diffs matching `pr25_maintainer_patch.zip` exactly:
+  `96d7948` (migration-journal fix), `e640f3d` (esbuild bump), `14b4539`
+  (CI workflow least-privilege permissions) — confirming a human
+  maintainer applied the delivered bundle precisely as instructed.
+- CI run **#131** (run ID `33996000449`), triggered by head `14b4539`:
+  **Success**, 14m21s, one non-blocking informational annotation (a
+  Node.js 20 deprecation notice for the GitHub-hosted runner image,
+  unrelated to this repository's own code) — confirmed live via GitHub's
+  Actions UI, since this session's GitHub App integration still returns
+  `403` on the `get_status`/`get_check_runs` API methods (unchanged all
+  session).
+- Legacy migration files (`0009_tired_warbird.sql`,
+  `0010_integration_and_data_exchange_foundation.sql`,
+  `0011_session_epoch_revocation.sql`) confirmed still present in
+  `packages/db/migrations/` — retained, not removed.
+- `pr25_maintainer_patch.zip` confirmed **not** committed anywhere in the
+  repository (checked the repo root and the full `docs/` directory
+  listing).
+- **One pre-existing anomaly found and investigated**: an unexpected file,
+  `pnpm-lock.yaml.part2`, present at the repository root. Traced via
+  `list_commits` (filtered by path) to a single commit, `0c87911`
+  ("chore(lockfile): stage part 2 content (lines 801-2000) in scratch file
+  before merging"), part of a much larger, already-visible sequence of
+  roughly 20 "part N/N, WIP" commits on this same branch from an earlier,
+  eventually-abandoned attempt to manually chunk-and-reassemble
+  `pnpm-lock.yaml` across many commits (visible in the PR's own commit
+  history, well before any of this session's real fix work) — superseded
+  on-branch by later "Update dependency lockfile" commits. Confirmed
+  **inert**: `pnpm-workspace.yaml` and every `package.json` reference only
+  the exact filename `pnpm-lock.yaml`, never `pnpm-lock.yaml.part2`; no
+  build, install, or CI step reads it; it predates every one of this
+  pass's own real commits by roughly 20 hours on the same day. Assessed as
+  harmless pre-existing repository-hygiene debris, not a material
+  difference against this pass's own stop condition — flagged here for
+  visibility and recommended for a future, separate cleanup commit, but
+  explicitly not addressed in this pass's own commits, per this pass's own
+  instruction not to add unrelated changes.
+
+**Phase 1 result: verification passed.** No condition required stopping
+with `BLOCKED — FINAL PR STATE CHANGED`.
+
+### Phase 2 — AE Project Owner risk decisions recorded
+
+`docs/DEPENDENCY_RISK_ACCEPTANCE.md` was rewritten (commit `2814776`,
+`docs(security): record temporary dependency risk decisions`) to record
+the AE Project Owner's own authorization verbatim, in place of this
+session's earlier recommendation language:
+
+- **`xlsx@0.18.5`** (2 high-severity advisories, no patched version
+  exists): accepted temporarily, maximum 90 days, expiring **2026-12-04**,
+  subject to the 25MB upload limit and 50,000-row limit remaining in
+  place, no expansion of import exposure, CSV remaining the preferred
+  import format, evaluation of a maintained replacement or safer parsing
+  method, immediate review on exploitation evidence/a patch/a suitable
+  replacement, and remediation/replacement/isolation/renewed approval
+  before expiry. Explicitly recorded: this acceptance does not authorise
+  permanent use of the vulnerable dependency. Accountable remediation
+  owner assigned: AE Backend Engineering, maintainers of
+  `apps/api/src/lib/import/` — not left ownerless.
+- **Transitive `esbuild` via `drizzle-kit`** (1 moderate advisory,
+  dev-tooling-only): accepted temporarily, subject to remaining confined
+  to dev/migration tooling, confirmed absence from production builds, no
+  exposure of the affected dev server to untrusted networks, review at the
+  next `drizzle-kit` upgrade, and immediate reassessment if runtime
+  exposure changes. A calendar backstop of the same 2026-12-04 date is
+  additionally recorded so the item cannot go unreviewed indefinitely
+  between `drizzle-kit` upgrades.
+- Both records name the approving authority as **AE Project Owner**, the
+  approval date **2026-09-05**, and are explicit that neither decision is,
+  or should be represented as, approval by an independent security
+  professional.
+- Issue **[#26, "Replace or isolate vulnerable xlsx parser"](https://github.com/AdamJRichards27/AgentEngineEasy/issues/26)**
+  was created with the specified acceptance criteria, tracking the `xlsx`
+  remediation follow-up. This pass does not implement that replacement
+  itself.
+- Pushed as a single commit; blob-SHA-1-verified byte-exact
+  (`ec7a7d3df2aa8e1bccbeba0d4f7b898bfcb55352`, 11,196 bytes) against
+  GitHub's own reported SHA for the pushed content — no corruption.
+
+### Phase 3 — reverification after the risk-decision commit
+
+- New head SHA after the doc commit: `2814776b46a16297aecf5449db870b4df65c04c9`.
+  `mergeable_state`: `clean`. Base `staging` unchanged at
+  `8eb5c24a5905415b2b4bb30febead263f0a553fc` (no rebase needed).
+- CI run **#132** (run ID `33997573273`), triggered by commit `2814776`:
+  **Success**, 14m35s, the same single non-blocking Node.js-20-deprecation
+  annotation as run #131 and no other warnings or failures — confirmed
+  live via GitHub's Actions UI. GitHub's own PR UI independently reports
+  "Ready to merge."
+- PR #25's description was updated in place (not a new report) to
+  decision `READY TO MERGE`, summarizing the cleared blockers, the CI
+  result, and the AE Project Owner's authorized risk decisions, with links
+  to the updated `docs/DEPENDENCY_RISK_ACCEPTANCE.md` and issue #26.
+
+**Phase 3 result: verification passed. Decision at this point in the
+pass: `READY TO MERGE`.**
 
 ## Update — CI Unblocking and Final Merge-Readiness pass
 
