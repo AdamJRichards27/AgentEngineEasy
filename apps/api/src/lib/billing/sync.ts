@@ -10,7 +10,7 @@ import {
   subscriptions,
   type EntitlementKey,
 } from "@aee/db";
-import { newCorrelationId, publishDomainEvent, type AgentEngineEasyEventType } from "@aee/events";
+import { currentCorrelationId, publishDomainEvent, type AgentEngineEasyEventType } from "@aee/events";
 import type { NormalizedSubscriptionSnapshot } from "@aee/integration-billing";
 import { invalidateEntitlementCache } from "../entitlements/resolver.js";
 
@@ -46,7 +46,7 @@ export async function applySubscriptionSnapshot(
     .where(and(eq(prices.productId, product.id), eq(prices.status, "Active")))
     .limit(1);
 
-  const correlationId = newCorrelationId();
+  const correlationId = currentCorrelationId();
   const shouldBeActive = ACTIVE_SUBSCRIPTION_STATUSES.has(snapshot.status);
   const isTerminal = snapshot.status === "Cancelled" || snapshot.status === "Ended";
 

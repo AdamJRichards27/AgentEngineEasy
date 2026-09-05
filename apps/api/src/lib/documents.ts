@@ -10,7 +10,7 @@ import {
   parties,
 } from "@aee/db";
 import type { DocumentPackage, Document, SignatureRequest, AgencyAgreementTerms } from "@aee/db";
-import { publishDomainEvent, newCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId } from "@aee/events";
 import { createESignProvider, type ESignWebhookResult } from "@aee/integration-esign";
 import { createObjectStorageProvider } from "@aee/integration-object-storage";
 import { populateTemplate } from "./documentTemplates.js";
@@ -298,7 +298,7 @@ export async function sendPackageForSignature(input: {
         actorType: "USER",
         actorId: input.userId,
         source: "api:documents:send-for-signature",
-        correlationId: newCorrelationId(),
+        correlationId: currentCorrelationId(),
         causationId: null,
         idempotencyKey: `agency-agreement-sent:${signatureRequest.id}`,
         payload: { packageId: input.packageId, signatureRequestId: signatureRequest.id, providerReference },
@@ -459,7 +459,7 @@ export async function processEsignWebhook(
           actorType: "INTEGRATION",
           actorId: null,
           source: `webhook:esign:${updated.provider}`,
-          correlationId: newCorrelationId(),
+          correlationId: currentCorrelationId(),
           causationId: null,
           idempotencyKey: `agency-agreement-signed:${updated.id}`,
           payload: { packageId: updated.packageId, signatureRequestId: updated.id },
