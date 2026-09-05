@@ -18,7 +18,7 @@
 // state transition, all of which have ALREADY been committed to the
 // database by the time this is called (publish-after-persist, rule 1).
 
-import { publishDomainEvent, currentCorrelationId, type AgentEngineEasyEventType } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger, type AgentEngineEasyEventType } from "@aee/events";
 
 export interface EmitFinancialEventInput {
   eventType: AgentEngineEasyEventType;
@@ -54,6 +54,6 @@ export async function emitFinancialEvent(input: EmitFinancialEventInput): Promis
       payload: input.payload,
     });
   } catch (err) {
-    console.error(`emitFinancialEvent(${input.eventType}) failed`, err);
+    logger.error("emit_financial_event_failed", { eventType: input.eventType, brokerageId: input.brokerageId, propertyId: input.propertyId, transactionId: input.transactionId, error: err });
   }
 }

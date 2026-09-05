@@ -1,5 +1,6 @@
 import { db, aiInteractions, aiUsage } from "@aee/db";
 import type { AiRole, ResponseKind, RiskLevel } from "./types.js";
+import { logger } from "@aee/events";
 
 export interface LogAiInteractionInput {
   requestId: string;
@@ -55,7 +56,7 @@ export async function logAiInteraction(input: LogAiInteractionInput): Promise<nu
       .returning({ id: aiInteractions.id });
     return row === undefined ? null : row.id;
   } catch (err) {
-    console.error("logAiInteraction failed", err);
+    logger.error("log_ai_interaction_failed", { requestId: input.requestId, brokerageId: input.brokerageId, userId: input.userId, error: err });
     return null;
   }
 }
@@ -73,6 +74,6 @@ export async function logAiUsage(input: LogAiUsageInput): Promise<void> {
       latencyMs: input.latencyMs,
     });
   } catch (err) {
-    console.error("logAiUsage failed", err);
+    logger.error("log_ai_usage_failed", { interactionId: input.interactionId, provider: input.provider, error: err });
   }
 }

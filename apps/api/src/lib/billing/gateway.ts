@@ -1,5 +1,6 @@
 import type { BillingProvider } from "@aee/integration-billing";
 import { MockBillingProvider, StripeBillingProvider } from "@aee/integration-billing";
+import { logger } from "@aee/events";
 
 export interface BillingGatewayConfig {
   providerName: "mock" | "stripe";
@@ -29,9 +30,7 @@ export function getBillingProvider(): BillingProvider {
   const config = loadBillingGatewayConfig();
   if (config.providerName === "stripe") {
     if (!config.stripeSecretKey) {
-      console.error(
-        "BILLING_PROVIDER=stripe but STRIPE_SECRET_KEY is not set - falling back to MockBillingProvider",
-      );
+      logger.warn("billing_provider_stripe_secret_key_missing_fallback_to_mock", {});
       cachedProvider = new MockBillingProvider();
       return cachedProvider;
     }

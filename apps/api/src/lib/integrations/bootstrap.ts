@@ -9,6 +9,7 @@
 // same non-blocking convention as billing's ensureCatalogueSeeded), and
 // starts the outbox retry-sweep scheduler.
 
+import { logger } from "@aee/events";
 import { registerAdapter, seedProviderCatalogue } from "./registry.js";
 import { mockPortalAdapter } from "./adapters/mockPortal.js";
 import { mockSmsAdapter } from "./adapters/mockSms.js";
@@ -35,10 +36,10 @@ export function registerIntegrationsEngine(): void {
   registerLaunchIntegrationHandlers();
   registerCommsIntegrationHandlers();
   registerFinancialIntegrationHandlers();
-  seedProviderCatalogue().catch((err) => console.error("seedProviderCatalogue failed", err));
+  seedProviderCatalogue().catch((err) => logger.error("seed_provider_catalogue_failed", { error: err }));
 
   intervalHandle = setInterval(() => {
-    dispatchDueOutbox().catch((err) => console.error("Integration outbox sweep failed", err));
+    dispatchDueOutbox().catch((err) => logger.error("integration_outbox_sweep_failed", { error: err }));
   }, SWEEP_INTERVAL_MS);
   intervalHandle.unref();
 }
