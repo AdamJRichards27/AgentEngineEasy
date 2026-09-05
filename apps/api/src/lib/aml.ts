@@ -1,7 +1,7 @@
 import { eq, and } from "drizzle-orm";
 import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
 import type { AmlVerification, Party } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 
@@ -164,7 +164,13 @@ export async function initiateAmlIfNeeded(input: {
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(AML_REQUESTED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "AML_REQUESTED",
+      propertyId: input.propertyId,
+      partyId: input.partyId,
+      verificationId: verification.id,
+      error: err,
+    });
   }
 
   return { verification, created: true };
@@ -273,11 +279,17 @@ export async function processAmlWebhook(
       metadata: {},
     });
   } catch (err) {
-    console.error("publishDomainEvent(AML_COMPLETED) failed", err);
+    logger.error("publish_domain_event_failed", {
+      eventType: "AML_COMPLETED",
+      propertyId: updated.propertyId,
+      partyId: updated.partyId,
+      verificationId: updated.id,
+      error: err,
+    });
   }
 
   await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: updated.propertyId, error: err }),
   );
 
   return { processed: true, verification: updated };
@@ -353,7 +365,7 @@ export async function retryAmlVerification(verificationId: number, brokerageId: 
   }
 
   await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: updated.propertyId, verificationId, error: err }),
   );
 
   return updated;
@@ -408,7 +420,7 @@ export async function resolveAmlException(input: {
     .returning();
 
   await refreshReadyToListSteps(updated.propertyId).catch((err) =>
-    console.error("refreshReadyToListSteps failed", err),
+    logger.error("refresh_ready_to_list_steps_failed", { propertyId: updated.propertyId, verificationId: input.verificationId, error: err }),
   );
 
   return updated;
