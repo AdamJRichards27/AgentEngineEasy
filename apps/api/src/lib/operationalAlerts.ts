@@ -4,6 +4,9 @@ import { isProductionEnvironment } from "./env.js";
 export type OperationalAlertType =
   | "UNHANDLED_API_ERROR"
   | "DB_READINESS_FAILURE"
+  | "STORAGE_READINESS_FAILURE"
+  | "DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED"
+  | "DOCUMENT_STORAGE_PENDING_RECONCILIATION_FAILURE"
   | "AUTH_ANOMALY"
   | "BACKUP_FAILURE"
   | "INTEGRATION_WEBHOOK_FAILURE"
@@ -20,6 +23,9 @@ export interface AlertPolicy {
 export const OPERATIONAL_ALERT_POLICIES: Readonly<Record<OperationalAlertType, AlertPolicy>> = {
   UNHANDLED_API_ERROR: { severity: "high", owner: "api-platform", runbook: "api-unhandled-errors" },
   DB_READINESS_FAILURE: { severity: "critical", owner: "api-platform", runbook: "database-readiness" },
+  STORAGE_READINESS_FAILURE: { severity: "critical", owner: "api-platform", runbook: "document-storage-readiness" },
+  DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED: { severity: "high", owner: "integrations", runbook: "document-storage-ingestion-retry" },
+  DOCUMENT_STORAGE_PENDING_RECONCILIATION_FAILURE: { severity: "high", owner: "operations", runbook: "document-storage-pending-reconciliation" },
   AUTH_ANOMALY: { severity: "high", owner: "security", runbook: "authentication-anomaly" },
   BACKUP_FAILURE: { severity: "critical", owner: "operations", runbook: "backup-restore" },
   INTEGRATION_WEBHOOK_FAILURE: { severity: "high", owner: "integrations", runbook: "integration-webhook-failure" },

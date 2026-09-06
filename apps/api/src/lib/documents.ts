@@ -12,12 +12,19 @@ import {
 import type { DocumentPackage, Document, SignatureRequest, AgencyAgreementTerms } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createESignProvider, type ESignWebhookResult } from "@aee/integration-esign";
-import { createObjectStorageProvider } from "@aee/integration-object-storage";
 import { populateTemplate } from "./documentTemplates.js";
+import { logAudit } from "./audit.js";
+import { dispatchOperationalAlert } from "./operationalAlerts.js";
+import {
+  DocumentStorageError,
+  configuredEsignMaxDocumentBytes,
+  configuredEsignMaxDocuments,
+  getStoredDocumentContent,
+  ingestDocumentVersion,
+} from "./documentStorage.js";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 
 const esignProvider = createESignProvider();
-const objectStorage = createObjectStorageProvider();
 
 async function partyName(partyId: number): Promise<string> {
   const [p] = await db.select().from(parties).where(eq(parties.id, partyId));
@@ -177,15 +184,50 @@ export async function populateDocumentPackage(packageId: number, brokerageId: nu
     }
 
     const content = populateTemplate(doc.documentType, doc.title, ctx);
-    const key = `packages/${packageId}/documents/${doc.id}.txt`;
-    await objectStorage.putObject(key, content, "text/plain");
+    const stored = await ingestDocumentVersion({
+      documentId: doc.id,
+      brokerageId,
+      bytes: Buffer.from(content, "utf8"),
+      originalFilename: `${doc.title}.txt`,
+      declaredMimeType: "text/plain",
+      source: "generated",
+      retentionClass: doc.documentType === "AgencyAgreement" ? "signed-agreement" : "legal-pending",
+      metadata: { ruleSetVersion: docPackage.ruleSetVersion },
+    });
+    await logAudit({
+      action:
+        stored.outcome === "created"
+          ? "document_version_generated"
+          : stored.outcome === "resumed"
+            ? "document_version_generation_reconciled"
+            : "document_version_generation_deduplicated",
+      recordType: "document_object_version",
+      recordId: String(stored.version.id),
+      propertyId: stored.version.propertyId,
+      updatedValue: JSON.stringify({
+        documentId: doc.id,
+        version: stored.version.version,
+        byteSize: stored.version.byteSize,
+        contentSha256: stored.version.contentSha256,
+        retentionClass: stored.version.retentionClass,
+      }),
+    });
 
     await db
       .update(documents)
       .set({
         status: "Generated",
-        objectStorageKey: key,
-        metadata: { ruleSetVersion: docPackage.ruleSetVersion, generatedAt: new Date().toISOString() },
+        objectStorageKey: stored.version.storageObjectKey,
+        metadata: {
+          ...((doc.metadata as Record<string, unknown> | null) ?? {}),
+          ruleSetVersion: docPackage.ruleSetVersion,
+          generatedAt: new Date().toISOString(),
+          activeObjectVersionId: stored.version.id,
+          contentSha256: stored.version.contentSha256,
+          byteSize: stored.version.byteSize,
+          detectedMimeType: stored.version.detectedMimeType,
+          version: stored.version.version,
+        },
         updatedAt: new Date(),
       })
       .where(eq(documents.id, doc.id));
@@ -320,6 +362,10 @@ export async function sendPackageForSignature(input: {
 
 export interface DocumentContentResult {
   content: string | Buffer;
+  contentType: string;
+  displayFilename: string;
+  versionId: number | null;
+  propertyId: number;
 }
 
 /**
@@ -335,15 +381,15 @@ export interface DocumentContentResult {
  * verified) still throws.
  */
 export async function getDocumentContent(documentId: number, brokerageId: number): Promise<DocumentContentResult | null> {
-  const [row] = await db
-    .select({ document: documents })
-    .from(documents)
-    .innerJoin(properties, eq(documents.propertyId, properties.id))
-    .where(and(eq(documents.id, documentId), eq(properties.brokerageId, brokerageId)));
-  const doc = row?.document;
-  if (!doc || !doc.objectStorageKey) return null;
-  const content = await objectStorage.getObject(doc.objectStorageKey);
-  return { content };
+  const stored = await getStoredDocumentContent(documentId, brokerageId);
+  if (!stored) return null;
+  return {
+    content: stored.bytes,
+    contentType: stored.contentType,
+    displayFilename: stored.displayFilename,
+    versionId: stored.version?.id ?? null,
+    propertyId: stored.document.propertyId,
+  };
 }
 
 export interface PackageByPropertyResult {
@@ -375,8 +421,35 @@ export async function getPackageByProperty(propertyId: number, brokerageId: numb
 
 export interface ProcessEsignWebhookResult {
   processed: boolean;
-  reason?: "invalid_signature" | "signature_request_not_found" | "duplicate_delivery";
+  reason?:
+    | "invalid_signature"
+    | "signature_request_not_found"
+    | "duplicate_delivery"
+    | "completed_document_missing"
+    | "completed_document_invalid"
+    | "completed_document_storage_retry_required";
   signatureRequest?: SignatureRequest;
+}
+
+function decodeCompletedDocument(contentBase64: string): Buffer {
+  const maximumBytes = configuredEsignMaxDocumentBytes();
+  const maximumEncodedLength = Math.ceil(maximumBytes / 3) * 4 + 4;
+  if (
+    contentBase64.length === 0 ||
+    contentBase64.length > maximumEncodedLength ||
+    contentBase64.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)
+  ) {
+    throw new Error("Invalid or oversized Base64 document");
+  }
+  const bytes = Buffer.from(contentBase64, "base64");
+  if (
+    bytes.length > maximumBytes ||
+    bytes.toString("base64") !== contentBase64
+  ) {
+    throw new Error("Invalid or oversized Base64 document");
+  }
+  return bytes;
 }
 
 /**
@@ -412,21 +485,161 @@ export async function processEsignWebhook(
     return { processed: false, reason: "duplicate_delivery", signatureRequest };
   }
 
+  const [docPackage] = await db
+    .select()
+    .from(documentPackages)
+    .where(eq(documentPackages.id, signatureRequest.packageId));
+  const packageDocuments = docPackage
+    ? await db.select().from(documents).where(eq(documents.packageId, docPackage.id))
+    : [];
+
+  let completedDocumentKey = signatureRequest.completedDocumentKey;
+  if (result.status === "Completed") {
+    if (
+      !docPackage ||
+      !result.completedDocuments ||
+      result.completedDocuments.length > configuredEsignMaxDocuments() ||
+      result.completedDocuments.length !== packageDocuments.length
+    ) {
+      return {
+        processed: false,
+        reason: "completed_document_missing",
+        signatureRequest,
+      };
+    }
+    const [property] = await db
+      .select()
+      .from(properties)
+      .where(eq(properties.id, docPackage.propertyId));
+    if (!property?.brokerageId) {
+      return {
+        processed: false,
+        reason: "completed_document_invalid",
+        signatureRequest,
+      };
+    }
+    const expectedIds = new Set(packageDocuments.map((document) => document.id));
+    if (
+      new Set(result.completedDocuments.map((document) => document.documentId)).size !==
+        packageDocuments.length ||
+      result.completedDocuments.some((document) => !expectedIds.has(document.documentId))
+    ) {
+      return {
+        processed: false,
+        reason: "completed_document_invalid",
+        signatureRequest,
+      };
+    }
+    let completedWithBytes: Array<{
+      completed: NonNullable<ESignWebhookResult["completedDocuments"]>[number];
+      bytes: Buffer;
+    }>;
+    try {
+      completedWithBytes = result.completedDocuments.map((completed) => ({
+        completed,
+        bytes: decodeCompletedDocument(completed.contentBase64),
+      }));
+    } catch {
+      return {
+        processed: false,
+        reason: "completed_document_invalid",
+        signatureRequest,
+      };
+    }
+    try {
+      const storedVersions = [];
+      for (const { completed, bytes } of completedWithBytes) {
+        const stored = await ingestDocumentVersion({
+          documentId: completed.documentId,
+          brokerageId: property.brokerageId,
+          bytes,
+          originalFilename: completed.filename,
+          declaredMimeType: completed.contentType,
+          replacementReason: `Completed e-signature envelope ${result.providerReference}`,
+          retentionClass: "signed-agreement",
+          source: "esign",
+          sourceProvider: signatureRequest.provider,
+          providerDocumentId: result.providerReference,
+          webhookVerified: true,
+        });
+        storedVersions.push(stored.version);
+        await logAudit({
+          action:
+            stored.outcome === "created"
+              ? "document_version_ingested_from_esign"
+              : stored.outcome === "resumed"
+                ? "document_version_esign_ingestion_reconciled"
+                : "document_version_esign_ingestion_deduplicated",
+          recordType: "document_object_version",
+          recordId: String(stored.version.id),
+          propertyId: stored.version.propertyId,
+          providerReference: result.providerReference,
+          updatedValue: JSON.stringify({
+            documentId: completed.documentId,
+            version: stored.version.version,
+            byteSize: stored.version.byteSize,
+            contentSha256: stored.version.contentSha256,
+            webhookVerified: true,
+          }),
+        });
+      }
+      completedDocumentKey = storedVersions[0]?.storageObjectKey ?? null;
+    } catch (error) {
+      const isInvalidPayload =
+        error instanceof DocumentStorageError &&
+        error.code !== "DOCUMENT_UNAVAILABLE" &&
+        error.code !== "DOCUMENT_INTEGRITY_FAILURE";
+      logger.warn("esign_completed_document_ingestion_rejected", {
+        signatureRequestId: signatureRequest.id,
+        retryable: !isInvalidPayload,
+        error: error instanceof Error ? error.message : "unknown error",
+      });
+      if (!isInvalidPayload) {
+        await logAudit({
+          action: "esign_completed_document_storage_retry_required",
+          recordType: "signature_request",
+          recordId: String(signatureRequest.id),
+          propertyId: docPackage.propertyId,
+          providerReference: result.providerReference,
+          updatedValue: JSON.stringify({
+            status: signatureRequest.status,
+            retryable: true,
+            pendingDocumentIds: completedWithBytes.map(({ completed }) => completed.documentId),
+          }),
+        });
+        await dispatchOperationalAlert({
+          type: "DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED",
+          summary: "Completed e-sign document storage requires provider redelivery",
+          dedupKey: `document-storage:esign-retry:${signatureRequest.id}`,
+          details: {
+            signatureRequestId: signatureRequest.id,
+            propertyId: docPackage.propertyId,
+            pendingDocumentCount: completedWithBytes.length,
+          },
+        });
+      }
+      return {
+        processed: false,
+        reason: isInvalidPayload
+          ? "completed_document_invalid"
+          : "completed_document_storage_retry_required",
+        signatureRequest,
+      };
+    }
+  }
+
   const [updated] = await db
     .update(signatureRequests)
     .set({
       status: result.status,
       completedAt: result.status === "Completed" || result.status === "Voided" ? new Date() : null,
-      completedDocumentKey: result.completedDocumentKey ?? signatureRequest.completedDocumentKey,
+      completedDocumentKey,
       updatedAt: new Date(),
     })
     .where(eq(signatureRequests.id, signatureRequest.id))
     .returning();
 
-  const [docPackage] = await db.select().from(documentPackages).where(eq(documentPackages.id, updated.packageId));
-
   if (result.status === "Completed" && docPackage) {
-    const packageDocuments = await db.select().from(documents).where(eq(documents.packageId, updated.packageId));
     await db
       .update(documents)
       .set({ status: "Signed", updatedAt: new Date() })

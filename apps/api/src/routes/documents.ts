@@ -1,7 +1,16 @@
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
+import multer from "multer";
 import { z } from "zod";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
+import {
+  DocumentStorageError,
+  configuredMaxDocumentBytes,
+  createDocumentSignedDownload,
+  ingestDocumentVersion,
+  quarantineDocument,
+  redeemDocumentSignedDownload,
+} from "../lib/documentStorage.js";
 import {
   upsertAgencyAgreementTerms,
   getAgencyAgreementTerms,
@@ -26,6 +35,18 @@ import {
 // app. See lib/documents.ts's own "Tenant chokepoints" comment for the
 // fetch-time discipline this relies on.
 export const documentsRouter = Router();
+const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: configuredMaxDocumentBytes(),
+    files: 1,
+    fields: 2,
+    parts: 3,
+    fieldNameSize: 64,
+    fieldSize: 2_048,
+    headerPairs: 32,
+  },
+});
 
 const agencyTermsSchema = z
   .object({
@@ -133,8 +154,36 @@ documentsRouter.post("/webhook", async (req, res) => {
     res.status(200).json({ received: true, processed: false, reason: result.reason });
     return;
   }
+  if (result.reason === "completed_document_storage_retry_required") {
+    res.setHeader("Retry-After", "30");
+    res.status(503).json({ received: false, processed: false, reason: result.reason });
+    return;
+  }
 
   res.status(200).json({ received: true, processed: result.processed, reason: result.reason });
+});
+
+documentsRouter.get("/signed-download/:versionId", async (req, res) => {
+  const versionId = Number(req.params.versionId);
+  const expires = Number(req.query.expires);
+  const signature = typeof req.query.signature === "string" ? req.query.signature : "";
+  try {
+    const result = await redeemDocumentSignedDownload(versionId, expires, signature);
+    const safeFilename = result.displayFilename.replace(/["\\]/g, "_");
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, no-store");
+    await logAudit({
+      action: "document_signed_download_redeemed",
+      recordType: "document_object_version",
+      recordId: String(result.version!.id),
+      propertyId: result.document.propertyId,
+    });
+    res.send(result.bytes);
+  } catch {
+    res.status(404).json({ error: "Signed document link is invalid, expired, or unavailable" });
+  }
 });
 
 // Lets the agent preview a generated (or signed) document's stored content
@@ -149,9 +198,144 @@ documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
       res.status(404).json({ error: "No stored content for this document" });
       return;
     }
-    res.type("text/plain").send(result.content);
+    const safeFilename = result.displayFilename.replace(/["\\]/g, "_");
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, no-store");
+    await logAudit({
+      userId: user.id,
+      action: "document_content_downloaded",
+      recordType: result.versionId ? "document_object_version" : "document",
+      recordId: String(result.versionId ?? documentId),
+      propertyId: result.propertyId,
+    });
+    res.send(result.content);
   } catch (err) {
     res.status(404).json({ error: "Stored content could not be read" });
+  }
+});
+
+documentsRouter.post(
+  "/:documentId/versions",
+  requireAuth,
+  documentUpload.single("file"),
+  async (req, res) => {
+    const documentId = Number(req.params.documentId);
+    const user = req.authedUser!;
+    if (!req.file) {
+      res.status(400).json({ error: "A document file is required" });
+      return;
+    }
+    try {
+      const stored = await ingestDocumentVersion({
+        documentId,
+        brokerageId: user.brokerageId,
+        actorUserId: user.id,
+        bytes: req.file.buffer,
+        originalFilename: req.file.originalname,
+        declaredMimeType: req.file.mimetype,
+        replacementReason:
+          typeof req.body.replacementReason === "string"
+            ? req.body.replacementReason
+            : undefined,
+        retentionClass:
+          typeof req.body.retentionClass === "string"
+            ? req.body.retentionClass
+            : undefined,
+        source: "upload",
+      });
+      await logAudit({
+        userId: user.id,
+        action:
+          stored.outcome === "created"
+            ? "document_version_ingested"
+            : stored.outcome === "resumed"
+              ? "document_version_ingestion_reconciled"
+              : "document_version_ingestion_deduplicated",
+        recordType: "document_object_version",
+        recordId: String(stored.version.id),
+        propertyId: stored.version.propertyId,
+        updatedValue: JSON.stringify({
+          documentId,
+          version: stored.version.version,
+          byteSize: stored.version.byteSize,
+          contentSha256: stored.version.contentSha256,
+          retentionClass: stored.version.retentionClass,
+        }),
+      });
+      res.status(stored.created ? 201 : 200).json({
+        created: stored.created,
+        outcome: stored.outcome,
+        version: stored.version,
+      });
+    } catch (error) {
+      if (error instanceof DocumentStorageError) {
+        const status =
+          error.code === "DOCUMENT_NOT_FOUND"
+            ? 404
+            : error.code === "DOCUMENT_TOO_LARGE"
+              ? 413
+              : 400;
+        res.status(status).json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+  },
+);
+
+documentsRouter.post("/:documentId/signed-download", requireAuth, async (req, res) => {
+  const documentId = Number(req.params.documentId);
+  const user = req.authedUser!;
+  try {
+    const { version, download } = await createDocumentSignedDownload(
+      documentId,
+      user.brokerageId,
+    );
+    await logAudit({
+      userId: user.id,
+      action: "document_signed_download_created",
+      recordType: "document_object_version",
+      recordId: String(version.id),
+      propertyId: version.propertyId,
+    });
+    res.json({
+      url: download.url,
+      expiresAt: download.expiresAt.toISOString(),
+    });
+  } catch (error) {
+    if (error instanceof DocumentStorageError) {
+      res.status(404).json({ error: "Stored document could not be found" });
+      return;
+    }
+    throw error;
+  }
+});
+
+documentsRouter.post("/:documentId/quarantine", requireAuth, async (req, res) => {
+  const documentId = Number(req.params.documentId);
+  const user = req.authedUser!;
+  if (user.role !== "Brokerage Administrator") {
+    res.status(403).json({ error: "Administrator access is required" });
+    return;
+  }
+  try {
+    const version = await quarantineDocument(documentId, user.brokerageId);
+    await logAudit({
+      userId: user.id,
+      action: "document_version_quarantined",
+      recordType: "document_object_version",
+      recordId: String(version.id),
+      propertyId: version.propertyId,
+    });
+    res.json({ version });
+  } catch (error) {
+    if (error instanceof DocumentStorageError) {
+      res.status(404).json({ error: "Stored document could not be found" });
+      return;
+    }
+    throw error;
   }
 });
 
@@ -160,4 +344,23 @@ documentsRouter.get("/packages/by-property/:propertyId", requireAuth, async (req
   const user = req.authedUser!;
   const result = await getPackageByProperty(propertyId, user.brokerageId);
   res.json(result);
+});
+
+documentsRouter.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (error instanceof multer.MulterError) {
+    const isFileSize = error.code === "LIMIT_FILE_SIZE";
+    res.status(413).json(
+      isFileSize
+        ? {
+            error: "Document exceeds the configured size limit",
+            code: "DOCUMENT_TOO_LARGE",
+          }
+        : {
+            error: "Document upload exceeds the configured multipart limits",
+            code: "DOCUMENT_UPLOAD_LIMIT",
+          },
+    );
+    return;
+  }
+  next(error);
 });

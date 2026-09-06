@@ -15,6 +15,7 @@ import {
   paymentMethods,
   documentPackages,
   documents,
+  documentObjectVersions,
   signatureRequests,
   agencyAgreementTerms,
   offers,
@@ -253,11 +254,20 @@ export async function createListedProperty(
   const sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
   if (sendRes.status !== 201) throw new Error(`send-for-signature failed: ${sendRes.status} ${await sendRes.text()}`);
   const { signatureRequest } = await json<{ signatureRequest: { providerReference: string } }>(sendRes);
+  const packageRes = await fetch(`${baseUrl}/api/documents/packages/by-property/${propertyId}`, { headers: { cookie } });
+  if (packageRes.status !== 200) throw new Error(`get package documents failed: ${packageRes.status} ${await packageRes.text()}`);
+  const { documents: packageDocuments } = await json<{ documents: Array<{ id: number; title: string }> }>(packageRes);
+  const completedDocuments = packageDocuments.map((document) => ({
+    documentId: document.id,
+    contentBase64: Buffer.from(`Signed document: ${document.title}\n`, "utf8").toString("base64"),
+    filename: `${document.title.replace(/[^A-Za-z0-9._-]/g, "_")}.txt`,
+    contentType: "text/plain",
+  }));
 
   const esignWebhookRes = await fetch(`${baseUrl}/api/documents/webhook`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed" }),
+    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed", completedDocuments }),
   });
   if (esignWebhookRes.status !== 200) throw new Error(`esign webhook failed: ${esignWebhookRes.status} ${await esignWebhookRes.text()}`);
 
@@ -569,6 +579,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     if (packageIds.length > 0) {
       await db.delete(signatureRequests).where(inArray(signatureRequests.packageId, packageIds));
     }
+    await db.delete(documentObjectVersions).where(inArray(documentObjectVersions.propertyId, propertyIds));
     await db.delete(documents).where(inArray(documents.propertyId, propertyIds));
     await db.delete(documentPackages).where(inArray(documentPackages.propertyId, propertyIds));
     await db.delete(amlVerifications).where(inArray(amlVerifications.propertyId, propertyIds));
@@ -599,7 +610,31 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(agencyAgreementTerms).where(inArray(agencyAgreementTerms.propertyId, propertyIds));
     await db.delete(auditLogs).where(inArray(auditLogs.propertyId, propertyIds));
     await db.delete(domainEvents).where(inArray(domainEvents.propertyId, propertyIds));
-    await db.delete(properties).where(inArray(properties.id, propertyIds));
+    // A full-suite exception scan can discover these fixtures after the
+    // earlier riskExceptions cleanup. Lock the parent rows, remove any late
+    // scan output, and delete the properties in one transaction so a
+    // concurrent FK insert cannot race between those operations.
+    await db.transaction(async (tx) => {
+      await tx
+        .select({ id: properties.id })
+        .from(properties)
+        .where(inArray(properties.id, propertyIds))
+        .for("update");
+      const lateRiskRows = await tx
+        .select({ id: riskExceptions.id })
+        .from(riskExceptions)
+        .where(inArray(riskExceptions.propertyId, propertyIds));
+      const lateRiskIds = lateRiskRows.map((row) => row.id);
+      if (lateRiskIds.length > 0) {
+        await tx
+          .delete(riskExceptionTransitions)
+          .where(inArray(riskExceptionTransitions.exceptionId, lateRiskIds));
+      }
+      await tx
+        .delete(riskExceptions)
+        .where(inArray(riskExceptions.propertyId, propertyIds));
+      await tx.delete(properties).where(inArray(properties.id, propertyIds));
+    });
   }
 
   await db.delete(entitlementGrants).where(inArray(entitlementGrants.brokerageId, ids));

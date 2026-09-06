@@ -142,15 +142,24 @@ test("Stage B: Agency Agreement -> Ready to List -> documents signed -> seller A
 
   const populateRes = await postJson(`/documents/packages/${packageId}/populate`, A.agent.cookie);
   assert.equal(populateRes.status, 200);
+  const packageRes = await getJson(`/documents/packages/by-property/${propertyId}`, A.agent.cookie);
+  assert.equal(packageRes.status, 200);
+  const { documents: packageDocuments } = await bodyOf<{ documents: Array<{ id: number; title: string }> }>(packageRes);
 
   const sendRes = await postJson(`/documents/packages/${packageId}/send-for-signature`, A.agent.cookie);
   assert.equal(sendRes.status, 201);
   const { signatureRequest } = await bodyOf<{ signatureRequest: { providerReference: string } }>(sendRes);
+  const completedDocuments = packageDocuments.map((document) => ({
+    documentId: document.id,
+    contentBase64: Buffer.from(`Signed document: ${document.title}\n`, "utf8").toString("base64"),
+    filename: `${document.title.replace(/[^A-Za-z0-9._-]/g, "_")}.txt`,
+    contentType: "text/plain",
+  }));
 
   const esignWebhookRes = await fetch(`${baseUrl}/api/documents/webhook`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed" }),
+    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed", completedDocuments }),
   });
   assert.equal(esignWebhookRes.status, 200);
 

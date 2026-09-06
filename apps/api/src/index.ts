@@ -15,6 +15,11 @@ import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js"
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
 import { registerIntegrationsEngine } from "./lib/integrations/bootstrap.js";
 import { assertOperationalAlertsConfigured } from "./lib/operationalAlerts.js";
+import {
+  assertDocumentStorageConfigured,
+  checkDocumentStorageReadiness,
+} from "./lib/documentStorage.js";
+import { registerDocumentStorageReconciler } from "./lib/documentStorageReconciler.js";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -41,6 +46,17 @@ assertMetricsAuthConfigured();
 assertAuthEmailProviderConfigured();
 assertOperationalAlertsConfigured();
 assertApprovedLegalVersionsConfigured();
+assertDocumentStorageConfigured();
+
+async function start(): Promise<void> {
+if (process.env.NODE_ENV === "production") {
+  const storageReadiness = await checkDocumentStorageReadiness();
+  if (!storageReadiness.ready) {
+    throw new Error(
+      `Production document storage readiness failed: ${storageReadiness.message ?? "unavailable"}`,
+    );
+  }
+}
 
 configureEvents();
 
@@ -80,6 +96,11 @@ registerFinancialEngine();
 // the engines above.
 registerIntegrationsEngine();
 
+// Resolves interrupted two-phase document ingestions in bounded batches.
+// Matching bytes are finalized; missing/corrupt terminal states are
+// quarantined with audit evidence rather than silently discarded.
+registerDocumentStorageReconciler();
+
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.
 ensureCatalogueSeeded().catch((err) => logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
@@ -96,4 +117,12 @@ const port = Number(process.env.PORT ?? 8080);
 
 app.listen(port, () => {
   logger.info("api_listening", { port });
+});
+}
+
+start().catch((error) => {
+  logger.error("api_startup_failed", {
+    error: error instanceof Error ? error.message : String(error),
+  });
+  process.exit(1);
 });

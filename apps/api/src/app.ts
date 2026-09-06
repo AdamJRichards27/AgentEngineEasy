@@ -9,6 +9,7 @@ import { globalRateLimiter } from "./middlewares/rateLimit.js";
 import { corsOriginCallback } from "./lib/cors.js";
 import { globalErrorHandler } from "./middlewares/errorHandler.js";
 import { mountStaticWebIfPresent } from "./lib/staticWeb.js";
+import { configuredDocumentWebhookMaxBytes } from "./lib/documentStorage.js";
 
 export function createApp() {
   const app = express();
@@ -59,10 +60,22 @@ export function createApp() {
   // alongside normal JSON parsing — webhook signature verification (Phase
   // 4's AML webhook, and future e-sign/payment webhooks) needs the exact
   // bytes the provider signed, not a re-serialised copy of the parsed body.
+  // Completed e-sign payloads carry Base64 document bytes and therefore use
+  // a separate bounded parser. Mount it before the generic parser so Express
+  // does not apply the unrelated 1 MB API limit after the body is consumed.
+  app.use(
+    "/api/documents/webhook",
+    express.json({
+      limit: configuredDocumentWebhookMaxBytes(),
+      verify: (req, _res, buf) => {
+        (req as import("express").Request).rawBody = Buffer.from(buf);
+      },
+    }),
+  );
   // Explicit 1mb limit (Express's implicit default is 100kb) — generous
-  // for this API's JSON payloads while still bounding how much of an
-  // oversized body gets buffered; file uploads go through routes/import.ts's
-  // own multer limit (multipart/form-data), not this JSON body parser.
+  // for the remaining JSON API while still bounding how much of an
+  // oversized body gets buffered; file uploads go through their own Multer
+  // limits and completed e-sign payloads use the parser above.
   app.use(
     express.json({
       limit: "1mb",

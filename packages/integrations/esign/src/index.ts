@@ -10,7 +10,12 @@ export interface DocumentPackageInput {
 export interface ESignWebhookResult {
   providerReference: string;
   status: "PartiallySigned" | "Completed" | "Voided";
-  completedDocumentKey?: string;
+  completedDocuments?: Array<{
+    documentId: number;
+    contentBase64: string;
+    filename: string;
+    contentType: string;
+  }>;
 }
 
 export interface ESignProvider {
@@ -41,7 +46,7 @@ export class MockESignProvider implements ESignProvider {
     return {
       providerReference: p.providerReference ?? "unknown",
       status: p.status ?? "Completed",
-      completedDocumentKey: p.completedDocumentKey,
+      completedDocuments: p.completedDocuments,
     };
   }
 }
@@ -106,6 +111,11 @@ export class HttpESignProvider implements ESignProvider {
   parseWebhook(payload: unknown): ESignWebhookResult {
     const p = (payload ?? {}) as Record<string, unknown>;
     const rawStatus = String(p.status ?? "").toLowerCase();
+    const rawDocuments = Array.isArray(p.completedDocuments ?? p.completed_documents)
+      ? (p.completedDocuments ?? p.completed_documents) as unknown[]
+      : p.completedDocument ?? p.completed_document
+        ? [p.completedDocument ?? p.completed_document]
+        : [];
 
     const statusMap: Record<string, ESignWebhookResult["status"]> = {
       partially_signed: "PartiallySigned",
@@ -119,12 +129,21 @@ export class HttpESignProvider implements ESignProvider {
     return {
       providerReference: String(p.id ?? p.reference ?? p.providerReference ?? "unknown"),
       status: statusMap[rawStatus] ?? "PartiallySigned",
-      completedDocumentKey:
-        typeof p.completedDocumentKey === "string"
-          ? p.completedDocumentKey
-          : typeof p.completed_document_key === "string"
-            ? p.completed_document_key
-            : undefined,
+      completedDocuments: rawDocuments
+        .map((value) => value as Record<string, unknown>)
+        .filter(
+          (document) =>
+            Number.isInteger(Number(document.documentId ?? document.document_id)) &&
+            typeof (document.contentBase64 ?? document.content_base64) === "string" &&
+            typeof document.filename === "string" &&
+            typeof (document.contentType ?? document.content_type) === "string",
+        )
+        .map((document) => ({
+          documentId: Number(document.documentId ?? document.document_id),
+          contentBase64: String(document.contentBase64 ?? document.content_base64),
+          filename: String(document.filename),
+          contentType: String(document.contentType ?? document.content_type),
+        })),
     };
   }
 }

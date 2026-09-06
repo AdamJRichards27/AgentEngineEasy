@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@aee/db";
 import { logger, observeHistogram } from "@aee/events";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
+import { checkDocumentStorageReadiness } from "../lib/documentStorage.js";
 
 export const healthRouter = Router();
 
@@ -23,16 +24,15 @@ export const healthRouter = Router();
 //   process is genuinely wedged (event loop blocked), it won't even get
 //   here, and that's what an orchestrator's liveness-probe TIMEOUT should
 //   catch — this handler's own logic never needs to detect that itself.
-// - GET /api/health/ready — readiness. Checks the one hard dependency
-//   this API cannot function without (Postgres). Three provable states:
-//     ok         — query succeeded within DEGRADED_LATENCY_MS.
-//     degraded   — query succeeded but took longer than
+// - GET /api/health/ready — readiness. Checks both hard dependencies this
+//   API cannot function without: Postgres and durable document storage.
+//   Three provable states:
+//     ok         — dependency checks succeeded within DEGRADED_LATENCY_MS.
+//     degraded   — a dependency check succeeded but took longer than
 //                  DEGRADED_LATENCY_MS (still 200 — keep routing traffic,
 //                  this is a signal for an alert, not a reason to fail
 //                  out of rotation).
-//     unavailable — query threw or the connection is unreachable (503 —
-//                  genuinely not ready to serve traffic that touches the
-//                  database, which today is effectively every route).
+//     unavailable — a dependency check failed or is unreachable (503).
 // - GET /api/health — kept byte-for-byte identical to its pre-Step-2
 //   response shape ({status, service} / {status, service, database}) for
 //   backward compatibility with anything already depending on it; it now
@@ -67,11 +67,41 @@ export async function checkReadiness(): Promise<ReadinessResult> {
     observeHistogram("health_check_duration_ms", durationMs, { status: "unavailable" });
     return { status: "unavailable", durationMs, reasons: ["database unreachable"] };
   }
+  const databaseDurationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+  const storageStart = process.hrtime.bigint();
+  const storage = await checkDocumentStorageReadiness();
+  const storageDurationMs = Number(process.hrtime.bigint() - storageStart) / 1_000_000;
+  if (!storage.ready) {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+    logger.error("storage_readiness_check_failed", {
+      error: storage.message ?? "object storage unavailable",
+      durationMs,
+    });
+    await dispatchOperationalAlert({
+      type: "STORAGE_READINESS_FAILURE",
+      summary: "Document storage readiness check failed",
+      dedupKey: "readiness:document-storage",
+      details: { durationMs },
+    });
+    observeHistogram("health_check_duration_ms", durationMs, { status: "unavailable" });
+    return { status: "unavailable", durationMs, reasons: ["document storage unreachable"] };
+  }
   const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
-  if (durationMs > DEGRADED_LATENCY_MS) {
+  if (databaseDurationMs > DEGRADED_LATENCY_MS) {
     status = "degraded";
-    reasons.push(`database query took ${durationMs.toFixed(1)}ms (> ${DEGRADED_LATENCY_MS}ms threshold)`);
-    logger.warn("readiness_check_degraded", { durationMs, thresholdMs: DEGRADED_LATENCY_MS });
+    reasons.push(`database query took ${databaseDurationMs.toFixed(1)}ms (> ${DEGRADED_LATENCY_MS}ms threshold)`);
+  }
+  if (storageDurationMs > DEGRADED_LATENCY_MS) {
+    status = "degraded";
+    reasons.push(`document storage check took ${storageDurationMs.toFixed(1)}ms (> ${DEGRADED_LATENCY_MS}ms threshold)`);
+  }
+  if (status === "degraded") {
+    logger.warn("readiness_check_degraded", {
+      durationMs,
+      databaseDurationMs,
+      storageDurationMs,
+      thresholdMs: DEGRADED_LATENCY_MS,
+    });
   }
   observeHistogram("health_check_duration_ms", durationMs, { status });
   return { status, durationMs, reasons };

@@ -296,7 +296,7 @@ test("GET /packages/by-property/:propertyId returns nothing for a different brok
 // GET /:documentId/content
 // ---------------------------------------------------------------------
 
-test("GET /:documentId/content succeeds for the owning brokerage, unchanged", async () => {
+test("GET /:documentId/content returns the integrity-checked signed artifact for the owning brokerage", async () => {
   const listed = await createListedProperty(baseUrl, A.agent.cookie, { address: `${Math.floor(Math.random() * 1_000_000)} Content Happy Path St` });
   const { body } = await getByProperty(A.agent.cookie, listed.propertyId);
   const doc = body.documents.find((d) => d.objectStorageKey);
@@ -307,7 +307,7 @@ test("GET /:documentId/content succeeds for the owning brokerage, unchanged", as
   assert.match(res.headers.get("content-type") ?? "", /text\/plain/);
   const text = await res.text();
   assert.ok(text.length > 0);
-  assert.ok(text.includes("Content Happy Path St"), "the generated content must actually be this property's document, not a placeholder");
+  assert.ok(text.startsWith("Signed document: "), "the retrieved bytes must be the completed signed artifact");
 });
 
 test("GET /:documentId/content rejects a document belonging to a different brokerage exactly like a nonexistent id — real signed contract content must not leak cross-tenant", async () => {
