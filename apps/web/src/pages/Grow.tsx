@@ -6,6 +6,7 @@ import { useSession } from "../lib/session";
 interface GrowAccess {
   entitled: boolean;
   entitlements: string[];
+  billingProviderName: string;
 }
 
 interface GrowOverview {
@@ -78,6 +79,11 @@ export default function Grow() {
             Grow turns every appraisal, buyer enquiry, and past client into a tracked relationship
             and a visible next action - no separate contact database, no unexplained scores.
           </p>
+          {access.data?.billingProviderName === "mock" && (
+            <p className="muted pilot-mode-note">
+              Sandbox billing — this is test-mode only. No real card is charged and no real subscription is created.
+            </p>
+          )}
           {user?.role === "Brokerage Administrator" ? (
             <>
               <button className="btn btn-primary" onClick={() => checkout.mutate()} disabled={checkout.isPending}>
@@ -97,6 +103,13 @@ export default function Grow() {
 }
 
 function GrowWorkspace() {
+  // Re-uses the "grow-access" query the outer Grow() component already fetched (react-query
+  // dedupes by key, so this is not a second network request) purely to read
+  // billingProviderName for the sandbox-billing note below.
+  const access = useQuery<GrowAccess>({
+    queryKey: ["grow-access"],
+    queryFn: () => apiFetch("/grow/access"),
+  });
   const overview = useQuery<GrowOverview>({
     queryKey: ["grow-overview"],
     queryFn: () => apiFetch("/grow/overview"),
@@ -118,6 +131,9 @@ function GrowWorkspace() {
     <div>
       <h1>Grow</h1>
         <p className="muted"><Link href="/grow/import">Import contacts &amp; properties &rarr;</Link></p>
+        {access.data?.billingProviderName === "mock" && (
+          <p className="muted pilot-mode-note">Sandbox billing is active — no real charge or subscription exists behind this workspace.</p>
+        )}
 
       <div className="stat-tiles">
         <div className="stat-tile">

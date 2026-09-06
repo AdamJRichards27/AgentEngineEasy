@@ -129,10 +129,25 @@ export class HttpESignProvider implements ESignProvider {
   }
 }
 
+// Critical Blocker Remediation, Phase 10 — external-action lock. Same check
+// (and same reasoning for why it's repeated locally rather than imported)
+// as packages/integrations/payments/src/index.ts's own
+// mustForceMockExternalProvider() — see that file's comment and
+// docs/gate-evidence/PHASE10_BILLING_AND_EXTERNAL_ACTION_LOCKS.md.
+function mustForceMockExternalProvider(): boolean {
+  return process.env.NODE_ENV === "production" && process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED !== "true";
+}
+
 export function createESignProvider(): ESignProvider {
   const provider = process.env.ESIGN_PROVIDER ?? "mock";
 
   if (provider === "http") {
+    if (mustForceMockExternalProvider()) {
+      logger.warn("esign_provider_locked_to_mock_pilot_policy", {
+        reason: "ESIGN_PROVIDER=http was requested but LIVE_EXTERNAL_TRANSACTIONS_APPROVED is not \"true\" in production — no real e-signature action is authorised for this pilot.",
+      });
+      return new MockESignProvider();
+    }
     const baseUrl = process.env.ESIGN_API_BASE_URL;
     const apiKey = process.env.ESIGN_PROVIDER_API_KEY;
     const webhookSecret = process.env.ESIGN_WEBHOOK_SECRET;
