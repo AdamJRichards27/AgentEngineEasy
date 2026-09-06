@@ -9,9 +9,9 @@ agents, real transaction workflows, synthetic/test data only, no public signup, 
 customer money movement, no launch beyond this Queensland, Australia pilot, and no
 multi-jurisdiction claim (jurisdiction confirmed by the AE Project Owner — see
 `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md`). It is written against what the system
-actually does today, not an aspirational target state — where the platform's own tooling is
-partial (e.g. metrics exist but there is no paging system; see `docs/METRICS_ALERTS_AND_SERVICE_
-OBJECTIVES.md`), this document says so and describes the manual step a human takes instead.
+actually does today, not an aspirational target state. Metrics and an `operationalAlerts`
+webhook boundary exist, but external delivery and human acknowledgement have not been
+evidenced; cooldown/deduplication is process-local and there is no durable alert outbox.
 
 It complements, and does not replace, two existing engineering documents that this pilot
 runbook assumes and points back to rather than re-deriving:
@@ -25,10 +25,10 @@ runbook assumes and points back to rather than re-deriving:
   time applies during a live pilot, what gets logged in the pilot's own incident log) and
   defers the technical root-cause procedure to that document.
 - `docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md` — the real, wired metrics and named
-  alert-ready conditions this runbook's "Trigger"/"Evidence to preserve" columns cite. No
-  paging pipeline exists yet, so every trigger below is either a participant report, a
-  role manually checking `GET /api/internal/metrics` / the admin views, or a log/exception
-  scan a human runs by hand.
+  alert-ready conditions this runbook's "Trigger"/"Evidence to preserve" columns cite.
+  Until external delivery and acknowledgement are evidenced, every signal must also be
+  checked by a role manually through `GET /api/internal/metrics`, the admin views, or a
+  log/exception scan.
 
 **Roles used throughout** (accountable roles, not named individuals — see note at the end
 of this section):
@@ -117,13 +117,13 @@ accountable Owner role, not time to full resolution.
 |---|---|
 | **Trigger** | A participant reports missing or garbled data on a property/transaction; a row-count or referential-integrity check turns up an anomaly; an unexpected `NULL`/orphaned foreign key is found. |
 | **Severity** | Critical |
-| **First response** | AE Backend Engineering (on-call) stops any process that might be actively writing to the affected rows (e.g. pause the relevant automation/outbox worker if it's implicated) and takes an immediate `pg_dump` snapshot of current state before doing anything else — so a bad situation is never made irreversible by a well-intentioned fix attempt. |
-| **Owner** | AE Backend Engineering (on-call), with AE Project Owner informed immediately given Critical severity |
-| **Escalation path** | AE Backend Engineering (on-call) → AE Project Owner (within 15 minutes) → AE Security/Compliance Owner (if corruption could be attacker-caused rather than a bug) |
+| **First response** | AE Backend Engineering (on-call) stops any process that might be actively writing to the affected rows and takes an immediate `pg_dump` snapshot of current state. Confirm whether the daily external backup scheduler completed and preserve its artifact/manifest evidence; do not assume an alert was received. |
+| **Owner** | AE Backend Engineering (on-call), with AE Project Owner informed immediately. External scheduler, object-store/KMS, and alert-receiver accountable owners are **unassigned**. |
+| **Escalation path** | AE Backend Engineering (on-call) → AE Project Owner (within 15 minutes) → AE Security/Compliance Owner (if corruption could be attacker-caused). If the failure is in scheduler, object storage, KMS, or alert receipt, escalate to its assigned external owner; until assigned, record the owner as unassigned and treat the gap as a stop-pilot candidate. |
 | **Target response time** | 15 minutes to acknowledge; scope of loss/corruption identified within 2 hours |
-| **Evidence to preserve** | The pre-remediation `pg_dump`, the specific table/row ids affected, and — if available — the most recent known-good backup for comparison (see `SECURITY_INCIDENT_RUNBOOKS.md`'s recorded backup/restore drill for the mechanical procedure, `pg_dump`/`pg_restore`) |
+| **Evidence to preserve** | The pre-remediation `pg_dump`, affected table/row ids, the most recent artifact and SHA-256 manifest if available, scheduler completion/failure record, and configuration-free evidence of KMS/object-store access. See `BACKUP_AND_RESTORE_RUNBOOK.md` for the current mechanical procedure. |
 | **Customer/participant communication approach** | Affected participant(s) told promptly that an issue was found, what is being done, and — critically for a pilot — that this is exactly the kind of thing the pilot exists to surface before a wider launch, not something to downplay |
-| **Resolution steps** | Restore the specific affected rows from the most recent clean backup if a targeted restore is possible; if not, restore the full pilot database to a scratch instance, reconcile the delta manually against what participants report having entered since, and only then cut over. Root-cause the corruption (application bug vs. infrastructure vs. bad migration) before considering the incident closed, not just after data is restored. |
+| **Resolution steps** | Restore and validate only to the configured fresh disposable restore environment first; verify manifest, inventory, and document integrity before any recovery decision. Reconcile any delta manually and obtain the AE Project Owner's explicit decision before an operator performs any separately planned cutover. Root-cause the corruption (application bug, infrastructure, or migration) before closure. Never restore over an active environment. |
 | **Closure record** | Incident log entry with scope of loss (tables/rows/participants affected), which backup was restored from and its timestamp, the manual reconciliation steps taken, and root cause. This is also a **stop-pilot trigger candidate** (see scenario 15) if the cause is not immediately and confidently fixable. |
 
 ---
@@ -166,13 +166,13 @@ accountable Owner role, not time to full resolution.
 
 | | |
 |---|---|
-| **Trigger** | A restore is attempted (in response to scenario 4, or as a scheduled drill) using `pg_restore` against a scratch database and it fails, or completes with unexpected referential-integrity/row-count discrepancies beyond what's explainable by in-flight writes during the dump window. |
+| **Trigger** | A disposable restore using `backup:restore -- --artifact=<artifact-name> --confirm-disposable` fails; manifest/inventory/document validation fails; or it completes with unexpected discrepancies. A failed or missing daily external-scheduler record, durable artifact/manifest, or backup-failure alert is also a trigger because recovery readiness is not demonstrated. |
 | **Severity** | Critical |
-| **First response** | AE Backend Engineering (on-call) does **not** attempt the restore against anything but a fresh scratch database — never overwrite the live pilot database with a restore that hasn't first been verified. Compare the failure against the known-good drill procedure recorded in `SECURITY_INCIDENT_RUNBOOKS.md`'s "Backup and recovery" section to identify what's different this time (dump corruption, a schema mismatch since that drill, missing referential integrity). |
-| **Owner** | AE Backend Engineering (on-call) |
-| **Escalation path** | AE Backend Engineering (on-call) → AE Backend Engineering → AE Project Owner (within 1 hour — this is a foundational pilot-safety gap if it means data loss (scenario 4) may not be recoverable) |
+| **First response** | AE Backend Engineering (on-call) does **not** restore anywhere except a fresh configured disposable target. Preserve the command error and test the current provider-neutral procedure in `BACKUP_AND_RESTORE_RUNBOOK.md`: manifest before decrypt, empty-target preflight, `pg_restore --exit-on-error`, inventory, and documents. |
+| **Owner** | AE Backend Engineering (on-call) for the application path. Scheduler, object-store/KMS, and alert-receiver accountable owners are **unassigned** until external ownership is recorded. |
+| **Escalation path** | AE Backend Engineering (on-call) → AE Backend Engineering → AE Project Owner (within 1 hour). Route scheduler/object-store/KMS/receiver faults to the assigned external owner; where none exists, explicitly record unassigned ownership and escalate to AE Project Owner. |
 | **Target response time** | 30 minutes to acknowledge; root cause of the failed restore identified within 4 hours |
-| **Evidence to preserve** | The dump file used, the exact `pg_restore` error output, the schema version/migration state of both the dump's origin and the restore target |
+| **Evidence to preserve** | Artifact and SHA-256 manifest, exact command error output, schema/migration state of origin and target, inventory/document-validation result, scheduler record, and any alert-dispatch result. Do not preserve secrets, tokens, connection URLs, or decrypted payloads in the incident log. |
 | **Customer/participant communication approach** | Only escalate to participant communication if this restore failure is blocking recovery from an active data-loss incident (scenario 4) — otherwise this is an internal readiness gap, not something participants need to be told about mid-pilot |
 | **Resolution steps** | Identify and fix the specific cause (corrupted dump, schema drift, missing extension/permission on the target); re-run the drill end to end and record a clean result before considering backup/restore trustworthy again |
 | **Closure record** | Incident log entry; if this occurred while attempting to recover from an actual data-loss event, this becomes a **stop-pilot trigger** (scenario 15) until backup/restore is proven working again |

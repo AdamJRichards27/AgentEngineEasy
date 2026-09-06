@@ -162,7 +162,36 @@ in production), exposed as Prometheus text at `GET /api/internal/metrics` behind
 token that fails closed at boot in production. Proven by
 `packages/events/src/__tests__/metrics.test.ts` (16 tests).
 
-## 5. Health check — liveness/readiness/degraded split, implemented
+## 5. Operational alerts — bounded webhook boundary, not evidenced paging
+
+`apps/api/src/lib/operationalAlerts.ts` provides an `operationalAlerts` webhook boundary
+for defined signals including `BACKUP_FAILURE`, readiness failure, authentication anomaly,
+integration webhook failure, reconciliation variance, and tenant-security signal. Its
+policies identify logical ownership labels and runbook names; those labels are not named
+people or external contacts.
+
+In production, boot fails closed unless `OPERATIONAL_ALERTS_ENABLED=true`,
+`OPERATIONAL_ALERTS_PROVIDER=webhook`, a valid **HTTPS**
+`OPERATIONAL_ALERTS_WEBHOOK_URL`, and an `OPERATIONAL_ALERTS_TOKEN` of at least 16
+characters are configured. Receiver and token administration is owner-controlled
+deployment configuration. The accountable external receiver/token owner is currently
+**unassigned** and must be recorded by the operating organisation without adding secrets
+to this repository.
+
+The boundary POSTs an authenticated JSON envelope and makes no more than three bounded
+in-process attempts (with a five-second request timeout). Cooldown/deduplication is an
+in-memory, process-local map; a restart loses it. There is no durable alert outbox, and a
+failed delivery is only returned/logged for a caller to handle at its own safe boundary.
+Consequently, it is incorrect to claim durable paging, external delivery, or human
+acknowledgement: external delivery and acknowledgement have **not yet been evidenced**.
+Manual metric, admin-view, and log review remains required.
+
+Backup scripts are independently provider-neutral and use their configured
+`BACKUP_ALERT_COMMAND`; they do not create a scheduler. See
+`BACKUP_AND_RESTORE_RUNBOOK.md` for the external daily scheduler contract, retention and
+integrity verification, and disposable-only restore preflight.
+
+## 6. Health check — liveness/readiness/degraded split, implemented
 
 `routes/health.ts` replaces the prior single combined check with three:
 
@@ -185,7 +214,7 @@ failure) that are impractical to trigger against a real local Postgres connectio
 exercised by temporarily substituting `db.execute` for the duration of one assertion and
 restoring the true original immediately after.
 
-## 6. What is still genuinely not done — disclosed, not implied away
+## 7. What is still genuinely not done — disclosed, not implied away
 
 - **The `console.*` sweep is partial, not complete.** At the start of this step's
   observability work, 109 raw `console.log`/`console.error`/`console.warn` call sites
@@ -215,3 +244,7 @@ restoring the true original immediately after.
   recoverable across the compaction), and is not itself part of the structured-logging work
   above (it's a separate, older mechanism, still in active use, not superseded by
   `logger.ts`).
+- **External alert evidence.** The webhook boundary is implemented, but no evidence records
+  a production receiver's external delivery or a responder's acknowledgement. Its external
+  receiver/token ownership is unassigned, its deduplication is process-local, and it has no
+  durable outbox.

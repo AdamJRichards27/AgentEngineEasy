@@ -13,13 +13,21 @@ assessing, production readiness or national launch readiness for any jurisdictio
 
 ## FINAL DECISION
 
-# BLOCKED — CRITICAL OPERATIONAL FAILURE
+# REMEDIATION REQUIRED
 
-This build must not admit pilot participants in its current state. The blocking finding is a
-**demonstrated, structural authentication and tenant-isolation failure** (§2 below) — not a
-theoretical risk, a missing nice-to-have, or something a configuration change fixes. It is
-compounded by, but does not depend on, a second and independent category of blocker —
-essential legal/privacy documents that do not exist at all (§7).
+**Current reconciled decision as of 2026-09-07 AEST.** This build must not admit pilot
+participants. The original authentication failure described below is historical and has been
+remediated, but remediation remains required for operational blockers. There is no active real
+offsite backup provider or recurring scheduler; alert generation/retry/configuration is
+implemented but lacks external receiver delivery/acknowledgement proof; and the selected
+PostgreSQL-records plus durable-object-storage topology remains incomplete because the current
+document adapter is local-only and signed-byte ingestion is missing. CI at HEAD is pending and
+is not claimed passing.
+
+**B2 legal is separately BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED.** The SHA-256
+artifact-bound legal-acceptance control is fail-closed, but all 13 legal documents remain
+draft/unapproved and require AE Project Owner and/or external legal counsel action. No technical
+control grants that approval.
 
 This is not a comment on the engineering team's competence or the codebase's overall quality.
 Large parts of this codebase — the core Run-tier transaction engine specifically — are unusually
@@ -27,14 +35,10 @@ well built, self-aware about their own limits, and genuinely tested end-to-end (
 below is narrow, specific, and fully evidenced; it is also sufficient, on its own, to block this
 gate.
 
-**Status of this section as of the Critical Blocker Remediation pass:** this FINAL DECISION line,
-and the rest of this report, describe the state of the codebase **before** the authentication
-remediation, jurisdiction correction, legal drafting, and other work carried out under "AE
-Operational Readiness — Critical Blocker Remediation." That remediation pass re-runs this gate
-and issues its own renewed final decision in a separate completion report (Phase 12); it does not
-edit this line, so that the original gate finding remains an intact historical record. See
-`docs/gate-evidence/PHASE12_COMPLETION_REPORT_AND_RENEWED_GATE_DECISION.md` for the current
-decision.
+The detailed original findings below are retained as historical evidence. Their current-state
+status is governed by this section and
+`docs/gate-evidence/TECHNICAL_CLOSURE_AND_GATE_RECONCILIATION.md`; they do not override the
+decision above.
 
 ---
 
@@ -214,13 +218,11 @@ relevant to the decision above:
   settlement, transaction closure, Pit Crew delegated work-item lifecycle, success-fee
   calculation, document management, data import (CSV/XLSX), audit logging, Timeline/Command
   Centre reporting, Run/Grow entitlement gating, Grow CRM record-keeping.
-- **Manual-workaround-only** (no in-app mechanism exists; requires a direct database write by AE
-  engineering for the pilot's duration): account/role onboarding generally (see §2), Pit Crew
-  role grant/revoke, any role change, agent deactivation, and Brokerage-Administrator succession
-  if the only admin is ever deactivated — there is **no safeguard anywhere** preventing a
-  brokerage from being left with zero active administrators, and every Brokerage-Administrator
-  -only action would then become permanently unreachable for that brokerage without another
-  direct database intervention.
+- **Historical capability note, superseded for access continuity:** the original run found
+  manual-only onboarding and no last-admin safeguard. Invitation-only authentication,
+  administrator succession, and last-admin protection are now implemented; succession protection
+  includes atomic audit/session revocation. Do not use this historical row to describe current
+  administrator continuity.
 - **Exclude from this pilot:** transaction cancellation/fall-through (no system state exists for
   a deal that genuinely dies rather than stalls — the most common real-world exception in
   property transactions), real outbound email/SMS (no live provider exists at all — every
@@ -238,15 +240,15 @@ relevant to the decision above:
 
 | ID | Severity | Area | Finding | Evidence | Remediable within this gate? | Owner |
 |---|---|---|---|---|---|---|
-| B1 | **Critical — gate-blocking** | Security / tenant isolation | No real authentication exists; any user can be impersonated via `POST /auth/dev-login`, and `GET /auth/known-users` unauthenticated-ly enumerates every account | §2 above; `apps/api/src/routes/auth.ts:30-135`, `apps/api/src/lib/env.ts:19-31` | **No** — requires a real identity-verification feature build, explicitly out of this gate's bounded-remediation scope. **Addressed under the separate Critical Blocker Remediation pass** — see §2's status note. | AE Backend Engineering (build); AE Project Owner (accept/authorize any interim mitigation) |
-| B2 | **Critical — gate-blocking** | Legal / privacy | 12 of 14 essential pilot legal/privacy artifacts are completely absent from the repository (platform ToS, privacy policy, consent notice, pilot-participation terms, PC service terms, direct-debit authority text, data-processing arrangements, AML responsibility statement, support/complaint process, data export/deletion process — code and documentation both, breach-notification process, record-retention schedule) | `docs/gate-evidence/PHASE7_PRIVACY_AND_LEGAL_INVENTORY.md` | **No** — this report does not draft or certify missing legal documents; supplying and approving them is a business/legal decision. **A full draft pack has since been produced under the Critical Blocker Remediation pass (Phase 7)** — every document marked DRAFT — LEGAL REVIEW REQUIRED and still pending formal legal approval; see `docs/legal/LEGAL_APPROVAL_REGISTER.md`. | AE Project Owner / external legal counsel |
+| B1 | **Closed** | Security / tenant isolation | The original dev-login/user-enumeration failure is historical. Invitation-only authentication is implemented; dev fixtures are gated outside real operation. | `docs/gate-evidence/PHASE12_COMPLETION_REPORT_AND_RENEWED_GATE_DECISION.md` | Closed by the remediation pass | AE Backend Engineering |
+| B2 | **Critical — gate-blocking** | Legal / privacy | Thirteen legal/privacy artifacts exist only as `DRAFT — LEGAL REVIEW REQUIRED` and remain unapproved. SHA-256 artifact-bound acceptance is fail-closed but cannot approve them. | `docs/legal/LEGAL_APPROVAL_REGISTER.md` | **BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED.** Formal legal approval is a business/legal decision. | AE Project Owner / external legal counsel |
 | B3 | **Resolved (Critical Blocker Remediation, Phase 6)** | Jurisdiction | Codebase is built for Australia (AU GST, AUD, AU direct-debit shape, AUSTRAC terminology); gate instruction originally assumed New Zealand; no NZ-specific content exists anywhere. **The AE Project Owner has confirmed the pilot's jurisdiction is Queensland, Australia — the codebase's existing defaults are correct, not a mismatch.** | §0 above; `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md` | **Resolved** — Owner decision received; no code change required. A non-blocking future item (configurable GST rate) is tracked separately. | AE Project Owner (decision received) |
 | B4 | **High** | Deployment | No configured path from this repository to a running pilot instance: `.replit` has no `[deployment]` section, its run command starts dev-mode processes only, and no code anywhere serves the built web frontend in any mode | `docs/gate-evidence/PHASE4_ENVIRONMENT_AND_DEPLOYMENT_AUDIT.md` §2 | Partially — configuring a real deployment is bounded infrastructure work, but the frontend-serving decision (API-served static vs. separate host) is a architecture choice this report does not make unilaterally | AE Backend Engineering / AE Project Owner (topology decision) |
-| B5 | **High** | Backup / data integrity | Generated transaction documents (10,866 files / 71MB in this mirror) live on local disk via `LocalObjectStorageProvider` with **zero backup coverage of any kind**; the database backup/restore mechanism is proven mechanically but has no automated recurring schedule, no offsite copy, and no encryption at rest for the dump file | `docs/BACKUP_AND_RESTORE_RUNBOOK.md` | Partially — a recurring schedule and an offsite copy target are bounded operational work; a real object-storage backup mechanism may require more | AE Backend Engineering / Platform Ops |
-| B6 | **High** | Security (webhook surface) | The only mandate-payment (direct-debit) webhook provider unconditionally accepts any signature and is reachable on the public internet with no per-brokerage scoping; the Grow subscription billing "real" Stripe adapter's signature check is an explicitly self-labelled non-cryptographic placeholder | `docs/INTEGRATION_FALLBACK_MATRIX.md` §"Webhook signature verification" | Partially remediated this pass (structured-logging of the provider-fallback path — see §11); the underlying missing real signature verification is not bounded remediation | AE Backend Engineering |
+| B5 | **High** | Backup / data integrity | Deployable protected backup/restore tooling and a controlled local-adapter drill are evidenced (real `pg_dump`/`pg_restore`/`tar`/AES-GCM; 93 tables, one tenant, representative document byte-match). **No real offsite provider or recurring scheduler is active.** | `docs/gate-evidence/TECHNICAL_CLOSURE_AND_GATE_RECONCILIATION.md` | **Open remediation** — configure, schedule, and prove offsite recovery | AE Backend Engineering / Platform Ops |
+| B6 | **High** | Security (webhook surface) | Security matrix enforces timestamp-bound signatures, freshness, disabled mode, replay containment, and tenant/provider/account context. Live-provider enablement remains separately controlled. | `docs/gate-evidence/TECHNICAL_CLOSURE_AND_GATE_RECONCILIATION.md` | Technical control implemented; no live traffic is authorised by this report | AE Backend Engineering |
 | B7 | **Medium** | Financial | No real payment rail exists for Pit Crew success fees (sandbox only); invoicing is entirely unimplemented across all billing subsystems | `docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md` §5–6 | N/A — resolved for this pilot by recommending free/manually-invoiced only, not by building a payment rail | AE Backend Engineering (future); AE Project Owner (billing-mode decision) |
-| B8 | **Medium** | Operability | No in-app user-lifecycle management (role change, deactivation, admin succession) — every such action requires a direct database write | §4 above; `docs/gate-evidence/PHASE3_CAPABILITY_MATRIX_AND_SCENARIOS.md` | No — a feature build. **Partially addressed under Critical Blocker Remediation Phase 4**: disable/enable is now in-app (`POST /auth/admin/users/:id/disable|enable`); role change and admin succession remain out of scope. | AE Backend Engineering |
-| B9 | **Medium** | Observability | No external alerting/paging pipeline exists at all; metrics are real but unscraped; no error-tracking service; no documented log-access mechanism beyond an open console tab | `docs/gate-evidence/PHASE4_ENVIRONMENT_AND_DEPLOYMENT_AUDIT.md` §9–10 | Partially — requires standing up external infrastructure, not a code change | AE Backend Engineering / SRE (role TBD) |
+| B8 | **Closed** | Operability | Administrator succession and last-admin protection are implemented with atomic audit and session revocation. | `docs/gate-evidence/TECHNICAL_CLOSURE_AND_GATE_RECONCILIATION.md` | Closed for the identified succession/last-admin gap | AE Backend Engineering |
+| B9 | **Medium** | Observability | Alert generation, retry, and fail-closed configuration are implemented, but there is no external receiver delivery or acknowledgement proof. | `docs/gate-evidence/TECHNICAL_CLOSURE_AND_GATE_RECONCILIATION.md` | **Open remediation** — configure and evidence external delivery/acknowledgement | AE Backend Engineering / SRE (role TBD) |
 | B10 | **Low, resolved this pass** | Observability hygiene | 5 provider-fallback `console.warn` sites in `packages/integrations/*` bypassed the structured logger and its redaction layer | §11 below | **Yes — fixed this pass** | AE Backend Engineering |
 
 ---
@@ -320,11 +322,10 @@ token/timeout bounds) are real and enforced.
 ## 10. Integrations (condensed — full detail in appendix)
 
 Full findings: `docs/INTEGRATION_FALLBACK_MATRIX.md`. Every integration capable of a genuine
-external side effect defaults to mock/sandbox, and no real vendor credential exists anywhere in
-this mirror. Two webhook endpoints (mandate-payments, Grow billing) accept traffic with no
-meaningful signature verification even though they are internet-reachable regardless of whether
-their underlying provider is "live" — see B6. No live external transaction may be triggered
-without separate owner authorization; nothing found in this audit changes that rule.
+external side effect defaults to mock/sandbox, and no live external transaction is authorised.
+The current webhook matrix requires timestamp-bound signatures, freshness, disabled mode, replay
+containment, and tenant/provider/account context; the former statement that the endpoints lacked
+meaningful verification is historical. This report does not authorise live-provider activation.
 
 ---
 
@@ -407,6 +408,12 @@ written, with resolution notes added where applicable:**
 
 ## 13. Test and CI evidence
 
+**Current evidence qualifier (2026-09-07 AEST):** the results below are retained as historical
+local evidence. A clean clone has since passed frozen install, migration, idempotency, and drift
+checks; snapshots 0010/0011 are generated and committed and orphan unjournaled SQL was removed.
+**CI at the current branch HEAD is pending, not passing.** Do not read any locally run result in
+this section as a GitHub CI pass.
+
 - **Typecheck:** `pnpm -r run typecheck` — all 13 workspace packages pass cleanly (`packages/db`,
   `packages/domain`, `packages/events`, all 7 `packages/integrations/*`, `apps/web`, `apps/api`),
   including the 5 packages modified in §11.
@@ -467,6 +474,13 @@ written, with resolution notes added where applicable:**
 ---
 
 ## 14. Exact next action
+
+**Superseded current next actions (2026-09-07 AEST):** complete and prove a real offsite,
+recurring backup/recovery path; configure an external alert receiver and retain delivery plus
+acknowledgement evidence; implement the selected durable-object document path and signed-byte
+ingestion; await CI for the actual branch HEAD; and obtain formal approval of all 13 legal
+artifacts. B2 is **BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED**. The overall decision remains
+**REMEDIATION REQUIRED**. Neither authorises pilot activity.
 
 1. AE Project Owner reviews this report and the six supporting deliverable documents.
 2. AE Project Owner decides on B1's remediation path (build real auth vs. an explicit, accepted

@@ -13,6 +13,10 @@ Roles are accountable functions, never named individuals (see the incident runbo
 note on this) — each pilot cohort keeps its own internal roster of who currently holds
 each role.
 
+**REMEDIATION REQUIRED:** this document does not authorise a pilot. The backup/recovery
+and external-alert controls described here remain readiness work, and the pilot retains
+its synthetic/test-data, no-live-customer-money, and no-public-signup restrictions.
+
 ## 1. How pilot participants report issues
 
 One designated channel, communicated to every participant at pilot kickoff and repeated
@@ -55,7 +59,7 @@ intake role doing first triage:
 
 | Severity | What it looks like at intake | Target first response |
 |---|---|---|
-| **Critical** | Participant sees another participant's data; total outage; suspected data loss; an active security/AML concern; anything matching Incident Runbook scenarios 1, 2, 4, 5, 6, 7, or 15 | 15 minutes |
+| **Critical** | Participant sees another participant's data; total outage; suspected data loss; a failed/missing backup or disposable restore validation; an active security/AML concern; anything matching Incident Runbook scenarios 1, 2, 4, 5, 6, 7, or 15 | 15 minutes |
 | **High** | The participant is blocked from completing something on a specific transaction, with no workaround; a suspected account-takeover attempt; a confirmed security event with no active exposure | 1 hour |
 | **Medium** | A workaround exists; affects one participant or one workflow; a data export/deletion request; a webhook/integration delay that hasn't yet blocked a milestone | 4 business hours |
 | **Low** | Cosmetic issue; a question; a non-urgent request | 2 business days |
@@ -105,7 +109,30 @@ for the severity in question, AE Support Lead escalates directly to AE Project O
 without waiting further — this mirrors Incident Runbook scenario 16 (on-call
 unreachable).
 
-## 5. Review cadence during the pilot
+## 5. Backup and operational-alert escalation
+
+The daily backup is run by an **external scheduler**, not by the API or support team.
+Its accountable scheduler owner, object-store/KMS owner, and external webhook
+receiver/token owner are currently **unassigned**; no people, contacts, or pilot
+authorisation are implied by these labels. The scheduler must run `backup:run` daily,
+retain completion/failure evidence, verify the protected artifact and SHA-256 manifest in
+the durable destination, and invoke its configured failure-alert adapter on any failed
+backup, upload, retention, or integrity step.
+
+AE Support Lead records a missing completion record, failed backup/restore preflight, or
+backup-failure signal as Critical and immediately routes it to AE Backend Engineering
+(on-call) and AE Project Owner. The incident record must state that any needed external
+owner is unassigned rather than silently assuming support owns object storage, KMS, or
+the receiver. Follow Incident Runbook scenario 7 and
+`BACKUP_AND_RESTORE_RUNBOOK.md`; restores are disposable-only.
+
+`operationalAlerts` is not evidence of paging: production configuration requires an
+enabled HTTPS webhook receiver and token, sends at most three bounded attempts, has only
+process-local cooldown/deduplication, and has no durable outbox. External delivery and
+human acknowledgement are not yet evidenced. Support therefore must not wait for an
+alert; it continues the documented manual daily review/escalation path.
+
+## 6. Review cadence during the pilot
 
 - **Daily (business days), 15 minutes**: AE Support Lead and AE Backend Engineering (on-call)
   review anything open from the last 24 hours — status of each open item, whether any
@@ -125,7 +152,7 @@ unreachable).
   the natural home for the AI/AML compliance note the Incident Runbook's scenario 6 calls
   for if that scenario was ever triggered.
 
-## 6. How issues get tracked to closure
+## 7. How issues get tracked to closure
 
 - Every participant report gets one entry in a shared **pilot issue tracker** (a
   lightweight tracker or spreadsheet is sufficient for this cohort size — the specific

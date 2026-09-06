@@ -1,114 +1,120 @@
-# Backup and Restore Runbook — Controlled Pilot
+# Backup and Restore Runbook — REMEDIATION REQUIRED
 
-**Scope.** This runbook records the mechanical backup/restore procedure proven during the
-Operational Readiness & Controlled Pilot Gate, states plainly what it does and does not
-establish, and gives AE Backend Engineering the steps to run this again against a real pilot
-database. It complements, and does not duplicate, `docs/SECURITY_INCIDENT_RUNBOOKS.md`'s own
-"Backup and recovery" section (a second, independently-run drill with its own numbers) and
-`docs/INCIDENT_RESPONSE_RUNBOOK.md` scenarios 4 and 7 (data loss / restore failure), which this
-document is cited from.
+## Status, scope, and proven drill
 
-## What was actually run, and its results
+This is a provider-neutral operational runbook for the backup scripts in
+`apps/api/src/ops/backup`. It applies only to the controlled pilot: invited participants,
+synthetic/test transaction data, no public signup, and no live customer-money traffic. It
+does not authorise a pilot or any live-traffic use.
 
-A non-destructive `pg_dump` / `pg_restore` drill was run this pass against a local, disposable
-`aee_test` database (never a real pilot or production dataset) as part of Phase 4 of the
-readiness gate. Evidence lives in the gate branch's supporting material and is summarized here:
+On **2026-09-07 AEST**, a controlled local recovery drill completed using real
+`pg_dump`, `pg_restore`, `tar`, and authenticated AES-GCM encryption/decryption commands.
+The disposable restore validated **93 tables**, **1 tenant**, and **one representative
+document byte match**. This is evidence that the local mechanical path can work. It is
+explicitly **not** evidence of offsite storage, a scheduled backup, production recovery,
+or external-alert delivery/acknowledgement.
 
-- **Schema scope:** 89 tables enumerated before the drill.
-- **Row-count fidelity:** a full 89-table row-count comparison between the source database and
-  the restored database matched exactly on 88 of 89 tables. The one discrepancy —
-  `audit_logs`, source 17,523 rows vs. restored 17,519 rows (a 4-row / 0.02% difference) — is
-  attributable to `audit_logs` being the one table under continuous background write traffic
-  during the drill (every authenticated action logs a row); the most likely explanation is a
-  few rows written between the `pg_dump` snapshot and whenever the source-side count was taken,
-  not a restore defect. This is the expected signature of comparing a live, continuously-written
-  table against a point-in-time snapshot — not the pattern (missing whole tables, halved counts,
-  corrupted rows) that would indicate the restore mechanism itself lost data.
-- **Referential integrity:** a generic loop over every single-column foreign key in the schema
-  found zero orphaned references after restore.
-- **Content fidelity:** a single-row, byte-for-byte content comparison between source and
-  restored data matched exactly.
-- **Restore log:** the `pg_restore` output log was empty, consistent with a clean restore (no
-  errors or warnings are written to stdout by pg_restore by default on success).
-- **A second, independent drill** is separately recorded in this repository's own
-  `docs/SECURITY_INCIDENT_RUNBOOKS.md` ("Backup and recovery" section), with its own numbers:
-  89/89 tables, 191/191 indexes, 357/357 constraints, zero FK orphans, matching whole-table
-  checksums — a second, corroborating data point that the mechanical dump/restore path works
-  against this schema.
-- **RTO evidence:** `pg_restore` completed in 0.779 seconds against the test-sized dataset used
-  in this drill. **This is not a meaningful RTO estimate for a real pilot-sized dataset** — it
-  only proves the mechanism works, not how long a real restore would take under real data
-  volume and real infrastructure conditions.
-- **RPO:** not established. There is no recurring backup schedule in this repository from which
-  an RPO could be derived (see "What this does not establish" below).
+**REMEDIATION REQUIRED:** do not represent this drill as a production backup or disaster
+recovery capability until the external scheduler, owner-controlled durable destination,
+key management, retention operation, restore preflight, and external alert evidence below
+are established and recorded.
 
-Both this drill and the one recorded in `SECURITY_INCIDENT_RUNBOOKS.md` ran against
-`aee_test` / local scratch databases — **neither has ever run against a real pilot or
-production dataset.**
+## Script contract and required configuration
 
-## What this does not establish (read before relying on this for the pilot)
+Run the existing scripts, not ad-hoc replacement commands:
 
-1. **No automated, recurring backup schedule exists anywhere in this repository or its
-   infrastructure configuration.** `.github/workflows/` contains only `ci.yml` (a push/PR test
-   and build gate, not a scheduled job). There is no cron, scheduled Action, or equivalent that
-   invokes `pg_dump` on any cadence. Until one is configured, "backup" means a human manually
-   running the procedure below, on whatever cadence they remember to.
-2. **No offsite/durable storage target for dump files.** The drill produced a dump file on the
-   same local disk as the database it dumped — a real disaster (disk failure, instance loss)
-   would take the dump with it. A pilot-real backup needs the dump copied somewhere durable and
-   separate from the source instance before it counts as a real backup.
-3. **No encryption at rest for the dump file itself**, which contains the same sensitive data
-   the live database does (PII, financial figures, session data).
-4. **Generated transaction documents are not covered by any backup drill.** Documents (agency
-   agreements, signature packages) are stored on local filesystem disk via
-   `LocalObjectStorageProvider` (`packages/integrations/object-storage`), entirely separate from
-   Postgres. In this mirror, that directory held 10,866 files totalling 71MB. Neither backup
-   drill touches this directory. For a real-estate platform whose core value includes signed
-   agency agreements, this is a real gap: today, "backing up the data" means backing up the
-   database only — the actual document files exist solely as ordinary files on whatever disk the
-   application instance runs on, with no automated backup, versioning, or off-instance copy of
-   any kind.
-5. **No restore has been rehearsed under time pressure against a realistically pilot-sized
-   dataset.** The drill proves the mechanism is sound at test scale; it does not prove how long a
-   real restore takes, or how a restore behaves against a schema that has accumulated 60 days of
-   real pilot activity plus whatever migrations shipped in between.
+```sh
+pnpm --filter @aee/api backup:run
+pnpm --filter @aee/api backup:restore -- --artifact=<artifact-name> --confirm-disposable
+```
 
-**Bottom line:** the mechanical dump/restore procedure is proven correct, twice, independently.
-The operational practice around it — a schedule, an offsite copy, encryption, and document-store
-coverage — does not exist yet and must be stood up before this is a real backup story for a live
-pilot, not just a successful lab exercise.
+Both scripts require `BACKUP_ENVIRONMENT=production`; this is a deliberate explicit
+production-operation guard, not permission to restore into production. Configure the
+following through the deployment's owner-controlled secret/configuration system:
 
-## The procedure (for AE Backend Engineering to re-run against a real pilot database)
+- `DATABASE_URL`, `BACKUP_DOCUMENT_DIRECTORY`, and a private
+  `BACKUP_STAGING_DIRECTORY` that does not contain the live document directory.
+- `BACKUP_DESTINATION` as a durable `s3://`, `gs://`, or `azblob://` object-store URI;
+  credentials and bucket/container policy belong to the object-store owner and are never
+  placed in this runbook.
+- Positive-integer `BACKUP_RETENTION_DAYS`.
+- `BACKUP_ENCRYPTION_AUTHENTICATED=true` and a non-secret
+  `BACKUP_ENCRYPTION_KMS_PROFILE=kms:<profile>`. The owner controls the KMS key/profile,
+  encryption command implementation, access policy, rotation, and recovery access.
+- JSON-array command adapters: `BACKUP_ENCRYPT_COMMAND` and
+  `BACKUP_DECRYPT_COMMAND` (must accept `{input}`, `{output}`, `{kmsProfile}`),
+  `BACKUP_UPLOAD_COMMAND`/`BACKUP_DOWNLOAD_COMMAND` (must accept `{source}` and
+  `{destination}`), `BACKUP_LIST_COMMAND` (`{destination}`), and
+  `BACKUP_DELETE_COMMAND` (`{object}`). These adapters make object storage and KMS
+  provider-neutral; they must use authenticated AES-GCM encryption in the configured
+  deployment.
+- Restore isolation: `BACKUP_RESTORE_DISPOSABLE=true`,
+  `BACKUP_RESTORE_ENVIRONMENT_ID=restore-...`,
+  `BACKUP_RESTORE_DATABASE_URL`, `BACKUP_RESTORE_ROOT`, and
+  `BACKUP_RESTORE_DOCUMENT_DIRECTORY` beneath that restore root.
+- `BACKUP_ALERT_COMMAND`, which must accept `{operation}` and `{error}`. The scheduler
+  owner supplies this adapter and records whether it reaches an external receiver.
 
-1. **Dump.** `pg_dump -Fc --file=<timestamped-file>.dump "$DATABASE_URL"` — the custom format
-   (`-Fc`) is what was used and verified in this drill; it supports selective/parallel restore if
-   ever needed.
-2. **Store the dump somewhere other than the source instance immediately.** This is not
-   optional — a dump left next to the database it came from protects against nothing.
-3. **Restore drill (never against a live/active database):** create a fresh, disposable target
-   database, then `pg_restore --no-owner --no-privileges --dbname=<disposable-target>
-   <dump-file>.dump`.
-4. **Verify, every time, not just on the first drill:**
-   - Row counts per table, source vs. restored (a full loop over `information_schema.tables`,
-     not a spot check).
-   - A generic foreign-key-orphan check across every FK in `public` (the same approach used in
-     this drill's own `fk_orphan_check.sql`).
-   - At least one full-row content comparison for a known record.
-   - Record the wall-clock time the restore took, as that pilot's own RTO evidence point.
-5. **Never restore over an active environment.** Every restore in this procedure targets a fresh,
-   disposable database — this is the same discipline `docs/INCIDENT_RESPONSE_RUNBOOK.md`
-   scenario 4 and scenario 7 both require explicitly.
-6. **Document object storage separately.** Until a real backup mechanism exists for
-   `OBJECT_STORAGE_LOCAL_DIR`, treat this as an open item, not as covered by the database drill
-   above.
+The scripts create a custom-format PostgreSQL dump, inventory database rows/tenant/document
+keys, archive documents with `tar`, package the payload, encrypt it, generate a SHA-256
+manifest, upload artifact plus manifest, and prune retained artifacts. They do not embed
+cloud credentials, select a KMS, or create a scheduler.
 
-## Recommendation before this stops being a pilot blocker
+## Daily external scheduler contract
 
-Stand up, before pilot participants are admitted: (a) a recurring, scheduled backup job (not a
-manual, remembered task); (b) an offsite/durable storage destination for dump files, separate
-from the database instance; (c) a decision and, if needed, a mechanism for backing up the
-document-storage directory; and (d) one full restore drill run against a copy of the actual
-pilot database once real pilot data exists, to get a real RTO figure rather than the test-scale
-number recorded here. Until these exist, this readiness gate's blocker register lists the
-database side as "backup restoration proven mechanically, but a real backup story does not yet
-exist" and the document-storage side as "no backup coverage of any kind."
+An **external scheduler**, operated by an assigned operations owner, must invoke
+`backup:run` once per day with the complete configuration above. The API does not own or
+invent this scheduler. The scheduler contract is:
+
+1. Run once daily; retain the command exit status and structured stdout/stderr without
+   exposing connection strings, tokens, or key material.
+2. Treat a non-zero exit, absent completion record, failed upload, failed manifest upload,
+   failed retention/list/delete operation, or document-integrity failure as a backup
+   failure. Invoke `BACKUP_ALERT_COMMAND` on failure and create an operational record.
+3. Verify that the artifact and its `.sha256.json` manifest are present in the configured
+   durable destination. Retention is enforced by the script from
+   `BACKUP_RETENTION_DAYS`; the owner must periodically verify object-store lifecycle
+   policy does not contradict that setting.
+4. Assign and record accountable owners for scheduler operation, object-store access/KMS
+   administration, and alert receiver response. **Those external accountable owners are
+   currently unassigned.**
+
+## Restore preflight and disposable-only procedure
+
+Restore is a verification/recovery operation for a **fresh disposable environment only**.
+It must never overwrite a live, active, pilot, or production database or document directory.
+The script rejects an equivalent source/target database, requires
+`--confirm-disposable`, requires the configured `restore-*` environment, checks the target
+database is empty, and rejects unsafe document paths.
+
+Before every restore:
+
+1. Select the protected artifact name and matching manifest from the durable destination.
+2. Confirm the restore database and document root are the isolated disposable values and
+   are empty; confirm no live service points at either target.
+3. Confirm the KMS owner has authorised decryption and the restore operator has no need
+   to copy secrets into logs or tickets.
+4. Run the restore command above. It downloads artifact and manifest, verifies SHA-256
+   integrity before decryption, extracts with `tar`, restores with `pg_restore
+   --exit-on-error`, validates table/row/tenant/document inventory, and verifies restored
+   document keys.
+5. Record artifact name, restore environment id, table/tenant/document validation result,
+   duration, and any discrepancy. Destroy or reset the disposable restore environment
+   according to its owner’s handling policy after verification.
+
+A failed restore, integrity mismatch, or document mismatch is Critical and follows
+`docs/INCIDENT_RESPONSE_RUNBOOK.md` scenario 7. Do not “fix” it by restoring over live data.
+
+## Operational-alert boundary
+
+Backup scripts use their configured `BACKUP_ALERT_COMMAND`; the application also exposes
+the `operationalAlerts` `BACKUP_FAILURE` boundary for a scheduler/integration to call.
+For production application startup, operational alerts require
+`OPERATIONAL_ALERTS_ENABLED=true`, `OPERATIONAL_ALERTS_PROVIDER=webhook`, a valid HTTPS
+`OPERATIONAL_ALERTS_WEBHOOK_URL`, and an `OPERATIONAL_ALERTS_TOKEN` of at least 16
+characters. The receiver/token owner is **unassigned**.
+
+Delivery makes at most three bounded in-process attempts. Cooldown/deduplication is
+process-local, and there is no durable alert outbox. A successful HTTP response is not
+proof that a human received or acknowledged the alert. External delivery and acknowledgement
+have **not yet been evidenced**.

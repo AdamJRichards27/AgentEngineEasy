@@ -1,12 +1,10 @@
 # Controlled Pilot Plan — Agent Engine 2.0
 
-**Status of this document: contingent, not authorising.** This plan describes how a small
-controlled pilot of Agent Engine 2.0 would run *if and when* the blockers recorded in
-`docs/OPERATIONAL_READINESS_GATE_REPORT.md` are resolved and the AE Project Owner separately
-authorises the pilot to begin. Writing this plan now — while the gate's overall decision is
-**BLOCKED** — means the pilot can start promptly once blockers clear, without having to
-reconstruct scope, participant handling, and stop-conditions from scratch under time pressure.
-**Nothing in this document authorises inviting a single participant today.**
+**Status of this document: contingent, not authorising.** The gate's current overall decision is
+**REMEDIATION REQUIRED** as of 2026-09-07 AEST. B2 legal is separately **BLOCKED — HUMAN OR
+EXTERNAL DECISION REQUIRED**: all 13 artifacts remain draft/unapproved despite the fail-closed,
+SHA-256-artifact-bound acceptance control. No pilot, deployment, participant invitation, live
+traffic, or legal approval is authorised by this plan.
 
 ---
 
@@ -66,11 +64,9 @@ codebase). Mapping the instruction's intent onto what exists:
     — **include** as a manual CRM rehearsal (no automated nurture/lead-scoring exists to pilot).
   - Pit Crew delegated work-item lifecycle (claim/assign/complete/release): real and
     well-tested — **include**.
-  - Pit Crew **role grant/revocation** and all user-lifecycle management: **no in-app
-    mechanism exists at all** (Phase 3 finding) — granting the Pit Crew role, or any role
-    change, requires a direct database write by AE engineering for the pilot's duration.
-    Document this operational dependency in the onboarding plan (Part B) rather than treating
-    it as pilot-ready self-service.
+  - Administrator succession and last-admin protection are implemented with atomic audit and
+    session revocation. Any remaining role-management boundary must be assessed against the
+    current gate evidence rather than the historical “no user-lifecycle mechanism” finding.
   - Pit Crew success-fee **billing**: calculation math is real and tested, but **no real
     payment rail exists in code at all** (sandbox only) and invoicing is entirely
     unimplemented — **exclude live charging**; see the Gate Report's Phase 6 recommendation
@@ -137,9 +133,9 @@ As defined in Part A, cross-referenced to the Gate Report's full capability matr
    name, email, and intended role.
 2. The Brokerage Administrator sends each participant a real, admin-issued invitation
    (`POST /auth/admin/invitations`) — a single-use, expiring link emailed via the test/sandbox
-   email provider in this environment (see `docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md`).
-   A real, approved email provider must be configured before this link reaches a genuine pilot
-   participant's real inbox.
+    email provider in this environment (see `docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md`).
+    This is a future operating procedure only: the current gate does not permit any participant
+    invitation.
 3. Each participant opens their invitation link, sets their own password, and must affirmatively
    accept the current (still DRAFT — see `docs/legal/LEGAL_APPROVAL_REGISTER.md`) Terms of Use
    and Privacy Policy before their account is created — there is no account creation path that
@@ -158,12 +154,10 @@ be onboarded — see `docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md` §6.
 
 ### B.5 Training
 
-A short walkthrough (live or recorded) of: the core transaction lifecycle (Scenario A in the
-Gate Report), what to do when something looks wrong (point to the support channel, not direct
-engineer contact), and an explicit callout of the known gaps that affect daily use — no
-transaction-cancellation/fall-through state (a genuinely dead deal has no clean way to be
-recorded), no in-app role management beyond disable/re-enable, and no real notifications ever
-being sent.
+A short walkthrough (live or recorded) would cover the core transaction lifecycle (Scenario A
+in the Gate Report), escalation through the support channel, and current documented operating
+boundaries. The training must not be scheduled or delivered to participants while the gate
+remains remediation-required.
 
 ### B.6 Test-to-live transition
 
@@ -189,9 +183,9 @@ incident-log entries.
 
 1. Number of transactions started and successfully closed end-to-end.
 2. Number and category of exceptions/risk-engine findings raised per transaction.
-3. Number of manual database interventions still required (role changes other than
-   disable/re-enable, and admin succession) — this is a direct signal of the remaining
-   user-lifecycle-management gap's real-world cost.
+3. Number of manual database interventions still required, if any, recorded against the current
+    access-control design. Administrator succession/last-admin protection is implemented and
+    must not be described as the former manual-only gap.
 4. Number of support requests by severity, and whether each met its target response time.
 5. Number of incident-log entries opened (Incident Response Runbook), by scenario number.
 6. Number of times a transaction became "stuck" with no clean state to move to (the
@@ -203,12 +197,11 @@ incident-log entries.
    signal worth investigating immediately.
 9. Participant-reported confusion patterns (flagged in the weekly review) as possible product
    gaps, not just one-off bugs.
-10. Backup/restore drill results, run at least once during the pilot window against the actual
-    pilot database (not just the local test database drilled during this gate).
-11. Uptime / extended-outage count (Incident Runbook scenario 5).
-12. Time-to-close per transaction, compared against the Scenario A trace's expected steps.
-13. Any occurrence of a Brokerage Administrator being left with no other active admin in a
-    pilot brokerage (the succession gap identified in Phase 3).
+10. Backup/restore evidence, including a successful restoration from the configured **offsite**
+     recurring backup destination. The prior local drill is not sufficient on its own.
+11. Alert delivery and acknowledgement evidence from the configured external receiver.
+12. Uptime / extended-outage count (Incident Runbook scenario 5).
+13. Time-to-close per transaction, compared against the Scenario A trace's expected steps.
 14. Actual AI (Copilot) usage volume and any cost data, even though no spend cap exists in code.
 15. Every stop-pilot condition check (§B.11) reviewed explicitly at each weekly review, whether
     or not it was triggered.
@@ -248,12 +241,14 @@ Any of the following pauses the pilot immediately, per
 
 ## What must happen before this plan can actually start
 
-This plan is ready to execute the moment the Gate Report's decision changes from
-**BLOCKED — CRITICAL OPERATIONAL FAILURE**. At minimum, per that report: a real identity/
-authentication mechanism (or an explicit, owner-accepted compensating control) must close the
-tenant-isolation gap described there; the essential pilot-participation legal/privacy documents
-listed as missing in Phase 7 must be supplied and formally approved (not drafted by, and not
-certified as sufficient by, this engineering process). **The jurisdiction question in the
-original §A.2 has been resolved** — the AE Project Owner has confirmed Queensland, Australia, and
-the codebase's existing defaults are correct for it; no further action is needed on that point.
-Everything else in this plan can proceed unchanged once the remaining items above are addressed.
+This plan cannot start while the gate decision is **REMEDIATION REQUIRED**. Before any future
+authorisation, the following must be independently evidenced: a real offsite backup provider and
+recurring scheduler with recovery proof; external alert receiver delivery and acknowledgement;
+the selected PostgreSQL-records plus durable-object-storage implementation including signed-byte
+ingestion; and completed CI for the actual branch HEAD (currently pending, not a pass).
+
+Separately, B2 remains **BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED**: all 13 legal/privacy
+artifacts must receive formal approval. SHA-256-bound, fail-closed acceptance does not make draft
+legal terms approved. Jurisdiction is resolved as Queensland, Australia, and authentication,
+administrator succession, and the current webhook security matrix have technical evidence, but
+none of those facts authorises a pilot before the remaining remediation and legal decision.

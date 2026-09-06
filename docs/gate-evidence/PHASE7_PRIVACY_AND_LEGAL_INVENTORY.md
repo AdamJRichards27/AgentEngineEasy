@@ -4,6 +4,11 @@
 **Repo audited:** AgentEngineEasy / "Agent Engine 2.0", mirrored read-only at `/home/claude/work/AgentEngineEasy` (no `.git`; plain file mirror).
 **Method:** Full-repository search (`docs/`, `README.md`, `ARCHITECTURE.md`, `apps/web/src`, `apps/api/src`, `packages/*`, built bundles in `apps/web/dist` and `apps/api/dist`). The 71 MB `apps/api/storage/packages/**` tree was identified as auto-generated runtime/test output (per-transaction placeholder documents), not source or policy content, and was excluded from the search after being sampled and confirmed as such.
 
+**CURRENT GATE STATUS: REMEDIATION REQUIRED. B2: BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED.**
+All 13 legal documents in `docs/legal/` remain draft and unapproved, with approval authority
+unassigned. Their draft markers remain authoritative. Production activation is blocked; the
+existence of a draft, a version string, or acceptance plumbing is not legal approval.
+
 **Jurisdiction note — RESOLVED: Queensland, Australia (Critical Blocker Remediation, Phase 6).**
 This section originally flagged a factual discrepancy: the task brief that produced this
 inventory described the platform as "an NZ real-estate transaction-management platform," while
@@ -224,3 +229,40 @@ and §11 above), written for the now-confirmed Queensland, Australia jurisdictio
 makes no determination as to whether any drafted document is legally sufficient — that
 determination remains with the AE Project Owner and/or external legal counsel, per the original
 scope of this inventory.
+
+---
+
+## Production legal activation and durable-record blockers
+
+### SHA-256-bound legal artifact control
+
+The production legal-document mechanism is an **engineering control, not an approval mechanism**.
+At production startup and when serving the active Terms of Use/Privacy Policy for acceptance, the
+service requires `LEGAL_DOCUMENTS_APPROVED=true`, configured artifact paths, and configured
+SHA-256 digests. It reads the exact configured bytes, recomputes each digest, rejects unreadable
+files, digest mismatch, and any artifact retaining `DRAFT — LEGAL REVIEW REQUIRED`, then records
+the digest as the acceptance version. This prevents accidental or implicit deployment of a draft
+and makes the accepted bytes identifiable. It neither establishes legal sufficiency nor assigns,
+records, or substitutes for legal approval. No approved paths or hashes are populated for this
+draft pack.
+
+### Pilot blockers requiring remediation or a human/external decision
+
+The following gaps prevent production activation for the controlled pilot:
+
+1. No durable object-storage adapter exists for generated/signed document bytes; the implemented
+   provider is local disk and remains the default.
+2. The local-disk default is development/test only and is not an authoritative or durable
+   production record store.
+3. Webhook signature verification alone does not prove durable byte ingestion, checksum
+   verification, or artifact/version provenance for AML, payment, or communications callbacks.
+4. There is no production fail-closed configuration proving durable database and document-storage
+   topology before production startup.
+5. Approval authority for every legal draft is unassigned; qualified legal review and a separate
+   approval decision are outstanding.
+
+The selected target topology is PostgreSQL as the authoritative operational record store and
+separate durable S3/GCS-compatible object storage for generated/signed bytes; see
+`docs/adr/0001-production-storage-topology.md`. Until these blockers are resolved with evidence,
+the overall status remains **REMEDIATION REQUIRED** and **B2 remains BLOCKED — HUMAN OR EXTERNAL
+DECISION REQUIRED**.
