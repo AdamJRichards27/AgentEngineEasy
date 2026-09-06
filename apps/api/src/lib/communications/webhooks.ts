@@ -33,6 +33,7 @@ export type InboundWebhookEventType = "DELIVERY_RECEIPT" | "INBOUND_MESSAGE" | "
 export interface VerifyWebhookSignatureInput {
   rawBody: Buffer | string;
   signatureHeader: string | undefined;
+  timestamp: string | undefined;
   secret: string;
 }
 
@@ -43,13 +44,21 @@ export interface VerifyWebhookSignatureInput {
  * differs; this covers the sandbox/dev path and the common case.
  */
 export function verifyWebhookSignature(input: VerifyWebhookSignatureInput): boolean {
-  if (!input.signatureHeader) return false;
-  const expected = createHmac("sha256", input.secret).update(input.rawBody).digest("hex");
+  if (!input.signatureHeader || !input.timestamp) return false;
+  const expected = createHmac("sha256", input.secret).update(input.timestamp).update(".").update(input.rawBody).digest("hex");
   const provided = input.signatureHeader.trim().toLowerCase().replace(/^sha256=/, "");
   const expectedBuf = Buffer.from(expected, "utf8");
   const providedBuf = Buffer.from(provided, "utf8");
   if (expectedBuf.length !== providedBuf.length) return false;
   return timingSafeEqual(expectedBuf, providedBuf);
+}
+
+export const WEBHOOK_TIMESTAMP_TOLERANCE_MS = 5 * 60_000;
+export function isWebhookTimestampFresh(timestamp: string | undefined, now = Date.now()): boolean {
+  if (!timestamp || !/^\d{10,13}$/.test(timestamp)) return false;
+  const raw = Number(timestamp);
+  const timestampMs = timestamp.length === 10 ? raw * 1_000 : raw;
+  return Number.isSafeInteger(timestampMs) && Math.abs(now - timestampMs) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS;
 }
 
 export interface InboundWebhookInput {
@@ -221,17 +230,23 @@ async function publishInboundMessageReceivedEvent(input: InboundWebhookInput): P
 }
 
 /** Tenant-safe lookup: only ever matches a message that already belongs to the webhook's own (URL-resolved) brokerage. */
-async function findMessageForBrokerage(providerMessageId: string | null | undefined, brokerageId: number) {
+async function findMessageForBrokerage(providerMessageId: string | null | undefined, brokerageId: number, provider: string) {
   if (!providerMessageId) return null;
   const [message] = await db
     .select()
     .from(communicationMessages)
-    .where(and(eq(communicationMessages.providerMessageId, providerMessageId), eq(communicationMessages.brokerageId, brokerageId)));
+    .where(
+      and(
+        eq(communicationMessages.providerMessageId, providerMessageId),
+        eq(communicationMessages.brokerageId, brokerageId),
+        eq(communicationMessages.provider, provider),
+      ),
+    );
   return message ?? null;
 }
 
 async function applyDeliveryReceipt(input: InboundWebhookInput): Promise<WebhookEffectResult> {
-  const message = await findMessageForBrokerage(input.providerMessageId, input.brokerageId);
+  const message = await findMessageForBrokerage(input.providerMessageId, input.brokerageId, input.provider);
   if (!message) return { summary: "No matching message in this brokerage for this delivery receipt — recorded only." };
 
   if (message.status !== "SENT") {
@@ -255,7 +270,7 @@ async function applyDeliveryReceipt(input: InboundWebhookInput): Promise<Webhook
 }
 
 async function applyBounce(input: InboundWebhookInput): Promise<WebhookEffectResult> {
-  const message = await findMessageForBrokerage(input.providerMessageId, input.brokerageId);
+  const message = await findMessageForBrokerage(input.providerMessageId, input.brokerageId, input.provider);
   if (!message) return { summary: "No matching message in this brokerage for this bounce — recorded only." };
 
   if (message.status !== "SENT" && message.status !== "DELIVERED") {

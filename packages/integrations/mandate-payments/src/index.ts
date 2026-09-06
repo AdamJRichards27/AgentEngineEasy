@@ -27,7 +27,7 @@
 // still written provider-neutral (an env var selects the implementation)
 // so swapping in a real adapter later is a config change, not a rewrite.
 
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { logger } from "@aee/events";
 
 export interface DebitRequest {
@@ -53,6 +53,14 @@ export interface MandateWebhookResult {
   providerEventId: string;
   providerRequestRef: string;
   status: MandateWebhookStatus;
+  /**
+   * Transport callbacks carry this signed context. It is optional for
+   * trusted in-process typed events, which have already crossed the
+   * transport boundary and are explicitly processed without route mode.
+   */
+  brokerageId?: number;
+  provider?: string;
+  mandateProviderRef?: string;
   failureReason?: string;
   disputeReason?: string;
 }
@@ -67,7 +75,14 @@ export interface MandatePaymentProvider {
   // Same shape as PaymentProvider/BillingProvider's own verifyWebhookSignature — payload should
   // be the raw request body whenever the provider signs raw bytes.
   verifyWebhookSignature(payload: unknown, signature: string): boolean;
+  isWebhookEnabled(): boolean;
   parseWebhook(payload: unknown): MandateWebhookResult;
+}
+
+export interface SandboxMandatePaymentProviderConfig {
+  webhookSecret?: string;
+  webhooksEnabled?: boolean;
+  now?: () => number;
 }
 
 /**
@@ -102,6 +117,20 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
   name = "sandbox";
   private scheduled = new Map<string, { mandateProviderRef: string; amountCents: number; status: MandateDebitStatus }>();
   private idempotencyIndex = new Map<string, string>(); // idempotencyKey -> providerRequestRef
+  private readonly configuredWebhookSecret: string | undefined;
+  private readonly configuredWebhooksEnabled: boolean | undefined;
+  private readonly now: () => number;
+
+  constructor(config: SandboxMandatePaymentProviderConfig = {}) {
+    this.configuredWebhookSecret = config.webhookSecret;
+    this.configuredWebhooksEnabled = config.webhooksEnabled;
+    this.now = config.now ?? Date.now;
+  }
+
+  private webhookSecret(): string | undefined {
+    const value = this.configuredWebhookSecret ?? process.env.MANDATE_PAYMENT_WEBHOOK_SECRET;
+    return value?.trim() || undefined;
+  }
 
   async scheduleDebit(input: DebitRequest): Promise<DebitResult> {
     const existingRef = this.idempotencyIndex.get(input.idempotencyKey);
@@ -140,19 +169,58 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
     // resulting REVERSED status on the payment request itself.
   }
 
-  verifyWebhookSignature(): boolean {
-    return true; // no real webhook traffic reaches the sandbox provider
+  isWebhookEnabled(): boolean {
+    const explicitlyEnabled =
+      this.configuredWebhooksEnabled ??
+      process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED === "true";
+    return explicitlyEnabled && this.webhookSecret() !== undefined;
+  }
+
+  verifyWebhookSignature(payload: unknown, signature: string): boolean {
+    const secret = this.webhookSecret();
+    if (!this.isWebhookEnabled() || !secret || !signature) return false;
+    const parts = Object.fromEntries(signature.split(",").map((part) => {
+      const separator = part.indexOf("=");
+      return separator === -1 ? [part.trim(), ""] : [part.slice(0, separator).trim(), part.slice(separator + 1).trim()];
+    }));
+    const timestamp = parts.t;
+    const supplied = parts.v1;
+    if (!timestamp || !supplied || !/^\d+$/.test(timestamp)) return false;
+
+    const timestampSeconds = Number(timestamp);
+    const nowSeconds = Math.floor(this.now() / 1000);
+    if (!Number.isSafeInteger(timestampSeconds) || Math.abs(nowSeconds - timestampSeconds) > 300) return false;
+
+    const raw = Buffer.isBuffer(payload)
+      ? payload
+      : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8");
+    const expected = createHmac("sha256", secret)
+      .update(Buffer.concat([Buffer.from(`${timestamp}.`, "utf8"), raw]))
+      .digest("hex");
+    const expectedBuffer = Buffer.from(expected, "utf8");
+    const suppliedBuffer = Buffer.from(supplied, "utf8");
+    return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
   }
 
   parseWebhook(payload: unknown): MandateWebhookResult {
     const p = payload as Partial<MandateWebhookResult>;
-    if (!p.providerEventId || !p.providerRequestRef || !p.status) {
-      throw new Error("Malformed sandbox mandate webhook payload: providerEventId, providerRequestRef and status are all required.");
+    if (
+      typeof p.providerEventId !== "string" ||
+      typeof p.providerRequestRef !== "string" ||
+      (p.brokerageId !== undefined && (typeof p.brokerageId !== "number" || !Number.isSafeInteger(p.brokerageId))) ||
+      (p.provider !== undefined && typeof p.provider !== "string") ||
+      (p.mandateProviderRef !== undefined && typeof p.mandateProviderRef !== "string") ||
+      !["Processing", "Paid", "Failed", "Reversed", "Disputed"].includes(p.status ?? "")
+    ) {
+      throw new Error("Malformed sandbox mandate webhook payload: providerEventId, providerRequestRef and status are required; supplied brokerage, provider, and mandate context must be valid.");
     }
     return {
       providerEventId: p.providerEventId,
       providerRequestRef: p.providerRequestRef,
-      status: p.status,
+      status: p.status as MandateWebhookStatus,
+      brokerageId: p.brokerageId,
+      provider: p.provider,
+      mandateProviderRef: p.mandateProviderRef,
       failureReason: p.failureReason,
       disputeReason: p.disputeReason,
     };

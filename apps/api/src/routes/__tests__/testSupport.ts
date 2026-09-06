@@ -1,4 +1,5 @@
 import { eq, inArray, and } from "drizzle-orm";
+import { createHmac } from "node:crypto";
 import {
   db,
   users,
@@ -182,6 +183,24 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 /**
+ * The mock AML provider is still authenticated exactly like a real
+ * timestamped webhook.  Test suites which use this shared lifecycle helper
+ * may not otherwise need AML configuration, so establish a sandbox-only
+ * secret before constructing the signed request (without replacing an
+ * explicitly configured test secret).
+ */
+function signedSandboxAmlWebhookHeaders(body: string): Record<string, string> {
+  const secret = process.env.AML_WEBHOOK_SECRET ?? "test-only-aml-webhook-secret";
+  process.env.AML_WEBHOOK_SECRET = secret;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return {
+    "content-type": "application/json",
+    "x-aml-timestamp": timestamp,
+    "x-aml-signature": createHmac("sha256", secret).update(`${timestamp}.`).update(body).digest("hex"),
+  };
+}
+
+/**
  * Drives a brand-new property all the way to `Listed` through the real
  * routes (Start Property -> add Seller -> Ready to List -> capture agency
  * terms -> populate -> send for signature -> simulate the e-sign webhook
@@ -247,10 +266,11 @@ export async function createListedProperty(
   if (verifications.length === 0) throw new Error("expected at least one AML verification");
 
   for (const v of verifications) {
+    const amlWebhookBody = JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false });
     const amlWebhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+      headers: signedSandboxAmlWebhookHeaders(amlWebhookBody),
+      body: amlWebhookBody,
     });
     if (amlWebhookRes.status !== 200) throw new Error(`aml webhook failed: ${amlWebhookRes.status} ${await amlWebhookRes.text()}`);
   }

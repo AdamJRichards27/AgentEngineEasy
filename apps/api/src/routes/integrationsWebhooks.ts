@@ -14,7 +14,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { getSecretIdentifierForSigning } from "../lib/integrations/credentials.js";
-import { verifyWebhookSignature, processInboundWebhook, MAX_WEBHOOK_PAYLOAD_BYTES } from "../lib/integrations/webhooks.js";
+import { verifyWebhookSignature, processInboundWebhook, MAX_WEBHOOK_PAYLOAD_BYTES, isWebhookTimestampFresh } from "../lib/integrations/webhooks.js";
 import { IntegrationError } from "../lib/integrations/types.js";
 
 export const integrationsWebhooksRouter = Router();
@@ -57,7 +57,11 @@ integrationsWebhooksRouter.post("/integrations/webhooks/:connectionId/:provider"
     // routes/__tests__/integrationsWebhooks.test.ts's non-UUID-connectionId
     // test, which hung indefinitely against the pre-fix code.
     const secret = await getSecretIdentifierForSigning(connectionId);
-    const signatureValid = secret != null && verifyWebhookSignature({ rawBody, signatureHeader: req.header("x-integration-signature"), secret });
+    const timestamp = req.header("x-integration-timestamp");
+    const signatureValid =
+      secret != null &&
+      isWebhookTimestampFresh(timestamp) &&
+      verifyWebhookSignature({ rawBody, timestamp, signatureHeader: req.header("x-integration-signature"), secret });
 
     const result = await processInboundWebhook({
       connectionId,

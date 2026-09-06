@@ -88,12 +88,17 @@ amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
 // so the signature check runs against the exact bytes the provider signed.
 amlRouter.post("/webhook", async (req, res) => {
   const signature = String(req.header("x-aml-signature") ?? req.header("x-webhook-signature") ?? "");
+  const timestamp = String(req.header("x-aml-timestamp") ?? req.header("x-webhook-timestamp") ?? "");
   const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
 
-  const result = await processAmlWebhook(rawBody, signature, req.body);
+  const result = await processAmlWebhook(rawBody, signature, req.body, timestamp);
 
-  if (result.reason === "invalid_signature") {
+  if (result.reason === "invalid_signature" || result.reason === "stale_timestamp") {
     res.status(401).json({ error: "Invalid webhook signature" });
+    return;
+  }
+  if (result.reason === "malformed_payload" || result.reason === "invalid_context") {
+    res.status(400).json({ error: "Invalid webhook payload" });
     return;
   }
   if (result.reason === "verification_not_found") {

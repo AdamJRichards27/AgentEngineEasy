@@ -35,6 +35,7 @@ import {
   financialPaymentProviderEvents,
   financialDisputes,
   financialLedgerEvents,
+  pcFeeAuthorities,
   properties,
   type FinancialPaymentRequest,
 } from "@aee/db";
@@ -69,7 +70,7 @@ async function recordLedgerEvent(input: {
 
 export interface ProcessMandateWebhookResult {
   processed: boolean;
-  reason?: "invalid_signature" | "payment_request_not_found" | "duplicate_delivery";
+  reason?: "webhooks_disabled" | "invalid_signature" | "payment_request_not_found" | "context_mismatch" | "duplicate_delivery";
   paymentRequest?: FinancialPaymentRequest;
 }
 
@@ -81,7 +82,13 @@ export async function processMandatePaymentWebhook(
   rawBody: Buffer | string,
   signature: string,
   payload: unknown,
+  options: { requireTransportContext?: boolean } = {},
 ): Promise<ProcessMandateWebhookResult> {
+  // Disabled is a hard no-op; in particular do not parse, deduplicate, or
+  // record an event that could later be mistaken for a provider outcome.
+  if (!mandatePaymentProvider.isWebhookEnabled()) {
+    return { processed: false, reason: "webhooks_disabled" };
+  }
   if (!mandatePaymentProvider.verifyWebhookSignature(rawBody, signature)) {
     return { processed: false, reason: "invalid_signature" };
   }
@@ -117,6 +124,42 @@ export async function processMandatePaymentWebhook(
       })
       .where(eq(financialPaymentProviderEvents.id, inserted.id));
     return { processed: false, reason: "payment_request_not_found" };
+  }
+
+  // providerRequestRef alone is not a tenant boundary. Public transport must
+  // provide all three signed bindings. Trusted in-process typed events may
+  // omit transport-only fields, but any context they do provide is still
+  // checked rather than silently trusted.
+  const contextSupplied =
+    result.brokerageId !== undefined ||
+    result.provider !== undefined ||
+    result.mandateProviderRef !== undefined;
+  const requiresAuthority = options.requireTransportContext || contextSupplied;
+  const [authority] = requiresAuthority && request.pcFeeAuthorityId != null
+    ? await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, request.pcFeeAuthorityId))
+    : [];
+  const contextMissing = options.requireTransportContext && (
+    result.brokerageId === undefined ||
+    result.provider === undefined ||
+    result.mandateProviderRef === undefined
+  );
+  if (
+    contextMissing ||
+    (contextSupplied && (
+      result.provider !== mandatePaymentProvider.name ||
+      request.provider !== result.provider ||
+      request.brokerageId !== result.brokerageId ||
+      !authority ||
+      authority.brokerageId !== request.brokerageId ||
+      authority.mandateProvider !== result.provider ||
+      authority.mandateProviderRef !== result.mandateProviderRef
+    ))
+  ) {
+    await db
+      .update(financialPaymentProviderEvents)
+      .set({ processingStatus: "FAILED", processingError: "Webhook provider, brokerage, or mandate context did not match payment request.", processedAt: new Date() })
+      .where(eq(financialPaymentProviderEvents.id, inserted.id));
+    return { processed: false, reason: "context_mismatch" };
   }
 
   const updated = await applyMandateWebhookResult(request, result);

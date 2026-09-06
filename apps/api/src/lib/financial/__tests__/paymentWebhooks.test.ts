@@ -1,5 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
 import { eq, and, desc } from "drizzle-orm";
 import { db, commissionAgreements, pcFeeAuthorities, financialPaymentRequests, financialDisputes, financialLedgerEvents, domainEvents } from "@aee/db";
@@ -13,7 +14,7 @@ import { createCommissionCalculation } from "../calculations.js";
 import { createPcFeeCalculation } from "../pcFeeCalculations.js";
 import { ensurePcSuccessFeeRequest } from "../settlement.js";
 import { advancePaymentRequestToNoticeSent, scheduleDebitForPaymentRequest } from "../paymentOutbox.js";
-import { processMandatePaymentWebhook } from "../paymentWebhooks.js";
+import { processMandatePaymentWebhook as processSignedMandatePaymentWebhook } from "../paymentWebhooks.js";
 
 // Agent Engine 2.0 — Financial Transaction Engine (Priority 9), Stage D.
 //
@@ -42,6 +43,8 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.MANDATE_PAYMENT_WEBHOOK_SECRET = "test-only-mandate-payment-webhook-secret";
+process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED = "true";
 
 let server: Server;
 let baseUrl: string;
@@ -53,6 +56,7 @@ interface ScheduledFixture {
   transactionId: number;
   paymentRequestId: number;
   providerRequestRef: string;
+  mandateProviderRef: string;
 }
 
 // pc_fee_authorities has a unique (agentUserId, version) index, and every
@@ -91,6 +95,7 @@ async function buildScheduledFixture(addressSuffix: string): Promise<ScheduledFi
       rateBps: 690,
       noticeRequiredDays: 0,
       mandateProviderRef: `test-mandate-${suffix}-${addressSuffix}`,
+      mandateProvider: "sandbox",
     })
     .returning();
 
@@ -117,7 +122,13 @@ async function buildScheduledFixture(addressSuffix: string): Promise<ScheduledFi
     throw new Error("fixture setup failed to obtain a providerRequestRef from scheduleDebitForPaymentRequest");
   }
 
-  return { propertyId, transactionId, paymentRequestId: paymentRequest.id, providerRequestRef: paymentRequest.providerRequestRef };
+  return {
+    propertyId,
+    transactionId,
+    paymentRequestId: paymentRequest.id,
+    providerRequestRef: paymentRequest.providerRequestRef,
+    mandateProviderRef: `test-mandate-${suffix}-${addressSuffix}`,
+  };
 }
 
 let fixtureProcessing: ScheduledFixture;
@@ -126,6 +137,18 @@ let fixtureFailedRetry: ScheduledFixture;
 let fixtureReversed: ScheduledFixture;
 let fixtureDisputed: ScheduledFixture;
 let fixtureDuplicate: ScheduledFixture;
+
+function signWebhook(body: string, timestamp = Math.floor(Date.now() / 1000)): string {
+  return `t=${timestamp},v1=${createHmac("sha256", process.env.MANDATE_PAYMENT_WEBHOOK_SECRET!).update(`${timestamp}.${body}`).digest("hex")}`;
+}
+
+// Lifecycle callers are trusted in-process typed events. They still pass
+// signature verification, while the HTTP route opts into mandatory transport
+// brokerage/provider/mandate context.
+async function processMandatePaymentWebhook(_rawBody: Buffer | string, _signature: string, payload: Record<string, unknown>) {
+  const rawBody = typeof _rawBody === "string" ? _rawBody : _rawBody.toString("utf8");
+  return processSignedMandatePaymentWebhook(rawBody, signWebhook(rawBody), payload);
+}
 
 before(async () => {
   const { configureEvents } = await import("../../events.js");
@@ -212,14 +235,19 @@ describe("processMandatePaymentWebhook — correlationId propagation (Step 2 har
     // synchronously inside the one route handler.
     const fixture = await buildScheduledFixture("correlation-proof");
 
+    const callback = {
+      providerEventId: `evt-correlation-proof-${suffix}`,
+      providerRequestRef: fixture.providerRequestRef,
+      status: "Paid",
+      brokerageId: A.brokerageId,
+      provider: "sandbox",
+      mandateProviderRef: fixture.mandateProviderRef,
+    };
+    const rawCallback = JSON.stringify(callback);
     const webhookRes = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-mandate-payment-signature": "sig" },
-      body: JSON.stringify({
-        providerEventId: `evt-correlation-proof-${suffix}`,
-        providerRequestRef: fixture.providerRequestRef,
-        status: "Paid",
-      }),
+      headers: { "content-type": "application/json", "x-mandate-payment-signature": signWebhook(rawCallback) },
+      body: rawCallback,
     });
     assert.equal(webhookRes.status, 200);
     const requestCorrelationId = webhookRes.headers.get("x-correlation-id");

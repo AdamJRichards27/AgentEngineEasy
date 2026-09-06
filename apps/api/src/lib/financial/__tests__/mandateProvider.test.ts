@@ -1,5 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { SandboxMandatePaymentProvider } from "@aee/integration-mandate-payments";
 
 // Agent Engine 2.0 — Financial Transaction Engine (Priority 9), Stage D.
@@ -84,20 +85,61 @@ describe("SandboxMandatePaymentProvider — reverseDebit", () => {
 });
 
 describe("SandboxMandatePaymentProvider — webhooks", () => {
-  test("verifyWebhookSignature always trusts the sandbox (no real webhook traffic reaches it)", () => {
-    const provider = new SandboxMandatePaymentProvider();
-    assert.equal(provider.verifyWebhookSignature(), true);
+  const secret = "mandate-provider-test-secret";
+  const now = 1_700_000_000_000;
+  const sign = (body: string, timestamp = Math.floor(now / 1000)) =>
+    `t=${timestamp},v1=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
+
+  test("accepts only a fresh HMAC over the timestamp and exact sandbox callback body", () => {
+    const provider = new SandboxMandatePaymentProvider({ webhookSecret: secret, webhooksEnabled: true, now: () => now });
+    const body = JSON.stringify({ example: "callback" });
+    assert.equal(provider.verifyWebhookSignature(body, sign(body)), true);
+    assert.equal(provider.verifyWebhookSignature(body, ""), false, "missing signatures are rejected");
+    assert.equal(provider.verifyWebhookSignature(body, "t=1700000000,v1=not-a-valid-signature"), false, "invalid signatures are rejected");
+    assert.equal(provider.verifyWebhookSignature(body, sign(body, 1_699_999_699)), false, "expired callbacks are rejected");
+    assert.equal(provider.verifyWebhookSignature(body, sign(body, 1_700_000_301)), false, "future callbacks are rejected");
+    assert.equal(provider.verifyWebhookSignature(`${body} `, sign(body)), false, "the exact raw bytes are signed");
+  });
+
+  test("disabled webhook mode rejects callbacks before they can have business effect", () => {
+    const provider = new SandboxMandatePaymentProvider({ webhookSecret: secret, webhooksEnabled: false, now: () => now });
+    assert.equal(provider.isWebhookEnabled(), false);
+    assert.equal(provider.verifyWebhookSignature("{}", sign("{}")), false);
+  });
+
+  test("default configuration cannot verify when ingress and its secret are omitted", () => {
+    const previousSecret = process.env.MANDATE_PAYMENT_WEBHOOK_SECRET;
+    const previousEnabled = process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED;
+    delete process.env.MANDATE_PAYMENT_WEBHOOK_SECRET;
+    delete process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED;
+    try {
+      const provider = new SandboxMandatePaymentProvider({ now: () => now });
+      assert.equal(provider.isWebhookEnabled(), false);
+      assert.equal(provider.verifyWebhookSignature("{}", sign("{}")), false);
+    } finally {
+      if (previousSecret === undefined) delete process.env.MANDATE_PAYMENT_WEBHOOK_SECRET;
+      else process.env.MANDATE_PAYMENT_WEBHOOK_SECRET = previousSecret;
+      if (previousEnabled === undefined) delete process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED;
+      else process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED = previousEnabled;
+    }
   });
 
   test("parseWebhook round-trips a well-formed payload", () => {
     const provider = new SandboxMandatePaymentProvider();
-    const payload = { providerEventId: "evt-1", providerRequestRef: "sandbox-debit-1", status: "Paid" as const };
+    const payload = {
+      providerEventId: "evt-1",
+      providerRequestRef: "sandbox-debit-1",
+      status: "Paid" as const,
+      brokerageId: 1,
+      provider: "sandbox",
+      mandateProviderRef: "mandate-1",
+    };
     const result = provider.parseWebhook(payload);
-    assert.deepEqual(result, { providerEventId: "evt-1", providerRequestRef: "sandbox-debit-1", status: "Paid", failureReason: undefined, disputeReason: undefined });
+    assert.deepEqual(result, { ...payload, failureReason: undefined, disputeReason: undefined });
   });
 
   test("parseWebhook rejects a malformed payload missing required fields", () => {
     const provider = new SandboxMandatePaymentProvider();
-    assert.throws(() => provider.parseWebhook({ status: "Paid" }), /providerEventId, providerRequestRef and status are all required/);
+    assert.throws(() => provider.parseWebhook({ status: "Paid" }), /providerEventId, providerRequestRef and status are required/);
   });
 });

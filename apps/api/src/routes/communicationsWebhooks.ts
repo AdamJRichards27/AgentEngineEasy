@@ -19,7 +19,9 @@
 import { Router } from "express";
 import { z } from "zod";
 import { incrementCounter, observeHistogram } from "@aee/events";
-import { processInboundWebhook, verifyWebhookSignature } from "../lib/communications/webhooks.js";
+import { processInboundWebhook, verifyWebhookSignature, isWebhookTimestampFresh } from "../lib/communications/webhooks.js";
+import { SANDBOX_EMAIL_PROVIDER_NAME } from "../lib/communications/providers/sandboxEmail.js";
+import { SANDBOX_SMS_PROVIDER_NAME } from "../lib/communications/providers/sandboxSms.js";
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -32,10 +34,15 @@ declare global {
 
 export const communicationsWebhooksRouter = Router();
 
-// Sandbox/dev-only shared secret until a real per-provider credential store
-// exists (Section 5: "no direct production provider activation without
-// credentials or authorization"). Overridable via env for local testing.
-const WEBHOOK_SECRET = process.env.COMMUNICATIONS_WEBHOOK_SECRET ?? "dev-sandbox-communications-webhook-secret";
+// Fail closed: this inbound surface is unavailable unless an operator has
+// explicitly enabled it and supplied the sandbox signing secret out of band.
+// There is deliberately no source-visible development fallback.
+export function communicationsWebhookIngressConfigured(
+  env: NodeJS.ProcessEnv = process.env,
+): env is NodeJS.ProcessEnv & { COMMUNICATIONS_WEBHOOK_SECRET: string } {
+  return env.COMMUNICATIONS_WEBHOOK_INGRESS_ENABLED === "true" && typeof env.COMMUNICATIONS_WEBHOOK_SECRET === "string" && env.COMMUNICATIONS_WEBHOOK_SECRET.trim().length > 0;
+}
+const ENABLED_SANDBOX_PROVIDERS = new Set([SANDBOX_EMAIL_PROVIDER_NAME, SANDBOX_SMS_PROVIDER_NAME]);
 
 const inboundWebhookSchema = z
   .object({
@@ -62,6 +69,11 @@ communicationsWebhooksRouter.post("/communications/webhooks/:brokerageId/:provid
     incrementCounter("communications_webhook_total", { outcome });
     observeHistogram("communications_webhook_duration_ms", Date.now() - startedAt, { outcome });
   };
+  if (!communicationsWebhookIngressConfigured(process.env)) {
+    finish("invalid_signature");
+    return void res.status(404).json({ error: "Webhook ingress is disabled." });
+  }
+  const webhookSecret = process.env.COMMUNICATIONS_WEBHOOK_SECRET;
 
   const brokerageId = Number(req.params.brokerageId);
   const provider = req.params.provider;
@@ -69,10 +81,17 @@ communicationsWebhooksRouter.post("/communications/webhooks/:brokerageId/:provid
     finish("schema_rejected");
     return void res.status(400).json({ error: "Invalid brokerage id." });
   }
+  // No real communications provider is registered in this build. Reject an
+  // unknown/disabled provider before parsing or applying any business effect.
+  if (!ENABLED_SANDBOX_PROVIDERS.has(provider)) {
+    finish("schema_rejected");
+    return void res.status(404).json({ error: "Webhook provider is disabled." });
+  }
 
   const signatureHeader = req.header("x-communications-signature");
+  const timestamp = req.header("x-communications-timestamp");
   const rawBody = req.rawBody;
-  if (!rawBody || !verifyWebhookSignature({ rawBody, signatureHeader, secret: WEBHOOK_SECRET })) {
+  if (!rawBody || !isWebhookTimestampFresh(timestamp) || !verifyWebhookSignature({ rawBody, timestamp, signatureHeader, secret: webhookSecret })) {
     finish("invalid_signature");
     return void res.status(401).json({ error: "Invalid or missing webhook signature." });
   }

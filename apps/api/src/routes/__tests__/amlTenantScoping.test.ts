@@ -19,6 +19,9 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { createHmac } from "node:crypto";
+import { and, eq } from "drizzle-orm";
+import { db, domainEvents } from "@aee/db";
 import {
   createBrokerageWithUsers,
   cleanupBrokerages,
@@ -30,6 +33,7 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.AML_WEBHOOK_SECRET = "aml-webhook-test-secret";
 
 let server: Server;
 let baseUrl: string;
@@ -112,13 +116,107 @@ async function seedVerification(cookie: string): Promise<{ propertyId: number; v
 
 /** Drives a seeded verification to "Failed" via the (unauthenticated) provider webhook, so retry/resolve-exception have something to act on. */
 async function failViaWebhook(providerReference: string): Promise<void> {
+  const body = JSON.stringify({ providerReference, outcome: "UNABLE_TO_VERIFY", reviewRequired: false });
   const res = await fetch(`${baseUrl}/api/aml/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference, outcome: "UNABLE_TO_VERIFY", reviewRequired: false }),
+    headers: amlWebhookHeaders(body),
+    body,
   });
   if (res.status !== 200) throw new Error(`aml webhook failed: ${res.status} ${await res.text()}`);
 }
+
+function amlWebhookHeaders(body: string, timestamp = String(Math.floor(Date.now() / 1000))): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    "x-aml-timestamp": timestamp,
+    "x-aml-signature": createHmac("sha256", process.env.AML_WEBHOOK_SECRET!).update(`${timestamp}.`).update(body).digest("hex"),
+  };
+}
+
+test("AML webhook ingress rejects unsigned, stale, replayed, disabled, and manipulated-context callbacks while a signed sandbox callback succeeds", async () => {
+  const seeded = await seedVerification(A.agent.cookie);
+  const validBody = JSON.stringify({ providerReference: seeded.providerReference, outcome: "VERIFIED", reviewRequired: false });
+
+  const missingSignature = await fetch(`${baseUrl}/api/aml/webhook`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-aml-timestamp": String(Math.floor(Date.now() / 1000)) },
+    body: validBody,
+  });
+  assert.equal(missingSignature.status, 401);
+
+  const staleTimestamp = String(Math.floor(Date.now() / 1000) - 301);
+  const stale = await fetch(`${baseUrl}/api/aml/webhook`, {
+    method: "POST",
+    headers: amlWebhookHeaders(validBody, staleTimestamp),
+    body: validBody,
+  });
+  assert.equal(stale.status, 401);
+
+  const tamperedBody = JSON.stringify({
+    providerReference: seeded.providerReference,
+    outcome: "VERIFIED",
+    reviewRequired: false,
+    brokerageId: B.brokerageId,
+  });
+  const tampered = await fetch(`${baseUrl}/api/aml/webhook`, {
+    method: "POST",
+    headers: amlWebhookHeaders(tamperedBody),
+    body: tamperedBody,
+  });
+  assert.equal(tampered.status, 400);
+
+  process.env.AML_WEBHOOKS_ENABLED = "false";
+  try {
+    const disabled = await fetch(`${baseUrl}/api/aml/webhook`, {
+      method: "POST",
+      headers: amlWebhookHeaders(validBody),
+      body: validBody,
+    });
+    assert.equal(disabled.status, 200);
+    const beforeValid = await fetch(`${baseUrl}/api/aml/by-property/${seeded.propertyId}`, { headers: { cookie: A.agent.cookie } });
+    const beforeValidBody = await json<{ verifications: Array<{ id: number; status: string }> }>(beforeValid);
+    assert.equal(beforeValidBody.verifications.find((v) => v.id === seeded.verificationId)?.status, "Awaiting Seller");
+  } finally {
+    delete process.env.AML_WEBHOOKS_ENABLED;
+  }
+
+  const [concurrentA, concurrentB] = await Promise.all(
+    [0, 1].map(() =>
+      fetch(`${baseUrl}/api/aml/webhook`, {
+        method: "POST",
+        headers: amlWebhookHeaders(validBody),
+        body: validBody,
+      }),
+    ),
+  );
+  assert.equal(concurrentA.status, 200);
+  assert.equal(concurrentB.status, 200);
+  const concurrentBodies = await Promise.all([
+    json<{ processed: boolean; reason?: string }>(concurrentA),
+    json<{ processed: boolean; reason?: string }>(concurrentB),
+  ]);
+  assert.equal(concurrentBodies.filter((body) => body.processed).length, 1, "exactly one concurrent delivery may claim and apply the outcome");
+  assert.equal(
+    concurrentBodies.filter((body) => !body.processed && body.reason === "duplicate_delivery").length,
+    1,
+    "the delivery waiting on the advisory lock must re-read and become a duplicate",
+  );
+  const completionEvents = await db
+    .select()
+    .from(domainEvents)
+    .where(and(eq(domainEvents.propertyId, seeded.propertyId), eq(domainEvents.eventType, "AML_COMPLETED")));
+  assert.equal(completionEvents.length, 1, "only the successful claimant may publish AML_COMPLETED");
+
+  const replay = await fetch(`${baseUrl}/api/aml/webhook`, {
+    method: "POST",
+    headers: amlWebhookHeaders(validBody),
+    body: validBody,
+  });
+  assert.equal(replay.status, 200);
+  const replayBody = await json<{ processed: boolean; reason?: string }>(replay);
+  assert.equal(replayBody.processed, false);
+  assert.equal(replayBody.reason, "duplicate_delivery");
+});
 
 // --- retry -------------------------------------------------------------
 

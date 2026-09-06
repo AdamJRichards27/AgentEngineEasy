@@ -12,6 +12,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { createHmac } from "node:crypto";
 import { db, automationTasks, automationAttentionItems } from "@aee/db";
 import { createBrokerageWithUsers, cleanupBrokerages, getDomainEventsForProperty, type DevLoginResult } from "./testSupport.js";
 
@@ -20,6 +21,7 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.AML_WEBHOOK_SECRET = "aml-webhook-test-secret";
 
 let server: Server;
 let baseUrl: string;
@@ -43,6 +45,14 @@ async function postJson(path: string, cookie: string, body?: unknown) {
 }
 async function getJson(path: string, cookie: string) {
   return fetch(`${baseUrl}/api${path}`, { headers: { cookie } });
+}
+function amlWebhookHeaders(body: string): Record<string, string> {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return {
+    "content-type": "application/json",
+    "x-aml-timestamp": timestamp,
+    "x-aml-signature": createHmac("sha256", process.env.AML_WEBHOOK_SECRET!).update(`${timestamp}.`).update(body).digest("hex"),
+  };
 }
 async function bodyOf<T>(res: Response): Promise<T> {
   const text = await res.text();
@@ -148,10 +158,11 @@ test("Stage B: Agency Agreement -> Ready to List -> documents signed -> seller A
   const { verifications } = await bodyOf<{ verifications: Array<{ providerReference: string }> }>(amlListRes);
   assert.ok(verifications.length > 0, "Ready to List must have initiated seller AML");
   for (const v of verifications) {
+    const body = JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false });
     const webhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+      headers: amlWebhookHeaders(body),
+      body,
     });
     assert.equal(webhookRes.status, 200);
   }
@@ -229,10 +240,11 @@ test("Contract + AML/CTF: contract signed publishes CONTRACT_SIGNED exactly once
   const { verifications } = await bodyOf<{ verifications: Array<{ providerReference: string; status: string }> }>(amlListRes);
   const buyerVerification = verifications.find((v) => v.status !== "Complete");
   assert.ok(buyerVerification, "contract signing must have initiated a new (buyer) AML verification");
+  const body = JSON.stringify({ providerReference: buyerVerification!.providerReference, outcome: "VERIFIED", reviewRequired: false });
   const buyerWebhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: buyerVerification!.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+    headers: amlWebhookHeaders(body),
+    body,
   });
   assert.equal(buyerWebhookRes.status, 200);
 

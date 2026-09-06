@@ -19,9 +19,10 @@
 
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
 import { eq, and } from "drizzle-orm";
-import { db, financialPaymentRequests, financialPaymentProviderEvents } from "@aee/db";
+import { db, financialPaymentRequests, financialPaymentProviderEvents, pcFeeAuthorities, properties } from "@aee/db";
 import { resetMetricsForTesting, renderMetricsText } from "@aee/events";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -30,6 +31,8 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.MANDATE_PAYMENT_WEBHOOK_SECRET = "test-only-mandate-payment-webhook-secret";
+process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED = "true";
 
 let server: Server;
 let baseUrl: string;
@@ -64,6 +67,18 @@ beforeEach(() => {
 
 async function createScheduledPaymentRequest(providerRequestRef: string) {
   const { propertyId, transactionId } = await createTransactionFromListedProperty(baseUrl, admin.cookie, { address: `1 Financial Webhook Metrics Rd ${suffix}-${Math.random()}` });
+  const [property] = await db.select({ agentId: properties.agentId }).from(properties).where(eq(properties.id, propertyId));
+  if (!property?.agentId) throw new Error("fixture property has no agent");
+  const [authority] = await db.insert(pcFeeAuthorities).values({
+    brokerageId,
+    agentUserId: property.agentId,
+    version: Math.floor(Math.random() * 1_000_000_000),
+    status: "ACTIVE",
+    rateBps: 690,
+    noticeRequiredDays: 0,
+    mandateProvider: "sandbox",
+    mandateProviderRef: `mandate-${providerRequestRef}`,
+  }).returning();
   const [request] = await db
     .insert(financialPaymentRequests)
     .values({
@@ -76,9 +91,19 @@ async function createScheduledPaymentRequest(providerRequestRef: string) {
       status: "DEBIT_SCHEDULED",
       provider: "sandbox",
       providerRequestRef,
+      pcFeeAuthorityId: authority.id,
     })
     .returning();
   return request;
+}
+
+function signedCallback(callback: Record<string, unknown>): { raw: string; signature: string } {
+  const raw = JSON.stringify(callback);
+  const timestamp = Math.floor(Date.now() / 1000);
+  return {
+    raw,
+    signature: `t=${timestamp},v1=${createHmac("sha256", process.env.MANDATE_PAYMENT_WEBHOOK_SECRET!).update(`${timestamp}.${raw}`).digest("hex")}`,
+  };
 }
 
 async function countProviderEventRows(providerEventId: string): Promise<number> {
@@ -90,11 +115,12 @@ async function countProviderEventRows(providerEventId: string): Promise<number> 
 }
 
 test("a malformed payload is rejected as schema_rejected (never hangs, never mutates state) — the try/catch this closure pass added around parseWebhook()", async () => {
+  const callback = signedCallback({ notAValidShape: true });
   const res = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
     // Missing providerEventId/providerRequestRef/status — parseWebhook() throws.
-    body: JSON.stringify({ notAValidShape: true }),
+    body: callback.raw,
   });
   assert.equal(res.status, 400);
   const body = (await res.json()) as { processed: boolean; reason?: string };
@@ -108,12 +134,33 @@ test("a malformed payload is rejected as schema_rejected (never hangs, never mut
   assert.match(text, /financial_webhook_duration_ms_count\{outcome="schema_rejected"\} 1/);
 });
 
-test("an unresolvable providerRequestRef is rejected as failure and writes a FAILED provider-event row only — never a payment_request mutation", async () => {
-  const providerEventId = `evt-${suffix}-unresolvable`;
+test("a missing or invalid signature is rejected before parsing or recording a provider event", async () => {
+  const providerEventId = `evt-${suffix}-unsigned`;
+  const raw = JSON.stringify({
+    providerEventId,
+    providerRequestRef: "would-not-be-resolved",
+    status: "Paid",
+    brokerageId,
+    provider: "sandbox",
+    mandateProviderRef: "would-not-be-resolved",
+  });
   const res = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerEventId, providerRequestRef: "no-such-ref-exists", status: "Paid" }),
+    body: raw,
+  });
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { processed: false, reason: "invalid_signature" });
+  assert.equal(await countProviderEventRows(providerEventId), 0);
+});
+
+test("an unresolvable providerRequestRef is rejected as failure and writes a FAILED provider-event row only — never a payment_request mutation", async () => {
+  const providerEventId = `evt-${suffix}-unresolvable`;
+  const callback = signedCallback({ providerEventId, providerRequestRef: "no-such-ref-exists", status: "Paid", brokerageId, provider: "sandbox", mandateProviderRef: "unknown-mandate" });
+  const res = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
+    body: callback.raw,
   });
   assert.equal(res.status, 404);
 
@@ -128,11 +175,12 @@ test("a valid, resolvable webhook is accepted and recorded as success, and a red
   const providerRequestRef = `ref-${suffix}-metrics-success`;
   await createScheduledPaymentRequest(providerRequestRef);
   const providerEventId = `evt-${suffix}-success`;
+  const callback = signedCallback({ providerEventId, providerRequestRef, status: "Paid", brokerageId, provider: "sandbox", mandateProviderRef: `mandate-${providerRequestRef}` });
 
   const firstRes = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerEventId, providerRequestRef, status: "Paid" }),
+    headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
+    body: callback.raw,
   });
   assert.equal(firstRes.status, 200);
   const firstBody = (await firstRes.json()) as { processed: boolean };
@@ -147,8 +195,8 @@ test("a valid, resolvable webhook is accepted and recorded as success, and a red
 
   const secondRes = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerEventId, providerRequestRef, status: "Paid" }),
+    headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
+    body: callback.raw,
   });
   const secondBody = (await secondRes.json()) as { processed: boolean; reason?: string };
   assert.equal(secondBody.processed, false);
