@@ -91,7 +91,7 @@ function isMalformedBody(err: BodyParserLikeError): boolean {
  * never do is fail in a way that leaves the request hanging exactly like
  * the bug this file exists to stop.
  */
-export async function globalErrorHandler(err: unknown, req: Request, res: Response, next: NextFunction): Promise<void> {
+export function globalErrorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
   if (res.headersSent) {
     next(err);
     return;
@@ -102,7 +102,7 @@ export async function globalErrorHandler(err: unknown, req: Request, res: Respon
     method: req.method,
     path: req.path,
   });
-  await dispatchOperationalAlert({
+  void dispatchOperationalAlert({
     type: "UNHANDLED_API_ERROR",
     summary: "Unhandled API route error",
     dedupKey: `api:${req.method}:${req.route?.path ?? req.path}`,
