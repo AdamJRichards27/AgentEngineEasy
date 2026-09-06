@@ -12,7 +12,11 @@ import CommunicationsHub from "./pages/CommunicationsHub";
 import FinancialOperations from "./pages/FinancialOperations";
 import Settings from "./pages/Settings";
 import SettingsIntegrations from "./pages/SettingsIntegrations";
+import SettingsUsers from "./pages/SettingsUsers";
 import Login from "./pages/Login";
+import AcceptInvitation from "./pages/AcceptInvitation";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout } from "./lib/session";
 
 function initials(firstName?: string, lastName?: string): string {
@@ -56,6 +60,15 @@ export default function App() {
       <Route path="/login">
         {isSignedIn ? <Redirect to="/" /> : <Login />}
       </Route>
+      {/* Critical Blocker Remediation, Phases 2/4 — public, unauthenticated
+          routes for the invitation-only auth flows. These must sit outside
+          the isSignedIn gate below: an invitation/reset link is opened from
+          an email, before any session cookie exists (and a currently
+          signed-in admin must still be able to open their own invite links
+          when testing, so none of these redirect away on isSignedIn). */}
+      <Route path="/accept-invitation/:token" component={AcceptInvitation} />
+      <Route path="/forgot-password" component={ForgotPassword} />
+      <Route path="/reset-password/:token" component={ResetPassword} />
       <Route>
         {isLoading ? (
           <div className="app-loading">Loading…</div>
@@ -165,6 +178,7 @@ function SidebarLayout({
             <Route path="/grow/import" component={GrowImport} />
             <Route path="/settings" component={Settings} />
             <Route path="/settings/integrations" component={SettingsIntegrations} />
+            <Route path="/settings/users" component={SettingsUsers} />
             <Route>
               <p>Page not found.</p>
             </Route>
