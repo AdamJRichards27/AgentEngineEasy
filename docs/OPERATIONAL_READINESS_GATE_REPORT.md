@@ -32,8 +32,9 @@ and the rest of this report, describe the state of the codebase **before** the a
 remediation, jurisdiction correction, legal drafting, and other work carried out under "AE
 Operational Readiness — Critical Blocker Remediation." That remediation pass re-runs this gate
 and issues its own renewed final decision in a separate completion report (Phase 12); it does not
-edit this line, so that the original gate finding remains an intact historical record. See that
-renewed report for the current decision.
+edit this line, so that the original gate finding remains an intact historical record. See
+`docs/gate-evidence/PHASE12_COMPLETION_REPORT_AND_RENEWED_GATE_DECISION.md` for the current
+decision.
 
 ---
 
@@ -456,8 +457,8 @@ written, with resolution notes added where applicable:**
 
   **Note (Critical Blocker Remediation pass):** the branch was updated substantially again after
   this SHA under the separate remediation instruction described at the top of this report. See
-  the renewed Phase 12 completion report for the current final SHA and full commit list of that
-  later pass.
+  `docs/gate-evidence/PHASE12_COMPLETION_REPORT_AND_RENEWED_GATE_DECISION.md` for the current
+  final SHA and full commit list of that later pass.
 - **PR:** [PR #27 — Agent Engine 2.0 — Operational Readiness and Controlled Pilot Gate]
   (https://github.com/AdamJRichards27/AgentEngineEasy/pull/27), opened from
   `feat/operational-readiness-pilot-gate` into `staging` as a **draft**, **not merged**. This
