@@ -16,6 +16,7 @@ import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 const isTestEnvironment = process.env.NODE_ENV === "test";
 
 const ONE_MINUTE_MS = 60_000;
+const TEST_REQUEST_LIMIT = 100_000;
 
 /**
  * Generous global throttle applied to the whole API (see app.ts) — 300
@@ -26,7 +27,7 @@ const ONE_MINUTE_MS = 60_000;
  */
 export const globalRateLimiter = rateLimit({
   windowMs: ONE_MINUTE_MS,
-  limit: isTestEnvironment ? 5_000 : 300,
+  limit: isTestEnvironment ? TEST_REQUEST_LIMIT : 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please try again later." },
@@ -41,7 +42,7 @@ export const globalRateLimiter = rateLimit({
  */
 export const authRateLimiter = rateLimit({
   windowMs: ONE_MINUTE_MS,
-  limit: isTestEnvironment ? 1_000 : 20,
+  limit: isTestEnvironment ? TEST_REQUEST_LIMIT : 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many authentication requests, please try again later." },
