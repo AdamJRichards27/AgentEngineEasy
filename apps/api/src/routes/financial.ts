@@ -92,7 +92,11 @@ const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES
 
 function handleFinancialControlError(err: unknown, res: Response): boolean {
   if (err instanceof FinancialControlError) {
-    const status = err.reason === "NOT_FOUND" ? 404 : err.reason === "SEPARATION_OF_DUTIES" ? 403 : 409;
+    // CUSTODY_BOUNDARY_VIOLATION (Critical Blocker Remediation, Phase 10) is a caller-input
+    // rejection, not a state conflict — 400, not the 409 every other non-NOT_FOUND/
+    // non-SEPARATION_OF_DUTIES reason falls back to.
+    const status =
+      err.reason === "NOT_FOUND" ? 404 : err.reason === "SEPARATION_OF_DUTIES" ? 403 : err.reason === "CUSTODY_BOUNDARY_VIOLATION" ? 400 : 409;
     res.status(status).json({ error: err.message, reason: err.reason });
     return true;
   }

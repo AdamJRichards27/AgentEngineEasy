@@ -63,6 +63,42 @@ describe("createPcFeeAuthority", () => {
     assert.equal(authority.status, "PENDING");
     assert.equal(authority.mandateProviderRef, null);
   });
+
+  test("defaults authorisedPaymentMethod to GENERAL_ACCOUNT_DEBIT_MANDATE when omitted", async () => {
+    const authority = await createPcFeeAuthority({ brokerageId: A.brokerageId, agentUserId: A.agent.user.id, rateBps: 690, createdByUserId: secondAdmin.user.id });
+    assert.equal(authority.authorisedPaymentMethod, "GENERAL_ACCOUNT_DEBIT_MANDATE");
+  });
+
+  // Critical Blocker Remediation, Phase 10 — custody-boundary lock
+  // (docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md §16: "AE must
+  // not receive, hold, transfer or disburse trust money" was true in effect
+  // but not technically enforced — authorisedPaymentMethod was unvalidated
+  // free text). This proves the enforcement, not just that the default is
+  // correct (the test above already covered that).
+  test("rejects any authorisedPaymentMethod other than GENERAL_ACCOUNT_DEBIT_MANDATE", async () => {
+    await assert.rejects(
+      () =>
+        createPcFeeAuthority({
+          brokerageId: A.brokerageId,
+          agentUserId: A.agent.user.id,
+          rateBps: 690,
+          createdByUserId: secondAdmin.user.id,
+          authorisedPaymentMethod: "TRUST_ACCOUNT_DEBIT",
+        }),
+      (err: unknown) => err instanceof FinancialControlError && err.reason === "CUSTODY_BOUNDARY_VIOLATION",
+    );
+  });
+
+  test("accepts an explicit GENERAL_ACCOUNT_DEBIT_MANDATE (the only allowed non-default value, which is also the default)", async () => {
+    const authority = await createPcFeeAuthority({
+      brokerageId: A.brokerageId,
+      agentUserId: A.agent.user.id,
+      rateBps: 690,
+      createdByUserId: secondAdmin.user.id,
+      authorisedPaymentMethod: "GENERAL_ACCOUNT_DEBIT_MANDATE",
+    });
+    assert.equal(authority.authorisedPaymentMethod, "GENERAL_ACCOUNT_DEBIT_MANDATE");
+  });
 });
 
 describe("activatePcFeeAuthority — separation of duties and sensitive-data protection", () => {

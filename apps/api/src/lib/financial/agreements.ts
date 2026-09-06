@@ -28,7 +28,7 @@ import { eq, and } from "drizzle-orm";
 import { db, commissionAgreements, financialLedgerEvents, type CommissionAgreement, type CommissionTier, type CommissionMethod } from "@aee/db";
 import { emitFinancialEvent } from "./events.js";
 
-export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES";
+export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES" | "CUSTODY_BOUNDARY_VIOLATION";
 
 export class FinancialControlError extends Error {
   reason: FinancialControlErrorReason;
