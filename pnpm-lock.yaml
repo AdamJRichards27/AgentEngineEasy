@@ -163,6 +163,10 @@ importers:
         version: 22.20.1
 
   packages/integrations/aml:
+    dependencies:
+      '@aee/events':
+        specifier: workspace:*
+        version: link:../../events
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -175,12 +179,20 @@ importers:
         version: 22.20.1
 
   packages/integrations/esign:
+    dependencies:
+      '@aee/events':
+        specifier: workspace:*
+        version: link:../../events
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
 
   packages/integrations/mandate-payments:
+    dependencies:
+      '@aee/events':
+        specifier: workspace:*
+        version: link:../../events
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -193,12 +205,20 @@ importers:
         version: 22.20.1
 
   packages/integrations/payments:
+    dependencies:
+      '@aee/events':
+        specifier: workspace:*
+        version: link:../../events
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
 
   packages/integrations/property-data:
+    dependencies:
+      '@aee/events':
+        specifier: workspace:*
+        version: link:../../events
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
