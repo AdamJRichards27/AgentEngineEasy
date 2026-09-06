@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { logger } from "@aee/events";
 
 export interface DocumentPackageInput {
   packageId: number;
@@ -138,9 +139,9 @@ export function createESignProvider(): ESignProvider {
     if (baseUrl && apiKey && webhookSecret) {
       return new HttpESignProvider({ baseUrl, apiKey, webhookSecret });
     }
-    console.warn(
-      "ESIGN_PROVIDER=http but ESIGN_API_BASE_URL/ESIGN_PROVIDER_API_KEY/ESIGN_WEBHOOK_SECRET are not all set — falling back to MockESignProvider.",
-    );
+    logger.warn("esign_provider_fallback_to_mock", {
+      reason: "ESIGN_PROVIDER=http but ESIGN_API_BASE_URL/ESIGN_PROVIDER_API_KEY/ESIGN_WEBHOOK_SECRET are not all set",
+    });
   }
 
   return new MockESignProvider();

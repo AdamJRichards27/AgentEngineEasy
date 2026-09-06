@@ -2,6 +2,8 @@
 // this interface, never on a specific provider — swapping providers later
 // is a factory config change, not a redesign.
 
+import { logger } from "@aee/events";
+
 export interface AddressCandidate {
   placeId: string;
   formattedAddress: string;
@@ -126,9 +128,9 @@ export function createPropertyDataProvider(): PropertyDataProvider {
     case "google-places": {
       const apiKey = process.env.GOOGLE_PLACES_API_KEY;
       if (!apiKey) {
-        console.warn(
-          "PROPERTY_DATA_PROVIDER=google-places but GOOGLE_PLACES_API_KEY is unset — falling back to MockPropertyDataProvider.",
-        );
+        logger.warn("property_data_provider_fallback_to_mock", {
+          reason: "PROPERTY_DATA_PROVIDER=google-places but GOOGLE_PLACES_API_KEY is unset",
+        });
         return new MockPropertyDataProvider();
       }
       return new GooglePlacesProvider(apiKey);

@@ -28,6 +28,7 @@
 // so swapping in a real adapter later is a config change, not a rewrite.
 
 import { randomUUID } from "node:crypto";
+import { logger } from "@aee/events";
 
 export interface DebitRequest {
   mandateProviderRef: string;
@@ -165,7 +166,10 @@ export function createMandatePaymentProvider(): MandatePaymentProvider {
     // and no real bank-debit vendor is procured for this build — every
     // other requested value falls back to the sandbox rather than silently
     // pretending to be a real provider it cannot yet be.
-    console.warn(`MANDATE_PAYMENT_PROVIDER=${provider} is not supported yet — falling back to SandboxMandatePaymentProvider.`);
+    logger.warn("mandate_payment_provider_fallback_to_sandbox", {
+      requestedProvider: provider,
+      reason: "provider not supported yet",
+    });
   }
   return new SandboxMandatePaymentProvider();
 }

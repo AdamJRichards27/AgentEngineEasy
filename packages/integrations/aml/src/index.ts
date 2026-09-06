@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { logger } from "@aee/events";
 
 export interface AMLVerificationRequest {
   propertyId: number;
@@ -164,9 +165,9 @@ export function createAMLProvider(): AMLProvider {
     if (baseUrl && apiKey && webhookSecret) {
       return new HttpAMLProvider({ baseUrl, apiKey, webhookSecret });
     }
-    console.warn(
-      "AML_PROVIDER=http but AML_API_BASE_URL/AML_PROVIDER_API_KEY/AML_WEBHOOK_SECRET are not all set — falling back to MockAMLProvider.",
-    );
+    logger.warn("aml_provider_fallback_to_mock", {
+      reason: "AML_PROVIDER=http but AML_API_BASE_URL/AML_PROVIDER_API_KEY/AML_WEBHOOK_SECRET are not all set",
+    });
   }
 
   return new MockAMLProvider();

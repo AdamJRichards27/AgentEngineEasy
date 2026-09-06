@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { logger } from "@aee/events";
 
 export interface ChargeRequest {
   paymentMethodProviderRef: string;
@@ -258,9 +259,9 @@ export function createPaymentProvider(): PaymentProvider {
     if (secretKey && webhookSecret) {
       return new StripePaymentProvider({ secretKey, webhookSecret, apiBaseUrl });
     }
-    console.warn(
-      "PAYMENT_PROVIDER=stripe but STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET are not both set — falling back to MockPaymentProvider.",
-    );
+    logger.warn("payment_provider_fallback_to_mock", {
+      reason: "PAYMENT_PROVIDER=stripe but STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET are not both set",
+    });
   }
 
   return new MockPaymentProvider();
