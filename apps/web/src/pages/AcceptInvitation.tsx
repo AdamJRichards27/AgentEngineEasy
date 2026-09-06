@@ -15,10 +15,10 @@ import type { SessionUser } from "../lib/session";
 // opaque states ("valid" / "invalid_or_expired") — never who was invited or
 // why a token is dead — so this page must not try to be more specific than
 // that either. POST /auth/invitations/:token/accept requires both
-// acceptedTerms and acceptedPrivacyPolicy to be exactly `true`; the
-// documents themselves are still marked DRAFT — LEGAL REVIEW REQUIRED (see
-// docs/legal/LEGAL_APPROVAL_REGISTER.md), which this screen says plainly
-// rather than implying they're final.
+// acceptedTerms and acceptedPrivacyPolicy to be exactly `true`. The linked
+// server endpoints return the exact active content whose SHA-256 identity is
+// recorded on acceptance; production cannot expose these unless approved,
+// hash-verified artifacts are configured.
 export default function AcceptInvitation({ params }: { params: { token: string } }) {
   const { token } = params;
   const [, setLocation] = useLocation();
@@ -31,6 +31,11 @@ export default function AcceptInvitation({ params }: { params: { token: string }
   const status = useQuery({
     queryKey: ["invitation-status", token],
     queryFn: () => apiFetch<{ status: "valid" | "invalid_or_expired" }>(`/auth/invitations/${token}/status`),
+    retry: false,
+  });
+  const legal = useQuery({
+    queryKey: ["legal-versions"],
+    queryFn: () => apiFetch<{ termsVersion: string; privacyVersion: string }>("/legal/versions"),
     retry: false,
   });
 
@@ -95,10 +100,7 @@ export default function AcceptInvitation({ params }: { params: { token: string }
             {confirmPassword.length > 0 && !passwordsMatch && <p className="error-text">Passwords don't match.</p>}
             <label className="checkbox-row">
               <input type="checkbox" checked={acceptedTerms} onChange={(e) => setAcceptedTerms(e.target.checked)} />
-              <span>
-                I have read and agree to the <strong>Terms of Use</strong>. (This document is currently a draft
-                pending legal review.)
-              </span>
+              <span>I have read and agree to the <a href="/api/legal/terms" target="_blank" rel="noreferrer">Terms of Use</a>{legal.data ? ` (${legal.data.termsVersion})` : ""}.</span>
             </label>
             <label className="checkbox-row">
               <input
@@ -106,10 +108,7 @@ export default function AcceptInvitation({ params }: { params: { token: string }
                 checked={acceptedPrivacyPolicy}
                 onChange={(e) => setAcceptedPrivacyPolicy(e.target.checked)}
               />
-              <span>
-                I have read and agree to the <strong>Privacy Policy</strong>. (This document is currently a draft
-                pending legal review.)
-              </span>
+              <span>I have read and agree to the <a href="/api/legal/privacy" target="_blank" rel="noreferrer">Privacy Policy</a>{legal.data ? ` (${legal.data.privacyVersion})` : ""}.</span>
             </label>
             <button className="btn btn-primary btn-block" onClick={submit} disabled={!canSubmit}>
               {accept.isPending ? "Creating your account…" : "Create account"}

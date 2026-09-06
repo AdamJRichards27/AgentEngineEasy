@@ -1,5 +1,6 @@
 import rateLimit from "express-rate-limit";
 import { incrementCounter } from "@aee/events";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 /**
  * Same NODE_ENV==="test" carve-out already used elsewhere in this codebase
@@ -51,6 +52,12 @@ export const authRateLimiter = rateLimit({
   // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
   handler: (_req, res, _next, options) => {
     incrementCounter("auth_security_event_total", { event: "auth_rate_limited" });
+    void dispatchOperationalAlert({
+      type: "AUTH_ANOMALY",
+      summary: "Authentication rate limit reached",
+      dedupKey: "auth-anomaly:rate-limit",
+      details: { signal: "auth_rate_limited" },
+    });
     res.status(options.statusCode).json(options.message);
   },
 });

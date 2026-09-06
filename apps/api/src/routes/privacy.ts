@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { eq, and, desc, count } from "drizzle-orm";
 import { z } from "zod";
-import { db, privacyRequests, users, PRIVACY_REQUEST_TYPES } from "@aee/db";
+import { db, privacyRequests, users, consentRecords, PRIVACY_REQUEST_TYPES } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
-import { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION } from "../lib/auth/legalVersions.js";
+import { getActiveLegalVersions, getActiveLegalDocuments } from "../lib/auth/legalVersions.js";
+import { verifyPassword } from "../lib/auth/password.js";
 
 // Critical Blocker Remediation, Phase 8 — application privacy controls.
 // See docs/legal/DATA_ACCESS_CORRECTION_DELETION_PROCESS.md for the
@@ -18,7 +19,82 @@ export const privacyRouter = Router();
 // Public — lets the frontend always link to/display the version it should
 // ask the user to accept, without hardcoding it twice. Contains no PII.
 privacyRouter.get("/legal/versions", (_req, res) => {
-  res.json({ termsVersion: CURRENT_TERMS_VERSION, privacyVersion: CURRENT_PRIVACY_VERSION });
+  try {
+    const versions = getActiveLegalVersions();
+    res.json({ termsVersion: versions.termsVersion, privacyVersion: versions.privacyVersion });
+  } catch {
+    res.status(503).json({ error: "Approved legal documents are not configured." });
+  }
+});
+
+// Server-selected content is exposed from the same verified artifact used to
+// determine the consent version. This prevents a UI from linking a document
+// different from the bytes bound to the acceptance record.
+privacyRouter.get("/legal/terms", (_req, res) => {
+  try {
+    const document = getActiveLegalDocuments();
+    res.json({ version: document.termsVersion, content: document.termsContent });
+  } catch {
+    res.status(503).json({ error: "Approved legal documents are not configured." });
+  }
+});
+
+privacyRouter.get("/legal/privacy", (_req, res) => {
+  try {
+    const document = getActiveLegalDocuments();
+    res.json({ version: document.privacyVersion, content: document.privacyContent });
+  } catch {
+    res.status(503).json({ error: "Approved legal documents are not configured." });
+  }
+});
+
+const acceptCurrentLegalSchema = z.object({
+  email: z.string().email(),
+  password: z.string(),
+  acceptedTerms: z.literal(true),
+  acceptedPrivacyPolicy: z.literal(true),
+});
+
+// Credential proof lets a user whose prior acceptance was superseded renew
+// acceptance before login, without creating a broadly-authorized temporary
+// session. Versions are always selected by the server.
+privacyRouter.post("/legal/acceptance", async (req, res) => {
+  const parsed = acceptCurrentLegalSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Current Terms of Use and Privacy Policy acceptance is required." });
+    return;
+  }
+  const [user] = await db.select().from(users).where(eq(users.email, parsed.data.email.toLowerCase()));
+  if (!user || !user.isActive || !user.passwordHash || !(await verifyPassword(user.passwordHash, parsed.data.password))) {
+    res.status(401).json({ error: "Invalid email or password." });
+    return;
+  }
+  let versions;
+  try {
+    versions = getActiveLegalVersions();
+  } catch {
+    res.status(503).json({ error: "Approved legal documents are not configured." });
+    return;
+  }
+  const existing = await db.select().from(consentRecords).where(eq(consentRecords.userId, user.id));
+  const now = new Date();
+  const values = [
+    !existing.some((r) => r.consentType === "terms_of_use" && r.documentVersion === versions.termsVersion)
+      ? { userId: user.id, consentType: "terms_of_use", documentVersion: versions.termsVersion, acceptedAt: now }
+      : null,
+    !existing.some((r) => r.consentType === "privacy_policy" && r.documentVersion === versions.privacyVersion)
+      ? { userId: user.id, consentType: "privacy_policy", documentVersion: versions.privacyVersion, acceptedAt: now }
+      : null,
+  ].filter((value): value is NonNullable<typeof value> => value !== null);
+  if (values.length) await db.insert(consentRecords).values(values);
+  await logAudit({
+    userId: user.id,
+    userEmail: user.email,
+    action: "legal_documents_accepted",
+    recordType: "consent",
+    recordId: String(user.id),
+  });
+  res.status(204).end();
 });
 
 const createRequestSchema = z.object({

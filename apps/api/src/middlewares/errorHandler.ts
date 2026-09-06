@@ -62,6 +62,7 @@
 
 import type { NextFunction, Request, Response } from "express";
 import { logger } from "@aee/events";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 const GENERIC_SERVER_ERROR_MESSAGE = "An unexpected error occurred. Please try again or contact support if the problem persists.";
 
@@ -90,7 +91,7 @@ function isMalformedBody(err: BodyParserLikeError): boolean {
  * never do is fail in a way that leaves the request hanging exactly like
  * the bug this file exists to stop.
  */
-export function globalErrorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
+export async function globalErrorHandler(err: unknown, req: Request, res: Response, next: NextFunction): Promise<void> {
   if (res.headersSent) {
     next(err);
     return;
@@ -100,6 +101,12 @@ export function globalErrorHandler(err: unknown, req: Request, res: Response, ne
     error: err,
     method: req.method,
     path: req.path,
+  });
+  await dispatchOperationalAlert({
+    type: "UNHANDLED_API_ERROR",
+    summary: "Unhandled API route error",
+    dedupKey: `api:${req.method}:${req.route?.path ?? req.path}`,
+    details: { method: req.method, path: req.path },
   });
 
   const asError = err as BodyParserLikeError;

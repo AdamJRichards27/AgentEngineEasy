@@ -2,6 +2,7 @@ import { Router } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "@aee/db";
 import { logger, observeHistogram } from "@aee/events";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 export const healthRouter = Router();
 
@@ -57,6 +58,12 @@ export async function checkReadiness(): Promise<ReadinessResult> {
   } catch (err) {
     const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
     logger.error("readiness_check_failed", { error: err instanceof Error ? err.message : String(err), durationMs });
+    await dispatchOperationalAlert({
+      type: "DB_READINESS_FAILURE",
+      summary: "Database readiness check failed",
+      dedupKey: "readiness:database",
+      details: { durationMs },
+    });
     observeHistogram("health_check_duration_ms", durationMs, { status: "unavailable" });
     return { status: "unavailable", durationMs, reasons: ["database unreachable"] };
   }

@@ -25,6 +25,7 @@ import { db, integrationInbox, integrationConnections, type IntegrationInboxRow,
 import { publishDomainEvent, currentCorrelationId, logger, incrementCounter } from "@aee/events";
 import { writeDeadLetter, markReplayed, loadDeadLetterInBrokerage } from "./deadLetters.js";
 import { IntegrationError, type InboundIntegrationWebhookInput, type ProcessIntegrationWebhookResult } from "./types.js";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export interface VerifyWebhookSignatureInput {
   rawBody: Buffer | string;
@@ -207,6 +208,12 @@ export async function processInboundWebhook(input: InboundIntegrationWebhookInpu
       payloadSnapshot: { provider: input.provider, eventType: input.eventType, payload: input.payload },
     });
     logger.error("integration_webhook_dead_lettered", { provider: input.provider, eventType: input.eventType, inboxId: event.id, connectionId: connection.id, brokerageId: connection.brokerageId, reason: message });
+    await dispatchOperationalAlert({
+      type: "INTEGRATION_WEBHOOK_FAILURE",
+      summary: "Integration webhook processing failed",
+      dedupKey: `integration-webhook:${input.provider}:${input.providerEventId}`,
+      details: { provider: input.provider, eventType: input.eventType, connectionId: connection.id, brokerageId: connection.brokerageId, inboxId: event.id },
+    });
     incrementCounter("integration_webhook_total", { outcome: "failed" });
     incrementCounter("integration_dead_letter_total", { source_type: "INBOX" });
     return { status: "FAILED", inboxId: event.id, detail: message };

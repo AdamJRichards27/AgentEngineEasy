@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs } from "@aee/db";
 import { hashToken } from "../../lib/auth/tokens.js";
 import { __getSandboxAuthEmailLog, __clearSandboxAuthEmailLog } from "../../lib/auth/email.js";
+import { hashPassword } from "../../lib/auth/password.js";
 
 // Critical Blocker Remediation, Phase 5 — exhaustive authentication
 // security test suite for the invitation-only auth model (Phase 4). Real
@@ -618,6 +619,119 @@ test("an admin cannot disable a user in a different brokerage (cross-tenant, 404
     headers: { cookie: adminA.cookie },
   });
   assert.equal(res.status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// Controlled administrator succession
+// ---------------------------------------------------------------------------
+
+async function giveAdminFreshAuth(adminId: number, password = STRONG_PASSWORD): Promise<void> {
+  await db
+    .update(users)
+    .set({ passwordHash: await hashPassword(password), emailVerifiedAt: new Date() })
+    .where(eq(users.id, adminId));
+}
+
+test("administrator succession atomically transfers authority, revokes both sessions, notifies both users, and audits the transfer", async () => {
+  __clearSandboxAuthEmailLog();
+  const admin = await createAdmin(`succession-admin-${runId}@example.com`);
+  await giveAdminFreshAuth(admin.userId);
+  const targetEmail = `succession-target-${runId}@example.com`;
+  const { plaintext } = await issueAndCaptureInvitationToken(admin.brokerageId, targetEmail, "Agent", admin.userId);
+  const accepted = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+  });
+  const targetCookie = cookieFrom(accepted);
+  const [targetBefore] = await db.select().from(users).where(eq(users.email, targetEmail));
+
+  const response = await fetch(`${baseUrl}/api/auth/admin/succession`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: admin.cookie },
+    body: JSON.stringify({
+      targetUserId: targetBefore.id,
+      currentPassword: STRONG_PASSWORD,
+      confirmation: "TRANSFER ADMINISTRATOR",
+    }),
+  });
+  assert.equal(response.status, 204);
+  assert.match(response.headers.get("set-cookie") ?? "", /aee_session=;/);
+
+  const [previousAfter] = await db.select().from(users).where(eq(users.id, admin.userId));
+  const [targetAfter] = await db.select().from(users).where(eq(users.id, targetBefore.id));
+  assert.equal(previousAfter.role, "Agent");
+  assert.equal(targetAfter.role, "Brokerage Administrator");
+  assert.equal(previousAfter.sessionEpoch, 1);
+  assert.equal(targetAfter.sessionEpoch, targetBefore.sessionEpoch + 1);
+  assert.equal((await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie: admin.cookie } })).status, 401);
+  assert.equal((await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie: targetCookie } })).status, 401);
+
+  const notifications = __getSandboxAuthEmailLog().filter((entry) => entry.template === "administrator_succession");
+  assert.deepEqual(new Set(notifications.map((entry) => entry.to)), new Set([previousAfter.email, targetAfter.email]));
+  const audit = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "administrator_succession_completed"), eq(auditLogs.recordId, String(previousAfter.id))));
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].previousValue, "Brokerage Administrator");
+  assert.equal(audit[0].updatedValue, "Agent");
+});
+
+test("administrator succession rejects missing confirmation, wrong fresh-auth proof, self-targeting, cross-tenant, inactive, and unverified targets without changing roles", async () => {
+  const admin = await createAdmin(`succession-fail-admin-${runId}@example.com`);
+  await giveAdminFreshAuth(admin.userId);
+  const otherTenantAdmin = await createAdmin(`succession-other-${runId}@example.com`);
+  const agentRes = await fetch(`${baseUrl}/api/auth/dev-login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: `succession-unverified-${runId}@example.com`,
+      firstName: "Not",
+      lastName: "Verified",
+      brokerageName: admin.brokerageName,
+    }),
+  });
+  const agentBody = (await agentRes.json()) as { user: { id: number } };
+  const request = (body: Record<string, unknown>) =>
+    fetch(`${baseUrl}/api/auth/admin/succession`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: admin.cookie },
+      body: JSON.stringify(body),
+    });
+  const base = { currentPassword: STRONG_PASSWORD, confirmation: "TRANSFER ADMINISTRATOR" };
+
+  assert.equal((await request({ ...base, targetUserId: admin.userId })).status, 400);
+  assert.equal((await request({ ...base, targetUserId: otherTenantAdmin.userId })).status, 404);
+  assert.equal((await request({ ...base, targetUserId: agentBody.user.id, currentPassword: "wrong" })).status, 401);
+  assert.equal((await request({ ...base, targetUserId: agentBody.user.id, confirmation: "yes" })).status, 400);
+  assert.equal((await request({ ...base, targetUserId: agentBody.user.id })).status, 409);
+  await db.update(users).set({ emailVerifiedAt: new Date(), isActive: false }).where(eq(users.id, agentBody.user.id));
+  assert.equal((await request({ ...base, targetUserId: agentBody.user.id })).status, 409);
+  const [stillAdmin] = await db.select().from(users).where(eq(users.id, admin.userId));
+  assert.equal(stillAdmin.role, "Brokerage Administrator");
+});
+
+test("disabling one of multiple administrators preserves an active administrator", async () => {
+  const admin = await createAdmin(`last-admin-caller-${runId}@example.com`);
+  const secondEmail = `last-admin-target-${runId}@example.com`;
+  const { plaintext } = await issueAndCaptureInvitationToken(admin.brokerageId, secondEmail, "Brokerage Administrator", admin.userId);
+  await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+  });
+  const [secondAdmin] = await db.select().from(users).where(eq(users.email, secondEmail));
+  const firstDisable = await fetch(`${baseUrl}/api/auth/admin/users/${secondAdmin.id}/disable`, {
+    method: "POST",
+    headers: { cookie: admin.cookie },
+  });
+  assert.equal(firstDisable.status, 204);
+  const [disabled] = await db.select().from(users).where(eq(users.id, secondAdmin.id));
+  assert.equal(disabled.isActive, false);
+  const [remaining] = await db.select().from(users).where(eq(users.id, admin.userId));
+  assert.equal(remaining.isActive, true);
+  assert.equal(remaining.role, "Brokerage Administrator");
 });
 
 // ---------------------------------------------------------------------------

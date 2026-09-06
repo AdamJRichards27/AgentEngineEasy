@@ -46,6 +46,7 @@ import {
 import { logAudit } from "../audit.js";
 import { recordMapping, resolveByExternalId, MappingConflictError } from "../integrations/mapping.js";
 import { incrementCounter } from "@aee/events";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export const PAYMENT_REQUEST_SOURCE_RECORD_TYPE = "financial_payment_request";
 export const MOCK_PAYMENT_STATUS_RECONCILIATION_SOURCE = "mock_integration_payment_status";
@@ -232,6 +233,19 @@ export async function applyMockPaymentStatusEvent(brokerageId: number, event: Mo
     // is recorded (this file's own header comment) — see
     // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
     incrementCounter("financial_reconciliation_variance_total", { source: MOCK_PAYMENT_STATUS_RECONCILIATION_SOURCE });
+    await dispatchOperationalAlert({
+      type: "FINANCIAL_RECONCILIATION_VARIANCE",
+      summary: "Payment-status reconciliation variance detected",
+      dedupKey: `financial-variance:${brokerageId}:${paymentRequestId}:${event.externalReference}`,
+      details: {
+        brokerageId,
+        paymentRequestId,
+        expectedAmountCents: request.amountCents,
+        reportedAmountCents: event.amountCents,
+        expectedCurrency: request.currency,
+        reportedCurrency: event.currency,
+      },
+    });
   }
 
   await recordLedgerEvent({

@@ -6,6 +6,7 @@ import { assertSessionSecretConfigured } from "./lib/session.js";
 import { assertCorsConfigured } from "./lib/cors.js";
 import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
 import { assertAuthEmailProviderConfigured } from "./lib/auth/email.js";
+import { assertApprovedLegalVersionsConfigured } from "./lib/auth/legalVersions.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
@@ -13,6 +14,7 @@ import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
 import { registerIntegrationsEngine } from "./lib/integrations/bootstrap.js";
+import { assertOperationalAlertsConfigured } from "./lib/operationalAlerts.js";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -37,6 +39,8 @@ assertMetricsAuthConfigured();
 // sandbox (non-delivering) auth email provider for invitation/password-reset
 // emails. See lib/auth/email.ts.
 assertAuthEmailProviderConfigured();
+assertOperationalAlertsConfigured();
+assertApprovedLegalVersionsConfigured();
 
 configureEvents();
 

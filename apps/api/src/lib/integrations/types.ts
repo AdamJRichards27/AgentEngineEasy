@@ -10,6 +10,7 @@
 
 import type { IntegrationConnectionStatus } from "@aee/db";
 import { incrementCounter } from "@aee/events";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export interface ActorRef {
   id: number;
@@ -44,6 +45,12 @@ export class IntegrationError extends Error {
     // each call site individually. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
     if (reason === "NOT_FOUND" || reason === "TENANT_MISMATCH") {
       incrementCounter("tenant_isolation_rejection_total", { boundary: "integrations" });
+      void dispatchOperationalAlert({
+        type: "TENANT_SECURITY_SIGNAL",
+        summary: "Tenant-scoped integration access was rejected",
+        dedupKey: "tenant-security:integrations",
+        details: { boundary: "integrations", reason },
+      });
     }
   }
 }

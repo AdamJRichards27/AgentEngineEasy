@@ -1,16 +1,17 @@
 import { Router } from "express";
 import { eq, sql, and, gt, isNull, desc, count } from "drizzle-orm";
 import { z } from "zod";
-import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, USER_ROLES } from "@aee/db";
+import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs, USER_ROLES } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { setSessionCookie, clearSessionCookie } from "../lib/session.js";
 import { logAudit } from "../lib/audit.js";
 import { isDevAuthEnabled } from "../lib/env.js";
-import { incrementCounter } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
 import { hashPassword, verifyPassword, passwordPolicyViolation } from "../lib/auth/password.js";
 import { generateToken, hashToken } from "../lib/auth/tokens.js";
 import { getAuthEmailProvider } from "../lib/auth/email.js";
-import { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION } from "../lib/auth/legalVersions.js";
+import { getActiveLegalVersions } from "../lib/auth/legalVersions.js";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 export const authRouter = Router();
 
@@ -236,6 +237,12 @@ const createInvitationSchema = z.object({
 // there is no way to invite a user into a brokerage the caller does not
 // administer.
 authRouter.post("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  try {
+    getActiveLegalVersions();
+  } catch {
+    res.status(503).json({ error: "Invitations are unavailable until approved Terms of Use and Privacy Policy versions are active." });
+    return;
+  }
   const parsed = createInvitationSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Enter a valid email address and role." });
@@ -414,6 +421,13 @@ authRouter.post("/invitations/:token/accept", async (req, res) => {
 
   const passwordHash = await hashPassword(parsed.data.password);
   const now = new Date();
+  let legalVersions;
+  try {
+    legalVersions = getActiveLegalVersions();
+  } catch {
+    res.status(503).json({ error: "Account creation is unavailable until approved legal documents are active." });
+    return;
+  }
 
   // Role/tenant come only from the invitation row created by an admin,
   // never from this request body (Phase 1 threat model T8).
@@ -434,8 +448,8 @@ authRouter.post("/invitations/:token/accept", async (req, res) => {
   await db.update(invitations).set({ acceptedAt: now }).where(eq(invitations.id, invitation.id));
 
   await db.insert(consentRecords).values([
-    { userId: created.id, consentType: "terms_of_use", documentVersion: CURRENT_TERMS_VERSION, acceptedAt: now },
-    { userId: created.id, consentType: "privacy_policy", documentVersion: CURRENT_PRIVACY_VERSION, acceptedAt: now },
+    { userId: created.id, consentType: "terms_of_use", documentVersion: legalVersions.termsVersion, acceptedAt: now },
+    { userId: created.id, consentType: "privacy_policy", documentVersion: legalVersions.privacyVersion, acceptedAt: now },
   ]);
 
   await logAudit({ userId: created.id, userEmail: created.email, action: "invitation_accepted", recordType: "invitation", recordId: String(invitation.id) });
@@ -492,8 +506,35 @@ authRouter.post("/login", async (req, res) => {
     await logAudit({ userId: user.id, userEmail: user.email, action: "login_failed", recordType: "user", recordId: String(user.id) });
     if (shouldLock) {
       await logAudit({ userId: user.id, userEmail: user.email, action: "account_locked", recordType: "user", recordId: String(user.id) });
+      await dispatchOperationalAlert({
+        type: "AUTH_ANOMALY",
+        summary: "Account locked after repeated failed sign-in attempts",
+        dedupKey: `auth-lockout:${user.id}`,
+        details: { userId: user.id, brokerageId: user.brokerageId },
+      });
     }
     res.status(401).json(GENERIC_LOGIN_ERROR);
+    return;
+  }
+
+  let legalVersions;
+  try {
+    legalVersions = getActiveLegalVersions();
+  } catch {
+    res.status(503).json({ error: "Sign-in is unavailable until approved legal documents are active." });
+    return;
+  }
+  const accepted = await db.select().from(consentRecords).where(eq(consentRecords.userId, user.id));
+  if (
+    !accepted.some((r) => r.consentType === "terms_of_use" && r.documentVersion === legalVersions.termsVersion) ||
+    !accepted.some((r) => r.consentType === "privacy_policy" && r.documentVersion === legalVersions.privacyVersion)
+  ) {
+    res.status(428).json({
+      error: "You must accept the current Terms of Use and Privacy Policy before signing in.",
+      code: "LEGAL_ACCEPTANCE_REQUIRED",
+      termsVersion: legalVersions.termsVersion,
+      privacyVersion: legalVersions.privacyVersion,
+    });
     return;
   }
 
@@ -662,16 +703,162 @@ authRouter.post("/admin/users/:id/disable", requireAuth, requireRole(...BROKERAG
     res.status(400).json({ error: "You cannot disable your own account." });
     return;
   }
-  const [updated] = await db
-    .update(users)
-    .set({ isActive: false, sessionEpoch: sql`${users.sessionEpoch} + 1` })
-    .where(and(eq(users.id, id), eq(users.brokerageId, admin.brokerageId)))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${admin.brokerageId})`);
+    const [target] = await tx.select().from(users).where(and(eq(users.id, id), eq(users.brokerageId, admin.brokerageId)));
+    if (!target) return undefined;
+    if (target.role === "Brokerage Administrator" && target.isActive) {
+      const activeAdmins = await tx
+        .select({ value: count() })
+        .from(users)
+        .where(and(eq(users.brokerageId, admin.brokerageId), eq(users.role, "Brokerage Administrator"), eq(users.isActive, true)));
+      if (Number(activeAdmins[0]?.value ?? 0) <= 1) return null;
+    }
+    const [row] = await tx
+      .update(users)
+      .set({ isActive: false, sessionEpoch: sql`${users.sessionEpoch} + 1` })
+      .where(and(eq(users.id, id), eq(users.brokerageId, admin.brokerageId)))
+      .returning();
+    return row;
+  });
+  if (updated === null) {
+    res.status(409).json({ error: "The last active brokerage administrator cannot be disabled." });
+    return;
+  }
   if (!updated) {
     res.status(404).json({ error: "User not found." });
     return;
   }
   await logAudit({ userId: admin.id, action: "account_disabled", recordType: "user", recordId: String(id) });
+  res.status(204).end();
+});
+
+const administratorSuccessionSchema = z.object({
+  targetUserId: z.number().int().positive(),
+  currentPassword: z.string().min(1),
+  confirmation: z.literal("TRANSFER ADMINISTRATOR"),
+});
+
+authRouter.post("/admin/succession", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const parsed = administratorSuccessionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Target, current password, and exact confirmation are required." });
+    return;
+  }
+  const admin = req.authedUser!;
+  if (parsed.data.targetUserId === admin.id) {
+    res.status(400).json({ error: "You cannot transfer administrator authority to yourself." });
+    return;
+  }
+
+  const outcome = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${admin.brokerageId})`);
+    const [current] = await tx.select().from(users).where(eq(users.id, admin.id));
+    if (
+      !current ||
+      current.brokerageId !== admin.brokerageId ||
+      current.role !== "Brokerage Administrator" ||
+      !current.isActive ||
+      !current.passwordHash ||
+      !(await verifyPassword(current.passwordHash, parsed.data.currentPassword))
+    ) return { kind: "unauthorized" as const };
+    const [target] = await tx
+      .select()
+      .from(users)
+      .where(and(eq(users.id, parsed.data.targetUserId), eq(users.brokerageId, admin.brokerageId)));
+    if (!target) return { kind: "not_found" as const };
+    if (!target.isActive || !target.emailVerifiedAt) return { kind: "ineligible" as const };
+    if (target.role === "Brokerage Administrator") return { kind: "already_admin" as const };
+
+    await tx
+      .update(users)
+      .set({ role: "Agent", sessionEpoch: sql`${users.sessionEpoch} + 1` })
+      .where(eq(users.id, current.id));
+    await tx
+      .update(users)
+      .set({ role: "Brokerage Administrator", sessionEpoch: sql`${users.sessionEpoch} + 1` })
+      .where(eq(users.id, target.id));
+    await tx.insert(auditLogs).values([
+      {
+        userId: current.id,
+        userEmail: current.email,
+        action: "administrator_succession_completed",
+        recordType: "user",
+        recordId: String(current.id),
+        previousValue: "Brokerage Administrator",
+        updatedValue: "Agent",
+        providerReference: String(target.id),
+      },
+      {
+        userId: current.id,
+        userEmail: current.email,
+        action: "administrator_authority_granted",
+        recordType: "user",
+        recordId: String(target.id),
+        previousValue: target.role,
+        updatedValue: "Brokerage Administrator",
+        providerReference: String(current.id),
+      },
+    ]);
+    return { kind: "success" as const, current, target };
+  });
+
+  if (outcome.kind === "unauthorized") {
+    res.status(401).json({ error: "Fresh authentication failed." });
+    return;
+  }
+  if (outcome.kind === "not_found") {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  if (outcome.kind === "ineligible") {
+    res.status(409).json({ error: "The successor must be an active, verified user in your brokerage." });
+    return;
+  }
+  if (outcome.kind === "already_admin") {
+    res.status(409).json({ error: "The selected user is already an administrator." });
+    return;
+  }
+
+  const notifications = await Promise.allSettled([
+    getAuthEmailProvider().sendAdministratorSuccession({
+      to: outcome.current.email,
+      counterpartEmail: outcome.target.email,
+      becameAdministrator: false,
+    }),
+    getAuthEmailProvider().sendAdministratorSuccession({
+      to: outcome.target.email,
+      counterpartEmail: outcome.current.email,
+      becameAdministrator: true,
+    }),
+  ]);
+  const failedNotifications = notifications.filter((result) => result.status === "rejected");
+  if (failedNotifications.length) {
+    // The authority transfer has committed and must remain successful even
+    // when a side-effecting notification provider is unavailable. The
+    // operational-alert dispatcher records failure and releases its dedup
+    // reservation on failed delivery so this evidence is retryable.
+    const retryEvidence = {
+      event: "administrator_succession_notification_retry_required",
+      previousAdministratorId: outcome.current.id,
+      newAdministratorId: outcome.target.id,
+      failedRecipients: failedNotifications.length,
+      retryable: true,
+    };
+    logger.error(retryEvidence.event, retryEvidence);
+    await dispatchOperationalAlert({
+      type: "AUTH_ANOMALY",
+      summary: "Administrator succession notification delivery failed after commit",
+      dedupKey: `administrator-succession-notification:${outcome.current.id}:${outcome.target.id}`,
+      details: {
+        retryable: true,
+        failedRecipients: failedNotifications.length,
+        previousAdministratorId: outcome.current.id,
+        newAdministratorId: outcome.target.id,
+      },
+    });
+  }
+  clearSessionCookie(res);
   res.status(204).end();
 });
 

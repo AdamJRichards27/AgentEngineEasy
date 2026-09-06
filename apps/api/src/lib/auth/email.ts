@@ -23,6 +23,7 @@ export interface AuthEmailProvider {
   readonly name: string;
   sendInvitation(input: { to: string; brokerageName: string; acceptUrl: string; expiresAt: Date }): Promise<void>;
   sendPasswordReset(input: { to: string; resetUrl: string; expiresAt: Date }): Promise<void>;
+  sendAdministratorSuccession(input: { to: string; counterpartEmail: string; becameAdministrator: boolean }): Promise<void>;
 }
 
 // Never performs a real network call. Records only that a send was
@@ -35,7 +36,7 @@ export const SANDBOX_AUTH_EMAIL_PROVIDER_NAME = "sandbox_auth_email";
 
 interface RecordedSend {
   provider: string;
-  template: "invitation" | "password_reset";
+  template: "invitation" | "password_reset" | "administrator_succession";
   to: string;
 }
 
@@ -64,6 +65,15 @@ export const sandboxAuthEmailProvider: AuthEmailProvider = {
     sentLog.push({ provider: SANDBOX_AUTH_EMAIL_PROVIDER_NAME, template: "password_reset", to: input.to });
     logger.info("auth_email_sandbox_send", { provider: SANDBOX_AUTH_EMAIL_PROVIDER_NAME, template: "password_reset" });
     logPilotModeLinkIfAcknowledged("password_reset", input.to, input.resetUrl);
+  },
+
+  async sendAdministratorSuccession(input) {
+    sentLog.push({ provider: SANDBOX_AUTH_EMAIL_PROVIDER_NAME, template: "administrator_succession", to: input.to });
+    logger.info("auth_email_sandbox_send", {
+      provider: SANDBOX_AUTH_EMAIL_PROVIDER_NAME,
+      template: "administrator_succession",
+      becameAdministrator: input.becameAdministrator,
+    });
   },
 };
 
