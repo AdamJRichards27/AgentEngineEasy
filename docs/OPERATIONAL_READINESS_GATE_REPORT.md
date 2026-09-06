@@ -76,8 +76,10 @@ not as a claim about New Zealand.
   file left over from an abandoned earlier commit sequence, was verified as unreferenced anywhere
   in the repository and unnecessary for a frozen-lockfile install, then removed in its own
   commit (`25f5faae6d8120949128bd8e70af3faa74f839d1`).
-- **This gate's own PR:** opened from `feat/operational-readiness-pilot-gate` into `staging`,
-  **not merged** — see §13 for the PR link and final commit SHA on this branch.
+- **This gate's own PR:** [PR #27](https://github.com/AdamJRichards27/AgentEngineEasy/pull/27),
+  opened from `feat/operational-readiness-pilot-gate` into `staging` as a **draft**, **not
+  merged** — see §13 for the final commit SHA on this branch as of this report's own closing
+  update.
 - **Method:** the repository has no working git credentials in this session (all commits go
   through the GitHub API with git-blob-SHA-1 verification on every push); a local, non-git file
   mirror of the repository was used for all reading, typechecking, test execution, and the
@@ -378,24 +380,38 @@ billing, or weakening any existing security control.
   over, against `aee_test`/local scratch databases only.
 - **Starting branch SHA:** `1c6958a735f4ab1ce92d7d8177e9e4d447b1cbae` (`staging` HEAD at branch
   creation).
-- **Remediation commits landed on `feat/operational-readiness-pilot-gate` this pass:**
-  - `25f5faae6d8120949128bd8e70af3faa74f839d1` — Phase 1 housekeeping (`pnpm-lock.yaml.part2` removal).
-  - `86b11c3c04f1a275f03e897520f93d43219c9270` — Phase 9: route the 4 remaining
-    `packages/integrations/*` provider-fallback `console.warn` sites through the `@aee/events`
-    structured logger (5 `src/index.ts` files + 5 `package.json` files).
-  - `2675a7db55e05bf86292a23588c06f4c0f329c71` — Phase 9 companion: extend
-    `apps/api/src/lib/__tests__/noConsoleUsage.test.ts` to also scan `packages/integrations/*/src`.
-  - `9cedc8518a50a3afe34308a77e903cf481efe5f0` — Phase 9 companion: regenerate `pnpm-lock.yaml`
-    for the 5 new `@aee/events: workspace:*` importer entries; pushed content verified
-    byte-for-byte via git-blob-SHA1 (`8f9b5f2202ca36953f86724bc49439f721fa4757`) both before and
-    after the push.
-  - Documentation commit(s) adding this report and its five companion deliverables under `docs/`
-    and `docs/gate-evidence/` — see the final branch SHA and PR below.
-- **Final branch SHA (this gate's branch):** recorded in this report's closing update once all
-  remediation commits and documentation commits have been pushed (see the PR itself for the
-  authoritative, always-current value).
-- **PR:** opened from `feat/operational-readiness-pilot-gate` into `staging`, **not merged** —
-  URL recorded in the closing update to this report and in the final message to the requester.
+- **All commits landed on `feat/operational-readiness-pilot-gate` this pass, in order:**
+  1. `25f5faae6d8120949128bd8e70af3faa74f839d1` — Phase 1 housekeeping (`pnpm-lock.yaml.part2` removal).
+  2. `86b11c3c04f1a275f03e897520f93d43219c9270` — Phase 9: route the 5
+     `packages/integrations/*` provider-fallback `console.warn` sites through the `@aee/events`
+     structured logger (5 `src/index.ts` files + 5 `package.json` files).
+  3. `2675a7db55e05bf86292a23588c06f4c0f329c71` — Phase 9 companion: extend
+     `apps/api/src/lib/__tests__/noConsoleUsage.test.ts` to also scan `packages/integrations/*/src`.
+  4. `9cedc8518a50a3afe34308a77e903cf481efe5f0` — Phase 9 companion: regenerate `pnpm-lock.yaml`
+     for the 5 new `@aee/events: workspace:*` importer entries; pushed content verified
+     byte-for-byte via git-blob-SHA1 (`8f9b5f2202ca36953f86724bc49439f721fa4757`) both before and
+     after the push.
+  5. `d1624015d848737262d07ffc0e46f1d1b8e5f36c` — `docs/CONTROLLED_PILOT_PLAN.md` and
+     `docs/BACKUP_AND_RESTORE_RUNBOOK.md`.
+  6. `939765f103b37b10245549fdda21bfbacbd9624e` — `docs/OPERATIONAL_READINESS_GATE_REPORT.md`
+     (this report, first version with real test evidence).
+  7. `5108bbdfdb7fd1f43234a9349749d3e483c04373` — `docs/PILOT_SUPPORT_AND_ESCALATION.md`,
+     `docs/gate-evidence/PHASE3_CAPABILITY_MATRIX_AND_SCENARIOS.md`,
+     `docs/gate-evidence/PHASE7_PRIVACY_AND_LEGAL_INVENTORY.md`.
+  8. `db1a4aa0a9e65cc66ce805f9894f8045cf7e4f65` — `docs/INTEGRATION_FALLBACK_MATRIX.md`.
+  9. `3f5ee1d5908f0d7c11d6f5a7e3082b8aba68a633` — `docs/INCIDENT_RESPONSE_RUNBOOK.md`.
+  10. `d3a8ac203716fab5cd2f5c729e453ea60df73807` — `docs/gate-evidence/PHASE4_ENVIRONMENT_AND_DEPLOYMENT_AUDIT.md`.
+  11. `f53f478caf60b3f6645f1668e8cf88a83db9ce6e` — `docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md`.
+  12. This commit — closes out this section with the final SHA and PR link below.
+- **Final branch SHA (this gate's branch):** `f53f478caf60b3f6645f1668e8cf88a83db9ce6e` immediately
+  prior to this closing commit. This commit (updating only this section) is the final commit this
+  gate's Phase 12 makes on the branch; the PR linked below tracks the branch reference directly, so
+  it carries this commit too — see the PR itself, not a hardcoded SHA, for the always-current HEAD
+  if the branch is ever updated again after this report is written.
+- **PR:** [PR #27 — Agent Engine 2.0 — Operational Readiness and Controlled Pilot Gate]
+  (https://github.com/AdamJRichards27/AgentEngineEasy/pull/27), opened from
+  `feat/operational-readiness-pilot-gate` into `staging` as a **draft**, **not merged**. This
+  report does not merge it.
 
 ---
 
@@ -411,7 +427,8 @@ billing, or weakening any existing security control.
 5. Once B1–B3 are closed, re-run this gate (or a focused re-verification of just the closed
    items) before any participant is invited — do not treat this report's other, non-blocking
    findings as a substitute for that re-check.
-6. This gate's own PR stays open, unmerged, as the durable record of this pass — merging it is a
+6. This gate's own PR ([#27](https://github.com/AdamJRichards27/AgentEngineEasy/pull/27)) stays
+   open, as a draft, unmerged, as the durable record of this pass — merging it is a
    documentation-only integration decision for the AE Project Owner once ready, and does not
    itself authorise the pilot.
 
