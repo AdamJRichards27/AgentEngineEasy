@@ -32,8 +32,9 @@ counsel.
 |---|---|
 | `0010_snapshot.json`, `0011_snapshot.json` | Generated and committed; the prior unpushed-artifact exception is closed. |
 | Orphan migration SQL | Removed; the prior repository-hygiene finding is closed. |
-| Clean-clone verification | Frozen install, migrate, repeat-migrate/idempotency, and drift checks passed in a clean clone. This is local technical evidence, not a CI result. |
-| CI at branch HEAD | **Pending.** No CI pass is asserted. |
+| Clean-clone verification | A clean clone of implementation head `4530be4` passed frozen install without worktree mutation, migrate, repeat-migrate/idempotency, drift check, workspace typecheck, the full API suite (`740` tests: `739` passed, `1` skipped, `0` failed), both production builds, production-mode startup with synthetic configuration, and health verification. |
+| CI at tested implementation head | GitHub Actions run #167 (`34057963520`), job `101553212644`, passed head `e5a44185ad2db9cc2cd0d1dbdf9e49ccdfd9d92d`; every install, typecheck, migration, drift, test, build, setup, and cleanup step concluded `success`. |
+| Security scans | Dependency audit reported `0 critical`, `2 high` `xlsx` findings with no published patch, and `2 moderate` vulnerable `esbuild` instances for one distinct dev-only transitive advisory. SAST reported `0`; the privacy/dataflow scan reported `2 low` normalized-email logging findings. Existing time-bounded dependency risk acceptance remains in force. |
 | Backup/restore tooling | Deployable protected tooling implemented. A controlled local-adapter drill used real `pg_dump`, `pg_restore`, `tar`, and AES-GCM, restored 93 tables and one tenant, and byte-matched one representative document. |
 | Backup operationalisation | Open: no real offsite provider and no recurring scheduler are active. |
 | Alerting | Generation, retry, and fail-closed configuration implemented. Open: no external receiver delivery or acknowledgement proof. |
@@ -54,14 +55,14 @@ counsel.
 | B8 administrator succession | Closed for the prior last-admin/succession gap. |
 | B9 alerting | **Open remediation.** Internal controls exist; external receiver delivery/acknowledgement proof does not. |
 | Storage ingestion/topology | **Open remediation.** The selected durable-object topology is not yet implemented end-to-end. |
-| CI | **Open evidence item.** Head CI is pending, not passing. |
+| CI | Closed for tested implementation head `e5a4418` by passing GitHub Actions run #167 / job `101553212644`. |
 
 ## What must happen next
 
 Engineering/operations must complete offsite scheduled recovery, externally evidenced alert
-delivery/acknowledgement, and durable-object signed-byte ingestion. CI must complete for the
-actual head. Separately, the appropriate human/external authority must approve the 13 legal
-artifacts. A further gate review is required after those facts exist.
+delivery/acknowledgement, and durable-object signed-byte ingestion. Separately, the appropriate
+human/external authority must approve the 13 legal artifacts. A further gate review is required
+after those facts exist.
 
 ## Non-authorisation and stop
 

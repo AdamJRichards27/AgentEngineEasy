@@ -21,8 +21,8 @@ remediated, but remediation remains required for operational blockers. There is 
 offsite backup provider or recurring scheduler; alert generation/retry/configuration is
 implemented but lacks external receiver delivery/acknowledgement proof; and the selected
 PostgreSQL-records plus durable-object-storage topology remains incomplete because the current
-document adapter is local-only and signed-byte ingestion is missing. CI at HEAD is pending and
-is not claimed passing.
+document adapter is local-only and signed-byte ingestion is missing. GitHub Actions run #167
+passed the tested implementation head; this does not close the remaining operational blockers.
 
 **B2 legal is separately BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED.** The SHA-256
 artifact-bound legal-acceptance control is fail-closed, but all 13 legal documents remain
@@ -258,7 +258,7 @@ relevant to the decision above:
 | Risk | Status | Detail |
 |---|---|---|
 | `xlsx@0.18.5` — 2 high-severity advisories (prototype pollution, ReDoS), no patch published | **Accepted** (AE Project Owner, 2026-09-05, expires 2026-12-04) | Unchanged from Step 2 closure; conditions and tracked issue #26 remain in force — see `docs/DEPENDENCY_RISK_ACCEPTANCE.md`. Nothing in this gate expands its exposure or attempts the replacement. |
-| Transitive `esbuild` via `drizzle-kit` — 1 moderate advisory, dev-tooling only | **Accepted** (AE Project Owner, 2026-09-05, reviewed at next `drizzle-kit` upgrade or 2026-12-04) | Unchanged from Step 2 closure. |
+| Transitive `esbuild` via `drizzle-kit` — 2 moderate vulnerable instances (`0.18.20`, `0.19.12`) representing 1 distinct advisory, dev-tooling only | **Accepted** (AE Project Owner, 2026-09-05, reviewed at next `drizzle-kit` upgrade or 2026-12-04) | Unchanged from Step 2 closure. |
 | Custody boundary ("AE never holds trust money") | **Holds today, not technically enforced** | True in effect — no trust-account model is wired to any charge path, and the only reachable value for `authorisedPaymentMethod` via the current route is the general-account mandate. But the field is unvalidated free text with no downstream check. Recommend a CHECK constraint or explicit assertion before this is relied on beyond a pilot with a fixed, reviewed set of callers. See `docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md` §16. |
 | Financial disputes can be opened but never formally closed in-app | **Monitor** | Acceptable for a pilot on synthetic data with no live charging; must be resolved before any live-billing phase. |
 | No timeout/circuit-breaker on AML/e-sign/payment/property-data outbound HTTP calls | **Monitor, low current risk** | Currently unreachable because every provider defaults to mock; becomes live risk the moment any is switched to its real HTTP-backed implementation. |
@@ -408,25 +408,30 @@ written, with resolution notes added where applicable:**
 
 ## 13. Test and CI evidence
 
-**Current evidence qualifier (2026-09-07 AEST):** the results below are retained as historical
-local evidence. A clean clone has since passed frozen install, migration, idempotency, and drift
-checks; snapshots 0010/0011 are generated and committed and orphan unjournaled SQL was removed.
-**CI at the current branch HEAD is pending, not passing.** Do not read any locally run result in
-this section as a GitHub CI pass.
+**Current evidence qualifier (2026-09-07 AEST):** snapshots 0010/0011 are generated and committed,
+orphan unjournaled SQL was removed, a clean clone of implementation head `4530be4` passed the
+complete verification sequence below, and GitHub Actions run #167 (`34057963520`) / job
+`101553212644` passed implementation head `e5a44185ad2db9cc2cd0d1dbdf9e49ccdfd9d92d`.
 
 - **Typecheck:** `pnpm -r run typecheck` — all 13 workspace packages pass cleanly (`packages/db`,
   `packages/domain`, `packages/events`, all 7 `packages/integrations/*`, `apps/web`, `apps/api`),
   including the 5 packages modified in §11.
 - **`@aee/events` test suite:** 63/63 passing.
-- **`@aee/api` test suite (run to completion against a fresh local Postgres 16 database, after
-  the Phase 9 remediation in §11 landed):** `tests 664 / suites 82 / pass 663 / fail 0 /
-  cancelled 0 / skipped 1 / todo 0`, wall-clock duration ≈797.8s (~13.3 minutes). The single skip
-  is the same pre-existing, explicitly-documented skip noted in the Phase 1 baseline (§1) —
-  it is not new, and its justification was not touched by this gate's changes. This is a
-  strictly-better result than the 662/662+1-skip baseline recorded in §1: the increase to 664
-  total tests reflects the one new sanity-check test this gate's own Phase 9 remediation added
-  to `apps/api/src/lib/__tests__/noConsoleUsage.test.ts` (see §11), not a change to
-  pre-existing coverage. Zero regressions were introduced by this gate's bounded remediation.
+- **`@aee/api` test suite (run to completion against a fresh local Postgres database):**
+  `tests 740 / suites 82 / pass 739 / fail 0 / cancelled 0 / skipped 1 / todo 0`. The single skip
+  remains pre-existing and explicitly documented.
+- **Production builds and startup:** API and web production builds passed. Production-mode API
+  startup with complete synthetic configuration succeeded and `/api/health` returned `status:
+  ok`; no live provider, participant, transaction, or external traffic was enabled.
+- **GitHub CI:** run #167 (`34057963520`), job `101553212644`, passed implementation head
+  `e5a44185ad2db9cc2cd0d1dbdf9e49ccdfd9d92d`. Frozen install, workspace typecheck,
+  clean-database migration, schema drift, the API suite, and both production builds all
+  concluded `success`; setup and cleanup steps also succeeded.
+- **Security scans:** dependency audit reported `0 critical`, `2 high` (`xlsx@0.18.5`, no
+  scanner-provided patched version), and `2 moderate` vulnerable `esbuild` instances
+  (`0.18.20`, `0.19.12`) representing one distinct dev-only transitive advisory. SAST reported
+  `0` findings. The privacy/dataflow scan reported `2 low` normalized-email logging findings in
+  the administrator bootstrap script.
 - **Migrations:** a fresh, disposable Postgres 16 database initialised cleanly via the documented
   migration runner (`pnpm --filter @aee/db run db:migrate`) with no manual schema step.
 - **Backup/restore drill:** see `docs/BACKUP_AND_RESTORE_RUNBOOK.md` — mechanically proven twice

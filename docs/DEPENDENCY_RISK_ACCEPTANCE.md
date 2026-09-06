@@ -181,8 +181,8 @@ that work.
 - The low-severity `esbuild` finding (`apps/api`'s own direct dependency)
   is fixed, verified, and now merged onto this branch (commit `e640f3d`) —
   fully resolved, not a risk-acceptance item.
-- The 2 high-severity `xlsx` findings and the 1 moderate transitive
-  `esbuild` finding are each now recorded above as an **authorized,
+- The 2 high-severity `xlsx` findings and the 2 moderate vulnerable
+  `esbuild` instances (one distinct transitive advisory) are recorded above as an **authorized,
   temporary, conditional risk acceptance by the AE Project Owner**, with a
   fixed review/expiry date, an assigned accountable remediation owner, and
   named conditions that trigger earlier reassessment. Neither acceptance is
