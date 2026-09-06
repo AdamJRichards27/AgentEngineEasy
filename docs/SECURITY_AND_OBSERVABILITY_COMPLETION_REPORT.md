@@ -2,7 +2,10 @@
 
 Agent Engine 2.0 — Step 2: Harden Security and Observability. This is the final,
 evidence-based report for this step, prepared against `AdamJRichards27/AgentEngineEasy`,
-branch `feat/security-observability-hardening`, PR #25 against `staging`.
+branch `feat/security-observability-hardening`, PR #25 against `staging`. PR #25 was
+merged into `staging` on 2026-09-05 (merge commit
+`399c8792cf865ca30d4aa2538793fa859098f00d`) — see this document's final update section
+below for full merge and post-merge verification detail.
 
 **A note on this report's own limitation, disclosed up front rather than buried.** This
 step's original governing instruction was extremely long and formally structured, and its
@@ -42,10 +45,9 @@ the next named phase.
 
 ### Current decision (this section)
 
-**`READY TO MERGE`** as of Phase 3 below. (Phase 4 merge execution and
-Phase 5/6 post-merge verification and closure follow in a subsequent
-update to this same section, appended once each completes — this report
-is not being replaced or duplicated.)
+**`STEP 2 COMPLETE — READY FOR OPERATIONAL READINESS`.** PR #25 merged
+into `staging` on 2026-09-05, and the post-merge `staging` CI run
+confirmed green — see Phases 4–6 below.
 
 ### Phase 1 — final PR state verification
 
@@ -150,6 +152,54 @@ session's earlier recommendation language:
 
 **Phase 3 result: verification passed. Decision at this point in the
 pass: `READY TO MERGE`.**
+
+### Phase 4 — merge into staging
+
+- Repo's established merge method confirmed from history: PR #24 (the
+  immediately prior step) was merged into `staging` via a standard merge
+  commit (`8eb5c24a5905415b2b4bb30febead263f0a553fc`, "Merge pull request
+  #24 from..."), not squash or rebase — PR #25 was merged the same way,
+  for consistency.
+- No branch protection or required-review block was encountered; the
+  merge proceeded via `merge_pull_request` with `merge_method: "merge"`
+  and an `expectedHeadSha` guard set to the exact head just reverified in
+  Phase 3 (`0b7e049b5e62d4676153c4ce6a671a76d4f26f69`), so the merge could
+  not silently apply to a different, newer head than the one verified.
+- **Merge commit SHA:** `399c8792cf865ca30d4aa2538793fa859098f00d`.
+- **Merged head SHA** (the PR branch tip that was merged):
+  `0b7e049b5e62d4676153c4ce6a671a76d4f26f69`.
+- **Resulting `staging` SHA:** `399c8792cf865ca30d4aa2538793fa859098f00d`
+  (confirmed via `list_commits` against `staging` immediately after the
+  merge call returned).
+- **Merge time:** 2026-09-05T23:49:15Z (per the PR's own `merged_at`).
+- No other PR was touched, no protection was bypassed, no check was
+  dismissed, and no force-push was used.
+
+### Phase 5 — post-merge staging CI verification
+
+- Post-merge CI run confirmed against the actual `staging` branch run,
+  not inferred from the PR-level run: workflow **CI**, run **#134**, run
+  ID `33999674255`, triggered via `push` of commit `399c879` (the merge
+  commit itself) directly on `staging`.
+- **Status: Success**, total duration 14m36s, job "Typecheck, test, build,
+  migration validation" succeeded in 14m31s — the same single job that
+  contains the schema-drift check, the clean-database migration check,
+  the workspace typecheck, both production builds, and the full test
+  suite (including the 88-test tenant-isolation subset), all as one
+  required job. One non-blocking informational annotation only (the same
+  Node.js-20-deprecation runner notice seen on every recent run) — no
+  errors, no failed steps.
+- Confirmed live via GitHub's Actions UI (branch-filtered to `staging`),
+  since this session's GitHub App integration still cannot read
+  check-runs/status via the API (unchanged all session).
+
+### Phase 6 — Step 2 closure
+
+Post-merge `staging` CI is green. Per this pass's own instruction, Step 2
+is complete and this pass does not begin "AE Operational Readiness and
+Controlled Pilot Gate" or any other next-phase work. See this session's
+final chat response for the full `STEP 2 COMPLETE — READY FOR OPERATIONAL
+READINESS` closure report delivered to the requesting user.
 
 ## Update — CI Unblocking and Final Merge-Readiness pass
 
