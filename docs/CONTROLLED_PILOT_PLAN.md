@@ -1,0 +1,221 @@
+# Controlled Pilot Plan — Agent Engine 2.0
+
+**Status of this document: contingent, not authorising.** This plan describes how a small
+controlled pilot of Agent Engine 2.0 would run *if and when* the blockers recorded in
+`docs/OPERATIONAL_READINESS_GATE_REPORT.md` are resolved and the AE Project Owner separately
+authorises the pilot to begin. Writing this plan now — while the gate's overall decision is
+**BLOCKED** — means the pilot can start promptly once blockers clear, without having to
+reconstruct scope, participant handling, and stop-conditions from scratch under time pressure.
+**Nothing in this document authorises inviting a single participant today.**
+
+---
+
+## Part A — Pilot scope (Phase 2)
+
+### A.1 What "the pilot" means
+
+A small, invitation-only exercise of the current `staging`-branch build of Agent Engine 2.0
+against **synthetic/test data only**: 5–10 individually invited real-estate agents (not a
+public signup), running real transaction workflows end-to-end for the purpose of operational
+and product rehearsal — not a commercial launch, not a source of real revenue, and not a
+substitute for the legal/compliance readiness this platform has not yet reached (see the Gate
+Report's blocker register).
+
+### A.2 Jurisdiction — flagged, not resolved, by this plan
+
+The instruction that produced this readiness gate assumed a **New Zealand** pilot. Direct
+code inspection (Phase 6/7 of the Gate Report) found the codebase is built for the
+**Australian** market throughout — AU GST (10%, hardcoded in the Pit Crew fee path with no
+override), AUD currency literals, an AU Direct-Debit-Request-shaped mandate flow, AUSTRAC-style
+AML/CTF terminology, and NSW-shaped test fixtures. No NZ-specific legal, tax, or regulatory
+content exists anywhere in the repository. **This plan does not resolve that mismatch** — it is
+listed in the Gate Report's "external/human decisions required" section. Whichever jurisdiction
+the AE Project Owner confirms the pilot is actually for, the GST/currency/mandate-shape findings
+in Phase 6 need to be re-checked against that confirmed jurisdiction before real figures are
+trusted, even for a synthetic-data pilot.
+
+### A.3 Run / Grow / Scale inclusion boundary
+
+The three-tier "Run / Grow / Scale" framing in the original gate instruction does not fully
+match the product as coded (Phase 6 finding: the actual billing catalogue is "Starter" /
+"Grow" / "Pro+Grow Bundle" — there is no "Scale" product, price, or entitlement anywhere in the
+codebase). Mapping the instruction's intent onto what exists:
+
+- **Run (core transaction platform) — IN SCOPE for pilot rehearsal**, on synthetic data, with
+  the specific capability-by-capability inclusion/exclusion already recorded in the Gate
+  Report's capability matrix (Phase 3). This is the best-evidenced, most solid part of the
+  codebase — a full account-creation-through-closed-transaction path passes a real end-to-end
+  test. It is **not** cleared for real customer use because of the platform-wide authentication
+  and legal-document gaps described in the Gate Report, which apply regardless of tier.
+- **Grow (CRM / lead nurture / Pit Crew / success-fee billing) — PARTIAL, not a blanket
+  inclusion.** Entitlement gating for Grow is real and server-side enforced. Within Grow:
+  - Relationships/Activities/Opportunities CRM record-keeping: real, tenant-isolated, testable
+    — **include** as a manual CRM rehearsal (no automated nurture/lead-scoring exists to pilot).
+  - Pit Crew delegated work-item lifecycle (claim/assign/complete/release): real and
+    well-tested — **include**.
+  - Pit Crew **role grant/revocation** and all user-lifecycle management: **no in-app
+    mechanism exists at all** (Phase 3 finding) — granting the Pit Crew role, or any role
+    change, requires a direct database write by AE engineering for the pilot's duration.
+    Document this operational dependency in the onboarding plan (Part B) rather than treating
+    it as pilot-ready self-service.
+  - Pit Crew success-fee **billing**: calculation math is real and tested, but **no real
+    payment rail exists in code at all** (sandbox only) and invoicing is entirely
+    unimplemented — **exclude live charging**; see the Gate Report's Phase 6 recommendation
+    (free / manually-invoiced only).
+  - AI coaching roles beyond the read-only Copilot widget: **not implemented** (each throws
+    "not implemented in this build") — **exclude**; nothing exists to pilot there.
+- **Scale — OUT OF SCOPE.** No code, schema, or entitlement for a "Scale" tier exists anywhere
+  in this repository, and no owner authorization to build or include it has been sought or
+  given. This is correctly absent, not a gap to remediate.
+
+### A.4 What this pilot explicitly is not
+
+No public signup. No unrestricted high-impact AI action (only the read-only Copilot widget, at
+its existing Level-0 cap, would ever be enabled). No live billing or real charging on any of the
+three billing subsystems found in the codebase. No real email/SMS delivery (none exists to
+enable). No live AML/e-signature vendor calls (none is procured). No trust money received, held,
+transferred, or disbursed by Agent Engine at any point — this boundary holds today as an
+emergent property of what has and hasn't been built (Phase 6), not yet as a technically enforced
+invariant, and the Gate Report recommends closing that gap before this claim is relied on beyond
+a pilot with a small, reviewed set of callers.
+
+---
+
+## Part B — Pilot operating plan (Phase 10)
+
+### B.1 Participant selection and count
+
+5–10 individually invited agents, selected and personally invited by the AE Project Owner (or a
+role they delegate) — not opened to self-signup. Given the Phase 3 finding that **no in-app
+invitation mechanism exists** (dev-login is a self-serve "join by knowing the brokerage name"
+flow), the realistic pilot onboarding mechanism, until an invitation system is built, is: AE
+Project Owner privately shares a specific brokerage name (treated as a shared secret for the
+pilot's duration) with each invited participant individually, and AE Backend Engineering
+periodically audits the resulting user list (`GET /auth/known-users`) to confirm no
+unexpected accounts have joined.
+
+### B.2 Jurisdictions
+
+Whichever single jurisdiction the AE Project Owner confirms per §A.2 — this plan does not
+recommend running the pilot simultaneously across two jurisdictions given the GST/currency
+hardcoding found in Phase 6.
+
+### B.3 Functionality included / excluded
+
+As defined in Part A, cross-referenced to the Gate Report's full capability matrix
+(`docs/OPERATIONAL_READINESS_GATE_REPORT.md` §3) for the definitive per-capability list.
+
+### B.4 Onboarding
+
+1. AE Project Owner confirms each participant's identity out of band (this pilot has no
+   in-app identity verification — see the Gate Report's primary blocker).
+2. AE Backend Engineering privately shares the pilot brokerage name/credentials-equivalent with
+   each participant.
+3. Each participant completes `POST /auth/dev-login` themselves (name, email, brokerage name);
+   the first participant in a new pilot brokerage becomes its Brokerage Administrator
+   automatically — the AE Project Owner should decide in advance who that should be and have
+   them go first, since there is no in-app way to change this after the fact without a direct
+   database update.
+4. AE Support Lead sends each participant the welcome material referenced in
+   `docs/PILOT_SUPPORT_AND_ESCALATION.md` (support channel, hours, what synthetic data means for
+   this pilot, and the explicit statement that no real email/SMS/AML/e-signature/payment ever
+   fires during this pilot).
+
+### B.5 Training
+
+A short walkthrough (live or recorded) of: the core transaction lifecycle (Scenario A in the
+Gate Report), what to do when something looks wrong (point to the support channel, not direct
+engineer contact), and an explicit callout of the known gaps that affect daily use — no
+transaction-cancellation/fall-through state (a genuinely dead deal has no clean way to be
+recorded), no in-app role management, and no real notifications ever being sent.
+
+### B.6 Test-to-live transition
+
+**Not part of this plan.** This pilot never transitions to real customer data, real payments, or
+real regulated communications while any of the Gate Report's blockers remain open. A future,
+separate readiness gate — not a mid-pilot flip of a configuration flag — is required before any
+such transition is considered.
+
+### B.7 Support hours, escalation, and severity definitions
+
+Defined in full in `docs/PILOT_SUPPORT_AND_ESCALATION.md` and `docs/INCIDENT_RESPONSE_RUNBOOK.md`
+— not duplicated here. Four severities (Critical/High/Medium/Low) with target first-response
+times of 15 minutes / 1 hour / 4 business hours / 2 business days respectively.
+
+### B.8 Daily/weekly reviews
+
+Per `docs/PILOT_SUPPORT_AND_ESCALATION.md` §5: a daily 15-minute standup between AE Support Lead
+and AE Backend Engineering (on-call) on open items, and a weekly written/verbal summary with the
+AE Project Owner covering new/closed issues, anything trending toward a stop-pilot condition, and
+incident-log entries.
+
+### B.9 Recommended minimum measures to track during the pilot
+
+1. Number of transactions started and successfully closed end-to-end.
+2. Number and category of exceptions/risk-engine findings raised per transaction.
+3. Number of manual database interventions required (role changes, deactivations, admin
+   succession) — this is a direct signal of the user-lifecycle-management gap's real-world cost.
+4. Number of support requests by severity, and whether each met its target response time.
+5. Number of incident-log entries opened (Incident Response Runbook), by scenario number.
+6. Number of times a transaction became "stuck" with no clean state to move to (the
+   cancellation/fall-through gap).
+7. Number of AML/e-signature "review required" or "failed" outcomes and their resolution time.
+8. Any instance of a webhook endpoint receiving traffic that failed signature verification (the
+   mandate-payments and Grow-billing endpoints in particular — see the Integration Fallback
+   Matrix) — a non-zero count here during a pilot with mock providers only would itself be a
+   signal worth investigating immediately.
+9. Participant-reported confusion patterns (flagged in the weekly review) as possible product
+   gaps, not just one-off bugs.
+10. Backup/restore drill results, run at least once during the pilot window against the actual
+    pilot database (not just the local test database drilled during this gate).
+11. Uptime / extended-outage count (Incident Runbook scenario 5).
+12. Time-to-close per transaction, compared against the Scenario A trace's expected steps.
+13. Any occurrence of a Brokerage Administrator being left with no other active admin in a
+    pilot brokerage (the succession gap identified in Phase 3).
+14. Actual AI (Copilot) usage volume and any cost data, even though no spend cap exists in code.
+15. Every stop-pilot condition check (§B.11) reviewed explicitly at each weekly review, whether
+    or not it was triggered.
+
+### B.10 Duration and exit criteria
+
+**Recommended duration: 60 days**, matching the gate instruction's own suggestion, provided the
+pilot has not been paused under a stop-pilot condition for cause. Exit criteria at the end of the
+window: AE Project Owner reviews the retrospective described in
+`docs/PILOT_SUPPORT_AND_ESCALATION.md` §5 ("End of pilot") and makes one of three calls —
+extend the pilot under the same terms, formally close it out with findings feeding a future
+readiness gate for wider launch, or stop it early for cause per §B.11. This plan does not
+pre-authorise progression beyond the pilot; that requires a fresh readiness assessment against
+whatever has changed by then (in particular: has the authentication gap been fixed, have the
+missing legal/privacy documents been supplied, has a real payment rail been built if live
+billing is ever wanted).
+
+### B.11 Mandatory stop-pilot conditions
+
+Any of the following pauses the pilot immediately, per
+`docs/INCIDENT_RESPONSE_RUNBOOK.md` scenario 15:
+
+1. Confirmed cross-tenant data exposure.
+2. A material privacy or security incident.
+3. An incorrect financial charge actually reaching a participant (should not be structurally
+   possible under this plan's no-live-billing constraint — its occurrence would itself indicate
+   the no-live-billing control had been bypassed, which is independently Critical).
+4. Data loss or corruption.
+5. An unrecoverable service failure.
+6. An uncontained AML/identity-handling failure.
+7. Inability to restore data from backup when needed.
+8. A critical defect with no safe workaround.
+9. AE Project Owner's own judgment that continuing risks participant trust or data integrity
+   beyond what the pilot is meant to accept.
+
+---
+
+## What must happen before this plan can actually start
+
+This plan is ready to execute the moment the Gate Report's decision changes from
+**BLOCKED — CRITICAL OPERATIONAL FAILURE**. At minimum, per that report: a real identity/
+authentication mechanism (or an explicit, owner-accepted compensating control) must close the
+tenant-isolation gap described there; the essential pilot-participation legal/privacy documents
+listed as missing in Phase 7 must be supplied and formally approved (not drafted by, and not
+certified as sufficient by, this engineering process); and the jurisdiction question in §A.2 must
+be resolved by the AE Project Owner. Everything else in this plan can proceed unchanged once
+those are addressed.
