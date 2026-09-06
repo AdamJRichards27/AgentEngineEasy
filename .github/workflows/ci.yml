@@ -11,10 +11,11 @@ name: CI
 #
 # This workflow deliberately requires no production secrets. The only
 # environment values it sets are a throwaway Postgres connection string
-# scoped to the ephemeral `postgres` service below, and a locally-generated
+# scoped to the ephemeral `postgres` service below, a locally-generated
 # dummy SESSION_SECRET used only to satisfy this repository's own
-# fail-closed session-secret check during the test run. Neither value is a
-# real credential and neither is capable of reaching any real environment.
+# fail-closed session-secret check, and NODE_ENV=test on the automated test
+# step so test-only scheduler/rate-limit isolation is deterministic. None is
+# a real credential or capable of reaching any real environment.
 
 on:
   pull_request:
@@ -115,6 +116,8 @@ jobs:
           }
 
       - name: API automated test suite
+        env:
+          NODE_ENV: test
         run: pnpm --filter @aee/api run test
 
       - name: API production build
