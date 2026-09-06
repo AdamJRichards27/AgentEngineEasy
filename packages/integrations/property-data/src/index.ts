@@ -122,10 +122,26 @@ export class GooglePlacesProvider implements PropertyDataProvider {
   }
 }
 
+// Critical Blocker Remediation, Phase 10 — external-action lock. Same check
+// (and same reasoning for why it's repeated locally rather than imported)
+// as packages/integrations/payments/src/index.ts's own
+// mustForceMockExternalProvider() — see that file's comment and
+// docs/gate-evidence/PHASE10_BILLING_AND_EXTERNAL_ACTION_LOCKS.md.
+function mustForceMockExternalProvider(): boolean {
+  return process.env.NODE_ENV === "production" && process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED !== "true";
+}
+
 export function createPropertyDataProvider(): PropertyDataProvider {
   const provider = process.env.PROPERTY_DATA_PROVIDER ?? "mock";
   switch (provider) {
     case "google-places": {
+      if (mustForceMockExternalProvider()) {
+        logger.warn("property_data_provider_locked_to_mock_pilot_policy", {
+          reason:
+            "PROPERTY_DATA_PROVIDER=google-places was requested but LIVE_EXTERNAL_TRANSACTIONS_APPROVED is not \"true\" in production — no real property-data action is authorised for this pilot.",
+        });
+        return new MockPropertyDataProvider();
+      }
       const apiKey = process.env.GOOGLE_PLACES_API_KEY;
       if (!apiKey) {
         logger.warn("property_data_provider_fallback_to_mock", {

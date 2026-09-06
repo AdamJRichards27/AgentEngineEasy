@@ -166,6 +166,16 @@ export function createMandatePaymentProvider(): MandatePaymentProvider {
     // and no real bank-debit vendor is procured for this build — every
     // other requested value falls back to the sandbox rather than silently
     // pretending to be a real provider it cannot yet be.
+    //
+    // Critical Blocker Remediation, Phase 10 audit note: because there is no
+    // "real" branch at all in this factory (unlike
+    // packages/integrations/payments|billing|aml|esign, which each needed an
+    // explicit mustForceMockExternalProvider() lock added this phase), the
+    // Owner's "no automated ... direct-debit/PC success-fee ... transaction
+    // authorised" instruction is already structurally satisfied here today —
+    // there is no live implementation this env var could ever select, no
+    // matter what credentials are present. See
+    // docs/gate-evidence/PHASE10_BILLING_AND_EXTERNAL_ACTION_LOCKS.md.
     logger.warn("mandate_payment_provider_fallback_to_sandbox", {
       requestedProvider: provider,
       reason: "provider not supported yet",
