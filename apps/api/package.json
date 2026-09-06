@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --packages=external",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --external:argon2 --external:cors --external:csv-parse --external:drizzle-orm --external:drizzle-zod --external:express --external:express-rate-limit --external:helmet --external:multer --external:pg --external:xlsx --external:zod",
     "start": "node dist/index.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/ai/__tests__/*.test.ts src/lib/entitlements/__tests__/*.test.ts src/lib/billing/__tests__/*.test.ts src/middlewares/__tests__/*.test.ts src/lib/import/__tests__/*.test.ts src/lib/__tests__/*.test.ts src/routes/__tests__/*.test.ts src/lib/automation/__tests__/*.test.ts src/lib/exceptions/__tests__/*.test.ts src/lib/launch/__tests__/*.test.ts src/lib/commandCentre/__tests__/*.test.ts src/lib/pitCrew/__tests__/*.test.ts src/lib/communications/__tests__/*.test.ts src/lib/financial/__tests__/*.test.ts src/lib/integrations/__tests__/*.test.ts src/lib/observability/__tests__/*.test.ts"
+    "test": "tsx --test src/lib/ai/__tests__/*.test.ts src/lib/entitlements/__tests__/*.test.ts src/lib/billing/__tests__/*.test.ts src/middlewares/__tests__/*.test.ts src/lib/import/__tests__/*.test.ts src/lib/__tests__/*.test.ts src/routes/__tests__/*.test.ts src/lib/automation/__tests__/*.test.ts src/lib/exceptions/__tests__/*.test.ts src/lib/launch/__tests__/*.test.ts src/lib/commandCentre/__tests__/*.test.ts src/lib/pitCrew/__tests__/*.test.ts src/lib/communications/__tests__/*.test.ts src/lib/financial/__tests__/*.test.ts src/lib/integrations/__tests__/*.test.ts src/lib/observability/__tests__/*.test.ts src/lib/auth/__tests__/*.test.ts",
+    "bootstrap-admin": "tsx src/scripts/bootstrapAdmin.ts"
   },
   "dependencies": {
     "@aee/db": "workspace:*",
@@ -20,13 +21,16 @@
     "@aee/integration-object-storage": "workspace:*",
     "@aee/integration-payments": "workspace:*",
     "@aee/integration-property-data": "workspace:*",
+    "argon2": "^0.45.1",
     "cors": "^2.8.5",
     "csv-parse": "^7.0.2",
     "drizzle-orm": "^0.45.2",
+    "drizzle-zod": "^0.5.1",
     "express": "^4.21.0",
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "multer": "^2.2.0",
+    "pg": "^8.13.0",
     "xlsx": "^0.18.5",
     "zod": "^3.25.76"
   },
