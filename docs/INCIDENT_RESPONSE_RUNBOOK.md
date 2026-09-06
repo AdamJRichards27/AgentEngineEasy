@@ -6,9 +6,11 @@
 
 This runbook governs the **controlled pilot** of Agent Engine 2.0: 5-10 invited real-estate
 agents, real transaction workflows, synthetic/test data only, no public signup, no live
-customer money movement, no NZ-wide launch. It is written against what the system actually
-does today, not an aspirational target state — where the platform's own tooling is partial
-(e.g. metrics exist but there is no paging system; see `docs/METRICS_ALERTS_AND_SERVICE_
+customer money movement, no launch beyond this Queensland, Australia pilot, and no
+multi-jurisdiction claim (jurisdiction confirmed by the AE Project Owner — see
+`docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md`). It is written against what the system
+actually does today, not an aspirational target state — where the platform's own tooling is
+partial (e.g. metrics exist but there is no paging system; see `docs/METRICS_ALERTS_AND_SERVICE_
 OBJECTIVES.md`), this document says so and describes the manual step a human takes instead.
 
 It complements, and does not replace, two existing engineering documents that this pilot
@@ -249,16 +251,16 @@ accountable Owner role, not time to full resolution.
 
 | | |
 |---|---|
-| **Trigger** | A participant emails or messages AE Support Lead asking for their data to be exported or removed. |
+| **Trigger** | A participant emails or messages AE Support Lead asking for their data to be exported or removed, or submits a request in-app (`POST /privacy/requests`). |
 | **Severity** | Medium (this is a routine, expected pilot request, not an emergency — but has a firm response-time commitment because it's a rights-adjacent request even against synthetic/test data) |
-| **First response** | AE Support Lead confirms with the participant exactly what they're asking for (their own property/transaction records; not another participant's) and logs the request. **Disclosed limitation**: this build has no self-service export/delete feature (no such route exists in the current API surface) — fulfilling this request today is a manual, engineer-performed action, not a one-click flow, and that should be said to the participant plainly rather than implied to be instant. |
+| **First response** | AE Support Lead confirms with the participant exactly what they're asking for (their own property/transaction records; not another participant's) and logs the request. **Updated under the Critical Blocker Remediation pass:** a tracked request queue now exists in-app (`POST /privacy/requests`, `GET /admin/privacy-requests`, `POST /admin/privacy-requests/:id/resolve` — see `docs/legal/DATA_ACCESS_CORRECTION_DELETION_PROCESS.md`), but resolving a request there only records a human decision; it never itself exports or deletes anything, and regulated/AML records are never auto-deleted. |
 | **Owner** | AE Support Lead for intake and communication; AE Backend Engineering for execution |
 | **Escalation path** | AE Support Lead → AE Backend Engineering → AE Security/Compliance Owner (sign-off before any deletion is executed, since deletion is irreversible and touches audit/event history) → AE Project Owner (informed, not required to approve, for a routine request) |
 | **Target response time** | Acknowledge within 1 business day; fulfil within 5 business days (export) or 10 business days (deletion, given the manual cross-table work and compliance sign-off involved) |
 | **Evidence to preserve** | A record of the request itself (who, what, when) and, for a deletion, a final export taken immediately before deletion in case of dispute or a later discovered need (e.g. an in-flight transaction another participant is also party to) |
 | **Customer/participant communication approach** | Set expectations up front about manual turnaround time; confirm completion in writing once done, describing what was exported or removed at a high level |
-| **Resolution steps** | **Export**: AE Backend Engineering queries the participant's own records (properties, parties, offers/transactions, documents, AML status — everything scoped to their `brokerageId`/user id) and delivers a structured extract. **Deletion**: AE Security/Compliance Owner first confirms no other still-active participant's transaction depends on the record being removed (e.g. a shared property/transaction with another pilot agent) — if it does, the request is only partially fulfillable and the participant is told which parts can and cannot be removed and why (audit-trail and other-party-record obligations); AE Backend Engineering then performs the deletion directly against the database, since no admin UI exists for this today. |
-| **Closure record** | Incident/request log entry recording exactly what was exported or deleted, when, by whom (role), and the Security/Compliance sign-off — this record itself is retained even after the underlying data is deleted, as the proof the request was honored. |
+| **Resolution steps** | **Export**: AE Backend Engineering queries the participant's own records (properties, parties, offers/transactions, documents, AML status — everything scoped to their `brokerageId`/user id) and delivers a structured extract. **Deletion**: AE Security/Compliance Owner first confirms no other still-active participant's transaction depends on the record being removed (e.g. a shared property/transaction with another pilot agent) — if it does, the request is only partially fulfillable and the participant is told which parts can and cannot be removed and why (audit-trail and other-party-record obligations); AE Backend Engineering then performs the actual export or deletion directly against the database, since no automated fulfillment exists today — the in-app request queue tracks and records the decision, it does not execute it. |
+| **Closure record** | Incident/request log entry recording exactly what was exported or deleted, when, by whom (role), and the Security/Compliance sign-off — this record itself is retained even after the underlying data is deleted, as the proof the request was honored. The in-app request's own `resolve` action (with resolution notes) is the primary record; this log entry cross-references it. |
 
 ---
 

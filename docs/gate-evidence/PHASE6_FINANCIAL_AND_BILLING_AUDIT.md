@@ -7,10 +7,18 @@ calculation unit tests were actually executed (`node:test`, no DB) and confirmed
 DB-backed tests could not be executed (no `DATABASE_URL`/Postgres in this environment) and are
 reported as "present but not independently re-run" rather than verified.
 
-## 0. Jurisdiction finding (bears on almost every item below)
+## 0. Jurisdiction — RESOLVED: Queensland, Australia (Critical Blocker Remediation, Phase 6)
 
-The task brief describes this as "a NZ real-estate transaction-management platform." The
-codebase itself says otherwise, explicitly and repeatedly:
+**This section originally flagged an unresolved mismatch between the task brief and the
+codebase. The AE Project Owner has since confirmed the pilot's actual jurisdiction, and it
+matches the codebase, not the original brief.** The original finding is retained below,
+corrected, as the record of what was checked and why it is now understood to be correct rather
+than a discrepancy.
+
+The original task brief described this as "a NZ real-estate transaction-management platform."
+The codebase itself said otherwise, explicitly and repeatedly — and this is exactly what the AE
+Project Owner has now confirmed is the correct jurisdiction for this pilot: **Queensland,
+Australia.**
 
 - `README.md:3` — *"A simplified, property-led real estate transaction platform for **Australian**
   real estate agents."*
@@ -29,10 +37,13 @@ codebase itself says otherwise, explicitly and repeatedly:
   (`packages/integrations/mandate-payments/src/index.ts:9,25`), not a NZ direct-debit or
   Automatic Payment scheme.
 
-**This is an Australian-market codebase (AU GST rate, AUD currency, AU direct-debit shape) that
-has not been adapted for New Zealand.** If this pilot is genuinely for NZ agents, GST is
-currently wrong by default everywhere it is hardcoded, and cannot even be corrected in the one
-place that matters most (the Pit Crew fee GST calculation has no override). See Section 4.
+**Conclusion (updated): this is an Australian-market codebase (AU GST rate, AUD currency, AU
+direct-debit shape) built for, and now confirmed to be used for, a Queensland, Australia pilot.**
+Every default cited above is the **correct** default for the confirmed jurisdiction — none of it
+requires a code change on jurisdiction grounds. See Section 4 for the one item that remains
+worth tracking regardless of jurisdiction: the Pit Crew success-fee GST rate has no
+per-brokerage override field, which only matters if this rate or jurisdiction ever changes in
+the future.
 
 ---
 
@@ -110,31 +121,40 @@ Mixed, and mostly sound:
 - The **GST rate applied to the Pit Crew fee itself** is the one place pricing is truly hardcoded
   with **no override path**: `pcFeeCalculations.ts:14-19`, `const GST_RATE_BPS = 1000;` — the
   module comment explicitly says this was a deliberate choice not to add a configurable field.
-  This is a real gap for any jurisdiction whose GST/VAT rate isn't 10%.
+  This rate (10%) is correct for the confirmed Queensland, Australia jurisdiction today; the gap
+  is the absence of an override, tracked as a future item (Section 4) in case the rate or
+  jurisdiction ever changes, not a present compliance risk.
 
-## 4. GST (NZ) treatment
+## 4. GST treatment (confirmed jurisdiction: Queensland, Australia)
 
-GST **is** calculated and recorded as structured data (not absent), but it is Australian GST
-logic, not New Zealand's:
-- Commission GST: `commissionAgreements.gstRateBps` defaults to 1000 (10%) but is a real, stored,
-  per-agreement field (`financial.ts:224`) — a brokerage admin *could* manually set 1500 (15%) per
-  agreement for NZ. `computeCommission()` (`apps/api/src/lib/financial/calculations.ts:144-145`)
-  correctly reads and applies whatever rate is stored.
-- The legacy flat calculation (`lib/transactions.ts:28,436`) hardcodes 1000 bps with no override
-  at all.
+GST **is** calculated and recorded as structured data (not absent), and — now that the
+jurisdiction question is resolved — it is the correct Australian GST logic for this pilot:
+- Commission GST: `commissionAgreements.gstRateBps` defaults to 1000 (10%, correct for AU) but is
+  a real, stored, per-agreement field (`financial.ts:224`) — a brokerage admin could still
+  manually set a different rate per agreement if ever needed. `computeCommission()`
+  (`apps/api/src/lib/financial/calculations.ts:144-145`) correctly reads and applies whatever
+  rate is stored.
+- The legacy flat calculation (`lib/transactions.ts:28,436`) hardcodes 1000 bps (10% AU GST,
+  correct for this pilot) with no override at all.
 - The **Pit Crew success-fee GST** (`pcFeeCalculations.ts:19,82`) is hardcoded to 1000 bps with
   **no field to override it, anywhere in the schema** (`pcFeeAuthorities` has no `gstRateBps`
-  column — only a boolean `gstApplicable`, `financial.ts:333`). For NZ's 15% rate, every Pit Crew
-  success fee calculated by this engine would under-collect GST by a third, with no
-  configuration escape hatch short of a code change.
-- No jurisdiction/tax-authority field exists anywhere (no NZ IRD GST number field, no per-brokerage
-  jurisdiction setting) — `financialSettings` (`financial.ts:874-885`) has `defaultGstRateBps` but
-  it is not read by `pcFeeCalculations.ts` at all (that module hardcodes its own constant instead
-  of consulting `financialSettings`).
+  column — only a boolean `gstApplicable`, `financial.ts:333`). This is the correct rate for
+  Queensland, Australia today. **Tracked future item:** because there is no override field, this
+  platform could not correctly serve a second jurisdiction with a different GST/VAT rate, or
+  adapt automatically if the Australian GST rate itself ever changes, without a code change. This
+  is not a blocker for the current, single-jurisdiction pilot.
+- No jurisdiction/tax-authority field exists anywhere (no per-brokerage jurisdiction setting) —
+  `financialSettings` (`financial.ts:874-885`) has `defaultGstRateBps` but it is not read by
+  `pcFeeCalculations.ts` at all (that module hardcodes its own constant instead of consulting
+  `financialSettings`). Wiring `pcFeeCalculations.ts` to read `financialSettings.defaultGstRateBps`
+  (falling back to the current 1000 bps constant) would be a reasonable, low-risk future
+  improvement that closes this gap without changing today's behavior — recorded here as a
+  suggestion, not performed as part of this bounded correction pass.
 
-**Conclusion: GST is calculated and recorded, but the code's GST logic is built for and defaults
-to the Australian 10% rate; NZ's 15% GST is not the default anywhere and cannot be applied at all
-to the Pit Crew success fee without a code change.**
+**Conclusion (updated): GST is calculated and recorded, and the code's GST logic — the
+Australian 10% rate — is the correct rate for the confirmed Queensland, Australia pilot. The
+gap is architectural (no override field for the Pit Crew fee specifically), not a jurisdiction
+error, and is tracked as a non-blocking future item.**
 
 ## 5. Invoice generation
 
@@ -476,7 +496,8 @@ reviewed set of callers.
 ## Recommendation
 
 **Run this pilot as free / manually-invoiced only. Do not enable live charging for any of the
-three billing subsystems.**
+three billing subsystems.** (Confirmed under the Critical Blocker Remediation pass: no automated
+subscription/direct-debit/PC success-fee/trust-money transaction is authorised.)
 
 Reasoning, drawn only from the findings above:
 
@@ -489,11 +510,11 @@ Reasoning, drawn only from the findings above:
    there is no code path that produces an invoice number or document, and the schema's own
    invoicing states (`AWAITING_AUTHORITY`, `READY_TO_INVOICE`, `INVOICED`) are never reached.
    Charging a real agent real money with no invoice ever issued is not something to pilot live.
-3. **GST is wrong for the stated jurisdiction by default, and cannot be corrected at all for the
-   Pit Crew fee** (Section 4) — if this pilot is genuinely for NZ agents, every Pit Crew fee this
-   engine calculates will under-state GST by a third with no configuration fix available short of
-   a code change. Live charging under an admittedly-wrong tax calculation is a compliance risk
-   regardless of dollar amounts involved.
+3. **The Pit Crew fee GST rate has no override for a future jurisdiction change** (Section 4) —
+   this is correct at 10% for the confirmed Queensland, Australia pilot today, but if this
+   platform is ever extended to a jurisdiction with a different rate, or the Australian rate
+   itself changes, this hardcoding would need to be fixed first. Not a live-charging blocker for
+   this pilot, but worth closing before scaling beyond it.
 4. **Fee disputes can be opened but never closed in code** (Section 13), and **reconciliation
    against actual settled payment-processor transactions does not exist** (Section 12) — both are
    acceptable gaps for a pilot recording synthetic transactions, but neither should be live with
