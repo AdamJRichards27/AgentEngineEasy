@@ -1,12 +1,16 @@
 import { Router } from "express";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, and, gt, isNull, desc, count } from "drizzle-orm";
 import { z } from "zod";
-import { db, users, brokerages } from "@aee/db";
-import { requireAuth } from "../middlewares/auth.js";
+import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, USER_ROLES } from "@aee/db";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { setSessionCookie, clearSessionCookie } from "../lib/session.js";
 import { logAudit } from "../lib/audit.js";
 import { isDevAuthEnabled } from "../lib/env.js";
 import { incrementCounter } from "@aee/events";
+import { hashPassword, verifyPassword, passwordPolicyViolation } from "../lib/auth/password.js";
+import { generateToken, hashToken } from "../lib/auth/tokens.js";
+import { getAuthEmailProvider } from "../lib/auth/email.js";
+import { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION } from "../lib/auth/legalVersions.js";
 
 export const authRouter = Router();
 
@@ -32,6 +36,14 @@ authRouter.get("/known-users", async (_req, res) => {
   // must never be reachable outside an explicitly declared development
   // environment. Returns 404 (not 403) so a disabled environment gives
   // no signal that this route exists at all.
+  //
+  // Critical Blocker Remediation, Phase 3: this route is retained
+  // unchanged, purely as a local-development/automated-test fixture — see
+  // docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md §6. The pilot's real
+  // Login screen (apps/web/src/pages/Login.tsx) no longer calls this route
+  // at all; it is rebuilt on POST /auth/login (below). Real, authenticated,
+  // tenant-scoped, paginated, audited user discovery for admins is
+  // GET /auth/admin/users, also below.
   if (!isDevAuthEnabled()) {
     incrementCounter("auth_security_event_total", { event: "dev_login_disabled_attempt" });
     res.status(404).end();
@@ -62,6 +74,15 @@ const devLoginSchema = z.object({
 // every brokerage needs at least one, since refunds/exception-resolution/
 // transaction-close are all Brokerage-Administrator-only actions elsewhere
 // in this app.
+//
+// Critical Blocker Remediation, Phase 3: retained unchanged as a
+// local-development/automated-test fixture only (~50 existing test files
+// depend on it) — see docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md §6
+// for why this is the correct bounded-remediation choice rather than
+// removing it. It already satisfies Phase 3's requirement ("unregistered
+// or 404 in production, fail-closed, proven by tests") today; this pass
+// adds no new capability to this route and the pilot's real sign-in no
+// longer depends on it.
 authRouter.post("/dev-login", async (req, res) => {
   // Foundation Remediation Stage 1.1: passwordless account creation and
   // sign-in must never be reachable outside an explicitly declared
@@ -180,5 +201,496 @@ authRouter.post("/logout", async (req, res) => {
     }
   }
   clearSessionCookie(res);
+  res.status(204).end();
+});
+
+// ---------------------------------------------------------------------------
+// Critical Blocker Remediation, Phase 4 — invitation-only authentication.
+// See docs/gate-evidence/PHASE2_AUTHENTICATION_DESIGN.md for the full design
+// this section implements.
+// ---------------------------------------------------------------------------
+
+const INVITATION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+const GENERIC_LOGIN_ERROR = { error: "Invalid email or password." };
+
+function frontendBaseUrl(): string {
+  // No hardcoded production domain — this pilot has none yet (Phase 9
+  // deployment is still pending approval). FRONTEND_BASE_URL is required
+  // wherever a real link must be emailed; the sandbox provider never
+  // actually transmits the link anywhere, so a missing value only affects
+  // what a human would eventually click, never the token's security.
+  return process.env.FRONTEND_BASE_URL ?? "http://localhost:5173";
+}
+
+const createInvitationSchema = z.object({
+  email: z.string().email(),
+  role: z.enum(USER_ROLES),
+});
+
+// Admin-issued invitations (Phase 2 design §4.1). Tenant-scoped: an admin
+// can only invite into their own brokerage — brokerageId is taken from the
+// caller's own session (req.authedUser), never from the request body, so
+// there is no way to invite a user into a brokerage the caller does not
+// administer.
+authRouter.post("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const parsed = createInvitationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Enter a valid email address and role." });
+    return;
+  }
+  const { email, role } = parsed.data;
+  const admin = req.authedUser!;
+  const normalizedEmail = email.toLowerCase();
+
+  const [existingUser] = await db.select().from(users).where(eq(users.email, normalizedEmail));
+  if (existingUser) {
+    res.status(409).json({ error: "A user with this email already exists." });
+    return;
+  }
+
+  // Re-inviting an email revokes any prior pending invitation first — one
+  // live invitation per email at a time (Phase 2 design §4.1).
+  await db
+    .update(invitations)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(invitations.email, normalizedEmail),
+        eq(invitations.brokerageId, admin.brokerageId),
+        isNull(invitations.acceptedAt),
+        isNull(invitations.revokedAt),
+      ),
+    );
+
+  const { plaintext, hash } = generateToken();
+  const expiresAt = new Date(Date.now() + INVITATION_EXPIRY_MS);
+  const [created] = await db
+    .insert(invitations)
+    .values({
+      brokerageId: admin.brokerageId,
+      email: normalizedEmail,
+      role,
+      tokenHash: hash,
+      invitedByUserId: admin.id,
+      expiresAt,
+    })
+    .returning();
+
+  const [brokerage] = await db.select().from(brokerages).where(eq(brokerages.id, admin.brokerageId));
+  const acceptUrl = `${frontendBaseUrl()}/accept-invitation/${plaintext}`;
+  await getAuthEmailProvider().sendInvitation({
+    to: normalizedEmail,
+    brokerageName: brokerage?.name ?? "",
+    acceptUrl,
+    expiresAt,
+  });
+
+  await logAudit({
+    userId: admin.id,
+    action: "invitation_created",
+    recordType: "invitation",
+    recordId: String(created.id),
+  });
+
+  // Never returns the token or acceptUrl — those exist only in the email
+  // (Phase 2 design §2/§6: "no password or reset token in ... production
+  // API responses").
+  res.status(201).json({ invitation: { id: created.id, email: created.email, role: created.role, expiresAt: created.expiresAt } });
+});
+
+// Tenant-scoped, paginated, admin-only invitation listing — lets an admin
+// see and manage what they've sent without ever exposing a token.
+authRouter.get("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const admin = req.authedUser!;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
+
+  const rows = await db
+    .select({
+      id: invitations.id,
+      email: invitations.email,
+      role: invitations.role,
+      expiresAt: invitations.expiresAt,
+      acceptedAt: invitations.acceptedAt,
+      revokedAt: invitations.revokedAt,
+      createdAt: invitations.createdAt,
+    })
+    .from(invitations)
+    .where(eq(invitations.brokerageId, admin.brokerageId))
+    .orderBy(desc(invitations.createdAt))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+
+  const [{ value: total }] = await db
+    .select({ value: count() })
+    .from(invitations)
+    .where(eq(invitations.brokerageId, admin.brokerageId));
+
+  res.json({ invitations: rows, page, pageSize, total });
+});
+
+authRouter.post("/admin/invitations/:id/revoke", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const admin = req.authedUser!;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: "Invalid invitation id." });
+    return;
+  }
+  // Tenant scoping: the WHERE clause requires brokerageId to match the
+  // caller's own brokerage, so an admin can never revoke another tenant's
+  // invitation even by guessing/enumerating ids (cross-tenant test
+  // coverage in Phase 5).
+  const [updated] = await db
+    .update(invitations)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(invitations.id, id), eq(invitations.brokerageId, admin.brokerageId), isNull(invitations.acceptedAt)))
+    .returning();
+  if (!updated) {
+    res.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  await logAudit({ userId: admin.id, action: "invitation_revoked", recordType: "invitation", recordId: String(id) });
+  res.status(204).end();
+});
+
+async function findLiveInvitationByPlaintextToken(plaintextToken: string) {
+  const hash = hashToken(plaintextToken);
+  const [invitation] = await db
+    .select()
+    .from(invitations)
+    .where(and(eq(invitations.tokenHash, hash), isNull(invitations.acceptedAt), isNull(invitations.revokedAt), gt(invitations.expiresAt, new Date())));
+  return invitation ?? null;
+}
+
+// Public, but reveals nothing about WHO was invited or WHY a token is
+// invalid — only one of three opaque states (Phase 2 design §4.2).
+authRouter.get("/invitations/:token/status", async (req, res) => {
+  const invitation = await findLiveInvitationByPlaintextToken(req.params.token);
+  res.json({ status: invitation ? "valid" : "invalid_or_expired" });
+});
+
+const acceptInvitationSchema = z.object({
+  password: z.string(),
+  // Critical Blocker Remediation, Phase 8: acceptance of the current
+  // Terms of Use / Privacy Policy is mandatory to create an account — both
+  // documents are still marked DRAFT — LEGAL REVIEW REQUIRED (see
+  // docs/legal/LEGAL_APPROVAL_REGISTER.md) and must not be presented to a
+  // real pilot participant as final. The VERSION recorded is always
+  // CURRENT_TERMS_VERSION/CURRENT_PRIVACY_VERSION as known to the server,
+  // never a client-supplied value — see lib/auth/legalVersions.ts.
+  acceptedTerms: z.literal(true, { errorMap: () => ({ message: "You must accept the Terms of Use to continue." }) }),
+  acceptedPrivacyPolicy: z.literal(true, { errorMap: () => ({ message: "You must accept the Privacy Policy to continue." }) }),
+});
+
+authRouter.post("/invitations/:token/accept", async (req, res) => {
+  const parsed = acceptInvitationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "A password is required, and you must accept the Terms of Use and Privacy Policy." });
+    return;
+  }
+  const invitation = await findLiveInvitationByPlaintextToken(req.params.token);
+  if (!invitation) {
+    res.status(400).json({ error: "This invitation link is invalid or has expired." });
+    return;
+  }
+  const policyViolation = passwordPolicyViolation(parsed.data.password);
+  if (policyViolation) {
+    res.status(400).json({ error: policyViolation });
+    return;
+  }
+
+  const [existingUser] = await db.select().from(users).where(eq(users.email, invitation.email));
+  if (existingUser) {
+    // Extremely rare race (two accept requests for the same invitation, or
+    // an account created out-of-band between invite and accept) — fail
+    // closed rather than silently overwrite an existing account's
+    // credentials via an invitation link.
+    res.status(409).json({ error: "An account with this email already exists." });
+    return;
+  }
+
+  const passwordHash = await hashPassword(parsed.data.password);
+  const now = new Date();
+
+  // Role/tenant come only from the invitation row created by an admin,
+  // never from this request body (Phase 1 threat model T8).
+  const [created] = await db
+    .insert(users)
+    .values({
+      authProviderId: `invite:${invitation.email}`,
+      email: invitation.email,
+      firstName: "",
+      lastName: "",
+      role: invitation.role,
+      brokerageId: invitation.brokerageId,
+      passwordHash,
+      emailVerifiedAt: now,
+    })
+    .returning();
+
+  await db.update(invitations).set({ acceptedAt: now }).where(eq(invitations.id, invitation.id));
+
+  await db.insert(consentRecords).values([
+    { userId: created.id, consentType: "terms_of_use", documentVersion: CURRENT_TERMS_VERSION, acceptedAt: now },
+    { userId: created.id, consentType: "privacy_policy", documentVersion: CURRENT_PRIVACY_VERSION, acceptedAt: now },
+  ]);
+
+  await logAudit({ userId: created.id, userEmail: created.email, action: "invitation_accepted", recordType: "invitation", recordId: String(invitation.id) });
+  await logAudit({ userId: created.id, userEmail: created.email, action: "user_signed_up", recordType: "user", recordId: String(created.id) });
+
+  setSessionCookie(res, created.id, created.sessionEpoch);
+  const [brokerage] = await db.select().from(brokerages).where(eq(brokerages.id, created.brokerageId!));
+  res.status(201).json({ user: userView(created, brokerage?.name) });
+});
+
+const loginSchema = z.object({ email: z.string().email(), password: z.string() });
+
+// Real sign-in for the controlled pilot (Phase 2 design §4.3). Every
+// failure mode below — unknown email, disabled account, never-completed
+// invitation, wrong password, active lockout — returns the identical
+// response, so none is distinguishable from outside (enumeration
+// resistance, Phase 1 threat model T4).
+authRouter.post("/login", async (req, res) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json(GENERIC_LOGIN_ERROR);
+    return;
+  }
+  const { email, password } = parsed.data;
+  const normalizedEmail = email.toLowerCase();
+  const [user] = await db.select().from(users).where(eq(users.email, normalizedEmail));
+
+  if (!user || !user.isActive || !user.passwordHash) {
+    // Still perform a hash comparison against a fixed dummy hash so this
+    // branch takes roughly the same time as a real failed-password check —
+    // otherwise a fast 401 here vs. a slower one below would itself leak
+    // account existence via timing.
+    await verifyPassword(await dummyHashForTiming(), password);
+    res.status(401).json(GENERIC_LOGIN_ERROR);
+    return;
+  }
+
+  if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
+    res.status(401).json(GENERIC_LOGIN_ERROR);
+    return;
+  }
+
+  const passwordOk = await verifyPassword(user.passwordHash, password);
+  if (!passwordOk) {
+    const attempts = user.failedLoginAttempts + 1;
+    const shouldLock = attempts >= MAX_FAILED_LOGIN_ATTEMPTS;
+    await db
+      .update(users)
+      .set({
+        failedLoginAttempts: shouldLock ? 0 : attempts,
+        lockedUntil: shouldLock ? new Date(Date.now() + LOCKOUT_MS) : null,
+      })
+      .where(eq(users.id, user.id));
+    await logAudit({ userId: user.id, userEmail: user.email, action: "login_failed", recordType: "user", recordId: String(user.id) });
+    if (shouldLock) {
+      await logAudit({ userId: user.id, userEmail: user.email, action: "account_locked", recordType: "user", recordId: String(user.id) });
+    }
+    res.status(401).json(GENERIC_LOGIN_ERROR);
+    return;
+  }
+
+  await db.update(users).set({ failedLoginAttempts: 0, lockedUntil: null }).where(eq(users.id, user.id));
+  await logAudit({ userId: user.id, userEmail: user.email, action: "user_signed_in", recordType: "user", recordId: String(user.id) });
+  setSessionCookie(res, user.id, user.sessionEpoch);
+  const [brokerage] = user.brokerageId ? await db.select().from(brokerages).where(eq(brokerages.id, user.brokerageId)) : [];
+  res.json({ user: userView(user, brokerage?.name) });
+});
+
+// A real (never-usable) Argon2id hash, computed lazily on first use and
+// cached, purely so the "no such user" / "no password set yet" branch above
+// can spend approximately the same wall-clock time as a genuine
+// wrong-password check. Never derived from, or comparable to, any real
+// account's password.
+let dummyHashPromise: Promise<string> | null = null;
+function dummyHashForTiming(): Promise<string> {
+  if (!dummyHashPromise) {
+    dummyHashPromise = hashPassword("timing-safety-dummy-value-never-a-real-password");
+  }
+  return dummyHashPromise;
+}
+
+const requestResetSchema = z.object({ email: z.string().email() });
+
+authRouter.post("/password-reset/request", async (req, res) => {
+  const parsed = requestResetSchema.safeParse(req.body);
+  if (parsed.success) {
+    const normalizedEmail = parsed.data.email.toLowerCase();
+    const [user] = await db.select().from(users).where(eq(users.email, normalizedEmail));
+    if (user && user.isActive) {
+      const { plaintext, hash } = generateToken();
+      const expiresAt = new Date(Date.now() + RESET_TOKEN_EXPIRY_MS);
+      await db.insert(passwordResetTokens).values({ userId: user.id, tokenHash: hash, expiresAt });
+      const resetUrl = `${frontendBaseUrl()}/reset-password/${plaintext}`;
+      await getAuthEmailProvider().sendPasswordReset({ to: user.email, resetUrl, expiresAt });
+      await logAudit({ userId: user.id, userEmail: user.email, action: "password_reset_requested", recordType: "user", recordId: String(user.id) });
+    }
+  }
+  // Always 202, regardless of whether the email exists, whether the body
+  // was even valid, or whether the account is disabled — no
+  // account-existence leak (Phase 1 threat model T4, Phase 2 design §4.5).
+  res.status(202).json({ message: "If that email address has an account, a reset link has been sent." });
+});
+
+const confirmResetSchema = z.object({ token: z.string().min(1), password: z.string() });
+const GENERIC_RESET_ERROR = { error: "This reset link is invalid or has expired." };
+
+authRouter.post("/password-reset/confirm", async (req, res) => {
+  const parsed = confirmResetSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json(GENERIC_RESET_ERROR);
+    return;
+  }
+  const hash = hashToken(parsed.data.token);
+  const [tokenRow] = await db
+    .select()
+    .from(passwordResetTokens)
+    .where(and(eq(passwordResetTokens.tokenHash, hash), isNull(passwordResetTokens.usedAt), gt(passwordResetTokens.expiresAt, new Date())));
+  if (!tokenRow) {
+    res.status(400).json(GENERIC_RESET_ERROR);
+    return;
+  }
+  const policyViolation = passwordPolicyViolation(parsed.data.password);
+  if (policyViolation) {
+    res.status(400).json({ error: policyViolation });
+    return;
+  }
+
+  const passwordHash = await hashPassword(parsed.data.password);
+  const [updated] = await db
+    .update(users)
+    // Bumping sessionEpoch revokes every existing session for this user —
+    // a password reset must invalidate any session an attacker may already
+    // hold (Phase 2 design §4.5).
+    .set({ passwordHash, failedLoginAttempts: 0, lockedUntil: null, sessionEpoch: sql`${users.sessionEpoch} + 1` })
+    .where(eq(users.id, tokenRow.userId))
+    .returning();
+  await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(eq(passwordResetTokens.id, tokenRow.id));
+
+  if (updated) {
+    await logAudit({ userId: updated.id, userEmail: updated.email, action: "password_reset_completed", recordType: "user", recordId: String(updated.id) });
+  }
+  res.status(204).end();
+});
+
+const changePasswordSchema = z.object({ currentPassword: z.string(), newPassword: z.string() });
+
+authRouter.post("/change-password", requireAuth, async (req, res) => {
+  const parsed = changePasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Enter your current and new password." });
+    return;
+  }
+  const authed = req.authedUser!;
+  const [user] = await db.select().from(users).where(eq(users.id, authed.id));
+  if (!user || !user.passwordHash || !(await verifyPassword(user.passwordHash, parsed.data.currentPassword))) {
+    res.status(401).json({ error: "Current password is incorrect." });
+    return;
+  }
+  const policyViolation = passwordPolicyViolation(parsed.data.newPassword);
+  if (policyViolation) {
+    res.status(400).json({ error: policyViolation });
+    return;
+  }
+  const passwordHash = await hashPassword(parsed.data.newPassword);
+  await db
+    .update(users)
+    .set({ passwordHash, sessionEpoch: sql`${users.sessionEpoch} + 1` })
+    .where(eq(users.id, user.id));
+  await logAudit({ userId: user.id, userEmail: user.email, action: "password_changed", recordType: "user", recordId: String(user.id) });
+  // The caller's own current session must keep working after this — issue
+  // a fresh cookie against the new epoch rather than logging them out.
+  const [refreshed] = await db.select().from(users).where(eq(users.id, user.id));
+  setSessionCookie(res, user.id, refreshed!.sessionEpoch);
+  res.status(204).end();
+});
+
+// Secure, authenticated, tenant-scoped, paginated user directory — the
+// legitimate replacement for GET /known-users' enumeration (Phase 3
+// priority: "secure user discovery and account administration").
+authRouter.get("/admin/users", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const admin = req.authedUser!;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
+
+  const rows = await db
+    .select()
+    .from(users)
+    .where(eq(users.brokerageId, admin.brokerageId))
+    .orderBy(desc(users.createdAt))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+  const [{ value: total }] = await db.select({ value: count() }).from(users).where(eq(users.brokerageId, admin.brokerageId));
+
+  res.json({
+    users: rows.map((r) => ({
+      id: r.id,
+      email: r.email,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      role: r.role,
+      isActive: r.isActive,
+      emailVerifiedAt: r.emailVerifiedAt,
+      createdAt: r.createdAt,
+    })),
+    page,
+    pageSize,
+    total,
+  });
+});
+
+// Disable / re-enable a tenant member. Tenant-scoped (WHERE brokerageId =
+// caller's own) so an admin can never act on another tenant's user even by
+// guessing an id. Disabling bumps sessionEpoch in the same update so any
+// already-issued token for that user dies immediately (Phase 2 design §4.6)
+// — not just on its next epoch-check miss.
+authRouter.post("/admin/users/:id/disable", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const admin = req.authedUser!;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: "Invalid user id." });
+    return;
+  }
+  if (id === admin.id) {
+    res.status(400).json({ error: "You cannot disable your own account." });
+    return;
+  }
+  const [updated] = await db
+    .update(users)
+    .set({ isActive: false, sessionEpoch: sql`${users.sessionEpoch} + 1` })
+    .where(and(eq(users.id, id), eq(users.brokerageId, admin.brokerageId)))
+    .returning();
+  if (!updated) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  await logAudit({ userId: admin.id, action: "account_disabled", recordType: "user", recordId: String(id) });
+  res.status(204).end();
+});
+
+authRouter.post("/admin/users/:id/enable", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const admin = req.authedUser!;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: "Invalid user id." });
+    return;
+  }
+  const [updated] = await db
+    .update(users)
+    .set({ isActive: true })
+    .where(and(eq(users.id, id), eq(users.brokerageId, admin.brokerageId)))
+    .returning();
+  if (!updated) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  await logAudit({ userId: admin.id, action: "account_enabled", recordType: "user", recordId: String(id) });
   res.status(204).end();
 });
