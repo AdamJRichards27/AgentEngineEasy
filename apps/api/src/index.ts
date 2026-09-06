@@ -5,6 +5,7 @@ import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
 import { assertCorsConfigured } from "./lib/cors.js";
 import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
+import { assertAuthEmailProviderConfigured } from "./lib/auth/email.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
@@ -30,6 +31,12 @@ assertCorsConfigured();
 // configured) with no authentication because an operator forgot to set
 // METRICS_TOKEN. See lib/metricsAuth.ts.
 assertMetricsAuthConfigured();
+
+// Critical Blocker Remediation, Phase 2/4: same fail-closed shape as the
+// three checks above — a production process must not silently rely on the
+// sandbox (non-delivering) auth email provider for invitation/password-reset
+// emails. See lib/auth/email.ts.
+assertAuthEmailProviderConfigured();
 
 configureEvents();
 

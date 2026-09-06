@@ -69,6 +69,13 @@ const ALLOWLISTED_FILES = new Set<string>([
   // src/scripts/reconcileLegacyCommissions.ts`) — an operator-run script,
   // not part of the running server.
   "apps/api/src/scripts/reconcileLegacyCommissions.ts",
+  // Critical Blocker Remediation, Phase 4 — one-time admin bootstrap CLI
+  // (`pnpm --filter @aee/api run bootstrap-admin -- --email ... --brokerage
+  // ...`). An explicit, human-operated, non-request-path script — see its
+  // own header comment. Uses console.log/error directly (not the
+  // structured logger) because its output is a terminal prompt/result for
+  // the operator running it, not a server log line.
+  "apps/api/src/scripts/bootstrapAdmin.ts",
 ]);
 
 // Directories anywhere under a scan root that are allowed to use console.*
