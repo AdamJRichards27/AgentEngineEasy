@@ -19,11 +19,7 @@ This build must not admit pilot participants in its current state. The blocking 
 **demonstrated, structural authentication and tenant-isolation failure** (§2 below) — not a
 theoretical risk, a missing nice-to-have, or something a configuration change fixes. It is
 compounded by, but does not depend on, a second and independent category of blocker —
-essential legal/privacy documents that do not exist at all (§7) and a platform-vs-brief
-jurisdiction mismatch (§0) — either of which would, on its own, also require
-**BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED** treatment before a pilot could start. Both
-categories must be resolved; this report names one decision, per the gate's own instruction,
-and explains the second explicitly in §12 so it is not lost.
+essential legal/privacy documents that do not exist at all (§7).
 
 This is not a comment on the engineering team's competence or the codebase's overall quality.
 Large parts of this codebase — the core Run-tier transaction engine specifically — are unusually
@@ -31,31 +27,59 @@ well built, self-aware about their own limits, and genuinely tested end-to-end (
 below is narrow, specific, and fully evidenced; it is also sufficient, on its own, to block this
 gate.
 
+**Status of this section as of the Critical Blocker Remediation pass:** this FINAL DECISION line,
+and the rest of this report, describe the state of the codebase **before** the authentication
+remediation, jurisdiction correction, legal drafting, and other work carried out under "AE
+Operational Readiness — Critical Blocker Remediation." That remediation pass re-runs this gate
+and issues its own renewed final decision in a separate completion report (Phase 12); it does not
+edit this line, so that the original gate finding remains an intact historical record. See that
+renewed report for the current decision.
+
 ---
 
-## 0. Jurisdiction finding (read this before anything else in this report)
+## 0. Jurisdiction — RESOLVED: Queensland, Australia (Critical Blocker Remediation, Phase 6)
 
-The gate instruction that produced this report describes Agent Engine 2.0 as a New Zealand
-real-estate platform. Direct code inspection found the opposite, repeatedly and unambiguously:
+**This section originally read as an unresolved blocker (B3). It has since been resolved by an
+explicit decision from the AE Project Owner and is retained below, corrected, as the historical
+record plus the current, confirmed fact.**
+
+The gate instruction that originally produced this report described Agent Engine 2.0 as a New
+Zealand real-estate platform. Direct code inspection found the opposite, repeatedly and
+unambiguously — and that finding is exactly what the AE Project Owner has now confirmed is
+correct:
+
+**The AE Project Owner has confirmed, in writing, that this pilot's jurisdiction is Queensland,
+Australia — not New Zealand, and not a multi-jurisdiction launch.** The codebase's existing
+Australian defaults were not a mismatch to fix; they were, and are, the correct defaults for the
+confirmed jurisdiction:
 
 - `README.md`: *"a simplified, property-led real estate transaction platform for **Australian**
   real estate agents."*
-- GST is hardcoded at the **Australian** 10% rate in the Pit Crew success-fee calculation, with
-  **no override field anywhere in the schema** (`packages/integrations` / `apps/api/src/lib/
-  financial/pcFeeCalculations.ts`) — if this pilot is genuinely for New Zealand agents, every
-  Pit Crew fee this engine would ever calculate is wrong by a third, with no configuration
-  escape hatch short of a code change.
-- Currency is hardcoded `"AUD"` at every money-handling call site.
-- The direct-debit mandate flow is modelled on Australia's Direct-Debit-Request shape, not a
-  NZ direct-debit or Automatic Payment scheme.
-- AML/CTF terminology throughout is AUSTRAC-shaped; no NZ AML/CFT Act-specific concepts appear
-  anywhere in the codebase.
+- GST is hardcoded at the **Australian** 10% rate in the Pit Crew success-fee calculation
+  (`packages/integrations` / `apps/api/src/lib/financial/pcFeeCalculations.ts`) — this is the
+  **correct rate for Queensland, Australia** as now confirmed. There is still **no per-brokerage
+  override field anywhere in the schema** for this specific calculation; that is tracked below as
+  a non-blocking future item, not a jurisdiction error.
+- Currency is hardcoded `"AUD"` at every money-handling call site — correct for the confirmed
+  jurisdiction.
+- The direct-debit mandate flow is modelled on Australia's Direct-Debit-Request shape — correct
+  for the confirmed jurisdiction.
+- AML/CTF terminology throughout is AUSTRAC-shaped — correct for the confirmed jurisdiction; no
+  NZ AML/CFT Act-specific concepts appear anywhere in the codebase, and none are needed.
 
-**This report does not resolve this mismatch and does not guess which is correct.** It is
-recorded here as a fact for the AE Project Owner to reconcile, and is listed again in §12 as a
-required external/human decision. Every dollar figure and every AML/compliance statement
-elsewhere in this report should be read as describing the codebase **as built (Australian)**,
-not as a claim about New Zealand.
+**Tracked future item (non-blocking):** the Pit Crew success-fee GST rate
+(`pcFeeCalculations.ts`) remains hardcoded with no per-brokerage/per-jurisdiction override field
+(no `gstRateBps` column on `pcFeeAuthorities`; `financialSettings.defaultGstRateBps` exists but is
+not consulted by this specific calculation — see
+`docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md` §3–4). This is not a blocker for a
+Queensland/Australia-only pilot at the current 10% rate, but should be made configurable before
+this platform is ever extended to a second jurisdiction, or if the Australian GST rate itself
+changes. See `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md` for the full correction
+record and this item's tracking entry.
+
+Every dollar figure and every AML/compliance statement elsewhere in this report describes the
+codebase as built (Australian, specifically Queensland for this pilot) — this is now a
+confirmed fact, not an open question.
 
 ---
 
@@ -150,6 +174,13 @@ manually audit the user list" (documented as an operational mitigation in
 `docs/CONTROLLED_PILOT_PLAN.md`) reduces but does not close the exposure, and this report does
 not represent it as sufficient to lift the block.
 
+**Status as of the Critical Blocker Remediation pass:** this finding is addressed by a real,
+invitation-only authentication system built under that pass — see
+`docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md` and
+`docs/gate-evidence/PHASE2_AUTHENTICATION_DESIGN.md` for the design, and the renewed Phase 12
+completion report for the verification evidence. This section is left otherwise unchanged as the
+original finding's historical record.
+
 ---
 
 ## 3. What this codebase does well (for balance — this finding does not mean the whole platform is unreliable)
@@ -206,14 +237,14 @@ relevant to the decision above:
 
 | ID | Severity | Area | Finding | Evidence | Remediable within this gate? | Owner |
 |---|---|---|---|---|---|---|
-| B1 | **Critical — gate-blocking** | Security / tenant isolation | No real authentication exists; any user can be impersonated via `POST /auth/dev-login`, and `GET /auth/known-users` unauthenticated-ly enumerates every account | §2 above; `apps/api/src/routes/auth.ts:30-135`, `apps/api/src/lib/env.ts:19-31` | **No** — requires a real identity-verification feature build, explicitly out of this gate's bounded-remediation scope | AE Backend Engineering (build); AE Project Owner (accept/authorize any interim mitigation) |
-| B2 | **Critical — gate-blocking** | Legal / privacy | 12 of 14 essential pilot legal/privacy artifacts are completely absent from the repository (platform ToS, privacy policy, consent notice, pilot-participation terms, PC service terms, direct-debit authority text, data-processing arrangements, AML responsibility statement, support/complaint process, data export/deletion process — code and documentation both, breach-notification process, record-retention schedule) | `docs/gate-evidence/PHASE7_PRIVACY_AND_LEGAL_INVENTORY.md` | **No** — this report does not draft or certify missing legal documents; supplying and approving them is a business/legal decision | AE Project Owner / external legal counsel |
-| B3 | **Critical, compounding** | Jurisdiction | Codebase is built for Australia (AU GST, AUD, AU direct-debit shape, AUSTRAC terminology); gate instruction assumed New Zealand; no NZ-specific content exists anywhere | §0 above | **No** — a business/product decision, not an engineering fix | AE Project Owner |
+| B1 | **Critical — gate-blocking** | Security / tenant isolation | No real authentication exists; any user can be impersonated via `POST /auth/dev-login`, and `GET /auth/known-users` unauthenticated-ly enumerates every account | §2 above; `apps/api/src/routes/auth.ts:30-135`, `apps/api/src/lib/env.ts:19-31` | **No** — requires a real identity-verification feature build, explicitly out of this gate's bounded-remediation scope. **Addressed under the separate Critical Blocker Remediation pass** — see §2's status note. | AE Backend Engineering (build); AE Project Owner (accept/authorize any interim mitigation) |
+| B2 | **Critical — gate-blocking** | Legal / privacy | 12 of 14 essential pilot legal/privacy artifacts are completely absent from the repository (platform ToS, privacy policy, consent notice, pilot-participation terms, PC service terms, direct-debit authority text, data-processing arrangements, AML responsibility statement, support/complaint process, data export/deletion process — code and documentation both, breach-notification process, record-retention schedule) | `docs/gate-evidence/PHASE7_PRIVACY_AND_LEGAL_INVENTORY.md` | **No** — this report does not draft or certify missing legal documents; supplying and approving them is a business/legal decision. **A full draft pack has since been produced under the Critical Blocker Remediation pass (Phase 7)** — every document marked DRAFT — LEGAL REVIEW REQUIRED and still pending formal legal approval; see `docs/legal/LEGAL_APPROVAL_REGISTER.md`. | AE Project Owner / external legal counsel |
+| B3 | **Resolved (Critical Blocker Remediation, Phase 6)** | Jurisdiction | Codebase is built for Australia (AU GST, AUD, AU direct-debit shape, AUSTRAC terminology); gate instruction originally assumed New Zealand; no NZ-specific content exists anywhere. **The AE Project Owner has confirmed the pilot's jurisdiction is Queensland, Australia — the codebase's existing defaults are correct, not a mismatch.** | §0 above; `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md` | **Resolved** — Owner decision received; no code change required. A non-blocking future item (configurable GST rate) is tracked separately. | AE Project Owner (decision received) |
 | B4 | **High** | Deployment | No configured path from this repository to a running pilot instance: `.replit` has no `[deployment]` section, its run command starts dev-mode processes only, and no code anywhere serves the built web frontend in any mode | `docs/gate-evidence/PHASE4_ENVIRONMENT_AND_DEPLOYMENT_AUDIT.md` §2 | Partially — configuring a real deployment is bounded infrastructure work, but the frontend-serving decision (API-served static vs. separate host) is a architecture choice this report does not make unilaterally | AE Backend Engineering / AE Project Owner (topology decision) |
 | B5 | **High** | Backup / data integrity | Generated transaction documents (10,866 files / 71MB in this mirror) live on local disk via `LocalObjectStorageProvider` with **zero backup coverage of any kind**; the database backup/restore mechanism is proven mechanically but has no automated recurring schedule, no offsite copy, and no encryption at rest for the dump file | `docs/BACKUP_AND_RESTORE_RUNBOOK.md` | Partially — a recurring schedule and an offsite copy target are bounded operational work; a real object-storage backup mechanism may require more | AE Backend Engineering / Platform Ops |
 | B6 | **High** | Security (webhook surface) | The only mandate-payment (direct-debit) webhook provider unconditionally accepts any signature and is reachable on the public internet with no per-brokerage scoping; the Grow subscription billing "real" Stripe adapter's signature check is an explicitly self-labelled non-cryptographic placeholder | `docs/INTEGRATION_FALLBACK_MATRIX.md` §"Webhook signature verification" | Partially remediated this pass (structured-logging of the provider-fallback path — see §11); the underlying missing real signature verification is not bounded remediation | AE Backend Engineering |
 | B7 | **Medium** | Financial | No real payment rail exists for Pit Crew success fees (sandbox only); invoicing is entirely unimplemented across all billing subsystems | `docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md` §5–6 | N/A — resolved for this pilot by recommending free/manually-invoiced only, not by building a payment rail | AE Backend Engineering (future); AE Project Owner (billing-mode decision) |
-| B8 | **Medium** | Operability | No in-app user-lifecycle management (role change, deactivation, admin succession) — every such action requires a direct database write | §4 above; `docs/gate-evidence/PHASE3_CAPABILITY_MATRIX_AND_SCENARIOS.md` | No — a feature build | AE Backend Engineering |
+| B8 | **Medium** | Operability | No in-app user-lifecycle management (role change, deactivation, admin succession) — every such action requires a direct database write | §4 above; `docs/gate-evidence/PHASE3_CAPABILITY_MATRIX_AND_SCENARIOS.md` | No — a feature build. **Partially addressed under Critical Blocker Remediation Phase 4**: disable/enable is now in-app (`POST /auth/admin/users/:id/disable|enable`); role change and admin succession remain out of scope. | AE Backend Engineering |
 | B9 | **Medium** | Observability | No external alerting/paging pipeline exists at all; metrics are real but unscraped; no error-tracking service; no documented log-access mechanism beyond an open console tab | `docs/gate-evidence/PHASE4_ENVIRONMENT_AND_DEPLOYMENT_AUDIT.md` §9–10 | Partially — requires standing up external infrastructure, not a code change | AE Backend Engineering / SRE (role TBD) |
 | B10 | **Low, resolved this pass** | Observability hygiene | 5 provider-fallback `console.warn` sites in `packages/integrations/*` bypassed the structured logger and its redaction layer | §11 below | **Yes — fixed this pass** | AE Backend Engineering |
 
@@ -230,6 +261,7 @@ relevant to the decision above:
 | No timeout/circuit-breaker on AML/e-sign/payment/property-data outbound HTTP calls | **Monitor, low current risk** | Currently unreachable because every provider defaults to mock; becomes live risk the moment any is switched to its real HTTP-backed implementation. |
 | Structured-logging migration is incomplete platform-wide | **Monitor** | `docs/OBSERVABILITY_STANDARD.md` self-discloses 92 of an original 109 raw `console.*` sites across 41 files remain unconverted, beyond the 5 fixed this pass (§11). Out of this gate's bounded scope; flagged for a dedicated future pass. |
 | Communications webhook secret has an insecure, source-visible hardcoded fallback if `COMMUNICATIONS_WEBHOOK_SECRET` is left unset | **Monitor — operational control, not a code gap** | The cryptographic check itself is genuine (HMAC-SHA256, constant-time compare); the risk is an operator forgetting to set the env var, which is not documented in `.env.example`. Recommend adding it there and treating it as a required pilot-launch secret. |
+| Pit Crew success-fee GST rate has no per-brokerage/per-jurisdiction override field | **Monitor — tracked future item (Phase 6)** | Correct at 10% for the confirmed Queensland, Australia pilot; not a blocker today. Should be made configurable before any future multi-jurisdiction extension, or if the AU rate changes. See `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md`. |
 
 ---
 
@@ -244,7 +276,7 @@ relevant to the decision above:
 | Privacy/security/AML-adjacent decisions, disclosure sign-off | AE Security/Compliance Owner |
 | Authentication/tenant-isolation remediation (B1) | AE Backend Engineering, authorized by AE Project Owner |
 | Legal/privacy document sourcing and approval (B2) | AE Project Owner / external legal counsel |
-| Jurisdiction confirmation (B3) | AE Project Owner |
+| Jurisdiction confirmation (B3) | **Confirmed: Queensland, Australia (AE Project Owner, Critical Blocker Remediation Phase 6)** |
 | Deployment topology decision and execution (B4) | AE Project Owner (decision) / AE Backend Engineering (execution) |
 | Backup schedule, offsite storage, document-store backup (B5) | AE Backend Engineering / Platform Ops |
 | Real webhook signature verification before any real vendor goes live (B6) | AE Backend Engineering |
@@ -328,34 +360,47 @@ legal/risk decisions):
 **Explicitly not attempted, per the gate's own prohibitions:** building real authentication
 (B1), drafting or certifying missing legal/privacy documents (B2), resolving the jurisdiction
 question (B3), implementing Scale, replacing the `xlsx` parser under issue #26, enabling live
-billing, or weakening any existing security control.
+billing, or weakening any existing security control. **B1, B2, and B3 have since been addressed
+under the separate "AE Operational Readiness — Critical Blocker Remediation" pass** — see the
+status notes in §0, §2, and the blocker register (§5) above, and the renewed Phase 12 completion
+report for the full evidence.
 
 ---
 
 ## 12. Unresolved blockers and external/human decisions required
 
-**Cannot be closed by further engineering work within this gate's rules:**
+**Cannot be closed by further engineering work within this gate's rules — status as originally
+written, with resolution notes added where applicable:**
 
 - **B1 (Critical, primary):** real authentication must be designed, built, and reviewed as its
   own feature — or the AE Project Owner must explicitly accept a documented, bounded interim
   mitigation (e.g. IP-allowlisting the pilot API, or a genuinely reviewed shared-secret scheme)
   with eyes open about what it does and does not close. Either way, this is a decision and a
-  build this report does not make unilaterally.
+  build this report does not make unilaterally. **Addressed under the Critical Blocker
+  Remediation pass — no interim mitigation was accepted; a real invitation-only authentication
+  system was built instead. See the renewed Phase 12 report for verification evidence.**
 - **B2 (Critical):** platform ToS, privacy policy, consent notice, pilot-participation terms, PC
   service terms, a data-processing disclosure covering the AI/AML/e-sign/payment sub-processors
   named in `.env.example`, an AML responsibility statement, a documented support/complaint
   process, a data export/deletion process, a breach-notification process, and a record-retention
   schedule must all be supplied and formally approved by the AE Project Owner and/or legal
-  counsel. **This report does not supply, draft, or certify any of these.**
-- **B3 (Critical, compounding):** the AE Project Owner must confirm which jurisdiction this pilot
-  is actually for, and whichever answer is given, the GST/currency/mandate-shape findings in
-  `docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md` must be re-checked against it.
+  counsel. **This report does not supply, draft, or certify any of these. A full draft pack has
+  since been produced (Critical Blocker Remediation, Phase 7) — every document is explicitly
+  marked DRAFT — LEGAL REVIEW REQUIRED and formal legal approval is still outstanding; see
+  `docs/legal/LEGAL_APPROVAL_REGISTER.md`.**
+- **B3 (Resolved):** ~~the AE Project Owner must confirm which jurisdiction this pilot is
+  actually for~~ — **resolved: the AE Project Owner has confirmed Queensland, Australia.** The
+  GST/currency/mandate-shape findings in
+  `docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md` have been re-read against this
+  confirmed jurisdiction and found to already be correct as built; see
+  `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md`.
 - **B4 (High):** a deployment topology decision (how the built web SPA gets served) is an
   architecture choice for the AE Project Owner/Backend Engineering to make together, not
   something this report imposes.
 - **B7 (Medium):** the AE Project Owner must confirm the pilot runs free or manually-invoiced
   only, per the Phase 6 recommendation, rather than assuming live charging is authorized by
-  default.
+  default. **Confirmed under Critical Blocker Remediation: free or manually-invoiced only; no
+  automated subscription/direct-debit/PC success-fee/trust-money transaction is authorised.**
 
 ---
 
@@ -408,6 +453,11 @@ billing, or weakening any existing security control.
   gate's Phase 12 makes on the branch; the PR linked below tracks the branch reference directly, so
   it carries this commit too — see the PR itself, not a hardcoded SHA, for the always-current HEAD
   if the branch is ever updated again after this report is written.
+
+  **Note (Critical Blocker Remediation pass):** the branch was updated substantially again after
+  this SHA under the separate remediation instruction described at the top of this report. See
+  the renewed Phase 12 completion report for the current final SHA and full commit list of that
+  later pass.
 - **PR:** [PR #27 — Agent Engine 2.0 — Operational Readiness and Controlled Pilot Gate]
   (https://github.com/AdamJRichards27/AgentEngineEasy/pull/27), opened from
   `feat/operational-readiness-pilot-gate` into `staging` as a **draft**, **not merged**. This
@@ -420,13 +470,20 @@ billing, or weakening any existing security control.
 1. AE Project Owner reviews this report and the six supporting deliverable documents.
 2. AE Project Owner decides on B1's remediation path (build real auth vs. an explicit, accepted
    interim mitigation) and directs AE Backend Engineering accordingly — this is new work, tracked
-   as its own effort, not a continuation of this gate.
+   as its own effort, not a continuation of this gate. **Done under Critical Blocker
+   Remediation: real auth was built, no interim mitigation accepted.**
 3. AE Project Owner and/or legal counsel source and approve the documents listed under B2.
+   **A full draft pack now exists (Phase 7); formal legal approval remains outstanding — see
+   `docs/legal/LEGAL_APPROVAL_REGISTER.md`.**
 4. AE Project Owner confirms the jurisdiction (B3) and directs a re-check of the GST/currency
-   findings against it.
+   findings against it. **Done: confirmed Queensland, Australia; re-check performed and recorded
+   in `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md` — the existing AU defaults are
+   correct.**
 5. Once B1–B3 are closed, re-run this gate (or a focused re-verification of just the closed
    items) before any participant is invited — do not treat this report's other, non-blocking
-   findings as a substitute for that re-check.
+   findings as a substitute for that re-check. **B1 and B3 are closed; B2 has a draft pack
+   pending formal legal approval. The gate has been re-run under the Critical Blocker
+   Remediation pass — see its own completion report for the renewed decision.**
 6. This gate's own PR ([#27](https://github.com/AdamJRichards27/AgentEngineEasy/pull/27)) stays
    open, as a draft, unmerged, as the durable record of this pass — merging it is a
    documentation-only integration decision for the AE Project Owner once ready, and does not

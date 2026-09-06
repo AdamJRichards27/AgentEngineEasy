@@ -21,18 +21,31 @@ and product rehearsal — not a commercial launch, not a source of real revenue,
 substitute for the legal/compliance readiness this platform has not yet reached (see the Gate
 Report's blocker register).
 
-### A.2 Jurisdiction — flagged, not resolved, by this plan
+### A.2 Jurisdiction — RESOLVED: Queensland, Australia
 
-The instruction that produced this readiness gate assumed a **New Zealand** pilot. Direct
-code inspection (Phase 6/7 of the Gate Report) found the codebase is built for the
+**This section originally read "flagged, not resolved" and is now updated to record the AE
+Project Owner's decision.**
+
+The instruction that originally produced this readiness gate assumed a **New Zealand** pilot.
+Direct code inspection (Phase 6/7 of the Gate Report) found the codebase is built for the
 **Australian** market throughout — AU GST (10%, hardcoded in the Pit Crew fee path with no
 override), AUD currency literals, an AU Direct-Debit-Request-shaped mandate flow, AUSTRAC-style
 AML/CTF terminology, and NSW-shaped test fixtures. No NZ-specific legal, tax, or regulatory
-content exists anywhere in the repository. **This plan does not resolve that mismatch** — it is
-listed in the Gate Report's "external/human decisions required" section. Whichever jurisdiction
-the AE Project Owner confirms the pilot is actually for, the GST/currency/mandate-shape findings
-in Phase 6 need to be re-checked against that confirmed jurisdiction before real figures are
-trusted, even for a synthetic-data pilot.
+content exists anywhere in the repository.
+
+**The AE Project Owner has confirmed, in writing, that this pilot's jurisdiction is Queensland,
+Australia — not New Zealand.** This resolves the mismatch: the codebase's existing AU defaults
+were the correct ones all along for the confirmed jurisdiction, not something requiring a
+correction. The GST/currency/mandate-shape findings in Phase 6 have been re-checked against this
+confirmed jurisdiction (see `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md`) and found to
+already be correct as built. This pilot runs under **AUD currency, 10% GST, and Australian
+Direct-Debit-Request-shaped mandate handling**, consistent with the code as it stands. This plan
+does not describe, and does not authorise, any multi-jurisdiction or NZ operation.
+
+**Tracked future item (non-blocking for this pilot):** the Pit Crew success-fee GST rate has no
+per-brokerage/jurisdiction override field in the schema — fine at the confirmed 10% AU rate today,
+but should be made configurable before any future extension to a second jurisdiction. See the
+Gate Report's risk register and `docs/gate-evidence/PHASE6_JURISDICTION_CORRECTION.md`.
 
 ### A.3 Run / Grow / Scale inclusion boundary
 
@@ -72,12 +85,15 @@ codebase). Mapping the instruction's intent onto what exists:
 
 No public signup. No unrestricted high-impact AI action (only the read-only Copilot widget, at
 its existing Level-0 cap, would ever be enabled). No live billing or real charging on any of the
-three billing subsystems found in the codebase. No real email/SMS delivery (none exists to
-enable). No live AML/e-signature vendor calls (none is procured). No trust money received, held,
-transferred, or disbursed by Agent Engine at any point — this boundary holds today as an
-emergent property of what has and hasn't been built (Phase 6), not yet as a technically enforced
-invariant, and the Gate Report recommends closing that gap before this claim is relied on beyond
-a pilot with a small, reviewed set of callers.
+three billing subsystems found in the codebase — free or manually-invoiced only, and no automated
+subscription, direct-debit, PC success-fee, or trust-money transaction is authorised. No real
+email/SMS delivery (none exists to enable; test/sandbox email only). No live AML/e-signature
+vendor calls (none is procured; test/sandbox modes only for any external service). No trust money
+received, held, transferred, or disbursed by Agent Engine at any point — this boundary holds
+today as an emergent property of what has and hasn't been built (Phase 6), not yet as a
+technically enforced invariant, and the Gate Report recommends closing that gap before this claim
+is relied on beyond a pilot with a small, reviewed set of callers. No New Zealand operation and no
+multi-jurisdiction claim — this pilot is Queensland, Australia only (§A.2).
 
 ---
 
@@ -86,19 +102,29 @@ a pilot with a small, reviewed set of callers.
 ### B.1 Participant selection and count
 
 5–10 individually invited agents, selected and personally invited by the AE Project Owner (or a
-role they delegate) — not opened to self-signup. Given the Phase 3 finding that **no in-app
-invitation mechanism exists** (dev-login is a self-serve "join by knowing the brokerage name"
-flow), the realistic pilot onboarding mechanism, until an invitation system is built, is: AE
-Project Owner privately shares a specific brokerage name (treated as a shared secret for the
-pilot's duration) with each invited participant individually, and AE Backend Engineering
-periodically audits the resulting user list (`GET /auth/known-users`) to confirm no
-unexpected accounts have joined.
+role they delegate) — not opened to self-signup.
 
-### B.2 Jurisdictions
+**Updated under the Critical Blocker Remediation pass:** the original text below described
+sharing a brokerage name as a shared-secret workaround, because no invitation mechanism existed
+in code at the time. That gap is now closed — see
+`docs/gate-evidence/PHASE2_AUTHENTICATION_DESIGN.md` and
+`docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md`. Onboarding is described in §B.4 below using
+the real invitation flow; the original shared-brokerage-name approach is retained here, struck
+through, purely as a historical record of what this plan said before that system existed:
 
-Whichever single jurisdiction the AE Project Owner confirms per §A.2 — this plan does not
-recommend running the pilot simultaneously across two jurisdictions given the GST/currency
-hardcoding found in Phase 6.
+> ~~Given the Phase 3 finding that no in-app invitation mechanism exists (dev-login is a
+> self-serve "join by knowing the brokerage name" flow), the realistic pilot onboarding
+> mechanism, until an invitation system is built, is: AE Project Owner privately shares a
+> specific brokerage name (treated as a shared secret for the pilot's duration) with each
+> invited participant individually, and AE Backend Engineering periodically audits the
+> resulting user list (`GET /auth/known-users`) to confirm no unexpected accounts have
+> joined.~~
+
+### B.2 Jurisdiction
+
+**Queensland, Australia — confirmed by the AE Project Owner (§A.2).** This plan does not
+recommend, and this pilot does not run, simultaneously across two jurisdictions, and no
+New Zealand operation is in scope.
 
 ### B.3 Functionality included / excluded
 
@@ -107,19 +133,28 @@ As defined in Part A, cross-referenced to the Gate Report's full capability matr
 
 ### B.4 Onboarding
 
-1. AE Project Owner confirms each participant's identity out of band (this pilot has no
-   in-app identity verification — see the Gate Report's primary blocker).
-2. AE Backend Engineering privately shares the pilot brokerage name/credentials-equivalent with
-   each participant.
-3. Each participant completes `POST /auth/dev-login` themselves (name, email, brokerage name);
-   the first participant in a new pilot brokerage becomes its Brokerage Administrator
-   automatically — the AE Project Owner should decide in advance who that should be and have
-   them go first, since there is no in-app way to change this after the fact without a direct
-   database update.
+1. AE Project Owner (or a Brokerage Administrator they designate) identifies each participant by
+   name, email, and intended role.
+2. The Brokerage Administrator sends each participant a real, admin-issued invitation
+   (`POST /auth/admin/invitations`) — a single-use, expiring link emailed via the test/sandbox
+   email provider in this environment (see `docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md`).
+   A real, approved email provider must be configured before this link reaches a genuine pilot
+   participant's real inbox.
+3. Each participant opens their invitation link, sets their own password, and must affirmatively
+   accept the current (still DRAFT — see `docs/legal/LEGAL_APPROVAL_REGISTER.md`) Terms of Use
+   and Privacy Policy before their account is created — there is no account creation path that
+   skips this.
 4. AE Support Lead sends each participant the welcome material referenced in
    `docs/PILOT_SUPPORT_AND_ESCALATION.md` (support channel, hours, what synthetic data means for
    this pilot, and the explicit statement that no real email/SMS/AML/e-signature/payment ever
    fires during this pilot).
+
+**Historical note:** an earlier version of this section described `POST /auth/dev-login`
+(name/email/brokerage name, no password, no invitation) as the onboarding mechanism, with the
+first participant in a brokerage automatically becoming its Brokerage Administrator. That
+mechanism is retained in the codebase only as a development/test fixture (disabled outside an
+explicitly enabled development environment) and is no longer how a pilot participant is meant to
+be onboarded — see `docs/gate-evidence/AUTHENTICATION_THREAT_MODEL.md` §6.
 
 ### B.5 Training
 
@@ -127,7 +162,8 @@ A short walkthrough (live or recorded) of: the core transaction lifecycle (Scena
 Gate Report), what to do when something looks wrong (point to the support channel, not direct
 engineer contact), and an explicit callout of the known gaps that affect daily use — no
 transaction-cancellation/fall-through state (a genuinely dead deal has no clean way to be
-recorded), no in-app role management, and no real notifications ever being sent.
+recorded), no in-app role management beyond disable/re-enable, and no real notifications ever
+being sent.
 
 ### B.6 Test-to-live transition
 
@@ -153,8 +189,9 @@ incident-log entries.
 
 1. Number of transactions started and successfully closed end-to-end.
 2. Number and category of exceptions/risk-engine findings raised per transaction.
-3. Number of manual database interventions required (role changes, deactivations, admin
-   succession) — this is a direct signal of the user-lifecycle-management gap's real-world cost.
+3. Number of manual database interventions still required (role changes other than
+   disable/re-enable, and admin succession) — this is a direct signal of the remaining
+   user-lifecycle-management gap's real-world cost.
 4. Number of support requests by severity, and whether each met its target response time.
 5. Number of incident-log entries opened (Incident Response Runbook), by scenario number.
 6. Number of times a transaction became "stuck" with no clean state to move to (the
@@ -186,8 +223,8 @@ extend the pilot under the same terms, formally close it out with findings feedi
 readiness gate for wider launch, or stop it early for cause per §B.11. This plan does not
 pre-authorise progression beyond the pilot; that requires a fresh readiness assessment against
 whatever has changed by then (in particular: has the authentication gap been fixed, have the
-missing legal/privacy documents been supplied, has a real payment rail been built if live
-billing is ever wanted).
+missing legal/privacy documents been supplied and formally approved, has a real payment rail been
+built if live billing is ever wanted).
 
 ### B.11 Mandatory stop-pilot conditions
 
@@ -216,6 +253,7 @@ This plan is ready to execute the moment the Gate Report's decision changes from
 authentication mechanism (or an explicit, owner-accepted compensating control) must close the
 tenant-isolation gap described there; the essential pilot-participation legal/privacy documents
 listed as missing in Phase 7 must be supplied and formally approved (not drafted by, and not
-certified as sufficient by, this engineering process); and the jurisdiction question in §A.2 must
-be resolved by the AE Project Owner. Everything else in this plan can proceed unchanged once
-those are addressed.
+certified as sufficient by, this engineering process). **The jurisdiction question in the
+original §A.2 has been resolved** — the AE Project Owner has confirmed Queensland, Australia, and
+the codebase's existing defaults are correct for it; no further action is needed on that point.
+Everything else in this plan can proceed unchanged once the remaining items above are addressed.
