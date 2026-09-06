@@ -41,3 +41,43 @@ export function isInsecureCookieExplicitlyAllowed(): boolean {
   if (isProductionEnvironment()) return false;
   return process.env.ALLOW_INSECURE_DEV_COOKIES === "true";
 }
+
+/**
+ * Critical Blocker Remediation, Phase 10 — commercial/external-action lock.
+ *
+ * True only when an operator has explicitly set
+ * LIVE_EXTERNAL_TRANSACTIONS_APPROVED to the literal string "true". This is
+ * the single flag that must be flipped before this process is allowed to
+ * use a real (non-mock/non-sandbox) billing, payment, AML, e-signature, or
+ * property-data provider in production — see mustForceMockExternalProvider()
+ * below and its equivalents inline in each packages/integrations/* provider
+ * factory (those packages cannot import this file — apps/api depends on
+ * them, not the other way around — so each repeats this same two-line
+ * check locally rather than sharing this function directly).
+ *
+ * Outside production this has no effect (see mustForceMockExternalProvider):
+ * local/test runs keep today's behaviour unchanged either way.
+ */
+export function isLiveExternalTransactionsApproved(): boolean {
+  return process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED === "true";
+}
+
+/**
+ * True only in production, when live external transactions have NOT been
+ * explicitly approved (isLiveExternalTransactionsApproved() above). While
+ * true, every provider factory in this app must ignore its own PROVIDER
+ * env var and any configured credentials, and return its mock/sandbox
+ * implementation instead — regardless of whether a real API key/secret
+ * happens to be present in the environment (e.g. copied in from another
+ * deployment's Secrets by mistake). This is what makes the AE Project
+ * Owner's explicit instruction for this remediation pass — "no automated
+ * subscription/direct-debit/PC success-fee/trust-money transaction
+ * authorised" and "test/sandbox modes only; no real AML/email/SMS/
+ * e-signature/payment/property-data action authorised" — true independent
+ * of what credentials an operator has or has not configured, the same
+ * "must not depend on a credential simply being absent" reasoning as every
+ * other fail-closed gate in this file.
+ */
+export function mustForceMockExternalProvider(): boolean {
+  return isProductionEnvironment() && !isLiveExternalTransactionsApproved();
+}

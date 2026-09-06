@@ -1,6 +1,7 @@
 import type { BillingProvider } from "@aee/integration-billing";
 import { MockBillingProvider, StripeBillingProvider } from "@aee/integration-billing";
 import { logger } from "@aee/events";
+import { mustForceMockExternalProvider } from "../env.js";
 
 export interface BillingGatewayConfig {
   providerName: "mock" | "stripe";
@@ -29,6 +30,19 @@ export function getBillingProvider(): BillingProvider {
 
   const config = loadBillingGatewayConfig();
   if (config.providerName === "stripe") {
+    // Critical Blocker Remediation, Phase 10 — commercial lock. Checked
+    // BEFORE the credential check below, and independent of it: a real
+    // STRIPE_SECRET_KEY being present must never be sufficient on its own
+    // to start a real subscription in this pilot. See env.ts's
+    // mustForceMockExternalProvider() and
+    // docs/gate-evidence/PHASE10_BILLING_AND_EXTERNAL_ACTION_LOCKS.md.
+    if (mustForceMockExternalProvider()) {
+      logger.warn("billing_provider_locked_to_mock_pilot_policy", {
+        reason: "BILLING_PROVIDER=stripe was requested but LIVE_EXTERNAL_TRANSACTIONS_APPROVED is not \"true\" in production — no real subscription/checkout is authorised for this pilot.",
+      });
+      cachedProvider = new MockBillingProvider();
+      return cachedProvider;
+    }
     if (!config.stripeSecretKey) {
       logger.warn("billing_provider_stripe_secret_key_missing_fallback_to_mock", {});
       cachedProvider = new MockBillingProvider();
