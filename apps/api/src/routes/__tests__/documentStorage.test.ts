@@ -774,26 +774,31 @@ test("batch document locks prevent a competing upload from creating partial acti
       .sort((left, right) => left.id - right.id);
 
     const competing: {
-      promise: ReturnType<typeof ingestDocumentVersion> | null;
-    } = { promise: null };
+      rejection: Promise<void> | null;
+    } = { rejection: null };
     storage.failPutForKeyIncludes = `/documents/${laterDocumentId}/`;
     storage.onPut = (key) => {
       if (
-        competing.promise ||
+        competing.rejection ||
         !key.includes(`/documents/${firstDocumentId}/`)
       ) {
         return;
       }
-      competing.promise = ingestDocumentVersion({
-        documentId: laterDocumentId,
-        brokerageId: A.brokerageId,
-        bytes: Buffer.from("concurrent replacement bytes\n"),
-        originalFilename: `concurrent-${laterDocumentId}.txt`,
-        declaredMimeType: "text/plain",
-        replacementReason: "Concurrent test upload",
-        retentionClass: "transaction",
-        source: "upload",
-      });
+      competing.rejection = assert.rejects(
+        ingestDocumentVersion({
+          documentId: laterDocumentId,
+          brokerageId: A.brokerageId,
+          bytes: Buffer.from("concurrent replacement bytes\n"),
+          originalFilename: `concurrent-${laterDocumentId}.txt`,
+          declaredMimeType: "text/plain",
+          replacementReason: "Concurrent test upload",
+          retentionClass: "transaction",
+          source: "upload",
+        }),
+        (error: unknown) =>
+          error instanceof DocumentStorageError &&
+          error.code === "DOCUMENT_UNAVAILABLE",
+      );
     };
 
     const body = JSON.stringify({
@@ -811,13 +816,8 @@ test("batch document locks prevent a competing upload from creating partial acti
       ((await response.json()) as { reason: string }).reason,
       "completed_document_storage_retry_required",
     );
-    assert.ok(competing.promise, "competing upload must start during the batch");
-    await assert.rejects(
-      competing.promise,
-      (error: unknown) =>
-        error instanceof DocumentStorageError &&
-        error.code === "DOCUMENT_UNAVAILABLE",
-    );
+    assert.ok(competing.rejection, "competing upload must start during the batch");
+    await competing.rejection;
 
     const afterDocuments = await db
       .select()
