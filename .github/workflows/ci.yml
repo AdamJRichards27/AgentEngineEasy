@@ -9,12 +9,10 @@ name: CI
 # database), a deterministic clean-database migration check, and both
 # production builds. Any required step failing fails the workflow.
 #
-# This workflow deliberately requires no production secrets. The only
-# environment values it sets are a throwaway Postgres connection string
-# scoped to the ephemeral `postgres` service below, and a locally-generated
-# dummy SESSION_SECRET used only to satisfy this repository's own
-# fail-closed session-secret check during the test run. Neither value is a
-# real credential and neither is capable of reaching any real environment.
+# This workflow deliberately requires no production secrets. It uses a
+# throwaway Postgres connection, CI-only dummy values, and a temporary
+# localhost HTTPS service for the synthetic production-startup check.
+# None is a real credential or capable of reaching any real environment.
 
 on:
   pull_request:
@@ -29,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "20.12.2"
+  NODE_VERSION: "24"
   PNPM_VERSION: "8.15.5"
 
 jobs:
@@ -91,6 +89,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Verify vendored dependencies
+        run: pnpm run verify:vendor
+
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
@@ -115,6 +116,8 @@ jobs:
           }
 
       - name: API automated test suite
+        env:
+          NODE_ENV: test
         run: pnpm --filter @aee/api run test
 
       - name: API production build
@@ -122,3 +125,9 @@ jobs:
 
       - name: Web production build
         run: pnpm --filter @aee/web run build
+
+      - name: Synthetic production startup and storage readiness
+        # Uses only a disposable localhost HTTPS mock and CI-local dummy
+        # values. It does not enable live external transactions or contact
+        # any external service.
+        run: bash .github/scripts/synthetic-production-startup.sh

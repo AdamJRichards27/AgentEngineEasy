@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
 import type { AmlVerification, Party } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
@@ -191,7 +191,7 @@ function serviceOrderStatusFor(status: (typeof AML_STATUSES)[number]): "InProgre
 
 export interface ProcessAmlWebhookResult {
   processed: boolean;
-  reason?: "invalid_signature" | "verification_not_found" | "duplicate_delivery";
+  reason?: "disabled" | "invalid_signature" | "stale_timestamp" | "malformed_payload" | "verification_not_found" | "invalid_context" | "duplicate_delivery";
   verification?: AmlVerification;
 }
 
@@ -211,54 +211,112 @@ export async function processAmlWebhook(
   rawBody: Buffer | string,
   signature: string,
   payload: unknown,
+  timestamp: string,
 ): Promise<ProcessAmlWebhookResult> {
-  if (!amlProvider.verifyWebhookSignature(rawBody, signature)) {
+  // An explicitly disabled ingress is a no-op.  In particular, do this
+  // before parsing or looking up a reference so a disabled integration can
+  // never mutate AML, billing, workflow, or event state.
+  if (process.env.AML_WEBHOOKS_ENABLED === "false" || process.env.AML_PROVIDER === "disabled") {
+    return { processed: false, reason: "disabled" };
+  }
+  const timestampSeconds = Number(timestamp);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const toleranceSeconds = Number(process.env.AML_WEBHOOK_TOLERANCE_SECONDS ?? 300);
+  if (!Number.isInteger(timestampSeconds) || !Number.isFinite(toleranceSeconds) || Math.abs(nowSeconds - timestampSeconds) > toleranceSeconds) {
+    return { processed: false, reason: "stale_timestamp" };
+  }
+  if (!amlProvider.verifyWebhookSignature(rawBody, signature, timestamp)) {
     return { processed: false, reason: "invalid_signature" };
   }
 
-  const result = amlProvider.parseWebhook(payload);
+  let result: AMLWebhookResult;
+  try {
+    result = amlProvider.parseWebhook(payload);
+  } catch {
+    return { processed: false, reason: "malformed_payload" };
+  }
 
-  const [verification] = await db
+  // Resolve only enough server-owned context to choose the lock. Nothing is
+  // mutated from this pre-lock read; the authoritative row is fetched again
+  // after the transaction-level advisory lock has been acquired.
+  const [candidate] = await db
     .select()
     .from(amlVerifications)
     .where(eq(amlVerifications.providerReference, result.providerReference));
-  if (!verification) {
+  if (!candidate) {
     return { processed: false, reason: "verification_not_found" };
   }
+  const [candidateProperty] = await db.select().from(properties).where(eq(properties.id, candidate.propertyId));
+  if (!candidateProperty) return { processed: false, reason: "verification_not_found" };
 
   const newStatus = mapOutcomeToStatus(result);
-  const isRepeatOfCurrentOutcome =
-    verification.status === newStatus &&
-    verification.outcome === result.outcome &&
-    verification.reviewRequired === result.reviewRequired;
-  if (isRepeatOfCurrentOutcome && verification.completedAt) {
-    return { processed: false, reason: "duplicate_delivery", verification };
-  }
+  const claim = await db.transaction(async (tx) => {
+    // PostgreSQL's two-int advisory-lock namespace scopes the lock directly
+    // to owning brokerage + verification without a hash collision.
+    // pg_advisory_xact_lock releases on commit/rollback, including errors.
+    await tx.execute(sql`select pg_advisory_xact_lock(${candidateProperty.brokerageId}, ${candidate.id})`);
 
-  const [updated] = await db
-    .update(amlVerifications)
-    .set({
-      status: newStatus,
-      outcome: result.outcome,
-      riskLevel: result.riskLevel ?? null,
-      reviewRequired: result.reviewRequired,
-      completedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(amlVerifications.id, verification.id))
-    .returning();
+    const [currentRow] = await tx
+      .select({ verification: amlVerifications, property: properties })
+      .from(amlVerifications)
+      .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
+      .where(eq(amlVerifications.id, candidate.id));
+    if (!currentRow || currentRow.verification.providerReference !== result.providerReference) {
+      return { kind: "not_found" as const };
+    }
+    const verification = currentRow.verification;
 
-  if (updated.serviceOrderId) {
-    await db
-      .update(serviceOrders)
+    // Provider callbacks may echo correlation fields. Never trust those
+    // fields to choose a row: if supplied, each must agree with the fresh,
+    // server-created verification/context under the lock.
+    if (
+      (result.provider !== undefined && result.provider !== verification.provider) ||
+      (result.propertyId !== undefined && result.propertyId !== verification.propertyId) ||
+      (result.partyId !== undefined && result.partyId !== verification.partyId) ||
+      (result.brokerageId !== undefined && result.brokerageId !== currentRow.property.brokerageId)
+    ) {
+      return { kind: "invalid_context" as const };
+    }
+
+    const isRepeatOfCurrentOutcome =
+      verification.status === newStatus &&
+      verification.outcome === result.outcome &&
+      verification.reviewRequired === result.reviewRequired;
+    if (isRepeatOfCurrentOutcome && verification.completedAt) {
+      return { kind: "duplicate" as const, verification };
+    }
+
+    const completedAt = new Date();
+    const [updated] = await tx
+      .update(amlVerifications)
       .set({
-        status: serviceOrderStatusFor(newStatus),
-        completedAt: newStatus === "Complete" || newStatus === "Failed" ? new Date() : null,
+        status: newStatus,
+        outcome: result.outcome,
+        riskLevel: result.riskLevel ?? null,
+        reviewRequired: result.reviewRequired,
+        completedAt,
+        updatedAt: completedAt,
       })
-      .where(eq(serviceOrders.id, updated.serviceOrderId));
-  }
+      .where(eq(amlVerifications.id, verification.id))
+      .returning();
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, updated.propertyId));
+    if (updated.serviceOrderId) {
+      await tx
+        .update(serviceOrders)
+        .set({
+          status: serviceOrderStatusFor(newStatus),
+          completedAt: newStatus === "Complete" || newStatus === "Failed" ? completedAt : null,
+        })
+        .where(eq(serviceOrders.id, updated.serviceOrderId));
+    }
+    return { kind: "claimed" as const, updated, property: currentRow.property };
+  });
+
+  if (claim.kind === "not_found") return { processed: false, reason: "verification_not_found" };
+  if (claim.kind === "invalid_context") return { processed: false, reason: "invalid_context" };
+  if (claim.kind === "duplicate") return { processed: false, reason: "duplicate_delivery", verification: claim.verification };
+
+  const { updated, property } = claim;
 
   try {
     await publishDomainEvent({

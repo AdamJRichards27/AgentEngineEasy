@@ -1,5 +1,6 @@
 import rateLimit from "express-rate-limit";
 import { incrementCounter } from "@aee/events";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 /**
  * Same NODE_ENV==="test" carve-out already used elsewhere in this codebase
@@ -15,6 +16,7 @@ import { incrementCounter } from "@aee/events";
 const isTestEnvironment = process.env.NODE_ENV === "test";
 
 const ONE_MINUTE_MS = 60_000;
+const TEST_REQUEST_LIMIT = 100_000;
 
 /**
  * Generous global throttle applied to the whole API (see app.ts) — 300
@@ -25,7 +27,7 @@ const ONE_MINUTE_MS = 60_000;
  */
 export const globalRateLimiter = rateLimit({
   windowMs: ONE_MINUTE_MS,
-  limit: isTestEnvironment ? 5_000 : 300,
+  limit: isTestEnvironment ? TEST_REQUEST_LIMIT : 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please try again later." },
@@ -40,7 +42,7 @@ export const globalRateLimiter = rateLimit({
  */
 export const authRateLimiter = rateLimit({
   windowMs: ONE_MINUTE_MS,
-  limit: isTestEnvironment ? 1_000 : 20,
+  limit: isTestEnvironment ? TEST_REQUEST_LIMIT : 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many authentication requests, please try again later." },
@@ -51,6 +53,12 @@ export const authRateLimiter = rateLimit({
   // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
   handler: (_req, res, _next, options) => {
     incrementCounter("auth_security_event_total", { event: "auth_rate_limited" });
+    void dispatchOperationalAlert({
+      type: "AUTH_ANOMALY",
+      summary: "Authentication rate limit reached",
+      dedupKey: "auth-anomaly:rate-limit",
+      details: { signal: "auth_rate_limited" },
+    });
     res.status(options.statusCode).json(options.message);
   },
 });

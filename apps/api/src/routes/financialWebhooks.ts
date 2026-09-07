@@ -49,7 +49,7 @@ export const financialWebhooksRouter = Router();
 financialWebhooksRouter.post("/financial/webhooks/mandate-payments", async (req, res) => {
   const startedAt = Date.now();
   incrementCounter("financial_webhook_total", { outcome: "received" });
-  const finish = (outcome: "invalid_signature" | "schema_rejected" | "replay_rejected" | "success" | "failure") => {
+  const finish = (outcome: "disabled" | "invalid_signature" | "schema_rejected" | "replay_rejected" | "success" | "failure") => {
     incrementCounter("financial_webhook_total", { outcome });
     observeHistogram("financial_webhook_duration_ms", Date.now() - startedAt, { outcome });
   };
@@ -61,7 +61,7 @@ financialWebhooksRouter.post("/financial/webhooks/mandate-payments", async (req,
 
   let result;
   try {
-    result = await processMandatePaymentWebhook(rawBody, signature, req.body);
+    result = await processMandatePaymentWebhook(rawBody, signature, req.body, { requireTransportContext: true });
   } catch (err) {
     logger.error("financial_webhook_malformed_payload_rejected", { error: err });
     finish("schema_rejected");
@@ -70,9 +70,9 @@ financialWebhooksRouter.post("/financial/webhooks/mandate-payments", async (req,
   }
 
   if (!result.processed) {
-    const outcome = result.reason === "invalid_signature" ? "invalid_signature" : result.reason === "duplicate_delivery" ? "replay_rejected" : "failure";
+    const outcome = result.reason === "webhooks_disabled" ? "disabled" : result.reason === "invalid_signature" ? "invalid_signature" : result.reason === "duplicate_delivery" ? "replay_rejected" : "failure";
     finish(outcome);
-    const status = result.reason === "invalid_signature" ? 401 : result.reason === "payment_request_not_found" ? 404 : 200;
+    const status = result.reason === "webhooks_disabled" ? 503 : result.reason === "invalid_signature" ? 401 : result.reason === "payment_request_not_found" ? 404 : result.reason === "context_mismatch" ? 403 : 200;
     res.status(status).json(result);
     return;
   }

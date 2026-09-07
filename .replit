@@ -1,7 +1,6 @@
 run = "pnpm install && (pnpm run dev:api &) && bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
 entrypoint = "apps/api/src/index.ts"
 modules = ["nodejs-24"]
-
 [env]
 PORT = "8080"
 
@@ -20,6 +19,22 @@ externalPort = 8081
 [nix]
 channel = "stable-24_05"
 packages = ["nodejs_20", "nodePackages.pnpm"]
+
+# Critical Blocker Remediation, Phase 9 — production-mode pilot deployment
+# readiness (docs/gate-evidence/PHASE9_DEPLOYMENT_READINESS_AUDIT.md,
+# docs/REPLIT_PILOT_DEPLOYMENT_RUNBOOK.md). This section is configuration
+# only: it does not deploy anything by itself, and no deployment has been
+# published from this section. A human operator must still explicitly
+# publish a deployment from the Replit UI/CLI, and only after the renewed
+# Operational Readiness Gate decision (Phase 12) authorises doing so — see
+# the runbook's explicit "do not deploy yet" instructions. The run command
+# starts the API only; in NODE_ENV=production the API also serves the
+# built web frontend directly (apps/api/src/lib/staticWeb.ts), so one
+# deployment serves both — see the runbook §1 for why.
+[deployment]
+deploymentTarget = "autoscale"
+build = ["sh", "-c", "pnpm install --frozen-lockfile && pnpm --filter @aee/web run build && pnpm --filter @aee/api run build"]
+run = ["sh", "-c", "node apps/api/dist/index.mjs"]
 
 [workflows]
 

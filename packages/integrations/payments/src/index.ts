@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { logger } from "@aee/events";
 
 export interface ChargeRequest {
   paymentMethodProviderRef: string;
@@ -248,19 +249,40 @@ export class StripePaymentProvider implements PaymentProvider {
   }
 }
 
+// Critical Blocker Remediation, Phase 10 — commercial lock. True only in
+// production, when an operator has NOT explicitly set
+// LIVE_EXTERNAL_TRANSACTIONS_APPROVED="true". While true, a real credential
+// being present (e.g. STRIPE_SECRET_KEY copied in from another deployment's
+// Secrets by mistake) must never be sufficient on its own to let this
+// process charge a real card — see apps/api/src/lib/env.ts's
+// mustForceMockExternalProvider() (this package cannot import that file —
+// apps/api depends on this package, not the other way around — so this is
+// the same two-line check, repeated locally) and
+// docs/gate-evidence/PHASE10_BILLING_AND_EXTERNAL_ACTION_LOCKS.md. Outside
+// production this always returns false — local/test behaviour is unchanged.
+function mustForceMockExternalProvider(): boolean {
+  return process.env.NODE_ENV === "production" && process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED !== "true";
+}
+
 export function createPaymentProvider(): PaymentProvider {
   const provider = process.env.PAYMENT_PROVIDER ?? "mock";
 
   if (provider === "stripe") {
+    if (mustForceMockExternalProvider()) {
+      logger.warn("payment_provider_locked_to_mock_pilot_policy", {
+        reason: "PAYMENT_PROVIDER=stripe was requested but LIVE_EXTERNAL_TRANSACTIONS_APPROVED is not \"true\" in production — no real card charge is authorised for this pilot.",
+      });
+      return new MockPaymentProvider();
+    }
     const secretKey = process.env.STRIPE_SECRET_KEY;
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
     const apiBaseUrl = process.env.STRIPE_API_BASE_URL ?? "https://api.stripe.com";
     if (secretKey && webhookSecret) {
       return new StripePaymentProvider({ secretKey, webhookSecret, apiBaseUrl });
     }
-    console.warn(
-      "PAYMENT_PROVIDER=stripe but STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET are not both set — falling back to MockPaymentProvider.",
-    );
+    logger.warn("payment_provider_fallback_to_mock", {
+      reason: "PAYMENT_PROVIDER=stripe but STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET are not both set",
+    });
   }
 
   return new MockPaymentProvider();

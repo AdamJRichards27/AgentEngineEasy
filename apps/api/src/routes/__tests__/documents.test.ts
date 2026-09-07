@@ -28,6 +28,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { inArray } from "drizzle-orm";
+import { db, documentObjectVersions } from "@aee/db";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -120,7 +122,19 @@ async function putAgencyTerms(cookie: string, propertyId: number, overrides: Rec
 
 async function getByProperty(cookie: string, propertyId: number) {
   const res = await fetch(`${baseUrl}/api/documents/packages/by-property/${propertyId}`, { headers: { cookie } });
-  return { res, body: await json<{ documentPackage: { id: number; status: string } | null; documents: Array<{ id: number; objectStorageKey: string | null }>; signatureRequest: { id: number } | null }>(res) };
+  return {
+    res,
+    body: await json<{
+      documentPackage: { id: number; status: string } | null;
+      documents: Array<{ id: number; status: string; objectStorageKey: string | null }>;
+      signatureRequest: {
+        id: number;
+        status: string;
+        providerReference: string;
+        completedDocumentKey: string | null;
+      } | null;
+    }>(res),
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -263,6 +277,102 @@ test("POST /packages/:packageId/send-for-signature rejects a package belonging t
   assert.equal(byProperty.signatureRequest, null, "no SignatureRequest must have been created by the cross-tenant caller");
 });
 
+test("POST /webhook rejects unsigned mock completion in production-disabled mode without persisting signed bytes or changing status", async () => {
+  const { propertyId, packageId } = await createReadyToListProperty(
+    A.agent.cookie,
+    `${Math.floor(Math.random() * 1_000_000)} Disabled ESign Webhook Rd`,
+  );
+  assert.equal((await putAgencyTerms(A.agent.cookie, propertyId)).status, 200);
+  assert.equal(
+    (
+      await fetch(`${baseUrl}/api/documents/packages/${packageId}/populate`, {
+        method: "POST",
+        headers: headersFor(A.agent.cookie),
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await fetch(
+        `${baseUrl}/api/documents/packages/${packageId}/send-for-signature`,
+        { method: "POST", headers: headersFor(A.agent.cookie) },
+      )
+    ).status,
+    201,
+  );
+
+  const before = (await getByProperty(A.agent.cookie, propertyId)).body;
+  assert.ok(before.signatureRequest);
+  const documentIds = before.documents.map((document) => document.id);
+  const versionsBefore = await db
+    .select({ id: documentObjectVersions.id })
+    .from(documentObjectVersions)
+    .where(inArray(documentObjectVersions.documentId, documentIds));
+  const payload = JSON.stringify({
+    providerReference: before.signatureRequest!.providerReference,
+    status: "Completed",
+    completedDocuments: before.documents.map((document) => ({
+      documentId: document.id,
+      contentBase64: Buffer.from(`forged signed bytes for ${document.id}`).toString("base64"),
+      filename: `forged-${document.id}.txt`,
+      contentType: "text/plain",
+    })),
+  });
+
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousApproval = process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED;
+  try {
+    process.env.NODE_ENV = "production";
+    delete process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED;
+    const response = await fetch(`${baseUrl}/api/documents/webhook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("retry-after"), "300");
+    assert.equal(
+      (await json<{ reason: string }>(response)).reason,
+      "webhooks_disabled",
+    );
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousApproval === undefined) {
+      delete process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED;
+    } else {
+      process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED = previousApproval;
+    }
+  }
+
+  const after = (await getByProperty(A.agent.cookie, propertyId)).body;
+  const versionsAfter = await db
+    .select({ id: documentObjectVersions.id })
+    .from(documentObjectVersions)
+    .where(inArray(documentObjectVersions.documentId, documentIds));
+  assert.equal(after.documentPackage?.status, "Sent");
+  assert.equal(after.signatureRequest?.status, "Sent");
+  assert.equal(after.signatureRequest?.completedDocumentKey, null);
+  assert.deepEqual(
+    after.documents.map(({ id, status, objectStorageKey }) => ({
+      id,
+      status,
+      objectStorageKey,
+    })),
+    before.documents.map(({ id, status, objectStorageKey }) => ({
+      id,
+      status,
+      objectStorageKey,
+    })),
+  );
+  assert.deepEqual(
+    versionsAfter.map(({ id }) => id),
+    versionsBefore.map(({ id }) => id),
+    "rejected completion must not create any document version",
+  );
+});
+
 // ---------------------------------------------------------------------
 // GET /packages/by-property/:propertyId
 // ---------------------------------------------------------------------
@@ -296,7 +406,7 @@ test("GET /packages/by-property/:propertyId returns nothing for a different brok
 // GET /:documentId/content
 // ---------------------------------------------------------------------
 
-test("GET /:documentId/content succeeds for the owning brokerage, unchanged", async () => {
+test("GET /:documentId/content returns the integrity-checked signed artifact for the owning brokerage", async () => {
   const listed = await createListedProperty(baseUrl, A.agent.cookie, { address: `${Math.floor(Math.random() * 1_000_000)} Content Happy Path St` });
   const { body } = await getByProperty(A.agent.cookie, listed.propertyId);
   const doc = body.documents.find((d) => d.objectStorageKey);
@@ -307,7 +417,7 @@ test("GET /:documentId/content succeeds for the owning brokerage, unchanged", as
   assert.match(res.headers.get("content-type") ?? "", /text\/plain/);
   const text = await res.text();
   assert.ok(text.length > 0);
-  assert.ok(text.includes("Content Happy Path St"), "the generated content must actually be this property's document, not a placeholder");
+  assert.ok(text.startsWith("Signed document: "), "the retrieved bytes must be the completed signed artifact");
 });
 
 test("GET /:documentId/content rejects a document belonging to a different brokerage exactly like a nonexistent id — real signed contract content must not leak cross-tenant", async () => {

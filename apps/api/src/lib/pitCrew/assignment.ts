@@ -16,6 +16,7 @@ import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrew
 import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { isValidPitCrewTransition, type PitCrewItemStatus } from "./types.js";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export class PitCrewTransitionError extends Error {
   constructor(message: string) {
@@ -40,6 +41,12 @@ export class PitCrewPropertyMismatchError extends Error {
     super(message);
     this.name = "PitCrewPropertyMismatchError";
     incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
+    void dispatchOperationalAlert({
+      type: "TENANT_SECURITY_SIGNAL",
+      summary: "Tenant-scoped Pit Crew property access was rejected",
+      dedupKey: "tenant-security:pit-crew-property",
+      details: { boundary: "pit_crew", recordType: "property" },
+    });
   }
 }
 
@@ -53,6 +60,12 @@ export class PitCrewAssigneeMismatchError extends Error {
     super(message);
     this.name = "PitCrewAssigneeMismatchError";
     incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
+    void dispatchOperationalAlert({
+      type: "TENANT_SECURITY_SIGNAL",
+      summary: "Tenant-scoped Pit Crew assignee access was rejected",
+      dedupKey: "tenant-security:pit-crew-assignee",
+      details: { boundary: "pit_crew", recordType: "assignee" },
+    });
   }
 }
 

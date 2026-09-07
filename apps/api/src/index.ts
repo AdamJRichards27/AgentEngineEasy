@@ -5,6 +5,8 @@ import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
 import { assertCorsConfigured } from "./lib/cors.js";
 import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
+import { assertAuthEmailProviderConfigured } from "./lib/auth/email.js";
+import { assertApprovedLegalVersionsConfigured } from "./lib/auth/legalVersions.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
@@ -12,6 +14,13 @@ import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
 import { registerIntegrationsEngine } from "./lib/integrations/bootstrap.js";
+import { assertOperationalAlertsConfigured } from "./lib/operationalAlerts.js";
+import {
+  assertDocumentStorageConfigured,
+  checkDocumentStorageReadiness,
+} from "./lib/documentStorage.js";
+import { registerDocumentStorageReconciler } from "./lib/documentStorageReconciler.js";
+import { assertESignProviderConfigured } from "@aee/integration-esign";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -30,6 +39,26 @@ assertCorsConfigured();
 // configured) with no authentication because an operator forgot to set
 // METRICS_TOKEN. See lib/metricsAuth.ts.
 assertMetricsAuthConfigured();
+
+// Critical Blocker Remediation, Phase 2/4: same fail-closed shape as the
+// three checks above — a production process must not silently rely on the
+// sandbox (non-delivering) auth email provider for invitation/password-reset
+// emails. See lib/auth/email.ts.
+assertAuthEmailProviderConfigured();
+assertOperationalAlertsConfigured();
+assertApprovedLegalVersionsConfigured();
+assertDocumentStorageConfigured();
+assertESignProviderConfigured();
+
+async function start(): Promise<void> {
+if (process.env.NODE_ENV === "production") {
+  const storageReadiness = await checkDocumentStorageReadiness();
+  if (!storageReadiness.ready) {
+    throw new Error(
+      `Production document storage readiness failed: ${storageReadiness.message ?? "unavailable"}`,
+    );
+  }
+}
 
 configureEvents();
 
@@ -69,6 +98,11 @@ registerFinancialEngine();
 // the engines above.
 registerIntegrationsEngine();
 
+// Resolves interrupted two-phase document ingestions in bounded batches.
+// Matching bytes are finalized; missing/corrupt terminal states are
+// quarantined with audit evidence rather than silently discarded.
+registerDocumentStorageReconciler();
+
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.
 ensureCatalogueSeeded().catch((err) => logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
@@ -85,4 +119,12 @@ const port = Number(process.env.PORT ?? 8080);
 
 app.listen(port, () => {
   logger.info("api_listening", { port });
+});
+}
+
+start().catch((error) => {
+  logger.error("api_startup_failed", {
+    error: error instanceof Error ? error.message : String(error),
+  });
+  process.exit(1);
 });

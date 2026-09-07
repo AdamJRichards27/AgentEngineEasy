@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authRateLimiter } from "../middlewares/rateLimit.js";
 import { authRouter } from "./auth.js";
+import { privacyRouter } from "./privacy.js";
 import { healthRouter } from "./health.js";
 import { metricsRouter } from "./metrics.js";
 import { propertiesRouter } from "./properties.js";
@@ -36,6 +37,12 @@ export const apiRouter = Router();
 // — sign-in/session endpoints are the highest-value target for
 // credential-stuffing / brute-force-style abuse.
 apiRouter.use("/auth", authRateLimiter, authRouter);
+// Critical Blocker Remediation, Phase 8 — application privacy controls
+// (consent-version lookup, data export/deletion request queue). Unprefixed
+// mount, same reasoning as several routers below — privacyRouter's own
+// paths span both a top-level /legal/... namespace and /privacy/...
+// /admin/privacy-requests/... namespaces.
+apiRouter.use(privacyRouter);
 apiRouter.use("/health", healthRouter);
 // Step 2 hardening — see routes/metrics.ts and lib/metricsAuth.ts. Mounted
 // under /internal (never under /health) so it's trivially distinguishable

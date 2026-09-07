@@ -71,6 +71,27 @@
       "when": 1788640016290,
       "tag": "0009_flimsy_norrin_radd",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788669079455,
+      "tag": "0010_invitation_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788671416045,
+      "tag": "0011_privacy_controls",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788730234781,
+      "tag": "0012_colossal_timeslip",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,8 @@
 export * from "./users";
+// Critical Blocker Remediation, Phase 4 — invitation-only authentication.
+export * from "./authTokens";
+// Critical Blocker Remediation, Phase 8 — application privacy controls.
+export * from "./privacy";
 export * from "./property";
 export * from "./appraisal";
 export * from "./aml";

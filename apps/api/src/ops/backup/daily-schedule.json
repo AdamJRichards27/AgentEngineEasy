@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "schedule": "0 2 * * *",
+  "timezone": "UTC",
+  "command": "pnpm --filter @aee/api run backup:run",
+  "environment": {
+    "BACKUP_ENVIRONMENT": "production"
+  },
+  "activation": "external scheduler owner must install this contract; this file does not schedule or deploy anything"
+}

@@ -13,7 +13,7 @@ instruction requires: the secrets scan, and the file/upload security boundary.
 | Financial — payment references | Provider customer/payment-method references (never raw card numbers) | `paymentMethods`, `payments` | High |
 | Financial — commercial terms | Commission-agreement terms, PC-fee-authority `feeBasis`/`rateBps`/`gciDefinition` | `commissionAgreements`, `pcFeeAuthorities` | High — confidential per-brokerage commercial terms (subject of finding #5 in the tenant-isolation doc) |
 | Financial — ledger | Settlement/reconciliation records | `financial.*` tables | High |
-| Documents | Generated/signed agreement content | `documents`, local object storage (`OBJECT_STORAGE_LOCAL_DIR`) | High |
+| Documents | Generated/signed agreement content | `documents` metadata plus local object storage (`OBJECT_STORAGE_LOCAL_DIR`) in the current build | High |
 | AML/compliance | Verification status, exceptions | `amlVerifications`, `riskExceptions` | High — regulated-adjacent data |
 | Communications | Message content, consent state | `communicationMessages`, `communicationConsent` | Medium–High |
 | Operational | Tasks, workflow state, Pit Crew assignments | Various | Medium |
@@ -104,11 +104,22 @@ patched build or a migration to a different parsing library — a decision requi
 sign-off, not made unilaterally this step.
 
 **Document generation/storage.** Generated and signed document content
-(`lib/documents.ts`) is stored via `OBJECT_STORAGE_PROVIDER=local` in this build and
+(`lib/documents.ts`) is stored via `OBJECT_STORAGE_PROVIDER=local` in the current build and
 retrieved only through the now-tenant-scoped `GET /documents/:documentId/content` route
 (finding #2 in the tenant-isolation doc). Content is served with `res.type("text/plain")`,
 not rendered as HTML, so a stored value cannot execute as script in a browser context that
 requests it directly.
+
+This local provider is development/test only, not a production durability claim. The selected
+production topology is PostgreSQL as the authoritative operational record store and separate
+durable S3/GCS-compatible object storage for generated/signed bytes
+(`docs/adr/0001-production-storage-topology.md`). No durable object-store adapter is currently
+implemented, local disk remains the default, and no production fail-closed durable-storage
+configuration exists. These are pilot blockers. A signed AML, payment, or communications webhook
+also proves only signature authenticity; it does not establish durable byte ingestion, checksum
+verification, or document/version provenance.
+
+**Current status: REMEDIATION REQUIRED. B2: BLOCKED — HUMAN OR EXTERNAL DECISION REQUIRED.**
 
 ## 6. Sensitive data in logs — open gap
 

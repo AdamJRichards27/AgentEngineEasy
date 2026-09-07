@@ -12,14 +12,22 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { createHmac } from "node:crypto";
 import { db, automationTasks, automationAttentionItems } from "@aee/db";
-import { createBrokerageWithUsers, cleanupBrokerages, getDomainEventsForProperty, type DevLoginResult } from "./testSupport.js";
+import {
+  createBrokerageWithUsers,
+  cleanupBrokerages,
+  getDomainEventsForProperty,
+  signedSandboxEsignWebhookHeaders,
+  type DevLoginResult,
+} from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.AML_WEBHOOK_SECRET = "aml-webhook-test-secret";
 
 let server: Server;
 let baseUrl: string;
@@ -43,6 +51,14 @@ async function postJson(path: string, cookie: string, body?: unknown) {
 }
 async function getJson(path: string, cookie: string) {
   return fetch(`${baseUrl}/api${path}`, { headers: { cookie } });
+}
+function amlWebhookHeaders(body: string): Record<string, string> {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return {
+    "content-type": "application/json",
+    "x-aml-timestamp": timestamp,
+    "x-aml-signature": createHmac("sha256", process.env.AML_WEBHOOK_SECRET!).update(`${timestamp}.`).update(body).digest("hex"),
+  };
 }
 async function bodyOf<T>(res: Response): Promise<T> {
   const text = await res.text();
@@ -132,15 +148,29 @@ test("Stage B: Agency Agreement -> Ready to List -> documents signed -> seller A
 
   const populateRes = await postJson(`/documents/packages/${packageId}/populate`, A.agent.cookie);
   assert.equal(populateRes.status, 200);
+  const packageRes = await getJson(`/documents/packages/by-property/${propertyId}`, A.agent.cookie);
+  assert.equal(packageRes.status, 200);
+  const { documents: packageDocuments } = await bodyOf<{ documents: Array<{ id: number; title: string }> }>(packageRes);
 
   const sendRes = await postJson(`/documents/packages/${packageId}/send-for-signature`, A.agent.cookie);
   assert.equal(sendRes.status, 201);
   const { signatureRequest } = await bodyOf<{ signatureRequest: { providerReference: string } }>(sendRes);
+  const completedDocuments = packageDocuments.map((document) => ({
+    documentId: document.id,
+    contentBase64: Buffer.from(`Signed document: ${document.title}\n`, "utf8").toString("base64"),
+    filename: `${document.title.replace(/[^A-Za-z0-9._-]/g, "_")}.txt`,
+    contentType: "text/plain",
+  }));
 
+  const esignWebhookBody = JSON.stringify({
+    providerReference: signatureRequest.providerReference,
+    status: "Completed",
+    completedDocuments,
+  });
   const esignWebhookRes = await fetch(`${baseUrl}/api/documents/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed" }),
+    headers: signedSandboxEsignWebhookHeaders(esignWebhookBody),
+    body: esignWebhookBody,
   });
   assert.equal(esignWebhookRes.status, 200);
 
@@ -148,10 +178,11 @@ test("Stage B: Agency Agreement -> Ready to List -> documents signed -> seller A
   const { verifications } = await bodyOf<{ verifications: Array<{ providerReference: string }> }>(amlListRes);
   assert.ok(verifications.length > 0, "Ready to List must have initiated seller AML");
   for (const v of verifications) {
+    const body = JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false });
     const webhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+      headers: amlWebhookHeaders(body),
+      body,
     });
     assert.equal(webhookRes.status, 200);
   }
@@ -229,10 +260,11 @@ test("Contract + AML/CTF: contract signed publishes CONTRACT_SIGNED exactly once
   const { verifications } = await bodyOf<{ verifications: Array<{ providerReference: string; status: string }> }>(amlListRes);
   const buyerVerification = verifications.find((v) => v.status !== "Complete");
   assert.ok(buyerVerification, "contract signing must have initiated a new (buyer) AML verification");
+  const body = JSON.stringify({ providerReference: buyerVerification!.providerReference, outcome: "VERIFIED", reviewRequired: false });
   const buyerWebhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: buyerVerification!.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+    headers: amlWebhookHeaders(body),
+    body,
   });
   assert.equal(buyerWebhookRes.status, 200);
 

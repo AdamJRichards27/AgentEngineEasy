@@ -12,6 +12,7 @@ import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
+import { getBillingProvider } from "../lib/billing/gateway.js";
 
 export const growRouter = Router();
 
@@ -19,11 +20,19 @@ export const growRouter = Router();
 // route that does not also requireEntitlement("grow.access") - it exists so the frontend can
 // ask "should I show the locked shell or the real one" without the answer itself ever being
 // used as an access-control decision. No protected Grow data is returned from here.
+//
+// billingProviderName (Critical Blocker Remediation, Phase 10): surfaces which billing
+// provider a checkout from this screen would actually use, so the "Add Grow" upgrade
+// screen can honestly label itself — see apps/web/src/pages/Grow.tsx. Reading
+// getBillingProvider().name here never itself triggers a checkout or any external call;
+// it only reports the outcome of the same fail-closed provider selection
+// POST /billing/checkout already uses.
 growRouter.get("/access", requireAuth, async (req, res) => {
   const entitlements = await resolveEntitlements(req.authedUser!);
   res.json({
     entitled: entitlements.has("grow.access"),
     entitlements: Array.from(entitlements),
+    billingProviderName: getBillingProvider().name,
   });
 });
 

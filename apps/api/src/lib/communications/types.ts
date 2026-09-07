@@ -17,6 +17,7 @@ import {
   type CommunicationMessageStatus,
 } from "@aee/db";
 import { incrementCounter } from "@aee/events";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export {
   COMMUNICATION_CHANNELS,
@@ -160,5 +161,11 @@ export class CommunicationTenancyError extends Error {
     super(message);
     this.name = "CommunicationTenancyError";
     incrementCounter("tenant_isolation_rejection_total", { boundary: "communications" });
+    void dispatchOperationalAlert({
+      type: "TENANT_SECURITY_SIGNAL",
+      summary: "Tenant-scoped communications access was rejected",
+      dedupKey: "tenant-security:communications",
+      details: { boundary: "communications" },
+    });
   }
 }

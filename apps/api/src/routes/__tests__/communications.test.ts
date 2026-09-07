@@ -36,6 +36,8 @@ process.env.SESSION_SECRET =
 // rather than relying on an ambient value that may not be set, and this
 // suite should too.
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.COMMUNICATIONS_WEBHOOK_INGRESS_ENABLED = "true";
+process.env.COMMUNICATIONS_WEBHOOK_SECRET = "test-only-communications-webhook-secret";
 
 let server: Server;
 let baseUrl: string;
@@ -48,7 +50,7 @@ let propertyId: number;
 let otherAdmin: DevLoginResult;
 let otherBrokerageId: number;
 
-const WEBHOOK_SECRET = process.env.COMMUNICATIONS_WEBHOOK_SECRET ?? "dev-sandbox-communications-webhook-secret";
+const WEBHOOK_SECRET = process.env.COMMUNICATIONS_WEBHOOK_SECRET;
 
 function authHeaders(cookie: string) {
   return { "content-type": "application/json", cookie };
@@ -451,11 +453,12 @@ test("7. a redelivered delivery-receipt webhook is processed exactly once", asyn
   const eventId = `webhook-dedup-test-${Date.now()}`;
   const payload = { eventId, eventType: "DELIVERY_RECEIPT", providerMessageId: message!.providerMessageId };
   const rawBody = Buffer.from(JSON.stringify(payload));
-  const signature = createHmac("sha256", WEBHOOK_SECRET).update(rawBody).digest("hex");
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const signature = createHmac("sha256", WEBHOOK_SECRET).update(timestamp).update(".").update(rawBody).digest("hex");
 
   const firstRes = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/sandbox_email`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-communications-signature": signature },
+    headers: { "content-type": "application/json", "x-communications-timestamp": timestamp, "x-communications-signature": signature },
     body: rawBody,
   });
   const first = await jsonOf<{ status: string }>(firstRes);
@@ -465,9 +468,42 @@ test("7. a redelivered delivery-receipt webhook is processed exactly once", asyn
   const [afterFirst] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, scenario1MessageId));
   assert.equal(afterFirst?.status, "DELIVERED");
 
+  // A correctly signed callback must still be bound to the provider and
+  // tenant context in its URL. Neither a sibling sandbox provider nor a
+  // different brokerage may transition this message.
+  for (const [label, callbackBrokerageId, callbackProvider] of [
+    ["provider-manipulated", brokerageId, "sandbox_sms"],
+    ["tenant-manipulated", otherBrokerageId, "sandbox_email"],
+  ] as const) {
+    const isolatedPayload = {
+      eventId: `${eventId}-${label}`,
+      eventType: "BOUNCE",
+      providerMessageId: message!.providerMessageId,
+    };
+    const isolatedRawBody = Buffer.from(JSON.stringify(isolatedPayload));
+    const isolatedTimestamp = String(Math.floor(Date.now() / 1_000));
+    const isolatedSignature = createHmac("sha256", WEBHOOK_SECRET)
+      .update(isolatedTimestamp)
+      .update(".")
+      .update(isolatedRawBody)
+      .digest("hex");
+    const isolatedRes = await fetch(`${baseUrl}/api/communications/webhooks/${callbackBrokerageId}/${callbackProvider}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-communications-timestamp": isolatedTimestamp,
+        "x-communications-signature": isolatedSignature,
+      },
+      body: isolatedRawBody,
+    });
+    assert.equal(isolatedRes.status, 200);
+    const [unchanged] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, scenario1MessageId));
+    assert.equal(unchanged?.status, "DELIVERED", `${label} webhook must not mutate another provider/tenant's message`);
+  }
+
   const secondRes = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/sandbox_email`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-communications-signature": signature },
+    headers: { "content-type": "application/json", "x-communications-timestamp": timestamp, "x-communications-signature": signature },
     body: rawBody,
   });
   const second = await jsonOf<{ status: string }>(secondRes);

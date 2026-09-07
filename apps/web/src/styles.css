@@ -733,6 +733,21 @@ details.section > *:not(summary) {
   color: var(--color-primary);
 }
 
+/* Critical Blocker Remediation, Phase 8 — mandatory Terms of Use / Privacy
+   Policy acceptance checkboxes on the accept-invitation screen. */
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-text);
+}
+
+.checkbox-row input[type="checkbox"] {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+
 .cost-summary {
   background: var(--color-bg);
   border-radius: var(--radius-sm);

@@ -131,6 +131,19 @@ export default function Settings() {
 
       {isAdmin && (
         <section className="card">
+          <h2>Users &amp; Access</h2>
+          <p className="muted">
+            Invite team members, manage existing accounts, and handle data export/deletion requests — every account
+            in this app starts as an admin-issued invitation.
+          </p>
+          <Link href="/settings/users" className="btn btn-secondary btn-small">
+            Manage Users &amp; Access →
+          </Link>
+        </section>
+      )}
+
+      {isAdmin && (
+        <section className="card">
           <h2>Integrations</h2>
           <p className="muted">Connect and manage provider integrations — portals, communications, and financial status feeds (mock/sandbox providers only in this build).</p>
           <Link href="/settings/integrations" className="btn btn-secondary btn-small">

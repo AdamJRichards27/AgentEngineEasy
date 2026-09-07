@@ -176,8 +176,9 @@ test("signed inbound webhook is processed and recorded", async () => {
   const secret = await getSecretIdentifierForSigning(connection.id);
   assert.ok(secret);
   const rawBody = JSON.stringify({ hello: "world" });
-  const signature = createHmac("sha256", secret!).update(rawBody).digest("hex");
-  const signatureValid = verifyWebhookSignature({ rawBody, signatureHeader: signature, secret: secret! });
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const signature = createHmac("sha256", secret!).update(timestamp).update(".").update(rawBody).digest("hex");
+  const signatureValid = verifyWebhookSignature({ rawBody, timestamp, signatureHeader: signature, secret: secret! });
   assert.equal(signatureValid, true);
 
   const result = await processInboundWebhook({

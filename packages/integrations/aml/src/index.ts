@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { logger } from "@aee/events";
 
 export interface AMLVerificationRequest {
   propertyId: number;
@@ -19,6 +20,12 @@ export interface AMLWebhookResult {
   outcome: "VERIFIED" | "PARTIALLY_VERIFIED" | "UNABLE_TO_VERIFY";
   riskLevel?: string;
   reviewRequired: boolean;
+  /** Optional correlation fields returned by providers.  They are checked
+   * against the verification we created; they are never used as authority. */
+  propertyId?: number;
+  partyId?: number;
+  brokerageId?: number;
+  provider?: string;
 }
 
 export interface AMLProvider {
@@ -27,7 +34,7 @@ export interface AMLProvider {
   // provider signs raw bytes, which is the normal case for HMAC-based
   // webhook signatures — re-serialising parsed JSON can byte-for-byte
   // differ from what was actually signed and silently break verification.
-  verifyWebhookSignature(payload: unknown, signature: string): boolean;
+  verifyWebhookSignature(payload: unknown, signature: string, timestamp: string): boolean;
   parseWebhook(payload: unknown): AMLWebhookResult;
 }
 
@@ -37,21 +44,38 @@ export interface AMLProvider {
  * implements the same interface; workflow code never changes.
  */
 export class MockAMLProvider implements AMLProvider {
+  // Keep the mock's secret lookup lazy: route test helpers configure their
+  // sandbox secret after importing shared fixtures, while production still
+  // fails closed when no secret has been configured.
+  constructor(private readonly webhookSecret?: string) {}
+
   async requestVerification(input: AMLVerificationRequest): Promise<{ providerReference: string }> {
     return { providerReference: `mock-aml-${input.partyId}-${Date.now()}` };
   }
 
-  verifyWebhookSignature(_payload: unknown, _signature: string): boolean {
-    return true; // mock provider — no real signature to verify
+  verifyWebhookSignature(payload: unknown, signature: string, timestamp: string): boolean {
+    return verifyTimestampedSignature(payload, signature, timestamp, this.webhookSecret ?? process.env.AML_WEBHOOK_SECRET ?? "");
   }
 
   parseWebhook(payload: unknown): AMLWebhookResult {
-    const p = payload as Partial<AMLWebhookResult>;
+    const p = (payload ?? {}) as Partial<AMLWebhookResult>;
+    if (
+      typeof p.providerReference !== "string" ||
+      !p.providerReference ||
+      (p.outcome !== "VERIFIED" && p.outcome !== "PARTIALLY_VERIFIED" && p.outcome !== "UNABLE_TO_VERIFY") ||
+      typeof p.reviewRequired !== "boolean"
+    ) {
+      throw new Error("Malformed AML webhook payload: providerReference, outcome and reviewRequired are required.");
+    }
     return {
-      providerReference: p.providerReference ?? "unknown",
-      outcome: p.outcome ?? "VERIFIED",
+      providerReference: p.providerReference,
+      outcome: p.outcome,
       riskLevel: p.riskLevel,
-      reviewRequired: p.reviewRequired ?? false,
+      reviewRequired: p.reviewRequired,
+      propertyId: p.propertyId,
+      partyId: p.partyId,
+      brokerageId: p.brokerageId,
+      provider: p.provider,
     };
   }
 }
@@ -115,19 +139,8 @@ export class HttpAMLProvider implements AMLProvider {
     return { providerReference };
   }
 
-  verifyWebhookSignature(payload: unknown, signature: string): boolean {
-    if (!signature) return false;
-    const raw = Buffer.isBuffer(payload)
-      ? payload
-      : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8");
-    const expected = createHmac("sha256", this.config.webhookSecret).update(raw).digest("hex");
-    const expectedBuf = Buffer.from(expected, "utf8");
-    const givenBuf = Buffer.from(signature, "utf8");
-    // Different-length buffers must still short-circuit safely — comparing
-    // unequal-length buffers with timingSafeEqual throws rather than
-    // returning false.
-    if (expectedBuf.length !== givenBuf.length) return false;
-    return timingSafeEqual(expectedBuf, givenBuf);
+  verifyWebhookSignature(payload: unknown, signature: string, timestamp: string): boolean {
+    return verifyTimestampedSignature(payload, signature, timestamp, this.config.webhookSecret);
   }
 
   parseWebhook(payload: unknown): AMLWebhookResult {
@@ -144,29 +157,67 @@ export class HttpAMLProvider implements AMLProvider {
       unable_to_verify: "UNABLE_TO_VERIFY",
       declined: "UNABLE_TO_VERIFY",
     };
+    const providerReference = p.id ?? p.reference ?? p.providerReference;
+    if (typeof providerReference !== "string" || !providerReference || !outcomeMap[rawOutcome]) {
+      throw new Error("Malformed AML webhook payload: provider reference and a recognised outcome are required.");
+    }
 
     return {
-      providerReference: String(p.id ?? p.reference ?? p.providerReference ?? "unknown"),
-      outcome: outcomeMap[rawOutcome] ?? "UNABLE_TO_VERIFY",
+      providerReference,
+      outcome: outcomeMap[rawOutcome],
       riskLevel: typeof p.riskLevel === "string" ? p.riskLevel : typeof p.risk_level === "string" ? p.risk_level : undefined,
       reviewRequired: Boolean(p.reviewRequired ?? p.review_required ?? rawOutcome === "manual_review"),
+      propertyId: typeof p.propertyId === "number" ? p.propertyId : undefined,
+      partyId: typeof p.partyId === "number" ? p.partyId : undefined,
+      brokerageId: typeof p.brokerageId === "number" ? p.brokerageId : undefined,
+      provider: typeof p.provider === "string" ? p.provider : undefined,
     };
   }
+}
+
+function verifyTimestampedSignature(payload: unknown, signature: string, timestamp: string, secret: string): boolean {
+  if (!signature || !timestamp || !secret) return false;
+  const raw = Buffer.isBuffer(payload)
+    ? payload
+    : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8");
+  const expected = createHmac("sha256", secret).update(`${timestamp}.`).update(raw).digest("hex");
+  const expectedBuf = Buffer.from(expected, "utf8");
+  const givenBuf = Buffer.from(signature, "utf8");
+  // Different-length buffers must still short-circuit safely — comparing
+  // unequal-length buffers with timingSafeEqual throws rather than
+  // returning false.
+  if (expectedBuf.length !== givenBuf.length) return false;
+  return timingSafeEqual(expectedBuf, givenBuf);
+}
+
+// Critical Blocker Remediation, Phase 10 — external-action lock. Same check
+// (and same reasoning for why it's repeated locally rather than imported)
+// as packages/integrations/payments/src/index.ts's own
+// mustForceMockExternalProvider() — see that file's comment and
+// docs/gate-evidence/PHASE10_BILLING_AND_EXTERNAL_ACTION_LOCKS.md.
+function mustForceMockExternalProvider(): boolean {
+  return process.env.NODE_ENV === "production" && process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED !== "true";
 }
 
 export function createAMLProvider(): AMLProvider {
   const provider = process.env.AML_PROVIDER ?? "mock";
 
   if (provider === "http") {
+    if (mustForceMockExternalProvider()) {
+      logger.warn("aml_provider_locked_to_mock_pilot_policy", {
+        reason: "AML_PROVIDER=http was requested but LIVE_EXTERNAL_TRANSACTIONS_APPROVED is not \"true\" in production — no real AML verification action is authorised for this pilot.",
+      });
+      return new MockAMLProvider();
+    }
     const baseUrl = process.env.AML_API_BASE_URL;
     const apiKey = process.env.AML_PROVIDER_API_KEY;
     const webhookSecret = process.env.AML_WEBHOOK_SECRET;
     if (baseUrl && apiKey && webhookSecret) {
       return new HttpAMLProvider({ baseUrl, apiKey, webhookSecret });
     }
-    console.warn(
-      "AML_PROVIDER=http but AML_API_BASE_URL/AML_PROVIDER_API_KEY/AML_WEBHOOK_SECRET are not all set — falling back to MockAMLProvider.",
-    );
+    logger.warn("aml_provider_fallback_to_mock", {
+      reason: "AML_PROVIDER=http but AML_API_BASE_URL/AML_PROVIDER_API_KEY/AML_WEBHOOK_SECRET are not all set",
+    });
   }
 
   return new MockAMLProvider();

@@ -1,4 +1,5 @@
 import { eq, inArray, and } from "drizzle-orm";
+import { createHmac } from "node:crypto";
 import {
   db,
   users,
@@ -14,6 +15,7 @@ import {
   paymentMethods,
   documentPackages,
   documents,
+  documentObjectVersions,
   signatureRequests,
   agencyAgreementTerms,
   offers,
@@ -76,6 +78,11 @@ import {
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
 // suites (properties/offers/transactions/aml/documents/home). Not itself a
 // *.test.ts file, so tsx --test's glob does not pick it up as a test.
+
+const TEST_ESIGN_WEBHOOK_SECRET =
+  process.env.ESIGN_WEBHOOK_SECRET ??
+  "test-only-esign-webhook-secret-not-for-real-use-0123456789";
+process.env.ESIGN_WEBHOOK_SECRET = TEST_ESIGN_WEBHOOK_SECRET;
 
 export function extractSessionCookie(res: Response): string {
   const raw = res.headers.get("set-cookie") ?? "";
@@ -182,6 +189,33 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 /**
+ * The mock AML provider is still authenticated exactly like a real
+ * timestamped webhook.  Test suites which use this shared lifecycle helper
+ * may not otherwise need AML configuration, so establish a sandbox-only
+ * secret before constructing the signed request (without replacing an
+ * explicitly configured test secret).
+ */
+function signedSandboxAmlWebhookHeaders(body: string): Record<string, string> {
+  const secret = process.env.AML_WEBHOOK_SECRET ?? "test-only-aml-webhook-secret";
+  process.env.AML_WEBHOOK_SECRET = secret;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return {
+    "content-type": "application/json",
+    "x-aml-timestamp": timestamp,
+    "x-aml-signature": createHmac("sha256", secret).update(`${timestamp}.`).update(body).digest("hex"),
+  };
+}
+
+export function signedSandboxEsignWebhookHeaders(body: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    "x-esign-signature": createHmac("sha256", TEST_ESIGN_WEBHOOK_SECRET)
+      .update(body)
+      .digest("hex"),
+  };
+}
+
+/**
  * Drives a brand-new property all the way to `Listed` through the real
  * routes (Start Property -> add Seller -> Ready to List -> capture agency
  * terms -> populate -> send for signature -> simulate the e-sign webhook
@@ -234,11 +268,25 @@ export async function createListedProperty(
   const sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
   if (sendRes.status !== 201) throw new Error(`send-for-signature failed: ${sendRes.status} ${await sendRes.text()}`);
   const { signatureRequest } = await json<{ signatureRequest: { providerReference: string } }>(sendRes);
+  const packageRes = await fetch(`${baseUrl}/api/documents/packages/by-property/${propertyId}`, { headers: { cookie } });
+  if (packageRes.status !== 200) throw new Error(`get package documents failed: ${packageRes.status} ${await packageRes.text()}`);
+  const { documents: packageDocuments } = await json<{ documents: Array<{ id: number; title: string }> }>(packageRes);
+  const completedDocuments = packageDocuments.map((document) => ({
+    documentId: document.id,
+    contentBase64: Buffer.from(`Signed document: ${document.title}\n`, "utf8").toString("base64"),
+    filename: `${document.title.replace(/[^A-Za-z0-9._-]/g, "_")}.txt`,
+    contentType: "text/plain",
+  }));
 
+  const esignWebhookBody = JSON.stringify({
+    providerReference: signatureRequest.providerReference,
+    status: "Completed",
+    completedDocuments,
+  });
   const esignWebhookRes = await fetch(`${baseUrl}/api/documents/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed" }),
+    headers: signedSandboxEsignWebhookHeaders(esignWebhookBody),
+    body: esignWebhookBody,
   });
   if (esignWebhookRes.status !== 200) throw new Error(`esign webhook failed: ${esignWebhookRes.status} ${await esignWebhookRes.text()}`);
 
@@ -247,10 +295,11 @@ export async function createListedProperty(
   if (verifications.length === 0) throw new Error("expected at least one AML verification");
 
   for (const v of verifications) {
+    const amlWebhookBody = JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false });
     const amlWebhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+      headers: signedSandboxAmlWebhookHeaders(amlWebhookBody),
+      body: amlWebhookBody,
     });
     if (amlWebhookRes.status !== 200) throw new Error(`aml webhook failed: ${amlWebhookRes.status} ${await amlWebhookRes.text()}`);
   }
@@ -549,6 +598,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     if (packageIds.length > 0) {
       await db.delete(signatureRequests).where(inArray(signatureRequests.packageId, packageIds));
     }
+    await db.delete(documentObjectVersions).where(inArray(documentObjectVersions.propertyId, propertyIds));
     await db.delete(documents).where(inArray(documents.propertyId, propertyIds));
     await db.delete(documentPackages).where(inArray(documentPackages.propertyId, propertyIds));
     await db.delete(amlVerifications).where(inArray(amlVerifications.propertyId, propertyIds));
@@ -579,7 +629,31 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(agencyAgreementTerms).where(inArray(agencyAgreementTerms.propertyId, propertyIds));
     await db.delete(auditLogs).where(inArray(auditLogs.propertyId, propertyIds));
     await db.delete(domainEvents).where(inArray(domainEvents.propertyId, propertyIds));
-    await db.delete(properties).where(inArray(properties.id, propertyIds));
+    // A full-suite exception scan can discover these fixtures after the
+    // earlier riskExceptions cleanup. Lock the parent rows, remove any late
+    // scan output, and delete the properties in one transaction so a
+    // concurrent FK insert cannot race between those operations.
+    await db.transaction(async (tx) => {
+      await tx
+        .select({ id: properties.id })
+        .from(properties)
+        .where(inArray(properties.id, propertyIds))
+        .for("update");
+      const lateRiskRows = await tx
+        .select({ id: riskExceptions.id })
+        .from(riskExceptions)
+        .where(inArray(riskExceptions.propertyId, propertyIds));
+      const lateRiskIds = lateRiskRows.map((row) => row.id);
+      if (lateRiskIds.length > 0) {
+        await tx
+          .delete(riskExceptionTransitions)
+          .where(inArray(riskExceptionTransitions.exceptionId, lateRiskIds));
+      }
+      await tx
+        .delete(riskExceptions)
+        .where(inArray(riskExceptions.propertyId, propertyIds));
+      await tx.delete(properties).where(inArray(properties.id, propertyIds));
+    });
   }
 
   await db.delete(entitlementGrants).where(inArray(entitlementGrants.brokerageId, ids));

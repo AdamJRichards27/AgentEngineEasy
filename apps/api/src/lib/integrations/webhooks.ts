@@ -25,22 +25,31 @@ import { db, integrationInbox, integrationConnections, type IntegrationInboxRow,
 import { publishDomainEvent, currentCorrelationId, logger, incrementCounter } from "@aee/events";
 import { writeDeadLetter, markReplayed, loadDeadLetterInBrokerage } from "./deadLetters.js";
 import { IntegrationError, type InboundIntegrationWebhookInput, type ProcessIntegrationWebhookResult } from "./types.js";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export interface VerifyWebhookSignatureInput {
   rawBody: Buffer | string;
   signatureHeader: string | undefined;
+  timestamp: string | undefined;
   secret: string;
 }
 
 /** HMAC-SHA256 over the exact raw bytes, constant-time compared — identical scheme to communications/webhooks.ts's verifyWebhookSignature (the generic shape most providers use; a provider-specific adapter wraps this if its scheme differs). */
 export function verifyWebhookSignature(input: VerifyWebhookSignatureInput): boolean {
-  if (!input.signatureHeader) return false;
-  const expected = createHmac("sha256", input.secret).update(input.rawBody).digest("hex");
+  if (!input.signatureHeader || !input.timestamp) return false;
+  const expected = createHmac("sha256", input.secret).update(input.timestamp).update(".").update(input.rawBody).digest("hex");
   const provided = input.signatureHeader.trim().toLowerCase().replace(/^sha256=/, "");
   const expectedBuf = Buffer.from(expected, "utf8");
   const providedBuf = Buffer.from(provided, "utf8");
   if (expectedBuf.length !== providedBuf.length) return false;
   return timingSafeEqual(expectedBuf, providedBuf);
+}
+export const WEBHOOK_TIMESTAMP_TOLERANCE_MS = 5 * 60_000;
+export function isWebhookTimestampFresh(timestamp: string | undefined, now = Date.now()): boolean {
+  if (!timestamp || !/^\d{10,13}$/.test(timestamp)) return false;
+  const raw = Number(timestamp);
+  const timestampMs = timestamp.length === 10 ? raw * 1_000 : raw;
+  return Number.isSafeInteger(timestampMs) && Math.abs(now - timestampMs) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS;
 }
 
 // Section 8/security: a hard ceiling on inbound payload size, checked here
@@ -120,6 +129,10 @@ export async function processInboundWebhook(input: InboundIntegrationWebhookInpu
   if (!connection) {
     await publishWebhookRejectedEvent(null, input.provider, input.providerEventId, "UNKNOWN_CONNECTION");
     throw new IntegrationError("NOT_FOUND", "Unknown integration connection.");
+  }
+  if (connection.providerId !== input.provider || connection.status !== "ACTIVE") {
+    await publishWebhookRejectedEvent(connection.brokerageId, input.provider, input.providerEventId, "DISABLED_OR_CONTEXT_MISMATCH");
+    throw new IntegrationError("CONNECTION_NOT_USABLE", "Integration webhook provider or connection is not active.");
   }
 
   if (!input.signatureValid) {
@@ -207,6 +220,12 @@ export async function processInboundWebhook(input: InboundIntegrationWebhookInpu
       payloadSnapshot: { provider: input.provider, eventType: input.eventType, payload: input.payload },
     });
     logger.error("integration_webhook_dead_lettered", { provider: input.provider, eventType: input.eventType, inboxId: event.id, connectionId: connection.id, brokerageId: connection.brokerageId, reason: message });
+    await dispatchOperationalAlert({
+      type: "INTEGRATION_WEBHOOK_FAILURE",
+      summary: "Integration webhook processing failed",
+      dedupKey: `integration-webhook:${input.provider}:${input.providerEventId}`,
+      details: { provider: input.provider, eventType: input.eventType, connectionId: connection.id, brokerageId: connection.brokerageId, inboxId: event.id },
+    });
     incrementCounter("integration_webhook_total", { outcome: "failed" });
     incrementCounter("integration_dead_letter_total", { source_type: "INBOX" });
     return { status: "FAILED", inboxId: event.id, detail: message };

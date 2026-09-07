@@ -15,6 +15,10 @@ function xlsxBuffer(ws: XLSX.WorkSheet): Buffer {
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
+test("uses the reviewed SheetJS CE release", () => {
+  assert.equal(XLSX.version, "0.20.3");
+});
+
 test("F-04: parses a genuine workbook into headers/rows (happy path sanity check)", async () => {
   const ws = XLSX.utils.aoa_to_sheet([
     ["First Name", "Last Name"],

@@ -1,12 +1,9 @@
 // F-04: fileValidation.ts is the sole compensating control gate that runs
 // BEFORE any buffer reaches XLSX.read() (see pipeline.ts:80, called ahead of
-// getParserForFile/parser.parse() at pipeline.ts:83-84). xlsx@0.18.5 carries
-// two HIGH-severity advisories (ReDoS + Prototype Pollution) with no patched
-// version published to the npm registry (`pnpm audit` shows
-// "Patched versions: <0.0.0" for both). These tests prove each compensating
-// control actually rejects the class of input it claims to reject, so the
-// fail-closed gate in front of the vulnerable parser is verified, not just
-// asserted in a comment.
+// getParserForFile/parser.parse() at pipeline.ts:83-84). These tests prove
+// each defence-in-depth control rejects the class of input it claims to
+// reject, so the fail-closed gate in front of the parser is verified, not
+// just asserted in a comment.
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as XLSX from "xlsx";

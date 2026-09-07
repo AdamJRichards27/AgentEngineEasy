@@ -62,6 +62,7 @@
 
 import type { NextFunction, Request, Response } from "express";
 import { logger } from "@aee/events";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 const GENERIC_SERVER_ERROR_MESSAGE = "An unexpected error occurred. Please try again or contact support if the problem persists.";
 
@@ -100,6 +101,12 @@ export function globalErrorHandler(err: unknown, req: Request, res: Response, ne
     error: err,
     method: req.method,
     path: req.path,
+  });
+  void dispatchOperationalAlert({
+    type: "UNHANDLED_API_ERROR",
+    summary: "Unhandled API route error",
+    dedupKey: `api:${req.method}:${req.route?.path ?? req.path}`,
+    details: { method: req.method, path: req.path },
   });
 
   const asError = err as BodyParserLikeError;

@@ -15,6 +15,7 @@ import { logAudit } from "../lib/audit.js";
 import { getBillingProvider } from "../lib/billing/gateway.js";
 import { applySubscriptionSnapshot } from "../lib/billing/sync.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
+import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
 export const billingRouter = Router();
 
@@ -221,6 +222,12 @@ billingRouter.post("/webhook", async (req, res) => {
     res.status(200).json({ received: true, processed: true });
   } catch (err) {
     logger.error("billing_webhook_processing_failed", { billingWebhookEventId: row.id, error: err });
+    await dispatchOperationalAlert({
+      type: "INTEGRATION_WEBHOOK_FAILURE",
+      summary: "Billing webhook processing failed",
+      dedupKey: `billing-webhook:${provider.name}:${event.providerEventId}`,
+      details: { provider: provider.name, eventType: event.eventType, billingWebhookEventId: row.id },
+    });
     await db
       .update(billingWebhookEvents)
       .set({ status: "Failed", error: String(err) })

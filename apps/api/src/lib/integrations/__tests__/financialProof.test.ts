@@ -264,22 +264,21 @@ test("safety: unapproved connection — a real ACTIVE connection never approved 
   const externalReference = `REF-unapproved-${suffix}`;
   await linkPaymentRequestToExternalReference(request.id, A.brokerageId, paymentConnection.connection.id, externalReference, actor);
 
-  // Deliver the SAME webhook, but through the portal connection's id — the
-  // gateway itself does not require input.provider to match the
-  // connection's own providerId (defense-in-depth is the domain handler's
-  // job, per financialProof.ts's own header comment), so this is exactly
-  // the "connection resolves, but was never approved for this capability"
-  // shape.
-  const result = await processInboundWebhook({
-    connectionId: portalConnection.id,
-    provider: MOCK_PAYMENT_STATUS_PROVIDER_ID,
-    providerEventId: `evt-unapproved-${suffix}`,
-    eventType: PAYMENT_STATUS_WEBHOOK_EVENT_TYPE,
-    payload: { externalReference, amountCents: 150000, currency: "AUD", status: "PAID_IN_FULL" },
-    signatureValid: true,
-  });
-  assert.equal(result.status, "PROCESSED");
-  assert.match(result.detail, /not usable/i);
+  // Deliver the SAME webhook, but through the portal connection's id. The
+  // gateway must reject the provider/connection mismatch before dispatch,
+  // rather than relying only on the domain handler's capability check.
+  await assert.rejects(
+    () =>
+      processInboundWebhook({
+        connectionId: portalConnection.id,
+        provider: MOCK_PAYMENT_STATUS_PROVIDER_ID,
+        providerEventId: `evt-unapproved-${suffix}`,
+        eventType: PAYMENT_STATUS_WEBHOOK_EVENT_TYPE,
+        payload: { externalReference, amountCents: 150000, currency: "AUD", status: "PAID_IN_FULL" },
+        signatureValid: true,
+      }),
+    (err: unknown) => err instanceof IntegrationError && err.reason === "CONNECTION_NOT_USABLE",
+  );
 
   const reconciliation = await latestReconciliation(A.brokerageId, String(request.id));
   assert.equal(reconciliation, null, "an unapproved connection must never be able to record reconciliation evidence");

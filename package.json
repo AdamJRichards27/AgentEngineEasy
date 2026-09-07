@@ -8,18 +8,21 @@
     "dev:web": "pnpm --filter @aee/web run dev",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck": "pnpm -r run typecheck",
-    "db:push": "pnpm --filter @aee/db run db:push"
+    "db:push": "pnpm --filter @aee/db run db:push",
+    "verify:vendor": "node scripts/verify-vendored-dependencies.mjs"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
     "prettier": "^3.9.5"
   },
   "engines": {
-    "node": "20.12.2",
+    "node": ">=24.0.0 <25",
     "pnpm": "8.15.5"
   },
   "pnpm": {
     "overrides": {
+      "@esbuild-kit/core-utils@3.3.2>esbuild": "0.25.12",
+      "drizzle-kit@0.30.6>esbuild": "0.25.12",
       "qs": "^6.16.0"
     }
   }

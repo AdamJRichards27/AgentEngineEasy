@@ -58,6 +58,27 @@ async function nextPcFeeAuthorityVersion(agentUserId: number): Promise<number> {
   return maxVersion + 1;
 }
 
+// Critical Blocker Remediation, Phase 10 — custody-boundary lock.
+//
+// docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md §16 confirmed the
+// "AE must not receive, hold, transfer or disburse trust money" claim held
+// in effect (no trust-account model exists anywhere in this codebase) but
+// was NOT a technically enforced invariant: authorisedPaymentMethod was a
+// free-text column with no validation anywhere, so nothing in code would
+// have rejected a future caller (a script, a bulk-import, a future admin UI
+// feature) that passed something other than "GENERAL_ACCOUNT_DEBIT_MANDATE"
+// — the claim held only because no such caller happened to exist yet, per
+// that audit's own closing recommendation. This is the enforced version:
+// createPcFeeAuthority() below now rejects any other value outright, so the
+// custody boundary is a real assertion, not an emergent property of what
+// hasn't been built. The one value ever actually reachable through the
+// existing POST /financial/pc-fee-authorities route was already this one —
+// its Zod schema (routes/financial.ts) has never accepted
+// authorisedPaymentMethod as input at all — so this closes the gap for
+// every OTHER caller (scripts, future routes) without changing today's
+// route's observable behaviour at all.
+const ALLOWED_PC_FEE_AUTHORISED_PAYMENT_METHODS = ["GENERAL_ACCOUNT_DEBIT_MANDATE"] as const;
+
 export interface CreatePcFeeAuthorityInput {
   brokerageId: number;
   agentUserId: number;
@@ -77,6 +98,16 @@ export interface CreatePcFeeAuthorityInput {
 
 /** Drafts a new, not-yet-active PC fee authority version for an agent. Never edits a prior version. */
 export async function createPcFeeAuthority(input: CreatePcFeeAuthorityInput): Promise<PcFeeAuthority> {
+  if (
+    input.authorisedPaymentMethod !== undefined &&
+    !(ALLOWED_PC_FEE_AUTHORISED_PAYMENT_METHODS as readonly string[]).includes(input.authorisedPaymentMethod)
+  ) {
+    throw new FinancialControlError(
+      "CUSTODY_BOUNDARY_VIOLATION",
+      `authorisedPaymentMethod "${input.authorisedPaymentMethod}" is not permitted — a PC fee authority may only ever be scoped to ${ALLOWED_PC_FEE_AUTHORISED_PAYMENT_METHODS.join(", ")}. AE does not receive, hold, transfer, or disburse trust money (see docs/gate-evidence/PHASE6_FINANCIAL_AND_BILLING_AUDIT.md §16).`,
+    );
+  }
+
   const version = await nextPcFeeAuthorityVersion(input.agentUserId);
   const [row] = await db
     .insert(pcFeeAuthorities)

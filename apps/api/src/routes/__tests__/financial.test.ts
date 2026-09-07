@@ -9,6 +9,7 @@
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, addSecondBrokerageAdmin, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -17,6 +18,8 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.MANDATE_PAYMENT_WEBHOOK_SECRET = "test-only-mandate-payment-webhook-secret";
+process.env.MANDATE_PAYMENT_WEBHOOKS_ENABLED = "true";
 
 let server: Server;
 let baseUrl: string;
@@ -34,6 +37,15 @@ async function json<T>(res: Response): Promise<T> {
   } catch {
     throw new Error(`Expected JSON, got: ${res.status} ${text}`);
   }
+}
+
+function signedMandateCallback(callback: Record<string, unknown>): { raw: string; signature: string } {
+  const raw = JSON.stringify(callback);
+  const timestamp = Math.floor(Date.now() / 1000);
+  return {
+    raw,
+    signature: `t=${timestamp},v1=${createHmac("sha256", process.env.MANDATE_PAYMENT_WEBHOOK_SECRET!).update(`${timestamp}.${raw}`).digest("hex")}`,
+  };
 }
 
 before(async () => {
@@ -272,10 +284,18 @@ describe("financial routes — end-to-end PC success fee lifecycle through the A
   });
 
   test("the sandbox mandate webhook moves the request to PAID and the ledger records it", async () => {
+    const callback = signedMandateCallback({
+      providerEventId: `evt-${suffix}-paid`,
+      providerRequestRef,
+      status: "Paid",
+      brokerageId: A.brokerageId,
+      provider: "sandbox",
+      mandateProviderRef: `sandbox-e2e-ref-${suffix}`,
+    });
     const webhookRes = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerEventId: `evt-${suffix}-paid`, providerRequestRef, status: "Paid" }),
+      headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
+      body: callback.raw,
     });
     assert.equal(webhookRes.status, 200);
     const body = await json<{ processed: boolean }>(webhookRes);
@@ -291,10 +311,18 @@ describe("financial routes — end-to-end PC success fee lifecycle through the A
   });
 
   test("a redelivered webhook is a no-op the second time", async () => {
+    const callback = signedMandateCallback({
+      providerEventId: `evt-${suffix}-paid`,
+      providerRequestRef,
+      status: "Paid",
+      brokerageId: A.brokerageId,
+      provider: "sandbox",
+      mandateProviderRef: `sandbox-e2e-ref-${suffix}`,
+    });
     const res = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerEventId: `evt-${suffix}-paid`, providerRequestRef, status: "Paid" }),
+      headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
+      body: callback.raw,
     });
     const body = await json<{ processed: boolean; reason?: string }>(res);
     assert.equal(body.processed, false);
@@ -302,10 +330,18 @@ describe("financial routes — end-to-end PC success fee lifecycle through the A
   });
 
   test("an unknown providerRequestRef reads as payment_request_not_found", async () => {
+    const callback = signedMandateCallback({
+      providerEventId: `evt-${suffix}-unknown`,
+      providerRequestRef: "no-such-ref",
+      status: "Paid",
+      brokerageId: A.brokerageId,
+      provider: "sandbox",
+      mandateProviderRef: "no-such-mandate",
+    });
     const res = await fetch(`${baseUrl}/api/financial/webhooks/mandate-payments`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerEventId: `evt-${suffix}-unknown`, providerRequestRef: "no-such-ref", status: "Paid" }),
+      headers: { "content-type": "application/json", "x-mandate-payment-signature": callback.signature },
+      body: callback.raw,
     });
     assert.equal(res.status, 404);
     const body = await json<{ reason?: string }>(res);

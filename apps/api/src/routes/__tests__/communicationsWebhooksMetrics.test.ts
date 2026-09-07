@@ -23,8 +23,10 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.COMMUNICATIONS_WEBHOOK_INGRESS_ENABLED = "true";
+process.env.COMMUNICATIONS_WEBHOOK_SECRET = "test-only-communications-webhook-secret";
 
-const WEBHOOK_SECRET = process.env.COMMUNICATIONS_WEBHOOK_SECRET ?? "dev-sandbox-communications-webhook-secret";
+const WEBHOOK_SECRET = process.env.COMMUNICATIONS_WEBHOOK_SECRET;
 
 let server: Server;
 let baseUrl: string;
@@ -57,8 +59,11 @@ beforeEach(() => {
   resetMetricsForTesting();
 });
 
-function sign(rawBody: Buffer): string {
-  return createHmac("sha256", WEBHOOK_SECRET).update(rawBody).digest("hex");
+function timestamp(): string {
+  return String(Math.floor(Date.now() / 1_000));
+}
+function sign(rawBody: Buffer, signedTimestamp: string): string {
+  return createHmac("sha256", WEBHOOK_SECRET).update(signedTimestamp).update(".").update(rawBody).digest("hex");
 }
 
 async function countRows(provider: string, providerEventId: string): Promise<number> {
@@ -104,13 +109,52 @@ test("a missing/invalid signature is rejected as invalid_signature and never rea
   assert.equal(await countRows("sandbox_email", eventId), 0, "an invalid-signature webhook must never mutate state");
 });
 
+test("expired or unreasonably future signed timestamps are rejected before any webhook row is written", async () => {
+  for (const [label, signedTimestamp] of [
+    ["expired", String(Math.floor((Date.now() - 6 * 60_000) / 1_000))],
+    ["future", String(Math.floor((Date.now() + 6 * 60_000) / 1_000))],
+  ] as const) {
+    const eventId = `evt-${suffix}-${label}-timestamp`;
+    const rawBody = Buffer.from(JSON.stringify({ eventId, eventType: "DELIVERY_RECEIPT" }));
+    const res = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/sandbox_email`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-communications-timestamp": signedTimestamp,
+        "x-communications-signature": sign(rawBody, signedTimestamp),
+      },
+      body: rawBody,
+    });
+    assert.equal(res.status, 401);
+    assert.equal(await countRows("sandbox_email", eventId), 0, `${label} timestamp must not be recorded or mutate business state`);
+  }
+});
+
+test("a signed request naming a disabled provider is rejected before business processing", async () => {
+  const eventId = `evt-${suffix}-disabled-provider`;
+  const rawBody = Buffer.from(JSON.stringify({ eventId, eventType: "DELIVERY_RECEIPT" }));
+  const signedTimestamp = timestamp();
+  const res = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/disabled_provider`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-communications-timestamp": signedTimestamp,
+      "x-communications-signature": sign(rawBody, signedTimestamp),
+    },
+    body: rawBody,
+  });
+  assert.equal(res.status, 404);
+  assert.equal(await countRows("disabled_provider", eventId), 0);
+});
+
 test("a schema-invalid body (correctly signed) is rejected as schema_rejected and never reaches processInboundWebhook", async () => {
   const eventId = `evt-${suffix}-bad-schema`;
   const rawBody = Buffer.from(JSON.stringify({ eventId, eventType: "NOT_A_REAL_EVENT_TYPE" }));
+  const signedTimestamp = timestamp();
 
   const res = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/sandbox_email`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-communications-signature": sign(rawBody) },
+    headers: { "content-type": "application/json", "x-communications-timestamp": signedTimestamp, "x-communications-signature": sign(rawBody, signedTimestamp) },
     body: rawBody,
   });
   assert.equal(res.status, 400);
@@ -125,11 +169,12 @@ test("a schema-invalid body (correctly signed) is rejected as schema_rejected an
 test("a validly signed, schema-valid, unrecognised event is accepted and recorded as success, and a redelivery of the same event increments replay_rejected", async () => {
   const eventId = `evt-${suffix}-success`;
   const rawBody = Buffer.from(JSON.stringify({ eventId, eventType: "DELIVERY_RECEIPT" }));
-  const signature = sign(rawBody);
+  const signedTimestamp = timestamp();
+  const signature = sign(rawBody, signedTimestamp);
 
   const firstRes = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/sandbox_email`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-communications-signature": signature },
+    headers: { "content-type": "application/json", "x-communications-timestamp": signedTimestamp, "x-communications-signature": signature },
     body: rawBody,
   });
   assert.equal(firstRes.status, 200);
@@ -144,7 +189,7 @@ test("a validly signed, schema-valid, unrecognised event is accepted and recorde
 
   const secondRes = await fetch(`${baseUrl}/api/communications/webhooks/${brokerageId}/sandbox_email`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-communications-signature": signature },
+    headers: { "content-type": "application/json", "x-communications-timestamp": signedTimestamp, "x-communications-signature": signature },
     body: rawBody,
   });
   assert.equal(secondRes.status, 200);

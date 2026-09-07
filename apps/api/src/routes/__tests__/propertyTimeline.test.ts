@@ -13,6 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { createHmac } from "node:crypto";
 import {
   createBrokerageWithUsers,
   createTransactionFromListedProperty,
@@ -25,6 +26,7 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+process.env.AML_WEBHOOK_SECRET = "aml-webhook-test-secret";
 
 let server: Server;
 let baseUrl: string;
@@ -78,6 +80,15 @@ async function getTimeline(cookie: string, propertyId: number): Promise<Response
   return fetch(`${baseUrl}/api/properties/${propertyId}/timeline`, { headers: { cookie } });
 }
 
+function amlWebhookHeaders(body: string): Record<string, string> {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return {
+    "content-type": "application/json",
+    "x-aml-timestamp": timestamp,
+    "x-aml-signature": createHmac("sha256", process.env.AML_WEBHOOK_SECRET!).update(`${timestamp}.`).update(body).digest("hex"),
+  };
+}
+
 test("Property Timeline: full property+transaction lifecycle produces exactly one entry per milestone, in ascending order, with financial redaction for a plain Agent", async () => {
   const headers = { "content-type": "application/json", cookie: A.agent.cookie };
 
@@ -96,10 +107,11 @@ test("Property Timeline: full property+transaction lifecycle produces exactly on
   const { verifications } = await json<{ verifications: Array<{ partyId: number; status: string; providerReference: string }> }>(amlListRes);
   const buyerVerification = verifications.find((v) => v.partyId !== sellerPartyId && v.status !== "Complete");
   assert.ok(buyerVerification, "expected a buyer AML verification to have been initiated at contract-signed");
+  const amlBody = JSON.stringify({ providerReference: buyerVerification!.providerReference, outcome: "VERIFIED", reviewRequired: false });
   const buyerAmlWebhookRes = await fetch(`${baseUrl}/api/aml/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: buyerVerification!.providerReference, outcome: "VERIFIED", reviewRequired: false }),
+    headers: amlWebhookHeaders(amlBody),
+    body: amlBody,
   });
   assert.equal(buyerAmlWebhookRes.status, 200, await buyerAmlWebhookRes.text());
 
