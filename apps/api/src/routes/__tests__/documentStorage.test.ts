@@ -3,10 +3,19 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { createHash } from "node:crypto";
 import type { ObjectStorageProvider } from "@aee/integration-object-storage";
-import { and, eq } from "drizzle-orm";
-import { db, auditLogs, documentObjectVersions } from "@aee/db";
+import { and, eq, inArray } from "drizzle-orm";
+import {
+  db,
+  auditLogs,
+  documentObjectVersions,
+  documentPackages,
+  documents,
+  domainEvents,
+  signatureRequests,
+} from "@aee/db";
 import {
   assertDocumentStorageConfigured,
+  DocumentStorageError,
   configuredDocumentWebhookMaxBytes,
   configuredEsignMaxDocumentBytes,
   configuredEsignMaxDocuments,
@@ -18,7 +27,12 @@ import {
   reconcilePendingDocumentVersions,
   setDocumentStorageProviderForTests,
 } from "../../lib/documentStorage.js";
-import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
+import {
+  createBrokerageWithUsers,
+  cleanupBrokerages,
+  signedSandboxEsignWebhookHeaders,
+  type DevLoginResult,
+} from "./testSupport.js";
 
 process.env.SESSION_SECRET ??= "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
@@ -29,14 +43,24 @@ class MemoryStorage implements ObjectStorageProvider {
   readonly putKeys: string[] = [];
   readonly deleteKeys: string[] = [];
   failNextPut: Error | null = null;
+  failPutForKeyIncludes: string | null = null;
+  onPut: ((key: string) => void) | null = null;
   readiness: { ready: boolean; message?: string } = { ready: true };
 
   async putObject(key: string, content: string | Buffer) {
     this.putKeys.push(key);
+    this.onPut?.(key);
     if (this.failNextPut) {
       const error = this.failNextPut;
       this.failNextPut = null;
       throw error;
+    }
+    if (
+      this.failPutForKeyIncludes &&
+      key.includes(this.failPutForKeyIncludes)
+    ) {
+      this.failPutForKeyIncludes = null;
+      throw new Error(`simulated storage failure for ${key}`);
     }
     this.objects.set(key, Buffer.isBuffer(content) ? Buffer.from(content) : Buffer.from(content));
     return { key };
@@ -128,6 +152,8 @@ async function createDocument(cookie: string): Promise<number> {
 }
 
 async function prepareESignCompletion(cookie: string): Promise<{
+  propertyId: number;
+  packageId: number;
   providerReference: string;
   completedDocuments: Array<{
     documentId: number;
@@ -205,6 +231,8 @@ async function prepareESignCompletion(cookie: string): Promise<{
     }
   ).documents;
   return {
+    propertyId,
+    packageId,
     providerReference,
     completedDocuments: packageDocuments.map((document) => ({
       documentId: document.id,
@@ -382,8 +410,8 @@ test("aged pending uploads are finalized or terminally quarantined without autom
         bytes: recoveredBytes,
         originalFilename: "recovered.txt",
         declaredMimeType: "text/plain",
-        source: "esign",
-        sourceProvider: "mock-esign",
+        source: "upload",
+        sourceProvider: "test-upload",
         providerDocumentId: "provider-recovered",
         webhookVerified: true,
         retentionClass: "signed-agreement",
@@ -412,8 +440,8 @@ test("aged pending uploads are finalized or terminally quarantined without autom
         bytes: Buffer.from("missing pending bytes"),
         originalFilename: "missing.txt",
         declaredMimeType: "text/plain",
-        source: "esign",
-        sourceProvider: "mock-esign",
+        source: "upload",
+        sourceProvider: "test-upload",
         providerDocumentId: "provider-missing",
         webhookVerified: true,
         retentionClass: "signed-agreement",
@@ -484,7 +512,7 @@ test("e-sign storage failures request redelivery and resume the pending version"
     });
     const failed = await fetch(`${baseUrl}/api/documents/webhook`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: signedSandboxEsignWebhookHeaders(payload),
       body: payload,
     });
     assert.equal(failed.status, 503);
@@ -520,7 +548,7 @@ test("e-sign storage failures request redelivery and resume the pending version"
 
     const retried = await fetch(`${baseUrl}/api/documents/webhook`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: signedSandboxEsignWebhookHeaders(payload),
       body: payload,
     });
     assert.equal(retried.status, 200);
@@ -539,6 +567,487 @@ test("e-sign storage failures request redelivery and resume the pending version"
         (audit) => audit.action === "document_version_upload_reconciled",
       ),
     );
+  } finally {
+    if (previousMaximum === undefined) {
+      delete process.env.DOCUMENT_STORAGE_MAX_BYTES;
+    } else {
+      process.env.DOCUMENT_STORAGE_MAX_BYTES = previousMaximum;
+    }
+  }
+});
+
+test("production-disabled unsigned e-sign completion leaves provider bytes and all durable state unchanged", async () => {
+  const previousMaximum = process.env.DOCUMENT_STORAGE_MAX_BYTES;
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousApproval = process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED;
+  process.env.DOCUMENT_STORAGE_MAX_BYTES = "1048576";
+  try {
+    const completion = await prepareESignCompletion(A.agent.cookie);
+    const documentIds = completion.completedDocuments.map(
+      (document) => document.documentId,
+    );
+    const snapshot = async () => ({
+      signatureRequest: await db
+        .select()
+        .from(signatureRequests)
+        .where(eq(signatureRequests.providerReference, completion.providerReference)),
+      documentPackage: await db
+        .select()
+        .from(documentPackages)
+        .where(eq(documentPackages.id, completion.packageId)),
+      packageDocuments: await db
+        .select()
+        .from(documents)
+        .where(inArray(documents.id, documentIds)),
+      versions: await db
+        .select()
+        .from(documentObjectVersions)
+        .where(inArray(documentObjectVersions.documentId, documentIds)),
+      audits: await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.propertyId, completion.propertyId)),
+      events: await db
+        .select()
+        .from(domainEvents)
+        .where(eq(domainEvents.propertyId, completion.propertyId)),
+      providerObjects: [...storage.objects.entries()]
+        .map(([key, bytes]) => [key, bytes.toString("base64")] as const)
+        .sort(([left], [right]) => left.localeCompare(right)),
+      providerPutKeys: [...storage.putKeys],
+    });
+    const before = await snapshot();
+    const payload = JSON.stringify({
+      providerReference: completion.providerReference,
+      status: "Completed",
+      completedDocuments: completion.completedDocuments,
+    });
+
+    process.env.NODE_ENV = "production";
+    delete process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED;
+    const rejected = await fetch(`${baseUrl}/api/documents/webhook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+    assert.equal(rejected.status, 503);
+    assert.equal(rejected.headers.get("retry-after"), "300");
+    assert.equal(
+      ((await rejected.json()) as { reason: string }).reason,
+      "webhooks_disabled",
+    );
+
+    const after = await snapshot();
+    assert.deepEqual(
+      after,
+      before,
+      "disabled webhook must not mutate object bytes, versions, statuses, audits, or events",
+    );
+  } finally {
+    if (previousMaximum === undefined) {
+      delete process.env.DOCUMENT_STORAGE_MAX_BYTES;
+    } else {
+      process.env.DOCUMENT_STORAGE_MAX_BYTES = previousMaximum;
+    }
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousApproval === undefined) {
+      delete process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED;
+    } else {
+      process.env.LIVE_EXTERNAL_TRANSACTIONS_APPROVED = previousApproval;
+    }
+  }
+});
+
+test("a valid first and invalid later e-sign document rejects with zero durable mutation", async () => {
+  const previousMaximum = process.env.DOCUMENT_STORAGE_MAX_BYTES;
+  process.env.DOCUMENT_STORAGE_MAX_BYTES = "1048576";
+  try {
+    const completion = await prepareESignCompletion(A.agent.cookie);
+    const documentIds = completion.completedDocuments.map(
+      (document) => document.documentId,
+    );
+    assert.ok(documentIds.length >= 2);
+    const snapshot = async () => ({
+      signatureRequest: await db
+        .select()
+        .from(signatureRequests)
+        .where(eq(signatureRequests.providerReference, completion.providerReference)),
+      documentPackage: await db
+        .select()
+        .from(documentPackages)
+        .where(eq(documentPackages.id, completion.packageId)),
+      packageDocuments: await db
+        .select()
+        .from(documents)
+        .where(inArray(documents.id, documentIds)),
+      versions: await db
+        .select()
+        .from(documentObjectVersions)
+        .where(inArray(documentObjectVersions.documentId, documentIds)),
+      audits: await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.propertyId, completion.propertyId)),
+      events: await db
+        .select()
+        .from(domainEvents)
+        .where(eq(domainEvents.propertyId, completion.propertyId)),
+      providerObjects: [...storage.objects.entries()]
+        .map(([key, bytes]) => [key, bytes.toString("base64")] as const)
+        .sort(([left], [right]) => left.localeCompare(right)),
+      providerPutKeys: [...storage.putKeys],
+    });
+    const before = await snapshot();
+    const completedDocuments = completion.completedDocuments.map(
+      (document, index) =>
+        index === 1
+          ? {
+              ...document,
+              filename: "signed-document-with-mismatched-extension.pdf",
+            }
+          : document,
+    );
+    const body = JSON.stringify({
+      providerReference: completion.providerReference,
+      status: "Completed",
+      completedDocuments,
+    });
+
+    const rejected = await fetch(`${baseUrl}/api/documents/webhook`, {
+      method: "POST",
+      headers: signedSandboxEsignWebhookHeaders(body),
+      body,
+    });
+    assert.equal(rejected.status, 200);
+    assert.deepEqual(
+      (await rejected.json()) as {
+        received: boolean;
+        processed: boolean;
+        reason: string;
+      },
+      {
+        received: true,
+        processed: false,
+        reason: "completed_document_invalid",
+      },
+    );
+
+    const after = await snapshot();
+    assert.deepEqual(
+      after,
+      before,
+      "preflight rejection must not mutate object bytes, versions, statuses, audits, or events",
+    );
+  } finally {
+    if (previousMaximum === undefined) {
+      delete process.env.DOCUMENT_STORAGE_MAX_BYTES;
+    } else {
+      process.env.DOCUMENT_STORAGE_MAX_BYTES = previousMaximum;
+    }
+  }
+});
+
+test("batch document locks prevent a competing upload from creating partial active e-sign state", async () => {
+  const previousMaximum = process.env.DOCUMENT_STORAGE_MAX_BYTES;
+  process.env.DOCUMENT_STORAGE_MAX_BYTES = "1048576";
+  try {
+    const completion = await prepareESignCompletion(A.agent.cookie);
+    assert.ok(completion.completedDocuments.length >= 2);
+    const firstDocumentId = completion.completedDocuments[0].documentId;
+    const laterDocumentId = completion.completedDocuments[1].documentId;
+    const documentIds = completion.completedDocuments.map(
+      (document) => document.documentId,
+    );
+    const beforeDocuments = await db
+      .select()
+      .from(documents)
+      .where(inArray(documents.id, documentIds));
+    const beforeActiveState = beforeDocuments
+      .map((document) => ({
+        id: document.id,
+        status: document.status,
+        objectStorageKey: document.objectStorageKey,
+        metadata: document.metadata,
+        updatedAt: document.updatedAt,
+      }))
+      .sort((left, right) => left.id - right.id);
+
+    const competing: {
+      promise: ReturnType<typeof ingestDocumentVersion> | null;
+    } = { promise: null };
+    storage.failPutForKeyIncludes = `/documents/${laterDocumentId}/`;
+    storage.onPut = (key) => {
+      if (
+        competing.promise ||
+        !key.includes(`/documents/${firstDocumentId}/`)
+      ) {
+        return;
+      }
+      competing.promise = ingestDocumentVersion({
+        documentId: laterDocumentId,
+        brokerageId: A.brokerageId,
+        bytes: Buffer.from("concurrent replacement bytes\n"),
+        originalFilename: `concurrent-${laterDocumentId}.txt`,
+        declaredMimeType: "text/plain",
+        replacementReason: "Concurrent test upload",
+        retentionClass: "transaction",
+        source: "upload",
+      });
+    };
+
+    const body = JSON.stringify({
+      providerReference: completion.providerReference,
+      status: "Completed",
+      completedDocuments: completion.completedDocuments,
+    });
+    const response = await fetch(`${baseUrl}/api/documents/webhook`, {
+      method: "POST",
+      headers: signedSandboxEsignWebhookHeaders(body),
+      body,
+    });
+    assert.equal(response.status, 503);
+    assert.equal(
+      ((await response.json()) as { reason: string }).reason,
+      "completed_document_storage_retry_required",
+    );
+    assert.ok(competing.promise, "competing upload must start during the batch");
+    await assert.rejects(
+      competing.promise,
+      (error: unknown) =>
+        error instanceof DocumentStorageError &&
+        error.code === "DOCUMENT_UNAVAILABLE",
+    );
+
+    const afterDocuments = await db
+      .select()
+      .from(documents)
+      .where(inArray(documents.id, documentIds));
+    const afterActiveState = afterDocuments
+      .map((document) => ({
+        id: document.id,
+        status: document.status,
+        objectStorageKey: document.objectStorageKey,
+        metadata: document.metadata,
+        updatedAt: document.updatedAt,
+      }))
+      .sort((left, right) => left.id - right.id);
+    assert.deepEqual(
+      afterActiveState,
+      beforeActiveState,
+      "no document pointer, metadata, status, or timestamp may activate partially",
+    );
+
+    const eSignVersions = await db
+      .select()
+      .from(documentObjectVersions)
+      .where(
+        and(
+          inArray(documentObjectVersions.documentId, documentIds),
+          eq(
+            documentObjectVersions.providerDocumentId,
+            completion.providerReference,
+          ),
+        ),
+      );
+    assert.equal(eSignVersions.length, documentIds.length);
+    assert.ok(
+      eSignVersions.every(
+        (version) => version.objectStatus === "PendingUpload",
+      ),
+      "provider failure may leave resumable pending rows but never an active partial set",
+    );
+
+    await reconcilePendingDocumentVersions({
+      now: new Date(Date.now() + 60 * 60 * 1000),
+      afterId: Math.min(...eSignVersions.map((version) => version.id)) - 1,
+      limit: 50,
+      reconcileAfterMs: 0,
+      quarantineAfterMs: 30 * 60 * 1000,
+    });
+    const afterReconciliationVersions = await db
+      .select()
+      .from(documentObjectVersions)
+      .where(
+        and(
+          inArray(documentObjectVersions.documentId, documentIds),
+          eq(
+            documentObjectVersions.providerDocumentId,
+            completion.providerReference,
+          ),
+        ),
+      );
+    assert.ok(
+      afterReconciliationVersions.every(
+        (version) => version.objectStatus === "PendingUpload",
+      ),
+      "single-document reconciliation must not activate e-sign batch members",
+    );
+    const afterReconciliationDocuments = await db
+      .select()
+      .from(documents)
+      .where(inArray(documents.id, documentIds));
+    assert.deepEqual(
+      afterReconciliationDocuments
+        .map((document) => ({
+          id: document.id,
+          status: document.status,
+          objectStorageKey: document.objectStorageKey,
+          metadata: document.metadata,
+          updatedAt: document.updatedAt,
+        }))
+        .sort((left, right) => left.id - right.id),
+      beforeActiveState,
+      "reconciliation must not change any active pointer in a failed e-sign batch",
+    );
+    const [signatureRequest] = await db
+      .select()
+      .from(signatureRequests)
+      .where(eq(signatureRequests.providerReference, completion.providerReference));
+    const [documentPackage] = await db
+      .select()
+      .from(documentPackages)
+      .where(eq(documentPackages.id, completion.packageId));
+    assert.equal(signatureRequest?.status, "Sent");
+    assert.equal(documentPackage?.status, "Sent");
+  } finally {
+    storage.onPut = null;
+    storage.failPutForKeyIncludes = null;
+    if (previousMaximum === undefined) {
+      delete process.env.DOCUMENT_STORAGE_MAX_BYTES;
+    } else {
+      process.env.DOCUMENT_STORAGE_MAX_BYTES = previousMaximum;
+    }
+  }
+});
+
+test("concurrent valid e-sign completions serialize to one immutable signed version set", async () => {
+  const previousMaximum = process.env.DOCUMENT_STORAGE_MAX_BYTES;
+  process.env.DOCUMENT_STORAGE_MAX_BYTES = "1048576";
+  try {
+    const completion = await prepareESignCompletion(A.agent.cookie);
+    const completedDocumentsFor = (marker: string) =>
+      completion.completedDocuments.map((document) => ({
+        ...document,
+        contentBase64: Buffer.from(
+          `${marker}: signed document ${document.documentId}\n`,
+        ).toString("base64"),
+      }));
+    const documentsA = completedDocumentsFor("delivery-a");
+    const documentsB = completedDocumentsFor("delivery-b");
+    const bodyA = JSON.stringify({
+      providerReference: completion.providerReference,
+      status: "Completed",
+      completedDocuments: documentsA,
+    });
+    const bodyB = JSON.stringify({
+      providerReference: completion.providerReference,
+      status: "Completed",
+      completedDocuments: documentsB,
+    });
+
+    const responses = await Promise.all(
+      [bodyA, bodyB].map((body) =>
+        fetch(`${baseUrl}/api/documents/webhook`, {
+          method: "POST",
+          headers: signedSandboxEsignWebhookHeaders(body),
+          body,
+        }),
+      ),
+    );
+    assert.deepEqual(
+      responses.map((response) => response.status),
+      [200, 200],
+    );
+    const outcomes = await Promise.all(
+      responses.map(
+        async (response) =>
+          (await response.json()) as {
+            processed: boolean;
+            reason?: string;
+          },
+      ),
+    );
+    assert.equal(
+      outcomes.filter((outcome) => outcome.processed).length,
+      1,
+    );
+    assert.deepEqual(
+      outcomes
+        .filter((outcome) => !outcome.processed)
+        .map((outcome) => outcome.reason),
+      ["duplicate_delivery"],
+    );
+
+    const documentIds = completion.completedDocuments.map(
+      (document) => document.documentId,
+    );
+    const signedVersions = await db
+      .select()
+      .from(documentObjectVersions)
+      .where(
+        and(
+          inArray(documentObjectVersions.documentId, documentIds),
+          eq(documentObjectVersions.source, "esign"),
+          eq(
+            documentObjectVersions.providerDocumentId,
+            completion.providerReference,
+          ),
+        ),
+      );
+    assert.equal(
+      signedVersions.length,
+      documentIds.length,
+      "only one e-sign version may be created for each document",
+    );
+
+    const actualBytes = await Promise.all(
+      documentIds.map(async (documentId) => {
+        const stored = await getStoredDocumentContent(
+          documentId,
+          A.brokerageId,
+        );
+        assert.ok(stored);
+        return stored.bytes.toString("utf8");
+      }),
+    );
+    const expectedA = documentsA.map((document) =>
+      Buffer.from(document.contentBase64, "base64").toString("utf8"),
+    );
+    const expectedB = documentsB.map((document) =>
+      Buffer.from(document.contentBase64, "base64").toString("utf8"),
+    );
+    assert.ok(
+      JSON.stringify(actualBytes) === JSON.stringify(expectedA) ||
+        JSON.stringify(actualBytes) === JSON.stringify(expectedB),
+      "all active bytes must come from the single delivery that acquired the row lock first",
+    );
+
+    const [signatureRequest] = await db
+      .select()
+      .from(signatureRequests)
+      .where(eq(signatureRequests.providerReference, completion.providerReference));
+    const [documentPackage] = await db
+      .select()
+      .from(documentPackages)
+      .where(eq(documentPackages.id, completion.packageId));
+    const packageDocuments = await db
+      .select()
+      .from(documents)
+      .where(inArray(documents.id, documentIds));
+    const signedEvents = await db
+      .select()
+      .from(domainEvents)
+      .where(
+        and(
+          eq(domainEvents.propertyId, completion.propertyId),
+          eq(domainEvents.eventType, "AGENCY_AGREEMENT_SIGNED"),
+        ),
+      );
+    assert.equal(signatureRequest?.status, "Completed");
+    assert.equal(documentPackage?.status, "Completed");
+    assert.ok(packageDocuments.every((document) => document.status === "Signed"));
+    assert.equal(signedEvents.length, 1);
   } finally {
     if (previousMaximum === undefined) {
       delete process.env.DOCUMENT_STORAGE_MAX_BYTES;

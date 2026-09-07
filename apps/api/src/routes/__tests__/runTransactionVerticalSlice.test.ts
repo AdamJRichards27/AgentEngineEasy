@@ -14,7 +14,13 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { createHmac } from "node:crypto";
 import { db, automationTasks, automationAttentionItems } from "@aee/db";
-import { createBrokerageWithUsers, cleanupBrokerages, getDomainEventsForProperty, type DevLoginResult } from "./testSupport.js";
+import {
+  createBrokerageWithUsers,
+  cleanupBrokerages,
+  getDomainEventsForProperty,
+  signedSandboxEsignWebhookHeaders,
+  type DevLoginResult,
+} from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -156,10 +162,15 @@ test("Stage B: Agency Agreement -> Ready to List -> documents signed -> seller A
     contentType: "text/plain",
   }));
 
+  const esignWebhookBody = JSON.stringify({
+    providerReference: signatureRequest.providerReference,
+    status: "Completed",
+    completedDocuments,
+  });
   const esignWebhookRes = await fetch(`${baseUrl}/api/documents/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed", completedDocuments }),
+    headers: signedSandboxEsignWebhookHeaders(esignWebhookBody),
+    body: esignWebhookBody,
   });
   assert.equal(esignWebhookRes.status, 200);
 

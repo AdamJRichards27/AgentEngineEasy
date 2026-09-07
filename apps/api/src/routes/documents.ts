@@ -142,10 +142,22 @@ documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, asy
 // raw bytes captured by app.ts's express.json({ verify }).
 documentsRouter.post("/webhook", async (req, res) => {
   const signature = String(req.header("x-esign-signature") ?? req.header("x-webhook-signature") ?? "");
-  const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
+  if (!Buffer.isBuffer(req.rawBody)) {
+    res.status(400).json({ error: "Raw webhook body is required" });
+    return;
+  }
 
-  const result = await processEsignWebhook(rawBody, signature, req.body);
+  const result = await processEsignWebhook(req.rawBody, signature, req.body);
 
+  if (result.reason === "webhooks_disabled") {
+    res.setHeader("Retry-After", "300");
+    res.status(503).json({
+      received: false,
+      processed: false,
+      reason: result.reason,
+    });
+    return;
+  }
   if (result.reason === "invalid_signature") {
     res.status(401).json({ error: "Invalid webhook signature" });
     return;

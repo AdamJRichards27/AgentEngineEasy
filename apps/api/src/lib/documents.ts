@@ -11,7 +11,11 @@ import {
 } from "@aee/db";
 import type { DocumentPackage, Document, SignatureRequest, AgencyAgreementTerms } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
-import { createESignProvider, type ESignWebhookResult } from "@aee/integration-esign";
+import {
+  createESignProvider,
+  isESignWebhookProcessingEnabled,
+  type ESignWebhookResult,
+} from "@aee/integration-esign";
 import { populateTemplate } from "./documentTemplates.js";
 import { logAudit } from "./audit.js";
 import { dispatchOperationalAlert } from "./operationalAlerts.js";
@@ -21,6 +25,9 @@ import {
   configuredEsignMaxDocuments,
   getStoredDocumentContent,
   ingestDocumentVersion,
+  ingestDocumentVersionBatch,
+  preflightDocumentVersionIngestion,
+  type IngestDocumentVersionInput,
 } from "./documentStorage.js";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 
@@ -318,7 +325,7 @@ export async function sendPackageForSignature(input: {
     .insert(signatureRequests)
     .values({
       packageId: input.packageId,
-      provider: process.env.ESIGN_PROVIDER ?? "mock",
+      provider: esignProvider.kind,
       providerReference,
       signatories: signatories.map((s) => ({ ...s, status: "Pending" })),
       status: "Sent",
@@ -422,6 +429,7 @@ export async function getPackageByProperty(propertyId: number, brokerageId: numb
 export interface ProcessEsignWebhookResult {
   processed: boolean;
   reason?:
+    | "webhooks_disabled"
     | "invalid_signature"
     | "signature_request_not_found"
     | "duplicate_delivery"
@@ -459,240 +467,340 @@ function decodeCompletedDocument(contentBase64: string): Buffer {
  * verified against the raw request bytes.
  */
 export async function processEsignWebhook(
-  rawBody: Buffer | string,
+  rawBody: Buffer,
   signature: string,
   payload: unknown,
 ): Promise<ProcessEsignWebhookResult> {
+  if (!isESignWebhookProcessingEnabled(esignProvider)) {
+    return { processed: false, reason: "webhooks_disabled" };
+  }
   if (!esignProvider.verifyWebhookSignature(rawBody, signature)) {
     return { processed: false, reason: "invalid_signature" };
   }
 
   const result: ESignWebhookResult = esignProvider.parseWebhook(payload);
 
-  const [signatureRequest] = await db
-    .select()
-    .from(signatureRequests)
-    .where(eq(signatureRequests.providerReference, result.providerReference));
-  if (!signatureRequest) {
-    return { processed: false, reason: "signature_request_not_found" };
-  }
+  const postCommit: {
+    refreshPropertyId: number | null;
+    signedEvent: {
+        signatureRequestId: number;
+        packageId: number;
+        propertyId: number;
+        provider: string;
+        brokerageId: number | null;
+        agentId: number | null;
+      } | null;
+  } = {
+    refreshPropertyId: null,
+    signedEvent: null,
+  };
 
-  const isTerminalRepeat =
-    signatureRequest.status === result.status &&
-    (signatureRequest.status === "Completed" || signatureRequest.status === "Voided") &&
-    signatureRequest.completedAt !== null;
-  if (isTerminalRepeat) {
-    return { processed: false, reason: "duplicate_delivery", signatureRequest };
-  }
-
-  const [docPackage] = await db
-    .select()
-    .from(documentPackages)
-    .where(eq(documentPackages.id, signatureRequest.packageId));
-  const packageDocuments = docPackage
-    ? await db.select().from(documents).where(eq(documents.packageId, docPackage.id))
-    : [];
-
-  let completedDocumentKey = signatureRequest.completedDocumentKey;
-  if (result.status === "Completed") {
-    if (
-      !docPackage ||
-      !result.completedDocuments ||
-      result.completedDocuments.length > configuredEsignMaxDocuments() ||
-      result.completedDocuments.length !== packageDocuments.length
-    ) {
-      return {
-        processed: false,
-        reason: "completed_document_missing",
-        signatureRequest,
-      };
-    }
-    const [property] = await db
+  const response = await db.transaction(async (tx) => {
+    // A provider can redeliver the same completion concurrently to different
+    // API instances. Lock the durable signature-request row before checking
+    // terminal state and keep it locked through byte ingestion and transition,
+    // so only one delivery can create signed versions.
+    const [signatureRequest] = await tx
       .select()
-      .from(properties)
-      .where(eq(properties.id, docPackage.propertyId));
-    if (!property?.brokerageId) {
+      .from(signatureRequests)
+      .where(eq(signatureRequests.providerReference, result.providerReference))
+      .for("update");
+    if (!signatureRequest) {
+      return { processed: false, reason: "signature_request_not_found" } as const;
+    }
+
+    const isTerminalRepeat =
+      signatureRequest.status === result.status &&
+      (signatureRequest.status === "Completed" || signatureRequest.status === "Voided") &&
+      signatureRequest.completedAt !== null;
+    if (isTerminalRepeat) {
       return {
         processed: false,
-        reason: "completed_document_invalid",
+        reason: "duplicate_delivery",
         signatureRequest,
-      };
+      } as const;
     }
-    const expectedIds = new Set(packageDocuments.map((document) => document.id));
-    if (
-      new Set(result.completedDocuments.map((document) => document.documentId)).size !==
-        packageDocuments.length ||
-      result.completedDocuments.some((document) => !expectedIds.has(document.documentId))
-    ) {
-      return {
-        processed: false,
-        reason: "completed_document_invalid",
-        signatureRequest,
-      };
-    }
-    let completedWithBytes: Array<{
-      completed: NonNullable<ESignWebhookResult["completedDocuments"]>[number];
-      bytes: Buffer;
-    }>;
-    try {
-      completedWithBytes = result.completedDocuments.map((completed) => ({
-        completed,
-        bytes: decodeCompletedDocument(completed.contentBase64),
-      }));
-    } catch {
-      return {
-        processed: false,
-        reason: "completed_document_invalid",
-        signatureRequest,
-      };
-    }
-    try {
-      const storedVersions = [];
-      for (const { completed, bytes } of completedWithBytes) {
-        const stored = await ingestDocumentVersion({
-          documentId: completed.documentId,
-          brokerageId: property.brokerageId,
-          bytes,
-          originalFilename: completed.filename,
-          declaredMimeType: completed.contentType,
-          replacementReason: `Completed e-signature envelope ${result.providerReference}`,
-          retentionClass: "signed-agreement",
-          source: "esign",
-          sourceProvider: signatureRequest.provider,
-          providerDocumentId: result.providerReference,
-          webhookVerified: true,
-        });
-        storedVersions.push(stored.version);
-        await logAudit({
-          action:
-            stored.outcome === "created"
-              ? "document_version_ingested_from_esign"
-              : stored.outcome === "resumed"
-                ? "document_version_esign_ingestion_reconciled"
-                : "document_version_esign_ingestion_deduplicated",
-          recordType: "document_object_version",
-          recordId: String(stored.version.id),
-          propertyId: stored.version.propertyId,
-          providerReference: result.providerReference,
-          updatedValue: JSON.stringify({
-            documentId: completed.documentId,
-            version: stored.version.version,
-            byteSize: stored.version.byteSize,
-            contentSha256: stored.version.contentSha256,
-            webhookVerified: true,
-          }),
-        });
+
+    const [docPackage] = await tx
+      .select()
+      .from(documentPackages)
+      .where(eq(documentPackages.id, signatureRequest.packageId));
+    const packageDocuments = docPackage
+      ? await tx.select().from(documents).where(eq(documents.packageId, docPackage.id))
+      : [];
+
+    let completedDocumentKey = signatureRequest.completedDocumentKey;
+    if (result.status === "Completed") {
+      if (
+        !docPackage ||
+        !result.completedDocuments ||
+        result.completedDocuments.length > configuredEsignMaxDocuments() ||
+        result.completedDocuments.length !== packageDocuments.length
+      ) {
+        return {
+          processed: false,
+          reason: "completed_document_missing",
+          signatureRequest,
+        } as const;
       }
-      completedDocumentKey = storedVersions[0]?.storageObjectKey ?? null;
-    } catch (error) {
-      const isInvalidPayload =
-        error instanceof DocumentStorageError &&
-        error.code !== "DOCUMENT_UNAVAILABLE" &&
-        error.code !== "DOCUMENT_INTEGRITY_FAILURE";
-      logger.warn("esign_completed_document_ingestion_rejected", {
-        signatureRequestId: signatureRequest.id,
-        retryable: !isInvalidPayload,
-        error: error instanceof Error ? error.message : "unknown error",
-      });
-      if (!isInvalidPayload) {
-        await logAudit({
-          action: "esign_completed_document_storage_retry_required",
-          recordType: "signature_request",
-          recordId: String(signatureRequest.id),
-          propertyId: docPackage.propertyId,
-          providerReference: result.providerReference,
-          updatedValue: JSON.stringify({
-            status: signatureRequest.status,
-            retryable: true,
-            pendingDocumentIds: completedWithBytes.map(({ completed }) => completed.documentId),
-          }),
-        });
-        await dispatchOperationalAlert({
-          type: "DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED",
-          summary: "Completed e-sign document storage requires provider redelivery",
-          dedupKey: `document-storage:esign-retry:${signatureRequest.id}`,
-          details: {
-            signatureRequestId: signatureRequest.id,
-            propertyId: docPackage.propertyId,
-            pendingDocumentCount: completedWithBytes.length,
-          },
-        });
+      const [property] = await tx
+        .select()
+        .from(properties)
+        .where(eq(properties.id, docPackage.propertyId));
+      if (!property?.brokerageId) {
+        return {
+          processed: false,
+          reason: "completed_document_invalid",
+          signatureRequest,
+        } as const;
       }
-      return {
-        processed: false,
-        reason: isInvalidPayload
-          ? "completed_document_invalid"
-          : "completed_document_storage_retry_required",
-        signatureRequest,
-      };
-    }
-  }
-
-  const [updated] = await db
-    .update(signatureRequests)
-    .set({
-      status: result.status,
-      completedAt: result.status === "Completed" || result.status === "Voided" ? new Date() : null,
-      completedDocumentKey,
-      updatedAt: new Date(),
-    })
-    .where(eq(signatureRequests.id, signatureRequest.id))
-    .returning();
-
-  if (result.status === "Completed" && docPackage) {
-    await db
-      .update(documents)
-      .set({ status: "Signed", updatedAt: new Date() })
-      .where(
-        and(
-          eq(documents.packageId, updated.packageId),
-          inArray(
-            documents.id,
-            packageDocuments.map((d) => d.id),
-          ),
-        ),
-      );
-    await db.update(documentPackages).set({ status: "Completed", updatedAt: new Date() }).where(eq(documentPackages.id, updated.packageId));
-
-    const hasAgencyAgreement = packageDocuments.some((d) => d.documentType === "AgencyAgreement");
-    if (hasAgencyAgreement) {
-      // #131/#135 fix: this webhook has no authenticated caller to take
-      // brokerageId/agentId from (unlike sendPackageForSignature's
-      // AGENCY_AGREEMENT_SENT above), so resolve them from the property
-      // itself -- exactly the pattern lib/aml.ts's processAmlWebhook
-      // already uses for AML_COMPLETED. Previously hardcoded to null,
-      // which silently made this event invisible to every brokerageId-
-      // filtered domain event consumer (the Property Timeline included).
-      const [property] = await db.select().from(properties).where(eq(properties.id, docPackage.propertyId));
+      const expectedIds = new Set(packageDocuments.map((document) => document.id));
+      if (
+        new Set(result.completedDocuments.map((document) => document.documentId)).size !==
+          packageDocuments.length ||
+        result.completedDocuments.some((document) => !expectedIds.has(document.documentId))
+      ) {
+        return {
+          processed: false,
+          reason: "completed_document_invalid",
+          signatureRequest,
+        } as const;
+      }
+      let completedWithBytes: Array<{
+        completed: NonNullable<ESignWebhookResult["completedDocuments"]>[number];
+        bytes: Buffer;
+      }>;
       try {
-        await publishDomainEvent({
-          eventType: "AGENCY_AGREEMENT_SIGNED",
-          occurredAt: new Date(),
+        completedWithBytes = result.completedDocuments.map((completed) => ({
+          completed,
+          bytes: decodeCompletedDocument(completed.contentBase64),
+        }));
+      } catch {
+        return {
+          processed: false,
+          reason: "completed_document_invalid",
+          signatureRequest,
+        } as const;
+      }
+      try {
+        const ingestionInputs: IngestDocumentVersionInput[] =
+          completedWithBytes.map(({ completed, bytes }) => ({
+            documentId: completed.documentId,
+            brokerageId: property.brokerageId,
+            bytes,
+            originalFilename: completed.filename,
+            declaredMimeType: completed.contentType,
+            replacementReason: `Completed e-signature envelope ${result.providerReference}`,
+            retentionClass: "signed-agreement",
+            source: "esign",
+            sourceProvider: signatureRequest.provider,
+            providerDocumentId: result.providerReference,
+            webhookVerified: true,
+          }));
+
+        // Validate the complete provider batch before the first object or
+        // metadata write. A bad later document must not partially persist an
+        // earlier valid document.
+        try {
+          await Promise.all(
+            ingestionInputs.map((input) =>
+              preflightDocumentVersionIngestion(input),
+            ),
+          );
+        } catch (error) {
+          const isInvalidPayload =
+            error instanceof DocumentStorageError &&
+            error.code !== "DOCUMENT_UNAVAILABLE" &&
+            error.code !== "DOCUMENT_INTEGRITY_FAILURE";
+          logger.warn("esign_completed_document_preflight_rejected", {
+            signatureRequestId: signatureRequest.id,
+            retryable: !isInvalidPayload,
+            error: error instanceof Error ? error.message : "unknown error",
+          });
+          return {
+            processed: false,
+            reason: isInvalidPayload
+              ? "completed_document_invalid"
+              : "completed_document_storage_retry_required",
+            signatureRequest,
+          } as const;
+        }
+
+        const storedResults = await ingestDocumentVersionBatch(
+          ingestionInputs,
+          tx,
+        );
+        const storedVersions = [];
+        for (let index = 0; index < storedResults.length; index += 1) {
+          const completed = completedWithBytes[index].completed;
+          const stored = storedResults[index];
+          storedVersions.push(stored.version);
+          await logAudit({
+            action:
+              stored.outcome === "created"
+                ? "document_version_ingested_from_esign"
+                : stored.outcome === "resumed"
+                  ? "document_version_esign_ingestion_reconciled"
+                  : "document_version_esign_ingestion_deduplicated",
+            recordType: "document_object_version",
+            recordId: String(stored.version.id),
+            propertyId: stored.version.propertyId,
+            providerReference: result.providerReference,
+            updatedValue: JSON.stringify({
+              documentId: completed.documentId,
+              version: stored.version.version,
+              byteSize: stored.version.byteSize,
+              contentSha256: stored.version.contentSha256,
+              webhookVerified: true,
+            }),
+          });
+        }
+        completedDocumentKey = storedVersions[0]?.storageObjectKey ?? null;
+      } catch (error) {
+        const isInvalidPayload =
+          error instanceof DocumentStorageError &&
+          error.code !== "DOCUMENT_UNAVAILABLE" &&
+          error.code !== "DOCUMENT_INTEGRITY_FAILURE";
+        logger.warn("esign_completed_document_ingestion_rejected", {
+          signatureRequestId: signatureRequest.id,
+          retryable: !isInvalidPayload,
+          error: error instanceof Error ? error.message : "unknown error",
+        });
+        if (!isInvalidPayload) {
+          await logAudit({
+            action: "esign_completed_document_storage_retry_required",
+            recordType: "signature_request",
+            recordId: String(signatureRequest.id),
+            propertyId: docPackage.propertyId,
+            providerReference: result.providerReference,
+            updatedValue: JSON.stringify({
+              status: signatureRequest.status,
+              retryable: true,
+              pendingDocumentIds: completedWithBytes.map(({ completed }) => completed.documentId),
+            }),
+          });
+          await dispatchOperationalAlert({
+            type: "DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED",
+            summary: "Completed e-sign document storage requires provider redelivery",
+            dedupKey: `document-storage:esign-retry:${signatureRequest.id}`,
+            details: {
+              signatureRequestId: signatureRequest.id,
+              propertyId: docPackage.propertyId,
+              pendingDocumentCount: completedWithBytes.length,
+            },
+          });
+        }
+        return {
+          processed: false,
+          reason: isInvalidPayload
+            ? "completed_document_invalid"
+            : "completed_document_storage_retry_required",
+          signatureRequest,
+        } as const;
+      }
+    }
+
+    const [updated] = await tx
+      .update(signatureRequests)
+      .set({
+        status: result.status,
+        completedAt: result.status === "Completed" || result.status === "Voided" ? new Date() : null,
+        completedDocumentKey,
+        updatedAt: new Date(),
+      })
+      .where(eq(signatureRequests.id, signatureRequest.id))
+      .returning();
+
+    if (result.status === "Completed" && docPackage) {
+      await tx
+        .update(documents)
+        .set({ status: "Signed", updatedAt: new Date() })
+        .where(
+          and(
+            eq(documents.packageId, updated.packageId),
+            inArray(
+              documents.id,
+              packageDocuments.map((d) => d.id),
+            ),
+          ),
+        );
+      await tx
+        .update(documentPackages)
+        .set({ status: "Completed", updatedAt: new Date() })
+        .where(eq(documentPackages.id, updated.packageId));
+
+      const hasAgencyAgreement = packageDocuments.some((d) => d.documentType === "AgencyAgreement");
+      if (hasAgencyAgreement) {
+        // #131/#135 fix: this webhook has no authenticated caller to take
+        // brokerageId/agentId from (unlike sendPackageForSignature's
+        // AGENCY_AGREEMENT_SENT above), so resolve them from the property
+        // itself -- exactly the pattern lib/aml.ts's processAmlWebhook
+        // already uses for AML_COMPLETED. Previously hardcoded to null,
+        // which silently made this event invisible to every brokerageId-
+        // filtered domain event consumer (the Property Timeline included).
+        const [property] = await tx
+          .select()
+          .from(properties)
+          .where(eq(properties.id, docPackage.propertyId));
+        postCommit.signedEvent = {
+          signatureRequestId: updated.id,
+          packageId: updated.packageId,
           propertyId: docPackage.propertyId,
-          transactionId: null,
-          partyId: null,
+          provider: updated.provider,
           brokerageId: property?.brokerageId ?? null,
           agentId: property?.agentId ?? null,
+        };
+      }
+    }
+
+    if (docPackage) {
+      postCommit.refreshPropertyId = docPackage.propertyId;
+    }
+
+    return { processed: true, signatureRequest: updated } as const;
+  });
+
+  const signedEvent = postCommit.signedEvent;
+  if (signedEvent) {
+    try {
+      await publishDomainEvent({
+          eventType: "AGENCY_AGREEMENT_SIGNED",
+          occurredAt: new Date(),
+          propertyId: signedEvent.propertyId,
+          transactionId: null,
+          partyId: null,
+          brokerageId: signedEvent.brokerageId,
+          agentId: signedEvent.agentId,
           actorType: "INTEGRATION",
           actorId: null,
-          source: `webhook:esign:${updated.provider}`,
+          source: `webhook:esign:${signedEvent.provider}`,
           correlationId: currentCorrelationId(),
           causationId: null,
-          idempotencyKey: `agency-agreement-signed:${updated.id}`,
-          payload: { packageId: updated.packageId, signatureRequestId: updated.id },
+          idempotencyKey: `agency-agreement-signed:${signedEvent.signatureRequestId}`,
+          payload: {
+            packageId: signedEvent.packageId,
+            signatureRequestId: signedEvent.signatureRequestId,
+          },
           metadata: {},
         });
-      } catch (err) {
-        logger.error("publish_domain_event_failed", { eventType: "AGENCY_AGREEMENT_SIGNED", packageId: updated.packageId, propertyId: docPackage.propertyId, error: err });
-      }
+    } catch (err) {
+      logger.error("publish_domain_event_failed", {
+        eventType: "AGENCY_AGREEMENT_SIGNED",
+        packageId: signedEvent.packageId,
+        propertyId: signedEvent.propertyId,
+        error: err,
+      });
     }
   }
 
-  if (docPackage) {
-    await refreshReadyToListSteps(docPackage.propertyId).catch((err) =>
-      logger.error("refresh_ready_to_list_steps_failed", { propertyId: docPackage.propertyId, packageId: docPackage.id, error: err }),
+  if (postCommit.refreshPropertyId !== null) {
+    await refreshReadyToListSteps(postCommit.refreshPropertyId).catch((err) =>
+      logger.error("refresh_ready_to_list_steps_failed", {
+        propertyId: postCommit.refreshPropertyId,
+        error: err,
+      }),
     );
   }
 
-  return { processed: true, signatureRequest: updated };
+  return response;
 }

@@ -79,6 +79,11 @@ import {
 // suites (properties/offers/transactions/aml/documents/home). Not itself a
 // *.test.ts file, so tsx --test's glob does not pick it up as a test.
 
+const TEST_ESIGN_WEBHOOK_SECRET =
+  process.env.ESIGN_WEBHOOK_SECRET ??
+  "test-only-esign-webhook-secret-not-for-real-use-0123456789";
+process.env.ESIGN_WEBHOOK_SECRET = TEST_ESIGN_WEBHOOK_SECRET;
+
 export function extractSessionCookie(res: Response): string {
   const raw = res.headers.get("set-cookie") ?? "";
   const match = raw.match(/aee_session=[^;]+/);
@@ -201,6 +206,15 @@ function signedSandboxAmlWebhookHeaders(body: string): Record<string, string> {
   };
 }
 
+export function signedSandboxEsignWebhookHeaders(body: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    "x-esign-signature": createHmac("sha256", TEST_ESIGN_WEBHOOK_SECRET)
+      .update(body)
+      .digest("hex"),
+  };
+}
+
 /**
  * Drives a brand-new property all the way to `Listed` through the real
  * routes (Start Property -> add Seller -> Ready to List -> capture agency
@@ -264,10 +278,15 @@ export async function createListedProperty(
     contentType: "text/plain",
   }));
 
+  const esignWebhookBody = JSON.stringify({
+    providerReference: signatureRequest.providerReference,
+    status: "Completed",
+    completedDocuments,
+  });
   const esignWebhookRes = await fetch(`${baseUrl}/api/documents/webhook`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerReference: signatureRequest.providerReference, status: "Completed", completedDocuments }),
+    headers: signedSandboxEsignWebhookHeaders(esignWebhookBody),
+    body: esignWebhookBody,
   });
   if (esignWebhookRes.status !== 200) throw new Error(`esign webhook failed: ${esignWebhookRes.status} ${await esignWebhookRes.text()}`);
 

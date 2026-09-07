@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lte, ne, sql } from "drizzle-orm";
 import {
   db,
   auditLogs,
@@ -80,6 +80,10 @@ export interface IngestDocumentVersionResult {
   created: boolean;
   outcome: "created" | "resumed" | "deduplicated";
 }
+
+type DatabaseTransaction = Parameters<
+  Parameters<typeof db.transaction>[0]
+>[0];
 
 export interface StoredDocumentContent {
   document: Document;
@@ -348,6 +352,90 @@ async function loadDocumentInBrokerage(
   return row?.document ?? null;
 }
 
+async function validateDocumentVersionIngestionInput(
+  input: IngestDocumentVersionInput,
+): Promise<{
+  document: Document;
+  validated: {
+    displayFilename: string;
+    declaredMimeType: string;
+    detectedMimeType: string;
+    extension: string;
+    contentSha256: string;
+  };
+  retentionClass: string;
+}> {
+  const document = await loadDocumentInBrokerage(
+    input.documentId,
+    input.brokerageId,
+  );
+  if (!document) {
+    throw new DocumentStorageError(
+      "DOCUMENT_NOT_FOUND",
+      `Document ${input.documentId} not found`,
+    );
+  }
+  const validated = validateDocumentBytes(
+    input.bytes,
+    input.originalFilename,
+    input.declaredMimeType,
+  );
+  const retentionClass = input.retentionClass ?? "legal-pending";
+  if (!configuredRetentionClasses().includes(retentionClass)) {
+    throw new DocumentStorageError(
+      "INVALID_RETENTION_CLASS",
+      "Unsupported document retention class",
+    );
+  }
+
+  // This is deliberately repeated under the authoritative advisory lock in
+  // ingestDocumentVersion. The preflight copy lets a multi-document caller
+  // reject its whole batch before the first object or metadata write.
+  const [current] = await db
+    .select()
+    .from(documentObjectVersions)
+    .where(
+      and(
+        eq(documentObjectVersions.documentId, input.documentId),
+        eq(documentObjectVersions.brokerageId, input.brokerageId),
+      ),
+    )
+    .orderBy(desc(documentObjectVersions.version))
+    .limit(1);
+  const sameBytes =
+    current?.contentSha256 === validated.contentSha256 &&
+    current.byteSize === input.bytes.length;
+  if (current?.objectStatus === "PendingUpload" && !sameBytes) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "A previous document ingestion is still pending reconciliation",
+    );
+  }
+  if (
+    current &&
+    !(sameBytes && current.objectStatus === "Active") &&
+    !(sameBytes && current.objectStatus === "PendingUpload") &&
+    !input.replacementReason?.trim()
+  ) {
+    throw new DocumentStorageError(
+      "REPLACEMENT_REASON_REQUIRED",
+      "A replacement reason is required when creating a new document version",
+    );
+  }
+
+  return { document, validated, retentionClass };
+}
+
+/**
+ * Validate tenant ownership, bytes, MIME/extension, limits, retention, and
+ * replacement constraints without creating metadata or writing an object.
+ */
+export async function preflightDocumentVersionIngestion(
+  input: IngestDocumentVersionInput,
+): Promise<void> {
+  await validateDocumentVersionIngestionInput(input);
+}
+
 async function versionForKey(
   documentId: number,
   brokerageId: number,
@@ -505,15 +593,8 @@ async function finalizePendingVersion(input: {
 export async function ingestDocumentVersion(
   input: IngestDocumentVersionInput,
 ): Promise<IngestDocumentVersionResult> {
-  const document = await loadDocumentInBrokerage(input.documentId, input.brokerageId);
-  if (!document) {
-    throw new DocumentStorageError("DOCUMENT_NOT_FOUND", `Document ${input.documentId} not found`);
-  }
-  const validated = validateDocumentBytes(input.bytes, input.originalFilename, input.declaredMimeType);
-  const retentionClass = input.retentionClass ?? "legal-pending";
-  if (!configuredRetentionClasses().includes(retentionClass)) {
-    throw new DocumentStorageError("INVALID_RETENTION_CLASS", "Unsupported document retention class");
-  }
+  const { document, validated, retentionClass } =
+    await validateDocumentVersionIngestionInput(input);
 
   const pending = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(${input.documentId})`);
@@ -688,6 +769,368 @@ export async function ingestDocumentVersion(
   };
 }
 
+/**
+ * Ingest a related document set without exposing a partially active set.
+ *
+ * The caller supplies the transaction that owns the parent state transition.
+ * Every document advisory lock is acquired in stable order before validation.
+ * Pending metadata for the complete batch is staged before provider I/O, and
+ * no version is activated until every object has been written and verified.
+ * A retryable provider failure therefore leaves only resumable PendingUpload
+ * rows; deterministic validation failures leave no mutation at all.
+ */
+export async function ingestDocumentVersionBatch(
+  inputs: IngestDocumentVersionInput[],
+  tx: DatabaseTransaction,
+): Promise<IngestDocumentVersionResult[]> {
+  if (inputs.length === 0) return [];
+
+  const uniqueDocumentIds = [...new Set(inputs.map((input) => input.documentId))];
+  if (uniqueDocumentIds.length !== inputs.length) {
+    throw new DocumentStorageError(
+      "DOCUMENT_TYPE_MISMATCH",
+      "A document may only appear once in an ingestion batch",
+    );
+  }
+  uniqueDocumentIds.sort((left, right) => left - right);
+  for (const documentId of uniqueDocumentIds) {
+    await tx.execute(sql`select pg_advisory_xact_lock(${documentId})`);
+  }
+
+  const validatedInputs: Array<{
+    input: IngestDocumentVersionInput;
+    document: Document;
+    validated: {
+      displayFilename: string;
+      declaredMimeType: string;
+      detectedMimeType: string;
+      extension: string;
+      contentSha256: string;
+    };
+    retentionClass: string;
+    current: DocumentObjectVersion | null;
+    sameBytes: boolean;
+  }> = [];
+
+  // Validate the entire batch under all locks before inserting the first row.
+  for (const input of inputs) {
+    const [row] = await tx
+      .select({ document: documents })
+      .from(documents)
+      .innerJoin(properties, eq(documents.propertyId, properties.id))
+      .where(
+        and(
+          eq(documents.id, input.documentId),
+          eq(properties.brokerageId, input.brokerageId),
+        ),
+      );
+    if (!row?.document) {
+      throw new DocumentStorageError(
+        "DOCUMENT_NOT_FOUND",
+        `Document ${input.documentId} not found`,
+      );
+    }
+    const validated = validateDocumentBytes(
+      input.bytes,
+      input.originalFilename,
+      input.declaredMimeType,
+    );
+    const retentionClass = input.retentionClass ?? "legal-pending";
+    if (!configuredRetentionClasses().includes(retentionClass)) {
+      throw new DocumentStorageError(
+        "INVALID_RETENTION_CLASS",
+        "Unsupported document retention class",
+      );
+    }
+    const [current] = await tx
+      .select()
+      .from(documentObjectVersions)
+      .where(
+        and(
+          eq(documentObjectVersions.documentId, input.documentId),
+          eq(documentObjectVersions.brokerageId, input.brokerageId),
+        ),
+      )
+      .orderBy(desc(documentObjectVersions.version))
+      .limit(1);
+    const sameBytes =
+      current?.contentSha256 === validated.contentSha256 &&
+      current.byteSize === input.bytes.length;
+    if (current?.objectStatus === "PendingUpload" && !sameBytes) {
+      throw new DocumentStorageError(
+        "DOCUMENT_UNAVAILABLE",
+        "A previous document ingestion is still pending reconciliation",
+      );
+    }
+    if (
+      current &&
+      !(sameBytes && current.objectStatus === "Active") &&
+      !(sameBytes && current.objectStatus === "PendingUpload") &&
+      !input.replacementReason?.trim()
+    ) {
+      throw new DocumentStorageError(
+        "REPLACEMENT_REASON_REQUIRED",
+        "A replacement reason is required when creating a new document version",
+      );
+    }
+    validatedInputs.push({
+      input,
+      document: row.document,
+      validated,
+      retentionClass,
+      current: current ?? null,
+      sameBytes,
+    });
+  }
+
+  const pendingInputs: Array<{
+    input: IngestDocumentVersionInput;
+    version: DocumentObjectVersion;
+    metadataCreated: boolean;
+    alreadyActive: boolean;
+    detectedMimeType: string;
+    contentSha256: string;
+  }> = [];
+
+  for (const item of validatedInputs) {
+    if (
+      item.current &&
+      item.sameBytes &&
+      item.current.objectStatus === "Active"
+    ) {
+      pendingInputs.push({
+        input: item.input,
+        version: item.current,
+        metadataCreated: false,
+        alreadyActive: true,
+        detectedMimeType: item.validated.detectedMimeType,
+        contentSha256: item.validated.contentSha256,
+      });
+      continue;
+    }
+    if (
+      item.current &&
+      item.sameBytes &&
+      item.current.objectStatus === "PendingUpload"
+    ) {
+      pendingInputs.push({
+        input: item.input,
+        version: item.current,
+        metadataCreated: false,
+        alreadyActive: false,
+        detectedMimeType: item.validated.detectedMimeType,
+        contentSha256: item.validated.contentSha256,
+      });
+      continue;
+    }
+
+    const versionNumber = (item.current?.version ?? 0) + 1;
+    const key = [
+      "tenants",
+      String(item.input.brokerageId),
+      "documents",
+      String(item.input.documentId),
+      `${randomUUID()}-v${versionNumber}${item.validated.extension}`,
+    ].join("/");
+    const [created] = await tx
+      .insert(documentObjectVersions)
+      .values({
+        documentId: item.document.id,
+        brokerageId: item.input.brokerageId,
+        propertyId: item.document.propertyId,
+        packageId: item.document.packageId,
+        storageObjectKey: key,
+        version: versionNumber,
+        previousVersionId: item.current?.id ?? null,
+        originalFilename: item.input.originalFilename,
+        displayFilename: item.validated.displayFilename,
+        declaredMimeType: item.validated.declaredMimeType,
+        detectedMimeType: item.validated.detectedMimeType,
+        byteSize: item.input.bytes.length,
+        contentSha256: item.validated.contentSha256,
+        source: item.input.source,
+        sourceProvider: item.input.sourceProvider ?? null,
+        providerDocumentId: item.input.providerDocumentId ?? null,
+        webhookVerified: item.input.webhookVerified ?? false,
+        uploadedBy: item.input.actorUserId ?? null,
+        replacementReason: item.input.replacementReason?.trim() || null,
+        retentionClass: item.retentionClass,
+        retainUntil: item.input.retainUntil ?? null,
+        objectStatus: "PendingUpload",
+        metadata: item.input.metadata ?? null,
+      })
+      .returning();
+    await tx.insert(auditLogs).values({
+      userId: item.input.actorUserId ?? null,
+      action: "document_version_upload_pending",
+      recordType: "document_object_version",
+      recordId: String(created.id),
+      propertyId: created.propertyId,
+      providerReference: item.input.providerDocumentId ?? null,
+      updatedValue: JSON.stringify({
+        objectStatus: "PendingUpload",
+        documentId: created.documentId,
+        version: created.version,
+        source: created.source,
+      }),
+    });
+    pendingInputs.push({
+      input: item.input,
+      version: created,
+      metadataCreated: true,
+      alreadyActive: false,
+      detectedMimeType: item.validated.detectedMimeType,
+      contentSha256: item.validated.contentSha256,
+    });
+  }
+
+  const provider = storageProvider();
+  for (const pending of pendingInputs) {
+    if (pending.alreadyActive) continue;
+    try {
+      await provider.putObject(
+        pending.version.storageObjectKey,
+        pending.input.bytes,
+        pending.detectedMimeType,
+      );
+      const acknowledgement = await provider.headObject(
+        pending.version.storageObjectKey,
+      );
+      if (
+        acknowledgement.size !== pending.input.bytes.length ||
+        acknowledgement.checksumSha256 !== pending.contentSha256
+      ) {
+        await tx
+          .update(documentObjectVersions)
+          .set({
+            objectStatus: "Quarantined",
+            quarantinedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(documentObjectVersions.id, pending.version.id),
+              eq(documentObjectVersions.objectStatus, "PendingUpload"),
+            ),
+          );
+        await tx.insert(auditLogs).values({
+          userId: pending.input.actorUserId ?? null,
+          action: "document_version_integrity_quarantined",
+          recordType: "document_object_version",
+          recordId: String(pending.version.id),
+          propertyId: pending.version.propertyId,
+          providerReference: pending.input.providerDocumentId ?? null,
+          previousValue: JSON.stringify({ objectStatus: "PendingUpload" }),
+          updatedValue: JSON.stringify({
+            objectStatus: "Quarantined",
+            reason: "storage acknowledgement checksum or size mismatch",
+          }),
+        });
+        throw new DocumentStorageError(
+          "DOCUMENT_INTEGRITY_FAILURE",
+          "Stored document acknowledgement did not match the ingested bytes",
+        );
+      }
+    } catch (error) {
+      await tx.insert(auditLogs).values({
+        userId: pending.input.actorUserId ?? null,
+        action: "document_version_storage_write_failed",
+        recordType: "document_object_version",
+        recordId: String(pending.version.id),
+        propertyId: pending.version.propertyId,
+        providerReference: pending.input.providerDocumentId ?? null,
+        previousValue: JSON.stringify({ objectStatus: "PendingUpload" }),
+        updatedValue: JSON.stringify({
+          objectStatus:
+            error instanceof DocumentStorageError &&
+            error.code === "DOCUMENT_INTEGRITY_FAILURE"
+              ? "Quarantined"
+              : "PendingUpload",
+          retryable: true,
+        }),
+      });
+      throw error;
+    }
+  }
+
+  // Every provider write is verified. Activate the complete batch as part of
+  // the caller's transaction so package/signature state and active pointers
+  // commit or roll back together.
+  const results: IngestDocumentVersionResult[] = [];
+  for (const pending of pendingInputs) {
+    if (pending.alreadyActive) {
+      results.push({
+        version: pending.version,
+        created: false,
+        outcome: "deduplicated",
+      });
+      continue;
+    }
+    const [activeVersion] = await tx
+      .update(documentObjectVersions)
+      .set({ objectStatus: "Active" })
+      .where(
+        and(
+          eq(documentObjectVersions.id, pending.version.id),
+          eq(documentObjectVersions.objectStatus, "PendingUpload"),
+        ),
+      )
+      .returning();
+    if (!activeVersion) {
+      throw new DocumentStorageError(
+        "DOCUMENT_UNAVAILABLE",
+        "Pending document version could not be finalized",
+      );
+    }
+    const [currentDocument] = await tx
+      .select()
+      .from(documents)
+      .where(eq(documents.id, activeVersion.documentId));
+    if (!currentDocument) {
+      throw new DocumentStorageError(
+        "DOCUMENT_UNAVAILABLE",
+        "Pending document metadata no longer has a parent document",
+      );
+    }
+    await tx
+      .update(documents)
+      .set({
+        objectStorageKey: activeVersion.storageObjectKey,
+        metadata: {
+          ...((currentDocument.metadata as Record<string, unknown> | null) ?? {}),
+          activeObjectVersionId: activeVersion.id,
+          contentSha256: activeVersion.contentSha256,
+          byteSize: activeVersion.byteSize,
+          detectedMimeType: activeVersion.detectedMimeType,
+          version: activeVersion.version,
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(documents.id, activeVersion.documentId));
+    await tx.insert(auditLogs).values({
+      userId: pending.input.actorUserId ?? null,
+      action: pending.metadataCreated
+        ? "document_version_upload_activated"
+        : "document_version_upload_reconciled",
+      recordType: "document_object_version",
+      recordId: String(activeVersion.id),
+      propertyId: activeVersion.propertyId,
+      providerReference: pending.input.providerDocumentId ?? null,
+      previousValue: JSON.stringify({ objectStatus: "PendingUpload" }),
+      updatedValue: JSON.stringify({
+        objectStatus: "Active",
+        documentId: activeVersion.documentId,
+        version: activeVersion.version,
+      }),
+    });
+    results.push({
+      version: activeVersion,
+      created: pending.metadataCreated,
+      outcome: pending.metadataCreated ? "created" : "resumed",
+    });
+  }
+  return results;
+}
+
 function isObjectNotFound(error: unknown): boolean {
   return (
     (error instanceof ObjectStorageRequestError && error.statusCode === 404) ||
@@ -743,6 +1186,11 @@ export async function reconcilePendingDocumentVersions(
     .where(
       and(
         eq(documentObjectVersions.objectStatus, "PendingUpload"),
+        // E-sign completions are multi-document batches. Finalizing one row
+        // here could expose a partial signed set while its envelope remains
+        // Sent. Only an authenticated provider redelivery may resume and
+        // atomically activate those rows through ingestDocumentVersionBatch.
+        ne(documentObjectVersions.source, "esign"),
         lte(
           documentObjectVersions.createdAt,
           new Date(now.getTime() - reconcileAfterMs),

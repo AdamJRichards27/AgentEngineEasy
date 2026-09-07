@@ -20,6 +20,7 @@ import {
   checkDocumentStorageReadiness,
 } from "./lib/documentStorage.js";
 import { registerDocumentStorageReconciler } from "./lib/documentStorageReconciler.js";
+import { assertESignProviderConfigured } from "@aee/integration-esign";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -47,6 +48,7 @@ assertAuthEmailProviderConfigured();
 assertOperationalAlertsConfigured();
 assertApprovedLegalVersionsConfigured();
 assertDocumentStorageConfigured();
+assertESignProviderConfigured();
 
 async function start(): Promise<void> {
 if (process.env.NODE_ENV === "production") {
