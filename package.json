@@ -8,7 +8,8 @@
     "dev:web": "pnpm --filter @aee/web run dev",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck": "pnpm -r run typecheck",
-    "db:push": "pnpm --filter @aee/db run db:push"
+    "db:push": "pnpm --filter @aee/db run db:push",
+    "verify:vendor": "node scripts/verify-vendored-dependencies.mjs"
   },
   "devDependencies": {
     "typescript": "~5.9.3",

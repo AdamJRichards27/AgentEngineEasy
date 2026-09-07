@@ -1,32 +1,23 @@
 # Dependency risk acceptance — Agent Engine 2.0, Step 2 closure
 
-## Status: AE Project Owner risk decisions recorded (2026-09-05)
+## Status: `xlsx` risk remediated; transitive `esbuild` acceptance remains active
 
-The two dependency-risk records below (A: `xlsx`, B: transitive `esbuild`)
-were previously presented as Claude's own **recommended** interim decisions,
-explicitly pending a named human call — no risk was self-accepted by Claude
-on the repository's behalf. The **AE Project Owner** has since reviewed and
-authorized both, in each case as a temporary, conditional acceptance with a
-fixed review point, not a permanent exception. Both records below are
-rewritten to state that authorization directly, using the AE Project
-Owner's own conditions verbatim rather than Claude's earlier recommendation
-language. **These are recorded business risk-acceptance decisions by the AE
-Project Owner. Neither is, and neither should be represented as, an
-approval by an independent security professional.**
+The `xlsx` risk acceptance recorded on 2026-09-05 is closed by the verified
+SheetJS CE 0.20.3 update described below. The separate transitive `esbuild`
+acceptance remains active under its original conditions. These are recorded
+business risk decisions by the AE Project Owner; none is represented as an
+approval by an independent security professional.
 
-## Re-audit results (carried forward, unchanged this pass)
+## Current re-audit results
 
 | Severity | Package | Advisory | Vulnerable | Patched | Where it comes from |
 |---|---|---|---|---|---|
-| high | xlsx | Prototype Pollution in SheetJS ([GHSA-4r6h-8v6p-xvw6](https://github.com/advisories/GHSA-4r6h-8v6p-xvw6)) | <0.19.3 | **none published** | `apps/api` direct dependency, `xlsx@0.18.5` |
-| high | xlsx | SheetJS ReDoS ([GHSA-5pgg-2g8v-p4x9](https://github.com/advisories/GHSA-5pgg-2g8v-p4x9)) | <0.20.2 | **none published** | `apps/api` direct dependency, `xlsx@0.18.5` |
 | moderate | esbuild | Dev-server allows any site to read/send requests ([GHSA-67mh-4wv8-2f99](https://github.com/advisories/GHSA-67mh-4wv8-2f99)) | ≤0.24.2 | ≥0.25.0 | Transitive, entirely inside `packages/db > drizzle-kit@0.30.6`'s own dependency tree |
 
-(`pnpm audit`'s summary line reports "2 moderate | 2 high" — that counts
-*vulnerable version instances* found in the tree, not distinct advisories:
-the moderate esbuild advisory matches two different transitive `esbuild`
-versions, 0.18.20 and 0.19.12, both pulled in by `drizzle-kit`. It is one
-advisory, one decision, counted once below.)
+`pnpm audit` reports `2 moderate | 0 high | 0 critical`. The moderate
+`esbuild` advisory matches two different transitive versions, 0.18.20 and
+0.19.12, both pulled in by `drizzle-kit`; it is one distinct advisory and
+one decision, counted once below.
 
 ## The `apps/api` direct esbuild finding — fixed and now merged
 
@@ -40,67 +31,28 @@ branch (commit `e640f3d`, `fix(api): bump esbuild to ^0.28.1
 `apps/api/package.json` now pins `"esbuild": "^0.28.1"`. This finding
 requires no further decision — it is fixed, not accepted as a risk.
 
-## A. `xlsx@0.18.5` — AE Project Owner risk acceptance (AUTHORIZED)
+## A. SheetJS CE — risk acceptance closed (REMEDIATED 2026-09-07)
 
-- **Dependency / advisories:** `xlsx@0.18.5` (direct `apps/api` dependency)
-  — GHSA-4r6h-8v6p-xvw6 (prototype pollution) and GHSA-5pgg-2g8v-p4x9
-  (ReDoS). Both report `"patched_versions": "<0.0.0"` — the `xlsx` npm
-  package has never published a version that resolves either advisory.
-- **Severity:** High (both advisories).
-- **Exposure:** Untrusted, user-uploaded `.xlsx` files reach this code.
-  `apps/api/src/lib/import/parsers/excelParser.ts` is the only non-test
-  call site; the import route (`apps/api/src/routes/import.ts`) accepts a
-  user-uploaded file via `multer` and hands the raw buffer to this parser.
-  Any brokerage user with import access can trigger it with an arbitrary
-  `.xlsx` file.
-- **Existing controls:**
-  - Upload size capped at 25MB (`MAX_FILE_SIZE_BYTES`,
-    `apps/api/src/lib/import/fileValidation.ts`).
-  - Parsed row count capped at 50,000 rows (`DEFAULT_MAX_ROWS`,
-    `excelParser.ts`).
-  - No formula recalculation is requested and SheetJS's community build
-    (used here) does not execute VBA macro bytecode — a data reader, not a
-    code-execution surface for macros. This bounds worst-case impact but
-    does not neutralise either advisory.
-  - CSV is, and remains, the preferred/recommended import format.
-- **Temporary decision — AUTHORIZED:** Accept the two high-severity
-  advisories for a **maximum of 90 days**, subject to the following
-  conditions, recorded exactly as authorized:
-  1. The 25MB upload limit is maintained.
-  2. The 50,000-row limit is maintained.
-  3. No expansion of spreadsheet-import exposure.
-  4. CSV is retained as the preferred import format.
-  5. A maintained replacement or a safer parsing method is evaluated.
-  6. This decision is reviewed immediately if exploitation evidence
-     appears, a patch is published, or a suitable replacement appears.
-  7. Remediation, replacement, isolation, or renewed approval occurs
-     before the 90-day expiry.
-
-  **This acceptance does not authorise permanent use of the vulnerable
-  dependency.**
-- **Approval date:** 2026-09-05
-- **Approving authority:** AE Project Owner.
-- **Review / expiry date:** 2026-12-04 (90 calendar days from the approval
-  date above), or immediately upon any of the earlier-reassessment
-  conditions below, whichever comes first.
-- **Conditions triggering earlier reassessment:** exploitation evidence
-  against either advisory; a patched `xlsx` release becoming available; a
-  suitable maintained replacement being identified and validated; any
-  request to expand spreadsheet-import functionality or exposure beyond
-  its current scope; any new advisory published against `xlsx`.
-- **Remediation owner:** AE Backend Engineering — the accountable owner is
-  the maintainer(s) of `apps/api/src/lib/import/` (the import pipeline).
-  This role is explicitly assigned; it is not left ownerless. (A specific
-  named individual should be recorded here by the AE Backend Engineering
-  lead once assigned.)
-- **Intended remediation milestone:** tracked in issue "Replace or isolate
-  vulnerable xlsx parser" (linked below) — evaluate and select one of: (a)
-  migrate `excelParser.ts` to a maintained parser (e.g. `exceljs`, or a
-  WASM-based reader); (b) isolate parsing in a sandboxed
-  process/worker with a strict resource/time limit; (c) adopt SheetJS's own
-  patched distribution channel outside the npm registry. Target: a
-  remediation decision made, and if replacement/isolation is chosen, a
-  validated implementation in place, before 2026-12-04.
+- **Remediation:** the direct `apps/api` dependency now uses SheetJS CE
+  0.20.3, which is outside both vulnerable ranges:
+  GHSA-4r6h-8v6p-xvw6 (`<0.19.3`) and GHSA-5pgg-2g8v-p4x9 (`<0.20.2`).
+- **Authoritative source:** the immutable official SheetJS CDN release
+  `https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz`.
+- **Retained artifact:** `vendor/xlsx-0.20.3.tgz`, 2,409,319 bytes, package
+  identity `xlsx@0.20.3`, Apache-2.0 license, no runtime dependencies, and
+  no install lifecycle scripts.
+- **SHA-512:** `a0b0eade3c3b01c2ea2961f60210a9553665f267fa5f661178ff8d7a1d12254cd5fc1759623b61f78b46e6da22301d4f3eb62dc4e09f6a850292fb6e1fedc024`.
+  The adjacent checksum record is verified automatically before frozen
+  installation in CI.
+- **Reproducibility:** the manifest and lockfile reference only the
+  repository-local archive. A clean `pnpm install --frozen-lockfile
+  --offline` completed with zero downloads.
+- **Compatibility:** existing upload-size, row-count, format, validation,
+  parsing, rollback, and tenant-isolation behavior is unchanged and covered
+  by the import regression suite.
+- **Audit result:** `pnpm audit` reports no `xlsx` advisory, no high
+  finding, and no critical finding. The former temporary acceptance is
+  therefore closed rather than renewed.
 
 ## B. Transitive `esbuild` via `drizzle-kit` — AE Project Owner risk acceptance (AUTHORIZED)
 
@@ -157,34 +109,31 @@ requires no further decision — it is fixed, not accepted as a risk.
 Filed as [issue #26](https://github.com/AdamJRichards27/AgentEngineEasy/issues/26)
 with acceptance criteria:
 
-- [ ] Evaluate at least one maintained alternative parser (e.g. `exceljs`)
-      or a safe isolation strategy (sandboxed worker/process) for `.xlsx`
-      import parsing.
-- [ ] Validate the chosen approach against the existing import test
+- [x] Adopt the supported official SheetJS CE distribution channel using a
+      pinned, checksummed, repository-local archive.
+- [x] Validate the chosen approach against the existing import test
       fixtures (`apps/api/src/lib/import/__tests__/`) with no regression.
-- [ ] Confirm the 25MB upload limit and 50,000-row limit remain enforced
+- [x] Confirm the 25MB upload limit and 50,000-row limit remain enforced
       (or are re-justified) under the new implementation.
-- [ ] Re-run `pnpm audit` and confirm neither GHSA-4r6h-8v6p-xvw6 nor
+- [x] Re-run `pnpm audit` and confirm neither GHSA-4r6h-8v6p-xvw6 nor
       GHSA-5pgg-2g8v-p4x9 applies to `apps/api`'s resulting dependency
       tree.
-- [ ] Update this document (`docs/DEPENDENCY_RISK_ACCEPTANCE.md`) to record
+- [x] Update this document (`docs/DEPENDENCY_RISK_ACCEPTANCE.md`) to record
       the remediation and close out risk-acceptance record A.
-- [ ] Complete, or formally renew with a new AE Project Owner decision,
+- [x] Complete, or formally renew with a new AE Project Owner decision,
       before the current expiry of **2026-12-04**.
 
-This issue tracks the follow-up only; this pass does not implement the
-replacement itself, per its own governing instruction not to expand into
-that work.
+The engineering acceptance criteria are complete. Issue closure remains an
+administrative repository action.
 
 ## Summary for the PR decision
 
 - The low-severity `esbuild` finding (`apps/api`'s own direct dependency)
   is fixed, verified, and now merged onto this branch (commit `e640f3d`) —
   fully resolved, not a risk-acceptance item.
-- The 2 high-severity `xlsx` findings and the 2 moderate vulnerable
-  `esbuild` instances (one distinct transitive advisory) are recorded above as an **authorized,
-  temporary, conditional risk acceptance by the AE Project Owner**, with a
-  fixed review/expiry date, an assigned accountable remediation owner, and
-  named conditions that trigger earlier reassessment. Neither acceptance is
-  represented as permanent, and neither is represented as an independent
-  security professional's approval.
+- The 2 high-severity `xlsx` findings are remediated and its temporary risk
+  acceptance is closed.
+- The 2 moderate vulnerable `esbuild` instances (one distinct transitive
+  advisory) remain under the authorized, temporary, conditional acceptance
+  above. It is not represented as permanent or as an independent security
+  professional's approval.

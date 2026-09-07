@@ -1,6 +1,6 @@
 // F-04: end-to-end, DB-backed proof that createImportJobFromFile (pipeline.ts)
 // enforces validateUploadedFile's compensating controls BEFORE any database
-// write and BEFORE the vulnerable xlsx parser ever touches the buffer -- not
+// write and BEFORE the xlsx parser ever touches the buffer -- not
 // just that the unit-level validator returns ok:false in isolation (see
 // fileValidation.test.ts / excelParser.test.ts for that), but that a
 // malicious upload leaves no trace in the real importJobs table.
