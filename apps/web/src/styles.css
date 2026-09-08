@@ -923,3 +923,54 @@ ul.pc-item-list li {
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
 }
+
+/* AE GROW Priority 1 -- Daily Command Centre */
+.grow-tabs {
+  margin-bottom: 1rem;
+}
+
+.grow-action-list li.grow-action-card {
+  padding: 0.9rem 0;
+}
+
+.grow-action-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+
+.grow-action-reason {
+  font-style: italic;
+}
+
+.grow-action-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.grow-inline-form {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: var(--color-bg);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+
+.grow-empty-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.grow-coming-soon {
+  text-align: left;
+}
+
+.grow-voice-seam {
+  margin-top: 1rem;
+}
