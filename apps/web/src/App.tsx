@@ -17,7 +17,8 @@ import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
-import { useSession, useLogout } from "./lib/session";
+import { useSession, useLogout, useEntitlements } from "./lib/session";
+import { buildProductNavLinks, resolveLandingRoute } from "./lib/productNav";
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -51,14 +52,21 @@ function initials(firstName?: string, lastName?: string): string {
 // reference Agent Engine app's design system rather than the earlier plain
 // top bar — see the "why does this look different" thread: this app is a
 // ground-up rebuild that hadn't had a real design pass until now.
+//
+// AE GROW Priority 0.5 -- Workstream 2: Grow-first main navigation. Grow is now the #1 product
+// selection (see lib/productNav.ts's buildProductNavLinks) and post-login landing is
+// entitlement-aware (resolveLandingRoute) rather than always "/". Every existing RUN route,
+// role gate, and the "/" fallback for a signed-in-but-not-Grow-entitled user are unchanged --
+// this is additive navigation/landing logic, not a rebuild of this route table.
 export default function App() {
   const { user, isLoading, isSignedIn } = useSession();
+  const { entitlements } = useEntitlements();
   const logout = useLogout();
 
   return (
     <Switch>
       <Route path="/login">
-        {isSignedIn ? <Redirect to="/" /> : <Login />}
+        {isSignedIn ? <Redirect to={resolveLandingRoute({ role: user?.role, entitlements })} /> : <Login />}
       </Route>
       {/* Critical Blocker Remediation, Phases 2/4 — public, unauthenticated
           routes for the invitation-only auth flows. These must sit outside
@@ -78,7 +86,7 @@ export default function App() {
           <div className="app-root">
             <div className="staging-banner">Staging Environment — Test Data Only</div>
             <div className="app-shell">
-              <SidebarLayout user={user} onSignOut={() => logout()} />
+              <SidebarLayout user={user} entitlements={entitlements} onSignOut={() => logout()} />
             </div>
           </div>
         )}
@@ -89,37 +97,21 @@ export default function App() {
 
 function SidebarLayout({
   user,
+  entitlements,
   onSignOut,
 }: {
   user: { firstName: string; lastName: string; role: string; brokerageName: string | null } | undefined;
+  entitlements: string[];
   onSignOut: () => void;
 }) {
   const [location] = useLocation();
 
-  // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7, Section 26):
-  // only Pit Crew and Brokerage Administrator ever see this link. Agents
-  // keep their existing nav unchanged. The API enforces the same gate
-  // independently (requireRole in routes/pitCrew.ts) -- this is a UX
-  // nicety, not the security boundary.
-  const canSeePitCrew = user?.role === "Pit Crew" || user?.role === "Brokerage Administrator";
-  // Agent Engine 2.0 -- Financial Transaction Engine (Priority 9, Stage G):
-  // only Brokerage Administrator ever sees this link -- every /financial/*
-  // route is gated requireRole(...BROKERAGE_ADMIN_ROLES) server-side
-  // (routes/financial.ts's own header comment), so a Pit Crew or Agent
-  // session would get a 403 from every call this page makes. Same
-  // "UX nicety, not the security boundary" reasoning as canSeePitCrew.
-  const canSeeFinancial = user?.role === "Brokerage Administrator";
-  const links: Array<{ path: string; label: string }> = [
-    { path: "/", label: "Home" },
-    { path: "/today", label: "Today" },
-    { path: "/properties", label: "Properties" },
-    { path: "/exceptions", label: "Exceptions" },
-    { path: "/communications", label: "Communications" },
-    ...(canSeeFinancial ? [{ path: "/financial", label: "Financial" }] : []),
-    ...(canSeePitCrew ? [{ path: "/pit-crew", label: "Pit Crew" }] : []),
-    { path: "/grow", label: "Grow" },
-    { path: "/settings", label: "Settings" },
-  ];
+  // AE GROW Priority 0.5 -- Workstream 2: navigation ordering (Grow first) and the existing
+  // role-based link visibility (Pit Crew / Brokerage Administrator only) are now centralised in
+  // lib/productNav.ts rather than recomputed inline here -- see that file's own header comment
+  // for the full ordering/entitlement rationale. This is a straight extraction: who sees
+  // Pit Crew/Financial is unchanged, only Grow's position (now first) has moved.
+  const links = buildProductNavLinks({ role: user?.role, entitlements });
 
   return (
     <>
