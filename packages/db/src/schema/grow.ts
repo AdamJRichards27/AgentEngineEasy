@@ -43,7 +43,18 @@ export const growRelationships = pgTable("grow_relationships", {
   id: serial("id").primaryKey(),
   brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
   partyId: integer("party_id").notNull().references(() => parties.id),
-  propertyId: integer("property_id").notNull().references(() => properties.id),
+  // AE GROW Priority 0.5 — Workstream 6: propertyId is deliberately NOT .notNull(). The revised
+  // Grow model (docs/AE_GROW_PRIORITY_0_5_FOUNDATION_REPORT.md §"Pre-Property Relationship
+  // Decision") requires an agent to be able to record a relationship with a contact BEFORE AE
+  // knows which property is relevant — prospecting and nurture naturally start with a person,
+  // not a property. Confirmed safe: the import pipeline (lib/import/relationships.ts's
+  // resolveRelationshipLinks) already only ever links a row that carries a real formatted
+  // property address regardless of this column's nullability, so it never created — and still
+  // never creates — a property-less row as an accidental side effect (see
+  // lib/import/__tests__/relationships.test.ts). routes/grow.ts's POST /relationships accepts a
+  // missing propertyId; GET /relationships uses a leftJoin (not innerJoin) against `properties`
+  // so a property-less relationship is still returned, with a null property.
+  propertyId: integer("property_id").references(() => properties.id),
   relationshipType: text("relationship_type").notNull(),
   role: text("role"), // free-text refinement, e.g. "Executor" when relationshipType = related_party
   status: text("status").notNull().default("Active"), // Active | Historical | PendingReview

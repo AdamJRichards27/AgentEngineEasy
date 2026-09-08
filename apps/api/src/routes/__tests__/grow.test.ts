@@ -436,3 +436,53 @@ test("POST /activities still creates successfully when partyId/propertyId/opport
   assert.equal(noRefsBody.activity.propertyId, null);
   assert.equal(noRefsBody.activity.opportunityId, null);
 });
+
+// AE GROW Priority 0.5 — Workstream 6 regression: growRelationships.propertyId is now nullable
+// (packages/db/src/schema/grow.ts) and POST /relationships accepts a missing propertyId. These
+// two tests are the direct HTTP-level proof for that migration, run against Brokerage A, which
+// already holds grow.relationships.manage from the earlier test above.
+test("POST /relationships accepts a missing propertyId (pre-property relationships), and GET /relationships returns it with a null property via leftJoin", async () => {
+  const preePropertyPartyId = await createParty(A.agent.cookie, await createProperty(A.agent.cookie, "7 Pre-Property Relationship Rd"));
+
+  const res = await fetch(growUrl("/relationships"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: preePropertyPartyId, relationshipType: "prospective_seller" }),
+  });
+  const body = (await res.json()) as { relationship: { id: number; propertyId: number | null } };
+  assert.equal(res.status, 201, JSON.stringify(body));
+  assert.equal(body.relationship.propertyId, null, "propertyId must be storable as null, not defaulted or rejected");
+
+  const listRes = await fetch(growUrl("/relationships"), { headers: { cookie: A.agent.cookie } });
+  const listBody = (await listRes.json()) as {
+    relationships: Array<{ id: number; propertyId: number | null; propertyAddress: string | null }>;
+  };
+  assert.equal(listRes.status, 200);
+  const listed = listBody.relationships.find((r) => r.id === body.relationship.id);
+  assert.ok(listed, "the property-less relationship must still be returned by GET /relationships (leftJoin, not innerJoin)");
+  assert.equal(listed!.propertyId, null);
+  assert.equal(listed!.propertyAddress, null);
+
+  // createdRelationshipId (from an earlier test in this file) was created WITH a property —
+  // confirming that row is still present and still carries its property proves the join change
+  // (innerJoin -> leftJoin) did not silently drop or null out existing, property-linked
+  // relationships.
+  const stillLinked = listBody.relationships.find((r) => r.id === createdRelationshipId);
+  assert.ok(stillLinked, "an existing property-linked relationship must still be returned");
+  assert.notEqual(stillLinked!.propertyId, null);
+  assert.notEqual(stillLinked!.propertyAddress, null);
+});
+
+test("POST /relationships without a propertyId still enforces tenant isolation on partyId", async () => {
+  const bPropertyId = await createProperty(B.agent.cookie, "8 Cross Tenant No Property Ave");
+  const bPartyId = await createParty(B.agent.cookie, bPropertyId);
+
+  const res = await fetch(growUrl("/relationships"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: bPartyId, relationshipType: "prospective_seller" }),
+  });
+  assert.equal(res.status, 404, "a cross-tenant partyId must still be rejected even with no propertyId supplied at all");
+  const body = (await res.json()) as { error: string };
+  assert.match(body.error, /not found in this brokerage/i);
+});
