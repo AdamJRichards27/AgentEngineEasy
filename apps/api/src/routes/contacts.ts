@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq, ilike, or } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, or } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -126,23 +126,23 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     return;
   }
 
-  const [roleRows, householdRows, propertyRelRows, opportunityRows, activityRows, commitmentRows, timeline, intelligence] =
+  const [householdRows, propertyRelRows, opportunityRows, roleRows, activityRows, commitmentRows, timeline, intelligence] =
     await Promise.all([
-      db.select().from(growContactRoles).where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.brokerageId, brokerageId))),
+      // §5 — household relationships are recorded as a single directed row per pair+type (see
+      // the dedup check in POST /:partyId/relationships below), but the relationship itself is
+      // symmetric: "A is B's spouse" and "B is A's spouse" are the same fact. Querying by
+      // partyId alone would only surface it on whichever contact happened to be `partyId` at
+      // creation time — the other contact's own Contact 360 page would silently omit it. Both
+      // directions are fetched here so either contact sees it.
       db
-        .select({
-          id: growContactRelationships.id,
-          relatedPartyId: growContactRelationships.relatedPartyId,
-          relationshipType: growContactRelationships.relationshipType,
-          note: growContactRelationships.note,
-          createdAt: growContactRelationships.createdAt,
-          relatedFirstName: parties.firstName,
-          relatedLastName: parties.lastName,
-          relatedOrganisationName: parties.organisationName,
-        })
+        .select()
         .from(growContactRelationships)
-        .innerJoin(parties, eq(growContactRelationships.relatedPartyId, parties.id))
-        .where(and(eq(growContactRelationships.partyId, partyId), eq(growContactRelationships.brokerageId, brokerageId))),
+        .where(
+          and(
+            eq(growContactRelationships.brokerageId, brokerageId),
+            or(eq(growContactRelationships.partyId, partyId), eq(growContactRelationships.relatedPartyId, partyId)),
+          ),
+        ),
       db
         .select({
           id: growRelationships.id,
@@ -166,6 +166,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
         .from(growOpportunities)
         .where(and(eq(growOpportunities.partyId, partyId), eq(growOpportunities.brokerageId, brokerageId)))
         .orderBy(desc(growOpportunities.createdAt)),
+      db.select().from(growContactRoles).where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.brokerageId, brokerageId))),
       db
         .select()
         .from(growActivities)
@@ -180,6 +181,19 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
       getRelationshipTimeline(brokerageId, partyId, 100),
       getContactIntelligenceSummary(brokerageId, partyId),
     ]);
+
+  // Batch-resolve display info for whichever party is on "the other side" of each household
+  // relationship row, regardless of which column (partyId or relatedPartyId) holds this contact.
+  const otherPartyIds = Array.from(
+    new Set(householdRows.map((h) => (h.partyId === partyId ? h.relatedPartyId : h.partyId))),
+  );
+  const otherPartyRows = otherPartyIds.length > 0
+    ? await db
+        .select({ id: parties.id, firstName: parties.firstName, lastName: parties.lastName, organisationName: parties.organisationName })
+        .from(parties)
+        .where(inArray(parties.id, otherPartyIds))
+    : [];
+  const otherPartyById = new Map(otherPartyRows.map((p) => [p.id, p]));
 
   // Derived, not canonical: `parties` has no owner/assigned-agent column of its own (§3 — Grow
   // extends the canonical model rather than adding fields to it for something this deterministic
@@ -206,18 +220,18 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     },
     assignedAgentUserId,
     roles: roleRows.map((r) => r.role),
-    householdRelationships: householdRows.map((h) => ({
-      id: h.id,
-      relatedPartyId: h.relatedPartyId,
-      relatedPartyDisplayName: displayName({
-        firstName: h.relatedFirstName,
-        lastName: h.relatedLastName,
-        organisationName: h.relatedOrganisationName,
-      }),
-      relationshipType: h.relationshipType,
-      note: h.note,
-      createdAt: h.createdAt.toISOString(),
-    })),
+    householdRelationships: householdRows.map((h) => {
+      const otherPartyId = h.partyId === partyId ? h.relatedPartyId : h.partyId;
+      const other = otherPartyById.get(otherPartyId);
+      return {
+        id: h.id,
+        relatedPartyId: otherPartyId,
+        relatedPartyDisplayName: other ? displayName(other) : "Unknown contact",
+        relationshipType: h.relationshipType,
+        note: h.note,
+        createdAt: h.createdAt.toISOString(),
+      };
+    }),
     properties: propertyRelRows.map((r) => ({
       relationshipId: r.id,
       propertyId: r.propertyId,
