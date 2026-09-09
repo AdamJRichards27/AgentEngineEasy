@@ -3,28 +3,17 @@
 Completion report. Branch: `feat/ae-grow-priority-2-contact-intelligence`. Base:
 `feat/ae-grow-priority-1-daily-command-centre` (SHA `d5691b65adca01dc34a7b347e6f7367509479300`).
 Pull request: [#30](https://github.com/AdamJRichards27/AgentEngineEasy/pull/30) (open, draft).
-Final SHA at the time of this report: `8c9336758c75a876420c4914e33a1e0c5646a173`.
+Final SHA at the time of this report: `1fa22c72b04327731dd5f737c53acb1ce9303690`.
 
 ## 1. Decision
 
 **REMEDIATION REQUIRED.**
 
-Every Priority 2 concept in the authorizing spec (§1–§21) is implemented — schema, API,
-Relationship Timeline, Contact Intelligence Summary, Contact 360 UI, and Priority 1
-integration — and is covered by a route-level automated test suite that was written honestly
-against this priority's own acceptance criteria, including a real, previously-undetected bug
-that the tests caught and this work then fixed (§16 below).
+Every Priority 2 concept in the authorizing spec (§1-§21) is implemented — schema, API, Relationship Timeline, Contact Intelligence Summary, Contact 360 UI, and Priority 1 integration — and is covered by a route-level automated test suite that was written honestly against this priority's own acceptance criteria, including a real, previously-undetected bug that the tests caught and this work then fixed (§16 below).
 
-The reason this is not `COMPLETE — READY FOR GROW PRIORITY 3` is that CI on PR #30 has never
-run to completion: it fails at the "Schema drift check" step, before the workspace typecheck,
-the migration-apply check, the real API test suite, or either production build ever execute.
-The root cause is fully diagnosed, the fix is verified safe, and a ready-to-apply patch has been
-handed to the Project Owner directly (not just described) — but it requires a maintainer with
-real git push access to apply, because the one file involved is too large for this session's
-only write channel to GitHub (the GitHub MCP server) to transmit in a single call. Until that
-lands and CI actually runs green through the API test suite, this cannot honestly be reported
-as complete. See §17 for the full, precise accounting, and §16 for what verification was and
-was not possible from inside this session.
+The two blockers this report tracked in earlier passes are now resolved and CI-verified, not just locally reasoned about: the missing `0014` migration snapshot has been regenerated and the schema drift check now passes cleanly in real GitHub Actions CI (PR #30, run #197, commit `1fa22c7`), and the `contacts.test.ts` assertion bug is fixed and confirmed passing. Both changes are committed and pushed to `feat/ae-grow-priority-2-contact-intelligence` — nothing is sitting outside the repository waiting on a maintainer with push access anymore.
+
+The reason this is not `COMPLETE — READY FOR GROW PRIORITY 3` is a third, separate blocker that only surfaced once CI actually ran past the drift check for the first time: a pre-existing defect in `privacy.test.ts`, unrelated to Priority 2, hangs the "API automated test suite" CI step indefinitely after its own 4 tests pass, because its teardown (`after`) hook throws on a `DELETE FROM brokerages` query and the process never exits afterward. In CI this consumed the entire 6-hour GitHub Actions job cap before the run was force-cancelled, meaning the API test suite step, both production-build steps, and the synthetic-startup check have never actually completed in CI on this branch — even though all three are independently verified passing locally. This is diagnosed in full in §16 and §17, is out of Priority 2's scope to fix unilaterally, and needs a Project Owner decision before this priority can be closed out.
 
 ## 2. Entry Gate Findings
 
@@ -284,109 +273,26 @@ category of side-effecting action beyond what `growActivities`/existing patterns
 
 ## 16. Test Evidence
 
-`apps/api/src/routes/__tests__/contacts.test.ts` (new, 15 sequential tests) covers, at minimum,
-every item §16 required: unauthenticated rejection across the whole `/grow/contacts` surface;
-`grow.contacts.read`/`grow.contacts.manage`/`grow.activities.manage` each gating exactly their
-own routes and nothing more; list/search/role filtering; multi-valued role assignment with
-idempotent re-assignment and no duplicate rows; tenant isolation on read, list, and role
-mutation; 400 vs. 404 on an invalid vs. a nonexistent contact id; the full Contact 360 payload
-shape for a brand-new contact, explicitly asserting the intelligence summary carries no
-predictive/scoring key; household relationships (bidirectional dedup on creation, the
-just-fixed bidirectional **visibility** bug, self-relationship rejection, invalid-type
-rejection, cross-tenant rejection, deletion with tenant isolation); a Priority 1 integration
-check (a relationship created via the pre-existing `POST /grow/relationships` route surfaces
-correctly on Contact 360, and Priority 1's own list route is unaffected); the full commitment
-lifecycle (create/validate/tenant-isolate, complete — asserting both the `growActivities` side
-effect and the resulting Timeline entry — the 409 on double-completing, and cancellation); and a
-dedicated Relationship Timeline test that creates 3 relationships + 2 activities + 1 opportunity
-+ 1 commitment for one contact and asserts an **exact** event count with **unique** event ids —
-the direct proof of no join-caused duplicates — plus newest-first ordering and tenant isolation.
-`testSupport.ts`'s `cleanupBrokerages` was extended (not replaced) for the three new tables, with
-foreign-key-safe delete ordering. **No existing test was weakened, skipped, or removed** to reach
-any of this.
+`apps/api/src/routes/__tests__/contacts.test.ts` (15 sequential tests) covers, at minimum, every item this priority's spec required: unauthenticated rejection across the whole `/grow/contacts` surface; `grow.contacts.read`/`grow.contacts.manage`/`grow.activities.manage` each gating exactly their own routes and nothing more; list/search/role filtering; multi-valued role assignment with idempotent re-assignment and no duplicate rows; tenant isolation on read, list, and role mutation; 400 vs. 404 on an invalid vs. a nonexistent contact id; the full Contact 360 payload shape for a brand-new contact, explicitly asserting the intelligence summary carries no predictive/scoring key; household relationships (bidirectional dedup on creation, the just-fixed bidirectional visibility bug, self-relationship rejection, invalid-type rejection, cross-tenant rejection, deletion with tenant isolation); a Priority 1 integration check (a relationship created via the pre-existing `POST /grow/relationships` route surfaces correctly on Contact 360, and Priority 1's own list route is unaffected); the full commitment lifecycle (create/validate/tenant-isolate, complete — asserting both the `growActivities` side effect and the resulting Timeline entry — the 409 on double-completing, and cancellation); and a dedicated Relationship Timeline test that creates 3 relationships + 2 activities + 1 opportunity + 1 commitment for one contact and asserts an exact event count with unique event ids, newest-first ordering, and tenant isolation. `testSupport.ts`'s `cleanupBrokerages` was extended (not replaced) for the three new tables, with foreign-key-safe delete ordering. No existing test was weakened, skipped, or removed to reach any of this.
 
-What could **not** be verified from inside this session, and why: this session has no direct
-network or git access to GitHub (organizational egress policy; confirmed via a 403 from `curl`
-and from `git`) — the GitHub MCP server is the only write channel, and it cannot run arbitrary
-commands, only fetch/write file content. So `contacts.test.ts` has never actually been executed
-against a real Postgres from inside this session — only reasoned about against `grow.test.ts`
-and `propertyTimeline.test.ts`'s already-CI-proven conventions, which this file mirrors
-deliberately. In its place, two substitute checks were run in a local, isolated reconstruction
-of the relevant packages (fetched file-by-file via the GitHub MCP server, with real pinned
-dependency versions installed): a genuine `tsc --noEmit` against `packages/db`'s actual
-`tsconfig.json`/`tsconfig.base.json` (TypeScript 5.6.3) — zero errors — and a TypeScript
-syntax-parse check (`ts.createSourceFile`, no module resolution) of every new/modified
-`apps/api` file and, this segment, the new/modified `apps/web` frontend files
-(`Grow.tsx`, using `ScriptKind.TSX`) — zero syntax errors in both. Neither substitute is a
-real test run or a real typecheck of the whole monorepo; both are reported here as exactly what
-they are, not as a stand-in claim of "tests passed."
+This suite is now confirmed passing for real, not just reconstructed: this session gained direct access to a real git clone of this repository, with a working Postgres and Node available, and ran `contacts.test.ts` against them. That run caught a genuine bug the test itself had been masking: test 15 ("Priority 1 integration: GET /grow/today still resolves successfully after Priority 2's additions to the Grow schema and routes") called `assert.equal(res.status, 200, await res.text())`, and `await res.text()` was evaluated unconditionally as the assertion's failure-message argument on every call — which itself threw because the response body had already been consumed earlier in the same test. The fix, `assert.equal(res.status, 200)`, is a one-line, test-only change; there is no application-code defect behind it. This fix, together with the regenerated `0014` migration snapshot, is committed as `1fa22c7` and pushed to `feat/ae-grow-priority-2-contact-intelligence`.
+
+Per explicit instruction, the status of `privacy.test.ts` was specifically verified rather than assumed, since earlier passes of this report found it silently missing from full-suite output. Run in isolation, it reproduces a consistent pattern: all 4 of its own tests pass (`GET /legal/versions is public and returns non-empty version strings`; `a signed-in user can create a privacy request and see it in their own history`; `an unauthenticated caller cannot create a privacy request`; `resolving a privacy request never deletes or exports data — it only records a human decision, and is tenant-scoped`) — but the file's own `after` teardown hook then fails (`not ok 5`, `failureType: 'hookFailed'`, `Error: Failed query: delete from "brokerages" where "brokerages"."id" = $1`), and the process hangs indefinitely afterward with no further output; a hard `timeout 60s` wrapper was required to terminate it (exit code 124). `git blame` confirms this file predates Priority 2 entirely (added by commit `11f5eb6`, an unrelated auth/privacy test suite), and no Priority 2 change touches the tables, teardown ordering, or routes it exercises. This finding is independently corroborated by real GitHub Actions CI on PR #30 (run #197): the identical 4-pass-then-hang pattern appears in the CI log at the same point, and the "API automated test suite" step ran for 5h 59m 57s before GitHub Actions' 6-hour job cap force-cancelled the run. This is a genuine, reproducible, pre-existing defect unrelated to Priority 2 — consistent with the already-documented `grow.test.ts` precedent — and it has been diagnosed, not fixed, per this remediation's scope.
+
+With direct repository access now available, both production builds and the synthetic-startup check were also run for real rather than reconstructed: the API production build (`pnpm --filter @aee/api run build`), the Web production build (`pnpm --filter @aee/web run build`), and the synthetic production-startup and storage-readiness script that CI also runs all pass locally. None of this is yet confirmed by CI itself, because the `privacy.test.ts` hang above prevents the same CI job from ever reaching those later steps — but it removes any remaining doubt about their correctness independent of CI reaching them.
 
 ## 17. Known Gaps & CI Status
 
-**CI ran once on PR #30 and failed at the "Schema drift check" step** (before typecheck, the
-migration-apply check, the real API test suite, or either production build could run — `ci.yml`
-has no `continue-on-error` anywhere, so one failing step skips everything after it in the same
-job).
+**CI has now run to a real terminal state on PR #30 (run #197, commit `1fa22c7`) — the first time this branch has gotten past the schema drift step.** Workspace typecheck, the deterministic clean-database migration check, and the schema drift check all passed cleanly (the drift check in 2 seconds). The original, long-standing blocker this report tracked across earlier passes is fixed and CI-confirmed, not just locally reasoned about.
 
-**Root cause, confirmed by reproducing it in the isolated local reconstruction described in
-§16:** this priority's own migration-authoring step produced
-`packages/db/migrations/0014_pretty_shriek.sql` (already committed, correct) but could not commit
-its paired `packages/db/migrations/meta/0014_snapshot.json` — a ~455KB pretty-printed JSON file
-that exceeds a hard per-call output-size ceiling of this session's only write channel to GitHub
-(the GitHub MCP server's `create_or_update_file`/`push_files`, which require a file's complete
-content as one literal argument with no chunked-upload mechanism). With that snapshot missing,
-`drizzle-kit generate` (the drift-check step) has an orphaned journal entry to work around: it
-falls back to the last snapshot it can find (`0013`), decides all three Priority 2 tables are
-still new, and emits a **new**, spuriously duplicate migration — observed in real CI as
-`migrations/0015_optimal_wither.sql` — which is what actually fails `git diff --exit-code`. This
-is a gap in this priority's own delivery, not a pre-existing repository issue, and it is the
-reason this report's decision is `REMEDIATION REQUIRED` rather than complete.
+**The run's final status is `Cancelled`, not `Success`, at a total duration of 6h 1m 20s.** The "API automated test suite" step alone ran for 5h 59m 57s before GitHub Actions' 6-hour job-execution cap force-cancelled the entire job (annotation: "The job has exceeded the maximum execution time of 6h0m0s"). The CI log shows exactly the pattern reproduced locally and described in §16: `privacy.test.ts`'s 4 tests pass, its teardown hook then fails with `failureType: 'hookFailed'` on the same `brokerages` delete-query error, and the process hangs with no further output until the cap cancels the run.
 
-**The fix is verified safe and has been handed to the Project Owner as a ready-to-apply file,
-not just a description**: a zip (`schema_drift_fix.zip`, delivered separately in this
-conversation) containing the regenerated `0014_quick_microchip.sql`, its
-`0014_snapshot.json`, a corrected `_journal.json`, and a README with exact `cp`/`git commit`
-steps. The regenerated SQL's `CREATE TABLE` statements, foreign keys, and indexes were confirmed
-byte-for-byte equivalent to the already-committed `0014_pretty_shriek.sql` (only the
-drizzle-kit-assigned filename differs) — this is a pure tooling/naming fix, with zero
-schema-design risk, that a maintainer with real git push access can apply in under a minute.
-Once applied and pushed, CI should run all the way through the API test suite and both
-production builds for the first time on this branch.
+**Because the test-suite step never finished, nothing after it ran in CI on this branch:** not the API production build, not the Web production build, not the synthetic production-startup and storage-readiness check. All three are verified passing locally (§16) but carry zero CI confirmation on this branch as of this report.
 
-**Second, unrelated permission wall, also confirmed and not routed around:** this session's
-GitHub MCP token lacks the `workflows` permission scope, so it cannot create or edit anything
-under `.github/workflows/` — a temporary CI-side workaround (a parallel verification workflow
-skipping just the drift-check step) was attempted and rejected with a 403 at "failed to create
-tree." This was abandoned rather than circumvented, consistent with this session's standing
-instruction to report a blocked host/permission rather than route around it.
+**The pre-existing `grow.test.ts` failures (4, from Priority 1, commit `acc3082`) remain present and untouched**, confirmed via git blame to predate this priority, consistent with every earlier pass of this report.
 
-**`privacy.test.ts`** (§17 of the spec): re-inspected this priority; it exercises
-`/legal/versions`, `/privacy/requests`, and `/admin/privacy-requests` against
-`privacyRequests`/`invitations`/`users`/`brokerages` — no file, table, or route Priority 2
-touched. `routes/index.ts`'s only change is one additive router mount. No plausible interaction
-was found by code-path inspection, but this session could not independently re-execute the test
-suite to confirm the previously-documented hang still reproduces byte-for-byte; per §17's
-instruction, it was left untouched and unremediated as a pre-existing, unrelated issue.
-
-**Frontend verification gap, stated plainly:** the new/modified `apps/web` files passed a
-syntax-only parse check (§16) but were not run through a full `apps/web` typecheck or build —
-reconstructing that locally (React, `@tanstack/react-query`, `wouter`, and every sibling
-file `Grow.tsx` imports from) was judged disproportionate to this priority's scope, the same
-judgment already applied to the `apps/api` backend files earlier in this PR. This is an
-additional reason CI actually completing end-to-end (which does run a real `apps/web` build)
-matters before this can be called complete.
+**The one open item blocking `COMPLETE` is a scoping decision, not a technical unknown.** Should the pre-existing `privacy.test.ts` teardown hang be fixed as part of landing this PR, even though it is not Priority 2 work, so that CI can reach a real pass/fail on the remaining steps? Or should PR #30 be evaluated on the Priority 2 diff alone and the legacy defect tracked and merged separately? This report does not have the authority to make that call and defers it to the Project Owner, per this remediation's explicit instruction not to modify unrelated pre-existing code without authorization.
 
 ## 18. Recommended Next Priority
 
-Do not start Grow Priority 3 (Communications Hub) or any later Grow priority yet. The immediate
-next step belongs to the Project Owner or a maintainer with real git access: apply the
-3-file schema-drift fix delivered in this conversation, push it, and let CI run all the way
-through on PR #30 for the first time. Once CI is actually green — typecheck, migration check,
-the real API test suite, and both production builds all passing, not merely "no changes were
-made to break them" — this priority can be reclassified `COMPLETE — READY FOR GROW PRIORITY 3`
-without any further code changes being required, since every Priority 2 concept, test, and UI
-surface described above is already built and committed. If CI surfaces anything genuinely new
-once it reaches the steps that never got to run (the real test suite, the production builds),
-that would need to be triaged and fixed before Priority 3 begins. Communications Hub itself
-(§13's contract target) is the logical next priority once this gate clears, since the
-Relationship Timeline's event-type contract was built specifically to receive it.
+Do not start Grow Priority 3 (Communications Hub) or any later Grow priority yet. Every Priority 2 concept, test, and UI surface described in this report is built, committed, and pushed to `feat/ae-grow-priority-2-contact-intelligence` — the only remaining gate is CI reaching a real green run on PR #30, which now depends entirely on the Project Owner's decision on the pre-existing `privacy.test.ts` hang (§17), not on any further Priority 2 work. Once that is resolved — whether by an authorized fix to that file's teardown or by a decision to track and merge it separately from this PR — and CI actually completes the API test suite, both production builds, and the synthetic-startup check on this branch, this priority can be reclassified `COMPLETE — READY FOR GROW PRIORITY 3` without any further code changes, since every Priority 2 concept is already built and committed. Communications Hub (§13's contract target) remains the logical next priority once this gate clears, since the Relationship Timeline's event-type contract was built specifically to receive it.
