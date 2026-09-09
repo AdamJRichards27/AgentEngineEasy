@@ -46,6 +46,151 @@ interface GrowOpportunity {
   reason: string;
 }
 
+// AE GROW Priority 2 — Contact Intelligence & Relationship Timeline, frontend types.
+// Mirrors apps/api/src/routes/contacts.ts's response shape and
+// apps/api/src/lib/{relationshipTimeline,contactIntelligence}.ts by hand — same convention
+// lib/growToday.ts already established for Priority 1 (the web app doesn't share a package
+// with the API). GROW_CONTACT_ROLES / GROW_CONTACT_RELATIONSHIP_TYPES mirror the same-named
+// arrays in packages/db/src/schema/contacts.ts; if those ever change, this list needs a
+// matching hand-edit (documented here so that dependency is visible).
+
+const GROW_CONTACT_ROLES = [
+  "Prospect",
+  "PastClient",
+  "CurrentClient",
+  "Seller",
+  "Buyer",
+  "Landlord",
+  "Tenant",
+  "Investor",
+  "PropertyOwner",
+  "AppraisalProspect",
+  "ReferralSource",
+  "ProfessionalPartner",
+  "Other",
+] as const;
+
+const GROW_CONTACT_RELATIONSHIP_TYPES = [
+  "spouse_partner",
+  "family",
+  "co_owner",
+  "business_partner",
+  "related_contact",
+  "other",
+] as const;
+
+interface GrowContactListItem {
+  id: number;
+  displayName: string;
+  partyType: string;
+  email: string | null;
+  mobile: string | null;
+  roles: string[];
+  relatedPropertyCount: number;
+}
+
+interface GrowContact360HouseholdRelationship {
+  id: number;
+  relatedPartyId: number;
+  relatedPartyDisplayName: string;
+  relationshipType: string;
+  note: string | null;
+  createdAt: string;
+}
+
+interface GrowContact360Property {
+  relationshipId: number;
+  propertyId: number | null;
+  propertyAddress: string | null;
+  relationshipType: string;
+  role: string | null;
+  status: string;
+  isPrimary: boolean;
+  validFrom: string;
+  validTo: string | null;
+}
+
+interface GrowContact360Opportunity {
+  id: number;
+  opportunityType: string;
+  status: string;
+  stage: string;
+  reason: string | null;
+  nextActionDueAt: string | null;
+  recommendedNextAction: string | null;
+  propertyId: number | null;
+}
+
+interface GrowContact360Activity {
+  id: number;
+  activityType: string;
+  occurredAt: string;
+  summary: string;
+  propertyId: number | null;
+  opportunityId: number | null;
+}
+
+interface GrowContact360Commitment {
+  id: number;
+  description: string;
+  dueAt: string;
+  status: string;
+  propertyId: number | null;
+  opportunityId: number | null;
+  completedAt: string | null;
+  cancelledAt: string | null;
+  cancelReason: string | null;
+}
+
+interface GrowTimelineEvent {
+  id: string;
+  type: string;
+  occurredAt: string;
+  summary: string;
+  propertyId: number | null;
+  propertyLabel: string | null;
+  opportunityId: number | null;
+}
+
+interface ContactIntelligenceSummary {
+  roles: string[];
+  relatedPropertyCount: number;
+  mostRecentInteractionAt: string | null;
+  daysSinceLastInteraction: number | null;
+  nextFollowUpAt: string | null;
+  nextFollowUpDescription: string | null;
+  activeOpportunityCount: number;
+  recentActivityCount: number;
+  outstandingCommitmentCount: number;
+  relationshipAgeDays: number | null;
+}
+
+interface GrowContact360 {
+  contact: {
+    id: number;
+    partyType: string;
+    firstName: string | null;
+    middleName: string | null;
+    lastName: string | null;
+    organisationName: string | null;
+    displayName: string;
+    email: string | null;
+    mobile: string | null;
+    residentialAddress: string | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  assignedAgentUserId: number | null;
+  roles: string[];
+  householdRelationships: GrowContact360HouseholdRelationship[];
+  properties: GrowContact360Property[];
+  opportunities: GrowContact360Opportunity[];
+  activities: GrowContact360Activity[];
+  commitments: GrowContact360Commitment[];
+  timeline: GrowTimelineEvent[];
+  intelligence: ContactIntelligenceSummary;
+}
+
 // Minimal proving UI for Stage A (ARCHITECTURE.md Grow Subscription/Entitlement/Core Data
 // build): a locked upgrade screen for brokerages without grow.access, and a real workspace once
 // entitled. This page's own /grow/access check is a rendering convenience only - every
@@ -127,6 +272,19 @@ const GROW_TABS: Array<{ key: GrowTab; label: string }> = [
 
 function GrowWorkspace() {
   const [tab, setTab] = useState<GrowTab>("today");
+  // AE GROW Priority 2 §12 — Priority 1 integration. The only state this priority adds at the
+  // workspace level: which contact (if any) the Contacts tab should open straight into a
+  // Contact 360 detail view for, rather than its default list. Lifted up here (rather than kept
+  // local to GrowContactsTab) purely so GrowToday's "View Contact" button can jump both the tab
+  // AND the selected contact in one click — Priority 1's own tab/state model is otherwise
+  // untouched.
+  const [contactPartyId, setContactPartyId] = useState<number | null>(null);
+
+  function viewContact(partyId: number) {
+    setContactPartyId(partyId);
+    setTab("contacts");
+  }
+
   // Re-uses the "grow-access" query the outer Grow() component already fetched (react-query
   // dedupes by key, so this is not a second network request) purely to read
   // billingProviderName for the sandbox-billing note below.
@@ -159,9 +317,9 @@ function GrowWorkspace() {
         ))}
       </nav>
 
-      {tab === "today" && <GrowToday onAskAE={() => setTab("askAE")} />}
+      {tab === "today" && <GrowToday onAskAE={() => setTab("askAE")} onViewContact={viewContact} />}
       {tab === "opportunities" && <GrowOpportunitiesTab />}
-      {tab === "contacts" && <GrowContactsTab />}
+      {tab === "contacts" && <GrowContactsTab selectedPartyId={contactPartyId} onSelectPartyId={setContactPartyId} />}
       {tab === "nurture" && (
         <GrowComingSoon
           title="Nurture"
@@ -185,7 +343,11 @@ function GrowWorkspace() {
 // item explaining, in plain language, why AE is surfacing it (see
 // apps/api/src/lib/growToday.ts's own header comment for the full rule set -- nothing here is
 // predictive scoring). One request (GET /grow/today) renders this whole tab.
-function GrowToday({ onAskAE }: { onAskAE: () => void }) {
+//
+// AE GROW Priority 2 §12: gained one new prop (onViewContact) so a card's contact can open
+// directly into Contact 360 — see GrowWorkspace.viewContact above. No other change to this
+// component or to the /grow/today contract it consumes.
+function GrowToday({ onAskAE, onViewContact }: { onAskAE: () => void; onViewContact: (partyId: number) => void }) {
   const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
 
@@ -205,6 +367,7 @@ function GrowToday({ onAskAE }: { onAskAE: () => void }) {
   const data = today.data;
   const canAddNote = hasEntitlement("grow.activities.manage");
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
+  const canViewContacts = hasEntitlement("grow.contacts.read");
 
   const doNow = data.priorityActions.filter((a) => a.priority === "DoNow");
   const doToday = data.priorityActions.filter((a) => a.priority === "DoToday");
@@ -254,7 +417,9 @@ function GrowToday({ onAskAE }: { onAskAE: () => void }) {
                     item={item}
                     canAddNote={canAddNote}
                     canManageOpportunities={canManageOpportunities}
+                    canViewContacts={canViewContacts}
                     onAskAE={onAskAE}
+                    onViewContact={onViewContact}
                   />
                 ))}
               </ul>
@@ -271,7 +436,9 @@ function GrowToday({ onAskAE }: { onAskAE: () => void }) {
                     item={item}
                     canAddNote={canAddNote}
                     canManageOpportunities={canManageOpportunities}
+                    canViewContacts={canViewContacts}
                     onAskAE={onAskAE}
+                    onViewContact={onViewContact}
                   />
                 ))}
               </ul>
@@ -288,7 +455,9 @@ function GrowToday({ onAskAE }: { onAskAE: () => void }) {
                     item={item}
                     canAddNote={canAddNote}
                     canManageOpportunities={canManageOpportunities}
+                    canViewContacts={canViewContacts}
                     onAskAE={onAskAE}
+                    onViewContact={onViewContact}
                   />
                 ))}
               </ul>
@@ -313,7 +482,9 @@ interface GrowActionCardProps {
   item: GrowTodayAction;
   canAddNote: boolean;
   canManageOpportunities: boolean;
+  canViewContacts: boolean;
   onAskAE: () => void;
+  onViewContact: (partyId: number) => void;
 }
 
 // One card renders every supported action for that item, same "no separate detail screen"
@@ -323,7 +494,14 @@ interface GrowActionCardProps {
 // button, and each one is additionally hidden unless the signed-in user actually holds the
 // entitlement that write requires (see canAddNote/canManageOpportunities above), so a button
 // that would just 403 is never shown in the first place.
-function GrowActionCard({ item, canAddNote, canManageOpportunities, onAskAE }: GrowActionCardProps) {
+//
+// AE GROW Priority 2 §12: "View Contact" follows the exact same precedent as "View property"
+// below (showViewProperty) — a plain button, gated on the read entitlement the destination tab
+// itself requires (canViewContacts = grow.contacts.read), never on item.availableActions, since
+// every GrowTodayAction already carries a real item.partyId and no change to
+// apps/api/src/lib/growToday.ts (Priority 1's own, already-shipped ranking logic) was needed or
+// made to add this.
+function GrowActionCard({ item, canAddNote, canManageOpportunities, canViewContacts, onAskAE, onViewContact }: GrowActionCardProps) {
   const queryClient = useQueryClient();
   const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
   const [noteText, setNoteText] = useState("");
@@ -371,6 +549,7 @@ function GrowActionCard({ item, canAddNote, canManageOpportunities, onAskAE }: G
   const showUpdateNextAction =
     canManageOpportunities && item.opportunityId !== null && item.availableActions.some((b) => b.action === "update_next_action");
   const showViewProperty = item.propertyId !== null && item.availableActions.some((b) => b.action === "view_property");
+  const showViewContact = canViewContacts;
   const showAskAE = item.availableActions.some((b) => b.action === "ask_ae");
 
   const busy = addNote.isPending || updateNextAction.isPending;
@@ -427,6 +606,11 @@ function GrowActionCard({ item, canAddNote, canManageOpportunities, onAskAE }: G
           <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
             View property
           </Link>
+        )}
+        {showViewContact && (
+          <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(item.partyId)}>
+            View contact
+          </button>
         )}
         {showAskAE && (
           <button type="button" className="btn btn-link btn-small" onClick={onAskAE}>
@@ -535,7 +719,40 @@ function GrowAskAETab() {
   );
 }
 
-function GrowContactsTab() {
+// AE GROW Priority 2 §11 — Contact 360. Replaces Priority 1's flat, read-only stand-in (a plain
+// relationships table + activity feed — see Priority 1's own completion report, which explicitly
+// deferred "a dedicated View Contact screen" to a future priority) with the real thing: a
+// searchable contact list, and a per-contact detail view built to answer "who is this person,
+// what are they connected to, and what should I do next" in one screen. `selectedPartyId` is
+// owned by GrowWorkspace (not local state here) purely so a Grow Today card's "View Contact"
+// button can open this tab directly into a contact's detail rather than its list — see
+// GrowWorkspace.viewContact.
+function GrowContactsTab({
+  selectedPartyId,
+  onSelectPartyId,
+}: {
+  selectedPartyId: number | null;
+  onSelectPartyId: (partyId: number | null) => void;
+}) {
+  if (selectedPartyId !== null) {
+    return <GrowContactDetail partyId={selectedPartyId} onBack={() => onSelectPartyId(null)} />;
+  }
+  return <GrowContactList onSelectPartyId={onSelectPartyId} />;
+}
+
+function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: number) => void }) {
+  const [search, setSearch] = useState("");
+  const [committedSearch, setCommittedSearch] = useState("");
+
+  const contacts = useQuery<{ contacts: GrowContactListItem[] }>({
+    queryKey: ["grow-contacts", committedSearch],
+    queryFn: () => apiFetch(`/grow/contacts${committedSearch ? `?search=${encodeURIComponent(committedSearch)}` : ""}`),
+  });
+
+  // Kept unchanged from Priority 1 (GET /grow/relationships, GET /grow/activities) — a
+  // brokerage-wide "every property relationship" / "everything that happened recently" view is
+  // still useful alongside the new per-contact Contact 360 below, and nothing about Contact 360
+  // required removing it.
   const relationships = useQuery<{ relationships: GrowRelationship[] }>({
     queryKey: ["grow-relationships"],
     queryFn: () => apiFetch("/grow/relationships"),
@@ -547,6 +764,60 @@ function GrowContactsTab() {
 
   return (
     <div>
+      <section className="card">
+        <h2>Contacts</h2>
+        <p className="muted">Search AE's canonical contacts. Open one to see Contact 360 — everything Grow knows about that relationship.</p>
+        <form
+          className="grow-inline-form-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setCommittedSearch(search.trim());
+          }}
+        >
+          <input
+            type="text"
+            placeholder="Search by name, organisation, or email"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search contacts"
+          />
+          <button type="submit" className="btn btn-secondary btn-small">
+            Search
+          </button>
+        </form>
+
+        {contacts.isLoading && <p className="muted">Loading…</p>}
+        {contacts.data?.contacts.length === 0 && <p className="empty-state">No contacts found.</p>}
+        {contacts.data && contacts.data.contacts.length > 0 && (
+          <table className="grow-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Roles</th>
+                <th>Properties</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {contacts.data.contacts.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.displayName}</td>
+                  <td>{c.partyType}</td>
+                  <td>{c.roles.length > 0 ? c.roles.join(", ") : "–"}</td>
+                  <td>{c.relatedPropertyCount}</td>
+                  <td>
+                    <button type="button" className="btn btn-link btn-small" onClick={() => onSelectPartyId(c.id)}>
+                      View Contact 360 &rarr;
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
       <section className="card">
         <h2>Relationships</h2>
         <p className="muted">Every person linked to a property, with why the link exists - never just an owner field.</p>
@@ -598,6 +869,515 @@ function GrowContactsTab() {
               </li>
             ))}
           </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// AE GROW Priority 2 §11 — Contact 360 detail. One request (GET /grow/contacts/:partyId, built
+// in this priority's API layer) backs the whole screen — header/identity, relationship-role
+// summary, household relationships, properties, the Relationship Timeline, notes/activities/
+// commitments, and opportunities — matching the "understand this relationship in seconds" UX
+// goal rather than a screen that fires off five separate requests or a generic CRM record view.
+function GrowContactDetail({ partyId, onBack }: { partyId: number; onBack: () => void }) {
+  const queryClient = useQueryClient();
+  const { hasEntitlement } = useEntitlements();
+  const canManageContacts = hasEntitlement("grow.contacts.manage");
+  const canManageActivities = hasEntitlement("grow.activities.manage");
+
+  const detail = useQuery<GrowContact360>({
+    queryKey: ["grow-contact", partyId],
+    queryFn: () => apiFetch(`/grow/contacts/${partyId}`),
+  });
+
+  function invalidate() {
+    queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+    queryClient.invalidateQueries({ queryKey: ["grow-contacts"] });
+  }
+
+  const assignRole = useMutation({
+    mutationFn: (role: string) => apiFetch(`/grow/contacts/${partyId}/roles`, { method: "POST", body: JSON.stringify({ role }) }),
+    onSuccess: invalidate,
+  });
+  const removeRole = useMutation({
+    mutationFn: (role: string) => apiFetch(`/grow/contacts/${partyId}/roles/${encodeURIComponent(role)}`, { method: "DELETE" }),
+    onSuccess: invalidate,
+  });
+
+  const [showAddRelationship, setShowAddRelationship] = useState(false);
+  const [relatedSearch, setRelatedSearch] = useState("");
+  const [relatedResults, setRelatedResults] = useState<GrowContactListItem[]>([]);
+  const [relatedPartyId, setRelatedPartyId] = useState<number | null>(null);
+  const [relationshipType, setRelationshipType] = useState<string>(GROW_CONTACT_RELATIONSHIP_TYPES[0]);
+  const [relationshipNote, setRelationshipNote] = useState("");
+
+  const searchRelated = useMutation({
+    mutationFn: (query: string) => apiFetch<{ contacts: GrowContactListItem[] }>(`/grow/contacts?search=${encodeURIComponent(query)}`),
+    onSuccess: (result) => setRelatedResults(result.contacts.filter((c) => c.id !== partyId)),
+  });
+
+  const addRelationship = useMutation({
+    mutationFn: () =>
+      apiFetch(`/grow/contacts/${partyId}/relationships`, {
+        method: "POST",
+        body: JSON.stringify({
+          relatedPartyId,
+          relationshipType,
+          ...(relationshipNote.trim() ? { note: relationshipNote.trim() } : {}),
+        }),
+      }),
+    onSuccess: () => {
+      setShowAddRelationship(false);
+      setRelatedSearch("");
+      setRelatedResults([]);
+      setRelatedPartyId(null);
+      setRelationshipNote("");
+      invalidate();
+    },
+  });
+
+  const removeRelationship = useMutation({
+    mutationFn: (id: number) => apiFetch(`/grow/contacts/relationships/${id}`, { method: "DELETE" }),
+    onSuccess: invalidate,
+  });
+
+  const [showAddCommitment, setShowAddCommitment] = useState(false);
+  const [commitmentDescription, setCommitmentDescription] = useState("");
+  const [commitmentDueAt, setCommitmentDueAt] = useState("");
+  const [commitmentPropertyId, setCommitmentPropertyId] = useState("");
+  const [commitmentOpportunityId, setCommitmentOpportunityId] = useState("");
+
+  const addCommitment = useMutation({
+    mutationFn: () =>
+      apiFetch(`/grow/contacts/${partyId}/commitments`, {
+        method: "POST",
+        body: JSON.stringify({
+          description: commitmentDescription.trim(),
+          dueAt: new Date(commitmentDueAt).toISOString(),
+          ...(commitmentPropertyId ? { propertyId: Number(commitmentPropertyId) } : {}),
+          ...(commitmentOpportunityId ? { opportunityId: Number(commitmentOpportunityId) } : {}),
+        }),
+      }),
+    onSuccess: () => {
+      setShowAddCommitment(false);
+      setCommitmentDescription("");
+      setCommitmentDueAt("");
+      setCommitmentPropertyId("");
+      setCommitmentOpportunityId("");
+      invalidate();
+    },
+  });
+
+  const updateCommitment = useMutation({
+    mutationFn: (vars: { id: number; status: "Completed" | "Cancelled" }) =>
+      apiFetch(`/grow/contacts/commitments/${vars.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: vars.status }),
+      }),
+    onSuccess: invalidate,
+  });
+
+  if (detail.isLoading) {
+    return <p className="muted">Loading contact…</p>;
+  }
+  if (detail.isError || !detail.data) {
+    return (
+      <div>
+        <button type="button" className="btn btn-link btn-small" onClick={onBack}>
+          &larr; Back to contacts
+        </button>
+        <p className="error-text">{detail.error instanceof ApiError ? detail.error.friendly : "Couldn't load this contact."}</p>
+      </div>
+    );
+  }
+
+  const data = detail.data;
+  const c = data.contact;
+
+  return (
+    <div>
+      <button type="button" className="btn btn-link btn-small" onClick={onBack}>
+        &larr; Back to contacts
+      </button>
+
+      <div className="primary-action">
+        <div className="eyebrow">{c.partyType}</div>
+        <h2>{c.displayName}</h2>
+        <p className="muted">
+          {c.email ?? "No email on file"}
+          {c.mobile ? ` · ${c.mobile}` : ""}
+        </p>
+        <div className="grow-contact-roles">
+          {GROW_CONTACT_ROLES.map((role) => {
+            const active = data.roles.includes(role);
+            return (
+              <button
+                key={role}
+                type="button"
+                className={`pill${active ? " pill-success" : ""}`}
+                disabled={!canManageContacts || assignRole.isPending || removeRole.isPending}
+                onClick={() => (active ? removeRole.mutate(role) : assignRole.mutate(role))}
+                title={
+                  canManageContacts
+                    ? active
+                      ? `Remove ${role} role`
+                      : `Assign ${role} role`
+                    : "Requires Grow contact management access"
+                }
+              >
+                {role}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="stat-tiles">
+        <StatTile label="Related Properties" value={data.intelligence.relatedPropertyCount} />
+        <StatTile label="Open Opportunities" value={data.intelligence.activeOpportunityCount} />
+        <StatTile label="Recent Activity (30d)" value={data.intelligence.recentActivityCount} />
+        <StatTile label="Outstanding Commitments" value={data.intelligence.outstandingCommitmentCount} />
+      </div>
+
+      <section className="card">
+        <h2>Relationship summary</h2>
+        <p className="muted">
+          {data.intelligence.relationshipAgeDays !== null
+            ? `Known to AE for ${data.intelligence.relationshipAgeDays} day(s). `
+            : "No recorded history yet. "}
+          {data.intelligence.mostRecentInteractionAt
+            ? `Last interaction ${data.intelligence.daysSinceLastInteraction} day(s) ago (${formatWhen(
+                data.intelligence.mostRecentInteractionAt,
+              )}).`
+            : "No interactions logged yet."}
+        </p>
+        {data.intelligence.nextFollowUpAt ? (
+          <p>
+            <strong>Next follow-up:</strong> {data.intelligence.nextFollowUpDescription} — due{" "}
+            {formatWhen(data.intelligence.nextFollowUpAt)}
+          </p>
+        ) : (
+          <p className="muted">No follow-up currently scheduled.</p>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Household &amp; related contacts</h2>
+        <p className="muted">Person-to-person context, recorded explicitly by an agent — AE never auto-infers this.</p>
+        {data.householdRelationships.length === 0 && <p className="empty-state">No related contacts recorded.</p>}
+        {data.householdRelationships.length > 0 && (
+          <ul className="item-list">
+            {data.householdRelationships.map((h) => (
+              <li key={h.id}>
+                <strong>{h.relatedPartyDisplayName}</strong> — {h.relationshipType.replace(/_/g, " ")}
+                {h.note ? <span className="muted"> ({h.note})</span> : null}
+                {canManageContacts && (
+                  <button
+                    type="button"
+                    className="btn btn-link btn-small"
+                    disabled={removeRelationship.isPending}
+                    onClick={() => removeRelationship.mutate(h.id)}
+                  >
+                    Remove
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {canManageContacts && (
+          <>
+            <button type="button" className="btn btn-secondary btn-small" onClick={() => setShowAddRelationship((v) => !v)}>
+              {showAddRelationship ? "Cancel" : "Add related contact"}
+            </button>
+            {showAddRelationship && (
+              <form
+                className="stack grow-inline-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!relatedPartyId) return;
+                  addRelationship.mutate();
+                }}
+              >
+                <label htmlFor="grow-related-search">Find contact</label>
+                <div className="grow-inline-form-row">
+                  <input
+                    id="grow-related-search"
+                    type="text"
+                    placeholder="Search by name or email"
+                    value={relatedSearch}
+                    onChange={(e) => setRelatedSearch(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-small"
+                    disabled={!relatedSearch.trim() || searchRelated.isPending}
+                    onClick={() => searchRelated.mutate(relatedSearch.trim())}
+                  >
+                    Search
+                  </button>
+                </div>
+                {relatedResults.length > 0 && (
+                  <ul className="item-list">
+                    {relatedResults.map((r) => (
+                      <li key={r.id}>
+                        <button
+                          type="button"
+                          className={`btn btn-link btn-small${relatedPartyId === r.id ? " active" : ""}`}
+                          onClick={() => setRelatedPartyId(r.id)}
+                        >
+                          {relatedPartyId === r.id ? "✓ " : ""}
+                          {r.displayName}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <label htmlFor="grow-relationship-type">Relationship</label>
+                <select id="grow-relationship-type" value={relationshipType} onChange={(e) => setRelationshipType(e.target.value)}>
+                  {GROW_CONTACT_RELATIONSHIP_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t.replace(/_/g, " ")}
+                    </option>
+                  ))}
+                </select>
+                <label htmlFor="grow-relationship-note">Note (optional)</label>
+                <input
+                  id="grow-relationship-note"
+                  type="text"
+                  value={relationshipNote}
+                  onChange={(e) => setRelationshipNote(e.target.value)}
+                />
+                <button className="btn btn-primary btn-small" type="submit" disabled={!relatedPartyId || addRelationship.isPending}>
+                  Save relationship
+                </button>
+              </form>
+            )}
+          </>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Properties</h2>
+        <p className="muted">Reuses AE's canonical properties — Grow does not keep a second property record.</p>
+        {data.properties.length === 0 && <p className="empty-state">No property relationships recorded.</p>}
+        {data.properties.length > 0 && (
+          <table className="grow-table">
+            <thead>
+              <tr>
+                <th>Property</th>
+                <th>Type</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Since</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.properties.map((p) => (
+                <tr key={p.relationshipId}>
+                  <td>
+                    {p.propertyId !== null ? (
+                      <Link href={`/properties/${p.propertyId}`}>{p.propertyAddress ?? "View property"}</Link>
+                    ) : (
+                      p.propertyAddress ?? "–"
+                    )}
+                  </td>
+                  <td>
+                    {p.relationshipType}
+                    {p.isPrimary ? " (primary)" : ""}
+                  </td>
+                  <td>{p.role ?? "–"}</td>
+                  <td>
+                    <span className={`pill ${p.status === "Active" ? "pill-success" : p.status === "PendingReview" ? "pill-warning" : ""}`}>
+                      {p.status}
+                    </span>
+                  </td>
+                  <td>{formatWhen(p.validFrom)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Relationship Timeline</h2>
+        <p className="muted">Every interaction, in one place, chronological — never a predictive score.</p>
+        {data.timeline.length === 0 && <p className="empty-state">No history yet.</p>}
+        {data.timeline.length > 0 && (
+          <ul className="timeline">
+            {data.timeline.map((e) => (
+              <li key={e.id}>
+                <span className="when">{new Date(e.occurredAt).toLocaleString()}</span>
+                <div className="eyebrow">{e.type.replace(/_/g, " ")}</div>
+                <p>{e.summary}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Notes, activity &amp; commitments</h2>
+        <h3>Recent activity</h3>
+        {data.activities.length === 0 && <p className="empty-state">No activity logged yet.</p>}
+        {data.activities.length > 0 && (
+          <ul className="timeline">
+            {data.activities.map((a) => (
+              <li key={a.id}>
+                <span className="when">{new Date(a.occurredAt).toLocaleString()}</span>
+                <div className="eyebrow">{a.activityType}</div>
+                <p>{a.summary}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <h3>Commitments</h3>
+        {data.commitments.length === 0 && <p className="empty-state">No commitments recorded.</p>}
+        {data.commitments.length > 0 && (
+          <ul className="item-list">
+            {data.commitments.map((cm) => (
+              <li key={cm.id}>
+                <span className={`pill ${cm.status === "Open" ? "pill-warning" : cm.status === "Completed" ? "pill-success" : "pill-danger"}`}>
+                  {cm.status}
+                </span>{" "}
+                {cm.description} — due {formatWhen(cm.dueAt)}
+                {cm.status === "Open" && canManageActivities && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-link btn-small"
+                      disabled={updateCommitment.isPending}
+                      onClick={() => updateCommitment.mutate({ id: cm.id, status: "Completed" })}
+                    >
+                      Complete
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-link btn-small"
+                      disabled={updateCommitment.isPending}
+                      onClick={() => updateCommitment.mutate({ id: cm.id, status: "Cancelled" })}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {canManageActivities && (
+          <>
+            <button type="button" className="btn btn-secondary btn-small" onClick={() => setShowAddCommitment((v) => !v)}>
+              {showAddCommitment ? "Cancel" : "Add commitment"}
+            </button>
+            {showAddCommitment && (
+              <form
+                className="stack grow-inline-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!commitmentDescription.trim() || !commitmentDueAt) return;
+                  addCommitment.mutate();
+                }}
+              >
+                <label htmlFor="grow-commitment-description">What was promised</label>
+                <input
+                  id="grow-commitment-description"
+                  type="text"
+                  placeholder="e.g. Call next month about listing"
+                  value={commitmentDescription}
+                  onChange={(e) => setCommitmentDescription(e.target.value)}
+                  required
+                />
+                <label htmlFor="grow-commitment-due">Due</label>
+                <input
+                  id="grow-commitment-due"
+                  type="date"
+                  value={commitmentDueAt}
+                  onChange={(e) => setCommitmentDueAt(e.target.value)}
+                  required
+                />
+                {data.properties.length > 0 && (
+                  <>
+                    <label htmlFor="grow-commitment-property">Property (optional)</label>
+                    <select
+                      id="grow-commitment-property"
+                      value={commitmentPropertyId}
+                      onChange={(e) => setCommitmentPropertyId(e.target.value)}
+                    >
+                      <option value="">None</option>
+                      {data.properties
+                        .filter((p) => p.propertyId !== null)
+                        .map((p) => (
+                          <option key={p.propertyId as number} value={p.propertyId as number}>
+                            {p.propertyAddress}
+                          </option>
+                        ))}
+                    </select>
+                  </>
+                )}
+                {data.opportunities.length > 0 && (
+                  <>
+                    <label htmlFor="grow-commitment-opportunity">Opportunity (optional)</label>
+                    <select
+                      id="grow-commitment-opportunity"
+                      value={commitmentOpportunityId}
+                      onChange={(e) => setCommitmentOpportunityId(e.target.value)}
+                    >
+                      <option value="">None</option>
+                      {data.opportunities.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.opportunityType} — {o.stage}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+                <button className="btn btn-primary btn-small" type="submit" disabled={addCommitment.isPending}>
+                  Save commitment
+                </button>
+              </form>
+            )}
+          </>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Opportunities</h2>
+        <p className="muted">Explainable by design - every opportunity carries a reason, never just a score.</p>
+        {data.opportunities.length === 0 && <p className="empty-state">No opportunities yet.</p>}
+        {data.opportunities.length > 0 && (
+          <table className="grow-table">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Stage</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Next action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.opportunities.map((o) => (
+                <tr key={o.id}>
+                  <td>{o.opportunityType}</td>
+                  <td>{o.stage}</td>
+                  <td>
+                    <span className={`pill ${o.status === "Open" ? "pill-success" : o.status === "Lost" ? "pill-danger" : ""}`}>
+                      {o.status}
+                    </span>
+                  </td>
+                  <td>{o.reason ?? "–"}</td>
+                  <td>
+                    {o.recommendedNextAction ?? "–"}
+                    {o.nextActionDueAt ? ` (due ${formatWhen(o.nextActionDueAt)})` : ""}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </section>
     </div>

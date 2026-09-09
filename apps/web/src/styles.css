@@ -974,3 +974,38 @@ ul.pc-item-list li {
 .grow-voice-seam {
   margin-top: 1rem;
 }
+
+/* AE GROW Priority 2 -- Contact Intelligence & Relationship Timeline (Contact 360) */
+.grow-inline-form-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.3rem;
+}
+
+.grow-inline-form-row input {
+  flex: 1 1 220px;
+  margin-top: 0;
+}
+
+.grow-contact-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.grow-contact-roles button.pill {
+  cursor: pointer;
+  border: 1px dashed var(--color-border);
+}
+
+.grow-contact-roles button.pill.pill-success {
+  border-style: solid;
+}
+
+.btn-link.active {
+  font-weight: 700;
+  text-decoration: underline;
+}
