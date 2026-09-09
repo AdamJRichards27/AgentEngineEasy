@@ -31,6 +31,9 @@ import {
   growRelationships,
   growActivities,
   growOpportunities,
+  growContactRoles,
+  growContactRelationships,
+  growCommitments,
   importJobs,
   importRecords,
   riskExceptions,
@@ -432,6 +435,18 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * commissionAgreements.id (must go before commissionAgreements); and
  * pcFeeAuthorities.agentUserId -> users.id (non-cascading), so it must be
  * cleared before the users delete near the end of this function too.
+ *
+ * AE GROW Priority 2 — Contact Intelligence & Relationship Timeline:
+ * extended again for grow_commitments / grow_contact_roles /
+ * grow_contact_relationships (packages/db/src/schema/contacts.ts). All
+ * three carry brokerageId directly, so this block stays scoped by `ids`
+ * alone. grow_commitments.opportunityId -> grow_opportunities.id is
+ * non-cascading, so it is deleted alongside growActivities — i.e. before
+ * the growOpportunities delete just below — exactly like growActivities
+ * already had to be. grow_contact_roles/grow_contact_relationships only
+ * reference parties.id (non-cascading), so they only need to run before
+ * the parties delete further down this function, which this placement
+ * already satisfies.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -466,7 +481,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(auditReturnReminders).where(inArray(auditReturnReminders.brokerageId, ids));
   await db.delete(financialSettings).where(inArray(financialSettings.brokerageId, ids));
 
-  // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+  // Agent Engine 2.0 -- Step 5: Integration and Data Exchange Foundation.
   // Every integration_* table carries brokerageId directly EXCEPT
   // integration_outbox_attempts (only outboxId -> integration_outbox.id)
   // and integration_credentials (only connectionId -> integration_connections.id
@@ -534,6 +549,15 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   // references grow_opportunities.id, so this order (activities, then opportunities, then
   // relationships) must run before parties/properties are deleted below or the deletes there
   // fail with a foreign key violation instead of silently succeeding.
+  //
+  // AE GROW Priority 2 additions (packages/db/src/schema/contacts.ts) — see this function's
+  // own doc comment above: grow_commitments also references grow_opportunities.id, so it is
+  // deleted here alongside growActivities, before growOpportunities. grow_contact_roles and
+  // grow_contact_relationships only reference parties.id, so they just need to precede the
+  // parties delete further down — placed here to keep every Grow-table cleanup together.
+  await db.delete(growCommitments).where(inArray(growCommitments.brokerageId, ids));
+  await db.delete(growContactRoles).where(inArray(growContactRoles.brokerageId, ids));
+  await db.delete(growContactRelationships).where(inArray(growContactRelationships.brokerageId, ids));
   await db.delete(growActivities).where(inArray(growActivities.brokerageId, ids));
   await db.delete(growOpportunities).where(inArray(growOpportunities.brokerageId, ids));
   await db.delete(growRelationships).where(inArray(growRelationships.brokerageId, ids));
