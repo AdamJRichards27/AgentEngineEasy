@@ -632,7 +632,7 @@ test("Relationship Timeline: aggregates every source table with no join-caused d
 
 test("Priority 1 integration: GET /grow/today still resolves successfully after Priority 2's additions to the Grow schema and routes", async () => {
   const res = await fetch(`${baseUrl}/api/grow/today`, { headers: { cookie: A.agent.cookie } });
-  assert.equal(res.status, 200, await res.text());
+  assert.equal(res.status, 200);
   const body = (await res.json()) as Record<string, unknown>;
   assert.ok(body && typeof body === "object");
 });
