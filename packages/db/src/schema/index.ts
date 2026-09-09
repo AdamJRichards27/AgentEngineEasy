@@ -38,3 +38,5 @@ export * from "./financial";
 // (logAudit) rather than duplicating either — see integrations.ts's own
 // header comment for the full list of deliberate reuse decisions.
 export * from "./integrations";
+// AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
+export * from "./contacts";
