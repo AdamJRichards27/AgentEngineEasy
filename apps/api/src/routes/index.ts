@@ -16,6 +16,7 @@ import { aiRouter } from "./ai.js";
 import { aiActionsRouter } from "./ai-actions.js";
 import { billingRouter } from "./billing.js";
 import { growRouter } from "./grow.js";
+import { contactsRouter } from "./contacts.js";
 import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
@@ -61,6 +62,12 @@ apiRouter.use("/ai", aiRouter);
 apiRouter.use("/ai/actions", aiActionsRouter);
 apiRouter.use("/billing", billingRouter);
 apiRouter.use("/grow", growRouter);
+// AE GROW Priority 2 — Contact Intelligence & Relationship Timeline. Nested under Grow's own
+// namespace (not a new top-level surface) since Contact 360 is a Grow-specific view onto the
+// canonical `parties` table, never a second contact database. Mounted directly after growRouter
+// so the two read as one Grow surface in this file, even though they're separate router objects
+// for file-size/organisation reasons only.
+apiRouter.use("/grow/contacts", contactsRouter);
 apiRouter.use("/import", importRouter);
 apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
