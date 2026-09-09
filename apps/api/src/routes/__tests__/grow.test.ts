@@ -125,8 +125,23 @@ test("GET /access reports entitlement state honestly and is never itself gated b
   const before_ = await fetch(growUrl("/access"), { headers: { cookie: A.agent.cookie } });
   assert.equal(before_.status, 200, "the whole point of /access is that it never 403s -- it IS the locked-shell signal");
   const beforeBody = (await before_.json()) as { entitled: boolean; entitlements: string[] };
-  assert.equal(beforeBody.entitled, false, "a brokerage with zero entitlementGrants rows must not be reported as entitled");
-  assert.deepEqual(beforeBody.entitlements, []);
+  assert.equal(beforeBody.entitled, false, "a brokerage with zero grow.* entitlementGrants rows must not be reported as entitled");
+  // AE GROW Priority 2 -- CI Stabilisation Gate: this brokerage is brand-new
+  // (createBrokerageWithUsers in this file's before()), so its ONLY
+  // entitlementGrants row is the automatic "run.access" grant dev-login makes
+  // for every new brokerage (routes/auth.ts) -- intentional, documented
+  // behaviour introduced by AE GROW Priority 0.5, Workstream 3 (commit
+  // deb4a42a/e7ce5a88, "run.access entitlement foundation"; see
+  // docs/AE_GROW_PRIORITY_0_5_FOUNDATION_REPORT.md Sections 5 and 13, whose
+  // own Test Evidence section candidly notes this file's suite was never
+  // re-run against that change). This assertion previously expected an empty
+  // array, which stopped being true the moment that grant was introduced --
+  // the resulting AssertionError threw here and silently skipped this test's
+  // own grant(A.brokerageId, "grow.access") call below, which is why every
+  // later test in this file that assumed Brokerage A already held
+  // grow.access (tests 3, 6, and 11) also failed. grow.access remains
+  // correctly un-granted at this point -- only run.access is present.
+  assert.deepEqual(beforeBody.entitlements, ["run.access"]);
 
   await grant(A.brokerageId, "grow.access");
 
