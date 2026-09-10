@@ -73,6 +73,7 @@ import {
   integrationDeadLetters,
   integrationCredentials,
   integrationSettings,
+  privacyRequests,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -432,6 +433,16 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * commissionAgreements.id (must go before commissionAgreements); and
  * pcFeeAuthorities.agentUserId -> users.id (non-cascading), so it must be
  * cleared before the users delete near the end of this function too.
+ *
+ * AE GROW Priority 0.5/1/2 -- CI Stabilisation Gate: privacy.test.ts
+ * (routes/__tests__/privacy.test.ts) creates privacy_requests rows via
+ * POST /privacy/requests. privacy_requests carries brokerageId directly
+ * (packages/db/src/schema/privacy.ts), so this block is scoped by `ids`
+ * alone -- but privacy_requests.user_id / handled_by_user_id both
+ * reference users.id non-cascading, so (like entitlementGrants/
+ * aiActionRequests/domainEvents immediately below) this must run before
+ * the users delete near the end of this function, or that delete fails
+ * with a foreign key violation instead of silently succeeding.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -466,7 +477,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(auditReturnReminders).where(inArray(auditReturnReminders.brokerageId, ids));
   await db.delete(financialSettings).where(inArray(financialSettings.brokerageId, ids));
 
-  // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
+  // Agent Engine 2.0 -- Step 5: Integration and Data Exchange Foundation.
   // Every integration_* table carries brokerageId directly EXCEPT
   // integration_outbox_attempts (only outboxId -> integration_outbox.id)
   // and integration_credentials (only connectionId -> integration_connections.id
@@ -656,6 +667,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     });
   }
 
+  await db.delete(privacyRequests).where(inArray(privacyRequests.brokerageId, ids));
   await db.delete(entitlementGrants).where(inArray(entitlementGrants.brokerageId, ids));
   await db.delete(aiActionRequests).where(inArray(aiActionRequests.brokerageId, ids));
   await db.delete(domainEvents).where(inArray(domainEvents.brokerageId, ids));
