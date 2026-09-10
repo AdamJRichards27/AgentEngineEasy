@@ -201,3 +201,141 @@ The foundation Priority 1 needs is in place:
 - **Voice and conversation-intelligence have a documented landing spot** (§10, §11) — enough for Priority 1 planning to start from a real design conversation rather than a blank page, without any premature commitment to vendor, schema, or UI.
 
 Per this task's explicit final instruction: Priority 0.5 implementation is complete, this report is filed, and no Priority 1 work has been started. **Awaiting Project Owner approval before Priority 1 begins.**
+
+## 17. Full-Suite CI Failure Investigation
+
+**Trigger:** Project Owner's "AE GROW — PR #28 CI FAILURE INVESTIGATION GATE" decision, followed by "AE GROW — PR #28 FINAL CONFIRMATION AND MERGE GATE" decision. The stacked merge sequence (PR #28 → PR #29 → PR #30 → `staging`) was held at PR #28 pending root-cause and CI resolution of failures observed in the full-suite CI run. This section is the required record of that investigation, per the Project Owner's step 11 (17-point) documentation requirement.
+
+### 17.1 Starting SHA
+
+`3494d85aeb8f9e4f5dd0705b6c7aef9fcfd10dc6` — "fix(test): stop privacy.test.ts teardown from hanging CI (backport from Priority 2)", the branch tip at the point the full-suite CI investigation began. This commit (together with `995bac3a04d48ce840d7bf66fe6aa4297508ee2d` and `69b13176cb3b9d6d906d420be0b91838c94c111f`, its two predecessor commits) had already fixed a prior, separate CI-hang defect (`privacy.test.ts`'s hand-rolled teardown throwing a Postgres FK violation on `entitlement_grants` and never reaching `server.close()`) — confirmed still effective in this investigation (no hang; see 17.9).
+
+### 17.2 Final SHA
+
+`4cf81d086605f836ba21c9cade877a6874ec1aa2` — current tip of `feat/ae-grow-priority-0-5-foundation` and current PR #28 HEAD at the time this section was written. (Note: this supersedes the "Final SHA: `cf6e25e5...`" recorded at the top of this report — that value was accurate as of §1–§16's Priority 0.5 implementation work; the branch has since advanced through this CI investigation, documented here.)
+
+### 17.3 CI run IDs
+
+| Run | Commit | Result | Total duration |
+|---|---|---|---|
+| #205 (run `34453097673`) | `3494d85aeb8f9e4f5dd0705b6c7aef9fcfd10dc6` | **Failure** — 4 test failures | 16m 2s |
+| #207 (run `34459749102`) | `71bd961e9f844880d09e419578309ddbf94b30a2` | **Failure** — typecheck error (tooling mistake, see 17.5) | 1m 14s |
+| #208 attempt 1 (run `34459859218`, attempt 1) | `4cf81d086605f836ba21c9cade877a6874ec1aa2` | **Success** — 774 tests, 0 fail | 16m 2s |
+| #208 attempt 2 / "Latest #2" (run `34459859218`, attempt 2) | `4cf81d086605f836ba21c9cade877a6874ec1aa2` | **Success** — 774 tests, 0 fail | 16m 21s |
+
+### 17.4 Original four failures (run #205, commit `3494d85`)
+
+Full-suite result: `tests 774`, `suites 82`, `pass 769`, `fail 4`, `cancelled 0`, `skipped 1`, `todo 0`, `duration_ms 885780.88` (test step); job total 16m 2s. Exact failing tests and assertion text, read directly from the CI job log's "failing tests:" section:
+
+1. **`GET /access reports entitlement state honestly and is never itself gated by grow.access`** (`apps/api/src/routes/__tests__/grow.test.ts:124`, assertion at line 129)
+   `AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal: + actual - expected + [ + 'run.access' + ] - []` — `code: 'ERR_ASSERTION'`, `actual: [ 'run.access' ]`, `expected: []`, `operator: 'deepStrictEqual'`.
+
+2. **`grow.access unlocks the four read routes but grants no write access of its own`** (`grow.test.ts:140`, assertion at line 145)
+   `AssertionError [ERR_ASSERTION]: GET /overview should be readable with only grow.access — 403 !== 200` — `actual: 403`, `expected: 200`, `operator: 'strictEqual'`.
+
+3. **`POST /activities requires grow.activities.manage even though GET /activities only needs grow.access, and validates required fields`** (`grow.test.ts:255`, assertion at line 284)
+   `AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 403 !== 200` — `actual: 403`, `expected: 200`, `operator: 'strictEqual'`.
+
+4. **`POST /relationships accepts a missing propertyId (pre-property relationships), and GET /relationships returns it with a null property via leftJoin`** (`grow.test.ts:444`, assertion at line 460)
+   `AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 403 !== 200` — `actual: 403`, `expected: 200`, `operator: 'strictEqual'`.
+
+### 17.5 Root cause
+
+**A single defect: a stale assertion in failure 1, which throws before a required `grant()` call in the same test executes.**
+
+Test 1 (`GET /access reports entitlement state honestly...`, `grow.test.ts:124`) asserted `beforeBody.entitlements` deep-equals `[]` immediately after Brokerage A's dev-login. This was correct until Priority 0.5 Workstream 3 shipped: every brand-new brokerage now auto-receives `run.access` at dev-login time (`routes/auth.ts`). The assertion was never updated to match, so it threw `AssertionError [ERR_ASSERTION]` with `actual: ['run.access']` vs `expected: []` (17.4.1) — a genuinely stale test expectation, not an application defect. `run.access` is a RUN-surface key, never one of the `grow.*` keys, so `entitled` (which specifically means `grow.access`) was and remains correctly `false`; only the `entitlements` array's contents were stale.
+
+Node's `node:test` runner does not implicitly wrap a test body in try/finally: when a `test()` callback throws, every statement *after* the throw point in that same callback is skipped, but subsequent `test()` blocks in the file still run normally. The line immediately following the failing assertion in test 1 was `await grant(A.brokerageId, "grow.access")` — the call that grants Brokerage A its `grow.access` entitlement for the rest of the file. Because the assertion above it threw, **this grant call never executed**, meaning Brokerage A genuinely, correctly never held `grow.access` for the remainder of the test run — not because of any resolver, cache, database, or CI-concurrency defect, but because the test file's own control flow never reached the line that was supposed to grant it.
+
+Failures 2, 3, and 4 are the direct, deterministic, and entirely expected consequence of that one missing grant: each is a later `grow.access`-gated `GET` request (the read-routes check in test 2, and the final `GET /activities` / `GET /relationships` re-checks at the end of two later `POST` tests) correctly 403ing because Brokerage A genuinely had no `grow.access` grant — `requireEntitlement("grow.access")` (`apps/api/src/middlewares/entitlement.ts`) did exactly what it is supposed to do. No apparent inconsistency exists between "the resolver worked correctly" and "the routes 403'd" — both are true, and both are explained by the single missing `grant()` call.
+
+**Why this was initially suspected to be four separate, full-suite-only, order/timing-dependent defects:** before this control-flow read was performed, the working hypothesis was that failures 2–4 were caused by full-suite state leakage, entitlement-cache staleness, or CI-only concurrency effects, since they did not reproduce in an isolated local resolver/DB repro (`repro2.mjs`, §17.6). That hypothesis is now known to be incorrect — see 17.6 for the negative evidence that ruled it out and led to the correct root cause.
+
+### 17.6 Diagnostic steps taken (full-suite state leakage, entitlement regression, and isolation checks)
+
+Per the Project Owner's steps 3–6, the following were investigated as candidate causes for failures 2–4 before the true root cause (17.5) was found, using GitHub Actions CI as the reproduction environment (no local git/gh credentials are available in this environment — confirmed: `GH_TOKEN`/`GITHUB_TOKEN` fail GitHub's HTTP auth for `git clone`, and no `gh` CLI is installed):
+
+- **Entitlement cache staleness** — ruled out by reading `apps/api/src/lib/entitlements/resolver.ts` in full: the GET routes' gate (`requireEntitlement` → `explainEntitlementDecision`) issues a fresh `db.select()` on every call with no cache involved at all. Only `resolveEntitlements`/`GET /access` uses the separate 30s-TTL cache, and that path is unrelated to the 403s observed.
+- **Route-level hidden logic** — ruled out by re-reading `apps/api/src/routes/grow.ts` in full: all four GET routes share identical `requireAuth, requireEntitlement("grow.access")` middleware with no additional checks.
+- **Database schema / unique-constraint overwrite** — ruled out by re-reading `packages/db/src/schema/billing.ts`: `entitlementGrants` has no unique constraint beyond its serial primary key, so no silent overwrite-via-conflict is possible.
+- **Test cleanup / cross-suite leakage** — ruled out by re-reading `apps/api/src/routes/__tests__/testSupport.ts`'s `cleanupBrokerages()` (the shared teardown helper) in full: every delete in its ~150-line body is scoped by `inArray(...ids)`; no unscoped delete exists.
+- **Billing-sync interference** — ruled out by reading `apps/api/src/lib/billing/sync.ts` and its test file in full: `applySubscriptionSnapshot`'s grant/revoke logic matches existing grants by `brokerageId` + `entitlementKey` + `sourceType: "subscription"` + `sourceId`, and the sync test's own cleanup is scoped to its own brokerage — neither can touch `grow.test.ts`'s Brokerage A/B rows (`sourceType` `"manual"`/`"migration"`, not `"subscription"`).
+- **Faithful full-sequence local reproduction** (`repro2.mjs`, run against a real local Postgres 16 instance with byte-for-byte-faithful copies of the resolver and schema): every grant and realistic inter-request timing gap in `grow.test.ts` was replayed in order, checking `explainEntitlementDecision(actorA, "grow.access")` at 11 checkpoints from immediately after granting `grow.access` through to the end of the file. **Result: `allowed=true reason=OK` at every single checkpoint.** This is the key negative result: it proves the entitlement resolver and database logic were never the defect, under a grant sequence that *does* include the `grow.access` grant. Combined with 17.5's control-flow finding — that the real (broken) test file's control flow meant the grant call was *never reached at all* — the full picture resolves cleanly: the resolver works correctly whenever it is actually given a grant to find; failures 2–4 occurred because the broken test never gave it one, not because the resolver misbehaved when it was given one.
+
+**Entitlement regression check (Project Owner step 5):** none of the four failures are an application-level entitlement regression. Failure 1 is a stale test expectation that Priority 0.5 Workstream 3's `run.access` auto-grant (documented and intended, §5 of this report) correctly invalidated. Failures 2–4 are the test's own control-flow consequence of failure 1, not a `grow.access`/`run.access`/tier-derivation defect in the application. No expected outcome was changed without a corresponding, cited Priority 0.5 contract change (§5–§6 of this report) — the *only* application-facing behaviour these failures relate to is the one Priority 0.5 change already documented and intended: the `run.access` auto-grant itself.
+
+**Isolation/cleanup check (Project Owner step 6):** `grow.test.ts`'s own setup/teardown was re-read in full; failures 2–4 do not stem from cross-test or cross-suite isolation defects — they stem from control flow *within a single test's body*, upstream of any cleanup boundary. No fixture or cleanup change was needed or made.
+
+### 17.7 Classification
+
+| # | Failure | Classification |
+|---|---|---|
+| 1 | `GET /access ... entitlements` assertion | **Stale test expectation** — assertion not updated when Priority 0.5 Workstream 3's `run.access` auto-grant shipped. |
+| 2 | `grow.access unlocks the four read routes...` (`GET /overview`, 403) | **Downstream consequence of #1** (test-order/control-flow dependency within the same file: the `grant("grow.access")` call after #1's throwing assertion never executed) — not an independent defect. |
+| 3 | `POST /activities requires grow.activities.manage...` (final `GET /activities`, 403) | **Downstream consequence of #1**, same mechanism. |
+| 4 | `POST /relationships accepts a missing propertyId...` (final `GET /relationships`, 403) | **Downstream consequence of #1**, same mechanism. |
+
+All four are one root cause, not four independent defects. None is an unrelated pre-existing defect (each is directly attributable, with evidence, to the interaction between Priority 0.5's own `run.access` auto-grant and this specific test file's assertion/control-flow — nothing was labelled "pre-existing" without that evidence, per the Project Owner's explicit instruction not to do so).
+
+Separately, commit `71bd961e` (run #207) was **not** a test or application defect at all: it was an authoring/tooling mistake in this session (a `create_or_update_file` MCP call was made with the literal placeholder string `"FILE_CONTENT_PLACEHOLDER"` as file content instead of the real ~500-line file), causing a real TypeScript compile error (`Cannot find name 'FILE_CONTENT_PLACEHOLDER'`) at the Typecheck step. It was self-caught immediately (the tool result reported a 24-byte file size), never merged anywhere, and corrected forward in the very next commit (`4cf81d08`) with no history rewrite, per this task's source-control rules. It is recorded here only for a complete, non-vague account of every CI run in this investigation's window, not because it bears on the four Grow-entitlement failures.
+
+### 17.8 Exact test corrected
+
+`apps/api/src/routes/__tests__/grow.test.ts`, line 129 (inside `"GET /access reports entitlement state honestly and is never itself gated by grow.access"`):
+
+```diff
+- assert.deepEqual(beforeBody.entitlements, []);
++ // AE GROW Priority 0.5 -- Workstream 3: every brand-new brokerage now auto-receives
++ // "run.access" at dev-login time (see routes/auth.ts's "every brand-new brokerage
++ // automatically receives run.access at creation time" grant), matching pre-Grow behaviour
++ // where every brokerage could use the RUN surface (Pit Crew, Financial) with no separate
++ // purchase step. run.access is a RUN-surface key, never one of the grow.* keys, so a
++ // brand-new brokerage with zero Grow entitlements now reports entitlements === ["run.access"]
++ // rather than [] -- `entitled` above (which specifically means grow.access) is correctly
++ // still false. This was previously asserted as [] and went stale the moment Workstream 3's
++ // auto-grant shipped; CI's "AE GROW Priority 0.5/1/2 -- CI Stabilisation Gate" investigation
++ // traced the resulting failure back to this exact line.
++ assert.deepEqual(beforeBody.entitlements, ["run.access"]);
+```
+
+No other line in the file was changed.
+
+### 17.9 Corrected expectation and justification
+
+`entitlements` now expected to equal `["run.access"]`, not `[]`, for a brand-new brokerage immediately after dev-login. This is justified directly by this report's own §5 ("Non-destructive backfill... New brokerages get the grant inline at creation time in dev-login (`routes/auth.ts`)") and §3 ("`run.access` is the only new entitlement key... additive to, not a replacement for, existing role-based checks"): a zero-Grow-entitlement brokerage correctly still has `entitled: false` (unchanged, still asserted), but its `entitlements` array honestly reflects the one RUN-surface grant it now holds by default. This is not a weakened assertion — it is the same strict `deepEqual` check, updated to the value the application now correctly and intentionally produces.
+
+### 17.10 Priority 0.5 fix SHA
+
+`4cf81d086605f836ba21c9cade877a6874ec1aa2` (branch `feat/ae-grow-priority-0-5-foundation`) — full, verified file content (25,821 bytes), confirmed byte-for-byte via a `get_file_contents` read-back after push. (Superseded an earlier same-session commit, `71bd961e9f844880d09e419578309ddbf94b30a2`, which was pushed with accidental placeholder content — see 17.7 — and is corrected forward by this commit, not amended or rewritten.)
+
+### 17.11 Priority 1 corresponding fix SHA
+
+`1745b82d8c2e6b606482d1c890ef99cc86fccb40` (branch `feat/ae-grow-priority-1-daily-command-centre`) — identical corrected `grow.test.ts` content (same fix, pushed directly with full correct content, no placeholder mistake on this branch), keeping the two branches' shared test file in sync per this task's established convention. This branch's own PR (#29) will run its own full CI at merge time (§8 of the Project Owner's "FINAL CONFIRMATION AND MERGE GATE" decision); this commit is recorded here as evidence the fix is already present on that branch ahead of that run.
+
+### 17.12 GitHub Actions run #208 attempt 1 result
+
+Run `34459859218`, attempt 1. Commit `4cf81d086605f836ba21c9cade877a6874ec1aa2`. **Success**, total duration 16m 2s. Full-suite summary (`API automated test suite` step): `tests 774`, `suites 82`, `pass 773`, `fail 0`, `cancelled 0`, `skipped 1`, `todo 0`. The 1 skip is pre-existing and unrelated to this investigation (present identically in run #205's 774/769/4/1 breakdown, i.e. it is not one of the 4 original failures and is not newly introduced).
+
+### 17.13 GitHub Actions run #208 attempt 2 ("Latest #2") result
+
+Run `34459859218`, attempt 2, triggered via "Re-run all jobs" specifically to obtain the Project Owner's required second, independent confirmation (a single green run is not conclusive if a defect might be order/timing related). Commit unchanged: `4cf81d086605f836ba21c9cade877a6874ec1aa2`. **Success**, total duration 16m 21s. Full-suite summary, extracted directly from the job log: `tests 774`, `suites 82`, `pass 773`, `fail 0`, `cancelled 0`, `skipped 1`, `todo 0`, `duration_ms 893566.46`. Identical outcome to attempt 1 in every count. Two consecutive, independent, fully green full-suite CI runs against the same final commit are now on record.
+
+### 17.14 Total tests / total failures
+
+774 tests total in both confirmation runs (attempt 1 and attempt 2); 0 failures in both. (For contrast: run #205, against the pre-fix commit, was also 774 tests total, with 4 failures — confirming the fix changed only the failure count, not the total test count, i.e. no test was added, removed, or skipped as part of the remediation.)
+
+### 17.15 Confirmation: suite exited normally; no application logic changed; no tests skipped or weakened
+
+- **Suite exited normally** in both confirmation runs: the "API automated test suite" step, and the overall job, both completed with a green check (not cancelled, not timed out) in both attempts, with the CI-hang fix (`--test-timeout=120000`, commits `995bac3a`/`69b13176`/`3494d85`) confirmed still in effect and not triggered (no test needed its safety-rail timeout).
+- **No application logic was changed** by this remediation. The only change across the entire investigation (excluding the self-corrected tooling mistake in 17.7, which also touched no application code — it corrupted a test file, not `apps/api/src/**` production source) is the one-line test assertion at `grow.test.ts:129` plus its explanatory comment. `git diff`-equivalent verification: the full corrected file content was read back via `get_file_contents` after each push and confirmed to match the intended content exactly, with the sole functional change being that one assertion line.
+- **No tests were skipped or weakened.** The corrected assertion is the same strict `assert.deepEqual` check as before, against an updated (not loosened) expected value; the pre-existing 1 skip is unrelated and unchanged across every run in this investigation (17.4, 17.12, 17.13). No `.skip`, `.only`, `test.todo`, broadened matcher, or removed assertion was introduced anywhere in this investigation.
+
+### 17.16 Final risk assessment
+
+Low. The root cause is fully explained, attributable to one line, and directly tied to an already-documented, intentional Priority 0.5 behaviour change (§3, §5 of this report) rather than to any unexplained infrastructure, concurrency, or resolver defect. The full-suite-only reproduction that initially looked like it might indicate order/timing risk is now explained without residual mystery: it reproduced in the full suite (and not in isolation) simply because the full suite is what runs `grow.test.ts`'s tests in their real order, which is exactly where the control-flow dependency between test 1's throw and test 1's own subsequent `grant()` call lives — there was never a cross-file or cross-suite interaction involved, which the diagnostic work in 17.6 independently corroborates. Two independent, consecutive, full-suite CI runs against the final commit are both fully green with an identical 774/773/0/1 breakdown, satisfying the Project Owner's explicit "do not treat one accidental green run as conclusive" bar. No remaining known risk is being carried forward into the merge.
+
+### 17.17 Merge recommendation
+
+**Proceed with merge.** The remaining three failures reported at the start of this investigation, plus the one stale-assertion failure that caused them, are a single, fully root-caused, minimally remediated defect (one corrected assertion line, permitted under the Project Owner's "minimal remediation only" rule — no skipped tests, no weakened assertions, no broad refactor, no unrelated changes). Required CI is green on two independent, consecutive full-suite runs against PR #28's current HEAD (`4cf81d086605f836ba21c9cade877a6874ec1aa2`). This satisfies the Project Owner's Merge Authorisation Rule §10 "Preferred" path ("the remaining three failures are fixed and required CI passes") without requiring an override.
+
+**Verdict: COMPLETE — PR #28 READY FOR MERGE.**
