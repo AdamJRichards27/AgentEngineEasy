@@ -2,7 +2,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
-import { db, users, brokerages, invitations, privacyRequests } from "@aee/db";
+import { db, users, privacyRequests } from "@aee/db";
+import { cleanupBrokerages } from "./testSupport.js";
 
 // Critical Blocker Remediation, Phase 8 — application privacy controls:
 // GET /legal/versions, POST /privacy/requests, GET /privacy/requests/mine,
@@ -29,17 +30,28 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
 
+// AE GROW Priority 0.5/1 -- CI Stabilisation Gate root cause (same defect
+// independently diagnosed and fixed on the AE GROW Priority 2 branch):
+// this teardown used to hand-roll its own delete order and never deleted
+// entitlement_grants (inserted by POST /auth/dev-login for every new
+// brokerage -- see routes/auth.ts). DELETE FROM brokerages therefore
+// threw a foreign key violation (entitlement_grants_brokerage_id_brokerages_id_fk,
+// Postgres code 23503) inside the for loop, which meant server.close()
+// on the last line was never reached -- leaving the HTTP server open and
+// hanging the test process indefinitely (node:test's after hook has no
+// implicit try/finally), which in turn hung the whole "API automated test
+// suite" CI step until it hit the job's 6h0m0s cap (observed on PR #28's
+// CI run #188). Delegating to the shared, FK-order-correct
+// cleanupBrokerages() helper (extended by this fix to also delete
+// privacy_requests, see testSupport.ts) and closing the server in a
+// finally fixes both the FK violation and the hang, regardless of whether
+// cleanup throws.
 after(async () => {
-  for (const brokerageId of createdBrokerageIds) {
-    await db.delete(invitations).where(eq(invitations.brokerageId, brokerageId));
-    const brokerageUsers = await db.select().from(users).where(eq(users.brokerageId, brokerageId));
-    for (const u of brokerageUsers) {
-      await db.delete(privacyRequests).where(eq(privacyRequests.userId, u.id));
-    }
-    await db.delete(users).where(eq(users.brokerageId, brokerageId));
-    await db.delete(brokerages).where(eq(brokerages.id, brokerageId));
+  try {
+    await cleanupBrokerages([...createdBrokerageIds]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
 function cookieFrom(res: Response): string {
