@@ -339,19 +339,40 @@ Do not start Grow Priority 3 (Communications Hub) or any later Grow priority yet
 
 **14. Test process termination — verified.** The full local suite run (item 8) returned control to the shell unaided, with exit code 1 and no further intervention required — no dangling HTTP servers, connection pools, or timers were observed, and no `timeout`/`kill` wrapper was needed to end the process (contrast with the pre-remediation state, where a hard `timeout 60s` was required to terminate `privacy.test.ts` in isolation, and where CI's own 6-hour job cap was previously the only thing that ever ended the full-suite run at all).
 
-**15. Merge recommendation and decision.**
+**15. Merge recommendation and decision (historical — see item 16 for the Project Owner's resolution).**
 
 The mandate's core objective — make the existing automated API test suite complete reliably in real CI and expose genuine remaining failures before PR #30 is considered for merge — **is achieved and independently evidenced**: the `privacy.test.ts` hang that previously consumed the full 6-hour CI job cap is fixed at its structural root (items 2–3), the `grow.test.ts` legacy failures are fixed with a cited justification (items 4–5), a measurement-grounded native CI timeout guard is live and CI-proven (items 9–10), and real GitHub Actions now runs this branch's complete pipeline — typecheck, migration check, schema drift check, the full 801-test API suite, both production builds, and the synthetic-startup check — to a clean `Success` in 17 minutes, for the first time ever on this branch.
 
 That result stands on `a83da0d`, which is already the tip of `origin/feat/ae-grow-priority-2-contact-intelligence` — nothing further needs to land for CI to keep passing at that commit. What remains is narrower than the underlying engineering: commit `58f0c2d`'s coarser CI-config hardening (item 10) is stuck in this session's local checkout, blocked by a GitHub OAuth scope restriction outside this session's authority to resolve (item 11), and the 13 pre-existing `exceptions/` test failures (item 12) are a known, accepted, out-of-scope risk that happened not to surface in run #199 but could recur in a future run under different timing.
 
-Because landing that CI-config commit requires an action only the Project Owner can authorize or perform — not further engineering — this report's decision is:
+Because landing that CI-config commit requires an action only the Project Owner can authorize or perform — not further engineering — this report's decision, at the time this item was written, was:
 
-**BLOCKED — PROJECT OWNER DECISION REQUIRED**
+~~BLOCKED — PROJECT OWNER DECISION REQUIRED~~ *(superseded — see item 16)*
 
 scoped narrowly to one item: how to land commit `58f0c2d`. Three paths, any of which resolves this block:
   (a) grant the `workflow` OAuth scope to the credential backing this repository's git remote, so this session (or the Project Owner) can `git push origin feat/ae-grow-priority-2-contact-intelligence` to land it as-is;
   (b) apply the equivalent `.github/workflows/ci.yml` diff manually via the GitHub web UI or the Project Owner's own authenticated `git`/`gh` CLI (the full diff is in this commit, inspectable in this session's local Replit checkout); or
   (c) decide the already-live, already-CI-proven native `--test-timeout=120000` guard (item 10) is sufficient on its own, explicitly waive the coarser step-level backstop, and treat PR #30 as ready to merge at `a83da0d` exactly as it stands on `origin` today.
 
-This is not a request for more engineering time: no further code, test, or CI change is anticipated regardless of which path the Project Owner chooses. Per the mandate's Section 12 stop condition, no Grow Priority 3 work has begun, and none will begin until the Project Owner reviews this decision.
+This was not a request for more engineering time: no further code, test, or CI change was anticipated regardless of which path the Project Owner chose.
+
+**16. Project Owner Decision — Waiver (resolves item 15).**
+
+The Project Owner reviewed this section and issued "AE GROW — PR #30 PROJECT OWNER DECISION," explicitly selecting **path (c)** above: the coarser, unpushed workflow-level `timeout-minutes: 20` backstop in `58f0c2d` is **waived**. The Project Owner's decision, recorded verbatim in substance:
+
+- The native per-test timeout guard (`--test-timeout=120000`, item 10, live on `origin` since `a83da0d`) is accepted as sufficient for the current merge gate.
+- The local-only `.github/workflows/ci.yml` timeout commit (`58f0c2d`) is optional defence-in-depth — not required for PR #30, not required for Grow Priority 2 completion, and not required before Priority 3 begins.
+- No additional OAuth `workflow` scope is to be requested for this task. Commit `58f0c2d` is not to be recreated or force-pushed. PR #30 is not to be kept blocked because of that commit.
+- The unpushed workflow-level timeout is deferred as optional future CI hardening, to be picked up separately (by whichever future session/environment has the appropriate `workflow`-scoped credential) if and when the Project Owner chooses — it is explicitly **not** a condition of this merge.
+
+With this waiver, every item this gate's own item 15 flagged as outstanding is now resolved:
+
+- The `privacy.test.ts` hang is fixed at its structural root (items 2–3) — confirmed by real CI.
+- The stale `grow.test.ts` assertion is fixed with a cited justification (items 4–5) — confirmed by real CI.
+- CI runs #199 (commit `a83da0d`) and #200 (commit `3aa0f3d`, a documentation-only commit stacked on `a83da0d` — see this report's revision history) both completed to a clean `Success` in real GitHub Actions: 17m1s and 16m40s respectively, every step green, only the pre-existing/unrelated Node.js 20 deprecation annotation present.
+- The native per-test timeout guard is live on `origin` and CI-proven (item 10; both green runs completed the API test suite step in well under its 120-second-per-test ceiling — 14m55s and equivalent on run #200 — with zero timeouts or cancellations).
+- The coarser workflow-level timeout was never pushed to `origin`, solely because of the missing OAuth `workflow` scope (item 11) — a credential-scope limitation, not a code or test defect.
+- The Project Owner has explicitly accepted that limitation and waived the requirement to land it before merge.
+- The 13 pre-existing `apps/api/src/lib/exceptions/__tests__/` failures (item 12) remain a known, accepted, out-of-scope risk, unchanged by this waiver, and did not reproduce in either green run.
+
+**Final decision: `COMPLETE — APPROVED FOR MERGE`**, superseding item 15's `BLOCKED — PROJECT OWNER DECISION REQUIRED`, provided PR #30's current HEAD continues to satisfy required CI at merge time (verified separately at merge; see the PR's own description and the stack-verification record for the exact commit and CI evidence used).
