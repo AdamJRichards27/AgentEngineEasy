@@ -77,6 +77,14 @@ export const subscriptionItems = pgTable("billing_subscription_items", {
 // "minimum foundation, not a full RUN entitlement redesign" mandate; a finer-grained RUN
 // entitlement taxonomy (mirroring Grow's per-capability keys) is explicitly deferred, not
 // something this phase invents speculatively.
+//
+// AE GROW Priority 2 — Contact Intelligence & Relationship Timeline: no new entitlement key
+// was required. grow.contacts.read (already reserved above, previously unused) is now the
+// read gate for Contact 360 / contact list+search; grow.contacts.manage (already reserved,
+// previously unused) is now the write gate for relationship-classification and
+// contact-property relationship mutations introduced by this priority. Notes/commitments
+// continue to reuse grow.activities.manage exactly as Priority 1 already established for
+// growActivities writes — see routes/contacts.ts's own header comment.
 export const ENTITLEMENT_KEYS = [
   "run.access",
   "grow.access",
