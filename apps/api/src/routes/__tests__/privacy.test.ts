@@ -30,18 +30,22 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
 
-// AE GROW Priority 2 -- CI Stabilisation Gate root cause: this teardown
-// used to hand-roll its own delete order and never deleted
+// AE GROW Priority 0.5/1 -- CI Stabilisation Gate root cause (same defect
+// independently diagnosed and fixed on the AE GROW Priority 2 branch):
+// this teardown used to hand-roll its own delete order and never deleted
 // entitlement_grants (inserted by POST /auth/dev-login for every new
 // brokerage -- see routes/auth.ts). DELETE FROM brokerages therefore
 // threw a foreign key violation (entitlement_grants_brokerage_id_brokerages_id_fk,
 // Postgres code 23503) inside the for loop, which meant server.close()
 // on the last line was never reached -- leaving the HTTP server open and
 // hanging the test process indefinitely (node:test's after hook has no
-// implicit try/finally). Delegating to the shared, FK-order-correct
+// implicit try/finally), which in turn hung the whole "API automated test
+// suite" CI step until it hit the job's 6h0m0s cap (observed on PR #28's
+// CI run #188). Delegating to the shared, FK-order-correct
 // cleanupBrokerages() helper (extended by this fix to also delete
-// privacy_requests) and closing the server in a finally fixes both the
-// FK violation and the hang, regardless of whether cleanup throws.
+// privacy_requests, see testSupport.ts) and closing the server in a
+// finally fixes both the FK violation and the hang, regardless of whether
+// cleanup throws.
 after(async () => {
   try {
     await cleanupBrokerages([...createdBrokerageIds]);
