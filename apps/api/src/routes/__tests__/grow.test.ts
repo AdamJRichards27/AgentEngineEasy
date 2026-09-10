@@ -126,7 +126,17 @@ test("GET /access reports entitlement state honestly and is never itself gated b
   assert.equal(before_.status, 200, "the whole point of /access is that it never 403s -- it IS the locked-shell signal");
   const beforeBody = (await before_.json()) as { entitled: boolean; entitlements: string[] };
   assert.equal(beforeBody.entitled, false, "a brokerage with zero entitlementGrants rows must not be reported as entitled");
-  assert.deepEqual(beforeBody.entitlements, []);
+  // AE GROW Priority 0.5 -- Workstream 3: every brand-new brokerage now auto-receives
+  // "run.access" at dev-login time (see routes/auth.ts's "every brand-new brokerage
+  // automatically receives run.access at creation time" grant), matching pre-Grow behaviour
+  // where every brokerage could use the RUN surface (Pit Crew, Financial) with no separate
+  // purchase step. run.access is a RUN-surface key, never one of the grow.* keys, so a
+  // brand-new brokerage with zero Grow entitlements now reports entitlements === ["run.access"]
+  // rather than [] -- `entitled` above (which specifically means grow.access) is correctly
+  // still false. This was previously asserted as [] and went stale the moment Workstream 3's
+  // auto-grant shipped; CI's "AE GROW Priority 0.5/1/2 -- CI Stabilisation Gate" investigation
+  // traced the resulting failure back to this exact line.
+  assert.deepEqual(beforeBody.entitlements, ["run.access"]);
 
   await grant(A.brokerageId, "grow.access");
 
