@@ -437,6 +437,16 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * pcFeeAuthorities.agentUserId -> users.id (non-cascading), so it must be
  * cleared before the users delete near the end of this function too.
  *
+ * AE GROW Priority 0.5/1/2 -- CI Stabilisation Gate: privacy.test.ts
+ * (routes/__tests__/privacy.test.ts) creates privacy_requests rows via
+ * POST /privacy/requests. privacy_requests carries brokerageId directly
+ * (packages/db/src/schema/privacy.ts), so this block is scoped by `ids`
+ * alone -- but privacy_requests.user_id / handled_by_user_id both
+ * reference users.id non-cascading, so (like entitlementGrants/
+ * aiActionRequests/domainEvents immediately below) this must run before
+ * the users delete near the end of this function, or that delete fails
+ * with a foreign key violation instead of silently succeeding.
+ *
  * AE GROW Priority 2 — Contact Intelligence & Relationship Timeline:
  * extended again for grow_commitments / grow_contact_roles /
  * grow_contact_relationships (packages/db/src/schema/contacts.ts). All
@@ -681,15 +691,6 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     });
   }
 
-  // AE GROW Priority 2 -- CI Stabilisation Gate: privacy.test.ts
-  // (routes/__tests__/privacy.test.ts) creates privacy_requests rows via
-  // POST /privacy/requests. privacy_requests carries brokerageId directly
-  // (packages/db/src/schema/privacy.ts), so this block is scoped by `ids`
-  // alone -- but privacy_requests.user_id / handled_by_user_id both
-  // reference users.id non-cascading, so (like entitlementGrants/
-  // aiActionRequests/domainEvents immediately below) this must run before
-  // the users delete near the end of this function, or that delete fails
-  // with a foreign key violation instead of silently succeeding.
   await db.delete(privacyRequests).where(inArray(privacyRequests.brokerageId, ids));
   await db.delete(entitlementGrants).where(inArray(entitlementGrants.brokerageId, ids));
   await db.delete(aiActionRequests).where(inArray(aiActionRequests.brokerageId, ids));
