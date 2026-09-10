@@ -13,7 +13,7 @@
 // rather than once via `financialRouter.use(...)` at the top of the file.
 // financialRouter is mounted unprefixed at apiRouter's root (see
 // routes/index.ts's own comment on why), and Express's Router.use()
-// without a path matches every request that reaches this router instance
+// without a path matches every request that reaches financialRouter instance
 // — not just ones a route declared below will end up matching. A blanket
 // `.use(requireAuth, ...)` here would therefore 401 any request that
 // merely passes through financialRouter on its way to a later-mounted
@@ -37,11 +37,21 @@
 // never exposes financialPaymentProviderEvents (raw provider webhook
 // payloads) at all — financialLedgerEvents is the evidence surface
 // external readers get.
+//
+// AE GROW Priority 0.5 — Workstream 3: requireFinancialAdmin now also requires
+// requireEntitlement("run.access"), alongside the existing BROKERAGE_ADMIN_ROLES role gate, not
+// instead of it. Financial is part of the RUN product ($289/mo, "Deliver the Business") under
+// the new GROW -> RUN -> SCALE product hierarchy — see
+// docs/AE_GROW_PRIORITY_0_5_FOUNDATION_REPORT.md's "Grow/Run Boundary" section. Every brokerage
+// that already had financial access before this phase keeps it uninterrupted via the
+// non-destructive run.access backfill (lib/billing/runAccessBackfill.ts) and the dev-login
+// auto-grant (routes/auth.ts).
 
 import { Router, type Response } from "express";
 import { z } from "zod";
 import { currentCorrelationId, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { db, users } from "@aee/db";
 import { eq, and } from "drizzle-orm";
 import {
@@ -88,7 +98,7 @@ import {
 } from "../lib/financial/queries.js";
 
 export const financialRouter = Router();
-const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES)] as const;
+const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), requireEntitlement("run.access")] as const;
 
 function handleFinancialControlError(err: unknown, res: Response): boolean {
   if (err instanceof FinancialControlError) {

@@ -10,6 +10,22 @@ import {
   serviceOrders,
 } from "@aee/db";
 
+// AE GROW Priority 0.5 — Workstream 5 (Grow "Today" preparation: architecture only, no UX built,
+// no behaviour changed here). This module is RUN's existing "what needs my attention today?"
+// surface (Phase 8, documented in the JSDoc immediately below). Grow's own future "Today" view
+// (Priority 1, NOT built in this phase) is a DIFFERENT product surface: it will aggregate
+// relationship/activity/opportunity signals from the Grow domain (packages/db/src/schema/
+// grow.ts — growRelationships, growActivities, growOpportunities), not the property-workflow
+// signals this function reads (properties/workflows/amlVerifications/offers/transactions/
+// serviceOrders). getHomeSummary() and getDashboardOverview() below stay exactly as they are —
+// they are RUN surfaces, reused by RUN's Home page (apps/web/src/pages/Home.tsx) and, per
+// Workstream 2, still reachable from RUN's own nav — and are not being merged, renamed, or
+// repurposed for Grow. When Grow "Today" is built, it should follow the same shape established
+// here (a flat list of concrete, actionable items, "Exception" vs "NextAction", each linking
+// back to the record it concerns — never a BI dashboard of counts/charts/trends), but as its own
+// function reading Grow's own tables, gated by "grow.access" rather than RUN's entitlement keys.
+// This comment records that boundary; it changes no behaviour in Priority 0.5.
+
 /**
  * Home screen aggregation (Phase 8, ARCHITECTURE.md §10 / Build Brief
  * §13, §26 — "what needs my attention today?", one or two decisions, not a

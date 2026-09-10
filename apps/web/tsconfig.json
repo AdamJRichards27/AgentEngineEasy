@@ -12,5 +12,14 @@
     "composite": false,
     "declaration": false
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Node-runner unit tests (tsx --test, see package.json's "test" script)
+  // import "node:test"/"node:assert/strict". Rather than adding Node's
+  // global ambient types to this browser bundle's program (risking
+  // conflicts with DOM lib globals for no benefit to the app itself),
+  // test files are excluded from the typechecked program, the same way
+  // packages/integrations/object-storage keeps its test files outside its
+  // tsc rootDir. tsx transpiles and runs these files directly and does not
+  // consult this config, so test execution is unaffected.
+  "exclude": ["src/**/__tests__/**"]
 }

@@ -3,6 +3,18 @@ import { Link } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 
+// AE GROW Priority 0.5 — Workstream 5 (Grow "Today" preparation: architecture only, no UX built,
+// no behaviour changed on this page). This is RUN's existing Home/Dashboard page, reading RUN's
+// getHomeSummary()/getDashboardOverview() (apps/api/src/lib/homeSummary.ts) via GET /home/summary
+// — property-workflow signals (exceptions, next actions, active properties, settlements). Grow's
+// own future "Today" view (Priority 1, NOT built in this phase) is a SEPARATE page and a SEPARATE
+// API surface reading the Grow domain (growRelationships/growActivities/growOpportunities), not
+// this one. Per Workstream 2, Grow-entitled non-Pit-Crew users land on /grow (a distinct route),
+// not here — this page is unchanged and continues to serve exactly the users it always has,
+// including every existing RUN user regardless of Grow entitlement. This component, its query,
+// and its rendering are not modified as part of Priority 0.5; this comment only records the
+// intended Grow "Today" boundary ahead of Priority 1.
+
 interface HomeSummaryItem {
   propertyId: number;
   propertyAddress: string;

@@ -54,13 +54,19 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
 // available for this user. Enforcement itself still happens server-side on
 // every /ask call regardless of what this endpoint says - this exists only so
 // the UI doesn't show a control that would just 403.
-aiRouter.get("/capabilities", requireAuth, (req, res) => {
+aiRouter.get("/capabilities", requireAuth, async (req, res) => {
   const authedUser = req.authedUser;
   if (authedUser === undefined) {
     res.status(401).json({ error: "Not authenticated" });
     return;
   }
-  const tier = resolveBrokerageTier(authedUser.brokerageId);
+  // resolveBrokerageTier() is async (AE GROW Priority 0.5 Workstream 4 - it
+  // derives the tier from the real entitlement resolver, not a hardcoded
+  // stub) and MUST be awaited: an unawaited Promise passed to
+  // isRoleEntitled() indexes TIER_CAPABILITIES with a Promise object,
+  // resolves to undefined, and throws on `.roles` - a real 500 on every
+  // request. See routes/__tests__/ai.test.ts for the regression test.
+  const tier = await resolveBrokerageTier(authedUser.brokerageId);
   res.json({
     tier,
     copilotEnabled: isRoleEnabled("copilot") && isRoleEntitled(tier, "copilot"),

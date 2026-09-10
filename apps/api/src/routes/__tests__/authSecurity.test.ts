@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs } from "@aee/db";
+import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs, entitlementGrants } from "@aee/db";
 import { hashToken } from "../../lib/auth/tokens.js";
 import { __getSandboxAuthEmailLog, __clearSandboxAuthEmailLog } from "../../lib/auth/email.js";
 import { hashPassword } from "../../lib/auth/password.js";
@@ -40,6 +40,13 @@ before(async () => {
 
 after(async () => {
   for (const brokerageId of createdBrokerageIds) {
+    // AE GROW Priority 0.5 — Workstream 3: dev-login now auto-grants a run.access
+    // entitlementGrants row when it creates a brand-new brokerage (see routes/auth.ts), and
+    // createAdmin() below creates one brand-new brokerage per call. entitlementGrants.brokerageId
+    // is a non-cascading FK onto brokerages.id (see packages/db/src/schema/billing.ts), so it
+    // must be deleted before the brokerage itself or this cleanup fails with a foreign key
+    // violation.
+    await db.delete(entitlementGrants).where(eq(entitlementGrants.brokerageId, brokerageId));
     await db.delete(invitations).where(eq(invitations.brokerageId, brokerageId));
     const brokerageUsers = await db.select().from(users).where(eq(users.brokerageId, brokerageId));
     for (const u of brokerageUsers) {

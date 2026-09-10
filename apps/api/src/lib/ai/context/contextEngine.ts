@@ -40,7 +40,7 @@ async function buildBrokerageContext(brokerageId: number): Promise<BrokerageCont
   if (row === undefined) {
     throw new Error(`AI context: brokerage ${brokerageId} not found`);
   }
-  return { id: row.id, name: row.name, tier: resolveBrokerageTier(brokerageId) };
+  return { id: row.id, name: row.name, tier: await resolveBrokerageTier(brokerageId) };
 }
 
 async function buildBusinessContext(brokerageId: number): Promise<BusinessContext> {

@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, users, brokerages, auditLogs } from "@aee/db";
+import { db, users, brokerages, auditLogs, entitlementGrants } from "@aee/db";
 
 // Foundation Remediation Stage 1.5: end-to-end proof, over real HTTP against
 // the real Express app, that:
@@ -36,6 +36,12 @@ before(async () => {
 after(async () => {
   const [brokerage] = await db.select().from(brokerages).where(eq(brokerages.name, testBrokerageName));
   if (brokerage) {
+    // AE GROW Priority 0.5 — Workstream 3: dev-login now auto-grants a run.access
+    // entitlementGrants row when it creates a brand-new brokerage (see routes/auth.ts).
+    // entitlementGrants.brokerageId is a non-cascading FK onto brokerages.id (see
+    // packages/db/src/schema/billing.ts), so it must be deleted before the brokerage itself or
+    // this cleanup fails with a foreign key violation.
+    await db.delete(entitlementGrants).where(eq(entitlementGrants.brokerageId, brokerage.id));
     await db.delete(users).where(eq(users.brokerageId, brokerage.id));
     await db.delete(brokerages).where(eq(brokerages.id, brokerage.id));
   }

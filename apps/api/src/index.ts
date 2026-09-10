@@ -2,6 +2,7 @@ import { logger } from "@aee/events";
 import { createApp } from "./app.js";
 import { configureEvents } from "./lib/events.js";
 import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
+import { ensureRunAccessBackfilled } from "./lib/billing/runAccessBackfill.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
 import { assertCorsConfigured } from "./lib/cors.js";
 import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
@@ -106,6 +107,12 @@ registerDocumentStorageReconciler();
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.
 ensureCatalogueSeeded().catch((err) => logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
+
+// AE GROW Priority 0.5 — Workstream 3: idempotent, non-destructive backfill granting every
+// pre-existing brokerage the run.access entitlement they implicitly always had, before that
+// key existed to gate anything. Fire-and-forget, non-blocking, same pattern as
+// ensureCatalogueSeeded above. See lib/billing/runAccessBackfill.ts's own module comment.
+ensureRunAccessBackfilled().catch((err) => logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) }));
 
 // Agent Engine 2.0 — Run Transaction Vertical Slice. Idempotent per-brokerage
 // install+activate sweep for the WAE Stage 2 workflow catalogue (see

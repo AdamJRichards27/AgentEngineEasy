@@ -7,10 +7,20 @@
 // (Section 12) and maps the resulting concurrency/transition errors to
 // 409/422 so the frontend can tell "someone else moved this" apart from
 // "that move isn't allowed from here."
+//
+// AE GROW Priority 0.5 -- Workstream 3: every route below now also requires
+// requireEntitlement("run.access"), alongside the existing role gate, not instead of it. Pit
+// Crew is part of the RUN product ($289/mo, "Deliver the Business") under the new GROW -> RUN
+// -> SCALE product hierarchy -- see docs/AE_GROW_PRIORITY_0_5_FOUNDATION_REPORT.md's "Grow/Run
+// Boundary" section. Every brokerage that already had Pit Crew access before this phase keeps it
+// uninterrupted via the non-destructive run.access backfill (lib/billing/runAccessBackfill.ts)
+// and the dev-login auto-grant (routes/auth.ts) -- this is additive entitlement enforcement, not
+// a new business rule about who may use Pit Crew.
 
 import { Router, type Response } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getPitCrewWorkspace, getPitCrewTeam } from "../lib/pitCrew/queries.js";
 import {
   claimWorkItem,
@@ -31,6 +41,7 @@ import { addPropertyNote } from "../lib/propertyNotes.js";
 export const pitCrewRouter = Router();
 
 const canAccess = requireRole(...PIT_CREW_ROLES, ...BROKERAGE_ADMIN_ROLES);
+const requiresRunAccess = requireEntitlement("run.access");
 
 function handlePitCrewError(err: unknown, res: Response): boolean {
   if (err instanceof PitCrewConcurrencyError) {
@@ -62,13 +73,13 @@ function handlePitCrewError(err: unknown, res: Response): boolean {
 // Reads.
 // ---------------------------------------------------------------------
 
-pitCrewRouter.get("/pit-crew/workspace", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.get("/pit-crew/workspace", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const workspace = await getPitCrewWorkspace(user.brokerageId, user.id);
   res.json(workspace);
 });
 
-pitCrewRouter.get("/pit-crew/team", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.get("/pit-crew/team", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const team = await getPitCrewTeam(user.brokerageId);
   res.json({ team });
@@ -86,7 +97,7 @@ const baseMutationSchema = z.object({
 
 const itemParamsSchema = z.object({ sourceType: z.string().min(1), sourceRecordId: z.string().min(1) });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/claim", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/claim", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.safeParse(req.body);
@@ -106,7 +117,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/claim", requireA
   }
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/assign", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/assign", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.extend({ assigneeUserId: z.coerce.number().int() }).safeParse(req.body);
@@ -127,7 +138,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/assign", require
   }
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/start", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/start", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.safeParse(req.body);
@@ -147,7 +158,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/start", requireA
   }
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/waiting-on", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/waiting-on", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema
@@ -177,7 +188,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/waiting-on", req
 });
 
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/return", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/return", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.safeParse(req.body);
@@ -192,7 +203,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/return", require
   } catch (err) { if (!handlePitCrewError(err, res)) throw err; }
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/complete", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/complete", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.safeParse(req.body);
@@ -207,7 +218,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/complete", requi
   } catch (err) { if (!handlePitCrewError(err, res)) throw err; }
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/release", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/release", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.safeParse(req.body);
@@ -222,7 +233,7 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/release", requir
   } catch (err) { if (!handlePitCrewError(err, res)) throw err; }
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/handoff", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/handoff", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const params = itemParamsSchema.safeParse(req.params);
   const body = baseMutationSchema.extend({
@@ -254,7 +265,7 @@ const noteSchema = z.object({
   note: z.string().min(1),
 });
 
-pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/note", requireAuth, canAccess, async (req, res) => {
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/note", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const body = noteSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });

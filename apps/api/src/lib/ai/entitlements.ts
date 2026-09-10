@@ -1,11 +1,44 @@
 import type { AiRole, SubscriptionTier } from "./types.js";
+import { resolveEntitlements } from "../entitlements/resolver.js";
+import type { EntitlementActor } from "../entitlements/types.js";
 
-// No subscription/tenant concept exists in the database yet (repository audit
-// RISK - see the completion report). Every brokerage resolves to STARTER until a
-// real billing/subscription build lands; this function is the single seam that
-// future build changes - nothing else in the AI layer needs to know how tier is
-// determined.
-export function resolveBrokerageTier(_brokerageId: number): SubscriptionTier {
+/**
+ * AE GROW Priority 0.5 — Workstream 4: AI entitlement source-of-truth consolidation.
+ *
+ * Before this phase, resolveBrokerageTier() was a disconnected stub — hardcoded to always
+ * return "STARTER" because "no subscription/tenant concept exists in the database yet." That
+ * premise is no longer true: packages/db/src/schema/billing.ts's entitlementGrants (Grow Stage
+ * A) and apps/api/src/lib/entitlements/resolver.ts (the real, tested, tenant-scoped, fail-closed
+ * entitlement resolver) are exactly that subscription/tenant concept, already used to gate every
+ * Grow route and, since this phase's Workstream 3, every RUN route (Pit Crew, Financial) too.
+ *
+ * This function now derives its answer from that SAME resolver — there is no second,
+ * independent notion of "what tier is this brokerage" anywhere in the codebase after this
+ * change. It resolves entitlements via a synthetic system-level actor
+ * ({ id: -1, role: "system", brokerageId }) rather than a real user id: resolver.ts's
+ * grantAppliesToActor() only inspects actor.id for the "user" granteeType, and every grant this
+ * codebase issues today is "brokerage"-scoped (see runAccessBackfill.ts, catalogue.ts), so the
+ * synthetic id is never actually consulted — this call answers "what does this BROKERAGE hold",
+ * not "what does this one user hold", which is what a brokerage-wide AI tier decision requires.
+ *
+ * Tier mapping (matches the three real products in lib/billing/catalogue.ts exactly):
+ *   - grow.access AND run.access   -> "PRO"     (the Pro + Grow bundle product)
+ *   - grow.access only             -> "GROW"    (the standalone Grow product)
+ *   - neither (or run.access only) -> "STARTER" (the Starter/RUN-only product, and the
+ *                                                 pre-Grow default — see "no divergence" below)
+ *
+ * No-divergence guarantee: a brokerage with zero entitlement grants at all resolves to
+ * "STARTER" here, identical to the old hardcoded return value — so this change cannot silently
+ * downgrade or upgrade any brokerage's AI capability on its own. Proven in
+ * __tests__/entitlements.test.ts.
+ */
+export async function resolveBrokerageTier(brokerageId: number): Promise<SubscriptionTier> {
+  const systemActor: EntitlementActor = { id: -1, role: "system", brokerageId };
+  const entitlements = await resolveEntitlements(systemActor);
+  const hasGrow = entitlements.has("grow.access");
+  const hasRun = entitlements.has("run.access");
+  if (hasGrow && hasRun) return "PRO";
+  if (hasGrow) return "GROW";
   return "STARTER";
 }
 

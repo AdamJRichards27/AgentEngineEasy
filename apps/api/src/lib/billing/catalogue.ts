@@ -11,9 +11,20 @@ import { ENTITLEMENT_KEYS } from "@aee/db";
  * entitlement resolver reads these numbers - it only reads entitlementGrants. Change a price by
  * editing this seed (or, later, an admin UI over the `prices` table), never by editing
  * permission logic.
+ *
+ * AE GROW Priority 0.5 — Workstream 3: this file previously mapped every ENTITLEMENT_KEYS entry
+ * onto both growProductId and bundleProductId in one undifferentiated loop. Now that
+ * ENTITLEMENT_KEYS also includes "run.access" (packages/db/src/schema/billing.ts), that same
+ * loop would have silently given every Grow-only purchaser RUN access too — exactly the product
+ * boundary violation Priority 0.5 exists to prevent. GROW_ENTITLEMENT_KEYS/RUN_ENTITLEMENT_KEYS
+ * below keep the two product surfaces explicitly separate: the Grow product gets only the 13
+ * grow.* keys (unchanged from before this phase), the Starter/RUN product gets only run.access
+ * (new), and the Pro+Grow bundle gets the full union of both — matching its name and its $289/mo
+ * price point, which has always been positioned as "Pro (RUN) + Grow" rather than Grow alone.
  */
 
 const ENTITLEMENT_DEFS: Record<(typeof ENTITLEMENT_KEYS)[number], string> = {
+  "run.access": "Access the RUN operational platform (transaction workflow, Pit Crew, financial transaction engine) at all.",
   "grow.access": "Access the Grow module at all.",
   "grow.contacts.read": "View Grow people/organisation records.",
   "grow.contacts.manage": "Create and edit Grow people/organisation records.",
@@ -28,6 +39,9 @@ const ENTITLEMENT_DEFS: Record<(typeof ENTITLEMENT_KEYS)[number], string> = {
   "grow.campaigns.use": "Use Grow campaign orchestration once available.",
   "grow.admin.configure": "Configure Grow settings for the brokerage.",
 };
+
+const GROW_ENTITLEMENT_KEYS = ENTITLEMENT_KEYS.filter((key) => key !== "run.access");
+const RUN_ENTITLEMENT_KEYS = ["run.access"] as const;
 
 const GROW_PRODUCT_CODE = "grow";
 const STARTER_PRODUCT_CODE = "agent_engine_starter";
@@ -74,7 +88,7 @@ async function ensureProductEntitlement(productId: number, entitlementDefinition
 export async function ensureCatalogueSeeded(): Promise<void> {
   const growProductId = await ensureProduct(GROW_PRODUCT_CODE, "Grow", "Relationship, prospecting and opportunity management add-on.");
   const starterProductId = await ensureProduct(STARTER_PRODUCT_CODE, "Starter", "Core Agent Engine RUN platform.");
-  const bundleProductId = await ensureProduct(BUNDLE_PRODUCT_CODE, "Pro + Grow Bundle", "Agent Engine Pro with Grow included.");
+  const bundleProductId = await ensureProduct(BUNDLE_PRODUCT_CODE, "Pro + Grow Bundle", "Agent Engine Pro (RUN) with Grow included.");
 
   await ensurePrice(growProductId, 9900, "month");
   await ensurePrice(starterProductId, 6900, "month");
@@ -85,8 +99,21 @@ export async function ensureCatalogueSeeded(): Promise<void> {
     entitlementDefIds[key] = await ensureEntitlementDefinition(key, ENTITLEMENT_DEFS[key]);
   }
 
-  for (const key of ENTITLEMENT_KEYS) {
+  // Grow: only the 13 grow.* keys - never run.access. Purchasing Grow standalone must never
+  // grant RUN/Pit Crew/Financial access (AE GROW Priority 0.5 Stop Condition 7 territory).
+  for (const key of GROW_ENTITLEMENT_KEYS) {
     await ensureProductEntitlement(growProductId, entitlementDefIds[key]);
+  }
+  // Starter (RUN): only run.access. This is the product every pre-existing brokerage is
+  // presumed to already hold - see lib/billing/runAccessBackfill.ts for the non-destructive
+  // backfill that grants existing brokerages the equivalent entitlementGrants row directly
+  // (this seed only creates the catalogue rows describing the product; it does not itself
+  // grant anything to any brokerage).
+  for (const key of RUN_ENTITLEMENT_KEYS) {
+    await ensureProductEntitlement(starterProductId, entitlementDefIds[key]);
+  }
+  // Bundle: the full union - every grow.* key AND run.access, matching "Pro + Grow".
+  for (const key of ENTITLEMENT_KEYS) {
     await ensureProductEntitlement(bundleProductId, entitlementDefIds[key]);
   }
 }

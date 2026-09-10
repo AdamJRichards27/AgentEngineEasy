@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { eq, sql, and, gt, isNull, desc, count } from "drizzle-orm";
 import { z } from "zod";
-import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs, USER_ROLES } from "@aee/db";
+import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs, entitlementGrants, USER_ROLES } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { setSessionCookie, clearSessionCookie } from "../lib/session.js";
 import { logAudit } from "../lib/audit.js";
@@ -12,6 +12,7 @@ import { generateToken, hashToken } from "../lib/auth/tokens.js";
 import { getAuthEmailProvider } from "../lib/auth/email.js";
 import { getActiveLegalVersions } from "../lib/auth/legalVersions.js";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
+import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 
 export const authRouter = Router();
 
@@ -127,6 +128,21 @@ authRouter.post("/dev-login", async (req, res) => {
   if (!brokerage) {
     [brokerage] = await db.insert(brokerages).values({ name: brokerageName }).returning();
     isFirstInBrokerage = true;
+    // AE GROW Priority 0.5 — Workstream 3: every brand-new brokerage automatically receives
+    // run.access at creation time, matching pre-Grow behaviour where every brokerage could use
+    // the RUN surface (Pit Crew, Financial) with no separate purchase step — see
+    // lib/billing/runAccessBackfill.ts for the equivalent, idempotent backfill covering
+    // brokerages that already existed before run.access was introduced. grow.access is
+    // deliberately NOT auto-granted here — Grow stays purchase-gated, unchanged from before
+    // this phase.
+    await db.insert(entitlementGrants).values({
+      brokerageId: brokerage.id,
+      entitlementKey: "run.access",
+      granteeType: "brokerage",
+      granteeId: brokerage.id,
+      sourceType: "migration",
+      status: "Active",
+    });
   } else {
     const existingInBrokerage = await db.select().from(users).where(eq(users.brokerageId, brokerage.id));
     isFirstInBrokerage = existingInBrokerage.length === 0;
@@ -156,6 +172,11 @@ authRouter.post("/dev-login", async (req, res) => {
   res.status(201).json({ user: userView(created, brokerage.name) });
 });
 
+// AE GROW Priority 0.5 — Workstream 1: frontend entitlement awareness. `entitlements` is added
+// as a new top-level sibling field alongside `user`, never merged into it — the entitlement set
+// is a resolver decision (lib/entitlements/resolver.ts), not a user-record field, so the `user`
+// shape itself never changes for any existing consumer of this endpoint. See
+// apps/web/src/lib/session.ts's useEntitlements() for the frontend side of this.
 authRouter.get("/me", requireAuth, async (req, res) => {
   const authed = req.authedUser!;
   const [row] = await db.select().from(users).where(eq(users.id, authed.id));
@@ -164,7 +185,8 @@ authRouter.get("/me", requireAuth, async (req, res) => {
     return;
   }
   const [b] = row.brokerageId ? await db.select().from(brokerages).where(eq(brokerages.id, row.brokerageId)) : [];
-  res.json({ user: userView(row, b?.name) });
+  const entitlements = await resolveEntitlements(authed);
+  res.json({ user: userView(row, b?.name), entitlements: Array.from(entitlements) });
 });
 
 // Foundation Remediation - server-side session revocation: this session

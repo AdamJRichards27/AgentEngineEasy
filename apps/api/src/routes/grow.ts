@@ -52,6 +52,12 @@ growRouter.get("/overview", requireAuth, requireEntitlement("grow.access"), asyn
   });
 });
 
+// AE GROW Priority 0.5 — Workstream 6: leftJoin (not innerJoin) against `properties`, matching
+// growRelationships.propertyId now being nullable (packages/db/src/schema/grow.ts). A
+// pre-property relationship (no propertyId at all) must still be returned here — an innerJoin
+// would silently drop it from every list response, which is exactly the "prospecting contact
+// disappears from the list" bug a naive migration could have introduced. propertyId/
+// propertyAddress simply come back null for such a row.
 growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
   const rows = await db
@@ -73,7 +79,7 @@ growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"),
     })
     .from(growRelationships)
     .innerJoin(parties, eq(growRelationships.partyId, parties.id))
-    .innerJoin(properties, eq(growRelationships.propertyId, properties.id))
+    .leftJoin(properties, eq(growRelationships.propertyId, properties.id))
     .where(eq(growRelationships.brokerageId, brokerageId))
     .orderBy(desc(growRelationships.createdAt))
     .limit(200);
@@ -87,20 +93,36 @@ growRouter.post(
   async (req, res) => {
     const user = req.authedUser!;
     const partyId = Number(req.body?.partyId);
-    const propertyId = Number(req.body?.propertyId);
     const relationshipType = typeof req.body?.relationshipType === "string" ? req.body.relationshipType : undefined;
-    if (!partyId || !propertyId || !relationshipType) {
-      res.status(400).json({ error: "partyId, propertyId, and relationshipType are required" });
+    // AE GROW Priority 0.5 — Workstream 6: propertyId is now OPTIONAL. growRelationships.
+    // propertyId is nullable (packages/db/src/schema/grow.ts) so an agent can record a
+    // relationship with a contact before AE knows which property is relevant — the
+    // pre-property relationship the revised Grow model requires (see
+    // docs/AE_GROW_PRIORITY_0_5_FOUNDATION_REPORT.md §"Pre-Property Relationship Decision"). A
+    // propertyId is still accepted and, when supplied, must resolve to a real property in this
+    // brokerage exactly as before — this only makes it optional, never meaningless when present.
+    const propertyIdSupplied = req.body?.propertyId !== undefined && req.body?.propertyId !== null;
+    const propertyId = propertyIdSupplied ? Number(req.body.propertyId) : null;
+    if (!partyId || !relationshipType || (propertyIdSupplied && !propertyId)) {
+      res.status(400).json({ error: "partyId and relationshipType are required; propertyId, if supplied, must be a valid id" });
       return;
     }
 
     // Tenant isolation on the referenced rows, not just the new row: a canonical party/property
-    // from another brokerage can never be linked into this brokerage's Grow relationships.
+    // from another brokerage can never be linked into this brokerage's Grow relationships. The
+    // property check only runs when a propertyId was actually supplied — a relationship
+    // legitimately has none yet (see the comment above).
     const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
-    const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
-    if (!party || !property) {
-      res.status(404).json({ error: "Party or property not found in this brokerage" });
+    if (!party) {
+      res.status(404).json({ error: "Party not found in this brokerage" });
       return;
+    }
+    if (propertyId !== null) {
+      const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
+      if (!property) {
+        res.status(404).json({ error: "Property not found in this brokerage" });
+        return;
+      }
     }
 
     const [inserted] = await db

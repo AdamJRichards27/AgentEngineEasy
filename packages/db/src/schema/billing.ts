@@ -67,7 +67,18 @@ export const subscriptionItems = pgTable("billing_subscription_items", {
 });
 
 // A small, meaningful set of capabilities - not one entitlement per button (Build Brief intent).
+//
+// AE GROW Priority 0.5 — Workstream 3: "run.access" was added here as the minimum coarse RUN
+// entitlement foundation (see docs/AE_GROW_PRIORITY_0_5_FOUNDATION_REPORT.md §"Grow/Run
+// Boundary" for the full key-by-key REMAINS GROW / BECOMES RUN / SHARED CORE mapping). Every
+// key below it is unchanged and REMAINS scoped to the Grow product exactly as before — none of
+// the existing 13 grow.* keys became a RUN key. run.access is deliberately coarse (one key
+// covering the whole existing RUN surface — Pit Crew, Financial), matching this phase's
+// "minimum foundation, not a full RUN entitlement redesign" mandate; a finer-grained RUN
+// entitlement taxonomy (mirroring Grow's per-capability keys) is explicitly deferred, not
+// something this phase invents speculatively.
 export const ENTITLEMENT_KEYS = [
+  "run.access",
   "grow.access",
   "grow.contacts.read",
   "grow.contacts.manage",
