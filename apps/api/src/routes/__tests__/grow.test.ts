@@ -125,7 +125,7 @@ test("GET /access reports entitlement state honestly and is never itself gated b
   const before_ = await fetch(growUrl("/access"), { headers: { cookie: A.agent.cookie } });
   assert.equal(before_.status, 200, "the whole point of /access is that it never 403s -- it IS the locked-shell signal");
   const beforeBody = (await before_.json()) as { entitled: boolean; entitlements: string[] };
-  assert.equal(beforeBody.entitled, false, "a brokerage with zero grow.* entitlementGrants rows must not be reported as entitled");
+  assert.equal(beforeBody.entitled, false, "a brokerage with zero entitlementGrants rows must not be reported as entitled");
   // AE GROW Priority 0.5 -- Workstream 3: every brand-new brokerage now auto-receives
   // "run.access" at dev-login time (see routes/auth.ts's "every brand-new brokerage
   // automatically receives run.access at creation time" grant), matching pre-Grow behaviour
