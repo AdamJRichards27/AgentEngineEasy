@@ -13,6 +13,8 @@ import { requireEntitlement } from "../middlewares/entitlement.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
 import { getBillingProvider } from "../lib/billing/gateway.js";
+import { getGrowTodaySummary } from "../lib/growToday.js";
+import { logAudit } from "../lib/audit.js";
 
 export const growRouter = Router();
 
@@ -50,6 +52,18 @@ growRouter.get("/overview", requireAuth, requireEntitlement("grow.access"), asyn
     activityCount: activities.length,
     openOpportunityCount: opportunities.filter((o) => o.status === "Open").length,
   });
+});
+
+// AE GROW Priority 1 — Daily Command Centre: Grow's own "what needs my attention today?"
+// surface. Reuses the exact same requireAuth + requireEntitlement("grow.access") gate as every
+// other Grow read route above — no separate/looser entitlement check, and no RUN/PC/financial
+// data is ever read (see lib/growToday.ts's own header comment for the full boundary this
+// endpoint was built to respect). One purpose-built response covers the whole screen so the
+// frontend does not need to make four or five separate requests just to render Today.
+growRouter.get("/today", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
+  const brokerageId = req.authedUser!.brokerageId;
+  const summary = await getGrowTodaySummary(brokerageId);
+  res.json(summary);
 });
 
 // AE GROW Priority 0.5 — Workstream 6: leftJoin (not innerJoin) against `properties`, matching
@@ -364,5 +378,83 @@ growRouter.post(
     }
 
     res.status(201).json({ opportunity: inserted });
+  },
+);
+
+// AE GROW Priority 1 — Daily Command Centre: the minimal write this phase actually needs behind
+// Today's "Create follow-up" action — updating an opportunity's own next-action fields. Mirrors
+// the sibling PATCH /relationships/:id above (tenant-scoped lookup by id + brokerageId, 404 for
+// anything outside this brokerage) but intentionally does NOT publish a new canonical domain
+// event: OPPORTUNITY_CREATED/OPPORTUNITY_STAGE_CHANGED/OPPORTUNITY_CONVERTED
+// (packages/events/src/types.ts) are the only Grow opportunity events that exist, and none of
+// them describes "the next-action plan changed" — inventing a new event type here would mean
+// touching the shared, cross-app event registry for what is a small, purely-Grow-local field
+// update. logAudit() (lib/audit.ts), already used the same way by routes/parties.ts, is the
+// right weight for this.
+growRouter.patch(
+  "/opportunities/:id",
+  requireAuth,
+  requireEntitlement("grow.opportunities.manage"),
+  async (req, res) => {
+    const user = req.authedUser!;
+    const id = Number(req.params.id);
+    const [existing] = await db
+      .select()
+      .from(growOpportunities)
+      .where(and(eq(growOpportunities.id, id), eq(growOpportunities.brokerageId, user.brokerageId)))
+      .limit(1);
+    if (!existing) {
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+
+    const hasNextActionDueAt = Object.prototype.hasOwnProperty.call(req.body ?? {}, "nextActionDueAt");
+    const hasRecommendedNextAction = Object.prototype.hasOwnProperty.call(req.body ?? {}, "recommendedNextAction");
+    if (!hasNextActionDueAt && !hasRecommendedNextAction) {
+      res.status(400).json({ error: "nextActionDueAt and/or recommendedNextAction must be supplied" });
+      return;
+    }
+
+    let nextActionDueAt = existing.nextActionDueAt;
+    if (hasNextActionDueAt) {
+      if (req.body.nextActionDueAt === null) {
+        nextActionDueAt = null;
+      } else {
+        const parsed = new Date(req.body.nextActionDueAt);
+        if (Number.isNaN(parsed.getTime())) {
+          res.status(400).json({ error: "nextActionDueAt must be a valid date or null" });
+          return;
+        }
+        nextActionDueAt = parsed;
+      }
+    }
+
+    const recommendedNextAction = hasRecommendedNextAction
+      ? (typeof req.body.recommendedNextAction === "string" ? req.body.recommendedNextAction : null)
+      : existing.recommendedNextAction;
+
+    const [updated] = await db
+      .update(growOpportunities)
+      .set({ nextActionDueAt, recommendedNextAction, updatedAt: new Date() })
+      .where(eq(growOpportunities.id, id))
+      .returning();
+
+    await logAudit({
+      userId: user.id,
+      action: "grow_opportunity_next_action_updated",
+      recordType: "grow_opportunity",
+      recordId: String(id),
+      propertyId: existing.propertyId ?? undefined,
+      previousValue: JSON.stringify({
+        nextActionDueAt: existing.nextActionDueAt,
+        recommendedNextAction: existing.recommendedNextAction,
+      }),
+      updatedValue: JSON.stringify({
+        nextActionDueAt: updated.nextActionDueAt,
+        recommendedNextAction: updated.recommendedNextAction,
+      }),
+    });
+
+    res.json({ opportunity: updated });
   },
 );
