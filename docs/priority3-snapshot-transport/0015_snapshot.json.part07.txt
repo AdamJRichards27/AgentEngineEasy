@@ -797,3 +797,4 @@
         "automation_executions_resolved_by_user_id_users_id_fk": {
           "name": "automation_executions_resolved_by_user_id_users_id_fk",
           "tableFrom": "automation_executions",
+          "tableTo": "users",
