@@ -1,7 +1,6 @@
 # AE GROW Priority 5 — Data & Property Intelligence
 
-**Status at first commit: Phase A audit complete, architecture decided, implementation in progress.**
-**This document is updated with a Final Addendum before the pull request is opened.**
+**Status: Phase A audit complete, architecture decided, implementation complete, CI verified green, PR #33 open against `staging` (not merged). Final Addendum below.**
 
 Authorised under a separate, explicit Project Owner instruction (the "AE GROW Priority 5 — Data & Property Intelligence" specification), issued after AE GROW Priority 4 (Appraisal Builder & Appraisal Workspace) was independently verified merged to `staging` and closed out.
 
@@ -124,15 +123,93 @@ A new Rule F is added to `getGrowTodaySummary()` (`growToday.ts`) surfacing only
 
 ## 4. Schema and migration summary
 
-*(Completed in the Final Addendum below, once implementation and CI verification are complete — recorded here as the plan being executed.)*
+New tables (`packages/db/src/schema/propertyIntelligence.ts`, exported from `schema/index.ts`): `property_external_identifiers`, `property_provider_observations`, `grow_opportunity_signals`. New nullable columns on `properties`: `latitude`, `longitude`, `data_quality_status`, `last_enriched_at`. New `ENTITLEMENT_KEYS` members on `billing.ts` (`grow.propertyIntelligence.read`, `grow.propertyIntelligence.manage`). All additive, forward-only, nullable/defaulted where mixed with existing rows, tenant-scoped (`brokerage_id` on every new table), and indexed on `(brokerage_id, property_id)`/`(brokerage_id, party_id)`/`(brokerage_id, status)` access patterns. No existing table is dropped, renamed, or narrowed.
 
-New tables (`packages/db/src/schema/propertyIntelligence.ts`, exported from `schema/index.ts`): `property_external_identifiers`, `property_provider_observations`, `grow_opportunity_signals`. New nullable columns on `properties`: `latitude`, `longitude`, `data_quality_status`, `last_enriched_at`. New `ENTITLEMENT_KEYS` members on `billing.ts`. All additive, forward-only, nullable/defaulted where mixed with existing rows, tenant-scoped (`brokerage_id` on every new table), and indexed on `(brokerage_id, property_id)`/`(brokerage_id, party_id)`/`(brokerage_id, status)` access patterns. No existing table is dropped, renamed, or narrowed.
+Migration `0017` (SQL + `meta/0017_snapshot.json`) implements the above. Its independent verification and CI confirmation are recorded in Section 6.
 
 ---
 
-## 5. Known limitations and deferred items (interim — finalised in the Final Addendum)
+## 5. Known limitations and deferred items
 
 - Live Pricefinder/Domain/Landchecker/mortgage-equity provider integration is explicitly **not** enabled anywhere in this build — only the interface and mocked fixtures exist, exactly as instructed.
 - Whether the existing consent/privacy framework (`privacy.ts`) already adequately covers property-enrichment and inferred-signal data, or needs an explicit policy extension, is a legal/policy question this priority does not resolve — flagged for Project Owner / legal review, not assumed.
-- The migration/snapshot pair in this branch was authored by hand against drizzle-kit's observed conventions (Section 2.10) and is verified against real CI's schema-drift check rather than a local `drizzle-kit generate` run; any correction CI surfaces is applied in a follow-up commit on this same branch and documented in the Final Addendum.
-- UI scope for Contact 360 / the property view is recorded in the Final Addendum once written, including which parts of `Grow.tsx`/`PropertyWorkspace.tsx` were read and safely, additively extended.
+- UI scope for Contact 360 / the property view: Grow's Property Intelligence panel was added additively inside the existing `Grow.tsx` contact view and `PropertyWorkspace.tsx` property view, gated client-side by `grow.propertyIntelligence.read`/`.manage` (in addition to the existing server-side enforcement, which is authoritative) — no new top-level page/route was introduced.
+- Exact CI test pass/fail counts for the "API automated test suite" step could not be extracted as a single summary line through the GitHub Actions log viewer's in-browser search (see Section 6.4) — this is a viewer/tooling limitation, not uncertainty about the result: the step itself completed with a green/success status (a nonzero test-runner exit code fails the step red), and the log excerpts directly reviewed across multiple points in the run showed only ✓-prefixed passing test lines, including explicit tenant-isolation and entitlement test cases, with zero ✗/failing markers observed.
+
+---
+
+## 6. Final Addendum — manual snapshot upload, CI remediation, and verification evidence
+
+This addendum was written after PR #33 was opened and its CI run reached a genuine, fully-green completion. It documents, in full and without omission, the manual-upload sequence for the `0017` migration snapshot (including two real issues it surfaced and how each was resolved), the one CI failure this priority's own code caused and how it was fixed, and the concrete evidence backing every verification claim below.
+
+### 6.1 Manual snapshot upload — full sequence, fully disclosed
+
+This session's GitHub-write path (the GitHub MCP `create_or_update_file`/`push_files` tools) requires the entire file content to be generated literally inline in a single tool call. `packages/db/migrations/meta/0017_snapshot.json` is 321,985 bytes (17,629 lines) — large enough that generating it inline exceeded this session's per-turn output budget. This is a hard architectural limit of the available write tools, not a policy restriction, and no lower-level blob/tree/commit API was available as a workaround. The resolution was to hand the Project Owner the exact, locally-verified file (via `SendUserFile`) and ask them to commit it directly, which they did through the GitHub web UI.
+
+Verifying that upload, rather than trusting it, surfaced two real issues:
+
+1. **Wrong filename.** The first upload landed at `packages/db/migrations/meta/0017_snapshot.json.json` (a double extension) — content byte-identical to the verified reference (same size, same `git hash-object` SHA `f71b1ea792e1f9a903734438151a43901748bee1`), but at a path drizzle-kit and CI would never look for. Per the explicit instruction governing this check ("if any check differs, stop immediately with REMEDIATION REQUIRED... do not regenerate or silently replace the file"), this was reported to the Project Owner rather than corrected unilaterally. The Project Owner chose to perform the rename themselves via the GitHub web UI, to stay in direct control of the exact commit; they confirmed completion, and the rename was independently re-verified rather than taken on trust.
+2. **Trailing-newline delta from the rename itself.** After the rename, the file's size and blob SHA had changed (321,985 → 321,986 bytes; SHA `f71b1ea792e1f9a903734438151a43901748bee1` → `a622e653c46632143d213bab3b56b55e82b16c33`). Rather than treating this as a second REMEDIATION REQUIRED stop, it was investigated: the full remote file content was fetched directly and compared byte-for-byte in this session against the original locally-verified reference file. The two are identical in every byte **except** a single trailing `\n` appended by GitHub's web-based file editor as a side effect of the rename operation. A trailing newline after the root value of a JSON document is insignificant under the JSON specification and does not change `id`, `prevId`, `version`, `dialect`, table count, or any table/column/index/fk definition — confirmed directly via `json.loads()` on the remote content, not assumed. This was treated as benign and disclosed here rather than silently ignored.
+
+Final, correctly-named, byte-verified file: `packages/db/migrations/meta/0017_snapshot.json`, current blob SHA `a622e653c46632143d213bab3b56b55e82b16c33`, 321,986 bytes.
+
+### 6.2 Independent file-integrity and migration-chain verification
+
+Performed directly against the final committed file (not assumed from the upload):
+
+- Valid JSON (`json.loads()` succeeded on the fetched remote content).
+- `id` = `ce2c6c7b-3eee-49c5-8d67-7c53b5a2c133`; `prevId` = `5759fa89-0bc2-4d40-9971-87f78266eb61` — exact match to `packages/db/migrations/meta/0016_snapshot.json`'s own `id` (`5759fa89-0bc2-4d40-9971-87f78266eb61`, sha `b0ed5e8170e33656f0707d73e3bf0b10d70578be`, 469,399 bytes, unchanged and unaffected throughout this process), confirming correct chain linkage from 0016 → 0017.
+- `version` = `"7"`, `dialect` = `"postgresql"`.
+- 102 tables total present in the snapshot, including all three new Priority 5 tables: `public.grow_opportunity_signals`, `public.property_external_identifiers`, `public.property_provider_observations`.
+- `packages/db/migrations/meta/_journal.json` (sha `40ece487b1c315bd046fd70a2cfdd1dc618943d1`, 2,721 bytes) was not touched by either upload commit — confirmed via `get_commit` on both, which is expected since the journal entry for `0017` was already present from the initial migration-authoring commit; only the snapshot file itself needed the manual upload.
+- As a bonus, non-substitute local check (this session has no full monorepo checkout, so this is not a replacement for CI's own schema-drift step), a partial local clone of `packages/db` with `drizzle-kit` 0.30.0 installed ran `npx drizzle-kit generate` against the current schema source and the committed migrations directory, and reported **"No schema changes, nothing to migrate 😴"** — independent evidence, prior to CI, that the hand-authored `0017` migration and its snapshot already matched the schema source exactly.
+
+### 6.3 CI run #293 (pre-fix) — genuine failure found and root-caused, not dismissed
+
+Once PR #33 was opened, its first CI run (Actions run **#293**) was monitored step-by-step via the browser, per the standing instruction to inspect every step individually rather than trust overall status. It failed at the **Workspace typecheck** step (28s in), and — because `pnpm -r run typecheck` stops at the first failing package — every step after it (Deterministic clean-database migration check, Schema drift check, API automated test suite, both production builds, the synthetic readiness check) was **skipped, not run**. This is an important distinction from a genuine schema-drift failure: the schema-drift check did not fail in run #293, it never executed at all.
+
+Exact failure, read from the job's own log (`apps/api` typecheck, `tsc --noEmit`):
+
+```
+src/lib/billing/catalogue.ts(26,7): error TS2739: Type '{ "run.access": string; ...; "grow.admin.configure": string; }'
+is missing the following properties from type 'Record<..., string>':
+"grow.propertyIntelligence.read", "grow.propertyIntelligence.manage"
+```
+
+Root cause, confirmed by reading both files directly: `packages/db/src/schema/billing.ts`'s `ENTITLEMENT_KEYS` union already correctly included the two new Priority 5 keys (Section 3.5) — that part of the implementation was correct. `apps/api/src/lib/billing/catalogue.ts`'s `ENTITLEMENT_DEFS` object, a `Record<EntitlementKey, string>` description map consumed by `ensureCatalogueSeeded()`, had simply never been updated with the two new keys' descriptions, so `tsc` correctly rejected it as incomplete. This was a real, narrow completeness gap in this priority's own implementation — not a pre-existing issue, not a CI/local environment discrepancy, and not related to the manual snapshot upload.
+
+**Fix applied** (commit `fc0bd66654c90584e8cb20d95077863939ea73f2`, pushed directly to `feat/ae-grow-priority-5-data-property-intelligence`): added the two missing `ENTITLEMENT_DEFS` entries, with description text drawn from `billing.ts`'s own Priority 5 header comment (which already precisely defines what each key gates):
+
+- `"grow.propertyIntelligence.read": "View property provider observations, match candidates and opportunity signals."`
+- `"grow.propertyIntelligence.manage": "Confirm or reject property matches, review or dismiss opportunity signals, and promote a signal into a Grow opportunity."`
+
+No schema, migration, entitlement-logic, or route-behaviour change was made — `ensureCatalogueSeeded()`'s existing loops already iterate the full `ENTITLEMENT_KEYS` union, so completing the description map was sufficient. This commit retriggered CI automatically (Actions run #294).
+
+### 6.4 CI run #294 (post-fix) — full green result, step-by-step evidence
+
+Run **#294**, on commit `fc0bd66654c90584e8cb20d95077863939ea73f2`, succeeded end-to-end in **17m16s**. Every step was individually opened and its log inspected (not inferred from the overall green status):
+
+- **Workspace typecheck** — 40s, passed. `tsc --noEmit` across all 12–13 workspace packages including `apps/api`, `apps/web`, `packages/db`, `packages/domain`, `packages/events`, and every `packages/integrations/*` package.
+- **Deterministic clean-database migration check** — 2s, passed.
+- **Schema drift check** — 2s, passed. Log confirmed this step genuinely re-ran `drizzle-kit generate` against the full schema (`Reading config file '.../packages/db/drizzle.config.ts'`), reported **"102 tables"**, explicitly enumerated every table by name including the three new ones (`grow_opportunity_signals`, `property_external_identifiers`, `property_provider_observations`), and concluded **"No schema changes, nothing to migrate 😴"** — i.e. zero drift between the committed `0017` migration/snapshot and the actual schema source, confirmed from the step's own output rather than assumed from a green checkmark (the specific concern this priority's verification checklist called out).
+- **API automated test suite** — 15m50s, passed. The step's own exit status is green (a failing test run exits non-zero and would show this step red); log excerpts reviewed at multiple points throughout the run showed exclusively ✓-prefixed passing test lines — including explicit tenant-isolation assertions (e.g. *"tenant isolation: a job cannot be read, planned, rolled back, or exported from a different brokerage"*) and entitlement-boundary assertions (e.g. *"safety: ineligible subscription — no communications.sms entitlement — is denied even with full role authority and an ACTIVE, approved connection"*) — with zero ✗/failing markers observed anywhere in the reviewed portions. A single machine-readable pass/fail summary line could not be isolated through the Actions log viewer's in-browser search across this run's full length; this is a tooling/viewer limitation recorded plainly here, not a gap papered over — the step's own success exit status is the authoritative pass/fail signal CI provides, and it is green.
+- **API production build** — 1s, passed. `esbuild src/index.ts --bundle ... --outfile=dist/index.mjs` produced `dist/index.mjs` (1.5mb) in 242ms.
+- **Web production build** — 3s, passed. `vite build` transformed 119 modules and produced `dist/index.html`, `dist/assets/*.css`, `dist/assets/*.js` in 2.06s.
+- **Synthetic production startup and storage readiness** — 4s, passed. Log: *"Synthetic S3-compatible encrypted object lifecycle passed."* / *"Synthetic production startup and durable-storage readiness passed."*
+
+The run's only annotation was **1 warning** — a pre-existing, GitHub-infrastructure-level notice that `actions/checkout@v4`/`actions/setup-node@v4`/`pnpm/action-setup` target Node.js 20 but are being run on the Node.js 24 GitHub-hosted runner. This is unrelated to this PR's code, was present in the failing run #293 as well, and is not something this branch's changes caused or can fix (it is a workflow/runner-level concern, not an application one).
+
+### 6.5 Tenant isolation, entitlement enforcement, and provider status — reconfirmed
+
+- **Tenant isolation:** every new table (`property_external_identifiers`, `property_provider_observations`, `grow_opportunity_signals`) carries `brokerage_id` and is queried with explicit brokerage scoping, consistent with every existing Grow table (Section 2.2); CI's own test suite (6.4) includes and passed explicit cross-brokerage isolation assertions.
+- **Server-side entitlement enforcement:** `grow.propertyIntelligence.read`/`.manage` are enforced via the existing `requireEntitlement` middleware server-side (Section 3.5) — never only hidden client-side — and neither key is auto-granted to any brokerage; CI's test suite includes and passed explicit entitlement-denial assertions for analogous keys in the same suite.
+- **Provider integrations disabled/mocked; no live external calls:** `PROPERTY_DATA_PROVIDER` continues to default to the mock provider; `mustForceMockExternalProvider()`'s existing fail-closed gate is unchanged; `LIVE_EXTERNAL_TRANSACTIONS_APPROVED` remains unset throughout this build; no Pricefinder/Domain/Landchecker credential, endpoint, or network call was added anywhere in this priority.
+- **No secrets committed:** no credential, API key, or connection string was introduced in any commit on this branch (all provider config remains environment-variable-driven, matching the existing pattern).
+- **Deterministic, explainable signal generation:** signal generation is rule-based (Section 3.4), never a raw ML/AI score, always carries `evidence` + a human-readable `explanation`, and uses a unique `dedupeKey` to make recalculation idempotent.
+- **No automatic consumer communication:** signals are surfaced for agent review only; promotion into a real `growOpportunities` row requires an explicit agent action (Section 3.2); no notification/email/SMS code path was touched by this priority.
+- **No Priority 1–4 regression:** `growToday.ts` Rule A–E logic and sort order are unchanged (Section 3.7); the new Rule F is additive; the full CI test suite (which includes the existing Priority 1–4 test coverage) passed in run #294.
+
+### 6.6 Final branch state
+
+- Final commit on `feat/ae-grow-priority-5-data-property-intelligence`: `fc0bd66654c90584e8cb20d95077863939ea73f2` ("fix(billing): add missing ENTITLEMENT_DEFS entries for Priority 5 propertyIntelligence keys"), immediately followed by this Final Addendum's own report-only commit.
+- PR #33 (`feat/ae-grow-priority-5-data-property-intelligence` → `staging`) is open, CI run #294 is fully green, and the PR has **not** been merged, per standing instruction. No deploy was performed. No production configuration was modified. AE GROW Priority 6 has not been started.
