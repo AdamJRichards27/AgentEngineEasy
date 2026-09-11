@@ -118,6 +118,13 @@ jobs:
       - name: API automated test suite
         env:
           NODE_ENV: test
+          # dev-login (routes/auth.ts) is fail-closed by default (Foundation
+          # Remediation, Stage 1.1) and requires this explicit opt-in even
+          # when NODE_ENV isn't "production". The whole integration test
+          # suite depends on it via testSupport.ts's dev-login helper, so
+          # without this the step fails closed with 404s having nothing to
+          # do with the code under test.
+          ALLOW_DEV_AUTH: "true"
         run: pnpm --filter @aee/api run test
 
       - name: API production build
