@@ -797,3 +797,4 @@
           "onUpdate": "no action"
         },
         "financial_deposits_property_id_properties_id_fk": {
+          "name": "financial_deposits_property_id_properties_id_fk",
