@@ -2,12 +2,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "evidence_ref": {
-          "name": "evidence_ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "property_id": {
           "name": "property_id",
           "type": "integer",
