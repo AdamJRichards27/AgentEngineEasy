@@ -1,0 +1,800 @@
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "evidence_ref": {
+          "name": "evidence_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reconciliation_status": {
+          "name": "reconciliation_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'NOT_REQUIRED'"
+        },
+        "reconciled_at": {
+          "name": "reconciled_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reconciled_by_user_id": {
+          "name": "reconciled_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recorded_by_user_id": {
+          "name": "recorded_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "marketing_payment_records_campaign_item_idx": {
+          "name": "marketing_payment_records_campaign_item_idx",
+          "columns": [
+            {
+              "expression": "campaign_item_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "marketing_payment_records_property_status_idx": {
+          "name": "marketing_payment_records_property_status_idx",
+          "columns": [
+            {
+              "expression": "property_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "marketing_payment_records_brokerage_id_brokerages_id_fk": {
+          "name": "marketing_payment_records_brokerage_id_brokerages_id_fk",
+          "tableFrom": "marketing_payment_records",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "marketing_payment_records_property_id_properties_id_fk": {
+          "name": "marketing_payment_records_property_id_properties_id_fk",
+          "tableFrom": "marketing_payment_records",
+          "tableTo": "properties",
+          "columnsFrom": [
+            "property_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "marketing_payment_records_reconciled_by_user_id_users_id_fk": {
+          "name": "marketing_payment_records_reconciled_by_user_id_users_id_fk",
+          "tableFrom": "marketing_payment_records",
+          "tableTo": "users",
+          "columnsFrom": [
+            "reconciled_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "marketing_payment_records_recorded_by_user_id_users_id_fk": {
+          "name": "marketing_payment_records_recorded_by_user_id_users_id_fk",
+          "tableFrom": "marketing_payment_records",
+          "tableTo": "users",
+          "columnsFrom": [
+            "recorded_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.pc_fee_authorities": {
+      "name": "pc_fee_authorities",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "agent_user_id": {
+          "name": "agent_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "supersedes_id": {
+          "name": "supersedes_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'NOT_PROVIDED'"
+        },
+        "fee_basis": {
+          "name": "fee_basis",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'PERCENTAGE_OF_GCI'"
+        },
+        "rate_bps": {
+          "name": "rate_bps",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fixed_amount_cents": {
+          "name": "fixed_amount_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gci_definition": {
+          "name": "gci_definition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'COMMISSION_EX_GST'"
+        },
+        "gst_applicable": {
+          "name": "gst_applicable",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "payment_trigger": {
+          "name": "payment_trigger",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'SETTLEMENT_COMPLETED'"
+        },
+        "authorised_payment_method": {
+          "name": "authorised_payment_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'GENERAL_ACCOUNT_DEBIT_MANDATE'"
+        },
+        "mandate_provider_ref": {
+          "name": "mandate_provider_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mandate_provider": {
+          "name": "mandate_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "maximum_amount_cents": {
+          "name": "maximum_amount_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "notice_required_days": {
+          "name": "notice_required_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 7
+        },
+        "signed_evidence_ref": {
+          "name": "signed_evidence_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "effective_date": {
+          "name": "effective_date",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoked_by_user_id": {
+          "name": "revoked_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoke_reason": {
+          "name": "revoke_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "pc_fee_authorities_agent_version_idx": {
+          "name": "pc_fee_authorities_agent_version_idx",
+          "columns": [
+            {
+              "expression": "agent_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "pc_fee_authorities_agent_status_idx": {
+          "name": "pc_fee_authorities_agent_status_idx",
+          "columns": [
+            {
+              "expression": "agent_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "pc_fee_authorities_brokerage_status_idx": {
+          "name": "pc_fee_authorities_brokerage_status_idx",
+          "columns": [
+            {
+              "expression": "brokerage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "pc_fee_authorities_brokerage_id_brokerages_id_fk": {
+          "name": "pc_fee_authorities_brokerage_id_brokerages_id_fk",
+          "tableFrom": "pc_fee_authorities",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_authorities_agent_user_id_users_id_fk": {
+          "name": "pc_fee_authorities_agent_user_id_users_id_fk",
+          "tableFrom": "pc_fee_authorities",
+          "tableTo": "users",
+          "columnsFrom": [
+            "agent_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_authorities_revoked_by_user_id_users_id_fk": {
+          "name": "pc_fee_authorities_revoked_by_user_id_users_id_fk",
+          "tableFrom": "pc_fee_authorities",
+          "tableTo": "users",
+          "columnsFrom": [
+            "revoked_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_authorities_created_by_user_id_users_id_fk": {
+          "name": "pc_fee_authorities_created_by_user_id_users_id_fk",
+          "tableFrom": "pc_fee_authorities",
+          "tableTo": "users",
+          "columnsFrom": [
+            "created_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.pc_fee_calculations": {
+      "name": "pc_fee_calculations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "property_id": {
+          "name": "property_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "transaction_id": {
+          "name": "transaction_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "commission_calculation_id": {
+          "name": "commission_calculation_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pc_fee_authority_id": {
+          "name": "pc_fee_authority_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "calculation_version": {
+          "name": "calculation_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ESTIMATE'"
+        },
+        "supersedes_id": {
+          "name": "supersedes_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fee_basis_used": {
+          "name": "fee_basis_used",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "gci_basis_cents": {
+          "name": "gci_basis_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rate_bps_used": {
+          "name": "rate_bps_used",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gross_fee_cents": {
+          "name": "gross_fee_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "gst_cents": {
+          "name": "gst_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "total_fee_cents": {
+          "name": "total_fee_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_disputed": {
+          "name": "is_disputed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "is_provisional": {
+          "name": "is_provisional",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "calculated_by_user_id": {
+          "name": "calculated_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "calculated_at": {
+          "name": "calculated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "finalised_at": {
+          "name": "finalised_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "correlation_id": {
+          "name": "correlation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "pc_fee_calculations_transaction_version_idx": {
+          "name": "pc_fee_calculations_transaction_version_idx",
+          "columns": [
+            {
+              "expression": "transaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "calculation_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "pc_fee_calculations_transaction_state_idx": {
+          "name": "pc_fee_calculations_transaction_state_idx",
+          "columns": [
+            {
+              "expression": "transaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "pc_fee_calculations_brokerage_id_brokerages_id_fk": {
+          "name": "pc_fee_calculations_brokerage_id_brokerages_id_fk",
+          "tableFrom": "pc_fee_calculations",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_calculations_property_id_properties_id_fk": {
+          "name": "pc_fee_calculations_property_id_properties_id_fk",
+          "tableFrom": "pc_fee_calculations",
+          "tableTo": "properties",
+          "columnsFrom": [
+            "property_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_calculations_transaction_id_transactions_id_fk": {
+          "name": "pc_fee_calculations_transaction_id_transactions_id_fk",
+          "tableFrom": "pc_fee_calculations",
+          "tableTo": "transactions",
+          "columnsFrom": [
+            "transaction_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_calculations_commission_calculation_id_commission_calculations_id_fk": {
+          "name": "pc_fee_calculations_commission_calculation_id_commission_calculations_id_fk",
+          "tableFrom": "pc_fee_calculations",
+          "tableTo": "commission_calculations",
+          "columnsFrom": [
+            "commission_calculation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_calculations_pc_fee_authority_id_pc_fee_authorities_id_fk": {
+          "name": "pc_fee_calculations_pc_fee_authority_id_pc_fee_authorities_id_fk",
+          "tableFrom": "pc_fee_calculations",
+          "tableTo": "pc_fee_authorities",
+          "columnsFrom": [
+            "pc_fee_authority_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pc_fee_calculations_calculated_by_user_id_users_id_fk": {
+          "name": "pc_fee_calculations_calculated_by_user_id_users_id_fk",
+          "tableFrom": "pc_fee_calculations",
+          "tableTo": "users",
+          "columnsFrom": [
+            "calculated_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.integration_connection_transitions": {
+      "name": "integration_connection_transitions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "transition_type": {
+          "name": "transition_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "from_value": {
+          "name": "from_value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "to_value": {
+          "name": "to_value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actor_type": {
+          "name": "actor_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_user_id": {
+          "name": "actor_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "integration_connection_transitions_connection_occurred_idx": {
+          "name": "integration_connection_transitions_connection_occurred_idx",
+          "columns": [
+            {
+              "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
