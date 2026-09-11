@@ -40,3 +40,5 @@ export * from "./financial";
 export * from "./integrations";
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
 export * from "./contacts";
+// AE GROW Priority 5 — Data & Property Intelligence.
+export * from "./propertyIntelligence";

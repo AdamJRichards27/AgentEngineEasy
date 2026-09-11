@@ -85,6 +85,14 @@ export const subscriptionItems = pgTable("billing_subscription_items", {
 // contact-property relationship mutations introduced by this priority. Notes/commitments
 // continue to reuse grow.activities.manage exactly as Priority 1 already established for
 // growActivities writes — see routes/contacts.ts's own header comment.
+//
+// AE GROW Priority 5 — Data & Property Intelligence: two new keys, deliberately separate from
+// grow.properties.link (linking a contact to a property) and grow.opportunities.manage
+// (owning a real pipeline opportunity). grow.propertyIntelligence.read gates viewing provider
+// observations / match candidates / opportunity signals (Contact 360, property-view panel,
+// GET routes); grow.propertyIntelligence.manage gates confirming/rejecting a match,
+// reviewing/dismissing a signal, and promoting a signal into a real growOpportunities row —
+// see routes/propertyIntelligence.ts's own header comment.
 export const ENTITLEMENT_KEYS = [
   "run.access",
   "grow.access",
@@ -100,6 +108,8 @@ export const ENTITLEMENT_KEYS = [
   "grow.automation.use",
   "grow.campaigns.use",
   "grow.admin.configure",
+  "grow.propertyIntelligence.read",
+  "grow.propertyIntelligence.manage",
 ] as const;
 export type EntitlementKey = (typeof ENTITLEMENT_KEYS)[number];
 
