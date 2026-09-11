@@ -4,6 +4,20 @@
 // same way lib/pitCrew.ts hand-mirrors Pit Crew's -- there is no shared
 // package between apps/web and apps/api, so these shapes are kept in sync
 // by hand.
+//
+// AE GROW PRIORITY 3 -- contact-first threads. propertyId/partyId on
+// CommunicationThread and CommunicationMessage are now both nullable
+// (mirrors packages/db/src/schema/communications.ts's own change -- a
+// thread/message is anchored to a property, a contact, or both, never
+// neither). fetchThreadsForParty / createContactCommunicationThread /
+// fetchContactRecipientCandidates below are the contact-first analogues of
+// the property-scoped functions just above each of them, calling the new
+// /grow/contacts/:partyId/communications/... routes
+// (apps/api/src/routes/communications.ts's "contact-first" block) rather
+// than /properties/:propertyId/communications/.... Everything past thread
+// creation (participants, composing, lifecycle actions) reuses the exact
+// same generic functions already declared below unchanged -- those only
+// ever needed a threadId/messageId, never a propertyId.
 import { apiFetch } from "./api";
 
 export const COMMUNICATION_CHANNELS = ["EMAIL", "SMS", "PHONE_CALL", "EXTERNAL_MESSAGE", "INTERNAL_NOTE"] as const;
@@ -32,7 +46,9 @@ export type CommunicationMessageStatus =
 export interface CommunicationThread {
   id: number;
   brokerageId: number;
-  propertyId: number;
+  // AE Grow Priority 3: nullable -- a contact-first thread (created from
+  // Contact 360) has no property. See partyId below.
+  propertyId: number | null;
   transactionId: number | null;
   subject: string;
   status: string;
@@ -40,6 +56,10 @@ export interface CommunicationThread {
   createdAt: string;
   updatedAt: string;
   lastActivityAt: string;
+  // AE Grow Priority 3: the contact-first anchor -- set on every thread
+  // created via POST /grow/contacts/:partyId/communications/threads, and
+  // null on an ordinary property-first thread that has no known contact.
+  partyId: number | null;
 }
 
 export interface CommunicationParticipant {
@@ -60,7 +80,8 @@ export interface CommunicationMessage {
   id: number;
   threadId: number;
   brokerageId: number;
-  propertyId: number;
+  // AE Grow Priority 3: nullable -- see CommunicationThread.propertyId above.
+  propertyId: number | null;
   transactionId: number | null;
   direction: "OUTBOUND" | "INBOUND";
   channel: CommunicationChannel;
@@ -92,6 +113,9 @@ export interface CommunicationMessage {
   version: number;
   createdAt: string;
   updatedAt: string;
+  // AE Grow Priority 3: denormalised straight from the thread's partyId --
+  // see CommunicationThread.partyId above.
+  partyId: number | null;
 }
 
 export interface CandidateRecipient {
@@ -176,6 +200,34 @@ export function fetchThreadDetail(threadId: number): Promise<ThreadDetail> {
 
 export function fetchRecipientCandidates(propertyId: number): Promise<{ candidates: CandidateRecipient[] }> {
   return apiFetch<{ candidates: CandidateRecipient[] }>(`/properties/${propertyId}/communications/recipients`);
+}
+
+// ---------------------------------------------------------------------
+// AE GROW PRIORITY 3 -- Threads (contact-first), for Contact 360. Mounted
+// under /grow/contacts/:partyId/communications/... rather than
+// /properties/:propertyId/communications/... -- see this file's header
+// comment. Shaped identically to the property-first functions above
+// (same CommunicationThread / CandidateRecipient types) so
+// components/CommunicationsSection.tsx's shared thread-detail/composer
+// pieces need no special-casing between the two.
+// ---------------------------------------------------------------------
+
+export function fetchThreadsForParty(partyId: number): Promise<{ threads: CommunicationThread[] }> {
+  return apiFetch<{ threads: CommunicationThread[] }>(`/grow/contacts/${partyId}/communications/threads`);
+}
+
+export function createContactCommunicationThread(
+  partyId: number,
+  body: { subject: string; transactionId?: number },
+): Promise<CommunicationThread> {
+  return apiFetch<CommunicationThread>(`/grow/contacts/${partyId}/communications/threads`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function fetchContactRecipientCandidates(partyId: number): Promise<{ candidates: CandidateRecipient[] }> {
+  return apiFetch<{ candidates: CandidateRecipient[] }>(`/grow/contacts/${partyId}/communications/recipients`);
 }
 
 // ---------------------------------------------------------------------

@@ -30,6 +30,20 @@
 //     write path. Duplicate and stale/out-of-order deliveries produce no
 //     duplicate/regressive effect (Proof A's own guarantee, exercised here
 //     for a second domain).
+//
+//   - AE Grow Priority 3: communicationMessages.propertyId is now nullable
+//     (a contact-first/party-only message has no property at all).
+//     resolveCommsSourceRecord below deliberately returns null for such a
+//     message — IntegrationSourceRecordResolution.propertyId is non-null by
+//     contract (riskExceptions.propertyId is NOT NULL — see
+//     sourceRecordResolvers.ts's own header comment), and there is no
+//     property to attach a risk exception to anyway. This mirrors this same
+//     resolver's existing "not found/cross-tenant -> null -> rule skips it,
+//     never guesses" behaviour; a dead-lettered outbox command behind a
+//     contact-first communication simply does not raise an H01 risk
+//     exception today (a documented, narrow deferral — see the Priority 3
+//     report's Known limitations — not a regression for any
+//     property-anchored communication, which resolves exactly as before).
 
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
@@ -399,6 +413,12 @@ async function applySmsDeliveryStatusUpdate({ connection, inboxRow }: WebhookEff
 async function resolveCommsSourceRecord(brokerageId: number, sourceRecordId: string) {
   const [message] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, Number(sourceRecordId)));
   if (!message || message.brokerageId !== brokerageId) return null;
+  // AE Grow Priority 3: a contact-first (party-only) message has no
+  // propertyId — IntegrationSourceRecordResolution.propertyId is non-null
+  // by contract (see this module's own header comment above), and there is
+  // no property to attach a risk exception to, so this is skipped exactly
+  // like an unmapped/cross-tenant record rather than guessed at.
+  if (message.propertyId == null) return null;
   return { propertyId: message.propertyId, transactionId: message.transactionId };
 }
 

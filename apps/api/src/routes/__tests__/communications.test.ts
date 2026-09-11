@@ -23,8 +23,9 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { createHmac } from "node:crypto";
 import { eq, and } from "drizzle-orm";
-import { db, users, communicationMessages, communicationWebhookEvents } from "@aee/db";
+import { db, users, communicationThreads, communicationMessages, communicationWebhookEvents, entitlementGrants } from "@aee/db";
 import { dispatchMessage } from "../../lib/communications/outbox.js";
+import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -94,6 +95,12 @@ interface DraftMessageInput {
   sendOnBehalfOfUserId?: number;
   templateId?: number;
   placeholderValues?: Record<string, string>;
+  // AE Grow Priority 3 — a contact-first (or ad-hoc) draft may name its
+  // recipient directly rather than via an existing participant row; the
+  // route (createDraftMessageSchema) already accepted these two fields
+  // before this addition, this interface just hadn't needed them yet.
+  recipientDisplayName?: string;
+  recipientDestination?: string;
 }
 
 async function createDraft(cookie: string, threadId: number, input: DraftMessageInput) {
@@ -111,6 +118,57 @@ async function sendMessage(cookie: string, messageId: number, expectedVersion: n
     method: "POST",
     headers: authHeaders(cookie),
     body: JSON.stringify({ expectedVersion }),
+  });
+  return { status: res.status, body: await jsonOf<any>(res) };
+}
+
+// AE Grow Priority 3 — same grant() helper as routes/__tests__/growToday.test.ts
+// and routes/__tests__/contacts.test.ts: dev-login does not auto-grant any
+// grow.* entitlement, so the contact-first routes' own grow.contacts.read/
+// grow.contacts.manage gates must be granted explicitly before they're usable.
+async function grant(targetBrokerageId: number, entitlementKey: string) {
+  await db.insert(entitlementGrants).values({
+    brokerageId: targetBrokerageId,
+    entitlementKey,
+    granteeType: "brokerage",
+    granteeId: targetBrokerageId,
+    sourceType: "manual",
+    status: "Active",
+  });
+  invalidateEntitlementCache(targetBrokerageId);
+}
+
+async function createHttpProperty(cookie: string, address: string): Promise<number> {
+  const res = await fetch(`${baseUrl}/api/properties`, {
+    method: "POST",
+    headers: authHeaders(cookie),
+    body: JSON.stringify({ formattedAddress: address, state: "NSW", suburb: "Testville", postcode: "2000" }),
+  });
+  if (res.status !== 201) throw new Error(`create property failed: ${res.status} ${await res.text()}`);
+  const { property } = await jsonOf<{ property: { id: number } }>(res);
+  return property.id;
+}
+
+async function createHttpParty(cookie: string, forPropertyId: number, overrides: Record<string, unknown> = {}): Promise<number> {
+  const res = await fetch(`${baseUrl}/api/parties`, {
+    method: "POST",
+    headers: authHeaders(cookie),
+    body: JSON.stringify({ propertyId: forPropertyId, role: "Buyer", firstName: "Contact", lastName: "First", ...overrides }),
+  });
+  if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
+  const { party } = await jsonOf<{ party: { id: number } }>(res);
+  return party.id;
+}
+
+function contactThreadsUrl(partyId: number): string {
+  return `${baseUrl}/api/grow/contacts/${partyId}/communications/threads`;
+}
+
+async function createContactThread(cookie: string, partyId: number, subject: string) {
+  const res = await fetch(contactThreadsUrl(partyId), {
+    method: "POST",
+    headers: authHeaders(cookie),
+    body: JSON.stringify({ subject }),
   });
   return { status: res.status, body: await jsonOf<any>(res) };
 }
@@ -563,4 +621,283 @@ test("8. a message/thread from one brokerage is invisible and inaccessible to an
   const ownSend = await sendMessage(agent.cookie, draft.id, draft.version);
   assert.equal(ownSend.status, 200);
   assert.equal(ownSend.body.message.status, "SENT");
+});
+
+// =======================================================================
+// AE GROW PRIORITY 3 — contact-first (property-less) threads/messages.
+// Additive coverage for the new /grow/contacts/:partyId/communications/...
+// routes and the propertyId/partyId anchoring change to createThread/
+// createDraftMessage (see routes/communications.ts's own "contact-first"
+// header comment and lib/communications/messages.ts's AE GROW PRIORITY 3
+// comments). Scenarios 1-8 above are untouched — every property-first
+// assertion in this file still exercises the exact same routes it always
+// did, unchanged.
+// =======================================================================
+
+let contactFirstPartyId: number;
+let contactFirstThreadId: number;
+let contactFirstParticipantId: number;
+
+test("AE Grow Priority 3 — creating a contact-first thread requires grow.contacts.manage and anchors the thread to partyId with propertyId null", async () => {
+  const originPropertyId = await createHttpProperty(agent.cookie, "Contact First Origin Property");
+  contactFirstPartyId = await createHttpParty(agent.cookie, originPropertyId, {
+    firstName: "Cara",
+    lastName: "ContactFirst",
+    email: `cara-contactfirst-${Date.now()}@example.com`,
+    mobile: "0400222333",
+  });
+
+  const beforeGrant = await createContactThread(agent.cookie, contactFirstPartyId, "Prospecting chat");
+  assert.equal(beforeGrant.status, 403, "creating a contact-first thread must require grow.contacts.manage, not just being an authenticated brokerage user");
+  assert.equal(beforeGrant.body.reason, "ENTITLEMENT_MISSING");
+
+  await grant(brokerageId, "grow.contacts.manage");
+  await grant(brokerageId, "grow.contacts.read");
+
+  const created = await createContactThread(agent.cookie, contactFirstPartyId, "Prospecting chat");
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.partyId, contactFirstPartyId);
+  assert.equal(created.body.propertyId, null, "a contact-first thread must never carry a propertyId");
+  contactFirstThreadId = created.body.id;
+});
+
+test("AE Grow Priority 3 — creating a contact-first thread for a nonexistent party, or a party belonging to another brokerage, is rejected with 404, not a 500 or silent success", async () => {
+  const nonexistentRes = await createContactThread(agent.cookie, 999999999, "Should not be created");
+  assert.equal(nonexistentRes.status, 404, JSON.stringify(nonexistentRes.body));
+
+  const otherOriginPropertyId = await createHttpProperty(otherAdmin.cookie, "Other Brokerage Origin Property");
+  const otherPartyId = await createHttpParty(otherAdmin.cookie, otherOriginPropertyId, { firstName: "Other", lastName: "Brokerage" });
+
+  const crossTenantRes = await createContactThread(agent.cookie, otherPartyId, "Should not be created either");
+  assert.equal(crossTenantRes.status, 404, JSON.stringify(crossTenantRes.body));
+
+  // Confirm neither rejected attempt actually left a row behind.
+  const threadsForOtherParty = await db.select().from(communicationThreads).where(eq(communicationThreads.partyId, otherPartyId));
+  assert.equal(threadsForOtherParty.length, 0, "a rejected thread creation (nonexistent or cross-tenant party) must not have left a row behind");
+});
+
+test("AE Grow Priority 3 — an email send from a contact-first thread reaches SENT through the same draft-to-send lifecycle as property-first, via the intended add-participant-from-party flow", async () => {
+  const recipientsRes = await fetch(`${baseUrl}/api/grow/contacts/${contactFirstPartyId}/communications/recipients`, { headers: { cookie: agent.cookie } });
+  const recipientsBody = await jsonOf<{ candidates: Array<{ partyId: number; email: string | null; mobile: string | null }> }>(recipientsRes);
+  assert.equal(recipientsRes.status, 200);
+  assert.equal(recipientsBody.candidates.length, 1, "a contact-first thread's candidate pool is exactly the one contact it is anchored to");
+  assert.equal(recipientsBody.candidates[0]!.partyId, contactFirstPartyId);
+
+  const participantRes = await fetch(`${baseUrl}/api/communications/threads/${contactFirstThreadId}/participants`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ partyId: contactFirstPartyId, role: "Other" }),
+  });
+  const participant = await jsonOf<{ id: number }>(participantRes);
+  assert.equal(participantRes.status, 201, JSON.stringify(participant));
+  contactFirstParticipantId = participant.id;
+
+  const draft = await createDraft(agent.cookie, contactFirstThreadId, {
+    channel: "EMAIL",
+    classification: "TRANSACTIONAL",
+    bodyText: "Thanks for registering your interest.",
+    recipientParticipantId: contactFirstParticipantId,
+  });
+  assert.equal(draft.status, "DRAFT");
+
+  const { status, body } = await sendMessage(agent.cookie, draft.id, draft.version);
+  assert.equal(status, 200);
+  assert.equal(body.dispatched, true);
+  assert.equal(body.blocked, false);
+  assert.equal(body.message.status, "SENT");
+  assert.equal(body.message.provider, "sandbox_email");
+  assert.equal(body.message.partyId, contactFirstPartyId);
+  assert.equal(body.message.propertyId, null, "a contact-first message must never carry a propertyId");
+});
+
+test("AE Grow Priority 3 — an SMS send from a contact-first thread reaches SENT likewise, reusing the same participant record", async () => {
+  const draft = await createDraft(agent.cookie, contactFirstThreadId, {
+    channel: "SMS",
+    classification: "TRANSACTIONAL",
+    bodyText: "Reminder: your appraisal is booked for 10am.",
+    recipientParticipantId: contactFirstParticipantId,
+  });
+  assert.equal(draft.status, "DRAFT");
+
+  const { status, body } = await sendMessage(agent.cookie, draft.id, draft.version);
+  assert.equal(status, 200);
+  assert.equal(body.dispatched, true);
+  assert.equal(body.blocked, false);
+  assert.equal(body.message.status, "SENT");
+  assert.equal(body.message.provider, "sandbox_sms");
+  assert.equal(body.message.partyId, contactFirstPartyId);
+  assert.equal(body.message.propertyId, null, "a contact-first message must never carry a propertyId");
+});
+
+test("AE Grow Priority 3 — a brokerage cannot create a thread for, read, or send on another brokerage's contact-first thread/party, even while holding the same entitlements; nothing leaks in the DB", async () => {
+  // Grant otherBrokerageId the SAME entitlements brokerageId already holds so a 404 here proves
+  // the row-level tenant check, not merely a missing entitlement (matching contacts.test.ts's
+  // own isolation-testing convention).
+  await grant(otherBrokerageId, "grow.contacts.manage");
+  await grant(otherBrokerageId, "grow.contacts.read");
+
+  const crossTenantCreate = await createContactThread(otherAdmin.cookie, contactFirstPartyId, "Should be rejected");
+  assert.equal(crossTenantCreate.status, 404);
+
+  const crossTenantRead = await fetch(`${baseUrl}/api/communications/threads/${contactFirstThreadId}`, { headers: { cookie: otherAdmin.cookie } });
+  assert.equal(crossTenantRead.status, 404);
+
+  const crossTenantThreadsList = await fetch(contactThreadsUrl(contactFirstPartyId), { headers: { cookie: otherAdmin.cookie } });
+  assert.equal(crossTenantThreadsList.status, 404, "listing another brokerage's contact's threads must 404, not return them");
+
+  const ownDraft = await createDraft(agent.cookie, contactFirstThreadId, {
+    channel: "EMAIL",
+    classification: "TRANSACTIONAL",
+    bodyText: "A message on the real owner's own thread.",
+    recipientParticipantId: contactFirstParticipantId,
+  });
+  const crossTenantSend = await sendMessage(otherAdmin.cookie, ownDraft.id, ownDraft.version);
+  assert.equal(crossTenantSend.status, 404);
+
+  // Direct DB read: confirm the cross-tenant attempts left nothing behind, and that the real
+  // thread/message still belong to the original brokerage, untouched.
+  const [threadRow] = await db.select().from(communicationThreads).where(eq(communicationThreads.id, contactFirstThreadId));
+  assert.equal(threadRow?.brokerageId, brokerageId);
+  const [messageRow] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, ownDraft.id));
+  assert.equal(messageRow?.brokerageId, brokerageId);
+  assert.equal(messageRow?.status, "DRAFT", "the cross-tenant send attempt must not have moved this message out of DRAFT");
+
+  const threadsAnchoredToContact = await db.select().from(communicationThreads).where(eq(communicationThreads.partyId, contactFirstPartyId));
+  assert.ok(
+    threadsAnchoredToContact.every((t) => t.brokerageId === brokerageId),
+    "no thread anchored to this contact must ever belong to another brokerage",
+  );
+});
+
+test("AE Grow Priority 3 — a marketing email on a contact-first thread is blocked without opt-in, then succeeds once consent is recorded and requeued", async () => {
+  const marketingOriginPropertyId = await createHttpProperty(agent.cookie, "Contact First Marketing Origin");
+  const marketingPartyId = await createHttpParty(agent.cookie, marketingOriginPropertyId, { firstName: "Mia", lastName: "Marketing" });
+  const threadRes = await createContactThread(agent.cookie, marketingPartyId, "Marketing outreach");
+  assert.equal(threadRes.status, 201, JSON.stringify(threadRes.body));
+  const threadId = threadRes.body.id;
+
+  const destination = `contact-first-marketing-${Date.now()}@example.com`;
+  const draft = await createDraft(agent.cookie, threadId, {
+    channel: "EMAIL",
+    classification: "MARKETING",
+    bodyText: "Check out our latest listings!",
+    recipientDisplayName: "Mia Marketing",
+    recipientDestination: destination,
+  });
+
+  await fetch(`${baseUrl}/api/communications/messages/${draft.id}/request-approval`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: draft.version }),
+  });
+  const approveRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/approve`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: draft.version + 1 }),
+  });
+  const approved = await jsonOf<{ status: string; version: number }>(approveRes);
+  assert.equal(approved.status, "APPROVED");
+
+  const blockedSend = await sendMessage(agent.cookie, draft.id, approved.version);
+  assert.equal(blockedSend.status, 200);
+  assert.equal(blockedSend.body.blocked, true);
+  assert.equal(blockedSend.body.message.status, "BLOCKED_BY_CONSENT");
+  assert.equal(blockedSend.body.message.partyId, marketingPartyId, "the blocked message must still carry its contact-first partyId");
+  assert.equal(blockedSend.body.message.propertyId, null);
+
+  const consentRes = await fetch(`${baseUrl}/api/communications/consent`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ channel: "EMAIL", destination, marketingOptIn: true }),
+  });
+  assert.equal(consentRes.status, 201);
+
+  const requeueRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: blockedSend.body.message.version }),
+  });
+  const requeued = await jsonOf<{ blocked: boolean; message: { status: string } }>(requeueRes);
+  assert.equal(requeued.blocked, false);
+  assert.equal(requeued.message.status, "SENT");
+});
+
+test("AE Grow Priority 3 — a marketing SMS on a contact-first thread is blocked without opt-in, then succeeds once consent is recorded and requeued", async () => {
+  const marketingOriginPropertyId = await createHttpProperty(agent.cookie, "Contact First SMS Marketing Origin");
+  const marketingPartyId = await createHttpParty(agent.cookie, marketingOriginPropertyId, { firstName: "Sam", lastName: "SmsMarketing" });
+  const threadRes = await createContactThread(agent.cookie, marketingPartyId, "SMS marketing outreach");
+  assert.equal(threadRes.status, 201, JSON.stringify(threadRes.body));
+  const threadId = threadRes.body.id;
+
+  const destination = "0400777888";
+  const draft = await createDraft(agent.cookie, threadId, {
+    channel: "SMS",
+    classification: "MARKETING",
+    bodyText: "Check out our latest listings!",
+    recipientDisplayName: "Sam SmsMarketing",
+    recipientDestination: destination,
+  });
+
+  await fetch(`${baseUrl}/api/communications/messages/${draft.id}/request-approval`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: draft.version }),
+  });
+  const approveRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/approve`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: draft.version + 1 }),
+  });
+  const approved = await jsonOf<{ status: string; version: number }>(approveRes);
+  assert.equal(approved.status, "APPROVED");
+
+  const blockedSend = await sendMessage(agent.cookie, draft.id, approved.version);
+  assert.equal(blockedSend.status, 200);
+  assert.equal(blockedSend.body.blocked, true);
+  assert.equal(blockedSend.body.message.status, "BLOCKED_BY_CONSENT");
+
+  const consentRes = await fetch(`${baseUrl}/api/communications/consent`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ channel: "SMS", destination, marketingOptIn: true }),
+  });
+  assert.equal(consentRes.status, 201);
+
+  const requeueRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: blockedSend.body.message.version }),
+  });
+  const requeued = await jsonOf<{ blocked: boolean; message: { status: string } }>(requeueRes);
+  assert.equal(requeued.blocked, false);
+  assert.equal(requeued.message.status, "SENT");
+});
+
+test("AE Grow Priority 3 regression — a property-first thread and message keep propertyId set and partyId null throughout the lifecycle, unchanged by the contact-first addition", async () => {
+  const threadId = await createThread(agent.cookie, "Property-first regression check");
+  const threadRes = await fetch(`${baseUrl}/api/communications/threads/${threadId}`, { headers: { cookie: agent.cookie } });
+  const threadBody = await jsonOf<{ thread: { propertyId: number | null; partyId: number | null } }>(threadRes);
+  assert.equal(threadRes.status, 200);
+  assert.equal(threadBody.thread.propertyId, propertyId);
+  assert.equal(threadBody.thread.partyId, null, "a property-first thread must never pick up a partyId it was never given");
+
+  const participant = await addManualParticipant(agent.cookie, threadId, {
+    displayName: "Regression Contact",
+    role: "Seller",
+    email: `regression-${Date.now()}@example.com`,
+    reason: "Property-first regression contact",
+  });
+  const draft = await createDraft(agent.cookie, threadId, {
+    channel: "EMAIL",
+    classification: "TRANSACTIONAL",
+    bodyText: "Property-first regression message.",
+    recipientParticipantId: participant.id,
+  });
+  assert.equal(draft.status, "DRAFT");
+
+  const { status, body } = await sendMessage(agent.cookie, draft.id, draft.version);
+  assert.equal(status, 200);
+  assert.equal(body.message.status, "SENT");
+  assert.equal(body.message.propertyId, propertyId, "a property-first message must keep its propertyId unchanged by the Priority 3 anchoring change");
+  assert.equal(body.message.partyId, null, "a property-first message must never pick up a partyId it was never given");
 });

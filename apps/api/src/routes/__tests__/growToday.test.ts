@@ -429,3 +429,71 @@ test("PATCH /opportunities/:id requires grow.opportunities.manage, validates inp
   assert.ok(auditRows.length > 0, "every successful PATCH must leave a real audit_logs row, not a silent update");
   assert.equal(auditRows[auditRows.length - 1].action, "grow_opportunity_next_action_updated");
 });
+
+// ---------------------------------------------------------------------
+// AE GROW PRIORITY 3 — additive communication-action metadata on Today's
+// availableActions ("email"/"sms"/"view_contact"). None of the ranking/
+// ordering/dedup tests above are touched — this is a new, independent
+// test(...) block asserting only the new, additive availableActions
+// entries and contactEmail/contactMobile fields growToday.ts now carries
+// (see that file's own AE GROW PRIORITY 3 header comment).
+// ---------------------------------------------------------------------
+
+test("AE Grow Priority 3 — Today's availableActions include email/sms/view_contact only when the contact actually has that field on file", async () => {
+  const propertyId = await createProperty(A.agent.cookie, "19 Contact Actions Way");
+  const uniqueSuffix = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+
+  const bothChannelsPartyId = await createParty(A.agent.cookie, propertyId, {
+    firstName: "Ellie",
+    lastName: "BothChannels",
+    email: `ellie-both-${uniqueSuffix}@example.com`,
+    mobile: "0400111222",
+  });
+  const bothChannelsOppId = await createOpportunity(A.agent.cookie, {
+    partyId: bothChannelsPartyId,
+    propertyId,
+    opportunityType: "Appraisal",
+    reason: "Wants an appraisal and is reachable by email and SMS.",
+  });
+
+  const noChannelsPartyId = await createParty(A.agent.cookie, propertyId, {
+    firstName: "Noah",
+    lastName: "NoChannels",
+  });
+  const noChannelsOppId = await createOpportunity(A.agent.cookie, {
+    partyId: noChannelsPartyId,
+    propertyId,
+    opportunityType: "Appraisal",
+    reason: "Wants an appraisal but has no email or mobile on file.",
+  });
+
+  const { status, body } = await fetchToday(A.agent.cookie);
+  assert.equal(status, 200);
+
+  const bothAction = body.priorityActions.find((a: any) => a.id === `opportunity:${bothChannelsOppId}`);
+  assert.ok(bothAction, "the both-channels opportunity must be surfaced on Today");
+  assert.equal(bothAction.partyId, bothChannelsPartyId);
+  assert.equal(bothAction.contactEmail, `ellie-both-${uniqueSuffix}@example.com`);
+  assert.equal(bothAction.contactMobile, "0400111222");
+  assert.ok(bothAction.availableActions.some((b: any) => b.action === "email" && b.partyId === bothChannelsPartyId));
+  assert.ok(bothAction.availableActions.some((b: any) => b.action === "sms" && b.partyId === bothChannelsPartyId));
+  assert.ok(bothAction.availableActions.some((b: any) => b.action === "view_contact" && b.partyId === bothChannelsPartyId));
+
+  const noChannelsAction = body.priorityActions.find((a: any) => a.id === `opportunity:${noChannelsOppId}`);
+  assert.ok(noChannelsAction, "the no-channels opportunity must still be surfaced on Today");
+  assert.equal(noChannelsAction.partyId, noChannelsPartyId);
+  assert.equal(noChannelsAction.contactEmail, null);
+  assert.equal(noChannelsAction.contactMobile, null);
+  assert.ok(
+    !noChannelsAction.availableActions.some((b: any) => b.action === "email"),
+    "no email action button when the contact has no email on file",
+  );
+  assert.ok(
+    !noChannelsAction.availableActions.some((b: any) => b.action === "sms"),
+    "no sms action button when the contact has no mobile on file",
+  );
+  assert.ok(
+    noChannelsAction.availableActions.some((b: any) => b.action === "view_contact" && b.partyId === noChannelsPartyId),
+    "view_contact is unconditional — it only needs partyId, which every action already carries",
+  );
+});

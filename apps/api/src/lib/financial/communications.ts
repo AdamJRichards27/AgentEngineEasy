@@ -27,6 +27,16 @@
 //  - Never throws: a broken notification must not break the financial
 //    write path that triggered it (same posture as events.ts's
 //    emitFinancialEvent, for the same reason).
+//
+//  - AE Grow Priority 3: createDraftMessage no longer accepts propertyId
+//    (or partyId) as a caller-supplied field — a message always
+//    denormalises its anchor straight from its parent thread (see
+//    lib/communications/messages.ts's own CreateDraftMessageInput doc
+//    comment). findOrCreateFinancialNoticesThread already creates/finds
+//    the thread with this notice's propertyId set, so the draft message
+//    below still ends up with the identical propertyId as before this
+//    change — nothing about this module's actual behaviour is different,
+//    only how that value reaches the message row.
 
 import { createThread, createDraftMessage, listThreadsForProperty } from "../communications/messages.js";
 import { logger } from "@aee/events";
@@ -71,7 +81,6 @@ export async function notifyFinancialEvent(input: NotifyFinancialEventInput): Pr
     await createDraftMessage({
       threadId,
       brokerageId: input.brokerageId,
-      propertyId: input.propertyId,
       transactionId: input.transactionId ?? null,
       channel: "INTERNAL_NOTE",
       classification: "TRANSACTIONAL",

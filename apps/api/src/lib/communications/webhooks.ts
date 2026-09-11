@@ -14,6 +14,13 @@
 //     is always a value THIS APP resolved and validated, never trusted from
 //     the inbound payload; every matched message's own brokerageId is then
 //     cross-checked against it before anything is mutated.
+//
+// AE GROW PRIORITY 3: findMessageForBrokerage() below resolves a message by
+// (providerMessageId, brokerageId, provider) only — it never referenced
+// propertyId — so it already correctly matches a contact-first message
+// (propertyId null, partyId set) with no changes required. The only fix
+// this priority needed here was publishCommunicationMessageEvent no longer
+// hardcoding partyId to null.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -178,7 +185,10 @@ async function publishCommunicationMessageEvent(
     occurredAt: new Date(),
     propertyId: message.propertyId,
     transactionId: message.transactionId,
-    partyId: null,
+    // AE Grow Priority 3: previously hardcoded null — now the message's
+    // real, denormalised partyId, matching outbox.ts's own
+    // publishCommunicationEvent fix.
+    partyId: message.partyId,
     brokerageId: message.brokerageId,
     agentId: message.sendOnBehalfOfUserId ?? message.senderUserId ?? null,
     actorType: "SYSTEM",

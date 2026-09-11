@@ -9,7 +9,21 @@
 // (chosen from the thread's existing participants -- add one first via the
 // controls below), a channel, a classification, and either a template or a
 // hand-written body. There is no bulk/multi-recipient send anywhere here.
-import { useState } from "react";
+//
+// AE GROW PRIORITY 3 -- Contact 360 reuses this exact composer rather than
+// a second one. ThreadDetailBlock/AddParticipantControls, which used to
+// take a hardcoded `propertyId` purely to fetch recipient candidates, now
+// take a small `RecipientSource` (a query key + fetch function) instead --
+// the only change needed to make them work identically for a property-
+// anchored thread (CommunicationsSection, unchanged public API below) and
+// a contact-anchored one (ContactCommunicationsSection, new). ComposerForm
+// and MessageRow were already generic over threadId/participants and
+// needed no such change; ComposerForm gained two small optional props
+// (initialChannel, and auto-selecting the recipient when there is exactly
+// one participant) purely so a Contact 360 Email/SMS click can land the
+// user straight in a ready-to-send composer -- see ContactCommunicationsSection
+// below for how those are used.
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../lib/api";
 import {
@@ -24,19 +38,33 @@ import {
   communicationStatusLabel,
   communicationStatusPillClass,
   createCommunicationThread,
+  createContactCommunicationThread,
   createDraftMessage,
+  fetchContactRecipientCandidates,
   fetchRecipientCandidates,
   fetchTemplates,
   fetchThreadDetail,
+  fetchThreadsForParty,
   fetchThreadsForProperty,
   requestApproval,
   requeueMessage,
   sendMessageNow,
+  type CandidateRecipient,
   type CommunicationChannel,
   type CommunicationClassification,
   type CommunicationMessage,
   type CommunicationParticipant,
 } from "../lib/communications";
+
+// A source of recipient candidates for a thread's "+ Add recipient"
+// control -- either a property's linked parties or (AE Grow Priority 3) a
+// single contact -- kept as data rather than a propertyId so
+// ThreadDetailBlock/AddParticipantControls don't need to know which kind
+// of anchor a thread has.
+interface RecipientSource {
+  queryKey: unknown[];
+  fetch: () => Promise<{ candidates: CandidateRecipient[] }>;
+}
 
 export function CommunicationsSection({ propertyId }: { propertyId: number }) {
   const queryClient = useQueryClient();
@@ -50,6 +78,11 @@ export function CommunicationsSection({ propertyId }: { propertyId: number }) {
   });
 
   const invalidateThreads = () => queryClient.invalidateQueries({ queryKey: ["communications-threads", propertyId] });
+
+  const recipientSource: RecipientSource = {
+    queryKey: ["communications-recipients", "property", propertyId],
+    fetch: () => fetchRecipientCandidates(propertyId),
+  };
 
   const createThreadMut = useMutation({
     mutationFn: (subject: string) => createCommunicationThread(propertyId, { subject }),
@@ -88,7 +121,7 @@ export function CommunicationsSection({ propertyId }: { propertyId: number }) {
                 <span className="muted">{new Date(t.lastActivityAt).toLocaleString()}</span>
               </div>
               {selectedThreadId === t.id && (
-                <ThreadDetailBlock threadId={t.id} propertyId={propertyId} onChanged={invalidateThreads} />
+                <ThreadDetailBlock threadId={t.id} recipientSource={recipientSource} onChanged={invalidateThreads} />
               )}
             </li>
           ))}
@@ -126,9 +159,225 @@ export function CommunicationsSection({ propertyId }: { propertyId: number }) {
   );
 }
 
-function ThreadDetailBlock({ threadId, propertyId, onChanged }: { threadId: number; propertyId: number; onChanged: () => void }) {
+// AE GROW PRIORITY 3 -- Contact 360's communications section. Thin
+// integration by design (see this file's header comment): the thread
+// list/detail/composer below are the exact same pieces
+// CommunicationsSection uses, pointed at the new contact-first routes
+// (lib/communications.ts's fetchThreadsForParty / fetchContactRecipientCandidates
+// / createContactCommunicationThread) instead of the property-first ones.
+// The one genuinely new piece is the Email/SMS quick-start below: rather
+// than making a user create a thread, add the contact as a recipient, and
+// then open the composer as three separate steps (the property-first flow
+// above still requires exactly that), a single Email/SMS click here does
+// all three and lands straight in a ready-to-send composer -- see
+// quickStart below.
+export function ContactCommunicationsSection({
+  partyId,
+  canStartThread,
+  quickComposeChannel,
+  onQuickComposeHandled,
+}: {
+  partyId: number;
+  // Gates thread creation (Email/SMS quick-start and "+ New Thread") on
+  // the grow.contacts.manage entitlement the server actually enforces on
+  // POST /grow/contacts/:partyId/communications/threads -- reading the
+  // thread/message history and composing/sending within an existing
+  // thread reuse the Hub's original, ungated-by-Grow-entitlement routes,
+  // so only the "start a new contact-first thread" action needs this.
+  canStartThread: boolean;
+  // Set (briefly) by an external trigger -- Grow Today's Email/SMS action
+  // buttons -- to run the same quick-start flow as this section's own
+  // Email/SMS buttons, without the user needing to click them again after
+  // being navigated here. Cleared via onQuickComposeHandled once handled.
+  quickComposeChannel?: CommunicationChannel | null;
+  onQuickComposeHandled?: () => void;
+}) {
   const queryClient = useQueryClient();
-  const [showComposer, setShowComposer] = useState(false);
+  const [selectedThreadId, setSelectedThreadId] = useState<number | null>(null);
+  const [autoComposeChannel, setAutoComposeChannel] = useState<CommunicationChannel | null>(null);
+  const [showNewThread, setShowNewThread] = useState(false);
+  const [newSubject, setNewSubject] = useState("");
+  const [quickStartError, setQuickStartError] = useState<string | null>(null);
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["communications-threads", "party", partyId],
+    queryFn: () => fetchThreadsForParty(partyId),
+  });
+
+  const { data: candidatesData } = useQuery({
+    queryKey: ["communications-recipients", "party", partyId],
+    queryFn: () => fetchContactRecipientCandidates(partyId),
+  });
+  const candidate = candidatesData?.candidates[0];
+
+  const invalidateThreads = () => queryClient.invalidateQueries({ queryKey: ["communications-threads", "party", partyId] });
+
+  const recipientSource: RecipientSource = {
+    queryKey: ["communications-recipients", "party", partyId],
+    fetch: () => fetchContactRecipientCandidates(partyId),
+  };
+
+  const createThreadMut = useMutation({
+    mutationFn: (subject: string) => createContactCommunicationThread(partyId, { subject }),
+    onSuccess: (thread) => {
+      setNewSubject("");
+      setShowNewThread(false);
+      invalidateThreads();
+      setAutoComposeChannel(null);
+      setSelectedThreadId(thread.id);
+    },
+  });
+
+  // Email/SMS quick-start: create a thread anchored to this contact, add
+  // the contact itself as its one participant, then open straight into a
+  // composer pre-set to that channel with that participant pre-selected
+  // (ComposerForm below auto-selects the recipient when there's exactly
+  // one). This is the "click Email or SMS, get a compose UI" flow Contact
+  // 360 needs, without a second composer implementation.
+  const quickStart = useMutation({
+    mutationFn: async (channel: CommunicationChannel) => {
+      const thread = await createContactCommunicationThread(partyId, { subject: channel === "EMAIL" ? "Email" : "SMS" });
+      await addParticipantFromParty(thread.id, { partyId, role: "Contact" });
+      return { thread, channel };
+    },
+    onSuccess: ({ thread, channel }) => {
+      setQuickStartError(null);
+      invalidateThreads();
+      setSelectedThreadId(thread.id);
+      setAutoComposeChannel(channel);
+    },
+    onError: (err: unknown) => setQuickStartError(err instanceof ApiError ? err.friendly : "Couldn't start that message."),
+  });
+
+  useEffect(() => {
+    if (!quickComposeChannel) return;
+    if (canStartThread && !quickStart.isPending) {
+      quickStart.mutate(quickComposeChannel);
+    }
+    onQuickComposeHandled?.();
+    // Only re-run when the external trigger itself changes -- quickStart
+    // and onQuickComposeHandled are stable enough for this purpose and
+    // including them would re-fire the effect on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickComposeChannel]);
+
+  const threads = data?.threads ?? [];
+
+  return (
+    <section className="card">
+      <h2>Communications</h2>
+      <p className="muted">Email and SMS sent to this contact, and the history of every message — the same composer as a property's Communications section.</p>
+
+      {canStartThread && (
+        <div className="pc-item-actions">
+          <button
+            type="button"
+            className="btn btn-primary btn-small"
+            disabled={!candidate?.email || quickStart.isPending}
+            title={candidate?.email ? undefined : "No email on file for this contact"}
+            onClick={() => quickStart.mutate("EMAIL")}
+          >
+            Email
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary btn-small"
+            disabled={!candidate?.mobile || quickStart.isPending}
+            title={candidate?.mobile ? undefined : "No mobile on file for this contact"}
+            onClick={() => quickStart.mutate("SMS")}
+          >
+            SMS
+          </button>
+        </div>
+      )}
+      {quickStartError && <p className="error-text">{quickStartError}</p>}
+
+      {isLoading ? (
+        <p className="muted">Loading communications…</p>
+      ) : isError ? (
+        <p className="error-text">Couldn't load communications for this contact.</p>
+      ) : threads.length === 0 ? (
+        <p className="muted">No communication threads yet.</p>
+      ) : (
+        <ul className="item-list">
+          {threads.map((t) => (
+            <li key={t.id}>
+              <div className="pc-item-header">
+                <button
+                  type="button"
+                  className="btn btn-link"
+                  onClick={() => {
+                    setAutoComposeChannel(null);
+                    setSelectedThreadId((cur) => (cur === t.id ? null : t.id));
+                  }}
+                >
+                  {t.subject}
+                </button>
+                <span className="muted">{new Date(t.lastActivityAt).toLocaleString()}</span>
+              </div>
+              {selectedThreadId === t.id && (
+                <ThreadDetailBlock
+                  threadId={t.id}
+                  recipientSource={recipientSource}
+                  onChanged={invalidateThreads}
+                  initialComposerChannel={autoComposeChannel ?? undefined}
+                />
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {canStartThread &&
+        (!showNewThread ? (
+          <button type="button" className="btn btn-link btn-small" onClick={() => setShowNewThread(true)}>
+            + New Thread
+          </button>
+        ) : (
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!newSubject.trim()) return;
+              createThreadMut.mutate(newSubject.trim());
+            }}
+          >
+            <input
+              value={newSubject}
+              onChange={(e) => setNewSubject(e.target.value)}
+              placeholder="Thread subject (e.g. Appraisal follow-up)"
+              required
+            />
+            <button className="btn btn-primary btn-small" type="submit" disabled={createThreadMut.isPending}>
+              Create
+            </button>
+            <button type="button" className="btn btn-link btn-small" onClick={() => setShowNewThread(false)}>
+              Cancel
+            </button>
+          </form>
+        ))}
+    </section>
+  );
+}
+
+function ThreadDetailBlock({
+  threadId,
+  recipientSource,
+  onChanged,
+  initialComposerChannel,
+}: {
+  threadId: number;
+  recipientSource: RecipientSource;
+  onChanged: () => void;
+  // AE Grow Priority 3: when set, the composer below opens immediately
+  // with this channel preselected, rather than requiring a second
+  // "+ Compose Message" click -- see ContactCommunicationsSection's
+  // quick-start above. Undefined for the property-first flow, which keeps
+  // its original two-step "expand thread, then compose" behaviour.
+  initialComposerChannel?: CommunicationChannel;
+}) {
+  const queryClient = useQueryClient();
+  const [showComposer, setShowComposer] = useState(initialComposerChannel != null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["communications-thread", threadId],
@@ -153,7 +402,7 @@ function ThreadDetailBlock({ threadId, propertyId, onChanged }: { threadId: numb
           <span className="muted">{data.participants.map((p) => `${p.displayName} (${p.role})`).join(", ")}</span>
         )}
       </div>
-      <AddParticipantControls threadId={threadId} propertyId={propertyId} onAdded={invalidate} />
+      <AddParticipantControls threadId={threadId} recipientSource={recipientSource} onAdded={invalidate} />
 
       {data.messages.length === 0 ? (
         <p className="muted">No messages in this thread yet.</p>
@@ -173,6 +422,7 @@ function ThreadDetailBlock({ threadId, propertyId, onChanged }: { threadId: numb
         <ComposerForm
           threadId={threadId}
           participants={data.participants}
+          initialChannel={initialComposerChannel}
           onSent={() => {
             setShowComposer(false);
             invalidate();
@@ -184,7 +434,15 @@ function ThreadDetailBlock({ threadId, propertyId, onChanged }: { threadId: numb
   );
 }
 
-function AddParticipantControls({ threadId, propertyId, onAdded }: { threadId: number; propertyId: number; onAdded: () => void }) {
+function AddParticipantControls({
+  threadId,
+  recipientSource,
+  onAdded,
+}: {
+  threadId: number;
+  recipientSource: RecipientSource;
+  onAdded: () => void;
+}) {
   const [mode, setMode] = useState<"closed" | "party" | "manual">("closed");
   const [selectedPartyId, setSelectedPartyId] = useState("");
   const [role, setRole] = useState("");
@@ -196,8 +454,8 @@ function AddParticipantControls({ threadId, propertyId, onAdded }: { threadId: n
   const [error, setError] = useState<string | null>(null);
 
   const { data: candidatesData } = useQuery({
-    queryKey: ["communications-recipients", propertyId],
-    queryFn: () => fetchRecipientCandidates(propertyId),
+    queryKey: recipientSource.queryKey,
+    queryFn: recipientSource.fetch,
     enabled: mode === "party",
   });
 
@@ -274,7 +532,7 @@ function AddParticipantControls({ threadId, propertyId, onAdded }: { threadId: n
         <button type="button" className="btn btn-link btn-small" onClick={() => setMode("closed")}>
           Cancel
         </button>
-        {candidates.length === 0 && <p className="muted">No parties linked to this property yet.</p>}
+        {candidates.length === 0 && <p className="muted">No candidate recipients found for this thread yet.</p>}
         {error && <p className="error-text">{error}</p>}
       </form>
     );
@@ -315,16 +573,28 @@ function AddParticipantControls({ threadId, propertyId, onAdded }: { threadId: n
 function ComposerForm({
   threadId,
   participants,
+  initialChannel,
   onSent,
   onCancel,
 }: {
   threadId: number;
   participants: CommunicationParticipant[];
+  // AE Grow Priority 3: preselects the channel (EMAIL/SMS) the user
+  // actually clicked, instead of always defaulting to EMAIL -- undefined
+  // for the property-first flow.
+  initialChannel?: CommunicationChannel;
   onSent: () => void;
   onCancel: () => void;
 }) {
-  const [recipientParticipantId, setRecipientParticipantId] = useState("");
-  const [channel, setChannel] = useState<CommunicationChannel>("EMAIL");
+  // AE Grow Priority 3: when there's exactly one participant (always true
+  // right after ContactCommunicationsSection's quick-start, which adds the
+  // contact as the thread's only participant), pick it automatically --
+  // one fewer click, and harmless for the property-first flow, which
+  // simply keeps requiring a manual choice whenever there's more than one.
+  const [recipientParticipantId, setRecipientParticipantId] = useState(() =>
+    participants.length === 1 ? String(participants[0].id) : "",
+  );
+  const [channel, setChannel] = useState<CommunicationChannel>(initialChannel ?? "EMAIL");
   const [classification, setClassification] = useState<CommunicationClassification>("TRANSACTIONAL");
   const [templateId, setTemplateId] = useState("");
   const [subject, setSubject] = useState("");

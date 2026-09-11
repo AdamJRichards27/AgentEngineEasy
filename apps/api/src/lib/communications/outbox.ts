@@ -33,6 +33,15 @@
 //      terminal FAILED, publish COMMUNICATION_MESSAGE_FAILED — the
 //      Exception & Risk Engine's communicationDelivery.ts rule listens for
 //      this (Section 24).
+//
+// AE GROW PRIORITY 3: this send path (queueMessage -> evaluateAndDispatch-
+// QueuedMessage -> dispatchMessage) is the SOLE place sandboxEmailProvider/
+// sandboxSmsProvider are ever called — steps 5/6/7 above (consent, cost
+// control, quiet hours) run unconditionally before either provider is
+// reached, for every EMAIL/SMS message regardless of whether it is
+// property-first or contact-first (these gates key on channel/destination/
+// classification, never on propertyId/partyId), so no separate contact-
+// first enforcement was needed here.
 
 import { and, eq, isNotNull, lte, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -112,7 +121,10 @@ export async function applyMessageTransition(input: ApplyMessageTransitionInput)
     action: input.auditAction,
     recordType: "communication_message",
     recordId: String(row.id),
-    propertyId: row.propertyId,
+    // AE Grow Priority 3: propertyId is nullable now (a contact-first
+    // message has none) — logAudit's own propertyId field is
+    // `number | undefined`, never `null`.
+    propertyId: row.propertyId ?? undefined,
     previousValue: existing.status,
     updatedValue: row.status,
   });
@@ -150,7 +162,12 @@ async function publishCommunicationEvent(eventType: CommunicationOutboxEventType
     occurredAt: new Date(),
     propertyId: message.propertyId,
     transactionId: message.transactionId,
-    partyId: null,
+    // AE Grow Priority 3: previously hardcoded null (no partyId column
+    // existed on communicationMessages yet) — now the message's real,
+    // denormalised partyId, so a contact-first message's own lifecycle
+    // events (queued/sent/failed/blocked) carry its party the same way a
+    // property-first message's events carry its property.
+    partyId: message.partyId,
     brokerageId: message.brokerageId,
     agentId: message.sendOnBehalfOfUserId ?? message.senderUserId ?? null,
     actorType: actorUserId ? "USER" : "SYSTEM",

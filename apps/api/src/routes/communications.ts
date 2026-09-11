@@ -9,15 +9,30 @@
 // Brokerage-Administrator-only). Every mutating route that changes an
 // existing communicationMessages row carries expectedVersion (the same
 // optimistic-concurrency contract as Pit Crew's routes).
+//
+// AE GROW PRIORITY 3 — contact-first routes. The block near the bottom of
+// this file (search "contact-first") adds the only new HTTP surface this
+// priority needed: thread creation and recipient-candidate resolution for
+// a party with no property, mounted under Grow's own /grow/contacts/:partyId
+// namespace (matching routes/contacts.ts) so it carries its own explicit
+// grow.contacts.* entitlement check — unlike every property-scoped route
+// above, which is reachable by any authenticated brokerage user regardless
+// of Grow entitlement. Every other action on a contact-first thread
+// (drafting/sending/approving a message, adding a participant, etc.) reuses
+// the exact same generic /communications/threads/:threadId/... routes
+// above unchanged — those never assumed a propertyId, only a threadId
+// resolvable within the caller's own brokerage.
 
 import { Router, type Response } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   createThread,
   getThread,
   listThreadsForProperty,
+  listThreadsForParty,
   listRecentMessagesForBrokerage,
   listParticipants,
   listMessagesForThread,
@@ -29,7 +44,12 @@ import {
   sendMessageNow,
   requeueMessage,
 } from "../lib/communications/messages.js";
-import { listRecipientCandidatesForProperty, addParticipantFromParty, addManualParticipant } from "../lib/communications/recipientResolution.js";
+import {
+  listRecipientCandidatesForProperty,
+  getContactRecipientCandidate,
+  addParticipantFromParty,
+  addManualParticipant,
+} from "../lib/communications/recipientResolution.js";
 import {
   createTemplate,
   createTemplateVersion,
@@ -45,6 +65,7 @@ import {
   CommunicationTenancyError,
   CommunicationConcurrencyError,
   CommunicationTransitionError,
+  CommunicationAnchorError,
   COMMUNICATION_CHANNELS,
   COMMUNICATION_CLASSIFICATIONS,
 } from "../lib/communications/types.js";
@@ -54,6 +75,10 @@ export const communicationsRouter = Router();
 function handleCommunicationsError(err: unknown, res: Response): boolean {
   if (err instanceof CommunicationConcurrencyError) {
     res.status(409).json({ error: err.message });
+    return true;
+  }
+  if (err instanceof CommunicationAnchorError) {
+    res.status(400).json({ error: err.message });
     return true;
   }
   if (err instanceof CommunicationTransitionError || err instanceof CommunicationTemplateError) {
@@ -163,6 +188,92 @@ communicationsRouter.get("/communications/threads/:threadId", requireAuth, async
 });
 
 // ---------------------------------------------------------------------
+// AE GROW PRIORITY 3 — contact-first threads. Mounted under Grow's own
+// /grow/contacts/:partyId namespace (matching routes/contacts.ts's own
+// mount) precisely so it can carry its own explicit grow.contacts.*
+// entitlement check, rather than inheriting the property-scoped routes'
+// "any authenticated brokerage user" reach. Reuses createThread/
+// listThreadsForParty/getContactRecipientCandidate — the exact same
+// service functions and DB tables the property-scoped routes above use —
+// never a second thread/message model.
+//
+// Everything past thread creation (drafting a message, adding a
+// participant, approving, sending, requeuing) reuses the generic
+// /communications/threads/:threadId/... and /communications/messages/
+// :messageId/... routes already declared above/below in this file
+// unchanged: none of them ever assumed a propertyId, only a threadId/
+// messageId resolvable within the caller's own brokerage. The intended
+// call sequence for a Contact 360 Email/SMS send is:
+//   1. POST /grow/contacts/:partyId/communications/threads  -> { id, ... }
+//   2. GET  /grow/contacts/:partyId/communications/recipients -> { candidates: [<the contact>] }
+//   3. POST /communications/threads/:threadId/participants  (partyId + a role) -> { id: participantId, ... }
+//   4. POST /communications/threads/:threadId/messages       (recipientParticipantId, channel, classification, bodyText, ...) -> DRAFT message
+//   5. POST /communications/messages/:messageId/send          (expectedVersion) -> { message, blocked, dispatched }
+// ---------------------------------------------------------------------
+
+const createContactThreadSchema = z.object({
+  transactionId: z.coerce.number().int().optional(),
+  subject: z.string().min(1),
+});
+
+communicationsRouter.get(
+  "/grow/contacts/:partyId/communications/threads",
+  requireAuth,
+  requireEntitlement("grow.contacts.read"),
+  async (req, res) => {
+    const user = req.authedUser!;
+    const partyId = Number(req.params.partyId);
+    try {
+      const threads = await listThreadsForParty(partyId, user.brokerageId);
+      res.json({ threads });
+    } catch (err) {
+      if (!handleCommunicationsError(err, res)) throw err;
+    }
+  },
+);
+
+communicationsRouter.post(
+  "/grow/contacts/:partyId/communications/threads",
+  requireAuth,
+  requireEntitlement("grow.contacts.manage"),
+  async (req, res) => {
+    const user = req.authedUser!;
+    const partyId = Number(req.params.partyId);
+    const body = createContactThreadSchema.safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: "Invalid request." });
+    try {
+      const thread = await createThread({
+        brokerageId: user.brokerageId,
+        partyId,
+        transactionId: body.data.transactionId ?? null,
+        subject: body.data.subject,
+        createdByUserId: user.id,
+      });
+      res.status(201).json(thread);
+    } catch (err) {
+      if (!handleCommunicationsError(err, res)) throw err;
+    }
+  },
+);
+
+// The contact-first analogue of GET /properties/:propertyId/communications/
+// recipients above: a party-anchored thread has no propertyParties links to
+// resolve candidates from, so the candidate pool is simply the one contact
+// itself, shaped identically (`candidates: CandidateRecipient[]`) so a
+// composer built against the property-first shape needs no special-casing.
+communicationsRouter.get(
+  "/grow/contacts/:partyId/communications/recipients",
+  requireAuth,
+  requireEntitlement("grow.contacts.read"),
+  async (req, res) => {
+    const user = req.authedUser!;
+    const partyId = Number(req.params.partyId);
+    const candidate = await getContactRecipientCandidate(partyId, user.brokerageId);
+    res.json({ candidates: candidate ? [candidate] : [] });
+  },
+);
+
+// ---------------------------------------------------------------------
 // Participants (Section 11).
 // ---------------------------------------------------------------------
 
@@ -253,11 +364,14 @@ communicationsRouter.post("/communications/threads/:threadId/messages", requireA
   const body = createDraftMessageSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
-    const thread = await getThread(threadId, user.brokerageId);
+    // AE Grow Priority 3: propertyId/partyId are no longer passed in here —
+    // createDraftMessage derives both directly from the thread itself (see
+    // messages.ts), so a draft can never disagree with its own thread's
+    // property/contact anchor. This also means a contact-first thread (no
+    // propertyId at all) works here unchanged.
     const message = await createDraftMessage({
       threadId,
       brokerageId: user.brokerageId,
-      propertyId: thread.propertyId,
       transactionId: body.data.transactionId ?? null,
       channel: body.data.channel,
       classification: body.data.classification,

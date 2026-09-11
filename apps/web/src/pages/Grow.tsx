@@ -4,6 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
 import { AskAgentEngine } from "../components/AskAgentEngine";
+// AE GROW Priority 3 — Contact 360's communications section, reused unmodified here (see that
+// component's own header comment). Grow Today's Email/SMS action buttons below route into it via
+// GrowWorkspace's pendingComposeChannel state rather than opening a second composer.
+import { ContactCommunicationsSection } from "../components/CommunicationsSection";
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
@@ -279,9 +283,31 @@ function GrowWorkspace() {
   // AND the selected contact in one click — Priority 1's own tab/state model is otherwise
   // untouched.
   const [contactPartyId, setContactPartyId] = useState<number | null>(null);
+  // AE GROW Priority 3 §2/§4 — the channel (if any) a Grow Today Email/SMS action button asked
+  // Contact 360 to jump straight into composing. Lifted up here for the same reason
+  // contactPartyId is: GrowToday's own buttons live several components away from
+  // ContactCommunicationsSection, which is what actually consumes this. Consumed exactly once by
+  // that component's quick-start effect and cleared straight back to null via
+  // onComposeHandled below, so it never re-fires on its own re-render.
+  const [pendingComposeChannel, setPendingComposeChannel] = useState<"EMAIL" | "SMS" | null>(null);
 
   function viewContact(partyId: number) {
     setContactPartyId(partyId);
+    setTab("contacts");
+  }
+
+  // AE GROW Priority 3 §4 — Grow Today's Email/SMS action buttons: same navigation as
+  // viewContact above, plus telling Contact 360's communications section which channel to open
+  // straight into a composer for, rather than requiring a second click once there.
+  function emailContact(partyId: number) {
+    setContactPartyId(partyId);
+    setPendingComposeChannel("EMAIL");
+    setTab("contacts");
+  }
+
+  function smsContact(partyId: number) {
+    setContactPartyId(partyId);
+    setPendingComposeChannel("SMS");
     setTab("contacts");
   }
 
@@ -317,9 +343,23 @@ function GrowWorkspace() {
         ))}
       </nav>
 
-      {tab === "today" && <GrowToday onAskAE={() => setTab("askAE")} onViewContact={viewContact} />}
+      {tab === "today" && (
+        <GrowToday
+          onAskAE={() => setTab("askAE")}
+          onViewContact={viewContact}
+          onEmailContact={emailContact}
+          onSmsContact={smsContact}
+        />
+      )}
       {tab === "opportunities" && <GrowOpportunitiesTab />}
-      {tab === "contacts" && <GrowContactsTab selectedPartyId={contactPartyId} onSelectPartyId={setContactPartyId} />}
+      {tab === "contacts" && (
+        <GrowContactsTab
+          selectedPartyId={contactPartyId}
+          onSelectPartyId={setContactPartyId}
+          pendingComposeChannel={pendingComposeChannel}
+          onComposeHandled={() => setPendingComposeChannel(null)}
+        />
+      )}
       {tab === "nurture" && (
         <GrowComingSoon
           title="Nurture"
@@ -347,7 +387,23 @@ function GrowWorkspace() {
 // AE GROW Priority 2 §12: gained one new prop (onViewContact) so a card's contact can open
 // directly into Contact 360 — see GrowWorkspace.viewContact above. No other change to this
 // component or to the /grow/today contract it consumes.
-function GrowToday({ onAskAE, onViewContact }: { onAskAE: () => void; onViewContact: (partyId: number) => void }) {
+//
+// AE GROW Priority 3 §4: gained two more (onEmailContact/onSmsContact), the same "route into
+// Contact 360" precedent as onViewContact — see GrowWorkspace.emailContact/smsContact. Still no
+// change to the /grow/today contract or to this component's own ranking/filtering logic; the
+// only new read is the contactEmail/contactMobile/availableActions fields growToday.ts's types
+// already carry.
+function GrowToday({
+  onAskAE,
+  onViewContact,
+  onEmailContact,
+  onSmsContact,
+}: {
+  onAskAE: () => void;
+  onViewContact: (partyId: number) => void;
+  onEmailContact: (partyId: number) => void;
+  onSmsContact: (partyId: number) => void;
+}) {
   const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
 
@@ -368,6 +424,11 @@ function GrowToday({ onAskAE, onViewContact }: { onAskAE: () => void; onViewCont
   const canAddNote = hasEntitlement("grow.activities.manage");
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
   const canViewContacts = hasEntitlement("grow.contacts.read");
+  // AE GROW Priority 3 §4: Email/SMS action buttons start a contact-first communication thread
+  // (POST /grow/contacts/:partyId/communications/threads), which the server gates on
+  // grow.contacts.manage — see routes/communications.ts's own header comment. Gating the buttons
+  // on the same entitlement here keeps a button that would just 403 from ever being shown.
+  const canManageContactComms = hasEntitlement("grow.contacts.manage");
 
   const doNow = data.priorityActions.filter((a) => a.priority === "DoNow");
   const doToday = data.priorityActions.filter((a) => a.priority === "DoToday");
@@ -418,8 +479,11 @@ function GrowToday({ onAskAE, onViewContact }: { onAskAE: () => void; onViewCont
                     canAddNote={canAddNote}
                     canManageOpportunities={canManageOpportunities}
                     canViewContacts={canViewContacts}
+                    canManageContactComms={canManageContactComms}
                     onAskAE={onAskAE}
                     onViewContact={onViewContact}
+                    onEmailContact={onEmailContact}
+                    onSmsContact={onSmsContact}
                   />
                 ))}
               </ul>
@@ -437,8 +501,11 @@ function GrowToday({ onAskAE, onViewContact }: { onAskAE: () => void; onViewCont
                     canAddNote={canAddNote}
                     canManageOpportunities={canManageOpportunities}
                     canViewContacts={canViewContacts}
+                    canManageContactComms={canManageContactComms}
                     onAskAE={onAskAE}
                     onViewContact={onViewContact}
+                    onEmailContact={onEmailContact}
+                    onSmsContact={onSmsContact}
                   />
                 ))}
               </ul>
@@ -456,8 +523,11 @@ function GrowToday({ onAskAE, onViewContact }: { onAskAE: () => void; onViewCont
                     canAddNote={canAddNote}
                     canManageOpportunities={canManageOpportunities}
                     canViewContacts={canViewContacts}
+                    canManageContactComms={canManageContactComms}
                     onAskAE={onAskAE}
                     onViewContact={onViewContact}
+                    onEmailContact={onEmailContact}
+                    onSmsContact={onSmsContact}
                   />
                 ))}
               </ul>
@@ -483,8 +553,12 @@ interface GrowActionCardProps {
   canAddNote: boolean;
   canManageOpportunities: boolean;
   canViewContacts: boolean;
+  // AE GROW Priority 3 §4.
+  canManageContactComms: boolean;
   onAskAE: () => void;
   onViewContact: (partyId: number) => void;
+  onEmailContact: (partyId: number) => void;
+  onSmsContact: (partyId: number) => void;
 }
 
 // One card renders every supported action for that item, same "no separate detail screen"
@@ -501,7 +575,17 @@ interface GrowActionCardProps {
 // every GrowTodayAction already carries a real item.partyId and no change to
 // apps/api/src/lib/growToday.ts (Priority 1's own, already-shipped ranking logic) was needed or
 // made to add this.
-function GrowActionCard({ item, canAddNote, canManageOpportunities, canViewContacts, onAskAE, onViewContact }: GrowActionCardProps) {
+function GrowActionCard({
+  item,
+  canAddNote,
+  canManageOpportunities,
+  canViewContacts,
+  canManageContactComms,
+  onAskAE,
+  onViewContact,
+  onEmailContact,
+  onSmsContact,
+}: GrowActionCardProps) {
   const queryClient = useQueryClient();
   const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
   const [noteText, setNoteText] = useState("");
@@ -550,6 +634,13 @@ function GrowActionCard({ item, canAddNote, canManageOpportunities, canViewConta
     canManageOpportunities && item.opportunityId !== null && item.availableActions.some((b) => b.action === "update_next_action");
   const showViewProperty = item.propertyId !== null && item.availableActions.some((b) => b.action === "view_property");
   const showViewContact = canViewContacts;
+  // AE GROW Priority 3 §4: gated on both the grow.contacts.manage entitlement (see
+  // canManageContactComms above) and the contact actually having that channel on file
+  // (contactEmail/contactMobile) — the same "guarded by contactEmail/contactMobile being
+  // non-null" rule apps/api/src/lib/growToday.ts's own header comment documents for the
+  // email/sms availableActions entries this checks alongside.
+  const showEmail = canManageContactComms && item.contactEmail !== null && item.availableActions.some((b) => b.action === "email");
+  const showSms = canManageContactComms && item.contactMobile !== null && item.availableActions.some((b) => b.action === "sms");
   const showAskAE = item.availableActions.some((b) => b.action === "ask_ae");
 
   const busy = addNote.isPending || updateNextAction.isPending;
@@ -610,6 +701,16 @@ function GrowActionCard({ item, canAddNote, canManageOpportunities, canViewConta
         {showViewContact && (
           <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(item.partyId)}>
             View contact
+          </button>
+        )}
+        {showEmail && (
+          <button type="button" className="btn btn-link btn-small" onClick={() => onEmailContact(item.partyId)}>
+            Email
+          </button>
+        )}
+        {showSms && (
+          <button type="button" className="btn btn-link btn-small" onClick={() => onSmsContact(item.partyId)}>
+            SMS
           </button>
         )}
         {showAskAE && (
@@ -730,12 +831,25 @@ function GrowAskAETab() {
 function GrowContactsTab({
   selectedPartyId,
   onSelectPartyId,
+  pendingComposeChannel,
+  onComposeHandled,
 }: {
   selectedPartyId: number | null;
   onSelectPartyId: (partyId: number | null) => void;
+  // AE GROW Priority 3 §4 — threaded straight through to GrowContactDetail's own
+  // ContactCommunicationsSection; see GrowWorkspace.pendingComposeChannel.
+  pendingComposeChannel: "EMAIL" | "SMS" | null;
+  onComposeHandled: () => void;
 }) {
   if (selectedPartyId !== null) {
-    return <GrowContactDetail partyId={selectedPartyId} onBack={() => onSelectPartyId(null)} />;
+    return (
+      <GrowContactDetail
+        partyId={selectedPartyId}
+        onBack={() => onSelectPartyId(null)}
+        pendingComposeChannel={pendingComposeChannel}
+        onComposeHandled={onComposeHandled}
+      />
+    );
   }
   return <GrowContactList onSelectPartyId={onSelectPartyId} />;
 }
@@ -880,7 +994,19 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
 // summary, household relationships, properties, the Relationship Timeline, notes/activities/
 // commitments, and opportunities — matching the "understand this relationship in seconds" UX
 // goal rather than a screen that fires off five separate requests or a generic CRM record view.
-function GrowContactDetail({ partyId, onBack }: { partyId: number; onBack: () => void }) {
+function GrowContactDetail({
+  partyId,
+  onBack,
+  pendingComposeChannel,
+  onComposeHandled,
+}: {
+  partyId: number;
+  onBack: () => void;
+  // AE GROW Priority 3 §2/§4 — see GrowWorkspace.pendingComposeChannel and
+  // ContactCommunicationsSection's own quickComposeChannel prop below.
+  pendingComposeChannel: "EMAIL" | "SMS" | null;
+  onComposeHandled: () => void;
+}) {
   const queryClient = useQueryClient();
   const { hasEntitlement } = useEntitlements();
   const canManageContacts = hasEntitlement("grow.contacts.manage");
@@ -1039,6 +1165,17 @@ function GrowContactDetail({ partyId, onBack }: { partyId: number; onBack: () =>
         <StatTile label="Recent Activity (30d)" value={data.intelligence.recentActivityCount} />
         <StatTile label="Outstanding Commitments" value={data.intelligence.outstandingCommitmentCount} />
       </div>
+
+      {/* AE GROW Priority 3 §2 — Contact 360's communications section: Email/SMS actions,
+          reusing the Communications Hub's own composer (components/CommunicationsSection.tsx),
+          wired to the new contact-first routes. The thread/message list rendered inside it is
+          this page's "communications history" — see that component's own header comment. */}
+      <ContactCommunicationsSection
+        partyId={partyId}
+        canStartThread={canManageContacts}
+        quickComposeChannel={pendingComposeChannel}
+        onQuickComposeHandled={onComposeHandled}
+      />
 
       <section className="card">
         <h2>Relationship summary</h2>

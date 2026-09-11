@@ -7,6 +7,16 @@
 // discipline as the rest of the module; state changes to an existing
 // message's status all funnel through outbox.ts's applyMessageTransition so
 // there is exactly one place the transition table is enforced.
+//
+// AE GROW PRIORITY 3 — contact-first anchoring. A thread (and every
+// message within it) is anchored to a property, a contact (party), or
+// both — never neither (packages/db/src/schema/communications.ts's CHECK
+// constraint, mirrored here by assertCommunicationAnchor() before every
+// insert). createDraftMessage() denormalises BOTH propertyId and partyId
+// straight from its thread rather than trusting a caller-supplied
+// propertyId, so a message can never disagree with its own thread's
+// anchor — see the file header comment on communications.ts (schema) for
+// the full rationale.
 
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
@@ -16,6 +26,7 @@ import {
   communicationMessages,
   communicationTemplates,
   properties,
+  parties,
   type CommunicationThread,
   type CommunicationParticipant,
   type CommunicationMessage,
@@ -25,31 +36,50 @@ import { logAudit } from "../audit.js";
 import {
   CommunicationTenancyError,
   CommunicationTransitionError,
+  assertCommunicationAnchor,
   type CommunicationChannel,
   type CommunicationClassification,
   type CommunicationDirection,
   type CommunicationMessageStatus,
 } from "./types.js";
 import { renderTemplate } from "./templates.js";
+import { partyDisplayName } from "./recipientResolution.js";
 import { applyMessageTransition, queueMessage, evaluateAndDispatchQueuedMessage, type QueueMessageResult } from "./outbox.js";
 
 export interface CreateThreadInput {
   brokerageId: number;
-  propertyId: number;
+  /** Optional since AE Grow Priority 3 — a contact-first thread has no property. At least one of propertyId/partyId is required (assertCommunicationAnchor). */
+  propertyId?: number | null;
+  /** AE Grow Priority 3 — the contact-first anchor. May be supplied alongside propertyId when the contact is already known. */
+  partyId?: number | null;
   transactionId?: number | null;
   subject: string;
   createdByUserId: number;
 }
 
 export async function createThread(input: CreateThreadInput): Promise<CommunicationThread> {
-  const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
-  if (!property || property.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
+  assertCommunicationAnchor(input.propertyId, input.partyId);
+
+  let propertyId: number | null = null;
+  if (input.propertyId != null) {
+    const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
+    if (!property || property.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
+    propertyId = property.id;
+  }
+
+  let partyId: number | null = null;
+  if (input.partyId != null) {
+    const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
+    if (!party || party.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
+    partyId = party.id;
+  }
 
   const [row] = await db
     .insert(communicationThreads)
     .values({
       brokerageId: input.brokerageId,
-      propertyId: input.propertyId,
+      propertyId,
+      partyId,
       transactionId: input.transactionId ?? null,
       subject: input.subject,
       createdByUserId: input.createdByUserId,
@@ -61,7 +91,7 @@ export async function createThread(input: CreateThreadInput): Promise<Communicat
     action: "communication_thread_created",
     recordType: "communication_thread",
     recordId: String(row.id),
-    propertyId: input.propertyId,
+    propertyId: row.propertyId ?? undefined,
     updatedValue: row.subject,
   });
 
@@ -86,6 +116,22 @@ export async function listThreadsForProperty(propertyId: number, brokerageId: nu
     .orderBy(desc(communicationThreads.lastActivityAt));
 }
 
+/**
+ * AE Grow Priority 3 — the contact-first analogue of listThreadsForProperty
+ * above, for Contact 360's own thread list (every thread anchored to this
+ * party, regardless of whether it also carries a propertyId).
+ */
+export async function listThreadsForParty(partyId: number, brokerageId: number): Promise<CommunicationThread[]> {
+  const [party] = await db.select().from(parties).where(eq(parties.id, partyId));
+  if (!party || party.brokerageId !== brokerageId) throw new CommunicationTenancyError();
+
+  return db
+    .select()
+    .from(communicationThreads)
+    .where(eq(communicationThreads.partyId, partyId))
+    .orderBy(desc(communicationThreads.lastActivityAt));
+}
+
 /** Statuses that mean "someone needs to act on this" — the Hub's default view (Section 32) leads with these rather than a full firehose. */
 const NEEDS_ATTENTION_STATUSES: CommunicationMessageStatus[] = [
   "AWAITING_APPROVAL",
@@ -98,8 +144,11 @@ const NEEDS_ATTENTION_STATUSES: CommunicationMessageStatus[] = [
 
 export interface RecentCommunicationRow {
   message: CommunicationMessage;
-  propertyAddress: string;
+  /** Null for a contact-first message (no propertyId) — see partyDisplayName below for what the Hub shows instead. */
+  propertyAddress: string | null;
   threadSubject: string;
+  /** AE Grow Priority 3 — the message's party's display name, when the message carries a partyId (contact-first, or a property-first message that also names a known contact). */
+  partyDisplayName: string | null;
 }
 
 export interface ListRecentMessagesOptions {
@@ -117,6 +166,15 @@ export interface ListRecentMessagesOptions {
  * summary feed — INTERNAL_NOTE rows are included because, as in
  * listMessagesForThread, this whole API surface is brokerage-staff only
  * (Section 31); there is no external audience here to hide them from.
+ *
+ * AE Grow Priority 3: propertyId is now nullable on communicationMessages,
+ * so the property join below is a leftJoin (was innerJoin) — an innerJoin
+ * would silently drop every contact-first message from this feed, exactly
+ * the "prospecting contact disappears from the list" failure mode
+ * grow.ts's own growRelationships leftJoin was already written to avoid
+ * (see that file's header comment). A leftJoin against parties is added
+ * alongside it so a contact-first row's summary line can show who it's
+ * with, since it has no property address to show instead.
  */
 export async function listRecentMessagesForBrokerage(
   brokerageId: number,
@@ -128,18 +186,33 @@ export async function listRecentMessagesForBrokerage(
     conditions.push(inArray(communicationMessages.status, NEEDS_ATTENTION_STATUSES));
   }
 
-  return db
+  const rows = await db
     .select({
       message: communicationMessages,
       propertyAddress: properties.formattedAddress,
       threadSubject: communicationThreads.subject,
+      partyType: parties.partyType,
+      partyFirstName: parties.firstName,
+      partyLastName: parties.lastName,
+      partyOrganisationName: parties.organisationName,
     })
     .from(communicationMessages)
-    .innerJoin(properties, eq(properties.id, communicationMessages.propertyId))
+    .leftJoin(properties, eq(properties.id, communicationMessages.propertyId))
+    .leftJoin(parties, eq(parties.id, communicationMessages.partyId))
     .innerJoin(communicationThreads, eq(communicationThreads.id, communicationMessages.threadId))
     .where(and(...conditions))
     .orderBy(desc(communicationMessages.createdAt))
     .limit(limit);
+
+  return rows.map((r) => ({
+    message: r.message,
+    propertyAddress: r.propertyAddress ?? null,
+    threadSubject: r.threadSubject,
+    partyDisplayName:
+      r.partyType != null
+        ? partyDisplayName({ partyType: r.partyType, firstName: r.partyFirstName, lastName: r.partyLastName, organisationName: r.partyOrganisationName })
+        : null,
+  }));
 }
 
 export async function listParticipants(threadId: number, brokerageId: number): Promise<CommunicationParticipant[]> {
@@ -170,7 +243,6 @@ export async function getMessage(messageId: number, brokerageId: number): Promis
 export interface CreateDraftMessageInput {
   threadId: number;
   brokerageId: number;
-  propertyId: number;
   transactionId?: number | null;
   direction?: CommunicationDirection;
   channel: CommunicationChannel;
@@ -193,9 +265,19 @@ export interface CreateDraftMessageInput {
  * The restrained composer's write path (Section 13): a single thread, a
  * single resolved recipient, optional template rendering. Always creates a
  * DRAFT — nothing here ever queues or sends.
+ *
+ * AE Grow Priority 3: propertyId/partyId are NOT accepted as input fields
+ * (there is no such field on CreateDraftMessageInput above) — they are
+ * always denormalised straight from the thread this message belongs to,
+ * so a message can never end up disagreeing with its own thread's anchor.
+ * This also removes the previous hard requirement that every draft supply
+ * a propertyId, which broke contact-first (property-less) threads.
  */
 export async function createDraftMessage(input: CreateDraftMessageInput): Promise<CommunicationMessage> {
   const thread = await getThread(input.threadId, input.brokerageId);
+  // Defensive — should always hold given createThread's own guard and the
+  // DB CHECK constraint, but this is the last point before insert.
+  assertCommunicationAnchor(thread.propertyId, thread.partyId);
 
   let recipientDisplayName = input.recipientDisplayName ?? null;
   let recipientDestination = input.recipientDestination ?? null;
@@ -244,7 +326,8 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
     .values({
       threadId: input.threadId,
       brokerageId: input.brokerageId,
-      propertyId: input.propertyId,
+      propertyId: thread.propertyId,
+      partyId: thread.partyId,
       transactionId: input.transactionId ?? thread.transactionId ?? null,
       direction: input.direction ?? "OUTBOUND",
       channel: input.channel,
@@ -285,7 +368,7 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
     action: "communication_message_drafted",
     recordType: "communication_message",
     recordId: String(row.id),
-    propertyId: row.propertyId,
+    propertyId: row.propertyId ?? undefined,
     updatedValue: `${row.channel}/${row.classification} to ${row.recipientDisplayName ?? row.recipientDestination ?? "unknown"}`,
   });
 
@@ -294,7 +377,11 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
     occurredAt: new Date(),
     propertyId: row.propertyId,
     transactionId: row.transactionId,
-    partyId: null,
+    // AE Grow Priority 3: previously hardcoded null (no partyId column
+    // existed on communicationMessages yet) — now the message's real,
+    // denormalised partyId, so a downstream event consumer can react to a
+    // contact-first draft the same way it would a property-first one.
+    partyId: row.partyId,
     brokerageId: row.brokerageId,
     agentId: row.sendOnBehalfOfUserId ?? row.senderUserId ?? null,
     actorType: "USER",
@@ -367,7 +454,7 @@ export async function cancelMessage(
       action: "communication_message_cancel_reason",
       recordType: "communication_message",
       recordId: String(cancelled.id),
-      propertyId: cancelled.propertyId,
+      propertyId: cancelled.propertyId ?? undefined,
       updatedValue: reason.trim(),
     });
   }

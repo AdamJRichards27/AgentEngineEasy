@@ -22,8 +22,26 @@
 // transitions' own "immutable ledger" convention), and communication_
 // messages' own status field always reflects the latest attempt without
 // requiring a join for the common case.
+//
+// AE GROW PRIORITY 3 EXTENSION — contact-first anchoring. This Hub was
+// originally property-only: a thread/message always belonged to exactly
+// one property. Grow's Contact 360 is person-first and property-optional
+// (a relationship with a contact often predates, or never involves, a
+// specific listing), so `propertyId` is now nullable on both
+// communicationThreads and communicationMessages, and a new nullable
+// `partyId` column anchors a thread/message to a contact instead. This is
+// the same "smallest correct extension" precedent already established by
+// `grow_relationships.property_id` (see grow.ts and migration
+// 0013_grow_relationship_property_optional.sql) — no new thread/message
+// model, no new Grow-specific tables. A CHECK constraint on both tables
+// enforces `property_id IS NOT NULL OR party_id IS NOT NULL` so a
+// thread/message can never end up anchored to neither (see
+// apps/api/src/lib/communications/messages.ts and recipientResolution.ts
+// for the application-level validation that keeps this true before a row
+// is ever inserted, and routes/communications.ts + relationshipTimeline.ts
+// for the leftJoin-tolerant reads this requires downstream).
 
-import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uuid, uniqueIndex, index, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uuid, uniqueIndex, index, check, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -85,14 +103,19 @@ export const COMMUNICATION_PARTICIPANT_ROLES = [
 ] as const;
 export type CommunicationParticipantRole = (typeof COMMUNICATION_PARTICIPANT_ROLES)[number];
 
-// One thread per property + topic. A thread is the unit the property-
-// centred UI (Section 10) renders — every message belongs to exactly one.
+// One thread per property + topic — or, since AE Grow Priority 3, per
+// contact + topic when there is no property yet. A thread is the unit the
+// property-centred UI (Section 10) and Grow's Contact 360 UI both render —
+// every message belongs to exactly one.
 export const communicationThreads = pgTable(
   "communication_threads",
   {
     id: serial("id").primaryKey(),
     brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
-    propertyId: integer("property_id").notNull().references(() => properties.id),
+    // Nullable since AE Grow Priority 3 — a contact-first thread has no
+    // property. See the CHECK constraint below: propertyId and partyId can
+    // never both be null.
+    propertyId: integer("property_id").references(() => properties.id),
     transactionId: integer("transaction_id").references(() => transactions.id),
 
     subject: text("subject").notNull(),
@@ -103,10 +126,21 @@ export const communicationThreads = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
     lastActivityAt: timestamp("last_activity_at").notNull().defaultNow(),
+    // AE Grow Priority 3: the contact-first anchor. Set when a thread is
+    // created from Contact 360 rather than from a property; may also be
+    // set alongside a propertyId when the contact is already known (never
+    // required to be null just because propertyId is set).
+    partyId: integer("party_id").references(() => parties.id),
   },
   (table) => ({
     propertyIdx: index("communication_threads_property_idx").on(table.propertyId, table.lastActivityAt),
     brokerageIdx: index("communication_threads_brokerage_idx").on(table.brokerageId, table.lastActivityAt),
+    // AE Grow Priority 3.
+    partyIdx: index("communication_threads_party_id_idx").on(table.partyId),
+    propertyOrPartyCheck: check(
+      "communication_threads_property_or_party_check",
+      sql`property_id IS NOT NULL OR party_id IS NOT NULL`,
+    ),
   }),
 );
 
@@ -144,7 +178,10 @@ export const communicationMessages = pgTable(
     id: serial("id").primaryKey(),
     threadId: integer("thread_id").notNull().references(() => communicationThreads.id),
     brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
-    propertyId: integer("property_id").notNull().references(() => properties.id),
+    // Nullable since AE Grow Priority 3 — denormalised from the thread the
+    // same way it always was, but a contact-first thread's messages carry
+    // no propertyId. See the CHECK constraint below.
+    propertyId: integer("property_id").references(() => properties.id),
     transactionId: integer("transaction_id").references(() => transactions.id),
 
     direction: text("direction").notNull(),
@@ -214,12 +251,22 @@ export const communicationMessages = pgTable(
 
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    // AE Grow Priority 3: denormalised from the thread's partyId (kept
+    // denormalised for the same reason propertyId always was — see the
+    // file header — so the common read never needs a join).
+    partyId: integer("party_id").references(() => parties.id),
   },
   (table) => ({
     threadIdx: index("communication_messages_thread_idx").on(table.threadId, table.createdAt),
     propertyIdx: index("communication_messages_property_idx").on(table.propertyId, table.status),
     brokerageStatusIdx: index("communication_messages_brokerage_status_idx").on(table.brokerageId, table.status),
     idempotencyKeyIdx: uniqueIndex("communication_messages_idempotency_key_idx").on(table.idempotencyKey),
+    // AE Grow Priority 3.
+    partyIdx: index("communication_messages_party_id_idx").on(table.partyId),
+    propertyOrPartyCheck: check(
+      "communication_messages_property_or_party_check",
+      sql`property_id IS NOT NULL OR party_id IS NOT NULL`,
+    ),
   }),
 );
 
