@@ -118,6 +118,7 @@ jobs:
       - name: API automated test suite
         env:
           NODE_ENV: test
+          ALLOW_DEV_AUTH: "true"
         run: pnpm --filter @aee/api run test
 
       - name: API production build
