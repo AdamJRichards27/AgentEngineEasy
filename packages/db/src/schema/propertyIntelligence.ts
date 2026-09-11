@@ -208,5 +208,3 @@ export type InsertGrowOpportunitySignal = z.infer<typeof insertGrowOpportunitySi
 export type PropertyExternalIdentifier = typeof propertyExternalIdentifiers.$inferSelect;
 export type PropertyProviderObservation = typeof propertyProviderObservations.$inferSelect;
 export type GrowOpportunitySignal = typeof growOpportunitySignals.$inferSelect;
-
-export type InsertPropertyExternalIdentifier = z.infer<typeof insertPropertyExternalIdentifierSchema>;
