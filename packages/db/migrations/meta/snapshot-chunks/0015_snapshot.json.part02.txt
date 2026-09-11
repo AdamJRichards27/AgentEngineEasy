@@ -797,3 +797,4 @@
           "notNull": false
         },
         "resolved_by_user_id": {
+          "name": "resolved_by_user_id",
