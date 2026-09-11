@@ -87,7 +87,6 @@ async function draftSmsMessage(brokerageId: number, cookie: string, senderUserId
   const message = await createDraftMessage({
     threadId: thread.id,
     brokerageId,
-    propertyId,
     channel: "SMS",
     classification: "TRANSACTIONAL",
     bodyText: "This is an automated test SMS used to drive an integration command to dead-letter.",
