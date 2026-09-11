@@ -2,6 +2,13 @@
 // Mirrors apps/api/src/lib/growToday.ts by hand (the web app doesn't share a package with the
 // API) — the same convention apps/web/src/lib/commandCentre.ts already uses for RUN's
 // structurally analogous "Today" surface.
+//
+// AE GROW Priority 3 — additive only: contactEmail/contactMobile on GrowTodayAction, and the
+// "email" / "sms" / "view_contact" GrowTodayActionButton kinds, mirror the exact same additions
+// already made to apps/api/src/lib/growToday.ts (see that file's own header comment for the full
+// rationale). Priority 1's ranking/priority/threshold/dedup logic is untouched — this is display
+// metadata only, consumed by pages/Grow.tsx's GrowActionCard to decide whether to render
+// Email/SMS/View Contact buttons.
 
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
@@ -10,7 +17,12 @@ export type GrowTodayActionButton =
   | { action: "add_note" }
   | { action: "view_property"; propertyId: number }
   | { action: "update_next_action"; opportunityId: number }
-  | { action: "ask_ae" };
+  | { action: "ask_ae" }
+  // AE Grow Priority 3 — additive: rendered only when the contact has that channel on file
+  // (email/sms) or unconditionally (view_contact, since partyId is always present).
+  | { action: "email"; partyId: number }
+  | { action: "sms"; partyId: number }
+  | { action: "view_contact"; partyId: number };
 
 export interface GrowTodayAction {
   id: string;
@@ -18,6 +30,10 @@ export interface GrowTodayAction {
   priority: GrowTodayPriority;
   partyId: number;
   contactName: string;
+  // AE Grow Priority 3 — additive: lets the frontend decide whether to render an Email/SMS
+  // action without a second lookup.
+  contactEmail: string | null;
+  contactMobile: string | null;
   relationshipType: string | null;
   propertyId: number | null;
   propertyLabel: string | null;
