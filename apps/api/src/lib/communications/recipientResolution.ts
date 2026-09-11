@@ -6,6 +6,12 @@
 // never re-entered here. Manual entry (a supplier, a non-party contact) is
 // the explicit fallback the spec requires, never the default: it demands a
 // name, role, destination, and a reason, and is fully audited.
+//
+// AE GROW PRIORITY 3 — contact-first recipient resolution.
+// getContactRecipientCandidate() below is the contact-first analogue of
+// listRecipientCandidatesForProperty: a party-anchored thread has no
+// propertyParties links to resolve candidates from, so its candidate pool
+// is simply the one contact the thread is anchored to.
 
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -74,6 +80,29 @@ export async function listRecipientCandidatesForProperty(propertyId: number, bro
   return candidates;
 }
 
+/**
+ * AE Grow Priority 3 — the contact-first analogue of
+ * listRecipientCandidatesForProperty above: for Contact 360's own
+ * composer, the candidate pool is just the one contact this thread is (or
+ * will be) anchored to. Returns null (never throws) for a partyId that
+ * doesn't exist or belongs to another brokerage, mirroring how the
+ * property version returns an empty array rather than surfacing tenancy
+ * details — the route layer maps null to an empty `candidates` array.
+ */
+export async function getContactRecipientCandidate(partyId: number, brokerageId: number): Promise<CandidateRecipient | null> {
+  const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
+  if (!party) return null;
+  return {
+    partyId: party.id,
+    role: "Contact",
+    isPrimary: true,
+    displayName: partyDisplayName(party),
+    email: party.email ?? null,
+    mobile: party.mobile ?? null,
+    isDuplicateContact: false,
+  };
+}
+
 export interface AddParticipantFromPartyInput {
   threadId: number;
   brokerageId: number;
@@ -108,7 +137,7 @@ export async function addParticipantFromParty(input: AddParticipantFromPartyInpu
     action: "communication_participant_added",
     recordType: "communication_thread",
     recordId: String(input.threadId),
-    propertyId: thread.propertyId,
+    propertyId: thread.propertyId ?? undefined,
     updatedValue: `${row.displayName} (${row.role})`,
   });
 
@@ -163,7 +192,7 @@ export async function addManualParticipant(input: AddManualParticipantInput): Pr
     action: "communication_participant_added_manually",
     recordType: "communication_thread",
     recordId: String(input.threadId),
-    propertyId: thread.propertyId,
+    propertyId: thread.propertyId ?? undefined,
     updatedValue: `${row.displayName} (${row.role}) — ${input.reason}`,
   });
 
