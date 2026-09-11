@@ -169,3 +169,26 @@ export class CommunicationTenancyError extends Error {
     });
   }
 }
+
+// AE GROW Priority 3 — contact-first anchoring. Both communicationThreads
+// and communicationMessages now carry a DB-level CHECK constraint requiring
+// property_id OR party_id to be set (packages/db/src/schema/communications.ts,
+// migration 0015_productive_morph.sql). That constraint is the backstop,
+// never the only check: every write path in this domain (messages.ts's
+// createThread/createDraftMessage) calls assertCommunicationAnchor() first,
+// so a caller gets a clear, typed 400 rather than a raw Postgres constraint
+// violation.
+export class CommunicationAnchorError extends Error {
+  constructor(
+    message = "A communication thread or message must be anchored to a property, a contact, or both — it cannot have neither.",
+  ) {
+    super(message);
+    this.name = "CommunicationAnchorError";
+  }
+}
+
+export function assertCommunicationAnchor(propertyId: number | null | undefined, partyId: number | null | undefined): void {
+  if (propertyId == null && partyId == null) {
+    throw new CommunicationAnchorError();
+  }
+}
