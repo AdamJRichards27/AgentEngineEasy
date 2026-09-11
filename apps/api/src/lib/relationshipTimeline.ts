@@ -1,6 +1,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
+  appraisals,
   growActivities,
   growCommitments,
   growOpportunities,
@@ -84,6 +85,22 @@ export const GROW_TIMELINE_EVENT_TYPES = [
   "SMS_RECEIVED",
   "SMS_DELIVERED",
   "SMS_FAILED",
+  // AE GROW Priority 4 -- Appraisal Workspace (Sec.16). Sourced live from the `appraisals`
+  // table itself (see growAppraisals.ts) -- same per-table-query convention as every other
+  // event family above, never a new copy/log. APPRAISAL_READY has no dedicated timestamp
+  // column, so it is inferred from the row's own updatedAt while status is currently READY
+  // (mirrors how COMMITMENT_COMPLETED/CANCELLED are gated on current status + timestamp
+  // above); every other Appraisal event is sourced from a dedicated timestamp column that
+  // growAppraisals.ts sets once, and is emitted whenever that column is populated.
+  "APPRAISAL_CREATED",
+  "APPRAISAL_READY",
+  "APPRAISAL_SENT",
+  "APPRAISAL_VIEWED",
+  "APPRAISAL_PRESENTED",
+  "APPRAISAL_FOLLOW_UP",
+  "APPRAISAL_WON",
+  "APPRAISAL_LOST",
+  "APPRAISAL_DEFERRED",
 ] as const;
 export type GrowTimelineEventType = (typeof GROW_TIMELINE_EVENT_TYPES)[number];
 
@@ -95,7 +112,7 @@ export interface GrowTimelineEvent {
   propertyId: number | null;
   propertyLabel: string | null;
   opportunityId: number | null;
-  sourceType: "party" | "relationship" | "activity" | "opportunity" | "commitment" | "communication";
+  sourceType: "party" | "relationship" | "activity" | "opportunity" | "commitment" | "communication" | "appraisal";
   sourceId: number;
 }
 
@@ -183,6 +200,7 @@ export async function getRelationshipTimeline(
     activityRows,
     opportunityRows,
     commitmentRows,
+    appraisalRows,
     partyAnchoredMessages,
     participantThreadLinks,
   ] = await Promise.all([
@@ -191,6 +209,7 @@ export async function getRelationshipTimeline(
     db.select().from(growActivities).where(eq(growActivities.partyId, partyId)),
     db.select().from(growOpportunities).where(eq(growOpportunities.partyId, partyId)),
     db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId)),
+    db.select().from(appraisals).where(eq(appraisals.partyId, partyId)),
     // AE GROW Priority 3, path 1 — messages anchored directly to this contact (a contact-first
     // thread). communicationMessages.partyId is denormalised from its thread's own partyId (see
     // communications.ts's header comment), so this is a single-column lookup, no join needed.
@@ -268,6 +287,7 @@ export async function getRelationshipTimeline(
   for (const a of activityRows) if (a.propertyId) propertyIds.add(a.propertyId);
   for (const o of opportunityRows) if (o.propertyId) propertyIds.add(o.propertyId);
   for (const c of commitmentRows) if (c.propertyId) propertyIds.add(c.propertyId);
+  for (const ap of appraisalRows) if (ap.propertyId) propertyIds.add(ap.propertyId);
   for (const m of communicationMessageRows) if (m.propertyId) propertyIds.add(m.propertyId);
 
   const propertyLabelById = new Map<number, string>();
@@ -400,6 +420,126 @@ export async function getRelationshipTimeline(
 
   // Newest first — a reverse-chronological feed, matching every other Grow "what's recent"
   // surface (growActivities list, growOpportunities list) already ordered by desc(createdAt).
+  // AE GROW Priority 4 -- Appraisal Workspace (Sec.16). One appraisal row can surface several
+  // events (created, ready, sent, viewed, presented, follow-up, outcome) since each is sourced
+  // from its own dedicated timestamp column on the same row -- never a separate log table.
+  for (const ap of appraisalRows) {
+    const propertyLabel = ap.propertyId ? propertyLabelById.get(ap.propertyId) ?? null : null;
+    events.push({
+      id: `appraisal:${ap.id}:CREATED`,
+      type: "APPRAISAL_CREATED",
+      occurredAt: ap.createdAt.toISOString(),
+      summary: "Appraisal created.",
+      propertyId: ap.propertyId,
+      propertyLabel,
+      opportunityId: ap.opportunityId,
+      sourceType: "appraisal",
+      sourceId: ap.id,
+    });
+    if (ap.status === "READY") {
+      events.push({
+        id: `appraisal:${ap.id}:READY`,
+        type: "APPRAISAL_READY",
+        occurredAt: ap.updatedAt.toISOString(),
+        summary: "Appraisal marked ready to send.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    }
+    if (ap.sentAt) {
+      events.push({
+        id: `appraisal:${ap.id}:SENT`,
+        type: "APPRAISAL_SENT",
+        occurredAt: ap.sentAt.toISOString(),
+        summary: "Appraisal sent to client.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    }
+    if (ap.viewedAt) {
+      events.push({
+        id: `appraisal:${ap.id}:VIEWED`,
+        type: "APPRAISAL_VIEWED",
+        occurredAt: ap.viewedAt.toISOString(),
+        summary: "Client viewed the appraisal.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    }
+    if (ap.presentationAt) {
+      events.push({
+        id: `appraisal:${ap.id}:PRESENTED`,
+        type: "APPRAISAL_PRESENTED",
+        occurredAt: ap.presentationAt.toISOString(),
+        summary: "Appraisal presented to client.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    }
+    if (ap.followUpAt && ap.status === "FOLLOW_UP") {
+      events.push({
+        id: `appraisal:${ap.id}:FOLLOW_UP`,
+        type: "APPRAISAL_FOLLOW_UP",
+        occurredAt: ap.followUpAt.toISOString(),
+        summary: "Appraisal follow-up scheduled.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    }
+    if (ap.outcome === "WON" && ap.outcomeAt) {
+      events.push({
+        id: `appraisal:${ap.id}:WON`,
+        type: "APPRAISAL_WON",
+        occurredAt: ap.outcomeAt.toISOString(),
+        summary: "Appraisal won.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    } else if (ap.outcome === "LOST" && ap.outcomeAt) {
+      events.push({
+        id: `appraisal:${ap.id}:LOST`,
+        type: "APPRAISAL_LOST",
+        occurredAt: ap.outcomeAt.toISOString(),
+        summary: "Appraisal lost.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    } else if (ap.outcome === "DEFERRED" && ap.outcomeAt) {
+      events.push({
+        id: `appraisal:${ap.id}:DEFERRED`,
+        type: "APPRAISAL_DEFERRED",
+        occurredAt: ap.outcomeAt.toISOString(),
+        summary: "Appraisal deferred.",
+        propertyId: ap.propertyId,
+        propertyLabel,
+        opportunityId: ap.opportunityId,
+        sourceType: "appraisal",
+        sourceId: ap.id,
+      });
+    }
+  }
+
   events.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
 
   return events.slice(0, limit);

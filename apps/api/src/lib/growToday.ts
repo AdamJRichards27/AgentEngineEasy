@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { db, growActivities, growOpportunities, growRelationships, parties, properties } from "@aee/db";
+import { db, appraisals, growActivities, growOpportunities, growRelationships, parties, properties } from "@aee/db";
 
 // AE GROW Priority 1 — Daily Command Centre.
 //
@@ -33,7 +33,7 @@ import { db, growActivities, growOpportunities, growRelationships, parties, prop
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
 
-export type GrowTodayActionType = "opportunity_follow_up" | "opportunity_no_action_set" | "relationship_cold";
+export type GrowTodayActionType = "opportunity_follow_up" | "opportunity_no_action_set" | "relationship_cold" | "appraisal_follow_up";
 
 export type GrowTodayActionButton =
   | { action: "add_note" }
@@ -45,7 +45,9 @@ export type GrowTodayActionButton =
   // partyId is always present on every action).
   | { action: "email"; partyId: number }
   | { action: "sms"; partyId: number }
-  | { action: "view_contact"; partyId: number };
+  | { action: "view_contact"; partyId: number }
+  // AE Grow Priority 4 -- additive: rendered only on an appraisal follow-up card.
+  | { action: "view_appraisal"; appraisalId: number };
 
 export interface GrowTodayAction {
   id: string;
@@ -61,6 +63,7 @@ export interface GrowTodayAction {
   propertyId: number | null;
   propertyLabel: string | null;
   opportunityId: number | null;
+  appraisalId: number | null;
   reason: string;
   recommendedAction: string;
   dueAt: string | null;
@@ -135,7 +138,7 @@ interface RelationshipRow {
 }
 
 export async function getGrowTodaySummary(brokerageId: number): Promise<GrowTodaySummary> {
-  const [relationshipRows, opportunityRows, activityRows] = await Promise.all([
+  const [relationshipRows, opportunityRows, activityRows, appraisalFollowUpRows] = await Promise.all([
     db
       .select({
         id: growRelationships.id,
@@ -179,6 +182,25 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       .select({ partyId: growActivities.partyId, occurredAt: growActivities.occurredAt })
       .from(growActivities)
       .where(eq(growActivities.brokerageId, brokerageId)),
+    db
+      .select({
+        id: appraisals.id,
+        partyId: appraisals.partyId,
+        propertyId: appraisals.propertyId,
+        opportunityId: appraisals.opportunityId,
+        followUpAt: appraisals.followUpAt,
+        followUpNotes: appraisals.followUpNotes,
+        partyFirstName: parties.firstName,
+        partyLastName: parties.lastName,
+        partyOrganisationName: parties.organisationName,
+        partyEmail: parties.email,
+        partyMobile: parties.mobile,
+        propertyAddress: properties.formattedAddress,
+      })
+      .from(appraisals)
+      .innerJoin(properties, eq(appraisals.propertyId, properties.id))
+      .innerJoin(parties, eq(appraisals.partyId, parties.id))
+      .where(and(eq(properties.brokerageId, brokerageId), eq(appraisals.status, "FOLLOW_UP"))),
   ]);
 
   const lastActivityByParty = new Map<number, Date>();
@@ -255,10 +277,63 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       propertyId: o.propertyId,
       propertyLabel: o.propertyAddress ?? null,
       opportunityId: o.id,
+      appraisalId: null,
       reason,
       recommendedAction,
       dueAt: o.nextActionDueAt ? o.nextActionDueAt.toISOString() : null,
       lastActivityAt: lastActivityAt ? lastActivityAt.toISOString() : null,
+      availableActions,
+    });
+  }
+
+  // Rule E -- appraisal follow-ups due (Sec.17). Mirrors Rules A/B/C: only an overdue or
+  // due-today follow-up is surfaced here (a future-dated one is what the Appraisal
+  // Workspace's own follow-up view is for); surfaced parties are added to
+  // partyIdsWithOpportunityAction so the same contact never also shows as a cold
+  // relationship in Rule D below.
+  for (const ap of appraisalFollowUpRows) {
+    if (!ap.partyId) continue;
+    if (!ap.followUpAt) continue;
+    let priority: GrowTodayPriority;
+    let reason: string;
+    if (ap.followUpAt.getTime() < today0.getTime()) {
+      priority = "DoNow";
+      reason = `Appraisal follow-up was due ${formatDateUtc(ap.followUpAt)}.`;
+      followUpsDueCount++;
+    } else if (ap.followUpAt.getTime() <= today1.getTime()) {
+      priority = "DoToday";
+      reason = "Appraisal follow-up is due today.";
+      followUpsDueCount++;
+    } else {
+      continue;
+    }
+
+    partyIdsWithOpportunityAction.add(ap.partyId);
+
+    const lastActivityAtAppraisal = lastActivityByParty.get(ap.partyId) ?? null;
+    const availableActions: GrowTodayActionButton[] = [{ action: "view_appraisal", appraisalId: ap.id }];
+    if (ap.partyEmail) availableActions.push({ action: "email", partyId: ap.partyId });
+    if (ap.partyMobile) availableActions.push({ action: "sms", partyId: ap.partyId });
+    availableActions.push({ action: "view_contact", partyId: ap.partyId });
+    availableActions.push({ action: "ask_ae" });
+
+    actions.push({
+      id: `appraisal:${ap.id}:followup`,
+      type: "appraisal_follow_up",
+      priority,
+      partyId: ap.partyId,
+      contactName: contactDisplayName(ap),
+      contactEmail: ap.partyEmail ?? null,
+      contactMobile: ap.partyMobile ?? null,
+      relationshipType: null,
+      propertyId: ap.propertyId,
+      propertyLabel: ap.propertyAddress ?? null,
+      opportunityId: ap.opportunityId,
+      appraisalId: ap.id,
+      reason,
+      recommendedAction: ap.followUpNotes ?? "Follow up on this appraisal.",
+      dueAt: ap.followUpAt.toISOString(),
+      lastActivityAt: lastActivityAtAppraisal ? lastActivityAtAppraisal.toISOString() : null,
       availableActions,
     });
   }
@@ -314,6 +389,7 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       propertyId: r.propertyId,
       propertyLabel: r.propertyAddress ?? null,
       opportunityId: null,
+      appraisalId: null,
       reason,
       recommendedAction: "Reach out to reconnect.",
       dueAt: null,

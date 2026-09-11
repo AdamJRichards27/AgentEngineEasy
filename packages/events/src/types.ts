@@ -55,6 +55,7 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   // AUTOMATION_ACTION_* to avoid the confirmed naming collision with the
   // existing, unrelated per-property "workflows" checklist engine (§2).
   "APPRAISAL_CREATED",
+  "APPRAISAL_STATUS_CHANGED",
   "PROPOSAL_SENT",
   "CONTRACT_PREPARATION_STARTED",
   "CONTRACT_EXCHANGED",
@@ -223,6 +224,7 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   AI_WORKFLOW_VERSION_ACTIVATED: { version: 1, description: "A new workflow version was activated by an authorised human." },
   // Agent Engine 2.0 — Workflow Automation Engine (Stage 2).
   APPRAISAL_CREATED: { version: 1, description: "An appraisal record was created for a property." },
+  APPRAISAL_STATUS_CHANGED: { version: 1, description: "An appraisal Grow workspace lifecycle status changed (e.g. ready, sent, presented, follow-up, won, lost, deferred)." },
   PROPOSAL_SENT: { version: 1, description: "A listing proposal was sent to a prospective vendor." },
   CONTRACT_PREPARATION_STARTED: { version: 1, description: "Contract preparation began for a transaction." },
   CONTRACT_EXCHANGED: { version: 1, description: "Contracts were formally exchanged between parties." },

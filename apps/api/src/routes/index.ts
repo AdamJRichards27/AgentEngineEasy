@@ -20,6 +20,7 @@ import { contactsRouter } from "./contacts.js";
 import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
+import { growAppraisalsRouter } from "./growAppraisals.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
@@ -72,6 +73,7 @@ apiRouter.use("/import", importRouter);
 apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
 apiRouter.use("/appraisals", appraisalsRouter);
+apiRouter.use("/grow/appraisals", growAppraisalsRouter);
 apiRouter.use("/tasks", tasksRouter);
 // Agent Engine 2.0 — Exception & Risk Engine (Priority 4). Mounted
 // unprefixed: exceptionsRouter's own route paths are already fully
