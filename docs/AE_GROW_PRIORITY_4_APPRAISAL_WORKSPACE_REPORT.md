@@ -1,9 +1,10 @@
 # AE Grow Priority 4 — Appraisal Builder & Appraisal Workspace (Backend)
 
 **Branch:** `feat/ae-grow-priority-4-appraisal-workspace`
-**PR:** [#32](https://github.com/AdamJRichards27/AgentEngineEasy/pull/32) → base `staging` @ `6a3dd741dba7edb6631a70a7de1665ca828c99da`
-**Head commit:** `b10a444b99a02eb60a0b8a8e7581edb0df76e581`
-**Status at time of writing:** open, not merged, CI environment gap remediated and a fresh real CI run is fully green (Addendum below); awaiting merge into `staging` per the Project Owner's CI remediation and merge instruction.
+**PR:** [#32](https://github.com/AdamJRichards27/AgentEngineEasy/pull/32) → base `staging` @ `6a3dd741dba7edb6631a70a7de1665ca828c99da` — **merged**
+**PR #32 head commit:** `de81c3a4dc82a6b2b60dd78467b359a995209419`
+**`staging` merge commit:** `a3f4b70b3fa9a757d7dab1ec1290acdc06f76ca7` (standard two-parent merge commit, merged by AdamJRichards27 on 2026-09-11T19:47:44Z)
+**Status at time of writing:** **`COMPLETE — PRIORITY 4 MERGED TO STAGING — READY FOR GROW PRIORITY 5`.** PR #32 is merged into `staging`; the post-merge `staging` CI run (Actions run #291) is confirmed fully green with per-step and per-test verification. See the Final Addendum at the end of this report for the complete post-merge evidence.
 
 ---
 
@@ -215,4 +216,52 @@ One pre-existing, unrelated annotation remained (a Node.js 20 deprecation notice
 
 ---
 
-*Report generated as part of AE Grow Priority 4. Commits authored on `feat/ae-grow-priority-4-appraisal-workspace`, PR #32 against `staging`.*
+## Final Addendum: Post-Merge Staging Verification & Final Verdict
+
+This addendum records the post-merge verification performed under the Project Owner's "AE GROW PRIORITY 4 — FINAL CI AND MERGE INSTRUCTION" directive, following PR #32's merge into `staging`.
+
+**1. Merge confirmed independently, not taken on trust.** `pull_request_read` on PR #32 was re-fetched fresh after the Project Owner reported the merge, rather than accepting the report at face value: `state: "closed"`, `merged: true`, `merged_by: "AdamJRichards27"`, `merged_at: "2026-09-11T19:47:44Z"`, final PR head SHA `de81c3a4dc82a6b2b60dd78467b359a995209419`, 10 commits total. `list_commits` against `staging` independently confirms the new branch HEAD is `a3f4b70b3fa9a757d7dab1ec1290acdc06f76ca7`, a genuine two-parent commit with message "Merge pull request #32 from AdamJRichards27/feat/ae-grow-priority-4-appraisal-workspace", authored/committed 2026-09-11T19:47:44Z — matching the PR's own `merged_at` exactly. The commit is a standard merge commit (not squash, not rebase), consistent with the merge method used for PRs #29/#30/#31 on this same repository.
+
+**2. Priority 4 code and the CI fix are both genuinely present on `staging`.** Re-fetched fresh at the merge commit (not assumed carried over): `apps/api/src/lib/growAppraisals.ts` and `packages/db/migrations/0016_fresh_wolfsbane.sql` are both present and correct on `staging` @ `a3f4b70b`. `.github/workflows/ci.yml` on `staging` @ `a3f4b70b` carries the `ALLOW_DEV_AUTH: "true"` fix scoped to only the "API automated test suite" step's own `env:` block — identical to the version verified on the PR branch, no drift.
+
+**3. Post-merge `staging` CI run located and monitored to completion.** The push of the merge commit to `staging` triggered Actions run **#291** ("Merge pull request #32 from AdamJRichards27/feat/ae-grow-priority-4-a...", commit `a3f4b70`, workflow `ci.yml`, job "Typecheck, test, build, migration validation"). This run was watched live via the Actions UI from "In progress" through to completion — **succeeded in 17m 14s.**
+
+**4. Every individual step inspected, not only the overall badge:**
+
+| Step | Result | Duration | Notes |
+|---|---|---|---|
+| Set up job / Initialize containers / Checkout / Install pnpm / Install Node.js / Verify vendored dependencies / Install dependencies | PASS | a few seconds each | — |
+| Workspace typecheck | PASS | 36s | vs. 38s on run #289 — normal variance |
+| Deterministic clean-database migration check | PASS | 2s | — |
+| Schema drift check | PASS | 2s | Log re-inspected directly: `drizzle-kit generate` genuinely enumerated all **99 tables** (including `appraisal_comparable_sales` 17 columns/0 indexes/1 fk, `appraisal_market_competition` 15 columns/0 indexes/1 fk, `appraisals` 34 columns/0 indexes/4 fks) and concluded "No schema changes, nothing to migrate 🎉" — identical evidence shape to run #289, confirming this is a genuine check, not a stub or false positive |
+| API automated test suite | PASS | 15m 49s | Final summary line (re-read directly from the expanded log, not inferred): `tests 821`, `suites 82`, `pass 820`, `fail 0`, `cancelled 0`, `skipped 1`, `todo 0`, `duration_ms 948738.875176` |
+| API production build | PASS | 1s | — |
+| Web production build | PASS | 3s | — |
+| Synthetic production startup and storage readiness | PASS | 5s | — |
+| Post Install Node.js / Post Install pnpm / Post Checkout / Stop containers / Complete job | PASS | — | — |
+
+**5. Comparison against PR CI run #289 — zero regressions, zero discrepancies.** Post-merge `staging` run #291's test totals (`821 tests / 82 suites / 820 pass / 0 fail / 0 cancelled / 1 skipped / 0 todo`) are **identical** to run #289's totals. The schema drift check's table enumeration (99 tables) and conclusion are identical. No test was skipped, removed, or weakened between the two runs — the skip count (1) and suite count (82) match exactly. Step durations vary only by normal CI runner variance (a few seconds either way on the shorter steps; the long-running test suite finished 9s faster than run #289). This confirms the merge itself introduced no regression and that CI's green result is not an artifact of a different, weaker run.
+
+**6. Security guarantees reconfirmed on `staging` (not merely re-asserted from the PR-branch check).** `apps/api/src/lib/env.ts` was re-fetched fresh from `staging` @ `a3f4b70b` (not the cached PR-branch read) and is byte-for-byte the same fail-closed logic verified before the CI-fix commit:
+```ts
+export function isProductionEnvironment(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
+export function isDevAuthEnabled(): boolean {
+  if (isProductionEnvironment()) return false;
+  return process.env.ALLOW_DEV_AUTH === "true";
+}
+```
+No application code changed between the PR-branch check and the merge (the merge commit's only content beyond the PR branch's own commits is the merge itself), so this re-verification is a genuine fresh read, not an assumption: (a) `ALLOW_DEV_AUTH` must equal the exact literal `"true"`; (b) no default-to-true — unset, empty, or any other value evaluates to `false`; (c) `NODE_ENV=production` unconditionally forces `isDevAuthEnabled()` to `false` regardless of `ALLOW_DEV_AUTH`; (d) the CI fix remains scoped to only the "API automated test suite" step's `env:` block on `staging`'s copy of `ci.yml` — no other step or job, and no deployment workflow in this repository, sets or inherits `ALLOW_DEV_AUTH`. Production authentication behaviour is unaffected.
+
+**7. Final verdict: `COMPLETE — PRIORITY 4 MERGED TO STAGING — READY FOR GROW PRIORITY 5`.** PR #32 is merged into `staging` via a standard merge commit; the post-merge `staging` CI run (#291) is fully green with every step and the full test suite individually verified; test totals are identical to the pre-merge PR CI run with zero regressions; the `ALLOW_DEV_AUTH` CI fix remains correctly scoped and production authentication behaviour remains unaffected, reconfirmed fresh against the merged code. No product or architectural decision remains outstanding for Priority 4. AE Grow Priority 5 (Data & Property Intelligence — Pricefinder/Domain/Landchecker readiness, comparable sales enrichment, etc.) may now begin under its own separate authorisation; it was explicitly not started as part of this instruction.
+
+**8. Known deferred items and minor notes, carried forward for completeness (none are blocking):**
+- Frontend UI for the Appraisal Workspace (tabbed view, pipeline list view, navigation entry points) remains out of scope for this PR, as stated throughout (§3, §20) — expected follow-up work for a future PR.
+- The CI-fix commit `b10a444`'s extended commit message has a harmless leading-character typo ("aAdds ALLOW_DEV_AUTH..."), an artifact of the GitHub web UI commit-message flow; left uncorrected per normal git-history-immutability practice, since it is cosmetic only.
+- `growAppraisals.ts`'s actual status-transition graph is a richer DAG (e.g. it includes an `APPOINTMENT_SCHEDULED` status reachable from multiple states) than the simplified linear chain described in §6's prose; and create-from-opportunity (§8) sets `growOpportunities.stage = "AppraisalBooked"` at creation time, with `"Converted"` only applied later in `recordAppraisalOutcome` on a WON outcome, rather than `"Converted"` being set directly at creation as §8's prose could be read to imply. Both are documentation-vs-code wording nuances only, not functional defects — the code's actual behaviour was independently verified via direct source review of `growAppraisals.ts` on `staging`, and no test assertion or behaviour depends on the simplified prose description.
+
+---
+
+*Report generated as part of AE Grow Priority 4. Commits authored on `feat/ae-grow-priority-4-appraisal-workspace`, PR #32, merged into `staging` at `a3f4b70b3fa9a757d7dab1ec1290acdc06f76ca7`.*
