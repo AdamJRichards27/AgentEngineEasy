@@ -21,6 +21,14 @@ import { db, growActivities, growOpportunities, growRelationships, parties, prop
 // score" fields) are deliberately not read here — an Opportunity Score
 // engine is out of scope for Priority 1 (see
 // docs/AE_GROW_PRIORITY_1_DAILY_COMMAND_CENTRE_REPORT.md).
+//
+// AE GROW PRIORITY 3 — additive communication-action metadata only. Each
+// action already carries a stable partyId; contactEmail/contactMobile and
+// the new "email"/"sms"/"view_contact" availableActions entries below are
+// pulled from the exact same parties join each query already performs
+// (no new query), so the Grow Today frontend can render Email/SMS/View
+// Contact buttons without a second round-trip. None of Priority 1's
+// ranking/priority/threshold/dedup/prioritisation logic is touched.
 
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
@@ -31,7 +39,13 @@ export type GrowTodayActionButton =
   | { action: "add_note" }
   | { action: "view_property"; propertyId: number }
   | { action: "update_next_action"; opportunityId: number }
-  | { action: "ask_ae" };
+  | { action: "ask_ae" }
+  // AE Grow Priority 3 — additive: rendered only when the contact has that
+  // channel on file (email/sms) or unconditionally (view_contact, since
+  // partyId is always present on every action).
+  | { action: "email"; partyId: number }
+  | { action: "sms"; partyId: number }
+  | { action: "view_contact"; partyId: number };
 
 export interface GrowTodayAction {
   id: string;
@@ -39,6 +53,10 @@ export interface GrowTodayAction {
   priority: GrowTodayPriority;
   partyId: number;
   contactName: string;
+  // AE Grow Priority 3 — additive: lets the frontend decide whether to
+  // render an Email/SMS action without a second lookup.
+  contactEmail: string | null;
+  contactMobile: string | null;
   relationshipType: string | null;
   propertyId: number | null;
   propertyLabel: string | null;
@@ -111,6 +129,8 @@ interface RelationshipRow {
   partyFirstName: string | null;
   partyLastName: string | null;
   partyOrganisationName: string | null;
+  partyEmail: string | null;
+  partyMobile: string | null;
   propertyAddress: string | null;
 }
 
@@ -127,6 +147,8 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
         partyFirstName: parties.firstName,
         partyLastName: parties.lastName,
         partyOrganisationName: parties.organisationName,
+        partyEmail: parties.email,
+        partyMobile: parties.mobile,
         propertyAddress: properties.formattedAddress,
       })
       .from(growRelationships)
@@ -145,6 +167,8 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
         partyFirstName: parties.firstName,
         partyLastName: parties.lastName,
         partyOrganisationName: parties.organisationName,
+        partyEmail: parties.email,
+        partyMobile: parties.mobile,
         propertyAddress: properties.formattedAddress,
       })
       .from(growOpportunities)
@@ -212,6 +236,9 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       { action: "update_next_action", opportunityId: o.id },
     ];
     if (o.propertyId) availableActions.push({ action: "view_property", propertyId: o.propertyId });
+    if (o.partyEmail) availableActions.push({ action: "email", partyId: o.partyId });
+    if (o.partyMobile) availableActions.push({ action: "sms", partyId: o.partyId });
+    availableActions.push({ action: "view_contact", partyId: o.partyId });
     availableActions.push({ action: "ask_ae" });
 
     const lastActivityAt = o.lastMeaningfulContactAt ?? lastActivityByParty.get(o.partyId) ?? null;
@@ -222,6 +249,8 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       priority,
       partyId: o.partyId,
       contactName: contactDisplayName(o),
+      contactEmail: o.partyEmail ?? null,
+      contactMobile: o.partyMobile ?? null,
       relationshipType: null,
       propertyId: o.propertyId,
       propertyLabel: o.propertyAddress ?? null,
@@ -268,6 +297,9 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
 
     const availableActions: GrowTodayActionButton[] = [{ action: "add_note" }];
     if (r.propertyId) availableActions.push({ action: "view_property", propertyId: r.propertyId });
+    if (r.partyEmail) availableActions.push({ action: "email", partyId: r.partyId });
+    if (r.partyMobile) availableActions.push({ action: "sms", partyId: r.partyId });
+    availableActions.push({ action: "view_contact", partyId: r.partyId });
     availableActions.push({ action: "ask_ae" });
 
     actions.push({
@@ -276,6 +308,8 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       priority: "KeepWarm",
       partyId: r.partyId,
       contactName: contactDisplayName(r),
+      contactEmail: r.partyEmail ?? null,
+      contactMobile: r.partyMobile ?? null,
       relationshipType: r.relationshipType,
       propertyId: r.propertyId,
       propertyLabel: r.propertyAddress ?? null,
