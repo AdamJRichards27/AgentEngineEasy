@@ -1,0 +1,498 @@
+        "cancel_reason": {
+          "name": "cancel_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "grow_commitments_brokerage_party_idx": {
+          "name": "grow_commitments_brokerage_party_idx",
+          "columns": [
+            {
+              "expression": "brokerage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "party_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "grow_commitments_brokerage_status_due_idx": {
+          "name": "grow_commitments_brokerage_status_due_idx",
+          "columns": [
+            {
+              "expression": "brokerage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "due_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "grow_commitments_property_idx": {
+          "name": "grow_commitments_property_idx",
+          "columns": [
+            {
+              "expression": "property_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "grow_commitments_opportunity_idx": {
+          "name": "grow_commitments_opportunity_idx",
+          "columns": [
+            {
+              "expression": "opportunity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "grow_commitments_brokerage_id_brokerages_id_fk": {
+          "name": "grow_commitments_brokerage_id_brokerages_id_fk",
+          "tableFrom": "grow_commitments",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_commitments_party_id_parties_id_fk": {
+          "name": "grow_commitments_party_id_parties_id_fk",
+          "tableFrom": "grow_commitments",
+          "tableTo": "parties",
+          "columnsFrom": [
+            "party_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_commitments_property_id_properties_id_fk": {
+          "name": "grow_commitments_property_id_properties_id_fk",
+          "tableFrom": "grow_commitments",
+          "tableTo": "properties",
+          "columnsFrom": [
+            "property_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_commitments_opportunity_id_grow_opportunities_id_fk": {
+          "name": "grow_commitments_opportunity_id_grow_opportunities_id_fk",
+          "tableFrom": "grow_commitments",
+          "tableTo": "grow_opportunities",
+          "columnsFrom": [
+            "opportunity_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_commitments_completed_by_user_id_users_id_fk": {
+          "name": "grow_commitments_completed_by_user_id_users_id_fk",
+          "tableFrom": "grow_commitments",
+          "tableTo": "users",
+          "columnsFrom": [
+            "completed_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_commitments_created_by_users_id_fk": {
+          "name": "grow_commitments_created_by_users_id_fk",
+          "tableFrom": "grow_commitments",
+          "tableTo": "users",
+          "columnsFrom": [
+            "created_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.grow_contact_relationships": {
+      "name": "grow_contact_relationships",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "party_id": {
+          "name": "party_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "related_party_id": {
+          "name": "related_party_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "relationship_type": {
+          "name": "relationship_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "grow_contact_relationships_brokerage_party_idx": {
+          "name": "grow_contact_relationships_brokerage_party_idx",
+          "columns": [
+            {
+              "expression": "brokerage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "party_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "grow_contact_relationships_related_party_idx": {
+          "name": "grow_contact_relationships_related_party_idx",
+          "columns": [
+            {
+              "expression": "related_party_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "grow_contact_relationships_brokerage_id_brokerages_id_fk": {
+          "name": "grow_contact_relationships_brokerage_id_brokerages_id_fk",
+          "tableFrom": "grow_contact_relationships",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_contact_relationships_party_id_parties_id_fk": {
+          "name": "grow_contact_relationships_party_id_parties_id_fk",
+          "tableFrom": "grow_contact_relationships",
+          "tableTo": "parties",
+          "columnsFrom": [
+            "party_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_contact_relationships_related_party_id_parties_id_fk": {
+          "name": "grow_contact_relationships_related_party_id_parties_id_fk",
+          "tableFrom": "grow_contact_relationships",
+          "tableTo": "parties",
+          "columnsFrom": [
+            "related_party_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_contact_relationships_created_by_users_id_fk": {
+          "name": "grow_contact_relationships_created_by_users_id_fk",
+          "tableFrom": "grow_contact_relationships",
+          "tableTo": "users",
+          "columnsFrom": [
+            "created_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.grow_contact_roles": {
+      "name": "grow_contact_roles",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "party_id": {
+          "name": "party_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "assigned_by_user_id": {
+          "name": "assigned_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "grow_contact_roles_party_role_unique": {
+          "name": "grow_contact_roles_party_role_unique",
+          "columns": [
+            {
+              "expression": "party_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "role",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "grow_contact_roles_brokerage_party_idx": {
+          "name": "grow_contact_roles_brokerage_party_idx",
+          "columns": [
+            {
+              "expression": "brokerage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "party_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "grow_contact_roles_brokerage_id_brokerages_id_fk": {
+          "name": "grow_contact_roles_brokerage_id_brokerages_id_fk",
+          "tableFrom": "grow_contact_roles",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_contact_roles_party_id_parties_id_fk": {
+          "name": "grow_contact_roles_party_id_parties_id_fk",
+          "tableFrom": "grow_contact_roles",
+          "tableTo": "parties",
+          "columnsFrom": [
+            "party_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "grow_contact_roles_assigned_by_user_id_users_id_fk": {
+          "name": "grow_contact_roles_assigned_by_user_id_users_id_fk",
+          "tableFrom": "grow_contact_roles",
+          "tableTo": "users",
+          "columnsFrom": [
+            "assigned_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}
