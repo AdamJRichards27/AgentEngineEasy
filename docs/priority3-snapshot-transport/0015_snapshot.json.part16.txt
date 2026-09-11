@@ -1,6 +1,3 @@
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "property_id": {
           "name": "property_id",
@@ -800,3 +797,4 @@
           "notNull": false
         },
         "payment_source": {
+          "name": "payment_source",
