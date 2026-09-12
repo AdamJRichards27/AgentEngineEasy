@@ -120,6 +120,13 @@
       "when": 1789118158656,
       "tag": "0016_fresh_wolfsbane",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789160467821,
+      "tag": "0017_ae_grow_priority_5_property_intelligence",
+      "breakpoints": true
     }
   ]
 }

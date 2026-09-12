@@ -38,6 +38,8 @@ const ENTITLEMENT_DEFS: Record<(typeof ENTITLEMENT_KEYS)[number], string> = {
   "grow.automation.use": "Use Grow automation rules once available.",
   "grow.campaigns.use": "Use Grow campaign orchestration once available.",
   "grow.admin.configure": "Configure Grow settings for the brokerage.",
+  "grow.propertyIntelligence.read": "View property provider observations, match candidates and opportunity signals.",
+  "grow.propertyIntelligence.manage": "Confirm or reject property matches, review or dismiss opportunity signals, and promote a signal into a Grow opportunity.",
 };
 
 const GROW_ENTITLEMENT_KEYS = ENTITLEMENT_KEYS.filter((key) => key !== "run.access");

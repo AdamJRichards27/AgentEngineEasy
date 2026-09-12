@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -58,7 +58,24 @@ export const properties = pgTable("properties", {
   isDraft: boolean("is_draft").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
+
+  // AE GROW Priority 5 — Data & Property Intelligence. All four columns are
+  // nullable and purely additive: geocode coordinates (set opportunistically
+  // when a provider observation resolves them — see
+  // lib/propertyIntelligence/observations.ts), and a coarse, human-readable
+  // rollup of "how enriched is this property" (never a raw score) driven by
+  // the same provider-observation pipeline. None of this is written by the
+  // existing ownership-review flow above, and none of it feeds
+  // ownershipReview* — enrichment quality and ownership review remain two
+  // independent signals.
+  latitude: numeric("latitude", { precision: 10, scale: 7 }),
+  longitude: numeric("longitude", { precision: 10, scale: 7 }),
+  dataQualityStatus: text("data_quality_status"), // null | "NotEnriched" | "Partial" | "Enriched" | "Stale"
+  lastEnrichedAt: timestamp("last_enriched_at"),
 });
+
+export const PROPERTY_DATA_QUALITY_STATUSES = ["NotEnriched", "Partial", "Enriched", "Stale"] as const;
+export type PropertyDataQualityStatus = (typeof PROPERTY_DATA_QUALITY_STATUSES)[number];
 
 // Person / Organisation / Trust / Estate / Other — initial workflow stays
 // simple; entity-specific fields requested only when partyType !== "Person" (§4).
