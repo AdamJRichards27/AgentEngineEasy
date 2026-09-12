@@ -798,12 +798,15 @@ function GrowComingSoon({ title, description }: { title: string; description: st
 // Voice command readiness (AE GROW Priority 1): architectural/visual seam ONLY. No speech-to-text
 // provider, no microphone stream, and no voice-driven action exists anywhere in this build -- the
 // button below is permanently disabled and says so, rather than pretending to listen.
-// AskAgentEngine itself is reused completely unmodified (contextType="business" is already a
-// real, supported value on the existing /ai/ask endpoint -- see apps/api/src/routes/ai.ts).
+// AE GROW Priority 6 Stage B: AskAgentEngine now gets contextType="grow" here (previously
+// "business" - the Grow tab's Ask AE was never actually Grow-scoped before this stage, despite
+// living on this page). AskAgentEngine itself required no changes to accept this beyond its own
+// Stage B extension (see that component's header comment) - it is still the exact same shared
+// component, not a second Ask AE surface.
 function GrowAskAETab() {
   return (
     <div>
-      <AskAgentEngine contextType="business" contextId={null} />
+      <AskAgentEngine contextType="grow" contextId={null} />
       <section className="card grow-voice-seam">
         <h2>Voice command</h2>
         <p className="muted">
