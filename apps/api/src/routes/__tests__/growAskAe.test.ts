@@ -185,10 +185,23 @@ test("POST /api/ai/ask (grow) with growFocusItemId set returns a suggestedNextSt
 
     const res = await askGrow(fresh.agent.cookie, { question: "Explain this item to me.", growFocusItemId: focusId });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { response: { suggestedNextStep?: string; supportingRecords?: Array<{ label: string }> } };
+    const body = (await res.json()) as { response: { suggestedNextStep?: string; supportingRecords?: Array<{ recordType: string; recordId: number; label: string; deepLink: string | null }> } };
     assert.equal(typeof body.response.suggestedNextStep, "string");
     assert.ok(body.response.supportingRecords && body.response.supportingRecords.length > 0);
-    assert.equal(body.response.supportingRecords![0].label, "Fiona RouteFocus");
+    // buildGrowSupportingRecords (apps/api/src/lib/ai/orchestrator.ts) checks
+    // propertyId before opportunityId/appraisalId/partyId - a real, deep-linkable
+    // /properties/:id record deliberately wins over a plain, deepLink: null
+    // opportunity/party record whenever the focused item has a property (see
+    // that function's own header comment, and its own already-passing unit
+    // test "a focused, property-linked item gets a real /properties/:id deep
+    // link" in lib/ai/__tests__/growOrchestrator.test.ts). This fixture's
+    // opportunity has a property, so the focused item's supportingRecord is
+    // the property, not the contact - asserting "Fiona RouteFocus" here was
+    // wrong; the property's own address is the correct, intended label.
+    assert.equal(body.response.supportingRecords![0].recordType, "property");
+    assert.equal(body.response.supportingRecords![0].recordId, propertyId);
+    assert.equal(body.response.supportingRecords![0].label, "5 Route Focus Item Ave");
+    assert.equal(body.response.supportingRecords![0].deepLink, `/properties/${propertyId}`);
   } finally {
     await cleanupBrokerages([fresh.brokerageId]);
   }
@@ -231,6 +244,7 @@ test("POST /api/ai/ask (grow) never leaks one brokerage's Grow data into another
     const bodyB = (await resB.json()) as { response: { supportingRecords?: Array<{ label: string }> } };
     const labelsB = (bodyB.response.supportingRecords ?? []).map((r) => r.label);
     assert.ok(!labelsB.includes("Tenant OnlyA"), "brokerage B's response must never reference brokerage A's contact");
+    assert.ok(!labelsB.includes("6 Route Cross Tenant Ave (A)"), "brokerage B's response must never reference brokerage A's property either");
   } finally {
     await cleanupBrokerages([A.brokerageId, B.brokerageId]);
   }
