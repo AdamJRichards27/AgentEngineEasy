@@ -10,8 +10,8 @@
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { eq } from "drizzle-orm";
-import { db, users, brokerages, entitlementGrants } from "@aee/db";
+import { eq, inArray } from "drizzle-orm";
+import { db, users, brokerages, entitlementGrants, aiInteractions, aiUsage } from "@aee/db";
 import type { User, Brokerage } from "@aee/db";
 import { invalidateEntitlementCache } from "../../entitlements/resolver.js";
 import {
@@ -323,6 +323,27 @@ async function grantEntitlement(brokerageId: number, entitlementKey: string): Pr
 
 async function cleanupFixture(brokerage: Brokerage, user: User): Promise<void> {
   await db.delete(entitlementGrants).where(eq(entitlementGrants.brokerageId, brokerage.id));
+  // AE GROW Priority 6 Stage B — CI run #307 (job 103537005001) failed here
+  // with a Postgres foreign key violation ("update or delete on table
+  // \"users\" violates foreign key constraint
+  // \"ai_interactions_user_id_users_id_fk\"") because every askCopilot()
+  // call above (the grow-tier/pro-tier/prompt-injection tests) writes
+  // exactly one ai_interactions row via logAiInteraction()
+  // (apps/api/src/lib/ai/audit.ts) regardless of outcome, and
+  // ai_interactions.user_id -> users.id is a required, non-cascading FK.
+  // This local cleanupFixture is a separate helper from
+  // routes/__tests__/testSupport.ts's cleanupBrokerages() (which already
+  // received the identical fix in an earlier Stage B commit) - this file
+  // uses its own lightweight fixture since it calls askCopilot() directly
+  // against the database rather than through the real HTTP app. ai_usage
+  // (interactionId -> ai_interactions.id, also non-cascading) must be
+  // cleared first.
+  const aiInteractionRows = await db.select({ id: aiInteractions.id }).from(aiInteractions).where(eq(aiInteractions.brokerageId, brokerage.id));
+  const aiInteractionIds = aiInteractionRows.map((r) => r.id);
+  if (aiInteractionIds.length > 0) {
+    await db.delete(aiUsage).where(inArray(aiUsage.interactionId, aiInteractionIds));
+  }
+  await db.delete(aiInteractions).where(eq(aiInteractions.brokerageId, brokerage.id));
   await db.delete(users).where(eq(users.id, user.id));
   await db.delete(brokerages).where(eq(brokerages.id, brokerage.id));
   invalidateEntitlementCache(brokerage.id);
