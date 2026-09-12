@@ -60,9 +60,23 @@ growRouter.get("/overview", requireAuth, requireEntitlement("grow.access"), asyn
 // data is ever read (see lib/growToday.ts's own header comment for the full boundary this
 // endpoint was built to respect). One purpose-built response covers the whole screen so the
 // frontend does not need to make four or five separate requests just to render Today.
+//
+// AE GROW Priority 5 Remediation — Rule F is a strictly additive layer on top of grow.access,
+// not a second gate on the whole route: a brokerage/user with grow.access but WITHOUT
+// grow.propertyIntelligence.read still gets the full, unchanged Rules A-E summary — they just
+// never see a Rule F card, exactly the same "no protected data returned without its own
+// entitlement, but the surrounding surface still works" shape /access's own comment above
+// describes. resolveEntitlements is the same set-of-entitlement-strings helper /access already
+// uses (Array.from(entitlements) / entitlements.has(...)) — reused here rather than
+// requireEntitlement("grow.propertyIntelligence.read") specifically because that middleware
+// would 403 the entire route for a user who simply doesn't have Property Intelligence, which is
+// not the behaviour this route wants.
 growRouter.get("/today", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
-  const summary = await getGrowTodaySummary(brokerageId);
+  const entitlements = await resolveEntitlements(req.authedUser!);
+  const summary = await getGrowTodaySummary(brokerageId, {
+    includePropertyIntelligenceSignals: entitlements.has("grow.propertyIntelligence.read"),
+  });
   res.json(summary);
 });
 
