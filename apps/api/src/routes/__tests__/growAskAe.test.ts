@@ -174,6 +174,10 @@ test("POST /api/ai/ask (grow) with growFocusItemId set returns a suggestedNextSt
   const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Route Focus ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    // createOverdueOpportunity below POSTs/PATCHes /api/grow/opportunities,
+    // which requires its own separate grow.opportunities.manage entitlement
+    // (apps/api/src/routes/grow.ts) - grow.access alone only gates the GET routes.
+    await grant(fresh.brokerageId, "grow.opportunities.manage");
     const propertyId = await createProperty(fresh.agent.cookie, "5 Route Focus Item Ave");
     const partyId = await createParty(fresh.agent.cookie, propertyId, { firstName: "Fiona", lastName: "RouteFocus" });
     const opportunityId = await createOverdueOpportunity(fresh.agent.cookie, propertyId, partyId, "Route-level focus item fixture.");
@@ -214,6 +218,9 @@ test("POST /api/ai/ask (grow) never leaks one brokerage's Grow data into another
   try {
     await grant(A.brokerageId, "grow.access");
     await grant(B.brokerageId, "grow.access");
+    // createOverdueOpportunity below (brokerage A only) needs
+    // grow.opportunities.manage separately from grow.access.
+    await grant(A.brokerageId, "grow.opportunities.manage");
 
     const propertyA = await createProperty(A.agent.cookie, "6 Route Cross Tenant Ave (A)");
     const partyA = await createParty(A.agent.cookie, propertyA, { firstName: "Tenant", lastName: "OnlyA" });

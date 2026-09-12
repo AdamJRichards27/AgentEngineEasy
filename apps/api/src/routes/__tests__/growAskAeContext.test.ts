@@ -42,6 +42,12 @@ before(async () => {
   B = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Context B ${suffix}`);
   await grant(A.brokerageId, "grow.access");
   await grant(B.brokerageId, "grow.access");
+  // POST /api/grow/opportunities (createOpportunity, used by the tenant-isolation
+  // and growFocusItemId-resolution tests below) requires its own separate
+  // grow.opportunities.manage entitlement (apps/api/src/routes/grow.ts) -
+  // grow.access alone only gates the GET routes.
+  await grant(A.brokerageId, "grow.opportunities.manage");
+  await grant(B.brokerageId, "grow.opportunities.manage");
 });
 
 after(async () => {
@@ -175,6 +181,9 @@ test("buildGrowContext: todayItems is bounded at 20 even when a brokerage has mo
   const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Context Bounding ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    // See the module-level before() above: createOpportunity below needs
+    // grow.opportunities.manage separately from grow.access.
+    await grant(fresh.brokerageId, "grow.opportunities.manage");
     const propertyId = await createProperty(fresh.agent.cookie, "4 Bounding Test Ave");
 
     const TOTAL_ITEMS = 22;
