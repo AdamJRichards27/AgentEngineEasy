@@ -216,6 +216,22 @@ const TIMELINE_ENTRY_TYPES: Record<string, EntryTypeConfig> = {
   FINANCIAL_PAYMENT_REVERSED: { source: "domain_event", category: "Transaction", sensitive: true },
   MARKETING_INVOICE_RECORDED: { source: "domain_event", category: "Listing", sensitive: true },
   MARKETING_PAYMENT_RECONCILED: { source: "domain_event", category: "Listing", sensitive: true },
+
+  // AE GROW Priority 5 Remediation — Property Intelligence. Logged by
+  // lib/propertyIntelligence/matches.ts and signals.ts via the exact same
+  // logAudit() this file's other audit_log-sourced rows already read,
+  // recordType "property_external_identifier"/"grow_opportunity_signal",
+  // always carrying the property's id. Grouped under the existing
+  // "Property" category — the same bucket ownership_review_resolved
+  // already uses for a property-level human review outcome — rather than
+  // widening TimelineCategory, for the same "don't widen a fixed union
+  // speculatively" reasoning risk_exception_*/LAUNCH_* above already give.
+  // None of these five carry a dollar figure, so none are sensitive.
+  property_intelligence_match_confirmed: { source: "audit_log", category: "Property", sensitive: false },
+  property_intelligence_match_rejected: { source: "audit_log", category: "Property", sensitive: false },
+  property_intelligence_signal_reviewed: { source: "audit_log", category: "Property", sensitive: false },
+  property_intelligence_signal_dismissed: { source: "audit_log", category: "Property", sensitive: false },
+  property_intelligence_signal_promoted: { source: "audit_log", category: "Property", sensitive: false },
 };
 
 const DOMAIN_EVENT_ENTRY_TYPES = Object.entries(TIMELINE_ENTRY_TYPES)
@@ -305,6 +321,12 @@ const SIMPLE_AUDIT_LABELS: Record<string, string> = {
   // Agent Engine 2.0 — Property Launch & Campaign Coordination.
   launch_market_ready_achieved: "Market Ready achieved",
   launch_resumed: "Launch resumed",
+  // AE GROW Priority 5 Remediation — Property Intelligence.
+  property_intelligence_match_confirmed: "Property match confirmed",
+  property_intelligence_match_rejected: "Property match rejected",
+  property_intelligence_signal_reviewed: "Property Intelligence signal reviewed",
+  property_intelligence_signal_dismissed: "Property Intelligence signal dismissed",
+  property_intelligence_signal_promoted: "Property Intelligence signal promoted to an opportunity",
 };
 
 // Figure-free version of a SENSITIVE entry's label, used whenever the
