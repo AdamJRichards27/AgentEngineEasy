@@ -179,7 +179,7 @@ async function createLongTenureOwner(cookie: string, propertyId: number, relatio
 async function recalculate(cookie: string, propertyId: number) {
   const res = await fetch(piUrl(`/property/${propertyId}/recalculate`), { method: "POST", headers: { cookie } });
   if (res.status !== 200) throw new Error(`recalculate failed: ${res.status} ${await res.text()}`);
-  return (await res.json()) as { signals: Array<{ id: number; signalType: string; confidenceBand: string; partyId: number | null; status: string }> };
+  return (await res.json()) as { signals: Array<{ id: number; signalType: string; confidenceBand: string; partyId: number | null; status: string; explanation: string }> };
 }
 
 test("unauthenticated requests to every property intelligence endpoint are rejected", async () => {
@@ -271,6 +271,21 @@ test("long ownership tenure — deterministic StrongIndicator band, idempotent r
   assert.equal(signal.confidenceBand, "StrongIndicator");
   assert.equal(signal.partyId, partyId);
   assert.equal(signal.status, "Active");
+
+  // AE GROW Priority 6 Stage B wording review (pre-implementation requirement): the displayed
+  // explanation must state only the recorded fact (tenure length), never claim or imply that
+  // long-tenure owners are statistically "likely to sell", and must explicitly disclaim any
+  // knowledge of this specific contact's private intentions. See
+  // docs/AE_GROW_PRIORITY_6_STAGE_B_GROW_ASK_AE_REPORT.md, "Priority 5 wording review", for the
+  // full before/after text and rationale.
+  assert.match(signal.explanation, /approximately 11 years/, "must state the recorded tenure as a fact");
+  assert.doesNotMatch(signal.explanation, /likely to (consider selling|sell)/i, "must never use sale-likelihood language");
+  assert.doesNotMatch(signal.explanation, /on average/i, "must never present an aggregate statistic as if it applied to this specific owner");
+  assert.match(
+    signal.explanation,
+    /AE has no information about their private intentions/,
+    "must explicitly disclaim knowledge of this contact's actual intentions",
+  );
 
   const second = await recalculate(cookie, propertyId);
   assert.equal(second.signals.length, 1);
