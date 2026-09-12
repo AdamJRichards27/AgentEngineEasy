@@ -40,6 +40,11 @@ import {
 } from "../lib/launchPlan";
 import { CommunicationsSection } from "../components/CommunicationsSection";
 import { FinancialSummarySection } from "../components/FinancialSummarySection";
+// AE GROW Priority 5 Remediation — Property Intelligence. Reused, unmodified, from the Property
+// Workspace's own perspective (anchor="property"); Contact 360 (Grow.tsx) embeds the same
+// component with anchor="contact". See that component's own header comment for why this is a
+// shared panel rather than a second bespoke screen.
+import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
 
 interface PropertyOverview {
   id: number;
@@ -770,6 +775,15 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           ? ` · ${[data.property.suburb, data.property.state, data.property.postcode].filter(Boolean).join(", ")}`
           : ""}
       </p>
+
+      {/* AE GROW Priority 5 Remediation — Property Intelligence. Extends this existing Property
+          Workspace view rather than adding a second property screen, per the remediation
+          objective's own instruction. Placed immediately under the header so it reads as a
+          concise decision-support summary of this property, not a raw provider-data dump; the
+          panel independently gates itself on grow.propertyIntelligence.read via
+          useEntitlements() and renders nothing (not even a placeholder) when the viewer lacks
+          it, so no wiring is needed here beyond mounting it. */}
+      <PropertyIntelligencePanel anchor="property" propertyId={propertyId} />
 
       {/* Ownership review — review, not block (Build Brief §8). Always
           visible when it applies, since it's a standing prompt rather than

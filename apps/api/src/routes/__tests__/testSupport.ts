@@ -77,6 +77,9 @@ import {
   integrationCredentials,
   integrationSettings,
   privacyRequests,
+  propertyExternalIdentifiers,
+  propertyProviderObservations,
+  growOpportunitySignals,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -458,6 +461,20 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * reference parties.id (non-cascading), so they only need to run before
  * the parties delete further down this function, which this placement
  * already satisfies.
+ *
+ * AE GROW Priority 5 Remediation — Property Intelligence
+ * (packages/db/src/schema/propertyIntelligence.ts). All three new tables
+ * carry brokerageId directly, so this block stays scoped by `ids` alone,
+ * independent of propertyIds. grow_opportunity_signals.promotedOpportunityId
+ * -> grow_opportunities.id is non-cascading, so it is deleted here,
+ * immediately BEFORE the growOpportunities delete just below — the same
+ * ordering constraint growCommitments/growActivities already have relative
+ * to growOpportunities, for the same reason. property_external_identifiers
+ * and property_provider_observations only reference properties.id
+ * (non-cascading; grow_opportunity_signals also references properties.id
+ * and, optionally, parties.id), so all three only need to run before the
+ * properties/parties deletes further down this function, which this
+ * placement already satisfies.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -570,6 +587,11 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(growContactRoles).where(inArray(growContactRoles.brokerageId, ids));
   await db.delete(growContactRelationships).where(inArray(growContactRelationships.brokerageId, ids));
   await db.delete(growActivities).where(inArray(growActivities.brokerageId, ids));
+  // AE GROW Priority 5 Remediation — see this function's own doc comment above: must run
+  // before growOpportunities immediately below (promotedOpportunityId FK).
+  await db.delete(growOpportunitySignals).where(inArray(growOpportunitySignals.brokerageId, ids));
+  await db.delete(propertyExternalIdentifiers).where(inArray(propertyExternalIdentifiers.brokerageId, ids));
+  await db.delete(propertyProviderObservations).where(inArray(propertyProviderObservations.brokerageId, ids));
   await db.delete(growOpportunities).where(inArray(growOpportunities.brokerageId, ids));
   await db.delete(growRelationships).where(inArray(growRelationships.brokerageId, ids));
 

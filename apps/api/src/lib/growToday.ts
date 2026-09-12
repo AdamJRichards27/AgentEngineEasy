@@ -1,5 +1,5 @@
-import { and, eq } from "drizzle-orm";
-import { db, appraisals, growActivities, growOpportunities, growRelationships, parties, properties } from "@aee/db";
+import { and, eq, gt, inArray, isNull, or } from "drizzle-orm";
+import { db, appraisals, growActivities, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
 
 // AE GROW Priority 1 — Daily Command Centre.
 //
@@ -29,11 +29,34 @@ import { db, appraisals, growActivities, growOpportunities, growRelationships, p
 // (no new query), so the Grow Today frontend can render Email/SMS/View
 // Contact buttons without a second round-trip. None of Priority 1's
 // ranking/priority/threshold/dedup/prioritisation logic is touched.
+//
+// AE GROW PRIORITY 5 REMEDIATION — Rule F, additive. Surfaces Property
+// Intelligence signals (packages/db/src/schema/propertyIntelligence.ts,
+// lib/propertyIntelligence/signals.ts) as Grow Today items under the exact
+// same conditions the remediation objective specifies: active, not
+// expired, not dismissed, belonging to the authenticated brokerage, linked
+// to accessible records, gated by grow.propertyIntelligence.read, and
+// meeting a minimum evidence bar (see PROPERTY_INTELLIGENCE_MIN_CONFIDENCE_BANDS
+// below). This file still does not know what an entitlement is — the
+// caller (routes/grow.ts) resolves grow.propertyIntelligence.read and
+// passes a plain boolean into getGrowTodaySummary's new options
+// parameter, exactly the same "resolve cross-cutting concerns at the
+// route, keep the rule engine itself concern-free" boundary this file
+// already draws around auth/session concepts. Rules A-E's own logic,
+// signatures, and behaviour are completely untouched by this addition —
+// see routes/__tests__/growToday.test.ts's regression coverage.
 
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
 
-export type GrowTodayActionType = "opportunity_follow_up" | "opportunity_no_action_set" | "relationship_cold" | "appraisal_follow_up";
+export type GrowTodayActionType =
+  | "opportunity_follow_up"
+  | "opportunity_no_action_set"
+  | "relationship_cold"
+  | "appraisal_follow_up"
+  // AE Grow Priority 5 Remediation — additive: a Property Intelligence
+  // signal surfaced by Rule F below.
+  | "property_intelligence_signal";
 
 export type GrowTodayActionButton =
   | { action: "add_note" }
@@ -94,6 +117,14 @@ export interface GrowTodaySummary {
 // a magic number buried in the rule logic below.
 const COLD_CONTACT_THRESHOLD_DAYS = 21;
 
+// AE GROW Priority 5 Remediation — Rule F's own minimum evidence bar. An
+// "Emerging" signal is, by the schema's own confidence-band definition
+// (packages/db/src/schema/propertyIntelligence.ts), the weakest band —
+// real, but not yet worth a daily action item. It stays fully visible and
+// reviewable on the property/contact record; Rule F just doesn't promote
+// it onto Today. Only the stronger two bands do.
+const PROPERTY_INTELLIGENCE_MIN_CONFIDENCE_BANDS = ["WorthReviewing", "StrongIndicator"] as const;
+
 function startOfTodayUtc(): Date {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
@@ -137,8 +168,81 @@ interface RelationshipRow {
   propertyAddress: string | null;
 }
 
-export async function getGrowTodaySummary(brokerageId: number): Promise<GrowTodaySummary> {
-  const [relationshipRows, opportunityRows, activityRows, appraisalFollowUpRows] = await Promise.all([
+// AE GROW Priority 5 Remediation — Rule F's own read, kept as a standalone
+// function (rather than inlined into the Promise.all below like Rules A-E's
+// queries) so it can short-circuit to an empty array with zero DB cost when
+// includePropertyIntelligenceSignals is false, without the ternary-branch
+// typing awkwardness of mixing a Drizzle query builder and Promise.resolve([])
+// inline. Reads growOpportunitySignals directly — the exact same table
+// lib/propertyIntelligence/signals.ts itself reads and writes — rather than
+// importing that module, so this file never takes a dependency on the
+// Property Intelligence service/entitlement layer.
+interface PropertyIntelligenceSignalRow {
+  id: number;
+  partyId: number | null;
+  propertyId: number | null;
+  signalType: string;
+  explanation: string;
+  confidenceBand: string;
+  partyFirstName: string | null;
+  partyLastName: string | null;
+  partyOrganisationName: string | null;
+  partyEmail: string | null;
+  partyMobile: string | null;
+  propertyAddress: string | null;
+}
+
+async function fetchPropertyIntelligenceSignalRows(
+  brokerageId: number,
+  enabled: boolean,
+  now: Date,
+): Promise<PropertyIntelligenceSignalRow[]> {
+  if (!enabled) return [];
+  return db
+    .select({
+      id: growOpportunitySignals.id,
+      partyId: growOpportunitySignals.partyId,
+      propertyId: growOpportunitySignals.propertyId,
+      signalType: growOpportunitySignals.signalType,
+      explanation: growOpportunitySignals.explanation,
+      confidenceBand: growOpportunitySignals.confidenceBand,
+      partyFirstName: parties.firstName,
+      partyLastName: parties.lastName,
+      partyOrganisationName: parties.organisationName,
+      partyEmail: parties.email,
+      partyMobile: parties.mobile,
+      propertyAddress: properties.formattedAddress,
+    })
+    .from(growOpportunitySignals)
+    // Rule F only ever surfaces a signal that has a linked contact (see the
+    // header comment above the loop below) — an inner join on parties is
+    // therefore both correct and a cheap extra tenant/shape guard, not just
+    // an optimisation.
+    .innerJoin(parties, eq(growOpportunitySignals.partyId, parties.id))
+    .leftJoin(properties, eq(growOpportunitySignals.propertyId, properties.id))
+    .where(
+      and(
+        eq(growOpportunitySignals.brokerageId, brokerageId),
+        eq(growOpportunitySignals.status, "Active"),
+        inArray(growOpportunitySignals.confidenceBand, PROPERTY_INTELLIGENCE_MIN_CONFIDENCE_BANDS),
+        or(isNull(growOpportunitySignals.expiresAt), gt(growOpportunitySignals.expiresAt, now)),
+      ),
+    );
+}
+
+export async function getGrowTodaySummary(
+  brokerageId: number,
+  options?: { includePropertyIntelligenceSignals?: boolean },
+): Promise<GrowTodaySummary> {
+  // AE GROW Priority 5 Remediation — Rule F is entitlement-gated, but this
+  // function never resolves grow.propertyIntelligence.read itself. The
+  // caller (routes/grow.ts) checks the entitlement and passes the result in
+  // here as a plain boolean, preserving this file's existing "no
+  // cross-cutting concerns" boundary — growToday.ts has never imported an
+  // entitlement or auth concept, and still doesn't.
+  const includePropertyIntelligenceSignals = options?.includePropertyIntelligenceSignals ?? false;
+  const propertyIntelligenceNow = new Date();
+  const [relationshipRows, opportunityRows, activityRows, appraisalFollowUpRows, propertyIntelligenceSignalRows] = await Promise.all([
     db
       .select({
         id: growRelationships.id,
@@ -201,6 +305,7 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
       .innerJoin(properties, eq(appraisals.propertyId, properties.id))
       .innerJoin(parties, eq(appraisals.partyId, parties.id))
       .where(and(eq(properties.brokerageId, brokerageId), eq(appraisals.status, "FOLLOW_UP"))),
+    fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, propertyIntelligenceNow),
   ]);
 
   const lastActivityByParty = new Map<number, Date>();
@@ -338,6 +443,72 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
     });
   }
 
+  // AE GROW Priority 5 Remediation — Rule F. Surfaces a manageable item for
+  // each Property Intelligence signal already filtered, by
+  // fetchPropertyIntelligenceSignalRows above, down to: Active, not
+  // expired (expiresAt null or in the future), belonging to this
+  // brokerage, and at or above the WorthReviewing confidence bar — so this
+  // loop only has two of the remediation objective's remaining conditions
+  // left to enforce itself:
+  //   1. "Not dismissed" — already guaranteed by the query's own
+  //      status = "Active" condition; a Dismissed (or Reviewed/Superseded/
+  //      Expired) signal is never returned in the first place, so no
+  //      separate check is needed in this loop.
+  //   2. "Linked to accessible records" — a signal with no linked contact
+  //      (every current observation-derived signal type) is skipped. Grow
+  //      Today's own GrowTodayAction contract requires a non-null partyId
+  //      on every item (contactName/email/sms/view_contact all depend on
+  //      it) — exactly the same invariant Rules A-E already rely on. This
+  //      loses no information: a property-only signal with no linked
+  //      contact is still visible, reviewable, dismissible and promotable
+  //      from the Property Workspace's own Property Intelligence panel —
+  //      it just isn't promoted onto Today as its own card.
+  //
+  // Like Rule E, a surfaced party is added to partyIdsWithOpportunityAction
+  // so the same contact never also shows as a generic "cold" nudge via
+  // Rule D below — they already have a specific, concrete reason to reach
+  // out. Rule F never contacts anyone, never creates a commitment,
+  // opportunity, appraisal, or property change, and never presents its
+  // signal's inference as a verified fact: reason is always the signal's
+  // own already-hedged, plain-language explanation (see
+  // lib/propertyIntelligence/signals.ts's SignalCandidate.explanation),
+  // and recommendedAction only ever asks the agent to review it themselves.
+  for (const s of propertyIntelligenceSignalRows) {
+    if (s.partyId === null) continue;
+
+    const priority: GrowTodayPriority = s.confidenceBand === "StrongIndicator" ? "DoToday" : "KeepWarm";
+    partyIdsWithOpportunityAction.add(s.partyId);
+
+    const availableActions: GrowTodayActionButton[] = [{ action: "add_note" }];
+    if (s.propertyId) availableActions.push({ action: "view_property", propertyId: s.propertyId });
+    if (s.partyEmail) availableActions.push({ action: "email", partyId: s.partyId });
+    if (s.partyMobile) availableActions.push({ action: "sms", partyId: s.partyId });
+    availableActions.push({ action: "view_contact", partyId: s.partyId });
+    availableActions.push({ action: "ask_ae" });
+
+    const lastActivityAtSignal = lastActivityByParty.get(s.partyId) ?? null;
+
+    actions.push({
+      id: `signal:${s.id}`,
+      type: "property_intelligence_signal",
+      priority,
+      partyId: s.partyId,
+      contactName: contactDisplayName(s),
+      contactEmail: s.partyEmail ?? null,
+      contactMobile: s.partyMobile ?? null,
+      relationshipType: null,
+      propertyId: s.propertyId,
+      propertyLabel: s.propertyAddress ?? null,
+      opportunityId: null,
+      appraisalId: null,
+      reason: s.explanation,
+      recommendedAction: "Review this signal on the property or contact record to decide whether it's worth acting on.",
+      dueAt: null,
+      lastActivityAt: lastActivityAtSignal ? lastActivityAtSignal.toISOString() : null,
+      availableActions,
+    });
+  }
+
   // Rule D — cold Active relationships, deduped to one card per party
   // (preferring the primary relationship, then the most recently
   // established one) and skipped for a party already carrying an
@@ -412,7 +583,15 @@ export async function getGrowTodaySummary(brokerageId: number): Promise<GrowToda
 
   return {
     generatedAt: new Date().toISOString(),
-    hasAnyGrowData: relationshipRows.length > 0 || opportunityRows.length > 0,
+    // AE GROW Priority 5 Remediation — genuine gap caught while writing this
+    // file's own test coverage: without this third clause, a brokerage whose
+    // ONLY actionable item today is a Rule F Property Intelligence signal
+    // (no relationships, no opportunities yet) would report
+    // hasAnyGrowData: false, which Grow.tsx reads as "never used Grow" and
+    // renders as the onboarding empty state — hiding a real, concrete
+    // action item behind an empty-state screen instead of showing it. Rules
+    // A-E's own inputs to this boolean are unchanged.
+    hasAnyGrowData: relationshipRows.length > 0 || opportunityRows.length > 0 || propertyIntelligenceSignalRows.length > 0,
     counts: {
       priorityActions: actions.length,
       followUpsDue: followUpsDueCount,

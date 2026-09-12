@@ -5,6 +5,7 @@ import {
   growActivities,
   growCommitments,
   growOpportunities,
+  growOpportunitySignals,
   growRelationships,
   parties,
   properties,
@@ -101,6 +102,19 @@ export const GROW_TIMELINE_EVENT_TYPES = [
   "APPRAISAL_WON",
   "APPRAISAL_LOST",
   "APPRAISAL_DEFERRED",
+  // AE GROW Priority 5 Remediation — Property Intelligence. Sourced live from
+  // growOpportunitySignals rows LINKED TO THIS CONTACT (partyId set) — only the meaningful,
+  // human-decided outcomes, per the remediation objective's own "add only meaningful business
+  // events... avoid technical refresh noise" instruction. A signal simply becoming Active
+  // (raised or recalculated) is deliberately NOT a Timeline event — that's routine background
+  // computation, not a business event a contact's history should record; only a human
+  // reviewing, dismissing, or promoting it is. A signal with no linked contact (every current
+  // observation-derived signal type) never appears here at all — see getRelationshipTimeline's
+  // own query below — it is Property Timeline-only (lib/timeline.ts), matching
+  // propertyExternalIdentifiers/growOpportunitySignals' own property-anchored-only shape.
+  "PROPERTY_INTELLIGENCE_SIGNAL_REVIEWED",
+  "PROPERTY_INTELLIGENCE_SIGNAL_DISMISSED",
+  "PROPERTY_INTELLIGENCE_SIGNAL_PROMOTED",
 ] as const;
 export type GrowTimelineEventType = (typeof GROW_TIMELINE_EVENT_TYPES)[number];
 
@@ -112,7 +126,16 @@ export interface GrowTimelineEvent {
   propertyId: number | null;
   propertyLabel: string | null;
   opportunityId: number | null;
-  sourceType: "party" | "relationship" | "activity" | "opportunity" | "commitment" | "communication" | "appraisal";
+  sourceType:
+    | "party"
+    | "relationship"
+    | "activity"
+    | "opportunity"
+    | "commitment"
+    | "communication"
+    | "appraisal"
+    // AE GROW Priority 5 Remediation.
+    | "property_intelligence_signal";
   sourceId: number;
 }
 
@@ -201,6 +224,7 @@ export async function getRelationshipTimeline(
     opportunityRows,
     commitmentRows,
     appraisalRows,
+    signalRows,
     partyAnchoredMessages,
     participantThreadLinks,
   ] = await Promise.all([
@@ -210,6 +234,14 @@ export async function getRelationshipTimeline(
     db.select().from(growOpportunities).where(eq(growOpportunities.partyId, partyId)),
     db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId)),
     db.select().from(appraisals).where(eq(appraisals.partyId, partyId)),
+    // AE GROW Priority 5 Remediation — Property Intelligence. brokerageId is filtered directly
+    // here (the column is right there on this table), same reasoning as the
+    // communicationMessages query below, in addition to the party.brokerageId guard every
+    // other source in this function relies on.
+    db
+      .select()
+      .from(growOpportunitySignals)
+      .where(and(eq(growOpportunitySignals.partyId, partyId), eq(growOpportunitySignals.brokerageId, brokerageId))),
     // AE GROW Priority 3, path 1 — messages anchored directly to this contact (a contact-first
     // thread). communicationMessages.partyId is denormalised from its thread's own partyId (see
     // communications.ts's header comment), so this is a single-column lookup, no join needed.
@@ -289,6 +321,7 @@ export async function getRelationshipTimeline(
   for (const c of commitmentRows) if (c.propertyId) propertyIds.add(c.propertyId);
   for (const ap of appraisalRows) if (ap.propertyId) propertyIds.add(ap.propertyId);
   for (const m of communicationMessageRows) if (m.propertyId) propertyIds.add(m.propertyId);
+  for (const s of signalRows) if (s.propertyId) propertyIds.add(s.propertyId);
 
   const propertyLabelById = new Map<number, string>();
   if (propertyIds.size > 0) {
@@ -536,6 +569,52 @@ export async function getRelationshipTimeline(
         opportunityId: ap.opportunityId,
         sourceType: "appraisal",
         sourceId: ap.id,
+      });
+    }
+  }
+
+  // AE GROW Priority 5 Remediation — Property Intelligence. Only the meaningful, human-decided
+  // outcome each signal reaches is surfaced (see this file's GROW_TIMELINE_EVENT_TYPES comment
+  // above) — Active/Expired signals produce no event. Each signal reaches at most one of these
+  // three terminal states exactly once, so this is always at most one event per row, never a
+  // pair.
+  for (const s of signalRows) {
+    const propertyLabel = s.propertyId ? propertyLabelById.get(s.propertyId) ?? null : null;
+    if (s.status === "Reviewed" && s.reviewedAt) {
+      events.push({
+        id: `signal:${s.id}:REVIEWED`,
+        type: "PROPERTY_INTELLIGENCE_SIGNAL_REVIEWED",
+        occurredAt: s.reviewedAt.toISOString(),
+        summary: `Property Intelligence signal reviewed: ${s.title}.`,
+        propertyId: s.propertyId,
+        propertyLabel,
+        opportunityId: null,
+        sourceType: "property_intelligence_signal",
+        sourceId: s.id,
+      });
+    } else if (s.status === "Dismissed" && s.reviewedAt) {
+      events.push({
+        id: `signal:${s.id}:DISMISSED`,
+        type: "PROPERTY_INTELLIGENCE_SIGNAL_DISMISSED",
+        occurredAt: s.reviewedAt.toISOString(),
+        summary: `Property Intelligence signal dismissed: ${s.title}${s.dismissedReason ? ` (${s.dismissedReason})` : ""}.`,
+        propertyId: s.propertyId,
+        propertyLabel,
+        opportunityId: null,
+        sourceType: "property_intelligence_signal",
+        sourceId: s.id,
+      });
+    } else if (s.status === "Superseded" && s.promotedOpportunityId !== null && s.reviewedAt) {
+      events.push({
+        id: `signal:${s.id}:PROMOTED`,
+        type: "PROPERTY_INTELLIGENCE_SIGNAL_PROMOTED",
+        occurredAt: s.reviewedAt.toISOString(),
+        summary: `Property Intelligence signal promoted to an opportunity: ${s.title}.`,
+        propertyId: s.propertyId,
+        propertyLabel,
+        opportunityId: s.promotedOpportunityId,
+        sourceType: "property_intelligence_signal",
+        sourceId: s.id,
       });
     }
   }

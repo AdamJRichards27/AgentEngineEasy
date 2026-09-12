@@ -8,6 +8,11 @@ import { AskAgentEngine } from "../components/AskAgentEngine";
 // component's own header comment). Grow Today's Email/SMS action buttons below route into it via
 // GrowWorkspace's pendingComposeChannel state rather than opening a second composer.
 import { ContactCommunicationsSection } from "../components/CommunicationsSection";
+// AE GROW Priority 5 Remediation — Property Intelligence. Reused, unmodified, from Contact 360's
+// own perspective (anchor="contact"); the Property Workspace embeds the same component with
+// anchor="property". See that component's own header comment for why this is a shared panel
+// rather than a second bespoke screen.
+import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
@@ -1337,6 +1342,13 @@ function GrowContactDetail({
           </table>
         )}
       </section>
+
+      {/* AE GROW Priority 5 Remediation — Property Intelligence. Extends this existing Contact
+          360 view rather than adding a second contact screen, per the remediation objective's
+          own instruction. The panel independently gates itself on grow.propertyIntelligence.read
+          via useEntitlements() and renders nothing (not even a placeholder) when the viewer lacks
+          it, so no wiring is needed here beyond mounting it. */}
+      <PropertyIntelligencePanel anchor="contact" partyId={partyId} />
 
       <section className="card">
         <h2>Relationship Timeline</h2>
