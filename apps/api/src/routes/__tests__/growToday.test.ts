@@ -12,7 +12,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, auditLogs, entitlementGrants } from "@aee/db";
+import { db, auditLogs, entitlementGrants, growOpportunitySignals } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -496,4 +496,209 @@ test("AE Grow Priority 3 — Today's availableActions include email/sms/view_con
     noChannelsAction.availableActions.some((b: any) => b.action === "view_contact" && b.partyId === noChannelsPartyId),
     "view_contact is unconditional — it only needs partyId, which every action already carries",
   );
+});
+
+// ---------------------------------------------------------------------
+// AE GROW PRIORITY 5 REMEDIATION — Rule F. Grow Today surfaces a Property
+// Intelligence signal (growOpportunitySignals) as its own card, gated
+// behind grow.propertyIntelligence.read and only at or above the
+// WorthReviewing confidence bar. Rows are seeded by a direct db.insert
+// against growOpportunitySignals — this file tests growToday.ts's own Rule
+// F wiring, not the Property Intelligence service/rule-engine itself (that
+// has its own dedicated HTTP-integration coverage in
+// routes/__tests__/propertyIntelligence.test.ts) — so it is deliberately
+// agnostic to how a signal row came to exist.
+//
+// Every test(...) block above this one is untouched by Rule F's addition
+// to growToday.ts (same assertions, same fixtures, same file) and is
+// itself the primary regression evidence that Rules A-E behave exactly as
+// they did before this remediation. The two tests below add explicit,
+// Rule-F-specific regression coverage on top of that: proving the new rule
+// is invisible without its entitlement, and that its presence does not
+// change how Rule D treats an unrelated, lower-confidence signal.
+// ---------------------------------------------------------------------
+
+test("Rule F — invisible without grow.propertyIntelligence.read; once entitled, a StrongIndicator signal surfaces as its own DoToday card and suppresses the same contact's Rule D 'cold relationship' card", async () => {
+  const propertyId = await createProperty(A.agent.cookie, "20 Rule F Signal St");
+  const partyId = await createParty(A.agent.cookie, propertyId, { firstName: "Selena", lastName: "SignalOwner" });
+  const relationshipId = await createRelationship(A.agent.cookie, { partyId, propertyId, relationshipType: "owner" });
+
+  // No entitlement yet: Rule F must not run at all, so this Active
+  // relationship (no activity ever recorded) surfaces through Rule D exactly
+  // like every other cold-contact fixture earlier in this file.
+  const beforeGrant = await fetchToday(A.agent.cookie);
+  assert.equal(beforeGrant.status, 200, "grow.access alone must still serve /today with grow.propertyIntelligence.read absent");
+  const coldCardBeforeGrant = beforeGrant.body.priorityActions.find((a: any) => a.id === `relationship:${relationshipId}`);
+  assert.ok(coldCardBeforeGrant, "Rule D must surface this contact normally while Rule F is not yet entitled");
+  assert.equal(coldCardBeforeGrant.reason, "No contact recorded yet.");
+  assert.ok(
+    !beforeGrant.body.priorityActions.some((a: any) => a.partyId === partyId && a.type === "property_intelligence_signal"),
+    "no signal card can appear before the signal even exists",
+  );
+
+  const [signal] = await db
+    .insert(growOpportunitySignals)
+    .values({
+      brokerageId: A.brokerageId,
+      partyId,
+      propertyId,
+      signalType: "long_ownership_tenure",
+      title: "Long ownership tenure",
+      explanation: "This contact has been recorded as the owner of this property for approximately 11 years.",
+      evidence: { fixture: "ruleF-strong" },
+      source: "internal",
+      confidenceBand: "StrongIndicator",
+      dedupeKey: `rule-f-test-${suffix}-strong`,
+    })
+    .returning();
+
+  const stillBeforeGrant = await fetchToday(A.agent.cookie);
+  assert.ok(
+    !stillBeforeGrant.body.priorityActions.some((a: any) => a.id === `signal:${signal.id}`),
+    "a real, qualifying signal must still not surface on Today without grow.propertyIntelligence.read",
+  );
+  const coldCardStillBeforeGrant = stillBeforeGrant.body.priorityActions.find((a: any) => a.id === `relationship:${relationshipId}`);
+  assert.ok(coldCardStillBeforeGrant, "Rule D's card for this contact must be completely unaffected by an un-entitled signal existing");
+
+  await grant(A.brokerageId, "grow.propertyIntelligence.read");
+
+  const afterGrant = await fetchToday(A.agent.cookie);
+  assert.equal(afterGrant.status, 200);
+  const signalCard = afterGrant.body.priorityActions.find((a: any) => a.id === `signal:${signal.id}`);
+  assert.ok(signalCard, "once entitled, the qualifying signal must surface as its own Today card");
+  assert.equal(signalCard.type, "property_intelligence_signal");
+  assert.equal(signalCard.priority, "DoToday");
+  assert.equal(signalCard.partyId, partyId);
+  assert.equal(signalCard.propertyId, propertyId);
+  assert.equal(signalCard.contactName, "Selena SignalOwner");
+  assert.equal(signalCard.reason, "This contact has been recorded as the owner of this property for approximately 11 years.");
+  assert.equal(
+    signalCard.recommendedAction,
+    "Review this signal on the property or contact record to decide whether it's worth acting on.",
+  );
+  assert.equal(signalCard.opportunityId, null, "Rule F never creates or references a growOpportunities row on its own");
+  assert.ok(
+    signalCard.availableActions.some((b: any) => b.action === "view_property" && b.propertyId === propertyId),
+    "the card must link back to the property review surface",
+  );
+  assert.ok(
+    signalCard.availableActions.some((b: any) => b.action === "view_contact" && b.partyId === partyId),
+    "the card must link back to the contact review surface",
+  );
+  assert.ok(!signalCard.availableActions.some((b: any) => b.action === "update_next_action"), "Rule F must never imply an opportunity exists to update");
+
+  // Rule D's card for the same contact must now be gone -- superseded by the
+  // more specific, concrete signal card, exactly like Rule E already
+  // suppresses Rule D for an appraisal-follow-up contact.
+  assert.ok(
+    !afterGrant.body.priorityActions.some((a: any) => a.id === `relationship:${relationshipId}`),
+    "Rule F suppresses the generic Rule D 'cold relationship' card for the same contact once it fires",
+  );
+  const cardsForSelena = afterGrant.body.priorityActions.filter((a: any) => a.partyId === partyId);
+  assert.equal(cardsForSelena.length, 1, "the contact must still appear exactly once on Today, never twice");
+});
+
+test("Rule F — an Emerging-band signal never surfaces on Today (Rule D still fires normally for that contact), and Rules A-E ranking/ordering is unaffected by Rule F cards being mixed in", async () => {
+  await grant(A.brokerageId, "grow.propertyIntelligence.read");
+
+  const emergingPropertyId = await createProperty(A.agent.cookie, "21 Emerging Signal St");
+  const emergingPartyId = await createParty(A.agent.cookie, emergingPropertyId, { firstName: "Emery", lastName: "Emerging" });
+  const emergingRelationshipId = await createRelationship(A.agent.cookie, {
+    partyId: emergingPartyId,
+    propertyId: emergingPropertyId,
+    relationshipType: "owner",
+  });
+  await db.insert(growOpportunitySignals).values({
+    brokerageId: A.brokerageId,
+    partyId: emergingPartyId,
+    propertyId: emergingPropertyId,
+    signalType: "long_ownership_tenure",
+    title: "Long ownership tenure",
+    explanation: "Emerging-band fixture; must never reach Today.",
+    evidence: { fixture: "ruleF-emerging" },
+    source: "internal",
+    confidenceBand: "Emerging",
+    dedupeKey: `rule-f-test-${suffix}-emerging`,
+  });
+
+  // A fresh Do Now overdue-opportunity fixture, exactly like the very first
+  // Rule A/B/C test in this file, run again here to prove the priority
+  // ordering contract (DoNow, then DoToday, then KeepWarm) still holds with
+  // Rule F cards mixed into the same list.
+  const doNowPropertyId = await createProperty(A.agent.cookie, "22 Rule F Ordering Overdue St");
+  const doNowPartyId = await createParty(A.agent.cookie, doNowPropertyId, { firstName: "Orson", lastName: "OverdueAgain" });
+  const doNowOppId = await createOpportunity(A.agent.cookie, {
+    partyId: doNowPartyId,
+    propertyId: doNowPropertyId,
+    opportunityType: "Listing",
+    reason: "Second overdue fixture for Rule F ordering regression.",
+  });
+  await fetch(growUrl(`/opportunities/${doNowOppId}`), {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ nextActionDueAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }),
+  });
+
+  const { body } = await fetchToday(A.agent.cookie);
+
+  assert.ok(
+    !body.priorityActions.some((a: any) => a.type === "property_intelligence_signal" && a.partyId === emergingPartyId),
+    "an Emerging-band signal must never be promoted onto Today, regardless of entitlement",
+  );
+  const emergingColdCard = body.priorityActions.find((a: any) => a.id === `relationship:${emergingRelationshipId}`);
+  assert.ok(emergingColdCard, "Rule D must still fire normally for a contact whose only signal is below Rule F's confidence bar");
+  assert.equal(emergingColdCard.priority, "KeepWarm");
+
+  const doNowIndex = body.priorityActions.findIndex((a: any) => a.id === `opportunity:${doNowOppId}`);
+  const keepWarmIndex = body.priorityActions.findIndex((a: any) => a.id === `relationship:${emergingRelationshipId}`);
+  assert.ok(doNowIndex !== -1 && keepWarmIndex !== -1);
+  assert.ok(doNowIndex < keepWarmIndex, "DoNow items must still sort ahead of KeepWarm items with Rule F in play");
+  for (let i = 1; i < body.priorityActions.length; i++) {
+    const priorityOrder: Record<string, number> = { DoNow: 0, DoToday: 1, KeepWarm: 2 };
+    assert.ok(
+      priorityOrder[body.priorityActions[i - 1].priority] <= priorityOrder[body.priorityActions[i].priority],
+      "the full returned list must remain sorted by priority end to end",
+    );
+  }
+});
+
+test("Rule F — hasAnyGrowData reports true when a qualifying signal is the only reason a brokerage has anything to show today", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Grow Today Rule F Only ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.propertyIntelligence.read");
+
+    const emptyBefore = await fetchToday(fresh.agent.cookie);
+    assert.equal(emptyBefore.status, 200);
+    assert.equal(emptyBefore.body.hasAnyGrowData, false);
+
+    const propertyId = await createProperty(fresh.agent.cookie, "1 Rule F Only St");
+    const partyId = await createParty(fresh.agent.cookie, propertyId, { firstName: "Sam", lastName: "RuleFOnly" });
+    const [signal] = await db
+      .insert(growOpportunitySignals)
+      .values({
+        brokerageId: fresh.brokerageId,
+        partyId,
+        propertyId,
+        signalType: "long_ownership_tenure",
+        title: "Long ownership tenure",
+        explanation: "The only actionable item this brokerage has today.",
+        evidence: { fixture: "ruleF-only" },
+        source: "internal",
+        confidenceBand: "StrongIndicator",
+        dedupeKey: `rule-f-test-${suffix}-only`,
+      })
+      .returning();
+
+    const { status, body } = await fetchToday(fresh.agent.cookie);
+    assert.equal(status, 200);
+    assert.equal(
+      body.hasAnyGrowData,
+      true,
+      "a real Rule F signal must count as 'this brokerage has Grow data', not fall through to the onboarding empty state",
+    );
+    assert.ok(body.priorityActions.some((a: any) => a.id === `signal:${signal.id}`));
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
 });
