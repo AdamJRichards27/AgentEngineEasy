@@ -6,6 +6,7 @@ import { getPrompt } from "./prompts.js";
 import { isRoleEnabled } from "./featureFlags.js";
 import { isRoleEntitled } from "./entitlements.js";
 import { logAiInteraction, logAiUsage } from "./audit.js";
+import { assertGrowRateLimit, GrowRateLimitError } from "./growRateLimiter.js";
 import { AUTO_EXECUTE_CEILING, AiEntitlementError, AiFeatureDisabledError, RISK_LEVEL_DESCRIPTIONS } from "./types.js";
 import type { AiContextPackage, AiRole, AiStructuredResponse, AiToolResult, ResponseKind, RiskLevel } from "./types.js";
 
@@ -192,6 +193,31 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
       question: input.question,
     });
     throw new AiFeatureDisabledError("The AI Copilot is currently disabled for this environment.");
+  }
+
+  // AE GROW Priority 6 Stage B — Performance/Cost Controls: rate limiting.
+  // Checked before any context/database work, and scoped to Grow only (see
+  // growRateLimiter.ts's own header comment for the full rationale and its
+  // documented single-process limitation).
+  if (isGrowRequest) {
+    try {
+      assertGrowRateLimit(input.brokerageId);
+    } catch (err) {
+      if (err instanceof GrowRateLimitError) {
+        await logAiInteraction({
+          requestId,
+          brokerageId: input.brokerageId,
+          userId: input.userId,
+          aiRole: role,
+          contextType: input.contextType ?? undefined,
+          question: input.question,
+          riskLevel: 0,
+          status: "blocked_flag",
+          errorMessage: err.message,
+        });
+      }
+      throw err;
+    }
   }
 
   const context = await buildContext({
