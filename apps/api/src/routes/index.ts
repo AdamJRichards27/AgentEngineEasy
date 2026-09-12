@@ -21,6 +21,7 @@ import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
 import { growAppraisalsRouter } from "./growAppraisals.js";
+import { propertyIntelligenceRouter } from "./propertyIntelligence.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
@@ -74,6 +75,14 @@ apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
 apiRouter.use("/appraisals", appraisalsRouter);
 apiRouter.use("/grow/appraisals", growAppraisalsRouter);
+// AE GROW Priority 5 Remediation — Property Intelligence. Mounted the same
+// way as growAppraisalsRouter immediately above: nested under Grow's own
+// namespace (Property Intelligence is a Grow-specific view onto the
+// canonical `properties` table plus the Priority 5 schema, never a second
+// property database), as its own router object for file-size/organisation
+// reasons only. See docs/AE_GROW_PRIORITY_5_APPLICATION_LAYER_REMEDIATION.md
+// for why this router did not exist until this remediation.
+apiRouter.use("/grow/property-intelligence", propertyIntelligenceRouter);
 apiRouter.use("/tasks", tasksRouter);
 // Agent Engine 2.0 — Exception & Risk Engine (Priority 4). Mounted
 // unprefixed: exceptionsRouter's own route paths are already fully
