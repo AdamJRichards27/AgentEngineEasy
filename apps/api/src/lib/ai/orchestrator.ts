@@ -45,7 +45,7 @@ function classifyResponseKind(toolResults: AiToolResult[]): ResponseKind {
   return hasData ? "fact" : "unknown";
 }
 
-function toolResultHasUsableData(result: AiToolResult): boolean {
+export function toolResultHasUsableData(result: AiToolResult): boolean {
   if (Array.isArray(result.data)) return result.data.length > 0;
   return result.data !== null && result.data !== undefined;
 }
@@ -72,7 +72,7 @@ function toolResultHasUsableData(result: AiToolResult): boolean {
 //                cannot be detected from tool results alone. Kept in the
 //                shared ResponseKind union only because AiStructuredResponse
 //                is shared with RUN Copilot.
-function classifyGrowResponseKind(toolResults: AiToolResult[]): ResponseKind {
+export function classifyGrowResponseKind(toolResults: AiToolResult[]): ResponseKind {
   const successful = toolResults.filter((result) => result.ok === true);
   if (successful.length === 0) {
     return "unknown";
@@ -82,8 +82,14 @@ function classifyGrowResponseKind(toolResults: AiToolResult[]): ResponseKind {
     return "indicator";
   }
   const summaryToolNames = new Set(["get_contact_relationship_summary", "get_grow_opportunity_pipeline"]);
-  const summaryResult = successful.find((result) => summaryToolNames.has(result.tool));
-  if (summaryResult !== undefined && toolResultHasUsableData(summaryResult)) {
+  // Checks every summary-tool result for usable data, not just whichever
+  // one happens to run first in GROW_TOOL_REGISTRY order - a brokerage with
+  // open opportunities but zero active relationships (or vice versa) must
+  // still classify as "summary", not silently fall through to "fact"
+  // because the first summary tool by array position happened to come back
+  // empty while a later one had real data.
+  const summaryResult = successful.find((result) => summaryToolNames.has(result.tool) && toolResultHasUsableData(result));
+  if (summaryResult !== undefined) {
     return "summary";
   }
   return successful.some(toolResultHasUsableData) ? "fact" : "unknown";
@@ -107,7 +113,7 @@ const MAX_GROW_SUPPORTING_RECORDS = 5;
 // for a foreign-brokerage record to reach this function, so no separate
 // re-query is needed before returning these ids, unlike a route handler that
 // receives an id from client input.
-function buildGrowSupportingRecords(context: AiContextPackage): AiStructuredResponse["supportingRecords"] {
+export function buildGrowSupportingRecords(context: AiContextPackage): AiStructuredResponse["supportingRecords"] {
   const grow = context.grow;
   if (grow === null) {
     return undefined;
@@ -141,12 +147,12 @@ function buildGrowSupportingRecords(context: AiContextPackage): AiStructuredResp
 // consumer of this API ever renders `summary` without also rendering the
 // system prompt's constraints: never a live check of anything beyond Grow
 // Today, never a claim about a contact's private intentions.
-const GROW_LIMITATIONS: string[] = [
+export const GROW_LIMITATIONS: string[] = [
   "This answer only reflects data already visible in your own Grow Today list - it is not a live check of any external source.",
   "AE has no information about a contact's private plans or motivations; any pattern mentioned here is a reason to review, not a prediction about that person.",
 ];
 
-function buildGrowSuggestedNextStep(context: AiContextPackage): string | undefined {
+export function buildGrowSuggestedNextStep(context: AiContextPackage): string | undefined {
   const grow = context.grow;
   if (grow === null) {
     return undefined;
