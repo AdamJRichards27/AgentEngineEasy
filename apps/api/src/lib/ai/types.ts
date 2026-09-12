@@ -22,9 +22,26 @@ export const AI_ROLES: readonly AiRole[] = [
 ];
 
 // Structured Response Framework: every AI answer self-declares which of these
-// four kinds it is so the UI never presents a guess with the confidence of a
+// kinds it is so the UI never presents a guess with the confidence of a
 // fact. "unknown" is a first-class, expected outcome, not an error.
-export type ResponseKind = "fact" | "inference" | "recommendation" | "unknown" | "action_proposal";
+//
+// AE GROW Priority 6 Stage B (Grow-Scoped Ask AE) additive extension: "summary"
+// and "indicator" are new alongside the original five. Both are backward
+// compatible additions (a wider union, not a narrower one) — every existing
+// consumer that matched on "fact" | "inference" | "recommendation" | "unknown"
+// | "action_proposal" (RUN Copilot's AskAgentEngine.tsx KIND_LABEL map, and
+// every existing AI test) still compiles and still behaves identically, since
+// no existing code path ever produces "summary" or "indicator" and no existing
+// value is removed or renamed. Only Stage B's own Grow-scoped orchestration
+// path (see orchestrator.ts's classifyGrowResponseKind) ever returns one:
+//   - summary:    an aggregated/calculated figure (e.g. "6 open opportunities
+//                 across 3 stages") — a genuine number Stage B computed, not a
+//                 single verified record.
+//   - indicator:  a system-generated signal already carrying its own
+//                 confidence band (e.g. a Property Intelligence signal) —
+//                 distinct from "fact" (a directly-recorded record) and from
+//                 "inference" (something the model itself derived).
+export type ResponseKind = "fact" | "inference" | "recommendation" | "unknown" | "action_proposal" | "summary" | "indicator";
 
 // Action-risk-level framework, Level 0 (read-only) through Level 4 (compliance/
 // financial). This build only ever produces Level 0 responses; Levels 1-4 are
@@ -75,11 +92,74 @@ export interface BusinessContext {
   upcomingSettlementCount: number;
 }
 
-// Placeholder interfaces only, per the Build Instructions' explicit stop point:
-// architect the shape, do not implement. Always null in this build's responses -
-// see context/growContext.ts and context/pitCrewContext.ts.
+// AE GROW Priority 6 Stage B — one bounded, already-tenant-scoped Grow Today
+// item, shaped for the AI prompt/tool-result surface rather than the full
+// GrowTodayAction the Grow Today UI itself uses (lib/growToday.ts): no
+// contact email/mobile/availableActions here (Stage B is read-only and never
+// renders an action button from AI output), so nothing PII-adjacent beyond a
+// display name and the ids needed for a safe deep link travels through the
+// model's context that the Grow Today API response didn't already expose to
+// this same authenticated user.
+export interface GrowTodayItemView {
+  id: string;
+  type: string;
+  priority: string;
+  partyId: number;
+  contactName: string;
+  propertyId: number | null;
+  propertyLabel: string | null;
+  opportunityId: number | null;
+  appraisalId: number | null;
+  reason: string;
+  recommendedAction: string;
+  dueAt: string | null;
+  lastActivityAt: string | null;
+}
+
+export interface GrowOpportunityStageSummary {
+  stage: string;
+  count: number;
+}
+
+export interface GrowRelationshipTypeCount {
+  relationshipType: string;
+  count: number;
+}
+
+export interface GrowRecentActivityView {
+  id: number;
+  partyId: number | null;
+  propertyId: number | null;
+  activityType: string;
+  occurredAt: string;
+  summary: string;
+}
+
+// AE GROW Priority 6 Stage B — the Grow context builder's real output
+// (context/growContext.ts). Replaces the Priority-0.5-era placeholder shape
+// ({ leadCount: number }) that was never populated (buildGrowContext always
+// returned null) and that nothing in this codebase ever read a value out of —
+// safe to redefine outright rather than extend. Every list below is already
+// bounded (see growContext.ts's own *_LIMIT constants) before it reaches this
+// package, so nothing here can grow the prompt or a tool result unboundedly
+// regardless of how much Grow data a brokerage holds.
 export interface GrowContext {
-  leadCount: number;
+  generatedAt: string;
+  hasAnyGrowData: boolean;
+  counts: {
+    priorityActions: number;
+    followUpsDue: number;
+    openOpportunities: number;
+    contactsNeedingAttention: number;
+  };
+  relationshipBreakdown: GrowRelationshipTypeCount[];
+  todayItems: GrowTodayItemView[];
+  focusedItem: GrowTodayItemView | null;
+  dueFollowUps: GrowTodayItemView[];
+  appraisalFollowUps: GrowTodayItemView[];
+  activeSignals: GrowTodayItemView[];
+  opportunityPipeline: GrowOpportunityStageSummary[];
+  recentActivity: GrowRecentActivityView[];
 }
 export interface PitCrewContext {
   openServiceOrderCount: number;
@@ -92,7 +172,13 @@ export interface AiContextPackage {
   userRole: string;
   tier: SubscriptionTier;
   role: AiRole;
-  contextType: "property" | "transaction" | "business" | null;
+  // AE GROW Priority 6 Stage B: "grow" is additive. contextId is unused for
+  // "grow" (Grow's Ask AE is brokerage-wide, not scoped to one property/
+  // transaction) — a specific Grow Today item to explain is instead threaded
+  // through growFocusItemId (see AskCopilotInput below), because a Grow
+  // Today item id is a string (e.g. "opportunity:123"), not the number this
+  // field's existing property/transaction usage already commits it to.
+  contextType: "property" | "transaction" | "business" | "grow" | null;
   contextId: number | null;
   user: UserContext;
   brokerage: BrokerageContext;
@@ -138,6 +224,14 @@ export interface AiStructuredResponse {
   // applies to this path exactly like every other one. Wiring an
   // automatic propose-on-suggestion loop is future work, not this stage.
   actionProposals?: Array<{ actionKey: string; proposedInput: unknown; rationale: string }>;
+  // AE GROW Priority 6 Stage B — Response Contract additions. Optional so
+  // every existing (non-Grow) AiStructuredResponse producer/consumer is
+  // completely unaffected: RUN Copilot never sets these fields today and
+  // never will unless a future stage decides to.
+  supportingRecords?: Array<{ recordType: "party" | "property" | "opportunity" | "appraisal"; recordId: number; label: string; deepLink: string | null }>;
+  dataFreshness?: string;
+  limitations?: string[];
+  suggestedNextStep?: string;
 }
 
 export interface AiProviderRequest {
