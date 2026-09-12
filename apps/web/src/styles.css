@@ -783,6 +783,142 @@ details.section > *:not(summary) {
   border-top: 1px solid var(--color-border, #e2e2e2);
 }
 
+/* AE GROW Priority 6 Stage B UX gate — the five ai-copilot-* selectors below
+   (ai-copilot-examples, its ai-copilot-example-chips child, ai-copilot-
+   supporting-records, ai-copilot-freshness, ai-copilot-limitations, plus
+   the new ai-copilot-loading/ai-copilot-spinner and ai-copilot-kind-*
+   additions) were referenced in AskAgentEngine.tsx with no matching rule
+   anywhere in this file. Every rule here reuses existing tokens/patterns
+   (the .card border-top divider rhythm already used just above by
+   .ai-copilot-answer, the ul.plain/ul.item-list list-reset pattern, the
+   .pc-tabs/.stat-tiles flex-wrap+gap pattern, and the existing
+   --color-success/--color-warning-text/--color-border tokens) rather than
+   introducing a new visual language. The one genuinely new pattern is the
+   small loading spinner - this codebase had no prior spinner anywhere to
+   reuse, and the Loading state below required a concrete "preparing
+   answer" indication - so it is deliberately minimal and built from
+   existing colour tokens only. */
+
+.ai-copilot-examples {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.ai-copilot-examples > p {
+  margin-bottom: 0.5rem;
+}
+
+.ai-copilot-example-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* Loading state ("preparing answer") - occupies the same region the example
+   chips or answer will use, so asking a question never collapses the card
+   to a smaller height while waiting (Stage B UX gate: "no layout jump"). */
+.ai-copilot-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.ai-copilot-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  flex-shrink: 0;
+  animation: ai-copilot-spin 0.7s linear infinite;
+}
+
+@keyframes ai-copilot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ai-copilot-supporting-records {
+  margin-top: 0.75rem;
+}
+
+.ai-copilot-supporting-records ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ai-copilot-supporting-records li {
+  padding: 0.35rem 0;
+}
+
+.ai-copilot-supporting-records a,
+.ai-copilot-supporting-records span {
+  overflow-wrap: anywhere;
+}
+
+/* An automated axe-core pass (see the Stage B report) found the app-wide
+   base `a { color: var(--color-primary); }` rule fails WCAG AA contrast at
+   this row's font size/weight - the app-wide default is unchanged (that is
+   a pre-existing, product-wide condition well beyond this gate's scope),
+   but this list is new in this stage, so it gets a passing colour from the
+   off: --color-primary-dark is the same existing hover-state token already
+   used by .btn-primary:hover, just applied here at rest. */
+.ai-copilot-supporting-records a {
+  color: var(--color-primary-dark);
+}
+
+.ai-copilot-freshness {
+  margin-top: 0.5rem;
+}
+
+.ai-copilot-limitations {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.ai-copilot-limitations li {
+  padding: 0.15rem 0;
+}
+
+/* Grow-only secondary reinforcement (never the sole differentiator - the
+   text label rendered alongside these classes is the primary signal) so a
+   recommendation/inference reads as visually distinct from a verified fact
+   or summary, reusing the same success/warning tokens already used by
+   .pill-success/.pill-warning elsewhere rather than inventing new colours. */
+.ai-copilot-kind-verified {
+  color: var(--color-success);
+}
+
+.ai-copilot-kind-advisory {
+  color: var(--color-warning-text);
+}
+
+.ai-copilot-kind-neutral {
+  color: var(--color-text-muted);
+}
+
+/* An automated axe-core pass (see the Stage B report) found the "Ask"
+   submit button and the example-question chips fail WCAG AA contrast at
+   this size/weight with the base .btn-secondary colour
+   (--color-primary/#e05a1b on white is ~3.7:1; 4.5:1 is required). Scoped
+   to .ai-copilot only, so every other .btn-secondary in the product (Start
+   Property, Pit Crew, etc.) is completely unaffected - this swaps in the
+   same existing --color-primary-dark hover-state token used above, at
+   rest, rather than introducing a new colour. */
+.ai-copilot .btn-secondary {
+  color: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+}
+
 /* Stage A: Grow Subscription/Entitlement/Core Data build - Grow shell + locked upgrade state. */
 .grow-locked {
   max-width: 640px;

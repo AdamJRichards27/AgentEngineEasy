@@ -23,8 +23,15 @@ export interface BuildContextInput {
   role: AiRole;
   // "transaction" reuses the property id as contextId - transactions are 1:1
   // with properties in this schema (see lib/transactions.ts getTransactionByProperty).
-  contextType: "property" | "transaction" | "business" | null;
+  //
+  // AE GROW Priority 6 Stage B: "grow" is additive. contextId is unused for
+  // "grow" (Grow's Ask AE is brokerage-wide, not scoped to one property/
+  // transaction) - a specific Grow Today item to explain is instead threaded
+  // through growFocusItemId below, since a Grow Today item id is a string
+  // (e.g. "opportunity:123"), not the number contextId already commits to.
+  contextType: "property" | "transaction" | "business" | "grow" | null;
   contextId: number | null;
+  growFocusItemId: string | null;
 }
 
 async function buildUserContext(userId: number): Promise<UserContext> {
@@ -80,20 +87,27 @@ async function buildTransactionContext(brokerageId: number, propertyId: number):
 // caller, so a bug in one context type can never leak another brokerage's data
 // through another (Build Instructions "Context Engine" + "Security").
 export async function buildContext(input: BuildContextInput): Promise<AiContextPackage> {
-  const [user, brokerage, business, grow, pitCrew] = await Promise.all([
+  const [user, brokerage, business, pitCrew] = await Promise.all([
     buildUserContext(input.userId),
     buildBrokerageContext(input.brokerageId),
     buildBusinessContext(input.brokerageId),
-    buildGrowContext(input.brokerageId),
     buildPitCrewContext(input.brokerageId),
   ]);
 
   let property: PropertyContext | null = null;
   let transaction: TransactionSummary | null = null;
+  // AE GROW Priority 6 Stage B: grow is built ONLY for contextType "grow" -
+  // never unconditionally like the old placeholder was. This mirrors the
+  // property/transaction branches below rather than the previous
+  // always-build-and-discard pattern, so a non-Grow ask never pays for or
+  // exposes a Grow query at all.
+  let grow: AiContextPackage["grow"] = null;
   if (input.contextType === "property" && input.contextId !== null) {
     property = await buildPropertyContext(input.brokerageId, input.contextId);
   } else if (input.contextType === "transaction" && input.contextId !== null) {
     transaction = await buildTransactionContext(input.brokerageId, input.contextId);
+  } else if (input.contextType === "grow") {
+    grow = await buildGrowContext(input.brokerageId, input.growFocusItemId);
   }
 
   return {

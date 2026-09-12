@@ -28,6 +28,8 @@ import {
   domainEvents,
   entitlementGrants,
   aiActionRequests,
+  aiInteractions,
+  aiUsage,
   growRelationships,
   growActivities,
   growOpportunities,
@@ -716,6 +718,30 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(privacyRequests).where(inArray(privacyRequests.brokerageId, ids));
   await db.delete(entitlementGrants).where(inArray(entitlementGrants.brokerageId, ids));
   await db.delete(aiActionRequests).where(inArray(aiActionRequests.brokerageId, ids));
+
+  // AE GROW Priority 6 Stage B — ai_interactions / ai_usage
+  // (apps/api/src/lib/ai/audit.ts). ai_interactions carries brokerageId
+  // directly but ALSO a required, non-cascading FK onto users.id
+  // (constraint ai_interactions_user_id_users_id_fk), so — like
+  // entitlementGrants/aiActionRequests/domainEvents immediately around it —
+  // this must run before the users delete near the end of this function, or
+  // that delete fails with a foreign key violation instead of silently
+  // succeeding. ai_usage.interactionId -> ai_interactions.id is also
+  // non-cascading, so it must be cleared first. Every askCopilot() call
+  // (RUN Copilot and Grow-scoped Ask AE alike) writes exactly one
+  // ai_interactions row per request via logAiInteraction() regardless of
+  // outcome (success, blocked, error), so any test that calls POST /ai/ask
+  // against one of these brokerages and then cleans up needs this block —
+  // discovered when AE GROW Priority 6 Stage B's own route tests
+  // (routes/__tests__/growAskAe.test.ts) were the first in this codebase to
+  // combine repeated Ask AE calls with an explicit cleanupBrokerages().
+  const aiInteractionRows = await db.select({ id: aiInteractions.id }).from(aiInteractions).where(inArray(aiInteractions.brokerageId, ids));
+  const aiInteractionIds = aiInteractionRows.map((r) => r.id);
+  if (aiInteractionIds.length > 0) {
+    await db.delete(aiUsage).where(inArray(aiUsage.interactionId, aiInteractionIds));
+  }
+  await db.delete(aiInteractions).where(inArray(aiInteractions.brokerageId, ids));
+
   await db.delete(domainEvents).where(inArray(domainEvents.brokerageId, ids));
   await db.delete(parties).where(inArray(parties.brokerageId, ids));
 

@@ -114,7 +114,7 @@ async function longOwnershipTenureCandidates(propertyId: number, brokerageId: nu
       propertyId,
       signalType: "long_ownership_tenure",
       title: "Long ownership tenure",
-      explanation: `This contact has been recorded as ${r.relationshipType === "co_owner" ? "a co-owner" : "the owner"} of this property for approximately ${Math.floor(years)} years — long-tenure owners are, on average, more likely to consider selling, though this is not a prediction about this specific owner.`,
+      explanation: `This contact has been recorded as ${r.relationshipType === "co_owner" ? "a co-owner" : "the owner"} of this property for approximately ${Math.floor(years)} years. AE surfaces long ownership tenure as a pattern worth reviewing, since an owner's circumstances can change over a long tenure — this is not a prediction about this contact's plans, and AE has no information about their private intentions.`,
       evidence: { relationshipId: r.id, relationshipType: r.relationshipType, validFrom: r.validFrom.toISOString(), approximateTenureYears: Math.floor(years) },
       source: "internal",
       sourceTimestamp: r.validFrom,

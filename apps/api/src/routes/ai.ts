@@ -6,13 +6,22 @@ import { askCopilot } from "../lib/ai/orchestrator.js";
 import { isRoleEnabled } from "../lib/ai/featureFlags.js";
 import { resolveBrokerageTier, isRoleEntitled } from "../lib/ai/entitlements.js";
 import { AiEntitlementError, AiFeatureDisabledError } from "../lib/ai/types.js";
+import { GrowRateLimitError } from "../lib/ai/growRateLimiter.js";
 
 export const aiRouter = Router();
 
+// AE GROW Priority 6 Stage B: "grow" is additive to the contextType enum, and
+// growFocusItemId is a new optional field - every existing (RUN Copilot)
+// request body shape is still accepted unchanged. growFocusItemId is a
+// string (Grow Today item ids look like "opportunity:123", not a numeric
+// id), capped at 64 chars - comfortably longer than any real id this app
+// generates, short enough to reject an oversized/malicious value outright
+// rather than pass it through to buildGrowContext's exact-match lookup.
 const askSchema = z.object({
   question: z.string().min(1).max(2000),
-  contextType: z.enum(["property", "transaction", "business"]).nullable().optional(),
+  contextType: z.enum(["property", "transaction", "business", "grow"]).nullable().optional(),
   contextId: z.number().int().positive().nullable().optional(),
+  growFocusItemId: z.string().min(1).max(64).nullable().optional(),
 });
 
 // Level 0 (read-only) only - see lib/ai/types.ts RISK_LEVEL_DESCRIPTIONS. Every
@@ -38,11 +47,19 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
       question: parsed.data.question,
       contextType: parsed.data.contextType ?? null,
       contextId: parsed.data.contextId ?? null,
+      growFocusItemId: parsed.data.growFocusItemId ?? null,
     });
     res.json(result);
   } catch (err) {
     if (err instanceof AiFeatureDisabledError || err instanceof AiEntitlementError) {
       res.status(403).json({ error: err.message });
+      return;
+    }
+    // AE GROW Priority 6 Stage B: Grow-scoped asks only - see
+    // growRateLimiter.ts. 429 (Too Many Requests) rather than 403/500,
+    // since this is neither a permission failure nor a server error.
+    if (err instanceof GrowRateLimitError) {
+      res.status(429).json({ error: err.message });
       return;
     }
     logger.error("ai_ask_route_failed", { error: err });
