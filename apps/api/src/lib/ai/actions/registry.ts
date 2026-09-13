@@ -42,6 +42,24 @@
 // functions in apps/api/src/lib/automation/{tasks,attentionItems}.ts, the
 // exact same "registry never touches the database" convention as every
 // other entry in this file.
+//
+// AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
+// Actions: one new action, CREATE_GROW_COMMITMENT, backing Ask AE and the
+// Business Coach's ability to propose a follow-up commitment against a
+// contact (apps/api/src/lib/ai/orchestrator.ts). Scoped to exactly this one
+// action per the Project Owner's authorisation — no broader action
+// catalogue. Authority EXECUTE + riskLevel 2 (MEDIUM) is the same
+// combination REQUEST_ACTION_APPROVAL already uses to guarantee human
+// approval by construction of isAutoExecuteEligible() (authority.ts), never
+// a special case added for this action. allowedActorTypes is ["AI"] only —
+// this action is proposed exclusively by the orchestrator's internal call
+// into proposeAIAction() with actorType "AI"; it is never reachable through
+// routes/ai-actions.ts's public propose endpoint, which hardcodes
+// actorType "USER" and would therefore always be rejected by the Policy
+// Engine's ACTOR_TYPE_FORBIDDEN check for this action. execute() calls a
+// new, ordinary domain function (lib/growCommitmentActions.ts) that mirrors
+// routes/contacts.ts's existing manual commitment-creation validation -- no
+// new database table, no new entitlement.
 import { z } from "zod";
 import { USER_ROLES, type UserRole } from "@aee/db";
 import type { RiskLevel } from "../types.js";
@@ -52,6 +70,7 @@ import { proposeWorkflowChange, activateWorkflowChangeProposal } from "../../wor
 import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js";
 import { createAutomationTask, assignAutomationTaskToRole } from "../../automation/tasks.js";
 import { raiseAttentionItem } from "../../automation/attentionItems.js";
+import { createApprovedGrowCommitment } from "../../growCommitmentActions.js";
 import {
   AUTOMATION_TASK_KEYS,
   AUTOMATION_ATTENTION_REASON_CODES,
@@ -86,7 +105,7 @@ export interface AIActionDefinition<TInput = unknown> {
   // Central Stage-A entitlement key (apps/api/src/lib/entitlements), if this
   // action requires a paid capability. Never bypassed for AI (Part 17).
   requiredEntitlementKey?: string;
-  resourceType: "property" | "workflow_change_proposal" | "automation_task" | "automation_attention_item" | null;
+  resourceType: "property" | "workflow_change_proposal" | "automation_task" | "automation_attention_item" | "grow_commitment" | null;
   inputSchema: z.ZodType<TInput>;
   reversible: boolean;
   auditRequired: true;
@@ -171,6 +190,39 @@ const requestActionApprovalInput = z.object({
   transactionId: z.number().int().positive().nullable().optional(),
   protectedActionKey: z.enum(PROTECTED_FUTURE_ACTION_KEYS),
   reason: z.string().min(1).max(1000),
+});
+
+// ---------------------------------------------------------------------
+// AE GROW Priority 6 Stage D — input schema.
+// ---------------------------------------------------------------------
+
+const createGrowCommitmentInput = z.object({
+  partyId: z.number().int().positive(),
+  description: z.string().min(1).max(2000),
+  dueAt: z.string().refine(isValidIsoDate, { message: "dueAt must be a valid ISO-8601 date" }),
+  propertyId: z.number().int().positive().nullable().optional(),
+  opportunityId: z.number().int().positive().nullable().optional(),
+  // Why AE is proposing this, and what it is grounded in — carried through
+  // to the human-readable summary and the audit trail, never used to
+  // control execution (Part 20: an AI-authored string is inert data, never
+  // an instruction). No appraisalId field: growCommitments (packages/db/src/
+  // schema/contacts.ts) has no such column (see docs/AE_GROW_PRIORITY_6_
+  // STAGE_D_APPROVED_ACTIONS_REPORT.md §2.2) — an appraisal is referenced
+  // only as free text inside `reason`/`evidenceSummary` when relevant, never
+  // as a first-class relational id.
+  reason: z.string().min(1).max(1000),
+  evidenceSummary: z.string().max(1000).nullable().optional(),
+  // Provenance back to the AI interaction/recommendation that produced this
+  // proposal (Response Contract requirement) — purely informational,
+  // never read by execute() itself.
+  originatingInteractionId: z.number().int().positive().nullable().optional(),
+  // A deterministic key the orchestrator derives from the source Grow Today
+  // item + due date, carried as the action request's resourceId (not part
+  // of the growCommitments row itself) so a repeat Ask AE/Coach call for
+  // the same underlying follow-up does not create a second, duplicate
+  // proposal while one is already pending — see actionRequests.ts's
+  // findOpenActionRequestByResource().
+  dedupeKey: z.string().min(1).max(200).nullable().optional(),
 });
 
 export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
@@ -417,6 +469,55 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
         summary: `Approval granted to proceed with ${input.protectedActionKey} (manual, outside this system): ${input.reason}`,
         detail: { protectedActionKey: input.protectedActionKey, approvedByUserId: ctx.userId },
         originatingEventId: null,
+      }),
+  },
+
+  // ---------------------------------------------------------------------
+  // AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
+  // Actions.
+  // ---------------------------------------------------------------------
+
+  CREATE_GROW_COMMITMENT: {
+    actionKey: "CREATE_GROW_COMMITMENT",
+    name: "Create Grow follow-up commitment",
+    description:
+      "Create a single follow-up commitment (a future-dated promise against a contact) proposed by Ask AE or the Business Coach from grounded Grow data. Always requires explicit human approval — riskLevel 2 combined with authorityLevel EXECUTE means isAutoExecuteEligible() is always false for this action (authority.ts), by construction, not a special case. Nothing is created until an authorised human reviews and approves the exact proposed contact, reason, and due date.",
+    category: "grow",
+    authorityLevel: AUTHORITY_LEVELS.EXECUTE,
+    riskLevel: 2,
+    allowedRoles: ["Agent", "Brokerage Administrator", "Pit Crew"],
+    // AI only — this action is never proposed by a human calling
+    // routes/ai-actions.ts's generic propose endpoint directly (that route
+    // hardcodes actorType "USER", which the Policy Engine's
+    // ACTOR_TYPE_FORBIDDEN check would reject here). It is proposed only
+    // from orchestrator.ts's internal call into proposeAIAction() with
+    // actorType "AI". It can likewise never be approved or executed by AI:
+    // routes/ai-actions.ts hardcodes actorType "USER" for those verbs too,
+    // and approveAIActionRequest()/executeAIAction() require an
+    // authenticated human session regardless of actorType.
+    allowedActorTypes: ["AI"],
+    requiredEntitlementKey: "grow.activities.manage",
+    resourceType: "grow_commitment",
+    inputSchema: createGrowCommitmentInput,
+    // Reversible in the same sense CREATE_INTERNAL_TASK/CREATE_REMINDER
+    // are: the created commitment can be completed or cancelled (existing
+    // PATCH /grow/contacts/commitments/:id) but is never hard-deleted as a
+    // consequence of this action.
+    reversible: true,
+    auditRequired: true,
+    enabled: true,
+    version: 1,
+    summarize: (input) =>
+      `Create a follow-up commitment for contact #${input.partyId}: "${input.description}" (due ${input.dueAt})`,
+    execute: async (ctx, input) =>
+      createApprovedGrowCommitment({
+        brokerageId: ctx.brokerageId,
+        createdBy: ctx.userId,
+        partyId: input.partyId,
+        description: input.description,
+        dueAt: input.dueAt,
+        propertyId: input.propertyId ?? null,
+        opportunityId: input.opportunityId ?? null,
       }),
   },
 };

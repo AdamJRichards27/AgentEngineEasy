@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { logger } from "@aee/events";
+import type { AiActionRequest } from "@aee/db";
 import { buildContext } from "./context/contextEngine.js";
 import { runAllTools } from "./tools/registry.js";
 import { generateWithGateway, loadAiGatewayConfig } from "./gateway.js";
@@ -19,8 +21,20 @@ import {
   buildCoachObservations,
 } from "./coaching/responseBuilder.js";
 import type { CoachingPeriodKey } from "./coaching/period.js";
+import { resolveCoachingTimeZone, localDateKey } from "./coaching/timezone.js";
+import { proposeAIAction, findOpenActionRequestByResource } from "./actionRequests.js";
+import type { PolicyActor } from "./policyEngine.js";
 import { AUTO_EXECUTE_CEILING, AiEntitlementError, AiFeatureDisabledError, RISK_LEVEL_DESCRIPTIONS } from "./types.js";
-import type { AiContextPackage, AiRole, AiStructuredResponse, AiToolResult, ResponseKind, RiskLevel } from "./types.js";
+import type {
+  AiContextPackage,
+  AiRole,
+  AiStructuredResponse,
+  AiToolResult,
+  GrowCommitmentProposalSummary,
+  GrowTodayItemView,
+  ResponseKind,
+  RiskLevel,
+} from "./types.js";
 
 export interface AskCopilotInput {
   brokerageId: number;
@@ -197,6 +211,165 @@ export function buildGrowSuggestedNextStep(context: AiContextPackage): string | 
   return undefined;
 }
 
+// ---------------------------------------------------------------------
+// AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
+// Actions.
+//
+// Deliberately grounded ONLY in context.grow — the same already-tenant-
+// scoped Grow Today data buildGrowSupportingRecords/buildGrowSuggestedNextStep
+// above already surface in the response — never in generation.response.text
+// (the model's own free-text output). This is what makes "insufficient
+// evidence must remain ordinary text, not become an actionable proposal"
+// true by construction: if context.grow has no qualifying item, no
+// proposal is attempted at all, regardless of what the model's prose says.
+// It is also what makes this immune to prompt injection via supporting
+// records/evidence text: nothing the model generates, and nothing stored in
+// a contact's notes/activities, is ever read back into the proposal's
+// partyId/dueAt/propertyId/opportunityId fields — those come only from
+// GrowTodayItemView fields Grow Today's own deterministic computation
+// (lib/growToday.ts) already resolved against this request's own
+// brokerageId before context.grow was ever built.
+//
+// selectGrowCommitmentCandidate/isReasonableCommitmentDueDate/
+// proposeGrowCommitmentIfGrounded are exported for direct unit testing
+// (see __tests__/growCommitmentAction.test.ts), mirroring how
+// classifyGrowResponseKind/buildGrowSupportingRecords/
+// buildGrowSuggestedNextStep above are already exported from this same
+// file for growOrchestrator.test.ts.
+// ---------------------------------------------------------------------
+
+// A broad sanity bound, not a "must be in the future" rule: Grow Today
+// deliberately surfaces OVERDUE follow-ups (a due date in the past is the
+// expected, common case for exactly the kind of "you're behind on this"
+// item this feature exists to help catch up on), so rejecting every past
+// date would defeat the feature. What this bound actually catches is a
+// stale or malformed date far outside any plausible follow-up window in
+// either direction. Same order of magnitude as coaching/period.ts's own
+// CUSTOM_PERIOD_MAX_LOOKBACK_DAYS, for the same "document the bound rather
+// than leave it implicit" reason.
+const GROW_COMMITMENT_MAX_DATE_SKEW_DAYS = 730;
+
+export function isReasonableCommitmentDueDate(dueAt: Date, now: Date): boolean {
+  const skewDays = Math.abs(dueAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000);
+  return skewDays <= GROW_COMMITMENT_MAX_DATE_SKEW_DAYS;
+}
+
+// The single, deterministic candidate for this request, if any: the
+// focused item the agent asked about, else the first due follow-up, else
+// the first appraisal follow-up — the same priority Grow Today itself
+// already uses to decide what to surface first. Returns null (no
+// proposal) whenever there is nothing concrete and dated to ground one
+// in, which is the ordinary case for most questions ("insufficient
+// evidence... remains ordinary text").
+export function selectGrowCommitmentCandidate(context: AiContextPackage): GrowTodayItemView | null {
+  const grow = context.grow;
+  if (grow === null) {
+    return null;
+  }
+  const candidate = grow.focusedItem ?? grow.dueFollowUps[0] ?? grow.appraisalFollowUps[0] ?? null;
+  if (candidate === null || candidate.dueAt === null) {
+    return null;
+  }
+  return candidate;
+}
+
+function summarizeGrowCommitmentProposal(
+  request: AiActionRequest,
+  candidate: GrowTodayItemView,
+  timeZone: string,
+): GrowCommitmentProposalSummary {
+  const payload = request.inputPayload as {
+    dueAt: string;
+    reason: string;
+    evidenceSummary?: string | null;
+    propertyId?: number | null;
+    opportunityId?: number | null;
+  };
+  return {
+    actionRequestId: request.id,
+    actionKey: "CREATE_GROW_COMMITMENT",
+    humanReadableSummary: request.humanReadableSummary,
+    contactName: candidate.contactName,
+    partyId: candidate.partyId,
+    dueAt: payload.dueAt,
+    timeZone,
+    relatedPropertyId: payload.propertyId ?? null,
+    relatedOpportunityId: payload.opportunityId ?? null,
+    reason: payload.reason,
+    evidenceSummary: payload.evidenceSummary ?? null,
+    // CREATE_GROW_COMMITMENT's authorityLevel/riskLevel combination makes
+    // isAutoExecuteEligible() always false today (see authority.ts), so
+    // decision.requiresApproval is always true and this branch is in
+    // practice always "AWAITING_APPROVAL" — the APPROVED case is kept only
+    // so a future, deliberate policy change cannot silently make this
+    // function report a stale/wrong status.
+    status: request.status === "APPROVED" ? "APPROVED" : "AWAITING_APPROVAL",
+    expiresAt: request.expiresAt ? request.expiresAt.toISOString() : null,
+    reviewUrl: "/grow",
+  };
+}
+
+// Attempts to propose exactly one CREATE_GROW_COMMITMENT action for this
+// request, and returns a safe summary of it — or undefined if there was
+// nothing grounded to propose, the policy engine denied it, or a
+// duplicate is already open. Never throws: askCopilot() wraps this call in
+// its own try/catch and a failure here must never be the reason a chat
+// answer fails (see the call site's own comment below).
+export async function proposeGrowCommitmentIfGrounded(
+  context: AiContextPackage,
+  actor: PolicyActor,
+  interactionId: number | null,
+): Promise<GrowCommitmentProposalSummary | undefined> {
+  const candidate = selectGrowCommitmentCandidate(context);
+  if (candidate === null || candidate.dueAt === null) {
+    return undefined;
+  }
+
+  const dueAt = new Date(candidate.dueAt);
+  if (Number.isNaN(dueAt.getTime()) || !isReasonableCommitmentDueDate(dueAt, new Date())) {
+    return undefined;
+  }
+
+  const { timeZone } = await resolveCoachingTimeZone(actor.brokerageId);
+  // A deterministic key derived only from already-tenant-scoped ids/dates
+  // this same server-side computation produced — never from client or
+  // model input — so a repeat Ask AE/Coach call for the same underlying
+  // follow-up cannot be tricked into a different dedup bucket.
+  const resourceId = `party:${candidate.partyId}:due:${localDateKey(dueAt, timeZone)}`;
+
+  const existing = await findOpenActionRequestByResource("CREATE_GROW_COMMITMENT", actor.brokerageId, resourceId);
+  if (existing !== null) {
+    return summarizeGrowCommitmentProposal(existing, candidate, timeZone);
+  }
+
+  const rawInput = {
+    partyId: candidate.partyId,
+    description: candidate.recommendedAction,
+    dueAt: dueAt.toISOString(),
+    propertyId: candidate.propertyId,
+    opportunityId: candidate.opportunityId,
+    reason: candidate.reason,
+    evidenceSummary: candidate.lastActivityAt ? `Last activity: ${candidate.lastActivityAt}` : null,
+    originatingInteractionId: interactionId,
+    dedupeKey: resourceId,
+  };
+
+  const { request, decision } = await proposeAIAction({
+    actionKey: "CREATE_GROW_COMMITMENT",
+    actor,
+    actorType: "AI",
+    rawInput,
+    resourceId,
+    interactionId,
+  });
+
+  if (decision.allowed === false || request === null) {
+    return undefined;
+  }
+
+  return summarizeGrowCommitmentProposal(request, candidate, timeZone);
+}
+
 // Nothing in this build calls this with anything but Level 0 - it exists so the
 // ceiling is a real, enforced check rather than an implicit assumption a future
 // higher-risk-level build could quietly slip past.
@@ -354,15 +527,29 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
   // there is no path from prompt/context content to executeAIAction()).
   // The AI Action Registry (registry.ts) and Execution Gateway
   // (executionGateway.ts) are reachable only via the authenticated human
-  // routes in routes/ai-actions.ts -- never automatically from this
-  // function's output. Raising this ceiling or wiring a suggestion in
-  // AiStructuredResponse.actionProposals into an automatic
-  // proposeAIAction() call is future work explicitly deferred by Build
-  // Instructions Part 15/30, not part of this stage. This applies equally
-  // to Grow and to the Business Coach: ctx.grow/ctx.coach are the same kind
-  // of plain, already-tenant-scoped data as ctx.property/ctx.business,
-  // never a callable tool or authority claim - Stage C's Business Coach
-  // stays Level 0 for exactly this reason.
+  // routes in routes/ai-actions.ts, OR (AE GROW Priority 6 Stage D) via
+  // this function's own narrow, additive call into proposeAIAction() near
+  // the end of askCopilot() -- never automatically from anything the model
+  // itself produced. That call is scoped to exactly one action
+  // (CREATE_GROW_COMMITMENT), is built entirely from context.grow (the
+  // same already-tenant-scoped data this ceiling already covers, never
+  // from generation.response.text), and only ever PROPOSES -- it cannot
+  // execute anything itself, since CREATE_GROW_COMMITMENT's own
+  // authorityLevel/riskLevel combination makes isAutoExecuteEligible()
+  // always false (authority.ts) and its allowedActorTypes excludes every
+  // caller but the orchestrator's own internal one. This ceiling assertion
+  // itself is unchanged and still enforced exactly as before: it governs
+  // THIS response's own riskLevel (always 0, a read-only chat answer),
+  // which is a different thing from the separate action request's own
+  // riskLevel (2) -- proposing a Level-2 action alongside a Level-0 answer
+  // does not raise the answer's own level, and nothing below raises this
+  // ceiling's argument above 0. Raising this ceiling further, or wiring
+  // AiStructuredResponse.actionProposals (a different, broader mechanism,
+  // untouched by Stage D) into an automatic proposeAIAction() call, remains
+  // future work explicitly deferred by Build Instructions Part 15/30. This
+  // still applies to every other respect of Grow and the Business Coach:
+  // ctx.grow/ctx.coach remain plain, already-tenant-scoped data, never a
+  // callable tool or authority claim in their own right.
   assertWithinAutoExecuteCeiling(0);
 
   const toolResults = await runAllTools(context);
@@ -515,6 +702,28 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
       estimatedCostUsd: generation.response.usage.estimatedCostUsd,
       latencyMs: generation.response.latencyMs,
     });
+  }
+
+  // AE GROW Priority 6 Stage D — additive only, and only for Grow-scoped
+  // requests (ask or coach). See proposeGrowCommitmentIfGrounded's own
+  // header comment for why this cannot be influenced by the model's own
+  // text or by anything an untrusted third party wrote into a contact's
+  // notes/activities. Wrapped in try/catch so that any failure here -- a
+  // transient DB error, an unexpected policy denial -- is logged and
+  // swallowed rather than turning a successful chat answer into a 500.
+  if (isGrowRequest) {
+    try {
+      const proposal = await proposeGrowCommitmentIfGrounded(
+        context,
+        { id: input.userId, role: input.userRole, brokerageId: input.brokerageId },
+        interactionId,
+      );
+      if (proposal !== undefined) {
+        response.proposedCommitment = proposal;
+      }
+    } catch (err) {
+      logger.error("grow_commitment_proposal_failed", { error: err, brokerageId: input.brokerageId, userId: input.userId });
+    }
   }
 
   return { requestId, response };

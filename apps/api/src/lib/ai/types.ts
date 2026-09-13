@@ -258,6 +258,43 @@ export interface CoachingSupportingMetric {
   definition: string;
 }
 
+// AE GROW Priority 6 Stage D — a safe, additive summary of a
+// CREATE_GROW_COMMITMENT proposal the orchestrator created alongside this
+// response. Deliberately excludes everything the Response Contract's
+// exclusion list names: no inputPayloadHash/tamper internals, no
+// authorityLevel/riskLevel/policy internals, no raw execution result, no
+// cross-tenant identifier of any kind (every field here was already
+// resolved against THIS request's own brokerageId before being placed on
+// this object — see orchestrator.ts's summarizeGrowCommitmentProposal).
+// `status` is deliberately narrowed to the two states a freshly created or
+// still-pending proposal can be in from this response's point of view
+// (AWAITING_APPROVAL the normal case; APPROVED only if a future policy
+// change ever made this action auto-execute-eligible, which
+// isAutoExecuteEligible() does not today) — a proposal can never appear
+// here already EXECUTING/COMPLETED/REJECTED/EXPIRED/FAILED, since this
+// object is only ever built at the moment of proposing (or finding an
+// already-open, not-yet-decided duplicate).
+export interface GrowCommitmentProposalSummary {
+  actionRequestId: number;
+  actionKey: "CREATE_GROW_COMMITMENT";
+  humanReadableSummary: string;
+  contactName: string;
+  partyId: number;
+  dueAt: string;
+  timeZone: string;
+  relatedPropertyId: number | null;
+  relatedOpportunityId: number | null;
+  reason: string;
+  evidenceSummary: string | null;
+  status: "AWAITING_APPROVAL" | "APPROVED";
+  expiresAt: string | null;
+  // A safe, internal link — the existing Grow surface (apps/web's /grow
+  // route) where the human review/approval UI for this proposal lives.
+  // Never a link to anything outside this application, never carries a
+  // cross-tenant identifier.
+  reviewUrl: string;
+}
+
 export interface AiContextPackage {
   requestId: string;
   brokerageId: number;
@@ -322,6 +359,18 @@ export interface AiStructuredResponse {
   // applies to this path exactly like every other one. Wiring an
   // automatic propose-on-suggestion loop is future work, not this stage.
   actionProposals?: Array<{ actionKey: string; proposedInput: unknown; rationale: string }>;
+  // AE GROW Priority 6 Stage D — a DIFFERENT, narrower mechanism from
+  // actionProposals above: populated only for the one scoped action this
+  // stage adds (CREATE_GROW_COMMITMENT), only when orchestrator.ts found a
+  // concrete, dated follow-up already grounded in this same request's own
+  // Grow Today data (context.grow) — never derived from the model's free
+  // text — and only after actually calling proposeAIAction() through the
+  // full, unmodified governance pipeline (Policy Engine, tamper hash,
+  // approval-required by construction). This is additive and optional:
+  // every existing (RUN Copilot, Grow Ask AE, Business Coach) response
+  // that does not meet that bar leaves this field undefined and is
+  // completely unaffected.
+  proposedCommitment?: GrowCommitmentProposalSummary;
   // AE GROW Priority 6 Stage B — Response Contract additions. Optional so
   // every existing (non-Grow) AiStructuredResponse producer/consumer is
   // completely unaffected: RUN Copilot never sets these fields today and
