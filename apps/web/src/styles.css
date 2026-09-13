@@ -906,6 +906,42 @@ details.section > *:not(summary) {
   color: var(--color-text-muted);
 }
 
+/* AE GROW Priority 6 Stage D — the proposed-commitment review card
+   (GrowCommitmentProposalCard in AskAgentEngine.tsx). Renders inside the
+   same aria-live region as the answer above it, so it reuses that
+   divider rhythm (.ai-coach-section's margin-top/padding-top/border-top
+   pattern) rather than a second nested .card background — this is a
+   sub-section of the answer, not a second widget. Action buttons reuse
+   the existing .grow-action-card-actions/.pc-item-actions flex-wrap+gap
+   pattern verbatim; the reject reason field reuses .grow-inline-form
+   verbatim; the Approving/Executing/Rejecting loading states reuse the
+   existing .ai-copilot-loading/.ai-copilot-spinner pattern verbatim. No
+   new colour token is introduced. */
+.ai-copilot-proposal {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.ai-copilot-proposal-details {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+}
+
+.ai-copilot-proposal-details li {
+  padding: 0.15rem 0;
+  font-size: 0.9rem;
+}
+
+.ai-copilot-proposal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
 /* An automated axe-core pass (see the Stage B report) found the "Ask"
    submit button and the example-question chips fail WCAG AA contrast at
    this size/weight with the base .btn-secondary colour
