@@ -371,12 +371,7 @@ function GrowWorkspace() {
           description="Automated nurture sequences and campaigns are planned for a future Grow release. Nothing here is active yet."
         />
       )}
-      {tab === "performance" && (
-        <GrowComingSoon
-          title="Performance"
-          description="Agent performance coaching and reporting are planned for a future Grow release. Nothing here is active yet."
-        />
-      )}
+      {tab === "performance" && <GrowBusinessCoachTab />}
       {tab === "askAE" && <GrowAskAETab />}
     </div>
   );
@@ -826,6 +821,17 @@ function GrowAskAETab() {
       </section>
     </div>
   );
+}
+
+// AE GROW Priority 6 Stage C — AI Business Coach. Replaces this tab's
+// previous GrowComingSoon placeholder with the real thing: the same shared
+// AskAgentEngine component GrowAskAETab (above) already uses, switched into
+// mode="coach" rather than a second, bespoke coaching surface. Read-only
+// analysis only, per the Stage C authorisation - AskAgentEngine's coach
+// rendering never offers a button that implies AE will carry out an
+// action, only questions about the agent's own already-recorded Grow data.
+function GrowBusinessCoachTab() {
+  return <AskAgentEngine contextType="grow" contextId={null} mode="coach" />;
 }
 
 // AE GROW Priority 2 §11 — Contact 360. Replaces Priority 1's flat, read-only stand-in (a plain
