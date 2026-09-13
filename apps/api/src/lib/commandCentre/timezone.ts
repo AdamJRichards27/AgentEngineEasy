@@ -1,4 +1,3 @@
-
 // Agent-local time for "today" / "overdue" / "coming up" (Build Instructions
 // Section 12). Neither `users` nor `brokerages` carries a stored time zone
 // today (verified directly in packages/db/src/schema/users.ts before this
@@ -11,6 +10,17 @@
 // AT Realty's seed data is Queensland (no DST); Australia/Brisbane is the
 // fallback both because it matches that data and because it is the example
 // used in the spec's own illustrative API response.
+//
+// AE GROW Priority 6 Stage C timezone remediation reuse note: Stage C's own
+// coaching-specific timezone resolution (lib/ai/coaching/timezone.ts) reuses
+// DEFAULT_TIME_ZONE, startOfLocalDay, localDateKey, and isSameLocalDay from
+// THIS module rather than duplicating the guess-then-correct DST-safe
+// technique a second time - zonedParts/offsetMs below are exported (they
+// were previously module-private) specifically so coaching/timezone.ts can
+// build its own local-MONTH boundary helpers (startOfLocalMonth /
+// startOfPreviousLocalMonth, which this module has no use for itself) on
+// top of the exact same primitives, rather than a second, subtly different
+// implementation of the same DST-correct arithmetic.
 export const DEFAULT_TIME_ZONE = "Australia/Brisbane";
 
 export interface TimeZoneResolution {
@@ -31,7 +41,7 @@ interface ZonedParts {
   second: number;
 }
 
-function zonedParts(instant: Date, timeZone: string): ZonedParts {
+export function zonedParts(instant: Date, timeZone: string): ZonedParts {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
@@ -57,7 +67,7 @@ function zonedParts(instant: Date, timeZone: string): ZonedParts {
 // How far the zone's local clock is ahead of UTC, in ms, at this instant.
 // Recomputed per-call rather than cached, so DST transitions resolve
 // correctly for the specific instant being asked about.
-function offsetMs(instant: Date, timeZone: string): number {
+export function offsetMs(instant: Date, timeZone: string): number {
   const p = zonedParts(instant, timeZone);
   const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
   return asUtc - instant.getTime();

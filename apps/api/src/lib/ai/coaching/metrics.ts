@@ -22,9 +22,14 @@
 // whether its input was truncated so a coaching response can say so rather
 // than silently presenting a partial count as complete.
 //
-// Timezone: periods are resolved by coaching/period.ts, which is UTC-based
-// (see that file's own header comment) — every date comparison here already
-// arrives as a plain Date and needs no further timezone handling.
+// Timezone: periods are resolved by coaching/period.ts against the
+// brokerage's resolved local timezone (coaching/timezone.ts) — AE GROW
+// Priority 6 Stage C's timezone remediation. Every date comparison here
+// still arrives as a plain Date needing no further handling EXCEPT
+// computeActivityConsistency's own "which calendar day is this activity
+// on" bucketing below, which must bucket by the period's resolved local
+// calendar day (period.timeZone), not a bare UTC date slice — see that
+// function's own comment for why.
 import { and, asc, eq, gte, isNotNull, lt, notInArray } from "drizzle-orm";
 import {
   db,
@@ -37,6 +42,7 @@ import {
   properties,
 } from "@aee/db";
 import { resolvePreviousComparablePeriod, toPeriodView, type PeriodView, type ResolvedPeriod } from "./period.js";
+import { localDateKey } from "./timezone.js";
 import type { GrowContext } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -104,17 +110,23 @@ export interface ActivityConsistencyMetric {
 }
 
 // Definition: totalActivities = every growActivities row recorded in the
-// period (brokerageId-scoped). activeDays = distinct UTC calendar days
-// within the period that have at least one such row. activeDayRate =
-// activeDays / totalDaysInPeriod. longestGapDays = the longest run of
-// consecutive inactive days between two active days (null when fewer than
-// two active days exist — a single data point cannot describe a gap).
+// period (brokerageId-scoped). activeDays = distinct LOCAL calendar days
+// (in the period's resolved timezone, coaching/timezone.ts) within the
+// period that have at least one such row. activeDayRate = activeDays /
+// totalDaysInPeriod. longestGapDays = the longest run of consecutive
+// inactive days between two active days (null when fewer than two active
+// days exist — a single data point cannot describe a gap).
 export function computeActivityConsistency(rows: ActivityRow[], period: ResolvedPeriod): ActivityConsistencyMetric {
   const activitiesByType: Record<string, number> = {};
   const activeDaySet = new Set<string>();
   for (const row of rows) {
     activitiesByType[row.activityType] = (activitiesByType[row.activityType] ?? 0) + 1;
-    activeDaySet.add(row.occurredAt.toISOString().slice(0, 10));
+    // AE GROW Priority 6 Stage C timezone remediation: bucket by the
+    // period's resolved LOCAL calendar day, not a bare UTC date slice — an
+    // activity logged late at night in an AU/NZ zone (e.g. 11pm AEDT) can
+    // fall on the FOLLOWING UTC calendar date, which previously miscounted
+    // it against the wrong day for any agent outside UTC entirely.
+    activeDaySet.add(localDateKey(row.occurredAt, period.timeZone));
   }
 
   const activeDays = activeDaySet.size;
@@ -125,6 +137,13 @@ export function computeActivityConsistency(rows: ActivityRow[], period: Resolved
   if (activeDays >= 2) {
     const sortedDays = Array.from(activeDaySet).sort();
     let maxGap = 0;
+    // Each entry in sortedDays is a "yyyy-mm-dd" LOCAL calendar-day key
+    // (localDateKey). Anchoring each one to UTC midnight here is only a
+    // convenient way to get a Date object for whole-day subtraction — it
+    // does not reinterpret the key as a UTC date, and the resulting day
+    // COUNT between two such anchors is identical regardless of which real
+    // timezone the keys came from, since both use the same anchoring
+    // convention consistently.
     for (let i = 1; i < sortedDays.length; i++) {
       const prev = new Date(`${sortedDays[i - 1]}T00:00:00.000Z`);
       const curr = new Date(`${sortedDays[i]}T00:00:00.000Z`);

@@ -7,7 +7,19 @@
 // off the finished BusinessCoachContext — neither one queries the database
 // or does its own arithmetic). Every fetch below is brokerageId-scoped by
 // the coaching/metrics.ts function it calls; this file adds no query of its
-// own beyond what those functions already do.
+// own beyond what those functions already do, and beyond the ONE additional
+// read added by the timezone remediation below (resolveCoachingTimeZone,
+// itself a plain read-only SELECT — see coaching/timezone.ts).
+//
+// AE GROW Priority 6 Stage C TIMEZONE REMEDIATION: this is the ONE call
+// site in the entire coaching path that resolves the brokerage's coaching
+// timezone (coaching/timezone.ts's resolveCoachingTimeZone) and threads it
+// into period resolution — every other file downstream (metrics.ts,
+// responseBuilder.ts, the coach tool registry) only ever reads
+// period.timeZone off an already-resolved ResolvedPeriod/PeriodView, never
+// re-resolves one itself. This keeps the "one place decides the timezone"
+// property true by construction, mirroring how this same function was
+// already the one place that resolves `period` at all.
 //
 // Grow Today reuse: `grow` here is the SAME GrowContext contextEngine.ts
 // already builds via buildGrowContext() for a plain Grow Ask AE request —
@@ -43,6 +55,7 @@ import {
   RECENT_ENGAGEMENT_THRESHOLD_DAYS,
 } from "../coaching/metrics.js";
 import { resolvePeriod, resolvePreviousComparablePeriod, toPeriodView, type CoachingPeriodKey } from "../coaching/period.js";
+import { resolveCoachingTimeZone } from "../coaching/timezone.js";
 import type { BusinessCoachContext, GrowContext } from "../types.js";
 
 export interface BuildBusinessCoachContextInput {
@@ -60,7 +73,14 @@ export async function buildBusinessCoachContext(
   input: BuildBusinessCoachContextInput,
 ): Promise<BusinessCoachContext> {
   const now = input.now ?? new Date();
-  const period = resolvePeriod({ period: input.period, startDate: input.startDate, endDate: input.endDate, now });
+  // AE GROW Priority 6 Stage C timezone remediation — resolved once, here,
+  // and threaded through resolvePeriod so every downstream figure (metrics,
+  // response text, the UI's period pill) is computed against the SAME
+  // brokerage-appropriate local calendar, not a bare UTC day. See
+  // coaching/timezone.ts for the full precedence chain and why this is a
+  // read-only lookup with no schema change.
+  const { timeZone, source: timeZoneSource } = await resolveCoachingTimeZone(brokerageId);
+  const period = resolvePeriod({ period: input.period, startDate: input.startDate, endDate: input.endDate, now, timeZone, timeZoneSource });
   const previousPeriod = resolvePreviousComparablePeriod(period);
   const recentSince = new Date(now.getTime() - RECENT_ENGAGEMENT_THRESHOLD_DAYS * 24 * 60 * 60 * 1000);
 
