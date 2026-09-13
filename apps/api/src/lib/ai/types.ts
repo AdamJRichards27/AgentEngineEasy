@@ -2,10 +2,35 @@
 // See ARCHITECTURE.md "Phase 9: Contextual AI Architecture" for the full design
 // and CLAUDE_AI_COMPLETION_REPORT.md for what is and is not implemented.
 
+// AE GROW Priority 6 Stage C — Business Coach. Both imports below are
+// `import type` only, so they are fully erased at compile time and add no
+// runtime dependency: this file stays what it has always been, a pure types
+// module with zero runtime imports. coaching/metrics.ts (in turn) imports
+// `GrowContext` from THIS file as `import type` too, so the two files form a
+// type-only cycle that TypeScript resolves safely (neither module actually
+// executes the other at runtime - see coaching/metrics.ts's own header
+// comment).
+import type {
+  ActivityConsistencyMetric,
+  AppraisalMomentumMetric,
+  CommitmentPerformanceMetric,
+  GrowTodayPatternsMetric,
+  OpportunityPipelineHealthMetric,
+  PeriodComparisonMetric,
+  RelationshipEngagementMetric,
+} from "./coaching/metrics.js";
+import type { PeriodView } from "./coaching/period.js";
+
 // Five architected AI roles (Build Instructions "Five-Role AI Capability
 // Architecture"). Only "copilot" has a real implementation in this build; the
 // rest exist as typed interfaces so a future build slots in without redesigning
 // the gateway/context/tool/orchestration layers.
+//
+// AE GROW Priority 6 Stage C — "business_coach" is the second role to gain a
+// real implementation (orchestrator.ts's askCopilot, mode: "coach"). This is
+// still the SAME AiRole union Priority 0.5 already defined - no new role name
+// is introduced, matching the Minimal Role Routing Authorisation's "invoke
+// the EXISTING business_coach role" instruction exactly.
 export type AiRole =
   | "copilot"
   | "proactive_intelligence"
@@ -41,6 +66,11 @@ export const AI_ROLES: readonly AiRole[] = [
 //                 confidence band (e.g. a Property Intelligence signal) —
 //                 distinct from "fact" (a directly-recorded record) and from
 //                 "inference" (something the model itself derived).
+//
+// AE GROW Priority 6 Stage C reuses "recommendation" (unchanged) for every
+// Business Coach response rather than adding a new kind — a coaching answer
+// always closes with prioritised suggestions, which is exactly what
+// "recommendation" already means in this union.
 export type ResponseKind = "fact" | "inference" | "recommendation" | "unknown" | "action_proposal" | "summary" | "indicator";
 
 // Action-risk-level framework, Level 0 (read-only) through Level 4 (compliance/
@@ -165,6 +195,69 @@ export interface PitCrewContext {
   openServiceOrderCount: number;
 }
 
+// AE GROW Priority 6 Stage C — Business Coach's own coaching-metrics
+// context, built by context/businessCoachContext.ts ONLY when a request is
+// mode "coach" (see contextEngine.ts). Every field here is one of
+// coaching/metrics.ts's already-deterministic, already-bounded compute
+// outputs — this file adds no new figures of its own, it only names the
+// shape that carries them from the context builder to the response builder
+// (coaching/responseBuilder.ts) and the coach tool registry
+// (tools/registry.ts's COACH_TOOL_REGISTRY).
+export interface BusinessCoachContext {
+  // When these metrics were computed, independent of any one metric's own
+  // period — the single "as of" timestamp a coaching response's
+  // dataFreshness field reports.
+  asOf: string;
+  period: PeriodView;
+  previousPeriod: PeriodView;
+  activity: ActivityConsistencyMetric;
+  commitments: CommitmentPerformanceMetric;
+  appraisals: AppraisalMomentumMetric;
+  opportunities: OpportunityPipelineHealthMetric;
+  relationships: RelationshipEngagementMetric;
+  growToday: GrowTodayPatternsMetric;
+  comparison: PeriodComparisonMetric;
+}
+
+// AE GROW Priority 6 Stage C — a coaching-specific evidence-strength label.
+// Deliberately a NEW, separate vocabulary from Property Intelligence's
+// PROPERTY_SIGNAL_CONFIDENCE_BANDS (packages/db/src/schema/propertyIntelligence.ts):
+// that vocabulary describes confidence in a system-generated selling-opportunity
+// signal about a property, a different domain from "how strong is the evidence
+// behind this coaching recommendation" — conflating the two would let a
+// coaching recommendation borrow the visual/semantic weight of a Property
+// Intelligence signal it has nothing to do with.
+export type CoachingEvidenceStrength = "Preliminary" | "Moderate" | "Strong";
+
+// AE GROW Priority 6 Stage C — one coaching recommendation. Every field
+// beyond `action`/`reason` is optional because not every recommendation
+// candidate has a natural relatedMetric (e.g. the "no attention items,
+// keep doing what you're doing" fallback) — never because a figure was
+// omitted to save space. Deliberately has NO execution payload of any kind
+// (contrast with AiStructuredResponse.actionProposals, Stage G9's Level 1+
+// action-proposal shape) — this is Level 0 only, a suggestion for the agent
+// to act on themselves, never something AE could carry out.
+export interface CoachingRecommendation {
+  action: string;
+  reason: string;
+  relatedMetric?: string;
+  relatedRecordLabel?: string;
+  suggestedTimeframe?: string;
+  progressMeasure?: string;
+  evidenceStrength?: CoachingEvidenceStrength;
+}
+
+// AE GROW Priority 6 Stage C — one supporting metric shown alongside a
+// coaching response, always pre-formatted (`value` is already a display
+// string, e.g. "62%" or "3 of 5") so the model is never asked to reformat or
+// restate a number itself.
+export interface CoachingSupportingMetric {
+  key: string;
+  label: string;
+  value: string;
+  definition: string;
+}
+
 export interface AiContextPackage {
   requestId: string;
   brokerageId: number;
@@ -187,6 +280,11 @@ export interface AiContextPackage {
   transaction: TransactionSummary | null;
   grow: GrowContext | null;
   pitCrew: PitCrewContext | null;
+  // AE GROW Priority 6 Stage C — additive, mirrors grow/pitCrew's own
+  // "always present, null unless this request actually needed it" shape.
+  // Only ever non-null when role === "business_coach" (mode "coach") — see
+  // context/contextEngine.ts's buildContext().
+  coach: BusinessCoachContext | null;
 }
 
 export interface AiToolDefinition {
@@ -232,6 +330,20 @@ export interface AiStructuredResponse {
   dataFreshness?: string;
   limitations?: string[];
   suggestedNextStep?: string;
+  // AE GROW Priority 6 Stage C — Business Coach Response Contract
+  // additions. Optional so every existing (RUN Copilot and Grow Ask AE)
+  // producer/consumer is completely unaffected — neither one sets these
+  // fields today and neither will unless a future stage decides to. Only
+  // orchestrator.ts's askCopilot() sets these, only when mode is "coach".
+  headline?: string;
+  period?: PeriodView;
+  performanceSummary?: string;
+  observations?: string[];
+  strengths?: string[];
+  focusAreas?: string[];
+  recommendations?: CoachingRecommendation[];
+  supportingMetrics?: CoachingSupportingMetric[];
+  suggestedReviewDate?: string;
 }
 
 export interface AiProviderRequest {
