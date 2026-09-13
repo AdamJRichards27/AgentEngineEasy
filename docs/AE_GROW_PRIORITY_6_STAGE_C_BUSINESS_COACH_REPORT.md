@@ -1,7 +1,7 @@
 # AE GROW Priority 6 Stage C — AI Business Performance Coach
 
 **Branch:** `feat/ae-grow-priority-6-stage-c-business-coach`
-**Status:** COMPLETE — PRIORITY 6 STAGE C READY FOR PROJECT OWNER MERGE REVIEW. PR #36 is open into `staging` (not merged), with a fully green real CI run (see §9 and §10).
+**Status:** COMPLETE — PRIORITY 6 STAGE C TIMEZONE-CORRECTED — READY FOR PROJECT OWNER MERGE REVIEW. PR #36 is open into `staging` (not merged). §9 documents the original (pre-remediation) CI verification; §11 documents the Project Owner's required timezone remediation, its own full audit trail, and the fresh, fully green CI run against the true final PR head (see §11.4 for the complete SHA lineage and §11.6 for the CI result).
 
 ## 1. Scope
 
@@ -240,13 +240,65 @@ Both test files were corrected, with no production code changed:
 
 Both changed files were byte-fidelity verified (git-blob SHA1) against GitHub immediately after pushing.
 
-A second, complete real CI run (run #315, run id `34732073292`) on the same PR then finished **green — Status: Success, duration 18m 37s** — confirmed via the run summary page. This run is the evidence cited throughout this report and the final 30-item response delivered alongside it for: the workspace typecheck, the clean migration/102-table schema-drift check, the full Stage C metrics/tools/orchestrator/route test suite (including tenant-isolation, Grow-only entitlement, and prompt-injection tests), the Stage B and RUN Copilot regression suite, and the API and Web production builds.
+A second, complete real CI run (run #315, run id `34732073292`) on the same PR then finished **green — Status: Success, duration 18m 37s** — confirmed via the run summary page. This run is the evidence cited throughout this report and the final 30-item response delivered alongside it for: the workspace typecheck, the clean migration/102-table schema-drift check, the full Stage C metrics/tools/orchestrator/route test suite (including tenant-isolation, Grow-only entitlement, and prompt-injection tests), the Stage B and RUN Copilot regression suite, and the API and Web production builds. **Correction:** run #315 also included, and passed, the "Synthetic production startup and storage readiness" step (6s) — an earlier verbal report of this run incorrectly described that step as not applicable or not run; it did run, and it succeeded. A subsequent documentation-only commit (`b847d155c5d0e0ea9bca6310d45e620b11f68f9c`) produced a further green run (run #316, run id `34733670668`, Status: Success, duration 18m 35s), confirming the doc-only change did not affect CI. Both #315 and #316 predate the Project Owner-required timezone remediation described in §11; that remediation's own CI verification is documented separately in §11.6.
 
-## 10. Final decision to project owner
+## 10. Final decision to project owner (pre-remediation — see §11 for the current, superseding decision)
 
-**COMPLETE — PRIORITY 6 STAGE C READY FOR PROJECT OWNER MERGE REVIEW.**
+**This section is retained for the historical record and is superseded by §11.7.** At the time this section was written, the decision was COMPLETE — PRIORITY 6 STAGE C READY FOR PROJECT OWNER MERGE REVIEW, against head `0bfa5690af33e877297079ed3c7c20c0ad286cbd`. The Project Owner's review of that state ("REMEDIATION REQUIRED — STAGE C TIMEZONE AND FINAL-HEAD VERIFICATION") subsequently identified that coaching periods used UTC calendar boundaries rather than the agent's local timezone, and required remediation before merge review — `0bfa5690af33e877297079ed3c7c20c0ad286cbd` must not be described as the final branch SHA. See §11 for the corrected, current decision and the true final PR head.
 
-PR #36 is open against `staging` (head `0bfa5690af33e877297079ed3c7c20c0ad286cbd`, base `staging` at `0a69fe2cae8d72d6e968d4211e4121ed6c3636bd`) with a fully green real CI run (#315) and has **not** been merged, deployed, or acted on beyond opening it, per the authorisation's explicit instruction not to merge, deploy, begin Stages D–F, or delete the branch as part of this stage. The disclosed audit-column gap (§6.1) and the two test-suite-only bugs found and fixed via real CI (§9) are the only known limitations; neither blocks Project Owner merge review. The full 30-item structured response accompanies this report in the conversation with the project owner.
+PR #36 is open against `staging` (base `staging` at `0a69fe2cae8d72d6e968d4211e4121ed6c3636bd`) and has **not** been merged, deployed, or acted on beyond opening it, per the authorisation's explicit instruction not to merge, deploy, begin Stages D–F, or delete the branch as part of this stage. The disclosed audit-column gap (§6.1) and the two test-suite-only bugs found and fixed via real CI (§9) are the only known limitations at that point in time; neither blocked Project Owner merge review on its own, but the timezone defect below did.
+
+## 11. Timezone remediation (Project Owner-required)
+
+### 11.1 Governing instruction
+
+The Project Owner's "REMEDIATION REQUIRED — STAGE C TIMEZONE AND FINAL-HEAD VERIFICATION" decision directed four corrections before merge review: (1) correct local-time handling for coaching periods (previously UTC-calendar-only); (2) reconcile this report with the actual PR head; (3) correct the storage-readiness statement (§9.2's correction above); (4) complete verification against the true final branch state. It also required a timezone source-of-truth audit before any code change, using a strict precedence order, with a `BLOCKED` stop condition if no canonical source existed.
+
+### 11.2 Timezone source-of-truth audit and precedence
+
+Precedence required (highest first): (1) an explicit authenticated-user timezone — not supported; `users` carries no timezone column anywhere in the schema. (2) An explicit brokerage timezone — `communication_settings.time_zone` (`packages/db/src/schema/communications.ts`) **is** a real, existing, nullable per-brokerage IANA-timezone column, already established by the Communications Hub and already reused as a fallback source by that hub's own quiet-hours logic (`lib/communications/quietHours.ts`'s `resolveCommunicationTimeZone`). (3) An existing canonical application default — `DEFAULT_TIME_ZONE` (`"Australia/Brisbane"`, `lib/commandCentre/timezone.ts`), the one documented, cross-feature-reused (Command Centre and Communications Hub) default this codebase has. (4) Fail closed — never reached, since tier 3 always resolves.
+
+Because tier 2 (an existing, non-schema-migration column) and tier 3 (an existing, cross-feature default) together satisfy the precedence chain without introducing any new schema field, **no `BLOCKED` stop condition applies** and no Project Owner timezone-source decision was required.
+
+### 11.3 Implementation summary
+
+- `lib/commandCentre/timezone.ts`: `zonedParts`/`offsetMs` changed from module-private to exported, so the coaching module below can build local-month boundaries on the same DST-safe primitives (`Intl.DateTimeFormat.formatToParts`, guess-then-correct via `Date.UTC`) without a second, subtly different implementation. No other line changed.
+- `lib/ai/coaching/timezone.ts` (new): `resolveCoachingTimeZone(brokerageId)` — a read-only `db.select()` against `communication_settings` (never `getOrCreateCommunicationSettings()`, which has a write side effect coaching must never trigger), falling back safely to `DEFAULT_TIME_ZONE` on a missing row, a null column, or an invalid stored value (validated via `isValidIanaTimeZone`, an `Intl.DateTimeFormat` type-guard). Also adds `startOfLocalMonth`/`startOfPreviousLocalMonth`, built on the same exported primitives, with `startOfPreviousLocalMonth` deliberately using an out-of-range month index (`-1`) to let `Date.UTC`'s own month/year rollover handle a December→January crossing without a hand-written special case.
+- `lib/ai/coaching/period.ts`: every `ResolvedPeriod`/`PeriodView` now carries `timeZone`/`timeZoneSource` (plus a human-readable `timeBasis` disclosure string); `last7days`/`last30days`/`currentMonth`/`previousPeriod` all resolve against true local calendar boundaries in the resolved timezone instead of UTC.
+- **Off-by-one defect found and fixed in the same pass:** the pre-remediation `last7days`/`last30days` formula (`start = todayStart - N*24h`, `end = now`) actually spanned N+1 calendar dates for any `now` not at exact local midnight — masked by every prior test fixture using an exact-UTC-midnight `now`. Corrected to `start = localTodayStart - (N-1)*24h`, spanning exactly N local calendar dates (today inclusive, plus the previous N-1) — the definition most consistent with this UI's own existing "Last 7 days"/"Last 30 days" labels, now stated explicitly in the module's own header comment.
+- `lib/ai/coaching/metrics.ts`: `computeActivityConsistency`'s "active day" bucketing changed from a bare UTC date slice (`occurredAt.toISOString().slice(0, 10)`) to the period's resolved local calendar day (`localDateKey(row.occurredAt, period.timeZone)`) — an activity logged late at night in an AU/NZ zone can fall on the following UTC calendar date, which previously miscounted it against the wrong local day.
+- `lib/ai/context/businessCoachContext.ts`: the single call site that resolves the brokerage's coaching timezone (`resolveCoachingTimeZone`) and threads it into `resolvePeriod` — every other file downstream only ever reads `period.timeZone` off an already-resolved period, never re-resolves one, keeping "one place decides the timezone" true by construction.
+- `apps/web/.../AskAgentEngine.tsx`: the coaching period pill now shows the resolved timezone directly (e.g. "Last 7 days · Australia/Brisbane"), with the fuller disclosure sentence as a hover tooltip, per the UI requirement.
+- **No changes needed** in `lib/ai/types.ts` (imports `PeriodView` as a type only) or `routes/ai.ts` (its `askSchema` has no `timeZone` field, and the route handler reads only specific named fields off the parsed body, never a spread) — confirmed by direct reading before concluding no client-supplied timezone can reach the response.
+- **Explicitly not changed, per the authorisation's scope boundary:** the pre-existing, disclosed inconsistency between `resolveComparisonPeriods` and `resolvePreviousComparablePeriod` for `currentMonth` comparisons (found in an earlier segment) — noted here again only as a standing observation, not remediated in this pass.
+
+### 11.4 SHA lineage
+
+| Label | SHA |
+|---|---|
+| Starting `staging` base SHA | `0a69fe2cae8d72d6e968d4211e4121ed6c3636bd` |
+| Last functional-code SHA before this remediation (previously mislabeled as "final SHA" in an earlier verbal report — it was not) | `0bfa5690af33e877297079ed3c7c20c0ad286cbd` |
+| Documentation-only commit SHA (added the pre-remediation version of this report) | `b847d155c5d0e0ea9bca6310d45e620b11f68f9c` |
+| Timezone-remediation commit 1 of 4 (production code: `commandCentre/timezone.ts`, new `coaching/timezone.ts`, `coaching/period.ts`, `coaching/metrics.ts`, `context/businessCoachContext.ts`) | `934f20b5a49192565e3d4036b02819c494426e9e` |
+| Timezone-remediation commit 2 of 4 (new `coaching/__tests__/timezone.test.ts`, rewritten `coaching/__tests__/period.test.ts`) | `58f3301a609acdbdf31af78f5bbb5acc15fc2ef1` |
+| Timezone-remediation commit 3 of 4 (`coaching/__tests__/metrics.test.ts`, `coaching/__tests__/responseBuilder.test.ts`, `tools/__tests__/coachRegistry.test.ts`) | `71e753eb6b75f47b278258e7ec5d87c343df120b` |
+| Timezone-remediation commit 4 of 4 (`__tests__/coachOrchestrator.test.ts`, `routes/__tests__/growAskAeCoach.test.ts`, `AskAgentEngine.tsx`) — **actual final PR head SHA** | `db338cd0ffb4093d4543596b9d7d2ec10cfb5ba3` |
+
+The four timezone-remediation commits were pushed sequentially rather than as one atomic commit; each intermediate commit represents a genuinely incomplete state of the change (e.g. production code expecting new test fixture fields not yet present) and is not independently meaningful — only the state at the final head (`db338cd0...`) reflects the completed remediation. This produced three superseded, non-representative CI runs against those intermediate states (run #317 and #318 failed, run #319 was cancelled by the next push) — none of them describe the finished code and none is cited as evidence anywhere in this report. Only run #320, against `db338cd0...`, is cited.
+
+### 11.5 Required timezone test matrix
+
+Implemented across `coaching/__tests__/timezone.test.ts` (pure primitives) and the rewritten `coaching/__tests__/period.test.ts` (product-level period resolution), both using injected/frozen clocks, never the CI runner's own timezone: Brisbane (no DST), Sydney (standard and daylight), Adelaide (half-hour offset, standard and daylight), Perth (no DST), Auckland (standard and daylight), a UTC calendar date disagreeing with the agent's local calendar date, a month boundary, a year boundary, the exact DST spring-forward transition instant, an invalid timezone string, a missing timezone (safe default), a client timezone-override attempt (`coachOrchestrator.test.ts` / `growAskAeCoach.test.ts` — has no effect), cross-tenant timezone isolation (`coachOrchestrator.test.ts` — one brokerage configured, a sibling brokerage falling back, in a single test), like-for-like comparison periods, a zero-valued prior period, an incomplete current period, and a suggested review date read back correctly in the local calendar (`responseBuilder.test.ts`).
+
+### 11.6 CI verification against the true final head
+
+Run #320 (run id `34736796800`), triggered by the fourth and final remediation commit, finished **Status: Success, Total duration: 18m 49s**, confirmed via the run summary page and the individual job step list, both inspected directly in the browser: Workspace typecheck (36s) — pass; Deterministic clean-database migration check (2s) — pass; Schema drift check (2s) — pass; API automated test suite (17m 10s, carrying the full Stage C suite including every timezone test above, the Stage B regression suite, and the RUN Copilot regression suite) — pass; API production build — pass; Web production build — pass; Synthetic production startup and storage readiness (6s) — pass. One unrelated informational warning was present (a GitHub Actions Node 20 deprecation notice for `actions/checkout@v4`/`actions/setup-node@v4`/`pnpm/action-setup@v4`, forced to run on Node 24 instead) — not a code defect and outside this stage's scope to address.
+
+### 11.7 Corrected final decision (supersedes §10)
+
+**COMPLETE — PRIORITY 6 STAGE C TIMEZONE-CORRECTED — READY FOR PROJECT OWNER MERGE REVIEW.**
+
+PR #36 is open against `staging` (true final head `db338cd0ffb4093d4543596b9d7d2ec10cfb5ba3`, base `staging` at `0a69fe2cae8d72d6e968d4211e4121ed6c3636bd`), with a fully green real CI run (#320) against that exact head, and has **not** been merged, deployed, or acted on beyond opening it. Coaching periods are now resolved against the agent's correct local calendar timezone (brokerage-configured, or the application default, per §11.2's precedence), with the required test matrix in place and passing. Known, disclosed limitations: the §6.1 audit-column gap; the pre-existing `resolveComparisonPeriods`/`resolvePreviousComparablePeriod` inconsistency noted in §11.3 (observed, not fixed, per the authorisation's scope boundary); and no live UI/manual staging walkthrough was performed (non-blocking, per the authorisation). None of these blocks Project Owner merge review. The full required 28-item structured response accompanies this report in the conversation with the Project Owner.
 
 ## Scope boundary confirmation
 
