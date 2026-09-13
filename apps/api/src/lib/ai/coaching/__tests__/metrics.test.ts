@@ -5,9 +5,22 @@
 // authorisation requires (fetchX/computeX are tested separately; the DB-
 // integration side of fetchX is exercised end-to-end by
 // __tests__/coachOrchestrator.test.ts instead of re-mocking drizzle here).
+//
+// AE GROW Priority 6 Stage C TIMEZONE REMEDIATION: makePeriod()'s default
+// ResolvedPeriod now carries a real timeZone/timeZoneSource (Australia/
+// Brisbane, fallback), and computeActivityConsistency's own "active days"
+// fixture below has been adjusted to land its three fixture timestamps on
+// the intended LOCAL (Brisbane, +10:00) calendar days rather than the UTC
+// ones the original fixture happened to line up with — see that test's own
+// updated comment for the exact reasoning. Every other fixture/assertion in
+// this file is either unaffected by the switch from UTC to local-calendar
+// bucketing (a single-row or empty-row case, or a case that never inspects
+// which specific day an activity fell on) or was already timezone-agnostic
+// (every other compute function here takes plain already-resolved figures,
+// not raw timestamps to bucket).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ResolvedPeriod } from "../period.js";
+import { toPeriodView, type ResolvedPeriod } from "../period.js";
 import {
   ACTIVITY_ROW_CAP,
   APPRAISAL_ROW_CAP,
@@ -46,6 +59,8 @@ function makePeriod(overrides: Partial<ResolvedPeriod> = {}): ResolvedPeriod {
     end: NOW,
     isComplete: true,
     durationDays: 7,
+    timeZone: "Australia/Brisbane",
+    timeZoneSource: "fallback",
     ...overrides,
   };
 }
@@ -58,22 +73,42 @@ function makeActivityRow(overrides: Partial<ActivityRow> = {}): ActivityRow {
   return { id: 1, partyId: 1, activityType: "Call", occurredAt: new Date("2026-03-09T09:00:00.000Z"), ...overrides };
 }
 
-test("computeActivityConsistency: counts by type, active days, active-day rate, and the longest gap between active days", () => {
+test("computeActivityConsistency: counts by type, active LOCAL calendar days, active-day rate, and the longest gap between active days", () => {
   const period = makePeriod();
   const rows: ActivityRow[] = [
-    makeActivityRow({ id: 1, activityType: "Call", occurredAt: new Date("2026-03-09T09:00:00.000Z") }),
-    makeActivityRow({ id: 2, activityType: "Email", occurredAt: new Date("2026-03-09T15:00:00.000Z") }),
-    makeActivityRow({ id: 3, activityType: "Call", occurredAt: new Date("2026-03-11T09:00:00.000Z") }),
+    // Local midnight 9 March in Brisbane (+10:00) is 2026-03-08T14:00:00Z,
+    // and local midnight 10 March is 2026-03-09T14:00:00Z - both of the
+    // first two rows below fall inside that window, so both are on the
+    // SAME local calendar day (9 March) despite being 6 UTC hours apart.
+    makeActivityRow({ id: 1, activityType: "Call", occurredAt: new Date("2026-03-08T23:00:00.000Z") }), // 09:00 local, 9 March
+    makeActivityRow({ id: 2, activityType: "Email", occurredAt: new Date("2026-03-09T05:00:00.000Z") }), // 15:00 local, 9 March
+    makeActivityRow({ id: 3, activityType: "Call", occurredAt: new Date("2026-03-10T23:00:00.000Z") }), // 09:00 local, 11 March
   ];
   const metric = computeActivityConsistency(rows, period);
   assert.equal(metric.totalActivities, 3);
   assert.deepEqual(metric.activitiesByType, { Call: 2, Email: 1 });
-  assert.equal(metric.activeDays, 2, "two distinct UTC calendar days, regardless of same-day multiple activities");
+  assert.equal(metric.activeDays, 2, "two distinct LOCAL calendar days, regardless of same-day multiple activities");
   assert.equal(metric.totalDaysInPeriod, 7);
   assert.equal(metric.activeDayRate, 2 / 7);
   assert.equal(metric.longestGapDays, 2);
   assert.equal(metric.truncated, false);
   assert.deepEqual(metric.limitations, []);
+});
+
+test("computeActivityConsistency: two activities sharing the same UTC calendar date can fall on two DIFFERENT local calendar dates, and must be counted as two distinct active days", () => {
+  // Both instants below share the UTC date "2026-03-09" (a bare
+  // `.toISOString().slice(0, 10)` slice — the pre-remediation logic — would
+  // have bucketed both under 9 March). In Australia/Brisbane (+10:00) the
+  // first is 23:00 on 9 March local, but the second is already 01:00 on 10
+  // March local - exactly the class of mismatch this remediation exists to
+  // fix.
+  const period = makePeriod();
+  const rows: ActivityRow[] = [
+    makeActivityRow({ id: 1, occurredAt: new Date("2026-03-09T13:00:00.000Z") }), // 23:00 local, 9 March
+    makeActivityRow({ id: 2, occurredAt: new Date("2026-03-09T15:00:00.000Z") }), // 01:00 local, 10 March
+  ];
+  const metric = computeActivityConsistency(rows, period);
+  assert.equal(metric.activeDays, 2, "the correct local-calendar bucketing must recognise these as two distinct days, not one");
 });
 
 test("computeActivityConsistency: fewer than two active days -> longestGapDays is null, not zero (a single point cannot describe a gap)", () => {
@@ -402,9 +437,8 @@ test("computeGrowTodayPatterns: groups the current Grow Today list by priority a
 // ---------------------------------------------------------------------------
 
 function makeActivityMetric(overrides: Partial<ActivityConsistencyMetric> = {}): ActivityConsistencyMetric {
-  const period = makePeriod();
   return {
-    period: { key: period.key, label: period.label, start: period.start.toISOString(), end: period.end.toISOString(), isComplete: period.isComplete, durationDays: period.durationDays, timeBasis: "UTC" },
+    period: toPeriodView(makePeriod()),
     sampleSize: 0,
     truncated: false,
     totalActivities: 0,

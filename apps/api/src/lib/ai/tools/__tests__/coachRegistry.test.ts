@@ -12,6 +12,12 @@
 // fetch/compute functions ctx.coach is built from have their own dedicated
 // coverage in coaching/__tests__/metrics.test.ts and
 // __tests__/coachOrchestrator.test.ts.
+//
+// AE GROW Priority 6 Stage C TIMEZONE REMEDIATION: makePeriodView()'s
+// default PeriodView now carries a real timeZone/timeZoneSource/timeBasis
+// (Australia/Brisbane, fallback) - no other change was needed in this file,
+// since every tool here is a pass-through of an already-built ctx.coach
+// field and none of them branch on period contents themselves.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { COACH_TOOL_REGISTRY, GROW_TOOL_REGISTRY, selectToolsForContext, runAllTools } from "../registry.js";
@@ -26,7 +32,9 @@ function makePeriodView(overrides: Partial<PeriodView> = {}): PeriodView {
     end: "2026-03-15T00:00:00.000Z",
     isComplete: true,
     durationDays: 7,
-    timeBasis: "UTC calendar time - this build has no per-brokerage timezone configured",
+    timeZone: "Australia/Brisbane",
+    timeZoneSource: "fallback",
+    timeBasis: "Local calendar time in Australia/Brisbane, this application's default timezone (no brokerage timezone is configured yet).",
     ...overrides,
   };
 }

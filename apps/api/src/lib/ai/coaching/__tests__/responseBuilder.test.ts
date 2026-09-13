@@ -5,6 +5,13 @@
 // these are exactly the deterministic functions that make "no model-
 // arithmetic" true by construction (see responseBuilder.ts's own header
 // comment), so their output must be pinned down precisely here.
+//
+// AE GROW Priority 6 Stage C TIMEZONE REMEDIATION: makePeriodView()'s
+// default PeriodView now carries a real timeZone/timeZoneSource/timeBasis
+// (Australia/Brisbane, fallback), and a new test below pins down that
+// buildCoachSuggestedReviewDate's output, when read back in the coaching
+// timezone, lands on the correct LOCAL calendar date even at an instant
+// where the UTC and local calendar dates already disagree.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -21,6 +28,7 @@ import {
   buildCoachSupportingMetrics,
 } from "../responseBuilder.js";
 import { STALE_APPRAISAL_DAYS, STALL_THRESHOLD_DAYS } from "../metrics.js";
+import { localDateKey } from "../timezone.js";
 import type { PeriodView } from "../period.js";
 import type {
   ActivityConsistencyMetric,
@@ -41,7 +49,9 @@ function makePeriodView(overrides: Partial<PeriodView> = {}): PeriodView {
     end: "2026-03-15T00:00:00.000Z",
     isComplete: true,
     durationDays: 7,
-    timeBasis: "UTC calendar time - this build has no per-brokerage timezone configured",
+    timeZone: "Australia/Brisbane",
+    timeZoneSource: "fallback",
+    timeBasis: "Local calendar time in Australia/Brisbane, this application's default timezone (no brokerage timezone is configured yet).",
     ...overrides,
   };
 }
@@ -402,4 +412,20 @@ test("buildCoachSuggestedReviewDate: a weekly cadence for a short/custom period,
 
   const customWeekly = buildCoachSuggestedReviewDate(makeCoachContext({ period: makePeriodView({ key: "custom" }) }), now);
   assert.equal(customWeekly, new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString());
+});
+
+test("buildCoachSuggestedReviewDate: REQUIRED CASE - the review date, read in the coaching timezone, lands exactly N days after TODAY'S LOCAL calendar date, even when the UTC calendar date already disagrees with the local one at the moment of asking", () => {
+  // `now` is 20:00 UTC, which in Australia/Brisbane (+10:00, no DST) is
+  // already 06:00 on the FOLLOWING day (16 March) - a suggested-review-date
+  // calculation that silently used the UTC calendar day instead of the
+  // resolved coaching timezone's local calendar day would land one day
+  // early.
+  const now = new Date("2026-03-15T20:00:00.000Z");
+  const context = makeCoachContext({ period: makePeriodView({ key: "last7days", timeZone: "Australia/Brisbane", timeZoneSource: "fallback" }) });
+  const reviewDateIso = buildCoachSuggestedReviewDate(context, now);
+  assert.equal(
+    localDateKey(new Date(reviewDateIso), "Australia/Brisbane"),
+    "2026-03-23",
+    "today is already 16 March in Brisbane local time, so a 7-day-cadence review date must land on 23 March local, not 22 March (the UTC calendar date's own +7)",
+  );
 });
