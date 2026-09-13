@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
   brokerages,
@@ -18,9 +18,13 @@ import {
   growCommitments,
   aiActionRequests,
   entitlementGrants,
+  subscriptions,
+  subscriptionItems,
   type UserRole,
 } from "@aee/db";
-import { invalidateEntitlementCache } from "../../entitlements/resolver.js";
+import { invalidateEntitlementCache, hasEntitlement } from "../../entitlements/resolver.js";
+import { ensureCatalogueSeeded, BUNDLE_PRODUCT_CODE } from "../../billing/catalogue.js";
+import { applySubscriptionSnapshot } from "../../billing/sync.js";
 import { evaluateAIAction, type PolicyActor } from "../policyEngine.js";
 import {
   proposeAIAction,
@@ -94,6 +98,17 @@ async function cleanupBrokerage(brokerageId: number): Promise<void> {
   await db.delete(growOpportunities).where(eq(growOpportunities.brokerageId, brokerageId));
   await db.delete(properties).where(eq(properties.brokerageId, brokerageId));
   await db.delete(parties).where(eq(parties.brokerageId, brokerageId));
+  // AE GROW Priority 6 Stage D — additive. subscriptionItems/subscriptions
+  // rows only ever exist for the one test below (§6, PRO/Scale bundle
+  // inheritance) that calls applySubscriptionSnapshot() instead of granting
+  // the entitlement manually - this delete is a no-op for every other test
+  // in this file, none of which insert either table. subscriptionItems is
+  // deleted first since it FKs to subscriptions.
+  const brokerageSubscriptions = await db.select({ id: subscriptions.id }).from(subscriptions).where(eq(subscriptions.brokerageId, brokerageId));
+  if (brokerageSubscriptions.length > 0) {
+    await db.delete(subscriptionItems).where(inArray(subscriptionItems.subscriptionId, brokerageSubscriptions.map((s) => s.id)));
+  }
+  await db.delete(subscriptions).where(eq(subscriptions.brokerageId, brokerageId));
   await db.delete(entitlementGrants).where(eq(entitlementGrants.brokerageId, brokerageId));
   await db.delete(users).where(eq(users.brokerageId, brokerageId));
   await db.delete(brokerages).where(eq(brokerages.id, brokerageId));
@@ -646,4 +661,296 @@ test("findOpenActionRequestByResource: only matches AWAITING_APPROVAL/APPROVED/E
 
   const afterRejection = await findOpenActionRequestByResource(ACTION_KEY, brokerageId, resourceId);
   assert.equal(afterRejection, null, "a rejected request must never be treated as 'still open' for dedup purposes");
+});
+
+// ---------------------------------------------------------------------------
+// 6. Concurrency, expiry, cross-tenant execution, entitlement inheritance
+//    and revocation, approver authority ("AI self-approval"), and replay -
+//    the remaining security-test-matrix scenarios not yet covered above.
+// ---------------------------------------------------------------------------
+
+test("approveAIActionRequest: two concurrent approval attempts race safely - exactly one succeeds, never both", async (t) => {
+  const brokerageId = await createBrokerage("concurrent-approval");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  const [first, second] = await Promise.all([
+    approveAIActionRequest(request!.id, brokerageId, actor),
+    approveAIActionRequest(request!.id, brokerageId, actor),
+  ]);
+
+  const succeeded = [first, second].filter((r) => r.ok);
+  assert.equal(succeeded.length, 1, "exactly one of the two concurrent approval attempts must succeed");
+
+  const final = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(final!.status, "APPROVED");
+});
+
+test("approveAIActionRequest: an expired proposal cannot be approved and flips to EXPIRED, not silently approved", async (t) => {
+  const brokerageId = await createBrokerage("expiry-blocks-approval");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, request!.id));
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(approval.ok, false);
+  assert.equal(approval.reason, "EXPIRED");
+
+  const after = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(after!.status, "EXPIRED");
+
+  const stillCannotApprove = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(stillCannotApprove.ok, false);
+  assert.equal(stillCannotApprove.reason, "WRONG_STATUS", "once flipped to EXPIRED, a second approval attempt is a status mismatch, not another EXPIRED result");
+});
+
+test("executeAIAction: a proposal that expires after approval but before execution cannot be executed, and creates no commitment", async (t) => {
+  const brokerageId = await createBrokerage("expiry-blocks-execution");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(approval.ok, true);
+
+  await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, request!.id));
+
+  const execution = await executeAIAction(request!.id, brokerageId);
+  assert.equal(execution.ok, false);
+  assert.equal(execution.reason, "EXPIRED");
+
+  const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
+  assert.equal(commitments.length, 0, "an execution blocked by expiry must never create a commitment");
+});
+
+test("cross-tenant: approve/reject/execute against a foreign brokerage's request id all return NOT_FOUND, never a status that would disclose the request exists", async (t) => {
+  const brokerageA = await createBrokerage("cross-tenant-action-a");
+  const brokerageB = await createBrokerage("cross-tenant-action-b");
+  t.after(() => Promise.all([cleanupBrokerage(brokerageA), cleanupBrokerage(brokerageB)]));
+  const agentA = await createUser(brokerageA, "Agent");
+  const agentB = await createUser(brokerageB, "Agent");
+  await grantEntitlement(brokerageA);
+  await grantEntitlement(brokerageB);
+  const partyA = await createParty(brokerageA, "Sarah");
+  const actorA = actorOf(agentA, "Agent", brokerageA);
+  const actorB = actorOf(agentB, "Agent", brokerageB);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorA,
+    actorType: "AI",
+    rawInput: { partyId: partyA, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  const foreignApprove = await approveAIActionRequest(request!.id, brokerageB, actorB);
+  assert.equal(foreignApprove.ok, false);
+  assert.equal(foreignApprove.reason, "NOT_FOUND");
+
+  const foreignReject = await rejectAIActionRequest(request!.id, brokerageB, actorB, "not mine");
+  assert.equal(foreignReject.ok, false);
+  assert.equal(foreignReject.reason, "NOT_FOUND");
+
+  const foreignExecute = await executeAIAction(request!.id, brokerageB);
+  assert.equal(foreignExecute.ok, false);
+  assert.equal(foreignExecute.reason, "NOT_FOUND");
+
+  // None of the foreign attempts above altered the request - its real
+  // owner can still approve it afterwards.
+  const legitimateApprove = await approveAIActionRequest(request!.id, brokerageA, actorA);
+  assert.equal(legitimateApprove.ok, true);
+});
+
+test("PRO/Scale bundle subscription grants grow.activities.manage via the real subscription mechanism (applySubscriptionSnapshot), not a manual grant", async (t) => {
+  const brokerageId = await createBrokerage("pro-bundle-inheritance");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  await ensureCatalogueSeeded();
+  await applySubscriptionSnapshot(
+    {
+      subscriptionRef: `test-sub-bundle-${brokerageId}`,
+      customerRef: `test-cus-bundle-${brokerageId}`,
+      status: "Active",
+      currentPeriodStart: new Date(),
+      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      cancelAtPeriodEnd: false,
+      productCode: BUNDLE_PRODUCT_CODE,
+      brokerageId,
+    },
+    { actorType: "SYSTEM", actorId: null, label: "test:stage-d-pro-bundle" },
+  );
+
+  assert.equal(await hasEntitlement(actor, ENTITLEMENT_KEY), true);
+
+  const [grant] = await db
+    .select()
+    .from(entitlementGrants)
+    .where(and(eq(entitlementGrants.brokerageId, brokerageId), eq(entitlementGrants.entitlementKey, ENTITLEMENT_KEY)));
+  assert.ok(grant);
+  assert.equal(grant.sourceType, "subscription", "the grant must be attributed to the subscription, not a manual override, for this to be a genuine inheritance test");
+
+  const { request, decision } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.equal(decision.allowed, true);
+  assert.ok(request);
+});
+
+test("revoking the entitlement between approval and execution denies execution at the mandatory pre-execution policy re-check, and creates no commitment", async (t) => {
+  const brokerageId = await createBrokerage("revoked-mid-flight");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(approval.ok, true);
+
+  // Revoke the entitlement the way a real revocation appears to the
+  // resolver - flip the grant's own status, never delete the row.
+  await db
+    .update(entitlementGrants)
+    .set({ status: "Revoked" })
+    .where(and(eq(entitlementGrants.brokerageId, brokerageId), eq(entitlementGrants.entitlementKey, ENTITLEMENT_KEY)));
+  invalidateEntitlementCache(brokerageId);
+
+  const execution = await executeAIAction(request!.id, brokerageId);
+  assert.equal(execution.ok, false);
+  assert.equal(execution.reason, "POLICY_DENIED");
+  assert.equal(execution.policyReason, "ENTITLEMENT_DENIED");
+
+  const after = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(after!.status, "FAILED");
+
+  const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
+  assert.equal(commitments.length, 0);
+});
+
+test("approveAIActionRequest enforces the Golden Rule on the approver too, standing in for an AI self-approval attempt - a role that could never create commitments manually cannot approve this proposal either", async (t) => {
+  const brokerageId = await createBrokerage("approver-role-forbidden");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorOf(agentId, "Agent", brokerageId),
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  // No human role is ever "AI" - this stands in for an AI actor attempting
+  // to approve its own proposal directly against approveAIActionRequest(),
+  // bypassing the fact that routes/ai-actions.ts never accepts actorType
+  // "AI" from a client in the first place (see that file's own header
+  // comment). If this call succeeded, AI self-approval would be possible;
+  // it must not.
+  const impossibleApprover = actorOf(agentId, "AI", brokerageId);
+  const approval = await approveAIActionRequest(request!.id, brokerageId, impossibleApprover);
+  assert.equal(approval.ok, false);
+  assert.equal(approval.reason, "APPROVER_ROLE_FORBIDDEN");
+
+  const after = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(after!.status, "AWAITING_APPROVAL", "a forbidden approval attempt must not change the request's status");
+});
+
+test("rejectAIActionRequest: a request that has already been approved can no longer be rejected", async (t) => {
+  const brokerageId = await createBrokerage("reject-after-approved");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(approval.ok, true);
+
+  const rejection = await rejectAIActionRequest(request!.id, brokerageId, actor, "changed my mind");
+  assert.equal(rejection.ok, false);
+  assert.equal(rejection.reason, "WRONG_STATUS");
+
+  const after = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(after!.status, "APPROVED", "an already-approved request must remain APPROVED, not flip to REJECTED via a late reject call");
+});
+
+test("approveAIActionRequest: replaying approval against an already-APPROVED request is refused as a status mismatch, not processed as a second approval", async (t) => {
+  const brokerageId = await createBrokerage("replay-approval");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor,
+    actorType: "AI",
+    rawInput: { partyId, description: "Follow up with Sarah", dueAt: new Date().toISOString(), reason: "Overdue" },
+  });
+  assert.ok(request);
+
+  const first = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(first.ok, true);
+
+  const replay = await approveAIActionRequest(request!.id, brokerageId, actor);
+  assert.equal(replay.ok, false);
+  assert.equal(replay.reason, "WRONG_STATUS");
 });
