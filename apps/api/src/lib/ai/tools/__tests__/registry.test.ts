@@ -11,6 +11,14 @@
 // ctx.grow is null" behaviors can be asserted in one deterministic call,
 // with no dependency on growContext.ts's own query shape (that has its own
 // dedicated coverage in routes/__tests__/growAskAeContext.test.ts).
+//
+// AE GROW Priority 6 Stage C — the 8 Business Coach tools (COACH_TOOL_REGISTRY)
+// get their own dedicated coverage in coachRegistry.test.ts, alongside this
+// file rather than inside it, mirroring how this file was already kept
+// separate from the pre-Stage-B TOOL_REGISTRY tests. This file's own
+// fixtures gain a `coach: null` field (AiContextPackage's new Stage C field)
+// so they keep compiling - every test here still only ever varies
+// `contextType`/`grow`, exactly as before.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -78,6 +86,7 @@ function makeContext(overrides: Partial<AiContextPackage> = {}): AiContextPackag
     transaction: null,
     grow: makeGrowContext(),
     pitCrew: null,
+    coach: null,
     ...overrides,
   };
 }
@@ -126,6 +135,11 @@ test("selectToolsForContext is unaffected by Grow's addition for every pre-exist
     grow: null,
   });
   assert.deepEqual(selectToolsForContext(propertyCtx), TOOL_REGISTRY);
+});
+
+test("selectToolsForContext returns GROW_TOOL_REGISTRY (not COACH_TOOL_REGISTRY) for a plain Grow Ask AE context (role 'copilot')", () => {
+  const ctx = makeContext({ contextType: "grow", role: "copilot", coach: null });
+  assert.deepEqual(selectToolsForContext(ctx), GROW_TOOL_REGISTRY);
 });
 
 test("every Grow tool fails closed with NO_GROW_CONTEXT_ERROR-shaped ok:false when ctx.grow is null", async () => {

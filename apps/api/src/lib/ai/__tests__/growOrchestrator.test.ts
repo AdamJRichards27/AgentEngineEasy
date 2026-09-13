@@ -7,6 +7,13 @@
 // so Stage B's own tests are easy to find and review on their own, per the
 // same convention routes/__tests__/growToday.test.ts already established
 // relative to routes/__tests__/grow.test.ts.
+//
+// AE GROW Priority 6 Stage C — this file's local makeContext fixture gains
+// a `coach: null` field (AiContextPackage's new Stage C field) so it keeps
+// compiling; every test in this file is otherwise untouched, and Stage C's
+// own askCopilot()/mode-routing coverage lives in coachOrchestrator.test.ts
+// alongside it, mirroring how this file was already kept separate from
+// __tests__/orchestrator.test.ts.
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -90,6 +97,7 @@ function makeContext(overrides: Partial<AiContextPackage> = {}): AiContextPackag
     transaction: null,
     grow: makeGrowContext(),
     pitCrew: null,
+    coach: null,
     ...overrides,
   };
 }
