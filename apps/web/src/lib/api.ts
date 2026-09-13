@@ -2,14 +2,29 @@
 // callers can special-case auth (401) without string-matching a message,
 // and a `.friendly` message that's safe to show an agent directly — see
 // humanizeApiError() below for how it's derived.
+//
+// AE GROW Priority 6 Stage D — `reason` is additive: some routes (the
+// existing AI-action governance router, `/ai/actions/requests/:id/...`)
+// already return a machine-readable `reason` string in their JSON error
+// body (e.g. "EXPIRED", "WRONG_STATUS") alongside the human-readable
+// `error` string humanizeApiError() already turns into `.friendly` below.
+// Every existing call site in this app ignores `.reason` completely (it
+// simply doesn't exist on ApiError before this change), so this is a
+// strictly additive capability, not a behavioural change to any existing
+// error handling — it exists so a caller that needs to distinguish, say,
+// an expired proposal from an already-actioned one (both currently
+// surfaced as the same 409 status) can do so without this file inventing
+// a parallel, route-specific error-parsing path of its own.
 export class ApiError extends Error {
   status: number;
   friendly: string;
+  reason?: string;
 
-  constructor(status: number, friendly: string, technical?: string) {
+  constructor(status: number, friendly: string, technical?: string, reason?: string) {
     super(technical ?? friendly);
     this.status = status;
     this.friendly = friendly;
+    this.reason = reason;
   }
 }
 
@@ -46,13 +61,15 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   });
   if (!res.ok) {
     let serverMessage: string | undefined;
+    let serverReason: string | undefined;
     try {
       const body = await res.json();
       serverMessage = typeof body?.error === "string" ? body.error : undefined;
+      serverReason = typeof body?.reason === "string" ? body.reason : undefined;
     } catch {
       // Non-JSON error body — fall through with no server message.
     }
-    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage), `API ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage), `API ${path} failed: ${res.status}`, serverReason);
   }
   if (res.status === 204) {
     return undefined as T;
