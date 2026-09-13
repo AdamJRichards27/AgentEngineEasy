@@ -229,6 +229,13 @@ export function buildGrowSuggestedNextStep(context: AiContextPackage): string | 
 // GrowTodayItemView fields Grow Today's own deterministic computation
 // (lib/growToday.ts) already resolved against this request's own
 // brokerageId before context.grow was ever built.
+//
+// selectGrowCommitmentCandidate/isReasonableCommitmentDueDate/
+// proposeGrowCommitmentIfGrounded are exported for direct unit testing
+// (see __tests__/growCommitmentAction.test.ts), mirroring how
+// classifyGrowResponseKind/buildGrowSupportingRecords/
+// buildGrowSuggestedNextStep above are already exported from this same
+// file for growOrchestrator.test.ts.
 // ---------------------------------------------------------------------
 
 // A broad sanity bound, not a "must be in the future" rule: Grow Today
@@ -242,7 +249,7 @@ export function buildGrowSuggestedNextStep(context: AiContextPackage): string | 
 // than leave it implicit" reason.
 const GROW_COMMITMENT_MAX_DATE_SKEW_DAYS = 730;
 
-function isReasonableCommitmentDueDate(dueAt: Date, now: Date): boolean {
+export function isReasonableCommitmentDueDate(dueAt: Date, now: Date): boolean {
   const skewDays = Math.abs(dueAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000);
   return skewDays <= GROW_COMMITMENT_MAX_DATE_SKEW_DAYS;
 }
@@ -254,7 +261,7 @@ function isReasonableCommitmentDueDate(dueAt: Date, now: Date): boolean {
 // proposal) whenever there is nothing concrete and dated to ground one
 // in, which is the ordinary case for most questions ("insufficient
 // evidence... remains ordinary text").
-function selectGrowCommitmentCandidate(context: AiContextPackage): GrowTodayItemView | null {
+export function selectGrowCommitmentCandidate(context: AiContextPackage): GrowTodayItemView | null {
   const grow = context.grow;
   if (grow === null) {
     return null;
@@ -308,7 +315,7 @@ function summarizeGrowCommitmentProposal(
 // duplicate is already open. Never throws: askCopilot() wraps this call in
 // its own try/catch and a failure here must never be the reason a chat
 // answer fails (see the call site's own comment below).
-async function proposeGrowCommitmentIfGrounded(
+export async function proposeGrowCommitmentIfGrounded(
   context: AiContextPackage,
   actor: PolicyActor,
   interactionId: number | null,
