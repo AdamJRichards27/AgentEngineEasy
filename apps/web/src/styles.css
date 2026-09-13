@@ -919,6 +919,66 @@ details.section > *:not(summary) {
   border-color: var(--color-primary-dark);
 }
 
+/* AE GROW Priority 6 Stage C — AI Business Coach response layout. This
+   response renders inside the same <section className="card ai-copilot">
+   wrapper Ask AE already uses, so every rule above this block (the
+   .ai-copilot-answer border-top divider, .ai-copilot-loading/-spinner, the
+   accessibility-contrast fixes for .ai-copilot .btn-secondary and
+   .ai-copilot-supporting-records a, .ai-copilot-limitations,
+   .ai-copilot-freshness, and the .ai-copilot-kind-* accents) already
+   applies unchanged. The period selector reuses the existing
+   .pc-tabs/.pc-tab segmented-control pattern verbatim (see the Pit Crew
+   Command Centre usage above) and the evidence metrics reuse the existing
+   .stat-tiles/.stat-tile grid verbatim - only the section/recommendation
+   structure below is new, and it is built from existing tokens only
+   (--color-border, --color-bg, --radius-sm) rather than a new visual
+   language. */
+.ai-coach-period-tabs {
+  margin-top: 0.75rem;
+}
+
+.ai-coach-section {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.ai-coach-section h4 {
+  margin: 0 0 0.4rem;
+}
+
+.ai-coach-section ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.ai-coach-section li {
+  padding: 0.15rem 0;
+}
+
+.ai-coach-recommendations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ai-coach-recommendation {
+  background: var(--color-bg);
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.85rem;
+}
+
+.ai-coach-recommendation p {
+  margin: 0.2rem 0;
+}
+
+.ai-coach-recommendation-action {
+  font-weight: 700;
+}
+
 /* Stage A: Grow Subscription/Entitlement/Core Data build - Grow shell + locked upgrade state. */
 .grow-locked {
   max-width: 640px;
