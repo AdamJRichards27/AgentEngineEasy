@@ -13,17 +13,29 @@
 // (which are not exported) - the exact same, deliberately duplicated
 // convention every other askCopilot()-integration test file in this
 // directory already follows.
+//
+// TIMEZONE REMEDIATION (Stage C project-owner-required coverage): two tests
+// near the end of this file exercise resolveCoachingTimeZone()'s DB-backed
+// resolution chain directly through askCopilot() - a brokerage with a
+// Communications Hub timezone configured (communication_settings.time_zone)
+// resolves periods in that zone, a sibling brokerage with nothing
+// configured falls back to the application default, and an invalid/
+// corrupted stored value also falls back rather than throwing. These
+// complement the pure-primitive coverage in coaching/__tests__/timezone.ts
+// and the full zone/DST matrix in coaching/__tests__/period.test.ts, which
+// cannot reach the DB-backed resolveCoachingTimeZone() step itself.
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { eq, inArray } from "drizzle-orm";
-import { db, users, brokerages, entitlementGrants, aiInteractions, aiUsage } from "@aee/db";
+import { db, users, brokerages, entitlementGrants, aiInteractions, aiUsage, communicationSettings } from "@aee/db";
 import type { User, Brokerage } from "@aee/db";
 import { invalidateEntitlementCache } from "../../entitlements/resolver.js";
 import { askCopilot } from "../orchestrator.js";
 import { AiEntitlementError } from "../types.js";
 import { COACH_TOOL_REGISTRY } from "../tools/registry.js";
 import { assertGrowRateLimit, GrowRateLimitError } from "../growRateLimiter.js";
+import { DEFAULT_TIME_ZONE } from "../coaching/timezone.js";
 
 // business_coach is a non-default-on AiRole (see featureFlags.ts's
 // ROLE_FLAG_ENV: every role other than "copilot" defaults to disabled, so
@@ -162,6 +174,13 @@ test("askCopilot: a GROW-tier brokerage (grow.access only) can ask a coach-mode 
   assert.equal(typeof response.headline, "string");
   assert.ok(response.headline!.length > 0);
   assert.ok(response.period && response.period.key === "last7days");
+  // Stage C timezone remediation: every period carries the resolved
+  // timezone and its provenance ("brokerage" or "fallback") - this
+  // brokerage has no Communications Hub timezone configured, so it must
+  // resolve to the application default via the fallback tier.
+  assert.equal(typeof response.period?.timeZone, "string");
+  assert.equal(response.period?.timeZoneSource, "fallback");
+  assert.equal(response.period?.timeZone, DEFAULT_TIME_ZONE);
   assert.equal(typeof response.performanceSummary, "string");
   assert.ok(Array.isArray(response.observations));
   assert.ok(Array.isArray(response.strengths));
@@ -270,4 +289,69 @@ test("askCopilot: prompt-injection-style question text stays inert for coach-mod
   for (const toolName of result.response.toolsUsed) {
     assert.ok(COACH_TOOL_NAMES.includes(toolName), `toolsUsed must only ever contain registered coaching tools, got: ${toolName}`);
   }
+});
+
+test("askCopilot: a brokerage with a configured Communications Hub timezone gets coaching periods resolved in that timezone, while a sibling brokerage with none configured falls back to the application default - per-brokerage (tenant) timezone isolation in one test", async (t) => {
+  const { brokerage: brokerageWithTz, user: userWithTz } = await createFixture("tz-configured");
+  const { brokerage: brokerageWithoutTz, user: userWithoutTz } = await createFixture("tz-unconfigured");
+  t.after(async () => {
+    // communication_settings has no cleanupFixture() awareness, so its row
+    // must be removed before cleanupFixture() deletes the brokerage row it
+    // references.
+    await db.delete(communicationSettings).where(eq(communicationSettings.brokerageId, brokerageWithTz.id));
+    await cleanupFixture(brokerageWithTz, userWithTz);
+    await cleanupFixture(brokerageWithoutTz, userWithoutTz);
+  });
+  await grantEntitlement(brokerageWithTz.id, "grow.access");
+  await grantEntitlement(brokerageWithoutTz.id, "grow.access");
+  await db.insert(communicationSettings).values({ brokerageId: brokerageWithTz.id, timeZone: "Australia/Sydney" });
+
+  const withTzResult = await askCopilot({
+    brokerageId: brokerageWithTz.id,
+    userId: userWithTz.id,
+    userRole: userWithTz.role,
+    question: "How am I tracking this week?",
+    contextType: "grow",
+    contextId: null,
+    mode: "coach",
+    period: "last7days",
+  });
+  assert.equal(withTzResult.response.period?.timeZone, "Australia/Sydney");
+  assert.equal(withTzResult.response.period?.timeZoneSource, "brokerage");
+
+  const withoutTzResult = await askCopilot({
+    brokerageId: brokerageWithoutTz.id,
+    userId: userWithoutTz.id,
+    userRole: userWithoutTz.role,
+    question: "How am I tracking this week?",
+    contextType: "grow",
+    contextId: null,
+    mode: "coach",
+    period: "last7days",
+  });
+  assert.equal(withoutTzResult.response.period?.timeZone, DEFAULT_TIME_ZONE);
+  assert.equal(withoutTzResult.response.period?.timeZoneSource, "fallback");
+});
+
+test("askCopilot: an invalid/corrupted stored communication_settings.time_zone value never throws - coaching falls back to the application default timezone instead", async (t) => {
+  const { brokerage, user } = await createFixture("tz-invalid-stored-value");
+  t.after(async () => {
+    await db.delete(communicationSettings).where(eq(communicationSettings.brokerageId, brokerage.id));
+    await cleanupFixture(brokerage, user);
+  });
+  await grantEntitlement(brokerage.id, "grow.access");
+  await db.insert(communicationSettings).values({ brokerageId: brokerage.id, timeZone: "Not/ARealZone" });
+
+  const result = await askCopilot({
+    brokerageId: brokerage.id,
+    userId: user.id,
+    userRole: user.role,
+    question: "How am I tracking this week?",
+    contextType: "grow",
+    contextId: null,
+    mode: "coach",
+    period: "last7days",
+  });
+  assert.equal(result.response.period?.timeZone, DEFAULT_TIME_ZONE);
+  assert.equal(result.response.period?.timeZoneSource, "fallback");
 });

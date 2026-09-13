@@ -41,6 +41,12 @@ type CoachingPeriodKey = "last7days" | "last30days" | "currentMonth";
 
 type CoachingEvidenceStrength = "Preliminary" | "Moderate" | "Strong";
 
+// AE GROW Priority 6 Stage C timezone remediation: `timeZone` is additive -
+// the backend's PeriodView (coaching/period.ts) now always includes it
+// (the IANA identifier the period's calendar boundaries were actually
+// resolved against, e.g. "Australia/Brisbane"), shown directly in the
+// period pill below per the Project Owner's UI disclosure requirement
+// ("Last 7 days · Australia/Brisbane").
 interface CoachingPeriodView {
   key: string;
   label: string;
@@ -48,6 +54,7 @@ interface CoachingPeriodView {
   end: string;
   isComplete: boolean;
   durationDays: number;
+  timeZone: string;
   timeBasis: string;
 }
 
@@ -463,7 +470,20 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
             {result.response.headline !== undefined && (
               <h3>
                 {result.response.headline}
-                {result.response.period !== undefined && <span className="pill">{result.response.period.label}</span>}
+                {/* AE GROW Priority 6 Stage C timezone remediation — the pill
+                    now always names the resolved timezone alongside the
+                    period label (e.g. "Last 7 days · Australia/Brisbane"),
+                    per the Project Owner's UI disclosure requirement; the
+                    fuller disclosure sentence (which brokerage/application
+                    default was used) is available as a hover tooltip via
+                    the existing `title=` pattern already used for
+                    supportingMetrics below, rather than adding new visible
+                    clutter. */}
+                {result.response.period !== undefined && (
+                  <span className="pill" title={result.response.period.timeBasis}>
+                    {result.response.period.label} · {result.response.period.timeZone}
+                  </span>
+                )}
               </h3>
             )}
             <p>{result.response.summary}</p>

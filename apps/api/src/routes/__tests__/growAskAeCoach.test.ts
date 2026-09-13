@@ -10,6 +10,15 @@
 // limiter, and the full coaching Response Contract shape), not just the
 // orchestrator function in isolation (see
 // lib/ai/__tests__/coachOrchestrator.test.ts for that unit-level coverage).
+//
+// TIMEZONE REMEDIATION (Stage C project-owner-required coverage): one test
+// near the end of this file proves the "client timezone override attempt"
+// case at the real HTTP boundary - a client-supplied timeZone field in the
+// request body must never influence the resolved period, because
+// routes/ai.ts's askSchema (a non-strict Zod object) silently drops any
+// field it does not itself declare before askCopilot() is ever called. The
+// existing success test below is also extended to assert the period's
+// timeZone/timeZoneSource/timeBasis fields are present and well-formed.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -147,7 +156,7 @@ test("POST /api/ai/ask (mode: coach) succeeds for a Grow-entitled brokerage and 
         kind: string;
         riskLevel: number;
         headline?: string;
-        period?: { key: string };
+        period?: { key: string; timeZone: string; timeZoneSource: string; timeBasis: string };
         performanceSummary?: string;
         observations?: string[];
         strengths?: string[];
@@ -164,6 +173,14 @@ test("POST /api/ai/ask (mode: coach) succeeds for a Grow-entitled brokerage and 
     assert.equal(body.response.riskLevel, 0);
     assert.equal(typeof body.response.headline, "string");
     assert.equal(body.response.period?.key, "last30days");
+    // Stage C timezone remediation: the period must carry a real IANA
+    // timezone identifier (never a fixed UTC offset) and disclose its
+    // provenance - this brokerage has no Communications Hub timezone
+    // configured, so it must resolve via the fallback tier.
+    assert.equal(typeof body.response.period?.timeZone, "string");
+    assert.ok(body.response.period!.timeZone.includes("/"), "an IANA timezone identifier, never a fixed UTC offset");
+    assert.ok(["brokerage", "fallback"].includes(body.response.period?.timeZoneSource ?? ""));
+    assert.equal(typeof body.response.period?.timeBasis, "string");
     assert.equal(typeof body.response.performanceSummary, "string");
     assert.ok(Array.isArray(body.response.recommendations) && body.response.recommendations.length >= 1 && body.response.recommendations.length <= 3);
     assert.ok(Array.isArray(body.response.supportingMetrics) && body.response.supportingMetrics.length === 6);
@@ -245,5 +262,27 @@ test("POST /api/ai/ask (mode: coach) never leaks one brokerage's coaching metric
     assert.equal(openOpportunities?.value, "0", "brokerage B has created no opportunities of its own, so it must never see brokerage A's open opportunity counted in its own metrics");
   } finally {
     await cleanupBrokerages([A.brokerageId, B.brokerageId]);
+  }
+});
+
+test("POST /api/ai/ask (mode: coach) ignores a client-supplied timeZone override - the response always uses the server-resolved (brokerage or default) timezone, never a client-asserted one", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route TZ Override ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    const res = await askCoach(fresh.agent.cookie, { period: "last7days", timeZone: "Pacific/Fiji" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { response: { period?: { timeZone: string; timeZoneSource: string } } };
+    assert.notEqual(
+      body.response.period?.timeZone,
+      "Pacific/Fiji",
+      "a client-supplied timeZone field must never reach the response - routes/ai.ts's non-strict Zod schema silently strips it before askCopilot() ever sees it",
+    );
+    assert.equal(
+      body.response.period?.timeZoneSource,
+      "fallback",
+      "this brokerage has no Communications Hub timezone configured, so the only legitimate source is the application default",
+    );
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
   }
 });
