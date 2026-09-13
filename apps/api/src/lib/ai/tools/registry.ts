@@ -243,6 +243,132 @@ export const GROW_TOOL_REGISTRY: AiToolDefinition[] = [
   explainGrowTodayItem,
 ];
 
+// AE GROW Priority 6 Stage C — Business Coach, read-only coaching tools.
+//
+// Every tool below reads ONE already-computed field off ctx.coach
+// (context/businessCoachContext.ts / coaching/metrics.ts) - exactly the same
+// "thin reader of an already-bounded, already-tenant-scoped context field"
+// pattern GROW_TOOL_REGISTRY above already established for Stage B. None of
+// these tools query the database, accept a caller-supplied brokerageId/date-
+// range override, or can return an unbounded result: every cap and every
+// date-range validation already happened in coaching/period.ts and
+// coaching/metrics.ts before ctx.coach existed.
+//
+// ctx.coach is only non-null when role === "business_coach" (mode "coach") -
+// so a coaching tool run outside that path (which selectToolsForContext
+// below should never allow, but is checked here too, defense in depth,
+// exactly mirroring the Grow tools' own ctx.grow === null check) fails
+// closed with ok:false.
+const NO_COACH_CONTEXT_ERROR = "No coaching context is available for this request.";
+
+const getActivityConsistency: AiToolDefinition = {
+  name: "get_activity_consistency",
+  description: "Read-only activity consistency metrics for the requested period: counts by activity type, active days, and the longest gap between active days.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_activity_consistency", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "get_activity_consistency", ok: true, data: ctx.coach.activity };
+  },
+};
+
+const getCommitmentPerformance: AiToolDefinition = {
+  name: "get_commitment_performance",
+  description: "Read-only commitment performance metrics: completion rate for the requested period, currently overdue count and age, and contacts with repeated overdue commitments.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_commitment_performance", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "get_commitment_performance", ok: true, data: ctx.coach.commitments };
+  },
+};
+
+const getAppraisalMomentum: AiToolDefinition = {
+  name: "get_appraisal_momentum",
+  description: "Read-only appraisal metrics: appraisals created in the requested period by current status/outcome, and appraisals with no recent update.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_appraisal_momentum", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "get_appraisal_momentum", ok: true, data: ctx.coach.appraisals };
+  },
+};
+
+const getOpportunityPipelineHealth: AiToolDefinition = {
+  name: "get_opportunity_pipeline_health",
+  description: "Read-only open opportunity pipeline metrics: distribution by stage, average age, opportunities new in the requested period, and opportunities showing signs of stalling.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_opportunity_pipeline_health", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "get_opportunity_pipeline_health", ok: true, data: ctx.coach.opportunities };
+  },
+};
+
+const getRelationshipEngagement: AiToolDefinition = {
+  name: "get_relationship_engagement",
+  description: "Read-only relationship engagement metrics: active relationships by type, and contacts with no recorded activity in the last 21 days.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_relationship_engagement", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "get_relationship_engagement", ok: true, data: ctx.coach.relationships };
+  },
+};
+
+const getGrowTodayPatterns: AiToolDefinition = {
+  name: "get_grow_today_patterns",
+  description: "Read-only snapshot of the caller's current Grow Today list grouped by priority and item type. A live snapshot, not a historical log of items resolved over time.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_grow_today_patterns", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "get_grow_today_patterns", ok: true, data: ctx.coach.growToday };
+  },
+};
+
+const getPerformanceSnapshot: AiToolDefinition = {
+  name: "get_performance_snapshot",
+  description: "Read-only bundle of every coaching metric for the requested period in one call: activity, commitments, appraisals, opportunities, relationships, and Grow Today patterns.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "get_performance_snapshot", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    const { activity, commitments, appraisals, opportunities, relationships, growToday, period } = ctx.coach;
+    return { tool: "get_performance_snapshot", ok: true, data: { period, activity, commitments, appraisals, opportunities, relationships, growToday } };
+  },
+};
+
+const comparePerformancePeriods: AiToolDefinition = {
+  name: "compare_performance_periods",
+  description: "Read-only, already-computed comparison of the requested period against the previous comparable period across activity, commitment completion, appraisals, and new opportunities.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.coach === null) {
+      return { tool: "compare_performance_periods", ok: false, error: NO_COACH_CONTEXT_ERROR };
+    }
+    return { tool: "compare_performance_periods", ok: true, data: ctx.coach.comparison };
+  },
+};
+
+export const COACH_TOOL_REGISTRY: AiToolDefinition[] = [
+  getActivityConsistency,
+  getCommitmentPerformance,
+  getAppraisalMomentum,
+  getOpportunityPipelineHealth,
+  getRelationshipEngagement,
+  getGrowTodayPatterns,
+  getPerformanceSnapshot,
+  comparePerformancePeriods,
+];
+
 // Copilot only ever runs the read-only tools relevant to the current context -
 // property-scoped tools are skipped entirely (not merely told to return
 // nothing) when there is no property in context, keeping every provider call's
@@ -254,7 +380,16 @@ export const GROW_TOOL_REGISTRY: AiToolDefinition[] = [
 // property is always null for contextType "grow" anyway, so without this
 // branch a Grow request would silently fall through to the
 // portfolio-overview-only branch and never see its own Grow data).
+//
+// AE GROW Priority 6 Stage C: a Business Coach request (role "business_coach",
+// mode "coach") runs ONLY the coaching tools, checked BEFORE the Grow branch -
+// every coach request also has contextType "grow" (routes/ai.ts's schema
+// requires it), so without this ordering a coach request would silently fall
+// through to GROW_TOOL_REGISTRY and never see its own coaching metrics.
 export function selectToolsForContext(ctx: AiContextPackage): AiToolDefinition[] {
+  if (ctx.role === "business_coach") {
+    return COACH_TOOL_REGISTRY;
+  }
   if (ctx.contextType === "grow") {
     return GROW_TOOL_REGISTRY;
   }

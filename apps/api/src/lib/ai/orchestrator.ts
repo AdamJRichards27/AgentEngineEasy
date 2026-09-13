@@ -7,6 +7,18 @@ import { isRoleEnabled } from "./featureFlags.js";
 import { isRoleEntitled } from "./entitlements.js";
 import { logAiInteraction, logAiUsage } from "./audit.js";
 import { assertGrowRateLimit, GrowRateLimitError } from "./growRateLimiter.js";
+import {
+  buildCoachFocusAreas,
+  buildCoachHeadline,
+  buildCoachLimitations,
+  buildCoachPerformanceSummary,
+  buildCoachRecommendations,
+  buildCoachStrengths,
+  buildCoachSuggestedReviewDate,
+  buildCoachSupportingMetrics,
+  buildCoachObservations,
+} from "./coaching/responseBuilder.js";
+import type { CoachingPeriodKey } from "./coaching/period.js";
 import { AUTO_EXECUTE_CEILING, AiEntitlementError, AiFeatureDisabledError, RISK_LEVEL_DESCRIPTIONS } from "./types.js";
 import type { AiContextPackage, AiRole, AiStructuredResponse, AiToolResult, ResponseKind, RiskLevel } from "./types.js";
 
@@ -26,6 +38,25 @@ export interface AskCopilotInput {
   // meaningful when contextType is "grow"; ignored otherwise, same as
   // contextId is already ignored for contextType "business"/null today.
   growFocusItemId?: string | null;
+  // AE GROW Priority 6 Stage C — additive, optional. "coach" switches the
+  // read-only Grow Ask AE surface into the read-only Business Coach: a
+  // different (business_coach) AI role, a different coaching-metrics
+  // context, a different tool registry, and a different structured
+  // response shape (headline/performanceSummary/recommendations/...)
+  // layered onto the SAME AiStructuredResponse contract. Every existing
+  // caller (RUN Copilot, Grow Ask AE) omits this field and is completely
+  // unaffected - default is "ask", which behaves exactly as before this
+  // stage existed. routes/ai.ts's schema only ever accepts "coach" together
+  // with contextType "grow" - there is no other path to the business_coach
+  // role from a client request.
+  mode?: "ask" | "coach";
+  // Coach-mode only; ignored for mode "ask" (or omitted, same as
+  // contextId is already ignored for contextType "business"/null today).
+  // Defaults to "last7days" in askCopilot() when mode is "coach" and this
+  // is omitted.
+  period?: CoachingPeriodKey;
+  periodStartDate?: string | null;
+  periodEndDate?: string | null;
 }
 
 export interface AskCopilotResult {
@@ -185,8 +216,17 @@ function assertWithinAutoExecuteCeiling(riskLevel: RiskLevel): void {
 // though the UI also hides disabled/unentitled capabilities - never UI-only.
 export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResult> {
   const requestId = randomUUID();
-  const role: AiRole = "copilot";
+  const mode = input.mode ?? "ask";
+  const isCoachRequest = mode === "coach";
   const isGrowRequest = input.contextType === "grow";
+  // AE GROW Priority 6 Stage C — the Minimal Role Routing Authorisation's
+  // entire "server maps mode -> role" boundary lives in this single line: a
+  // client can never send a raw role name (AskCopilotInput/askSchema have no
+  // such field at all), and the only two possible values of `role` this
+  // function can ever compute are the two roles this build actually
+  // implements. There is no dynamic role registration and no client-
+  // controlled risk level or tenant anywhere in this function.
+  const role: AiRole = isCoachRequest ? "business_coach" : "copilot";
 
   if (isRoleEnabled(role) === false) {
     await logAiInteraction({
@@ -198,13 +238,21 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
       status: "blocked_flag",
       question: input.question,
     });
-    throw new AiFeatureDisabledError("The AI Copilot is currently disabled for this environment.");
+    throw new AiFeatureDisabledError(
+      role === "business_coach"
+        ? "The AI Business Coach is currently disabled for this environment."
+        : "The AI Copilot is currently disabled for this environment."
+    );
   }
 
   // AE GROW Priority 6 Stage B — Performance/Cost Controls: rate limiting.
   // Checked before any context/database work, and scoped to Grow only (see
   // growRateLimiter.ts's own header comment for the full rationale and its
-  // documented single-process limitation).
+  // documented single-process limitation). AE GROW Priority 6 Stage C reuses
+  // this SAME limiter, unchanged, for Business Coach requests rather than
+  // adding a second one - every coach request is also a Grow request
+  // (isGrowRequest is true whenever isCoachRequest is), so this check already
+  // covers both without any modification.
   if (isGrowRequest) {
     try {
       assertGrowRateLimit(input.brokerageId);
@@ -235,7 +283,22 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
     contextType: input.contextType,
     contextId: input.contextId,
     growFocusItemId: input.growFocusItemId ?? null,
+    mode,
+    period: input.period,
+    periodStartDate: input.periodStartDate ?? null,
+    periodEndDate: input.periodEndDate ?? null,
   });
+
+  // Defense in depth: routes/ai.ts's schema refuses mode "coach" unless
+  // contextType is "grow", and contextEngine.ts only builds ctx.coach inside
+  // its "grow" branch when mode is "coach" - so this should be unreachable
+  // in practice. It stays a hard failure rather than a silent fallback to
+  // the Ask AE path, so a future change to either of those guards fails
+  // loudly here instead of quietly serving a coach-mode request with no
+  // coaching data.
+  if (isCoachRequest && context.coach === null) {
+    throw new Error("Business Coach context was not built for a coach-mode request.");
+  }
 
   if (isRoleEntitled(context.tier, role) === false) {
     await logAiInteraction({
@@ -247,14 +310,18 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
       status: "blocked_entitlement",
       question: input.question,
     });
-    throw new AiEntitlementError(`The ${context.tier} plan does not include the AI Copilot.`);
+    throw new AiEntitlementError(
+      `The ${context.tier} plan does not include ${role === "business_coach" ? "the AI Business Coach" : "the AI Copilot"}.`
+    );
   }
 
   // AE GROW Priority 6 Stage B — Grow-specific entitlement gate. The check
-  // above (isRoleEntitled(tier, "copilot")) is true for every tier today
-  // (see entitlements.ts's TIER_CAPABILITIES - copilot: true on STARTER,
-  // GROW, and PRO alike), so it does NOT gate Grow access on its own: a
-  // STARTER brokerage (no grow.access) would otherwise sail through it.
+  // above (isRoleEntitled(tier, role)) already fully gates Business Coach
+  // (TIER_CAPABILITIES.*.roles.business_coach is false on STARTER and true
+  // on GROW/PRO - see entitlements.ts), but for the "copilot" role it is
+  // true for every tier today (copilot: true on STARTER, GROW, and PRO
+  // alike), so it does NOT gate Grow Ask AE access on its own: a STARTER
+  // brokerage (no grow.access) would otherwise sail through it.
   // resolveBrokerageTier() already derives tier from grow.access
   // specifically (grow.access && run.access -> PRO; grow.access only ->
   // GROW; neither/run-only -> STARTER), so "tier !== STARTER" here is
@@ -292,27 +359,36 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
   // AiStructuredResponse.actionProposals into an automatic
   // proposeAIAction() call is future work explicitly deferred by Build
   // Instructions Part 15/30, not part of this stage. This applies equally
-  // to Grow: ctx.grow is the same kind of plain, already-tenant-scoped data
-  // as ctx.property/ctx.business, never a callable tool or authority claim.
+  // to Grow and to the Business Coach: ctx.grow/ctx.coach are the same kind
+  // of plain, already-tenant-scoped data as ctx.property/ctx.business,
+  // never a callable tool or authority claim - Stage C's Business Coach
+  // stays Level 0 for exactly this reason.
   assertWithinAutoExecuteCeiling(0);
 
   const toolResults = await runAllTools(context);
-  // AE GROW Priority 6 Stage B: a Grow-scoped ask uses the Grow-specific
-  // prompt (five-way classification + the wording hard constraints) instead
-  // of the original copilot.ask.v1 - every non-Grow contextType keeps using
-  // copilot.ask.v1 exactly as before.
-  const prompt = getPrompt(isGrowRequest ? "copilot.ask.grow.v1" : "copilot.ask.v1");
+  // AE GROW Priority 6: a coach-mode ask uses the Business Coach prompt; a
+  // Grow-scoped (but not coach) ask uses the Grow Ask AE prompt (five-way
+  // classification + wording hard constraints); every other contextType
+  // keeps using copilot.ask.v1 exactly as before Stage B or Stage C existed.
+  const promptKey = isCoachRequest ? "business.coach.grow.v1" : isGrowRequest ? "copilot.ask.grow.v1" : "copilot.ask.v1";
+  const prompt = getPrompt(promptKey);
   const config = loadAiGatewayConfig();
 
-  // AE GROW Priority 6 Stage B: the non-Grow payload shape below
+  // AE GROW Priority 6: the non-Grow payload shape below
   // (brokerage/business/property/transaction/toolResults) is byte-for-byte
   // identical to what this function has always sent - RUN Copilot's prompt
-  // payload is unchanged. A Grow-scoped ask sends brokerage/grow/toolResults
-  // instead: property/transaction are always null for contextType "grow"
-  // (contextEngine.ts) and would only add noise, and business's
-  // activePropertyCount/upcomingSettlementCount figures aren't part of
-  // Grow's own subject matter.
-  const contextPayload = isGrowRequest
+  // payload is unchanged. A Grow-scoped (non-coach) ask sends
+  // brokerage/grow/toolResults instead: property/transaction are always
+  // null for contextType "grow" (contextEngine.ts) and would only add
+  // noise, and business's activePropertyCount/upcomingSettlementCount
+  // figures aren't part of Grow's own subject matter. A coach-mode ask
+  // sends brokerage/coach/toolResults - ctx.coach already carries every
+  // deterministic figure the model may reference; ctx.grow is deliberately
+  // left out of the coach payload so the model is never handed two
+  // different shapes of "the same underlying data" to reconcile itself.
+  const contextPayload = isCoachRequest
+    ? { brokerage: context.brokerage, coach: context.coach, toolResults }
+    : isGrowRequest
     ? { brokerage: context.brokerage, grow: context.grow, toolResults }
     : { brokerage: context.brokerage, business: context.business, property: context.property, transaction: context.transaction, toolResults };
 
@@ -355,27 +431,63 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
     throw err;
   }
 
-  const kind = isGrowRequest ? classifyGrowResponseKind(toolResults) : classifyResponseKind(toolResults);
   const toolsUsed = toolResults.filter((result) => result.ok === true).map((result) => result.tool);
-  const response: AiStructuredResponse = {
-    kind,
-    summary: generation.response.text,
-    details: toolResults.map((result) => (result.ok === true ? `${result.tool}: ok` : `${result.tool}: ${result.error ?? "no data"}`)),
-    toolsUsed,
-    riskLevel: 0,
-    disclaimer:
-      generation.usedFallback === true
-        ? `Answered by the fallback AI provider (${generation.response.provider}) after the primary provider failed.`
-        : undefined,
-    // AE GROW Priority 6 Stage B — Response Contract additions. Left
-    // undefined for every non-Grow request, exactly as before this stage
-    // (these fields did not exist until this branch's types.ts commit, and
-    // RUN Copilot never sets them).
-    supportingRecords: isGrowRequest ? buildGrowSupportingRecords(context) : undefined,
-    dataFreshness: isGrowRequest ? context.grow?.generatedAt : undefined,
-    limitations: isGrowRequest ? GROW_LIMITATIONS : undefined,
-    suggestedNextStep: isGrowRequest ? buildGrowSuggestedNextStep(context) : undefined,
-  };
+
+  let response: AiStructuredResponse;
+  if (isCoachRequest && context.coach !== null) {
+    const coach = context.coach;
+    // Every field below (other than `summary`, the model's own narrative
+    // text) is DETERMINISTIC - produced by coaching/responseBuilder.ts from
+    // ctx.coach, never parsed out of or overridden by the model's response.
+    // This is what makes the "no model-arithmetic" / "never let the model
+    // recompute a metric" requirement true by construction rather than by
+    // asking the model nicely in the prompt.
+    response = {
+      kind: "recommendation",
+      summary: generation.response.text,
+      details: toolResults.map((result) => (result.ok === true ? `${result.tool}: ok` : `${result.tool}: ${result.error ?? "no data"}`)),
+      toolsUsed,
+      riskLevel: 0,
+      disclaimer:
+        generation.usedFallback === true
+          ? `Answered by the fallback AI provider (${generation.response.provider}) after the primary provider failed.`
+          : undefined,
+      headline: buildCoachHeadline(coach),
+      period: coach.period,
+      performanceSummary: buildCoachPerformanceSummary(coach),
+      observations: buildCoachObservations(coach),
+      strengths: buildCoachStrengths(coach),
+      focusAreas: buildCoachFocusAreas(coach),
+      recommendations: buildCoachRecommendations(coach),
+      supportingMetrics: buildCoachSupportingMetrics(coach),
+      dataFreshness: coach.asOf,
+      limitations: buildCoachLimitations(coach),
+      suggestedReviewDate: buildCoachSuggestedReviewDate(coach, new Date()),
+    };
+  } else {
+    const kind = isGrowRequest ? classifyGrowResponseKind(toolResults) : classifyResponseKind(toolResults);
+    response = {
+      kind,
+      summary: generation.response.text,
+      details: toolResults.map((result) => (result.ok === true ? `${result.tool}: ok` : `${result.tool}: ${result.error ?? "no data"}`)),
+      toolsUsed,
+      riskLevel: 0,
+      disclaimer:
+        generation.usedFallback === true
+          ? `Answered by the fallback AI provider (${generation.response.provider}) after the primary provider failed.`
+          : undefined,
+      // AE GROW Priority 6 Stage B — Response Contract additions. Left
+      // undefined for every non-Grow request, exactly as before this stage
+      // (these fields did not exist until this branch's types.ts commit, and
+      // RUN Copilot never sets them).
+      supportingRecords: isGrowRequest ? buildGrowSupportingRecords(context) : undefined,
+      dataFreshness: isGrowRequest ? context.grow?.generatedAt : undefined,
+      limitations: isGrowRequest ? GROW_LIMITATIONS : undefined,
+      suggestedNextStep: isGrowRequest ? buildGrowSuggestedNextStep(context) : undefined,
+    };
+  }
+
+  const responseKindForAudit = response.kind;
 
   const interactionId = await logAiInteraction({
     requestId,
@@ -387,7 +499,7 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
     promptKey: prompt.key,
     promptVersion: prompt.version,
     question: input.question,
-    responseKind: kind,
+    responseKind: responseKindForAudit,
     riskLevel: 0,
     status: "success",
   });

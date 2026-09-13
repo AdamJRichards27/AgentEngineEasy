@@ -5,6 +5,8 @@ import { getTransactionByProperty } from "../../transactions.js";
 import { resolveBrokerageTier } from "../entitlements.js";
 import { buildGrowContext } from "./growContext.js";
 import { buildPitCrewContext } from "./pitCrewContext.js";
+import { buildBusinessCoachContext } from "./businessCoachContext.js";
+import type { CoachingPeriodKey } from "../coaching/period.js";
 import type {
   AiContextPackage,
   AiRole,
@@ -32,6 +34,13 @@ export interface BuildContextInput {
   contextType: "property" | "transaction" | "business" | "grow" | null;
   contextId: number | null;
   growFocusItemId: string | null;
+  // AE GROW Priority 6 Stage C — additive. mode/period* are only meaningful
+  // when contextType is "grow" and mode is "coach"; ignored otherwise, same
+  // as growFocusItemId is already ignored outside contextType "grow".
+  mode?: "ask" | "coach";
+  period?: CoachingPeriodKey;
+  periodStartDate?: string | null;
+  periodEndDate?: string | null;
 }
 
 async function buildUserContext(userId: number): Promise<UserContext> {
@@ -102,12 +111,23 @@ export async function buildContext(input: BuildContextInput): Promise<AiContextP
   // always-build-and-discard pattern, so a non-Grow ask never pays for or
   // exposes a Grow query at all.
   let grow: AiContextPackage["grow"] = null;
+  // AE GROW Priority 6 Stage C: coach is built ONLY when contextType is
+  // "grow" AND mode is "coach" - a plain Grow Ask AE request (mode "ask" or
+  // omitted) never pays for or exposes the coaching-metrics queries.
+  let coach: AiContextPackage["coach"] = null;
   if (input.contextType === "property" && input.contextId !== null) {
     property = await buildPropertyContext(input.brokerageId, input.contextId);
   } else if (input.contextType === "transaction" && input.contextId !== null) {
     transaction = await buildTransactionContext(input.brokerageId, input.contextId);
   } else if (input.contextType === "grow") {
     grow = await buildGrowContext(input.brokerageId, input.growFocusItemId);
+    if (input.mode === "coach") {
+      coach = await buildBusinessCoachContext(input.brokerageId, grow, {
+        period: input.period ?? "last7days",
+        startDate: input.periodStartDate ?? null,
+        endDate: input.periodEndDate ?? null,
+      });
+    }
   }
 
   return {
@@ -126,5 +146,6 @@ export async function buildContext(input: BuildContextInput): Promise<AiContextP
     transaction,
     grow,
     pitCrew,
+    coach,
   };
 }
