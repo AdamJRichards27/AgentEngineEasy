@@ -1,7 +1,7 @@
 # AE GROW Priority 6 Stage C — AI Business Performance Coach
 
 **Branch:** `feat/ae-grow-priority-6-stage-c-business-coach`
-**Status:** Backend, tests, and UI implemented and pushed. PR not yet opened (see "Remaining work" at the end of this report).
+**Status:** COMPLETE — PRIORITY 6 STAGE C READY FOR PROJECT OWNER MERGE REVIEW. PR #36 is open into `staging` (not merged), with a fully green real CI run (see §9 and §10).
 
 ## 1. Scope
 
@@ -220,12 +220,34 @@ Every new/edited test file was byte-fidelity verified against the pushed GitHub 
 
 Not yet performed (see §9): a live CI run, the full monorepo `pnpm typecheck`/`pnpm build`/full test suite, and a manual staging walkthrough — these require the PR to be opened first.
 
-## 9. Remaining work
+## 9. CI verification and remediation
 
-1. Open a PR from this branch into `staging` (not merged), and inspect the resulting CI run job-by-job in the browser.
-2. Run and record the full Required Verification checklist against real CI evidence (typecheck, migration check — trivially satisfied since none was made, schema-drift check, the full new/regression test suite above, tenant-isolation/entitlement/prompt-injection tests already written, Stage B/RUN Copilot regression, full monorepo test suite, API and Web builds).
-3. Compose the final 30-item report to the project owner with one of the eight allowed decision labels, restating the disclosed audit-column gap (§6.1).
+PR #36 (`feat/ae-grow-priority-6-stage-c-business-coach` → `staging`) was opened after the text above was written, and real GitHub Actions CI was run and inspected job-by-job in the browser, per the authorisation's delivery requirements.
+
+### 9.1 First CI run — genuine failures found (run #314, run id `34730490523`)
+
+The first real CI run on PR #36 failed: 6 of 7 tests in `lib/ai/__tests__/coachOrchestrator.test.ts` and 3 of 9 tests in `routes/__tests__/growAskAeCoach.test.ts` failed. Both failures were root-caused to bugs in the Stage C **test suite itself** — not in any production code path the tests exercise:
+
+1. **Missing feature-flag activation.** `business_coach` is a non-default-on `AiRole` (`apps/api/src/lib/ai/featureFlags.ts`'s `ROLE_FLAG_ENV`): the master `AI_ENABLED` switch defaults to true, but the per-role flag (`AI_BUSINESS_COACH_ENABLED`) defaults to disabled and is enabled only by the exact lowercase string `"true"`. Neither `coachOrchestrator.test.ts` nor `growAskAeCoach.test.ts` ever set it, so every `mode: "coach"` request in both files was refused as feature-disabled before the tier/entitlement gate the tests actually meant to exercise was ever reached.
+2. **GROW-vs-PRO tier fixture mismatch.** `growAskAeCoach.test.ts`'s capabilities test asserted that an HTTP fixture brokerage granted only `"grow.access"` resolves to tier `"GROW"`. But `createBrokerageWithUsers()`'s underlying dev-login (`routes/auth.ts`) auto-grants `"run.access"` to every brand-new brokerage at creation — so that fixture actually resolved to tier `"PRO"` (`grow.access` **and** `run.access`), not `"GROW"`, failing the test's exact `assert.equal(body.tier, "GROW")` assertion.
+
+### 9.2 Fix and final verification (commit `0bfa5690af33e877297079ed3c7c20c0ad286cbd`)
+
+Both test files were corrected, with no production code changed:
+
+- Added `process.env.AI_BUSINESS_COACH_ENABLED = "true";` at the top of both `coachOrchestrator.test.ts` and `growAskAeCoach.test.ts` (each with an explanatory comment). Node's test runner (`node:test`) isolates each `*.test.ts` file into its own process, so this assignment cannot leak into any other test file's run.
+- Added a `revokeRunAccess(brokerageId)` helper to `growAskAeCoach.test.ts`, called only by the one capabilities test that specifically asserts tier `"GROW"`, so that fixture brokerage is genuinely Grow-only (its auto-granted `run.access` is explicitly revoked, via an `entitlementGrants` status update plus `invalidateEntitlementCache`) rather than actually PRO.
+
+Both changed files were byte-fidelity verified (git-blob SHA1) against GitHub immediately after pushing.
+
+A second, complete real CI run (run #315, run id `34732073292`) on the same PR then finished **green — Status: Success, duration 18m 37s** — confirmed via the run summary page. This run is the evidence cited throughout this report and the final 30-item response delivered alongside it for: the workspace typecheck, the clean migration/102-table schema-drift check, the full Stage C metrics/tools/orchestrator/route test suite (including tenant-isolation, Grow-only entitlement, and prompt-injection tests), the Stage B and RUN Copilot regression suite, and the API and Web production builds.
+
+## 10. Final decision to project owner
+
+**COMPLETE — PRIORITY 6 STAGE C READY FOR PROJECT OWNER MERGE REVIEW.**
+
+PR #36 is open against `staging` (head `0bfa5690af33e877297079ed3c7c20c0ad286cbd`, base `staging` at `0a69fe2cae8d72d6e968d4211e4121ed6c3636bd`) with a fully green real CI run (#315) and has **not** been merged, deployed, or acted on beyond opening it, per the authorisation's explicit instruction not to merge, deploy, begin Stages D–F, or delete the branch as part of this stage. The disclosed audit-column gap (§6.1) and the two test-suite-only bugs found and fixed via real CI (§9) are the only known limitations; neither blocks Project Owner merge review. The full 30-item structured response accompanies this report in the conversation with the project owner.
 
 ## Scope boundary confirmation
 
-Everything built in this stage stays within the authorised boundary: read-only analysis and coaching narrative only; no AI-proposed executable action; no voice input; no call recording or transcription; no live deployment; no live AI provider credentials introduced (this stage reuses the existing gateway/provider abstraction unchanged); no distributed rate limiter; no new billing entitlement; no branch deletion; no unrelated changes to any other Priority's code; the PR (once opened) will not be merged as part of this stage.
+Everything built in this stage stays within the authorised boundary: read-only analysis and coaching narrative only; no AI-proposed executable action; no voice input; no call recording or transcription; no live deployment; no live AI provider credentials introduced (this stage reuses the existing gateway/provider abstraction unchanged); no distributed rate limiter; no new billing entitlement; no branch deletion; no unrelated changes to any other Priority's code; PR #36 (opened this stage) has not been merged, per authorisation.
