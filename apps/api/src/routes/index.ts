@@ -17,6 +17,7 @@ import { aiActionsRouter } from "./ai-actions.js";
 import { billingRouter } from "./billing.js";
 import { growRouter } from "./grow.js";
 import { contactsRouter } from "./contacts.js";
+import { growAiActionsRouter } from "./growAiActions.js";
 import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
@@ -70,6 +71,14 @@ apiRouter.use("/grow", growRouter);
 // so the two read as one Grow surface in this file, even though they're separate router objects
 // for file-size/organisation reasons only.
 apiRouter.use("/grow/contacts", contactsRouter);
+// AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
+// Actions. Same "separate router object for file-size/organisation
+// reasons only" pattern as contactsRouter immediately above — this is a
+// Grow-specific read surface (the caller's own pending
+// CREATE_GROW_COMMITMENT proposals), never a second/competing action-
+// governance surface: every other verb still reuses aiActionsRouter
+// ("/ai/actions", mounted above) unmodified.
+apiRouter.use("/grow/ai-actions", growAiActionsRouter);
 apiRouter.use("/import", importRouter);
 apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
