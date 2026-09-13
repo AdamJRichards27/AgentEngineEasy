@@ -26,10 +26,15 @@
 // after insert, a mismatch can only mean the row was altered outside this
 // module (e.g. a direct DB edit) -- exactly the scenario Part 25 requires
 // this system to detect and block, not silently trust.
+//
+// AE GROW Priority 6 Stage D additions (bottom of file): two small,
+// read-only, additive query helpers (findOpenActionRequestByResource,
+// listAwaitingApprovalForUser) used by the Grow follow-up-commitment
+// proposal flow. Neither one changes any existing function's behaviour.
 
 import { createHash } from "node:crypto";
 import { db, aiActionRequests, type AiActionRequest, type InsertAiActionRequest } from "@aee/db";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { evaluateAIAction, type PolicyActor, type PolicyDecision } from "./policyEngine.js";
 import { getActionDefinition, type ActorType } from "./actions/registry.js";
 import { publishAiActionEvent } from "./actionEvents.js";
@@ -221,4 +226,64 @@ export async function rejectAIActionRequest(
   if (!updated) return { ok: false, reason: "WRONG_STATUS" };
   await publishAiActionEvent(updated, "AI_ACTION_REJECTED", { rejectedByUserId: rejector.id, reason });
   return { ok: true, request: updated };
+}
+
+// ---------------------------------------------------------------------
+// AE GROW Priority 6 Stage D — additive, read-only query helpers.
+// ---------------------------------------------------------------------
+
+const OPEN_ACTION_REQUEST_STATUSES = ["AWAITING_APPROVAL", "APPROVED", "EXECUTING"] as const;
+
+// Finds an existing, still-open (not yet rejected/failed/expired, and not
+// so long completed that it stopped mattering) request for the same
+// action + brokerage + resourceId, so a caller can avoid creating a
+// second, duplicate proposal for the same underlying follow-up while one
+// is already pending review or in flight. Read-only; callers decide what
+// to do with the result — orchestrator.ts's Grow follow-up-commitment
+// flow skips proposing a new one when this returns a row, using a
+// deterministic resourceId derived from the source Grow Today item and
+// due date (never a client- or model-supplied value).
+export async function findOpenActionRequestByResource(
+  actionKey: string,
+  brokerageId: number,
+  resourceId: string,
+): Promise<AiActionRequest | null> {
+  const [row] = await db
+    .select()
+    .from(aiActionRequests)
+    .where(
+      and(
+        eq(aiActionRequests.actionKey, actionKey),
+        eq(aiActionRequests.brokerageId, brokerageId),
+        eq(aiActionRequests.resourceId, resourceId),
+        inArray(aiActionRequests.status, [...OPEN_ACTION_REQUEST_STATUSES]),
+      ),
+    )
+    .orderBy(desc(aiActionRequests.createdAt))
+    .limit(1);
+  return row ?? null;
+}
+
+// Backs the "list current user's pending Grow proposals" read surface
+// (routes/growAiActions.ts). Deliberately scoped to one specific
+// actionKey, one brokerage, and one user — never a generic "list every
+// request" query, matching the Stage D specification's prohibition on a
+// generic, unscoped action-request listing surface.
+export async function listAwaitingApprovalForUser(
+  actionKey: string,
+  brokerageId: number,
+  userId: number,
+): Promise<AiActionRequest[]> {
+  return db
+    .select()
+    .from(aiActionRequests)
+    .where(
+      and(
+        eq(aiActionRequests.actionKey, actionKey),
+        eq(aiActionRequests.brokerageId, brokerageId),
+        eq(aiActionRequests.userId, userId),
+        eq(aiActionRequests.status, "AWAITING_APPROVAL"),
+      ),
+    )
+    .orderBy(desc(aiActionRequests.createdAt));
 }
