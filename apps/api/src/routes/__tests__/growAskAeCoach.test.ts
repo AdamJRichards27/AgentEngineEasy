@@ -13,6 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { and, eq } from "drizzle-orm";
 import { db, entitlementGrants } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages } from "./testSupport.js";
@@ -22,6 +23,14 @@ process.env.SESSION_SECRET =
     ? process.env.SESSION_SECRET
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
+// business_coach is a non-default-on AiRole (see
+// apps/api/src/lib/ai/featureFlags.ts's ROLE_FLAG_ENV) - AI_ENABLED already
+// defaults to true, but the per-role flag does not, so every coach-mode
+// request in this file would otherwise be refused as feature-disabled
+// before the tier/entitlement gate this file actually means to exercise is
+// ever reached. Node's test runner isolates each *.test.ts file into its
+// own process, so this assignment cannot leak into any other test file.
+process.env.AI_BUSINESS_COACH_ENABLED = "true";
 
 let server: Server;
 let baseUrl: string;
@@ -52,6 +61,23 @@ async function grant(brokerageId: number, entitlementKey: string) {
     sourceType: "manual",
     status: "Active",
   });
+  invalidateEntitlementCache(brokerageId);
+}
+
+/**
+ * createBrokerageWithUsers()'s underlying dev-login auto-grants "run.access"
+ * to every brand-new brokerage at creation (routes/auth.ts's first-user-in-
+ * a-brokerage path), so a brokerage that only ever calls
+ * grant(..., "grow.access") on top of that actually resolves to PRO tier
+ * (grow.access AND run.access), not GROW. Used by the one test below that
+ * specifically asserts a GROW (not PRO) tier value, so that brokerage needs
+ * its auto-granted run.access revoked first to be genuinely GROW-only.
+ */
+async function revokeRunAccess(brokerageId: number) {
+  await db
+    .update(entitlementGrants)
+    .set({ status: "Revoked" })
+    .where(and(eq(entitlementGrants.brokerageId, brokerageId), eq(entitlementGrants.entitlementKey, "run.access")));
   invalidateEntitlementCache(brokerageId);
 }
 
@@ -152,6 +178,7 @@ test("POST /api/ai/ask (mode: coach) succeeds for a Grow-entitled brokerage and 
 test("GET /api/ai/capabilities reports businessCoachEnabled alongside the existing copilotEnabled field", async () => {
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Capabilities ${suffix}`);
   try {
+    await revokeRunAccess(fresh.brokerageId);
     await grant(fresh.brokerageId, "grow.access");
     const res = await fetch(`${baseUrl}/api/ai/capabilities`, { headers: { cookie: fresh.agent.cookie } });
     assert.equal(res.status, 200);

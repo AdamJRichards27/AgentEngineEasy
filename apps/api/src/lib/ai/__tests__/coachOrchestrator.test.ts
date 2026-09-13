@@ -25,6 +25,18 @@ import { AiEntitlementError } from "../types.js";
 import { COACH_TOOL_REGISTRY } from "../tools/registry.js";
 import { assertGrowRateLimit, GrowRateLimitError } from "../growRateLimiter.js";
 
+// business_coach is a non-default-on AiRole (see featureFlags.ts's
+// ROLE_FLAG_ENV: every role other than "copilot" defaults to disabled, so
+// turning on the AI_ENABLED master switch alone can never expose a
+// capability whose own rollout flag was never explicitly turned on). Every
+// test in this file exercises the tier/entitlement gate that sits BEHIND
+// that flag, not the flag itself (see featureFlags.test.ts for that), so
+// the flag must be explicitly on for the whole file - AI_ENABLED already
+// defaults to true (isAiEnabled()), so only the role-specific flag needs
+// setting here. Node's test runner isolates each *.test.ts file into its
+// own process, so this assignment cannot leak into any other test file.
+process.env.AI_BUSINESS_COACH_ENABLED = "true";
+
 const COACH_TOOL_NAMES = COACH_TOOL_REGISTRY.map((t) => t.name);
 
 async function createFixture(tag: string): Promise<{ brokerage: Brokerage; user: User }> {
