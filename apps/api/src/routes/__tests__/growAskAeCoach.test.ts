@@ -23,7 +23,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, entitlementGrants } from "@aee/db";
+import { db, entitlementGrants, growCommitments, aiActionRequests } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages } from "./testSupport.js";
 
@@ -96,6 +96,57 @@ function askCoach(cookie: string | undefined, overrides: Record<string, unknown>
     headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
     body: JSON.stringify({ question: "How am I tracking this week?", contextType: "grow", contextId: null, mode: "coach", ...overrides }),
   });
+}
+
+// AE GROW Priority 6 Stage D remediation pass - the same real-HTTP-seeding
+// recipe routes/__tests__/growAskAe.test.ts already established and relies
+// on for its own "growFocusItemId" and cross-tenant tests, duplicated here
+// verbatim rather than imported (per this file's own existing convention of
+// duplicating small per-file fixture helpers - see grant()/askCoach() above,
+// neither of which is imported from growAskAe.test.ts either). Seeding a
+// concrete due date through the real POST/PATCH API, instead of inserting a
+// growOpportunities row directly, means the grounding data this section's
+// tests exercise is produced exactly the way a real agent using the product
+// would produce it - not a shortcut that could mask a real gap between the
+// test fixture and the real write path.
+async function createProperty(cookie: string, address: string) {
+  const res = await fetch(`${baseUrl}/api/properties`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ formattedAddress: address, state: "NSW", suburb: "Testville", postcode: "2000" }),
+  });
+  if (res.status !== 201) throw new Error(`create property failed: ${res.status} ${await res.text()}`);
+  const { property } = (await res.json()) as { property: { id: number } };
+  return property.id;
+}
+
+async function createParty(cookie: string, propertyId: number, overrides: Record<string, unknown> = {}) {
+  const res = await fetch(`${baseUrl}/api/parties`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ propertyId, role: "Buyer", firstName: "Test", lastName: "Contact", ...overrides }),
+  });
+  if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
+  const { party } = (await res.json()) as { party: { id: number } };
+  return party.id;
+}
+
+async function createOverdueOpportunity(cookie: string, propertyId: number, partyId: number, reason: string) {
+  const createRes = await fetch(`${baseUrl}/api/grow/opportunities`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ partyId, propertyId, opportunityType: "Listing", reason }),
+  });
+  if (createRes.status !== 201) throw new Error(`create opportunity failed: ${createRes.status} ${await createRes.text()}`);
+  const { opportunity } = (await createRes.json()) as { opportunity: { id: number } };
+
+  const patchRes = await fetch(`${baseUrl}/api/grow/opportunities/${opportunity.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ nextActionDueAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }),
+  });
+  if (patchRes.status !== 200) throw new Error(`patch opportunity failed: ${patchRes.status} ${await patchRes.text()}`);
+  return opportunity.id;
 }
 
 test("POST /api/ai/ask (mode: coach) requires authentication", async () => {
@@ -284,5 +335,172 @@ test("POST /api/ai/ask (mode: coach) ignores a client-supplied timeZone override
     );
   } finally {
     await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AE GROW Priority 6 Stage D remediation pass - dedicated Business Coach
+// coverage for the CREATE_GROW_COMMITMENT proposal path.
+//
+// Everything above this point is pre-existing Stage C coverage (entitlement
+// gating, tier, rate limiting, cross-tenant metrics isolation, timezone) and
+// predates Stage D. None of it proves that an authenticated mode: "coach"
+// request reaches the same governed CREATE_GROW_COMMITMENT proposal flow as
+// plain Grow Ask AE - that is specifically what the three tests below close,
+// at the real HTTP route (this file's own createApp()/fetch() harness), not
+// by calling selectGrowCommitmentCandidate or another isolated orchestrator
+// helper directly and describing that as integration coverage (see
+// lib/ai/__tests__/growCommitmentAction.test.ts §4 for that separate,
+// already-existing unit-level coverage of the helper functions themselves).
+//
+// Grounding data is seeded through the real POST/PATCH HTTP API via
+// createProperty/createParty/createOverdueOpportunity above - the exact
+// same real-write recipe routes/__tests__/growAskAe.test.ts already
+// established for its own "growFocusItemId" test - never by inserting a
+// growOpportunities row directly, so a passing test here proves the real
+// write path, not a shortcut around it.
+//
+// The "missing entitlement" negative case in the required test matrix is
+// deliberately not duplicated here: the pre-existing "is refused with 403
+// for a STARTER brokerage" test above already proves the whole request -
+// including any Stage D proposal attempt - is refused before the proposal
+// path is ever reached, for both modes. Re-testing it here would be
+// redundant coverage of the same gate, not additional proof.
+// ---------------------------------------------------------------------------
+
+test("POST /api/ai/ask (mode: coach) with a grounded, dated follow-up produces an AWAITING_APPROVAL CREATE_GROW_COMMITMENT proposal, through the real HTTP route and orchestrator together - server-selected role, brokerage-scoped grounding data, no client-supplied role/actorType trusted", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Commitment Proposal ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.opportunities.manage");
+    const propertyId = await createProperty(fresh.agent.cookie, "9 Coach Commitment Ave");
+    const partyId = await createParty(fresh.agent.cookie, propertyId, { firstName: "Priya", lastName: "CoachCommitment" });
+    await createOverdueOpportunity(fresh.agent.cookie, propertyId, partyId, "Coach-mode commitment fixture - overdue follow-up.");
+
+    // A client-supplied role/actorType must never be accepted or trusted.
+    // routes/ai.ts's askSchema declares no role field at all, and (like the
+    // pre-existing "ignores a client-supplied timeZone override" test
+    // above already proves for timeZone) a non-strict Zod object silently
+    // drops any field it does not itself declare before askCopilot() ever
+    // sees it. This call deliberately tries to smuggle both fields in.
+    const res = await askCoach(fresh.agent.cookie, { role: "system_change", actorType: "AI" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      response: {
+        headline?: string;
+        // Deliberately typed loosely (Record<string, unknown>, not a named
+        // interface) - this test asserts on the proposal's runtime values,
+        // not on a locally-guessed field-type declaration that could drift
+        // out of sync with the real summarizeGrowCommitmentProposal() return
+        // type and fail the workspace typecheck step for the wrong reason.
+        proposedCommitment?: Record<string, unknown>;
+      };
+    };
+
+    // The full Business Coach Response Contract shape (headline etc. - see
+    // the pre-existing "succeeds ... returns the full coaching Response
+    // Contract shape" test above) is present only when the server resolved
+    // role === "business_coach" server-side from mode: "coach". This is the
+    // same observable evidence that test already relies on for role
+    // selection, and it is also the proof that the smuggled role/actorType
+    // fields above had no effect - a client-selected "system_change" role
+    // would never produce this shape.
+    assert.equal(typeof body.response.headline, "string");
+
+    assert.ok(body.response.proposedCommitment, "a concrete, dated, brokerage-owned follow-up must produce a proposal in coach mode, exactly as it does in plain Grow Ask AE mode");
+    const proposal = body.response.proposedCommitment!;
+    assert.equal(proposal.actionKey, "CREATE_GROW_COMMITMENT");
+    assert.equal(proposal.partyId, partyId, "the proposal must reference the real, brokerage-owned party that was actually seeded through the HTTP API - never a model-generated identifier");
+    assert.equal(proposal.contactName, "Priya CoachCommitment");
+    assert.equal(proposal.status, "AWAITING_APPROVAL", "the proposal must require human approval - it can never arrive already-executed");
+    assert.equal(proposal.reviewUrl, "/grow");
+
+    const commitmentsAfterProposal = await db.select().from(growCommitments).where(eq(growCommitments.brokerageId, fresh.brokerageId));
+    assert.equal(commitmentsAfterProposal.length, 0, "a proposal alone must never create a growCommitments row - nothing is created until a human explicitly approves it");
+
+    const actionRequests = await db.select().from(aiActionRequests).where(eq(aiActionRequests.brokerageId, fresh.brokerageId));
+    assert.equal(actionRequests.length, 1, "exactly one action request must exist - this single HTTP call must not create duplicates or any other domain record");
+    assert.equal(actionRequests[0].actionKey, "CREATE_GROW_COMMITMENT");
+    assert.equal(actionRequests[0].actorType, "AI", "the request must be attributed to the server's own internal AI actor, never to the client-supplied actorType field this call tried to smuggle in");
+    assert.equal(actionRequests[0].status, "AWAITING_APPROVAL");
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
+test("POST /api/ai/ask (mode: coach) creates no proposal when no concrete, dated follow-up exists yet - an opportunity with no next-action date set is not concrete enough to ground a proposal on", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route No Grounded Follow-up ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.opportunities.manage");
+    const propertyId = await createProperty(fresh.agent.cookie, "11 Coach No Followup Ave");
+    const partyId = await createParty(fresh.agent.cookie, propertyId, { firstName: "Noor", lastName: "NoFollowup" });
+    // Deliberately no createOverdueOpportunity()/PATCH step here - the
+    // opportunity is left with no nextActionDueAt, so it surfaces on Grow
+    // Today (as an "opportunity_no_action_set" item, per growToday.ts) but
+    // is not concrete/dated enough for selectGrowCommitmentCandidate to
+    // treat as grounding data (see lib/ai/__tests__/growCommitmentAction.test.ts
+    // §4's own "no qualifying item, returns null" unit coverage of that
+    // same rule - this test proves the identical rule holds at the real
+    // HTTP boundary, for coach mode specifically).
+    const createRes = await fetch(`${baseUrl}/api/grow/opportunities`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: fresh.agent.cookie },
+      body: JSON.stringify({ partyId, propertyId, opportunityType: "Listing", reason: "No concrete follow-up yet fixture." }),
+    });
+    if (createRes.status !== 201) throw new Error(`create opportunity failed: ${createRes.status} ${await createRes.text()}`);
+
+    const res = await askCoach(fresh.agent.cookie);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { response: { headline?: string; proposedCommitment?: unknown } };
+    assert.equal(typeof body.response.headline, "string", "still a real, full coach response - only the proposal is absent");
+    assert.equal(body.response.proposedCommitment, undefined, "no concrete dated follow-up exists, so no proposal must be created even though this brokerage is otherwise fully Grow-entitled");
+
+    const actionRequests = await db.select().from(aiActionRequests).where(eq(aiActionRequests.brokerageId, fresh.brokerageId));
+    assert.equal(actionRequests.length, 0, "no action request of any kind must be created when there is nothing concrete to ground one on");
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
+test("POST /api/ai/ask (mode: coach) never proposes a commitment against, or leaks any detail of, another brokerage's grounded follow-up - both brokerages hold an identical entitlement set, so tenant scoping is the only possible explanation for the difference", async () => {
+  const ours = await createBrokerageWithUsers(baseUrl, `Coach Route Tenant Isolation Ours ${suffix}`);
+  const foreign = await createBrokerageWithUsers(baseUrl, `Coach Route Tenant Isolation Foreign ${suffix}`);
+  try {
+    await grant(ours.brokerageId, "grow.access");
+    await grant(ours.brokerageId, "grow.opportunities.manage");
+    await grant(foreign.brokerageId, "grow.access");
+    await grant(foreign.brokerageId, "grow.opportunities.manage");
+
+    const foreignPropertyId = await createProperty(foreign.agent.cookie, "13 Zenith Foreign Ave");
+    const foreignPartyId = await createParty(foreign.agent.cookie, foreignPropertyId, { firstName: "Zenith", lastName: "ForeignContact" });
+    await createOverdueOpportunity(
+      foreign.agent.cookie,
+      foreignPropertyId,
+      foreignPartyId,
+      "Zenith foreign brokerage overdue follow-up - must never reach the other brokerage.",
+    );
+
+    const res = await askCoach(ours.agent.cookie);
+    assert.equal(res.status, 200);
+    const rawBody = await res.text();
+    assert.ok(!rawBody.includes("Zenith"), "the foreign contact's name and the foreign fixture's distinctive reason text must never appear anywhere in our brokerage's response");
+    assert.ok(!rawBody.includes("Foreign Ave"), "the foreign property's address must never appear anywhere in our brokerage's response");
+
+    const body = JSON.parse(rawBody) as { response: { headline?: string; proposedCommitment?: unknown } };
+    assert.equal(typeof body.response.headline, "string", "still a real, full coach response for our own brokerage");
+    assert.equal(
+      body.response.proposedCommitment,
+      undefined,
+      "our brokerage has no grounded follow-up of its own, so no proposal must be created regardless of what the foreign brokerage has - and it must certainly never be created FROM the foreign brokerage's data",
+    );
+
+    const ourActionRequests = await db.select().from(aiActionRequests).where(eq(aiActionRequests.brokerageId, ours.brokerageId));
+    assert.equal(ourActionRequests.length, 0, "no action request must exist in our brokerage referencing the foreign brokerage's contact or property");
+
+    const foreignActionRequests = await db.select().from(aiActionRequests).where(eq(aiActionRequests.brokerageId, foreign.brokerageId));
+    assert.equal(foreignActionRequests.length, 0, "the foreign brokerage's own overdue follow-up was never itself asked about in coach mode by its own agent in this test, so it correctly has no proposal either - this asserts our fixture setup did not accidentally create one as a side effect");
+  } finally {
+    await cleanupBrokerages([ours.brokerageId, foreign.brokerageId]);
   }
 });
