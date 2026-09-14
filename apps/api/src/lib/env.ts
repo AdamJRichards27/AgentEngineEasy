@@ -81,3 +81,44 @@ export function isLiveExternalTransactionsApproved(): boolean {
 export function mustForceMockExternalProvider(): boolean {
   return isProductionEnvironment() && !isLiveExternalTransactionsApproved();
 }
+
+/**
+ * AE GROW Priority 6 Stage E — Voice as Input.
+ *
+ * True only when an operator has explicitly set
+ * LIVE_VOICE_TRANSCRIPTION_APPROVED to the literal string "true". Modelled
+ * directly on isLiveExternalTransactionsApproved() above: a single,
+ * explicit flag that must be flipped before this process is allowed to
+ * send real audio to a real (non-mock) transcription provider such as
+ * Deepgram. See apps/api/src/lib/ai/voice/gateway.ts's
+ * buildVoiceTranscriptionProvider() for where this is actually enforced.
+ *
+ * Deliberately a SEPARATE flag from LIVE_EXTERNAL_TRANSACTIONS_APPROVED,
+ * not a reuse of it: approving payments/AML/e-signature/property-data
+ * providers is not the same decision as approving an external party to
+ * receive a user's recorded voice, which the Stage E authorisation
+ * requires to be its own, explicit, later Project Owner decision (see the
+ * "Live-activation gates" section of
+ * docs/AE_GROW_PRIORITY_6_STAGE_E_VOICE_INPUT_REPORT.md).
+ */
+export function isLiveVoiceTranscriptionApproved(): boolean {
+  return process.env.LIVE_VOICE_TRANSCRIPTION_APPROVED === "true";
+}
+
+/**
+ * True only in production, when live voice transcription has NOT been
+ * explicitly approved (isLiveVoiceTranscriptionApproved() above). While
+ * true, apps/api/src/lib/ai/voice/gateway.ts's
+ * buildVoiceTranscriptionProvider() refuses to construct a live (Deepgram)
+ * provider even if AI_TRANSCRIPTION_PROVIDER=deepgram and a DEEPGRAM_API_KEY
+ * are both configured — it throws a typed, fail-closed error instead
+ * (mapped to an honest "provider unavailable" response, never a silent
+ * substitution of the mock provider for a caller who asked for a live
+ * one — see that module's own header comment for why this stage
+ * deliberately diverges from mustForceMockExternalProvider()'s "silently
+ * return the mock/sandbox implementation" convention). Outside production
+ * this has no effect, same as mustForceMockExternalProvider() above.
+ */
+export function mustForceMockVoiceTranscriptionProvider(): boolean {
+  return isProductionEnvironment() && !isLiveVoiceTranscriptionApproved();
+}

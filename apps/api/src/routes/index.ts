@@ -14,6 +14,7 @@ import { transactionsRouter } from "./transactions.js";
 import { homeRouter } from "./home.js";
 import { aiRouter } from "./ai.js";
 import { aiActionsRouter } from "./ai-actions.js";
+import { aiVoiceRouter } from "./aiVoice.js";
 import { billingRouter } from "./billing.js";
 import { growRouter } from "./grow.js";
 import { contactsRouter } from "./contacts.js";
@@ -63,6 +64,15 @@ apiRouter.use("/transactions", transactionsRouter);
 apiRouter.use("/home", homeRouter);
 apiRouter.use("/ai", aiRouter);
 apiRouter.use("/ai/actions", aiActionsRouter);
+// AE GROW Priority 6 Stage E — Voice as Input. Its own router (rather than
+// a new route inside aiRouter) purely for file-size/organisation reasons,
+// same pattern as aiActionsRouter immediately above — mounted at
+// "/ai/voice" so its one route (POST /transcribe) resolves to the exact
+// external path the Stage E authorisation specifies: POST
+// /api/ai/voice/transcribe. See routes/aiVoice.ts for the entitlement
+// gate (deliberately identical to askCopilot()'s own) and every other
+// Stage E control.
+apiRouter.use("/ai/voice", aiVoiceRouter);
 apiRouter.use("/billing", billingRouter);
 apiRouter.use("/grow", growRouter);
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline. Nested under Grow's own
