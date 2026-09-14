@@ -42,3 +42,6 @@ export * from "./integrations";
 export * from "./contacts";
 // AE GROW Priority 5 — Data & Property Intelligence.
 export * from "./propertyIntelligence";
+// AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and Sandbox
+// Telephony.
+export * from "./telephony";
