@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
-import type { SessionUser } from "../lib/session";
+import { fetchSession, type SessionResponse, type SessionUser } from "../lib/session";
+import { resolveLandingRoute } from "../lib/productNav";
 
 interface KnownUser {
   id: number;
@@ -10,6 +11,10 @@ interface KnownUser {
   firstName: string;
   lastName: string;
   brokerageName: string | null;
+}
+
+export function resolveLoginDestination(session: Pick<SessionResponse, "user" | "entitlements">): "/" | "/today" | "/grow" {
+  return resolveLandingRoute({ role: session.user.role, entitlements: session.entitlements });
 }
 
 // Critical Blocker Remediation, Phase 4 — real sign-in for the controlled
@@ -27,6 +32,27 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showDevPicker, setShowDevPicker] = useState(true);
+  const [sessionError, setSessionError] = useState<ApiError | null>(null);
+
+  // Both login endpoints set the cookie but intentionally return only the user
+  // record. Fetch the authoritative /auth/me payload before navigating so the
+  // shared session cache has entitlements and landing cannot race ahead to
+  // the fallback route.
+  const finishSignIn = async () => {
+    setSessionError(null);
+    try {
+      const session = await queryClient.fetchQuery<SessionResponse>({
+        queryKey: ["session"],
+        queryFn: fetchSession,
+      });
+      queryClient.setQueryData(["session"], session);
+      setLocation(resolveLoginDestination(session));
+    } catch (error) {
+      setSessionError(
+        error instanceof ApiError ? error : new ApiError(500, "We couldn't finish signing you in. Try again."),
+      );
+    }
+  };
 
   const { data: knownUsers } = useQuery({
     queryKey: ["known-users"],
@@ -44,18 +70,12 @@ export default function Login() {
         method: "POST",
         body: JSON.stringify({ firstName: u.firstName, lastName: u.lastName, email: u.email, brokerageName: u.brokerageName ?? "" }),
       }),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["session"], data.user);
-      setLocation("/");
-    },
+    onSuccess: finishSignIn,
   });
 
   const login = useMutation({
     mutationFn: () => apiFetch<{ user: SessionUser }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["session"], data.user);
-      setLocation("/");
-    },
+    onSuccess: finishSignIn,
   });
 
   const submit = () => {
@@ -121,8 +141,8 @@ export default function Login() {
           </div>
         )}
 
-        {(login.isError || devSignIn.isError) && (
-          <p className="error-text">{((login.error ?? devSignIn.error) as ApiError).friendly}</p>
+        {(login.isError || devSignIn.isError || sessionError) && (
+          <p className="error-text">{(sessionError ?? (login.error ?? devSignIn.error) as ApiError).friendly}</p>
         )}
         <p className="muted" style={{ fontSize: "0.8em", marginTop: "1.5rem" }}>
           New to Agent Engine? You'll need an invitation from your Brokerage Administrator — check

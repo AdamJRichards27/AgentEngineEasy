@@ -1,8 +1,10 @@
-import { useState } from "react";
-import { Link } from "wouter";
+import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { Link, useLocation, useSearch } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
+import { ActionCard } from "../components/ActionCard";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 // AE GROW Priority 3 — Contact 360's communications section, reused unmodified here (see that
 // component's own header comment). Grow Today's Email/SMS action buttons below route into it via
@@ -18,6 +20,7 @@ import {
   type GrowTodaySummary,
   formatGeneratedAt,
   formatWhen,
+  growTodayBucketPresentation,
   priorityLabel,
   priorityPillClass,
 } from "../lib/growToday";
@@ -268,9 +271,9 @@ export default function Grow() {
   return <GrowWorkspace />;
 }
 
-type GrowTab = "today" | "opportunities" | "contacts" | "nurture" | "performance" | "askAE";
+export type GrowTab = "today" | "opportunities" | "contacts" | "nurture" | "performance" | "askAE";
 
-const GROW_TABS: Array<{ key: GrowTab; label: string }> = [
+export const GROW_TABS: Array<{ key: GrowTab; label: string }> = [
   { key: "today", label: "Today" },
   { key: "opportunities", label: "Opportunities" },
   { key: "contacts", label: "Contacts" },
@@ -279,8 +282,33 @@ const GROW_TABS: Array<{ key: GrowTab; label: string }> = [
   { key: "askAE", label: "Ask AE" },
 ];
 
+/**
+ * Grow owns its internal tab state, but the state is addressable. This keeps sidebar links,
+ * browser history, refreshes, and copied deep links on the same existing /grow route rather than
+ * creating one route per tab.
+ */
+export function parseGrowTab(search: string): GrowTab {
+  const requestedTab = new URLSearchParams(search).get("tab");
+  return GROW_TABS.some((tab) => tab.key === requestedTab) ? (requestedTab as GrowTab) : "today";
+}
+
+export function parseGrowContactId(search: string): number | null {
+  const value = new URLSearchParams(search).get("contact");
+  if (value === null || !/^\d+$/.test(value)) return null;
+  const partyId = Number(value);
+  return Number.isSafeInteger(partyId) && partyId > 0 ? partyId : null;
+}
+
+export function buildGrowWorkspaceHref(tab: GrowTab, contactPartyId: number | null = null): string {
+  const params = new URLSearchParams({ tab });
+  if (tab === "contacts" && contactPartyId !== null) params.set("contact", String(contactPartyId));
+  return `/grow?${params.toString()}`;
+}
+
 function GrowWorkspace() {
-  const [tab, setTab] = useState<GrowTab>("today");
+  const [location, navigate] = useLocation();
+  const search = useSearch();
+  const [tab, setTab] = useState<GrowTab>(() => parseGrowTab(search));
   // AE GROW Priority 2 §12 — Priority 1 integration. The only state this priority adds at the
   // workspace level: which contact (if any) the Contacts tab should open straight into a
   // Contact 360 detail view for, rather than its default list. Lifted up here (rather than kept
@@ -296,9 +324,24 @@ function GrowWorkspace() {
   // onComposeHandled below, so it never re-fires on its own re-render.
   const [pendingComposeChannel, setPendingComposeChannel] = useState<"EMAIL" | "SMS" | null>(null);
 
+  // Browser back/forward and copied links are the source of truth when the URL changes outside a
+  // tab button. `location` is included because wouter's pathname hook and search hook notify on
+  // different history events in some browser versions.
+  useEffect(() => {
+    setTab(parseGrowTab(search));
+    setContactPartyId(parseGrowContactId(search));
+  }, [location, search]);
+
+  function selectTab(nextTab: GrowTab) {
+    setTab(nextTab);
+    setContactPartyId(null);
+    navigate(buildGrowWorkspaceHref(nextTab));
+  }
+
   function viewContact(partyId: number) {
     setContactPartyId(partyId);
     setTab("contacts");
+    navigate(buildGrowWorkspaceHref("contacts", partyId));
   }
 
   // AE GROW Priority 3 §4 — Grow Today's Email/SMS action buttons: same navigation as
@@ -308,12 +351,14 @@ function GrowWorkspace() {
     setContactPartyId(partyId);
     setPendingComposeChannel("EMAIL");
     setTab("contacts");
+    navigate(buildGrowWorkspaceHref("contacts", partyId));
   }
 
   function smsContact(partyId: number) {
     setContactPartyId(partyId);
     setPendingComposeChannel("SMS");
     setTab("contacts");
+    navigate(buildGrowWorkspaceHref("contacts", partyId));
   }
 
   // Re-uses the "grow-access" query the outer Grow() component already fetched (react-query
@@ -341,7 +386,7 @@ function GrowWorkspace() {
             type="button"
             className={`pc-tab${tab === t.key ? " active" : ""}`}
             aria-current={tab === t.key ? "page" : undefined}
-            onClick={() => setTab(t.key)}
+            onClick={() => selectTab(t.key)}
           >
             {t.label}
           </button>
@@ -350,7 +395,7 @@ function GrowWorkspace() {
 
       {tab === "today" && (
         <GrowToday
-          onAskAE={() => setTab("askAE")}
+          onAskAE={() => selectTab("askAE")}
           onViewContact={viewContact}
           onEmailContact={emailContact}
           onSmsContact={smsContact}
@@ -360,7 +405,10 @@ function GrowWorkspace() {
       {tab === "contacts" && (
         <GrowContactsTab
           selectedPartyId={contactPartyId}
-          onSelectPartyId={setContactPartyId}
+          onSelectPartyId={(partyId) => {
+            setContactPartyId(partyId);
+            navigate(buildGrowWorkspaceHref("contacts", partyId));
+          }}
           pendingComposeChannel={pendingComposeChannel}
           onComposeHandled={() => setPendingComposeChannel(null)}
         />
@@ -433,6 +481,28 @@ function GrowToday({
   const doNow = data.priorityActions.filter((a) => a.priority === "DoNow");
   const doToday = data.priorityActions.filter((a) => a.priority === "DoToday");
   const keepWarm = data.priorityActions.filter((a) => a.priority === "KeepWarm");
+  const buckets = [
+    { priority: "DoNow" as const, items: doNow },
+    { priority: "DoToday" as const, items: doToday },
+    { priority: "KeepWarm" as const, items: keepWarm },
+  ];
+
+  function renderGrowActionCard(item: GrowTodayAction) {
+    return (
+      <GrowActionCard
+        key={item.id}
+        item={item}
+        canAddNote={canAddNote}
+        canManageOpportunities={canManageOpportunities}
+        canViewContacts={canViewContacts}
+        canManageContactComms={canManageContactComms}
+        onAskAE={onAskAE}
+        onViewContact={onViewContact}
+        onEmailContact={onEmailContact}
+        onSmsContact={onSmsContact}
+      />
+    );
+  }
 
   return (
     <div>
@@ -467,73 +537,55 @@ function GrowToday({
           <p className="empty-state">You're all caught up — nothing needs your attention right now.</p>
         </section>
       ) : (
-        <>
-          {doNow.length > 0 && (
-            <section className="card">
-              <h2>Do Now ({doNow.length})</h2>
-              <ul className="item-list grow-action-list">
-                {doNow.map((item) => (
-                  <GrowActionCard
-                    key={item.id}
-                    item={item}
-                    canAddNote={canAddNote}
-                    canManageOpportunities={canManageOpportunities}
-                    canViewContacts={canViewContacts}
-                    canManageContactComms={canManageContactComms}
-                    onAskAE={onAskAE}
-                    onViewContact={onViewContact}
-                    onEmailContact={onEmailContact}
-                    onSmsContact={onSmsContact}
-                  />
-                ))}
-              </ul>
-            </section>
-          )}
+        <div className="grow-today-buckets">
+          {buckets.map(({ priority, items }) => {
+            const presentation = growTodayBucketPresentation(priority, items.length);
 
-          {doToday.length > 0 && (
-            <section className="card">
-              <h2>Do Today ({doToday.length})</h2>
-              <ul className="item-list grow-action-list">
-                {doToday.map((item) => (
-                  <GrowActionCard
-                    key={item.id}
-                    item={item}
-                    canAddNote={canAddNote}
-                    canManageOpportunities={canManageOpportunities}
-                    canViewContacts={canViewContacts}
-                    canManageContactComms={canManageContactComms}
-                    onAskAE={onAskAE}
-                    onViewContact={onViewContact}
-                    onEmailContact={onEmailContact}
-                    onSmsContact={onSmsContact}
-                  />
-                ))}
-              </ul>
-            </section>
-          )}
+            if (presentation.isEmpty) {
+              return (
+                <details key={priority} className="section grow-today-bucket grow-today-bucket-zero">
+                  <summary aria-label={`${presentation.label}: 0. ${presentation.emptyText}`}>
+                    <span>{presentation.label}</span>
+                    <span className="section-count">({presentation.count})</span>
+                    <span className="muted">{presentation.emptyText}</span>
+                  </summary>
+                  <p className="empty-state">{presentation.emptyText}</p>
+                </details>
+              );
+            }
 
-          {keepWarm.length > 0 && (
-            <details className="section" open={doNow.length === 0 && doToday.length === 0}>
-              <summary>Keep Warm ({keepWarm.length})</summary>
-              <ul className="item-list grow-action-list">
-                {keepWarm.map((item) => (
-                  <GrowActionCard
-                    key={item.id}
-                    item={item}
-                    canAddNote={canAddNote}
-                    canManageOpportunities={canManageOpportunities}
-                    canViewContacts={canViewContacts}
-                    canManageContactComms={canManageContactComms}
-                    onAskAE={onAskAE}
-                    onViewContact={onViewContact}
-                    onEmailContact={onEmailContact}
-                    onSmsContact={onSmsContact}
-                  />
-                ))}
-              </ul>
-            </details>
-          )}
-        </>
+            if (priority === "KeepWarm") {
+              return (
+                <details
+                  key={priority}
+                  className={`section grow-today-bucket grow-today-bucket-${presentation.tone}`}
+                  open={doNow.length === 0 && doToday.length === 0}
+                >
+                  <summary aria-label={`${presentation.label}: ${presentation.count}. ${presentation.description}`}>
+                    <span>{presentation.label}</span>
+                    <span className="section-count">({presentation.count})</span>
+                    <span className="muted">{presentation.description}</span>
+                  </summary>
+                  <ul className="item-list grow-action-list">{items.map(renderGrowActionCard)}</ul>
+                </details>
+              );
+            }
+
+            return (
+              <section key={priority} className={`card grow-today-bucket grow-today-bucket-${presentation.tone}`}>
+                <div className="grow-today-bucket-heading">
+                  <div>
+                    <h2>
+                      {presentation.label} <span className="section-count">({presentation.count})</span>
+                    </h2>
+                    <p className="muted">{presentation.description}</p>
+                  </div>
+                </div>
+                <ul className="item-list grow-action-list">{items.map(renderGrowActionCard)}</ul>
+              </section>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -654,128 +706,149 @@ function GrowActionCard({
       : "Something went wrong. Try again."
     : null;
 
+  // Keep the existing action order and all of the existing entitlement /
+  // availableActions gates. ActionCard only gives the first existing control
+  // primary placement; it does not create or remove a capability.
+  const actionButtons: ReactNode[] = [];
+  if (showAddNote) {
+    actionButtons.push(
+      <button
+        key="add-note"
+        className="btn btn-secondary btn-small"
+        disabled={busy}
+        onClick={() => setOpenForm(openForm === "note" ? null : "note")}
+      >
+        Add note
+      </button>,
+    );
+  }
+  if (showUpdateNextAction) {
+    actionButtons.push(
+      <button
+        key="create-follow-up"
+        className="btn btn-secondary btn-small"
+        disabled={busy}
+        onClick={() => setOpenForm(openForm === "nextAction" ? null : "nextAction")}
+      >
+        Create follow-up
+      </button>,
+    );
+  }
+  if (showViewProperty && item.propertyId !== null) {
+    actionButtons.push(
+      <Link key="view-property" href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
+        View property
+      </Link>,
+    );
+  }
+  if (showViewContact) {
+    actionButtons.push(
+      <button key="view-contact" type="button" className="btn btn-link btn-small" onClick={() => onViewContact(item.partyId)}>
+        View contact
+      </button>,
+    );
+  }
+  if (showEmail) {
+    actionButtons.push(
+      <button key="email" type="button" className="btn btn-link btn-small" onClick={() => onEmailContact(item.partyId)}>
+        Email
+      </button>,
+    );
+  }
+  if (showSms) {
+    actionButtons.push(
+      <button key="sms" type="button" className="btn btn-link btn-small" onClick={() => onSmsContact(item.partyId)}>
+        SMS
+      </button>,
+    );
+  }
+  if (showAskAE) {
+    actionButtons.push(
+      <button key="ask-ae" type="button" className="btn btn-link btn-small" onClick={onAskAE}>
+        Ask AE
+      </button>,
+    );
+  }
+
   return (
     <li className="grow-action-card">
-      <div className="grow-action-card-header">
-        <span className={priorityPillClass(item.priority)}>{priorityLabel(item.priority)}</span>
-        <strong>{item.contactName}</strong>
-        {item.propertyLabel ? <span className="muted"> — {item.propertyLabel}</span> : null}
-      </div>
-      <p className="muted grow-action-reason">{item.reason}</p>
-      <p>Recommended: {item.recommendedAction}</p>
-      <p className="muted">
-        {item.dueAt
-          ? `Due ${formatWhen(item.dueAt)}`
-          : item.lastActivityAt
-          ? `Last contact ${formatWhen(item.lastActivityAt)}`
-          : "No contact recorded yet"}
-        {item.relationshipType ? ` · ${item.relationshipType.replace(/_/g, " ")}` : null}
-      </p>
-
-      {errorMessage && <p className="error-text">{errorMessage}</p>}
-
-      <div className="grow-action-card-actions">
-        {showAddNote && (
-          <button
-            className="btn btn-secondary btn-small"
-            disabled={busy}
-            onClick={() => setOpenForm(openForm === "note" ? null : "note")}
+      <ActionCard
+        status={<span className={priorityPillClass(item.priority)}>{priorityLabel(item.priority)}</span>}
+        title={item.contactName}
+        context={item.propertyLabel ?? "No property linked"}
+        explanation={item.reason}
+        suggestedNextStep={item.recommendedAction}
+        metadata={
+          <span className="muted">
+            {item.dueAt
+              ? `Due ${formatWhen(item.dueAt)}`
+              : item.lastActivityAt
+              ? `Last contact ${formatWhen(item.lastActivityAt)}`
+              : "No contact recorded yet"}
+            {item.relationshipType ? ` · ${item.relationshipType.replace(/_/g, " ")}` : null}
+          </span>
+        }
+        notice={errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+        primaryAction={actionButtons[0]}
+        secondaryActions={actionButtons.length > 1 ? actionButtons.slice(1) : null}
+      >
+        {openForm === "note" && (
+          <form
+            className="stack grow-inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!noteText.trim()) return;
+              addNote.mutate(noteText.trim());
+            }}
           >
-            Add note
-          </button>
+            <label htmlFor={`grow-note-${item.id}`}>Note</label>
+            <textarea
+              id={`grow-note-${item.id}`}
+              placeholder="Add a note about this contact"
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+              required
+              rows={2}
+            />
+            <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+              Save note
+            </button>
+          </form>
         )}
-        {showUpdateNextAction && (
-          <button
-            className="btn btn-secondary btn-small"
-            disabled={busy}
-            onClick={() => setOpenForm(openForm === "nextAction" ? null : "nextAction")}
+
+        {openForm === "nextAction" && (
+          <form
+            className="stack grow-inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const vars: { nextActionDueAt?: string; recommendedNextAction?: string } = {};
+              if (nextActionDate) vars.nextActionDueAt = new Date(nextActionDate).toISOString();
+              if (nextActionText.trim()) vars.recommendedNextAction = nextActionText.trim();
+              if (!vars.nextActionDueAt && !vars.recommendedNextAction) return;
+              updateNextAction.mutate(vars);
+            }}
           >
-            Create follow-up
-          </button>
+            <label htmlFor={`grow-next-action-date-${item.id}`}>Next action due</label>
+            <input
+              id={`grow-next-action-date-${item.id}`}
+              type="date"
+              value={nextActionDate}
+              onChange={(e) => setNextActionDate(e.target.value)}
+            />
+            <label htmlFor={`grow-next-action-text-${item.id}`}>Recommended next action</label>
+            <input
+              id={`grow-next-action-text-${item.id}`}
+              type="text"
+              placeholder="e.g. Call to confirm appraisal time"
+              value={nextActionText}
+              onChange={(e) => setNextActionText(e.target.value)}
+            />
+            <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+              Save follow-up
+            </button>
+          </form>
         )}
-        {showViewProperty && item.propertyId !== null && (
-          <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
-            View property
-          </Link>
-        )}
-        {showViewContact && (
-          <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(item.partyId)}>
-            View contact
-          </button>
-        )}
-        {showEmail && (
-          <button type="button" className="btn btn-link btn-small" onClick={() => onEmailContact(item.partyId)}>
-            Email
-          </button>
-        )}
-        {showSms && (
-          <button type="button" className="btn btn-link btn-small" onClick={() => onSmsContact(item.partyId)}>
-            SMS
-          </button>
-        )}
-        {showAskAE && (
-          <button type="button" className="btn btn-link btn-small" onClick={onAskAE}>
-            Ask AE
-          </button>
-        )}
-      </div>
-
-      {openForm === "note" && (
-        <form
-          className="stack grow-inline-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!noteText.trim()) return;
-            addNote.mutate(noteText.trim());
-          }}
-        >
-          <label htmlFor={`grow-note-${item.id}`}>Note</label>
-          <textarea
-            id={`grow-note-${item.id}`}
-            placeholder="Add a note about this contact"
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-            required
-            rows={2}
-          />
-          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
-            Save note
-          </button>
-        </form>
-      )}
-
-      {openForm === "nextAction" && (
-        <form
-          className="stack grow-inline-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const vars: { nextActionDueAt?: string; recommendedNextAction?: string } = {};
-            if (nextActionDate) vars.nextActionDueAt = new Date(nextActionDate).toISOString();
-            if (nextActionText.trim()) vars.recommendedNextAction = nextActionText.trim();
-            if (!vars.nextActionDueAt && !vars.recommendedNextAction) return;
-            updateNextAction.mutate(vars);
-          }}
-        >
-          <label htmlFor={`grow-next-action-date-${item.id}`}>Next action due</label>
-          <input
-            id={`grow-next-action-date-${item.id}`}
-            type="date"
-            value={nextActionDate}
-            onChange={(e) => setNextActionDate(e.target.value)}
-          />
-          <label htmlFor={`grow-next-action-text-${item.id}`}>Recommended next action</label>
-          <input
-            id={`grow-next-action-text-${item.id}`}
-            type="text"
-            placeholder="e.g. Call to confirm appraisal time"
-            value={nextActionText}
-            onChange={(e) => setNextActionText(e.target.value)}
-          />
-          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
-            Save follow-up
-          </button>
-        </form>
-      )}
+      </ActionCard>
     </li>
   );
 }
