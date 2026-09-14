@@ -245,6 +245,31 @@ test("POST /api/ai/voice/transcribe rejects a declared type that does not match 
   }
 });
 
+// AE GROW Priority 6 Stage E — test hardening (Commit 4). Distinct from
+// both the AUDIO_TYPE_MISMATCH case immediately above (real signature
+// bytes for one container, declared as a different, mismatched one) and
+// the UNSUPPORTED_AUDIO_TYPE-outside-the-allowlist case above it (a
+// well-formed declared Content-Type that is simply never allowed at all,
+// e.g. "video/mp4") — this exercises the third, previously HTTP-untested
+// branch: a declared type that IS on the allowlist, but bytes that match
+// no known container signature whatsoever (a genuinely corrupt/garbage
+// upload). Already unit-tested directly against detectAudioContainer/
+// validateVoiceAudioUpload in lib/ai/voice/__tests__/audioValidation.test.ts;
+// this proves the real route wires that same branch through end to end.
+test("POST /api/ai/voice/transcribe rejects corrupt/garbage bytes that match no known container, even when the declared type is on the allowlist, with 400 UNSUPPORTED_AUDIO_TYPE", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Corrupt Bytes ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    const garbage = Buffer.from("this-is-not-a-real-audio-container-just-plain-text-bytes");
+    const res = await uploadAudio(fresh.agent.cookie, garbage, "audio/wav", { mode: "ask" });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { code?: string };
+    assert.equal(body.code, "UNSUPPORTED_AUDIO_TYPE");
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
 test("POST /api/ai/voice/transcribe rejects an empty (zero-byte) audio upload with 400 EMPTY_AUDIO", async () => {
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Empty Audio ${suffix}`);
   try {
