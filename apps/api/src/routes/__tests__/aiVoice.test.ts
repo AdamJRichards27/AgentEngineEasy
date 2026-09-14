@@ -218,6 +218,42 @@ test("POST /api/ai/voice/transcribe rejects an attempt to inject an extra multip
   }
 });
 
+// AE GROW Priority 6 Stage E — merge-readiness multer safety cross-check.
+// Distinct from the "extra multipart field" test immediately above, which
+// exercises fields:1 (an injected extra TEXT field such as brokerageId).
+// This exercises the route's other multer-level defence, files:1: a
+// second AUDIO FILE in the same request, appended under the same field
+// name a genuine client always uses ("audio"), alongside the normal mode
+// field. Empirically confirmed against the exact multer version this
+// workspace's lockfile resolves (multer@2.2.0, busboy@1.6.0) in an
+// isolated sandbox outside this repo: multer/busboy raise the second file
+// as a LIMIT_FILE_COUNT MulterError (not LIMIT_UNEXPECTED_FILE, and not
+// silently dropped or silently accepted as the request's file) — a
+// MulterError code other than LIMIT_FILE_SIZE, so this file's own
+// multer-error middleware below maps it to exactly the same 400
+// AUDIO_UPLOAD_LIMIT response as the extra-field case, never a 200 with
+// either file silently accepted and never a 500.
+test("POST /api/ai/voice/transcribe rejects a second audio file in the same request — files:1 is enforced, not just fields:1", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Second File ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    const form = new FormData();
+    form.set("mode", "ask");
+    form.append("audio", new Blob([wavBytes()], { type: "audio/wav" }), "recording1.wav");
+    form.append("audio", new Blob([wavBytes()], { type: "audio/wav" }), "recording2.wav");
+    const res = await fetch(`${baseUrl}/api/ai/voice/transcribe`, {
+      method: "POST",
+      headers: { cookie: fresh.agent.cookie },
+      body: form,
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { code?: string };
+    assert.equal(body.code, "AUDIO_UPLOAD_LIMIT");
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
 test("POST /api/ai/voice/transcribe rejects a declared type outside the allowlist with 400 UNSUPPORTED_AUDIO_TYPE", async () => {
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Bad Mime ${suffix}`);
   try {
