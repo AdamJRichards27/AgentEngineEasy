@@ -93,6 +93,17 @@ export const subscriptionItems = pgTable("billing_subscription_items", {
 // GET routes); grow.propertyIntelligence.manage gates confirming/rejecting a match,
 // reviewing/dismissing a signal, and promoting a signal into a real growOpportunities row —
 // see routes/propertyIntelligence.ts's own header comment.
+//
+// AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and Sandbox Telephony: three
+// new keys, reviewed against the entitlement names PR #39's discovery proposed and renamed to
+// match this file's existing grow.<domain>.<verb> convention exactly.
+// grow.calling.access gates the call-session lifecycle itself (create/confirm/cancel/view a
+// sandbox call, the Contact 360 eligibility check) — see routes/growCalls.ts. grow.calling.
+// recording gates capturing/withdrawing call-recording consent — a SEPARATE key from
+// grow.calling.access, since being entitled to place a (sandbox) call must never imply being
+// entitled to manage recording consent for it. grow.calling.transcription is reserved for a
+// later, separately-gated phase (F3) — nothing in F1 checks it, and it enables no real
+// capability by existing; see the Stage F1 completion report.
 export const ENTITLEMENT_KEYS = [
   "run.access",
   "grow.access",
@@ -110,6 +121,9 @@ export const ENTITLEMENT_KEYS = [
   "grow.admin.configure",
   "grow.propertyIntelligence.read",
   "grow.propertyIntelligence.manage",
+  "grow.calling.access",
+  "grow.calling.recording",
+  "grow.calling.transcription",
 ] as const;
 export type EntitlementKey = (typeof ENTITLEMENT_KEYS)[number];
 

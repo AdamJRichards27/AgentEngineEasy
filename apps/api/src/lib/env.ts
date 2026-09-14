@@ -122,3 +122,42 @@ export function isLiveVoiceTranscriptionApproved(): boolean {
 export function mustForceMockVoiceTranscriptionProvider(): boolean {
   return isProductionEnvironment() && !isLiveVoiceTranscriptionApproved();
 }
+
+/**
+ * AE GROW Priority 6 Stage F1 — Call Foundation.
+ *
+ * True only when an operator has explicitly set LIVE_TELEPHONY_APPROVED to
+ * the literal string "true". Modelled directly on
+ * isLiveVoiceTranscriptionApproved() above, but this is a KILL SWITCH for a
+ * real telephony provider that does not exist yet — F1 implements ONLY
+ * SandboxTelephonyProvider (see apps/api/src/lib/telephony/sandboxProvider.ts)
+ * and defines no real provider adapter at all. This flag therefore has no
+ * effect on any code path F1 ships; it exists now, ahead of any real
+ * adapter, so that a future F2 provider integration inherits a
+ * fail-closed default from day one rather than needing this decision
+ * retrofitted later. The governing F1 authorisation is explicit that even
+ * once a real adapter exists, activating it requires ALL of: a configured
+ * provider selection, credentials, an entitlement, AND this flag — never
+ * this flag alone.
+ *
+ * Deliberately a SEPARATE flag from LIVE_EXTERNAL_TRANSACTIONS_APPROVED and
+ * LIVE_VOICE_TRANSCRIPTION_APPROVED, per that same authorisation — approving
+ * any of the other two domains must never be read as approving live
+ * telephony.
+ */
+export function isLiveTelephonyApproved(): boolean {
+  return process.env.LIVE_TELEPHONY_APPROVED === "true";
+}
+
+/**
+ * True only in production, when live telephony has NOT been explicitly
+ * approved (isLiveTelephonyApproved() above). Symmetrical with
+ * mustForceMockVoiceTranscriptionProvider() above; unused by any F1 code
+ * path today (see isLiveTelephonyApproved()'s own comment), but defined
+ * now so a future real TelephonyProvider adapter has this check ready to
+ * call rather than needing it invented under time pressure once a
+ * provider is actually being integrated.
+ */
+export function mustForceMockTelephonyProvider(): boolean {
+  return isProductionEnvironment() && !isLiveTelephonyApproved();
+}
