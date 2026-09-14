@@ -58,7 +58,30 @@ const voiceUpload = multer({
     fileSize: configuredMaxVoiceAudioBytes(),
     files: 1,
     fields: 1,
-    parts: 2,
+    // NOT 2. This looks like it should be "1 file + 1 field = 2 real
+    // multipart parts", and that is genuinely the intent — but the
+    // multer 2.x line this workspace's lockfile currently resolves within
+    // this package's own "^2.2.0" range (multer 2.2.0 and 2.3.0 both
+    // reproduce it; 2.4.0 does not) has a real off-by-one bug in its own
+    // `limits.parts` boundary check: it throws a LIMIT_PART_COUNT
+    // MulterError once the running part count REACHES the configured
+    // value, not once it exceeds it. With `parts: 2`, that means every
+    // genuine "1 file + 1 field" request — the exact, only shape this
+    // route is meant to accept — was itself being rejected, mapped by
+    // this file's own multer-error middleware below to an unintended 400
+    // AUDIO_UPLOAD_LIMIT response instead of ever reaching the route
+    // handler. Confirmed by direct reproduction in isolation against real
+    // multer 2.2.0/2.3.0 installs: `parts: 2` throws LIMIT_PART_COUNT for
+    // a genuine 1-file-1-field upload (busboy itself, multer's underlying
+    // parser, is not at fault — the same busboy 1.6.0 is resolved under
+    // every one of these multer versions); `parts: 3` and `parts: 4` do
+    // not. `parts` is headroom against an excessive-part-count multipart
+    // body, not this route's real defence against a second audio file or
+    // an injected extra field (e.g. a client-supplied brokerageId) —
+    // `files: 1` and `fields: 1` immediately above are, and the same
+    // reproduction confirmed both trigger correctly at exactly their
+    // configured value, with no equivalent off-by-one.
+    parts: 4,
     fieldNameSize: 32,
     fieldSize: 256,
     headerPairs: 32,
