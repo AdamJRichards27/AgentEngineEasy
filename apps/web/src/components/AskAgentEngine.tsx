@@ -1,7 +1,20 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
+// AE GROW Priority 6 Stage E — Voice as Input. The recording lifecycle
+// itself (permission/MIME/duration/error handling, the state machine) is
+// extracted into lib/voiceRecording.ts so it can be unit tested without a
+// browser — see that module's own header comment. This component is a
+// thin, mostly-declarative renderer of the state it produces.
+import {
+  createVoiceRecordingController,
+  createBrowserVoiceRecordingDeps,
+  formatElapsedTime,
+  MAX_RECORDING_SECONDS,
+  type VoiceRecordingState,
+  type VoiceRecordingController,
+} from "../lib/voiceRecording";
 
 interface AskAgentEngineProps {
   // AE GROW Priority 6 Stage B: "grow" is additive - every existing caller
@@ -226,6 +239,44 @@ const COACH_STARTING_OPTIONS: Array<{ label: string; period: CoachingPeriodKey }
   { label: "How consistent is my follow-up?", period: "last30days" },
   { label: "Which appraisals need attention?", period: "last30days" },
   { label: "Compare this month with last month", period: "currentMonth" },
+];
+
+// AE GROW Priority 6 Stage E — a small, self-contained mic glyph so the
+// voice control needs no new icon-font/asset dependency. Defined once at
+// module scope (never recreated per render).
+const MIC_ICON = (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <line x1="12" y1="19" x2="12" y2="23" />
+    <line x1="8" y1="23" x2="16" y2="23" />
+  </svg>
+);
+
+// AE GROW Priority 6 Stage E — the voice states that mean "something the
+// agent should be told about went wrong", each rendered with its own
+// dismissible error strip. "cancelled" and "transcript_ready" are
+// deliberately excluded: cancellation is a silent, deliberate no-op (it
+// must never look like a failure), and a ready transcript's own feedback
+// is the populated text input, not a banner.
+const VOICE_ERROR_STATES: readonly VoiceRecordingState[] = [
+  "permission_denied",
+  "no_microphone",
+  "upload_too_large",
+  "rate_limited",
+  "provider_unavailable",
+  "transcription_failed",
 ];
 
 function formatDataFreshness(iso: string): string {
@@ -522,6 +573,16 @@ function GrowCommitmentProposalCard({ proposal }: { proposal: GrowCommitmentProp
 // is completely unaffected either way: proposedCommitment is additive, and
 // nothing about asking a question ever becomes not-read-only merely
 // because a proposal was also attached to the answer.
+//
+// AE GROW Priority 6 Stage E extends it a fourth time: a small mic control
+// beside the existing text input lets the agent speak their question
+// instead of typing it. Voice is always Grow-scoped (there is no non-Grow
+// voice surface — see apps/api/src/routes/aiVoice.ts's own header
+// comment), so the control only ever renders when isGrow, covering both
+// plain Ask AE (isCoach false) and the Business Coach (isCoach true). A
+// transcript only ever populates the existing `question` state below —
+// exactly as if the agent had typed it — and is never submitted
+// automatically; the agent still has to press the existing Ask button.
 export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }: AskAgentEngineProps) {
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<AskCopilotResult | null>(null);
@@ -532,6 +593,64 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
   // against. Only ever read/sent when isCoach; harmless, inert state for
   // every existing (non-coach) call site.
   const [coachPeriod, setCoachPeriod] = useState<CoachingPeriodKey>("last7days");
+
+  // AE GROW Priority 6 Stage E — voice input state, driven entirely by the
+  // controller's own callbacks (see the effect below). Kept as plain local
+  // state, matching every other piece of UI state in this component,
+  // rather than introducing a second state-management approach for one
+  // control.
+  const voiceControllerRef = useRef<VoiceRecordingController | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceRecordingState>("idle");
+  const [voiceElapsedSeconds, setVoiceElapsedSeconds] = useState(0);
+  const [voiceErrorMessage, setVoiceErrorMessage] = useState<string | null>(null);
+
+  // Created once per (isGrow, isCoach) combination — recreated only if
+  // this same mounted component's mode ever changes, which disposes the
+  // previous controller first (releasing any held microphone) rather than
+  // leaking it. Never created at all outside Grow, since voice has no
+  // non-Grow surface.
+  useEffect(() => {
+    if (!isGrow) {
+      voiceControllerRef.current = null;
+      return;
+    }
+    const controller = createVoiceRecordingController(createBrowserVoiceRecordingDeps(isCoach ? "coach" : "ask"), {
+      onStateChange: (next) => setVoiceState(next),
+      onElapsedSecondsChange: (seconds) => setVoiceElapsedSeconds(seconds),
+      onTranscript: (transcript) => {
+        // The ENTIRE effect of a completed transcription: populate the
+        // same, already-existing question textbox a typed question would
+        // use. Never calls ask.mutate — the agent must still press Ask.
+        setQuestion(transcript);
+      },
+      onErrorMessage: (message) => setVoiceErrorMessage(message),
+    });
+    voiceControllerRef.current = controller;
+    setVoiceState(controller.getState());
+    setVoiceElapsedSeconds(0);
+    setVoiceErrorMessage(null);
+    return () => {
+      // Ensures the microphone is never left active, no timer keeps
+      // running, and no in-flight upload keeps waiting, once this
+      // component unmounts (e.g. the agent navigates away mid-recording).
+      controller.dispose();
+      voiceControllerRef.current = null;
+    };
+  }, [isGrow, isCoach]);
+
+  const handleVoiceMicClick = () => {
+    void voiceControllerRef.current?.start();
+  };
+  const handleVoiceStopClick = () => {
+    voiceControllerRef.current?.stop();
+  };
+  const handleVoiceCancelClick = () => {
+    voiceControllerRef.current?.cancel();
+  };
+  const handleVoiceDismiss = () => {
+    voiceControllerRef.current?.reset();
+    setVoiceErrorMessage(null);
+  };
 
   const { data: capabilities } = useQuery({
     queryKey: ["ai-capabilities"],
@@ -661,7 +780,83 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
         >
           {ask.isPending ? "Asking..." : "Ask"}
         </button>
+        {/* AE GROW Priority 6 Stage E — the voice control. Only ever
+            rendered for Grow (both plain Ask AE and the Business Coach) —
+            voice has no non-Grow surface, matching the server's own
+            always-Grow-scoped entitlement gate (aiVoice.ts). Text entry
+            above remains fully available and unaffected in every voice
+            state. */}
+        {isGrow && voiceState === "unsupported" && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-small ai-copilot-voice-button"
+            disabled
+            aria-disabled="true"
+            title="Voice input isn't supported in this browser — you can still type your question."
+          >
+            {MIC_ICON} Voice
+          </button>
+        )}
+        {isGrow && voiceState === "requesting_permission" && (
+          <span className="ai-copilot-voice-active">
+            <span className="ai-copilot-loading">
+              <span className="ai-copilot-spinner" aria-hidden="true" />
+              Requesting microphone access…
+            </span>
+            <button type="button" className="btn btn-link btn-small" onClick={handleVoiceCancelClick}>
+              Cancel
+            </button>
+          </span>
+        )}
+        {isGrow && (voiceState === "recording" || voiceState === "duration_limit_reached") && (
+          <span className="ai-copilot-voice-active">
+            <span aria-live="polite" aria-atomic="true">
+              Recording… {formatElapsedTime(voiceElapsedSeconds)} / {formatElapsedTime(MAX_RECORDING_SECONDS)}
+            </span>
+            <button type="button" className="btn btn-primary btn-small" onClick={handleVoiceStopClick}>
+              Stop
+            </button>
+            <button type="button" className="btn btn-link btn-small" onClick={handleVoiceCancelClick}>
+              Cancel
+            </button>
+          </span>
+        )}
+        {isGrow && (voiceState === "stopping" || voiceState === "transcribing") && (
+          <span className="ai-copilot-voice-active">
+            <span className="ai-copilot-loading">
+              <span className="ai-copilot-spinner" aria-hidden="true" />
+              {voiceState === "stopping" ? "Finishing recording…" : "Transcribing…"}
+            </span>
+            <button type="button" className="btn btn-link btn-small" onClick={handleVoiceCancelClick}>
+              Cancel
+            </button>
+          </span>
+        )}
+        {isGrow &&
+          voiceState !== "unsupported" &&
+          voiceState !== "requesting_permission" &&
+          voiceState !== "recording" &&
+          voiceState !== "duration_limit_reached" &&
+          voiceState !== "stopping" &&
+          voiceState !== "transcribing" && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-small ai-copilot-voice-button"
+              onClick={handleVoiceMicClick}
+              aria-label={isCoach ? "Ask the Business Coach with your voice" : "Ask AE with your voice"}
+            >
+              {MIC_ICON} Voice
+            </button>
+          )}
       </div>
+      {isGrow && voiceErrorMessage !== null && VOICE_ERROR_STATES.includes(voiceState) && (
+        <p className="error-text" role="alert">
+          {voiceErrorMessage}{" "}
+          <button type="button" className="btn btn-link btn-small" onClick={handleVoiceDismiss}>
+            Dismiss
+          </button>
+        </p>
+      )}
       {/* AE GROW Priority 6 Stage B UX gate — a single live region for every
           dynamic outcome of asking a question (preparing/error/answer) so a
           screen reader announces the *result* once, rather than announcing
