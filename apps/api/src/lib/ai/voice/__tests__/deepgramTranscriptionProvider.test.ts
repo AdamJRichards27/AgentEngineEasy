@@ -13,11 +13,27 @@ function restoreFetch(): void {
 }
 
 test("deepgram provider calls the fixed AU endpoint, forwards the audio and bearer token, and parses a successful response", async () => {
-  let capturedUrl: string | null = null;
-  let capturedInit: RequestInit | null = null;
+  // A single mutable record (rather than two separate `let ... = null`
+  // variables) captures what the mocked fetch call received. This also
+  // sidesteps a real TypeScript control-flow-analysis quirk: a bare
+  // `let x: T | null = null` that is only ever reassigned inside a closure
+  // narrows to exactly `null` at any read *outside* that closure later in
+  // the same enclosing scope, from the compiler's point of view (it does
+  // not reason about when — or whether — a closure passed elsewhere is
+  // actually invoked) — so a later property access such as `x?.headers`
+  // fails to compile with "Property 'headers' does not exist on type
+  // 'never'", even though the closure demonstrably runs (via
+  // provider.transcribe below, which internally calls the mocked fetch)
+  // well before that read. A plain value read (no property access) or a
+  // function *call* through the same narrowed-to-null reference does not
+  // trigger this, which is why it surfaced only here, at `.headers`/`.body`
+  // access, and not for a bare captured URL string elsewhere in this file.
+  // An object property is not subject to the same narrowing, so this
+  // capture-object pattern is used here instead of two bare `let`s.
+  const captured: { url: string | null; init: RequestInit | null } = { url: null, init: null };
   global.fetch = (async (url: string, init: RequestInit) => {
-    capturedUrl = url;
-    capturedInit = init;
+    captured.url = url;
+    captured.init = init;
     return {
       ok: true,
       status: 200,
@@ -43,11 +59,11 @@ test("deepgram provider calls the fixed AU endpoint, forwards the audio and bear
 
     // Fixed-region enforcement: exactly the AU endpoint, every time, with
     // no way for any caller to route this class to a different region.
-    assert.equal(capturedUrl, "https://api.au.deepgram.com/v1/listen?model=nova-2&punctuate=true&mip_opt_out=true");
-    const headers = capturedInit?.headers as Record<string, string>;
+    assert.equal(captured.url, "https://api.au.deepgram.com/v1/listen?model=nova-2&punctuate=true&mip_opt_out=true");
+    const headers = captured.init?.headers as Record<string, string>;
     assert.equal(headers.authorization, "Token secret-key-abc123");
     assert.equal(headers["content-type"], "audio/webm");
-    assert.equal(capturedInit?.body, audio);
+    assert.equal(captured.init?.body, audio);
   } finally {
     restoreFetch();
   }
