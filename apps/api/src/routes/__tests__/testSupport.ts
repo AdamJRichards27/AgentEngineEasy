@@ -82,6 +82,9 @@ import {
   propertyExternalIdentifiers,
   propertyProviderObservations,
   growOpportunitySignals,
+  growCallSessions,
+  growCallRecordingConsents,
+  growCallWebhookEvents,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -477,6 +480,23 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * and, optionally, parties.id), so all three only need to run before the
  * properties/parties deletes further down this function, which this
  * placement already satisfies.
+ *
+ * AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and Sandbox
+ * Telephony (packages/db/src/schema/telephony.ts). All three new tables
+ * carry brokerageId directly EXCEPT grow_call_webhook_events (only
+ * relatedCallSessionId -> grow_call_sessions.id — see that file's own
+ * header comment for why it does not carry brokerageId), so this block is
+ * scoped by callSessionIds looked up from grow_call_sessions rather than
+ * by `ids` directly for that one table. Internal ordering:
+ * grow_call_webhook_events must be cleared before grow_call_sessions
+ * (relatedCallSessionId, non-cascading); grow_call_sessions itself
+ * references grow_call_recording_consents.id (recordingConsentId,
+ * non-cascading) and must therefore be cleared before
+ * grow_call_recording_consents. Both grow_call_sessions and
+ * grow_call_recording_consents also carry non-cascading FKs onto
+ * parties.id and users.id, so — like every block above — this whole
+ * block must run before the parties/users deletes further down this
+ * function.
  */
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
@@ -572,6 +592,19 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(importRecords).where(inArray(importRecords.importJobId, importJobIds));
   }
   await db.delete(importJobs).where(inArray(importJobs.brokerageId, ids));
+
+  // AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and
+  // Sandbox Telephony. See this function's own doc comment above for the
+  // FK ordering this block depends on. Placed here, ahead of the
+  // parties/users deletes further down, alongside every other
+  // brokerage-scoped block added by a later priority.
+  const growCallSessionRows = await db.select({ id: growCallSessions.id }).from(growCallSessions).where(inArray(growCallSessions.brokerageId, ids));
+  const growCallSessionIds = growCallSessionRows.map((s) => s.id);
+  if (growCallSessionIds.length > 0) {
+    await db.delete(growCallWebhookEvents).where(inArray(growCallWebhookEvents.relatedCallSessionId, growCallSessionIds));
+  }
+  await db.delete(growCallSessions).where(inArray(growCallSessions.brokerageId, ids));
+  await db.delete(growCallRecordingConsents).where(inArray(growCallRecordingConsents.brokerageId, ids));
 
   // F-05: Grow (grow_activities / grow_opportunities / grow_relationships) rows are deleted
   // first and scoped directly by brokerageId -- all three have non-cascading FKs onto
