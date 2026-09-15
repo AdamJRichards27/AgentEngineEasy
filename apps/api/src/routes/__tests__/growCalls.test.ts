@@ -258,7 +258,7 @@ test("creates a call session, requires confirmation before dialling, and progres
   const timelineBody = (await timelineRes.json()) as { timeline: Array<{ type: string; sourceId: number }> };
   assert.equal(timelineRes.status, 200);
   assert.ok(
-    timelineBody.timeline.some((e) => e.type === "ACTIVITY_LOGGED" && e.sourceId === happyPathSessionId),
+    timelineBody.timeline.some((e) => e.type === "ACTIVITY_LOGGED" && e.sourceId === activityRows[0]!.id),
     "the completed sandbox call must surface on the contact's own Relationship Timeline",
   );
 });
