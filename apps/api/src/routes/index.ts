@@ -24,6 +24,8 @@ import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
 import { growAppraisalsRouter } from "./growAppraisals.js";
 import { propertyIntelligenceRouter } from "./propertyIntelligence.js";
+import { growCallsRouter } from "./growCalls.js";
+import { growCallsWebhooksRouter } from "./growCallsWebhooks.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
@@ -102,6 +104,25 @@ apiRouter.use("/grow/appraisals", growAppraisalsRouter);
 // reasons only. See docs/AE_GROW_PRIORITY_5_APPLICATION_LAYER_REMEDIATION.md
 // for why this router did not exist until this remediation.
 apiRouter.use("/grow/property-intelligence", propertyIntelligenceRouter);
+// AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and Sandbox
+// Telephony. growCallsWebhooksRouter MUST be mounted BEFORE growCallsRouter,
+// for exactly the reason documented below at
+// integrationsWebhooksRouter/integrationsRouter and
+// communicationsWebhooksRouter/communicationsRouter: growCallsRouter
+// applies a single blanket `router.use(requireAuth)` covering every path
+// under its "/grow/calls" mount prefix (see routes/growCalls.ts), and
+// Express tries routers in registration order — if growCallsRouter were
+// registered first, an unauthenticated sandbox-webhook request to
+// /grow/calls/webhooks/sandbox would be intercepted and rejected 401 by
+// that blanket gate before ever reaching growCallsWebhooksRouter's own,
+// unauthenticated, signature-verified route, even though no route inside
+// growCallsRouter itself matches "/webhooks/sandbox". growCallsWebhooksRouter
+// is mounted unprefixed (it declares its own full path,
+// "/grow/calls/webhooks/sandbox", exactly like communicationsWebhooksRouter
+// does immediately below) so it is tried, and fully handles the request,
+// before growCallsRouter's prefix match is even reached.
+apiRouter.use(growCallsWebhooksRouter);
+apiRouter.use("/grow/calls", growCallsRouter);
 apiRouter.use("/tasks", tasksRouter);
 // Agent Engine 2.0 — Exception & Risk Engine (Priority 4). Mounted
 // unprefixed: exceptionsRouter's own route paths are already fully
