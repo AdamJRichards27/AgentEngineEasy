@@ -383,3 +383,363 @@ test(
     }
   },
 );
+
+test(
+  "consent persistence scopes all five F2 tables, policy resolution, actors, references, and decision audits by brokerage",
+  { skip: !databaseEnabled, concurrency: false },
+  async (t) => {
+    const [
+      {
+        db,
+        brokerages,
+        users,
+        parties,
+        auditLogs,
+        growContactChannelConsents,
+        growConsentPolicyVersions,
+        growContactDncrStatuses,
+        growContactChannelSuppressions,
+        growConsentDecisions,
+      },
+      persistence,
+    ] = await Promise.all([import("@aee/db"), import("../consentControlsPersistence.js")]);
+    try {
+      await Promise.all([
+        db.execute(sql`select 1 from grow_contact_channel_consents limit 0`),
+        db.execute(sql`select 1 from grow_consent_policy_versions limit 0`),
+        db.execute(sql`select 1 from grow_contact_dncr_statuses limit 0`),
+        db.execute(sql`select 1 from grow_contact_channel_suppressions limit 0`),
+        db.execute(sql`select 1 from grow_consent_decisions limit 0`),
+      ]);
+    } catch {
+      t.skip("F2 consent tables are not present in this database; run the isolated migration test target.");
+      return;
+    }
+
+    const suffix = `${Date.now()}_${process.pid}`;
+    const [brokerageA, brokerageB] = await db
+      .insert(brokerages)
+      .values([{ name: `F2 isolation A ${suffix}` }, { name: `F2 isolation B ${suffix}` }])
+      .returning();
+    const [userA] = await db
+      .insert(users)
+      .values({
+        authProviderId: `f2-isolation-auth-a-${suffix}`,
+        email: `f2-isolation-a-${suffix}@example.test`,
+        firstName: "F2",
+        lastName: "Isolation A",
+        brokerageId: brokerageA.id,
+      })
+      .returning();
+    const [userB] = await db
+      .insert(users)
+      .values({
+        authProviderId: `f2-isolation-auth-b-${suffix}`,
+        email: `f2-isolation-b-${suffix}@example.test`,
+        firstName: "F2",
+        lastName: "Isolation B",
+        brokerageId: brokerageB.id,
+      })
+      .returning();
+    const [partyA] = await db.insert(parties).values({ brokerageId: brokerageA.id, firstName: "Isolation", lastName: "A" }).returning();
+    const [partyB] = await db.insert(parties).values({ brokerageId: brokerageB.id, firstName: "Isolation", lastName: "B" }).returning();
+
+    try {
+      const bConsent = await persistence.captureConsentState({
+        brokerageId: brokerageB.id,
+        partyId: partyB.id,
+        channel: "PHONE_CALL",
+        state: "EXPRESS",
+        source: "f2-isolation",
+        captureMethod: "test",
+        purpose: "outreach",
+        scope: "standing",
+        jurisdiction: "NZ",
+        recordedByUserId: userB.id,
+      });
+      const bPolicy = await persistence.recordConsentPolicy({
+        brokerageId: brokerageB.id,
+        jurisdiction: "NZ",
+        version: "nz-isolation-1",
+        effectiveAt: new Date("2020-01-01T00:00:00.000Z"),
+        dncrRequired: true,
+        suppressionEnabled: true,
+        timeZone: "Etc/UTC",
+        // Equal endpoints are the evaluator's explicit full-day window.
+        allowedHoursStart: "00:00",
+        allowedHoursEnd: "00:00",
+        recordedByUserId: userB.id,
+      });
+      const bDncr = await persistence.recordDncrStatus({
+        brokerageId: brokerageB.id,
+        partyId: partyB.id,
+        channel: "PHONE_CALL",
+        jurisdiction: "NZ",
+        status: "CLEARED",
+        checkedAt: new Date(Date.now() - 1_000),
+        validUntil: new Date("2099-01-01T00:00:00.000Z"),
+        reviewAt: new Date("2099-01-01T00:00:00.000Z"),
+        source: "f2-isolation",
+        reference: `dncr-${suffix}`,
+        recordedByUserId: userB.id,
+      });
+      const bSuppression = await persistence.recordConsentSuppression({
+        brokerageId: brokerageB.id,
+        partyId: partyB.id,
+        channel: "PHONE_CALL",
+        state: "SUPPRESSED",
+        reason: "F2 tenant isolation",
+        effectiveAt: new Date(Date.now() - 1_000),
+        reference: `suppression-${suffix}`,
+        recordedByUserId: userB.id,
+      });
+
+      // A foreign consent reference is rejected before an A stream exists.
+      await assert.rejects(
+        persistence.captureConsentState({
+          brokerageId: brokerageA.id,
+          partyId: partyA.id,
+          channel: "PHONE_CALL",
+          state: "NONE",
+          source: "f2-isolation",
+          captureMethod: "test",
+          purpose: "outreach",
+          scope: "standing",
+          supersedesConsentId: bConsent.id,
+          recordedByUserId: userA.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+
+      const aConsent = await persistence.captureConsentState({
+        brokerageId: brokerageA.id,
+        partyId: partyA.id,
+        channel: "PHONE_CALL",
+        state: "EXPRESS",
+        source: "f2-isolation",
+        captureMethod: "test",
+        purpose: "outreach",
+        scope: "standing",
+        jurisdiction: "NZ",
+        recordedByUserId: userA.id,
+      });
+
+      // Every supported writer rejects a foreign party or actor.  These calls
+      // do not insert rows, so the later per-tenant counts remain exact.
+      await assert.rejects(
+        persistence.captureConsentState({
+          brokerageId: brokerageA.id,
+          partyId: partyB.id,
+          channel: "EMAIL",
+          state: "NONE",
+          source: "f2-isolation",
+          captureMethod: "test",
+          purpose: "foreign-party",
+          scope: "one-off",
+          recordedByUserId: userA.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.captureConsentState({
+          brokerageId: brokerageA.id,
+          partyId: partyA.id,
+          channel: "EMAIL",
+          state: "NONE",
+          source: "f2-isolation",
+          captureMethod: "test",
+          purpose: "foreign-actor",
+          scope: "one-off",
+          recordedByUserId: userB.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.recordConsentPolicy({
+          brokerageId: brokerageA.id,
+          jurisdiction: "NZ",
+          version: "nz-foreign-actor",
+          effectiveAt: new Date("2020-01-01T00:00:00.000Z"),
+          dncrRequired: true,
+          recordedByUserId: userB.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.recordDncrStatus({
+          brokerageId: brokerageA.id,
+          partyId: partyB.id,
+          channel: "PHONE_CALL",
+          jurisdiction: "NZ",
+          status: "UNKNOWN",
+          source: "f2-isolation",
+          recordedByUserId: userA.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.recordDncrStatus({
+          brokerageId: brokerageA.id,
+          partyId: partyA.id,
+          channel: "PHONE_CALL",
+          jurisdiction: "NZ",
+          status: "UNKNOWN",
+          source: "f2-isolation",
+          recordedByUserId: userB.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.recordConsentSuppression({
+          brokerageId: brokerageA.id,
+          partyId: partyB.id,
+          channel: "PHONE_CALL",
+          state: "SUPPRESSED",
+          reason: "foreign party",
+          recordedByUserId: userA.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.recordConsentSuppression({
+          brokerageId: brokerageA.id,
+          partyId: partyA.id,
+          channel: "PHONE_CALL",
+          state: "SUPPRESSED",
+          reason: "foreign actor",
+          recordedByUserId: userB.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.evaluateAndRecordConsentDecision({
+          brokerageId: brokerageA.id,
+          partyId: partyB.id,
+          channel: "PHONE_CALL",
+          purpose: "outreach",
+          scope: "standing",
+          jurisdiction: "NZ",
+          decidedByUserId: userA.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+      await assert.rejects(
+        persistence.evaluateAndRecordConsentDecision({
+          brokerageId: brokerageA.id,
+          partyId: partyA.id,
+          channel: "PHONE_CALL",
+          purpose: "outreach",
+          scope: "standing",
+          jurisdiction: "NZ",
+          decidedByUserId: userB.id,
+        }),
+        persistence.ConsentControlsNotFoundError,
+      );
+
+      // B's policy must not resolve for A.  A therefore records a review
+      // decision with no foreign policy or evidence-row references.
+      const aDecision = await persistence.evaluateAndRecordConsentDecision({
+        brokerageId: brokerageA.id,
+        partyId: partyA.id,
+        channel: "PHONE_CALL",
+        purpose: "outreach",
+        scope: "standing",
+        jurisdiction: "NZ",
+        decidedByUserId: userA.id,
+      });
+      assert.equal(aDecision.evaluation.decision, "REVIEW_REQUIRED");
+      assert.equal(aDecision.evaluation.reasonCode, "POLICY_NOT_FOUND");
+      assert.equal(aDecision.decision.reasonCode, "POLICY_NOT_FOUND");
+      assert.equal(aDecision.decision.policyVersionId, null);
+      assert.equal(aDecision.decision.consentId, aConsent.id);
+      assert.equal((aDecision.decision.evidence as { policySnapshot: unknown }).policySnapshot, null);
+
+      const bDecision = await persistence.evaluateAndRecordConsentDecision({
+        brokerageId: brokerageB.id,
+        partyId: partyB.id,
+        channel: "PHONE_CALL",
+        purpose: "outreach",
+        scope: "standing",
+        jurisdiction: "NZ",
+        decidedByUserId: userB.id,
+      });
+      assert.equal(bDecision.evaluation.decision, "BLOCKED");
+      assert.equal(bDecision.evaluation.reasonCode, "SUPPRESSED");
+      assert.equal(bDecision.decision.reasonCode, "SUPPRESSED");
+      assert.equal(bDecision.decision.consentId, bConsent.id);
+      assert.equal(bDecision.decision.dncrStatusId, bDncr.id);
+      assert.equal(bDecision.decision.suppressionId, bSuppression.id);
+      assert.equal(bDecision.decision.policyVersionId, bPolicy.id);
+
+      const [aConsentRows, aPolicyRows, aDncrRows, aSuppressionRows, aDecisionRows] = await Promise.all([
+        db.select().from(growContactChannelConsents).where(sql`${growContactChannelConsents.brokerageId} = ${brokerageA.id}`),
+        db.select().from(growConsentPolicyVersions).where(sql`${growConsentPolicyVersions.brokerageId} = ${brokerageA.id}`),
+        db.select().from(growContactDncrStatuses).where(sql`${growContactDncrStatuses.brokerageId} = ${brokerageA.id}`),
+        db.select().from(growContactChannelSuppressions).where(sql`${growContactChannelSuppressions.brokerageId} = ${brokerageA.id}`),
+        db.select().from(growConsentDecisions).where(sql`${growConsentDecisions.brokerageId} = ${brokerageA.id}`),
+      ]);
+      assert.equal(aConsentRows.length, 1);
+      assert.equal(aPolicyRows.length, 0);
+      assert.equal(aDncrRows.length, 0);
+      assert.equal(aSuppressionRows.length, 0);
+      assert.equal(aDecisionRows.length, 1);
+
+      const [bConsentRows, bPolicyRows, bDncrRows, bSuppressionRows, bDecisionRows] = await Promise.all([
+        db.select().from(growContactChannelConsents).where(sql`${growContactChannelConsents.brokerageId} = ${brokerageB.id}`),
+        db.select().from(growConsentPolicyVersions).where(sql`${growConsentPolicyVersions.brokerageId} = ${brokerageB.id}`),
+        db.select().from(growContactDncrStatuses).where(sql`${growContactDncrStatuses.brokerageId} = ${brokerageB.id}`),
+        db.select().from(growContactChannelSuppressions).where(sql`${growContactChannelSuppressions.brokerageId} = ${brokerageB.id}`),
+        db.select().from(growConsentDecisions).where(sql`${growConsentDecisions.brokerageId} = ${brokerageB.id}`),
+      ]);
+      assert.equal(bConsentRows.length, 1);
+      assert.equal(bPolicyRows.length, 1);
+      assert.equal(bDncrRows.length, 1);
+      assert.equal(bSuppressionRows.length, 1);
+      assert.equal(bDecisionRows.length, 1);
+
+      const audits = await db
+        .select()
+        .from(auditLogs)
+        .where(sql`${auditLogs.brokerageId} = ${brokerageA.id} or ${auditLogs.brokerageId} = ${brokerageB.id}`);
+      const sourceAuditCases = [
+        { brokerageId: brokerageA.id, userId: userA.id, action: "grow_consent_state_captured", recordId: aConsent.id },
+        { brokerageId: brokerageB.id, userId: userB.id, action: "grow_consent_state_captured", recordId: bConsent.id },
+        { brokerageId: brokerageB.id, userId: userB.id, action: "grow_consent_policy_version_recorded", recordId: bPolicy.id },
+        { brokerageId: brokerageB.id, userId: userB.id, action: "grow_dncr_status_recorded", recordId: bDncr.id },
+        { brokerageId: brokerageB.id, userId: userB.id, action: "grow_consent_suppression_recorded", recordId: bSuppression.id },
+      ];
+      for (const expected of sourceAuditCases) {
+        const audit = audits.find((row) => row.action === expected.action && row.recordId === String(expected.recordId));
+        assert.ok(audit, `${expected.action} audit is present`);
+        assert.equal(audit.brokerageId, expected.brokerageId);
+        assert.equal(audit.userId, expected.userId);
+      }
+
+      for (const expected of [
+        { brokerageId: brokerageA.id, decision: aDecision.decision },
+        { brokerageId: brokerageB.id, decision: bDecision.decision },
+      ]) {
+        const audit = audits.find(
+          (row) => row.action === "grow_consent_decision_recorded" && row.recordId === String(expected.decision.id),
+        );
+        assert.ok(audit, `decision ${expected.decision.id} audit is present`);
+        assert.equal(audit.brokerageId, expected.brokerageId);
+        assert.equal(audit.userId, expected.brokerageId === brokerageA.id ? userA.id : userB.id);
+        const auditPayload = JSON.parse(audit.updatedValue ?? "{}") as { brokerageId?: number; reasonCode?: string };
+        assert.equal(auditPayload.brokerageId, expected.brokerageId);
+        assert.equal(auditPayload.reasonCode, expected.decision.reasonCode);
+      }
+    } finally {
+      const brokerageIds = [brokerageA.id, brokerageB.id];
+      await db.delete(growConsentDecisions).where(inArray(growConsentDecisions.brokerageId, brokerageIds));
+      await db.delete(growContactChannelSuppressions).where(inArray(growContactChannelSuppressions.brokerageId, brokerageIds));
+      await db.delete(growContactDncrStatuses).where(inArray(growContactDncrStatuses.brokerageId, brokerageIds));
+      await db.delete(growContactChannelConsents).where(inArray(growContactChannelConsents.brokerageId, brokerageIds));
+      await db.delete(growConsentPolicyVersions).where(inArray(growConsentPolicyVersions.brokerageId, brokerageIds));
+      await db.delete(auditLogs).where(inArray(auditLogs.brokerageId, brokerageIds));
+      await db.delete(parties).where(inArray(parties.brokerageId, brokerageIds));
+      await db.delete(users).where(inArray(users.brokerageId, brokerageIds));
+      await db.delete(brokerages).where(inArray(brokerages.id, brokerageIds));
+    }
+  },
+);

@@ -222,6 +222,55 @@ test("stores synthetic recording metadata through document versions with tenant/
   const content = await getCallRecordingContent({ brokerageId, callSessionId });
   assert.deepEqual(content?.bytes, syntheticBytes);
 
+  const versionsBeforeForgedCapture = await db
+    .select({ id: documentObjectVersions.id })
+    .from(documentObjectVersions)
+    .where(eq(documentObjectVersions.brokerageId, brokerageId));
+  await assert.rejects(
+    storeCallRecording({
+      brokerageId,
+      callSessionId,
+      captureEvidence: {
+        ...evidence,
+        trustedByServer: false,
+      } as unknown as typeof evidence,
+      bytes: Buffer.from("forged synthetic capture\n", "utf8"),
+      originalFilename: `call-${callSessionId}-forged.txt`,
+      declaredMimeType: "text/plain",
+    }),
+    (error: unknown) =>
+      error instanceof CallRecordingStorageError &&
+      error.code === "CAPTURE_EVIDENCE_INVALID",
+  );
+  const versionsAfterForgedCapture = await db
+    .select({ id: documentObjectVersions.id })
+    .from(documentObjectVersions)
+    .where(eq(documentObjectVersions.brokerageId, brokerageId));
+  assert.deepEqual(
+    versionsAfterForgedCapture.map((row) => row.id),
+    versionsBeforeForgedCapture.map((row) => row.id),
+    "forged capture evidence must not create a document version",
+  );
+  await assert.rejects(
+    storeCallRecording({
+      brokerageId,
+      callSessionId,
+      actor: {
+        userId,
+        role: "Agent",
+        brokerageId: brokerageId + 999_998,
+      },
+      captureEvidence: evidence,
+      bytes: Buffer.from("cross-brokerage synthetic capture\n", "utf8"),
+      originalFilename: `call-${callSessionId}-cross-brokerage.txt`,
+      declaredMimeType: "text/plain",
+    }),
+    (error: unknown) =>
+      error instanceof CallRecordingStorageError &&
+      error.code === "RECORDING_ACCESS_DENIED",
+    "storage must authorize the actor brokerage before reading or writing a recording",
+  );
+
   const duplicate = await storeCallRecording({
     brokerageId,
     callSessionId,
@@ -234,20 +283,28 @@ test("stores synthetic recording metadata through document versions with tenant/
   assert.equal(duplicate.outcome, "deduplicated");
   assert.equal(duplicate.metadata.retentionClass, "legal-pending");
 
-  process.env.TELEPHONY_RECORDING_RETENTION_CLASS = "general";
-  await assert.rejects(
-    storeCallRecording({
-      brokerageId,
-      callSessionId,
-      captureEvidence: evidence,
-      originalFilename: `call-${callSessionId}-recording-metadata.txt`,
-      declaredMimeType: "text/plain",
-    }),
-    (error: unknown) =>
-      error instanceof CallRecordingStorageError &&
-      error.code === "RECORDING_RETENTION_MISMATCH",
-  );
-  delete process.env.TELEPHONY_RECORDING_RETENTION_CLASS;
+  const retentionClassBeforeMismatch = process.env.TELEPHONY_RECORDING_RETENTION_CLASS;
+  try {
+    process.env.TELEPHONY_RECORDING_RETENTION_CLASS = "general";
+    await assert.rejects(
+      storeCallRecording({
+        brokerageId,
+        callSessionId,
+        captureEvidence: evidence,
+        originalFilename: `call-${callSessionId}-recording-metadata.txt`,
+        declaredMimeType: "text/plain",
+      }),
+      (error: unknown) =>
+        error instanceof CallRecordingStorageError &&
+        error.code === "RECORDING_RETENTION_MISMATCH",
+    );
+  } finally {
+    if (retentionClassBeforeMismatch === undefined) {
+      delete process.env.TELEPHONY_RECORDING_RETENTION_CLASS;
+    } else {
+      process.env.TELEPHONY_RECORDING_RETENTION_CLASS = retentionClassBeforeMismatch;
+    }
+  }
   const authoritativeRead = await getCallRecordingMetadata({ brokerageId, callSessionId });
   assert.equal(authoritativeRead?.metadata.retentionClass, "legal-pending");
 
@@ -255,6 +312,26 @@ test("stores synthetic recording metadata through document versions with tenant/
     getCallRecordingMetadata({ brokerageId: brokerageId + 999_999, callSessionId }),
     (error: unknown) =>
       error instanceof CallRecordingStorageError && error.code === "CALL_NOT_FOUND",
+  );
+  await assert.rejects(
+    getCallRecordingMetadata({ brokerageId: brokerageId + 999_998, callSessionId }),
+    (error: unknown) =>
+      error instanceof CallRecordingStorageError && error.code === "CALL_NOT_FOUND",
+  );
+  await assert.rejects(
+    getCallRecordingMetadata({
+      brokerageId,
+      callSessionId,
+      actor: {
+        userId,
+        role: "Agent",
+        brokerageId: brokerageId + 999_998,
+      },
+    }),
+    (error: unknown) =>
+      error instanceof CallRecordingStorageError &&
+      error.code === "RECORDING_ACCESS_DENIED",
+    "a cross-brokerage actor must not read the recording even with a valid call id",
   );
 
   const quarantined = await quarantineCallRecording({

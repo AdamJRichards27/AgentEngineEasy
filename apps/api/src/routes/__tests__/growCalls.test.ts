@@ -24,6 +24,7 @@ import {
   auditLogs,
   growActivities,
   growCallSessions,
+  growCallRecordingConsents,
   parties,
   growContactChannelConsents,
   growConsentDecisions,
@@ -47,6 +48,7 @@ process.env.SESSION_SECRET =
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
 process.env.GROW_CALLS_WEBHOOK_INGRESS_ENABLED = "true";
+process.env.LIVE_RECORDING_APPROVED = "false";
 const GROW_CALLS_WEBHOOK_SECRET =
   process.env.GROW_CALLS_WEBHOOK_SECRET && process.env.GROW_CALLS_WEBHOOK_SECRET.length > 0
     ? process.env.GROW_CALLS_WEBHOOK_SECRET
@@ -118,6 +120,23 @@ async function createParty(cookie: string, propertyId: number, overrides: Record
   const { party } = (await res.json()) as { party: { id: number } };
   const owner = cookie === A.agent.cookie ? A.agent : B.agent;
   await seedCallEvidence(owner.user.brokerageId, owner.user.id, party.id);
+  return party.id;
+}
+
+/**
+ * Some F2 compliance fixtures deliberately need to start without the
+ * canonical PHONE_CALL evidence that createParty() installs for the F1
+ * lifecycle matrix.  The caller then records the exact consent/DNCR/policy
+ * evidence under test before invoking the HTTP route.
+ */
+async function createPartyWithoutCallEvidence(cookie: string, propertyId: number, overrides: Record<string, unknown> = {}) {
+  const res = await fetch(`${baseUrl}/api/parties`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ propertyId, role: "Buyer", firstName: "Evidence", lastName: "Fixture", ...overrides }),
+  });
+  if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
+  const { party } = (await res.json()) as { party: { id: number } };
   return party.id;
 }
 
@@ -210,6 +229,41 @@ async function withdrawCallEvidence(brokerageId: number, userId: number, partyId
   });
 }
 
+async function assertConsentDecisionAudit(
+  decision: { id: number; partyId: number },
+  expected: { brokerageId: number; userId: number; reasonCode: string },
+): Promise<void> {
+  const rows = await db
+    .select()
+    .from(auditLogs)
+    .where(
+      and(
+        eq(auditLogs.brokerageId, expected.brokerageId),
+        eq(auditLogs.action, "grow_consent_decision_recorded"),
+        eq(auditLogs.recordId, String(decision.id)),
+      ),
+    );
+  assert.equal(rows.length, 1, `expected exactly one consent-decision audit for decision ${decision.id}`);
+  const [row] = rows;
+  assert.equal(row!.action, "grow_consent_decision_recorded");
+  assert.equal(row!.recordType, "grow_consent_decision");
+  assert.equal(row!.recordId, String(decision.id));
+  assert.equal(row!.brokerageId, expected.brokerageId);
+  assert.equal(row!.userId, expected.userId);
+  assert.equal(row!.providerReference, `grow-consent-decision:${decision.id}`);
+
+  const payload = JSON.parse(row!.updatedValue ?? "{}") as {
+    id?: number;
+    brokerageId?: number;
+    partyId?: number;
+    reasonCode?: string;
+  };
+  assert.equal(payload.id, decision.id);
+  assert.equal(payload.brokerageId, expected.brokerageId);
+  assert.equal(payload.partyId, decision.partyId);
+  assert.equal(payload.reasonCode, expected.reasonCode);
+}
+
 function uniqueEmail(label: string): string {
   return `${label}-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com`;
 }
@@ -233,12 +287,15 @@ test("unauthenticated requests are rejected across the calls surface", async () 
     ["GET", "/contacts/1/eligibility"],
     ["POST", "/"],
     ["GET", "/1"],
+    ["GET", "/1/recording/status"],
     ["POST", "/1/confirm"],
     ["POST", "/1/cancel"],
     ["POST", "/1/consent"],
     ["POST", "/1/recording/disclosure"],
+    ["POST", "/1/recording/disclose"],
     ["POST", "/1/recording/confirm"],
     ["POST", "/1/recording/decline"],
+    ["POST", "/contacts/1/consent"],
     ["POST", "/consent/1/withdraw"],
   ];
   for (const [method, path] of endpoints) {
@@ -329,7 +386,15 @@ test("confirmation rejects a session when the contact phone changes after creati
   const createRes = await fetch(callsUrl("/"), {
     method: "POST",
     headers: { "content-type": "application/json", cookie: A.agent.cookie },
-    body: JSON.stringify({ partyId }),
+    body: JSON.stringify({
+      partyId,
+      eligible: true,
+      consentDecisionId: 999999999,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
   });
   const createBody = (await createRes.json()) as { callSession: { id: number } };
   assert.equal(createRes.status, 201);
@@ -337,7 +402,15 @@ test("confirmation rejects a session when the contact phone changes after creati
 
   const confirmRes = await fetch(callsUrl(`/${createBody.callSession.id}/confirm`), {
     method: "POST",
-    headers: { cookie: A.agent.cookie },
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      eligible: true,
+      consentDecisionId: 999999999,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
   });
   const confirmBody = (await confirmRes.json()) as { error: string };
   assert.equal(confirmRes.status, 409);
@@ -659,7 +732,15 @@ test("withdrawal between create and confirm fails closed and never invokes the s
   const createRes = await fetch(callsUrl("/"), {
     method: "POST",
     headers: { "content-type": "application/json", cookie: A.agent.cookie },
-    body: JSON.stringify({ partyId }),
+    body: JSON.stringify({
+      partyId,
+      eligible: true,
+      consentDecisionId: 999999999,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
   });
   const createBody = (await createRes.json()) as { callSession: { id: number; status: string; providerCallId: string | null } };
   assert.equal(createRes.status, 201, JSON.stringify(createBody));
@@ -669,7 +750,15 @@ test("withdrawal between create and confirm fails closed and never invokes the s
 
   const confirmRes = await fetch(callsUrl(`/${createBody.callSession.id}/confirm`), {
     method: "POST",
-    headers: { cookie: A.agent.cookie },
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      eligible: true,
+      consentDecisionId: 999999999,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
   });
   const confirmBody = (await confirmRes.json()) as { error: string; consentDecisionId?: number | null };
   assert.equal(confirmRes.status, 409, JSON.stringify(confirmBody));
@@ -691,6 +780,12 @@ test("withdrawal between create and confirm fails closed and never invokes the s
     .from(auditLogs)
     .where(and(eq(auditLogs.action, "grow_call_dial_consent_denied"), eq(auditLogs.recordId, String(createBody.callSession.id))));
   assert.equal(deniedAudits.length, 0, "a pre-dial denial before DIAL_REQUESTED must not claim the adapter was reached");
+  const denialDecisionAudits = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_consent_decision_recorded"), eq(auditLogs.recordId, String(decisions[0]!.id))));
+  assert.equal(denialDecisionAudits.length, 1);
+  assert.equal((denialDecisionAudits[0]!.updatedValue ?? "").includes("WITHDRAWN"), true);
 });
 
 test("recording remains orthogonal: missing consent is unrecorded, disclosure/confirmation do not block the call, and withdrawal fails closed", async () => {
@@ -993,4 +1088,696 @@ test("webhook cross-tenant safety: an event for Brokerage A's providerCallId nev
   const [bSession] = await db.select().from(growCallSessions).where(eq(growCallSessions.id, bCreateBody.callSession.id));
   assert.equal(aSession!.status, "COMPLETED");
   assert.equal(bSession!.status, "RINGING", "Brokerage B's session must be completely unaffected by Brokerage A's webhook event");
+});
+
+test("authoritative eligible decisions ignore forged authority fields and permit a real inferred call only when policy enables it", async () => {
+  await recordConsentPolicy({
+    brokerageId: A.brokerageId,
+    jurisdiction: "AU",
+    version: `f2-inferred-enabled-${suffix}`,
+    effectiveAt: new Date(Date.now() - 2_000),
+    allowInferredConsent: true,
+    dncrRequired: true,
+    suppressionEnabled: true,
+    timeZone: "Etc/UTC",
+    allowedHoursStart: "00:00",
+    allowedHoursEnd: "00:00",
+    policyData: { recordingPolicy: { allowed: true, jurisdiction: "AU" } },
+    recordedByUserId: A.agent.user.id,
+  });
+  const propertyId = await createProperty(A.agent.cookie, "6 Inferred Evidence Way");
+  const partyId = await createPartyWithoutCallEvidence(A.agent.cookie, propertyId, {
+    email: uniqueEmail("inferred-enabled"),
+    mobile: "+61412000901",
+  });
+  const reviewedAt = new Date(Date.now() - 1_000);
+  const consent = await captureConsentState({
+    brokerageId: A.brokerageId,
+    partyId,
+    channel: "PHONE_CALL",
+    state: "INFERRED",
+    source: "relationship-review",
+    captureMethod: "record-review",
+    purpose: PHONE_CALL_CONSENT_PURPOSE,
+    scope: PHONE_CALL_CONSENT_SCOPE,
+    jurisdiction: "AU",
+    inferredReasoning: "The recorded relationship is an active buyer enquiry.",
+    evidenceReference: `relationship-review-${partyId}`,
+    relationshipEvidence: { source: "grow_relationship", sourceId: `relationship-${partyId}` },
+    inferredEvidenceReviewedAt: reviewedAt,
+    inferredEvidenceReviewedByUserId: A.agent.user.id,
+    recordedByUserId: A.agent.user.id,
+  });
+  await recordDncrStatus({
+    brokerageId: A.brokerageId,
+    partyId,
+    channel: "PHONE_CALL",
+    jurisdiction: "AU",
+    status: "CLEARED",
+    checkedAt: new Date(Date.now() - 1_000),
+    validUntil: new Date(Date.now() + 60 * 60 * 1_000),
+    reviewAt: new Date(Date.now() + 60 * 60 * 1_000),
+    source: "f2-inferred-test",
+    reference: `dncr-inferred-${partyId}`,
+    recordedByUserId: A.agent.user.id,
+  });
+
+  const eligibilityRes = await fetch(callsUrl(`/contacts/${partyId}/eligibility`), { headers: { cookie: A.agent.cookie } });
+  const eligibilityBody = (await eligibilityRes.json()) as {
+    eligible: boolean;
+    reason: string;
+    consentDecisionId: number | null;
+    recording: { permitted: boolean; provider: string; fiveGateResult: { allPassed: boolean } };
+  };
+  assert.equal(eligibilityRes.status, 200, JSON.stringify(eligibilityBody));
+  assert.equal(eligibilityBody.eligible, true);
+  assert.equal(eligibilityBody.reason, "OK");
+  assert.ok(eligibilityBody.consentDecisionId, "eligibility must expose the server-recorded decision id");
+  assert.equal(eligibilityBody.recording.permitted, false);
+  assert.equal(eligibilityBody.recording.provider, "sandbox");
+  assert.equal(eligibilityBody.recording.fiveGateResult.allPassed, false);
+
+  const createRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      partyId,
+      recordingRequested: true,
+      eligible: false,
+      consentDecisionId: 1,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
+  });
+  const createBody = (await createRes.json()) as {
+    callSession: {
+      id: number;
+      status: string;
+      provider: string;
+      providerCallId: string | null;
+      recordingPermitted: boolean;
+      recordingStatus: string;
+      [key: string]: unknown;
+    };
+  };
+  assert.equal(createRes.status, 201, JSON.stringify(createBody));
+  assert.equal(createBody.callSession.status, "READY");
+  assert.equal(createBody.callSession.provider, "sandbox");
+  assert.equal(createBody.callSession.providerCallId, null);
+  assert.equal(createBody.callSession.recordingPermitted, false);
+  assert.equal(createBody.callSession.recordingStatus, "UNRECORDED");
+  for (const forgedField of ["eligible", "consentDecisionId", "gates", "liveApproval"]) {
+    assert.equal(forgedField in createBody.callSession, false, `create must not echo forged ${forgedField}`);
+  }
+  const createdSessionId = createBody.callSession.id;
+
+  const createdDecisions = await db
+    .select()
+    .from(growConsentDecisions)
+    .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, partyId)))
+    .orderBy(desc(growConsentDecisions.id));
+  assert.ok(createdDecisions.length >= 2, "eligibility and create must each record an authoritative decision");
+  assert.equal(createdDecisions[0]!.decision, "ELIGIBLE");
+  assert.equal(createdDecisions[0]!.reasonCode, "INFERRED_CONSENT_ELIGIBLE");
+  assert.equal(createdDecisions[0]!.consentId, consent.id);
+  const decisionAudit = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_consent_decision_recorded"), eq(auditLogs.recordId, String(createdDecisions[0]!.id))));
+  assert.equal(decisionAudit.length, 1);
+  assert.equal(decisionAudit[0]!.providerReference, `grow-consent-decision:${createdDecisions[0]!.id}`);
+  assert.equal((decisionAudit[0]!.updatedValue ?? "").includes("INFERRED_CONSENT_ELIGIBLE"), true);
+
+  const confirmRes = await fetch(callsUrl(`/${createdSessionId}/confirm`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      eligible: false,
+      consentDecisionId: 999999999,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
+  });
+  const confirmBody = (await confirmRes.json()) as {
+    callSession: { status: string; provider: string; providerCallId: string; recordingPermitted: boolean; [key: string]: unknown };
+  };
+  assert.equal(confirmRes.status, 200, JSON.stringify(confirmBody));
+  assert.equal(confirmBody.callSession.status, "DIAL_REQUESTED");
+  assert.equal(confirmBody.callSession.provider, "sandbox");
+  assert.equal(confirmBody.callSession.providerCallId, `sandbox_call_${createdSessionId}`);
+  assert.equal(confirmBody.callSession.recordingPermitted, false);
+  for (const forgedField of ["eligible", "consentDecisionId", "gates", "liveApproval"]) {
+    assert.equal(forgedField in confirmBody.callSession, false, `confirm must not echo forged ${forgedField}`);
+  }
+
+  const [stored] = await db.select().from(growCallSessions).where(eq(growCallSessions.id, createdSessionId));
+  assert.equal(stored!.provider, "sandbox");
+  assert.equal(stored!.providerCallId, `sandbox_call_${createdSessionId}`);
+  assert.equal(stored!.recordingPermitted, false);
+  const startedAudit = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_call_started"), eq(auditLogs.recordId, String(createdSessionId))));
+  assert.equal(startedAudit.length, 1, "only the authoritative confirmation may create the provider-start audit");
+});
+
+test("missing, listed, unknown, and policy-disabled inferred consent produce audited blocked/review outcomes without a provider dial", async () => {
+  async function prepareExpressParty(label: string, mobile: string) {
+    const propertyId = await createProperty(A.agent.cookie, `${label} Consent Evidence Way`);
+    const partyId = await createPartyWithoutCallEvidence(A.agent.cookie, propertyId, {
+      email: uniqueEmail(label.toLowerCase().replace(/\s+/g, "-")),
+      mobile,
+    });
+    await captureConsentState({
+      brokerageId: A.brokerageId,
+      partyId,
+      channel: "PHONE_CALL",
+      state: "EXPRESS",
+      source: "f2-compliance-test",
+      captureMethod: "test",
+      purpose: PHONE_CALL_CONSENT_PURPOSE,
+      scope: PHONE_CALL_CONSENT_SCOPE,
+      jurisdiction: "AU",
+      recordedByUserId: A.agent.user.id,
+    });
+    return partyId;
+  }
+
+  const missingDncrPartyId = await prepareExpressParty("Missing DNCR", "+61412000911");
+  const missingEligibilityRes = await fetch(callsUrl(`/contacts/${missingDncrPartyId}/eligibility`), { headers: { cookie: A.agent.cookie } });
+  const missingEligibilityBody = (await missingEligibilityRes.json()) as { eligible: boolean; reason: string; consentDecisionId: number | null };
+  assert.equal(missingEligibilityRes.status, 200);
+  assert.equal(missingEligibilityBody.eligible, false);
+  assert.equal(missingEligibilityBody.reason, "NO_VALID_DNCR_CLEARED_CONSENT");
+  assert.ok(missingEligibilityBody.consentDecisionId);
+  const missingCreateRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      partyId: missingDncrPartyId,
+      eligible: true,
+      consentDecisionId: 1,
+      provider: "live",
+      liveApproval: true,
+    }),
+  });
+  const missingCreateBody = (await missingCreateRes.json()) as { error: string; consentDecisionId?: number };
+  assert.equal(missingCreateRes.status, 400);
+  assert.match(missingCreateBody.error, /NO_VALID_DNCR_CLEARED_CONSENT/);
+  const missingSessions = await db.select().from(growCallSessions).where(eq(growCallSessions.partyId, missingDncrPartyId));
+  assert.equal(missingSessions.length, 0, "blocked creation must not leave a session that could later be dialled");
+  const [missingDecision] = await db
+    .select()
+    .from(growConsentDecisions)
+    .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, missingDncrPartyId)))
+    .orderBy(desc(growConsentDecisions.id))
+    .limit(1);
+  assert.equal(missingDecision!.decision, "BLOCKED");
+  assert.equal(missingDecision!.reasonCode, "NO_VALID_DNCR_CLEARED_CONSENT");
+  await assertConsentDecisionAudit(missingDecision!, {
+    brokerageId: A.brokerageId,
+    userId: A.agent.user.id,
+    reasonCode: "NO_VALID_DNCR_CLEARED_CONSENT",
+  });
+  assert.equal("consentDecisionId" in missingCreateBody, false, "the route must not accept or echo a forged decision id");
+
+  const listedPartyId = await prepareExpressParty("Listed DNCR", "+61412000912");
+  await recordDncrStatus({
+    brokerageId: A.brokerageId,
+    partyId: listedPartyId,
+    channel: "PHONE_CALL",
+    jurisdiction: "AU",
+    status: "LISTED",
+    source: "f2-compliance-test",
+    reference: `dncr-listed-${listedPartyId}`,
+    recordedByUserId: A.agent.user.id,
+  });
+  const listedCreateRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: listedPartyId, eligible: true, provider: "live", liveApproval: true }),
+  });
+  const listedCreateBody = (await listedCreateRes.json()) as { error: string };
+  assert.equal(listedCreateRes.status, 400);
+  assert.match(listedCreateBody.error, /DNCR_LISTED/);
+  assert.equal((await db.select().from(growCallSessions).where(eq(growCallSessions.partyId, listedPartyId))).length, 0);
+  const [listedDecision] = await db
+    .select()
+    .from(growConsentDecisions)
+    .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, listedPartyId)))
+    .orderBy(desc(growConsentDecisions.id))
+    .limit(1);
+  assert.equal(listedDecision!.decision, "BLOCKED");
+  assert.equal(listedDecision!.reasonCode, "DNCR_LISTED");
+  await assertConsentDecisionAudit(listedDecision!, {
+    brokerageId: A.brokerageId,
+    userId: A.agent.user.id,
+    reasonCode: "DNCR_LISTED",
+  });
+
+  const unknownPartyPropertyId = await createProperty(A.agent.cookie, "Unknown Consent Evidence Way");
+  const unknownPartyId = await createPartyWithoutCallEvidence(A.agent.cookie, unknownPartyPropertyId, {
+    email: uniqueEmail("unknown-consent"),
+    mobile: "+61412000913",
+  });
+  await assert.rejects(
+    () =>
+      captureConsentState({
+        brokerageId: A.brokerageId,
+        partyId: unknownPartyId,
+        channel: "PHONE_CALL",
+        state: "INFERRED",
+        source: "invalid-f2-fixture",
+        captureMethod: "test",
+        purpose: PHONE_CALL_CONSENT_PURPOSE,
+        scope: PHONE_CALL_CONSENT_SCOPE,
+        jurisdiction: "AU",
+        recordedByUserId: A.agent.user.id,
+      }),
+    /INFERRED consent requires explicit inferred reasoning/,
+    "inferred consent without proof must not become an authority row",
+  );
+  const unknownEligibilityRes = await fetch(callsUrl(`/contacts/${unknownPartyId}/eligibility`), { headers: { cookie: A.agent.cookie } });
+  const unknownEligibilityBody = (await unknownEligibilityRes.json()) as { eligible: boolean; reason: string };
+  assert.equal(unknownEligibilityRes.status, 200);
+  assert.equal(unknownEligibilityBody.eligible, false);
+  assert.equal(unknownEligibilityBody.reason, "UNKNOWN_CONSENT");
+  const unknownCreateRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: unknownPartyId, eligible: true, provider: "live", liveApproval: true }),
+  });
+  const unknownCreateBody = (await unknownCreateRes.json()) as { error: string };
+  assert.equal(unknownCreateRes.status, 400);
+  assert.match(unknownCreateBody.error, /UNKNOWN_CONSENT/);
+  assert.equal((await db.select().from(growCallSessions).where(eq(growCallSessions.partyId, unknownPartyId))).length, 0);
+  const [unknownDecision] = await db
+    .select()
+    .from(growConsentDecisions)
+    .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, unknownPartyId)))
+    .orderBy(desc(growConsentDecisions.id))
+    .limit(1);
+  assert.equal(unknownDecision!.decision, "REVIEW_REQUIRED");
+  assert.equal(unknownDecision!.reasonCode, "UNKNOWN_CONSENT");
+  await assertConsentDecisionAudit(unknownDecision!, {
+    brokerageId: A.brokerageId,
+    userId: A.agent.user.id,
+    reasonCode: "UNKNOWN_CONSENT",
+  });
+
+  await recordConsentPolicy({
+    brokerageId: A.brokerageId,
+    jurisdiction: "AU",
+    version: `f2-inferred-disabled-${suffix}`,
+    effectiveAt: new Date(Date.now() - 1_000),
+    allowInferredConsent: false,
+    dncrRequired: true,
+    suppressionEnabled: true,
+    timeZone: "Etc/UTC",
+    allowedHoursStart: "00:00",
+    allowedHoursEnd: "00:00",
+    policyData: { recordingPolicy: { allowed: true, jurisdiction: "AU" } },
+    recordedByUserId: A.agent.user.id,
+  });
+  const inferredReviewPropertyId = await createProperty(A.agent.cookie, "Inferred Review Evidence Way");
+  const inferredReviewPartyId = await createPartyWithoutCallEvidence(A.agent.cookie, inferredReviewPropertyId, {
+    email: uniqueEmail("inferred-review"),
+    mobile: "+61412000914",
+  });
+  await captureConsentState({
+    brokerageId: A.brokerageId,
+    partyId: inferredReviewPartyId,
+    channel: "PHONE_CALL",
+    state: "INFERRED",
+    source: "f2-compliance-test",
+    captureMethod: "test",
+    purpose: PHONE_CALL_CONSENT_PURPOSE,
+    scope: PHONE_CALL_CONSENT_SCOPE,
+    jurisdiction: "AU",
+    inferredReasoning: "A recorded relationship was reviewed.",
+    evidenceReference: `relationship-review-${inferredReviewPartyId}`,
+    relationshipEvidence: { source: "grow_relationship", sourceId: `relationship-${inferredReviewPartyId}` },
+    inferredEvidenceReviewedAt: new Date(Date.now() - 1_000),
+    inferredEvidenceReviewedByUserId: A.agent.user.id,
+    recordedByUserId: A.agent.user.id,
+  });
+  await recordDncrStatus({
+    brokerageId: A.brokerageId,
+    partyId: inferredReviewPartyId,
+    channel: "PHONE_CALL",
+    jurisdiction: "AU",
+    status: "CLEARED",
+    checkedAt: new Date(Date.now() - 1_000),
+    validUntil: new Date(Date.now() + 60 * 60 * 1_000),
+    reviewAt: new Date(Date.now() + 60 * 60 * 1_000),
+    source: "f2-compliance-test",
+    reference: `dncr-inferred-review-${inferredReviewPartyId}`,
+    recordedByUserId: A.agent.user.id,
+  });
+  const inferredReviewRes = await fetch(callsUrl(`/contacts/${inferredReviewPartyId}/eligibility`), { headers: { cookie: A.agent.cookie } });
+  const inferredReviewBody = (await inferredReviewRes.json()) as { eligible: boolean; reason: string };
+  assert.equal(inferredReviewRes.status, 200);
+  assert.equal(inferredReviewBody.eligible, false);
+  assert.equal(inferredReviewBody.reason, "INFERRED_NOT_ENABLED_BY_POLICY");
+  const inferredReviewCreateRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: inferredReviewPartyId, eligible: true, provider: "live", liveApproval: true }),
+  });
+  const inferredReviewCreateBody = (await inferredReviewCreateRes.json()) as { error: string };
+  assert.equal(inferredReviewCreateRes.status, 400);
+  assert.match(inferredReviewCreateBody.error, /INFERRED_NOT_ENABLED_BY_POLICY/);
+  assert.equal((await db.select().from(growCallSessions).where(eq(growCallSessions.partyId, inferredReviewPartyId))).length, 0);
+  const [inferredReviewDecision] = await db
+    .select()
+    .from(growConsentDecisions)
+    .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, inferredReviewPartyId)))
+    .orderBy(desc(growConsentDecisions.id))
+    .limit(1);
+  assert.equal(inferredReviewDecision!.decision, "REVIEW_REQUIRED");
+  assert.equal(inferredReviewDecision!.reasonCode, "INFERRED_NOT_ENABLED_BY_POLICY");
+  await assertConsentDecisionAudit(inferredReviewDecision!, {
+    brokerageId: A.brokerageId,
+    userId: A.agent.user.id,
+    reasonCode: "INFERRED_NOT_ENABLED_BY_POLICY",
+  });
+  const inferredStartedAudits = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_call_started"), eq(auditLogs.recordId, String(inferredReviewPartyId))));
+  assert.equal(inferredStartedAudits.length, 0, "review/blocked outcomes must never produce a provider-start audit");
+});
+
+test("recording disclosure, confirmation, status, and decline expose and persist the authoritative five-gate evidence", async () => {
+  await recordConsentPolicy({
+    brokerageId: A.brokerageId,
+    jurisdiction: "AU",
+    version: `f2-recording-gates-${suffix}`,
+    effectiveAt: new Date(Date.now() - 2_000),
+    allowInferredConsent: false,
+    dncrRequired: true,
+    suppressionEnabled: true,
+    timeZone: "Etc/UTC",
+    allowedHoursStart: "00:00",
+    allowedHoursEnd: "00:00",
+    policyData: { recordingPolicy: { allowed: true, jurisdiction: "AU" } },
+    recordedByUserId: A.agent.user.id,
+  });
+  const propertyId = await createProperty(A.agent.cookie, "7 Recording Gates Way");
+  const partyId = await createParty(A.agent.cookie, propertyId, {
+    email: uniqueEmail("recording-gates"),
+    mobile: "+61412000921",
+  });
+  const standingConsentRes = await fetch(callsUrl(`/contacts/${partyId}/consent`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      scope: "STANDING",
+      source: "VERBAL_ON_CALL",
+      jurisdiction: "AU",
+      evidenceMetadata: { capturedFor: "recording-gates-test" },
+    }),
+  });
+  const standingConsentBody = (await standingConsentRes.json()) as { consent: { id: number } };
+  assert.equal(standingConsentRes.status, 201, JSON.stringify(standingConsentBody));
+
+  const createRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({
+      partyId,
+      recordingRequested: true,
+      eligible: false,
+      consentDecisionId: 999999999,
+      recordingPermitted: true,
+      gates: { allPassed: true },
+      provider: "live",
+      liveApproval: true,
+    }),
+  });
+  const createBody = (await createRes.json()) as {
+    callSession: {
+      id: number;
+      provider: string;
+      providerCallId: string | null;
+      recordingRequested: boolean;
+      recordingPermitted: boolean;
+      recordingConsentId: number | null;
+      recordingStatus: string;
+      [key: string]: unknown;
+    };
+  };
+  assert.equal(createRes.status, 201, JSON.stringify(createBody));
+  const sessionId = createBody.callSession.id;
+  assert.equal(createBody.callSession.provider, "sandbox");
+  assert.equal(createBody.callSession.providerCallId, null);
+  assert.equal(createBody.callSession.recordingRequested, true);
+  assert.equal(createBody.callSession.recordingPermitted, false);
+  assert.equal(createBody.callSession.recordingConsentId, standingConsentBody.consent.id);
+  assert.equal(createBody.callSession.recordingStatus, "DISCLOSURE_REQUIRED");
+  assert.equal("gates" in createBody.callSession, false);
+  assert.equal("liveApproval" in createBody.callSession, false);
+
+  const confirmRes = await fetch(callsUrl(`/${sessionId}/confirm`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ provider: "live", liveApproval: true, recordingPermitted: true, gates: { allPassed: true } }),
+  });
+  const confirmBody = (await confirmRes.json()) as { callSession: { providerCallId: string; provider: string; recordingPermitted: boolean } };
+  assert.equal(confirmRes.status, 200, JSON.stringify(confirmBody));
+  assert.equal(confirmBody.callSession.provider, "sandbox");
+  assert.equal(confirmBody.callSession.providerCallId, `sandbox_call_${sessionId}`);
+  assert.equal(confirmBody.callSession.recordingPermitted, false);
+  assert.equal((await postWebhookEvent("evt-gates-ringing", "call.ringing", confirmBody.callSession.providerCallId)).status, 200);
+  assert.equal((await postWebhookEvent("evt-gates-connected", "call.connected", confirmBody.callSession.providerCallId)).status, 200);
+
+  const beforeRecordingRes = await fetch(callsUrl(`/${sessionId}/recording/status`), { headers: { cookie: A.agent.cookie } });
+  const beforeRecordingBody = (await beforeRecordingRes.json()) as {
+    callSessionId: number;
+    recording: {
+      provider: string;
+      permitted: boolean;
+      statusCode: string;
+      fiveGateResult: {
+        allPassed: boolean;
+        outboundDecisionId: number | null;
+        gates: Record<string, { passed: boolean; reason: string }>;
+      };
+    };
+  };
+  assert.equal(beforeRecordingRes.status, 200, JSON.stringify(beforeRecordingBody));
+  assert.equal(beforeRecordingBody.callSessionId, sessionId);
+  assert.equal(beforeRecordingBody.recording.provider, "sandbox");
+  assert.equal(beforeRecordingBody.recording.permitted, false);
+  assert.equal(beforeRecordingBody.recording.statusCode, "DISCLOSURE_REQUIRED");
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.allPassed, false);
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.outboundDecisionId, null, "read-only status must not manufacture an authority id");
+  assert.deepEqual(Object.keys(beforeRecordingBody.recording.fiveGateResult.gates).sort(), [
+    "adapterCapability",
+    "entitlement",
+    "legacyConsentAndDisclosure",
+    "legalPolicy",
+    "operationalApproval",
+  ]);
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.gates.entitlement.passed, true);
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.gates.legalPolicy.passed, true);
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.gates.legacyConsentAndDisclosure.passed, false);
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.gates.adapterCapability.reason, "ADAPTER_RECORDING_UNAVAILABLE");
+  assert.equal(beforeRecordingBody.recording.fiveGateResult.gates.operationalApproval.reason, "OPERATIONAL_RECORDING_NOT_APPROVED");
+
+  const disclosureRes = await fetch(callsUrl(`/${sessionId}/recording/disclosure`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ provider: "live", liveApproval: true, recordingPermitted: true, gates: { allPassed: true } }),
+  });
+  const disclosureBody = (await disclosureRes.json()) as { callSession: { status: string; recordingStatus: string; recordingPermitted: boolean } };
+  assert.equal(disclosureRes.status, 200, JSON.stringify(disclosureBody));
+  assert.equal(disclosureBody.callSession.status, "CONNECTED");
+  assert.equal(disclosureBody.callSession.recordingStatus, "DISCLOSED");
+  assert.equal(disclosureBody.callSession.recordingPermitted, false);
+
+  const recordingConfirmRes = await fetch(callsUrl(`/${sessionId}/recording/confirm`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ provider: "live", liveApproval: true, recordingPermitted: true, gates: { allPassed: true } }),
+  });
+  const recordingConfirmBody = (await recordingConfirmRes.json()) as {
+    callSession: { status: string; recordingStatus: string; recordingPermitted: boolean; provider: string };
+  };
+  assert.equal(recordingConfirmRes.status, 200, JSON.stringify(recordingConfirmBody));
+  assert.equal(recordingConfirmBody.callSession.status, "CONNECTED");
+  assert.equal(recordingConfirmBody.callSession.recordingStatus, "UNRECORDED");
+  assert.equal(recordingConfirmBody.callSession.recordingPermitted, false);
+  assert.equal(recordingConfirmBody.callSession.provider, "sandbox");
+
+  const disclosureAudits = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_call_recording_disclosed_in_call"), eq(auditLogs.recordId, String(sessionId))));
+  assert.equal(disclosureAudits.length, 1);
+  assert.equal(disclosureAudits[0]!.updatedValue, "DISCLOSED");
+  const confirmationAudits = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_call_recording_confirmation_received"), eq(auditLogs.recordId, String(sessionId))));
+  assert.equal(confirmationAudits.length, 1);
+  assert.equal(confirmationAudits[0]!.updatedValue, "CONFIRMED");
+  const gateAudits = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_call_recording_unrecorded"), eq(auditLogs.recordId, String(sessionId))));
+  assert.equal(gateAudits.length, 1);
+  const gateEvidence = JSON.parse(gateAudits[0]!.updatedValue ?? "{}") as {
+    allPassed: boolean;
+    requested: boolean;
+    outboundDecisionId: number | null;
+    outboundReasonCode: string | null;
+    gates: Record<string, { passed: boolean; reason: string; humanReason: string }>;
+  };
+  assert.equal(gateEvidence.requested, true);
+  assert.equal(gateEvidence.allPassed, false);
+  assert.ok(gateEvidence.outboundDecisionId, "mutating recording confirmation must retain the authoritative decision id");
+  assert.equal(gateEvidence.outboundReasonCode, "EXPRESS_CONSENT_ELIGIBLE");
+  assert.deepEqual(Object.keys(gateEvidence.gates).sort(), [
+    "adapterCapability",
+    "entitlement",
+    "legacyConsentAndDisclosure",
+    "legalPolicy",
+    "operationalApproval",
+  ]);
+  assert.equal(gateEvidence.gates.entitlement.passed, true);
+  assert.equal(gateEvidence.gates.legalPolicy.passed, true);
+  assert.equal(gateEvidence.gates.legacyConsentAndDisclosure.passed, true);
+  assert.equal(gateEvidence.gates.adapterCapability.passed, false);
+  assert.equal(gateEvidence.gates.operationalApproval.passed, false);
+  const [gateDecision] = await db.select().from(growConsentDecisions).where(eq(growConsentDecisions.id, gateEvidence.outboundDecisionId));
+  assert.equal(gateDecision!.decision, "ELIGIBLE");
+
+  const declinePropertyId = await createProperty(A.agent.cookie, "7 Recording Decline Way");
+  const declinePartyId = await createParty(A.agent.cookie, declinePropertyId, {
+    email: uniqueEmail("recording-decline-authority"),
+    mobile: "+61412000922",
+  });
+  const declineCreateRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: declinePartyId, recordingRequested: true }),
+  });
+  const declineCreateBody = (await declineCreateRes.json()) as { callSession: { id: number } };
+  assert.equal(declineCreateRes.status, 201);
+  const declineConfirmRes = await fetch(callsUrl(`/${declineCreateBody.callSession.id}/confirm`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ provider: "live", liveApproval: true, recordingPermitted: true, gates: { allPassed: true } }),
+  });
+  const declineConfirmBody = (await declineConfirmRes.json()) as { callSession: { providerCallId: string } };
+  assert.equal(declineConfirmRes.status, 200);
+  assert.equal((await postWebhookEvent("evt-gates-decline-ringing", "call.ringing", declineConfirmBody.callSession.providerCallId)).status, 200);
+  assert.equal((await postWebhookEvent("evt-gates-decline-connected", "call.connected", declineConfirmBody.callSession.providerCallId)).status, 200);
+  const declineRes = await fetch(callsUrl(`/${declineCreateBody.callSession.id}/recording/decline`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ provider: "live", liveApproval: true, recordingPermitted: true, gates: { allPassed: true } }),
+  });
+  const declineBody = (await declineRes.json()) as { callSession: { recordingStatus: string; recordingPermitted: boolean } };
+  assert.equal(declineRes.status, 200, JSON.stringify(declineBody));
+  assert.equal(declineBody.callSession.recordingStatus, "DECLINED");
+  assert.equal(declineBody.callSession.recordingPermitted, false);
+  const declineAudits = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "grow_call_recording_declined_in_call"), eq(auditLogs.recordId, String(declineCreateBody.callSession.id))));
+  assert.equal(declineAudits.length, 1);
+  assert.equal(declineAudits[0]!.updatedValue, "DECLINED");
+});
+
+test("every grow-calls route rejects Brokerage B's cross-tenant actor, party, session, consent, and evidence ids", async () => {
+  await grant(B.brokerageId, "grow.calling.access");
+  await grant(B.brokerageId, "grow.calling.recording");
+  const propertyId = await createProperty(A.agent.cookie, "8 Cross Tenant Route Way");
+  const partyId = await createParty(A.agent.cookie, propertyId, {
+    email: uniqueEmail("cross-tenant-routes"),
+    mobile: "+61412000931",
+  });
+  const consentRes = await fetch(callsUrl(`/contacts/${partyId}/consent`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ scope: "STANDING", source: "VERBAL_ON_CALL", jurisdiction: "AU" }),
+  });
+  const consentBody = (await consentRes.json()) as { consent: { id: number; status: string } };
+  assert.equal(consentRes.status, 201, JSON.stringify(consentBody));
+  assert.equal(consentBody.consent.status, "ACTIVE");
+  const createRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId, recordingRequested: true }),
+  });
+  const createBody = (await createRes.json()) as { callSession: { id: number; providerCallId: string | null } };
+  assert.equal(createRes.status, 201);
+  const sessionId = createBody.callSession.id;
+  assert.equal(createBody.callSession.providerCallId, null);
+
+  const getRes = await fetch(callsUrl(`/${sessionId}`), { headers: { cookie: B.agent.cookie } });
+  assert.equal(getRes.status, 404);
+  assert.equal((await getRes.text()).includes(String(sessionId)), false);
+  const recordingStatusRes = await fetch(callsUrl(`/${sessionId}/recording/status`), { headers: { cookie: B.agent.cookie } });
+  assert.equal(recordingStatusRes.status, 404);
+  assert.equal((await recordingStatusRes.text()).includes(String(sessionId)), false);
+  const eligibilityRes = await fetch(callsUrl(`/contacts/${partyId}/eligibility`), { headers: { cookie: B.agent.cookie } });
+  assert.equal(eligibilityRes.status, 404);
+  assert.equal((await eligibilityRes.text()).includes(String(partyId)), false);
+
+  const createCrossRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: B.agent.cookie },
+    body: JSON.stringify({
+      brokerageId: A.brokerageId,
+      partyId,
+      initiatedByUserId: A.agent.user.id,
+      consentDecisionId: consentBody.consent.id,
+      recordingConsentId: consentBody.consent.id,
+      provider: "live",
+    }),
+  });
+  assert.equal(createCrossRes.status, 400, "a cross-tenant party cannot be used even with forged owner/evidence ids");
+
+  const routeRequests: Array<{ path: string; method: "POST"; body?: Record<string, unknown> }> = [
+    { path: `/${sessionId}/confirm`, method: "POST", body: { confirmedByUserId: A.agent.user.id, consentDecisionId: consentBody.consent.id } },
+    { path: `/${sessionId}/cancel`, method: "POST", body: { cancelledByUserId: A.agent.user.id, reason: "cross-tenant" } },
+    { path: `/${sessionId}/recording/disclosure`, method: "POST", body: { disclosedByUserId: A.agent.user.id, provider: "live" } },
+    { path: `/${sessionId}/recording/disclose`, method: "POST", body: { disclosedByUserId: A.agent.user.id, provider: "live" } },
+    { path: `/${sessionId}/recording/confirm`, method: "POST", body: { confirmedByUserId: A.agent.user.id, liveApproval: true } },
+    { path: `/${sessionId}/recording/decline`, method: "POST", body: { declinedByUserId: A.agent.user.id, liveApproval: true } },
+    { path: `/${sessionId}/consent`, method: "POST", body: { scope: "PER_CALL", source: "VERBAL_ON_CALL", jurisdiction: "AU", capturedByUserId: A.agent.user.id } },
+    { path: `/consent/${consentBody.consent.id}/withdraw`, method: "POST", body: { withdrawnByUserId: A.agent.user.id, reason: "cross-tenant" } },
+    { path: `/contacts/${partyId}/consent`, method: "POST", body: { scope: "STANDING", source: "VERBAL_ON_CALL", jurisdiction: "AU", capturedByUserId: A.agent.user.id } },
+  ];
+  for (const request of routeRequests) {
+    const response = await fetch(callsUrl(request.path), {
+      method: request.method,
+      headers: { "content-type": "application/json", cookie: B.agent.cookie },
+      body: JSON.stringify(request.body ?? {}),
+    });
+    assert.equal(response.status, 404, `Brokerage B must not use A's ids at ${request.method} ${request.path}`);
+    const responseText = await response.text();
+    assert.equal(responseText.includes(String(partyId)), false, `cross-tenant response must not disclose party ${partyId}`);
+    assert.equal(responseText.includes(String(sessionId)), false, `cross-tenant response must not disclose session ${sessionId}`);
+    assert.equal(responseText.includes(String(consentBody.consent.id)), false, `cross-tenant response must not disclose consent ${consentBody.consent.id}`);
+  }
+
+  const [unchanged] = await db.select().from(growCallSessions).where(eq(growCallSessions.id, sessionId));
+  assert.equal(unchanged!.status, "READY");
+  assert.equal(unchanged!.providerCallId, null);
+  const consentReadAsB = await fetch(callsUrl(`/consent/${consentBody.consent.id}/withdraw`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: B.agent.cookie },
+    body: JSON.stringify({}),
+  });
+  assert.equal(consentReadAsB.status, 404);
+  const consentRows = await db.select().from(growCallRecordingConsents).where(eq(growCallRecordingConsents.id, consentBody.consent.id));
+  assert.equal(consentRows[0]!.status, "ACTIVE");
 });
