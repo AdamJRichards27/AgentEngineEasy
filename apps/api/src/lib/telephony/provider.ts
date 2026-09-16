@@ -21,8 +21,20 @@ export interface TelephonyDialResult {
   providerCallId: string;
 }
 
+/**
+ * Provider-neutral capability metadata.  Capabilities describe what the
+ * active adapter can do; they do not activate a live provider or grant
+ * permission to use the capability.  Recording remains separately gated by
+ * policy, consent, entitlement, and operational approval.
+ */
+export interface TelephonyProviderCapabilities {
+  recording: boolean;
+  transcription: boolean;
+}
+
 export interface TelephonyProvider {
   readonly name: string;
+  readonly capabilities: TelephonyProviderCapabilities;
   /**
    * Requests that a call be placed. A real provider implementation would
    * make an outbound API call here; F1 defines no such implementation —

@@ -9,6 +9,11 @@ import {
   type GrowCallRecordingConsentSource,
 } from "@aee/db";
 import { logAudit } from "../audit.js";
+import {
+  type ConsentTransaction,
+  withConsentBrokerageLock,
+  writeAuditInTransaction,
+} from "../consentControlsPersistence.js";
 
 // AE GROW Priority 6 Stage F1 — Call Foundation.
 //
@@ -18,8 +23,10 @@ import { logAudit } from "../audit.js";
 // fail-closed, whether a call session may currently be marked
 // recordingPermitted = true. "No ambiguous or missing consent may fall
 // through to allowed" (§9) is enforced by resolveRecordingPermission()
-// below being the ONLY place recordingPermitted is ever computed —
-// routes/growCalls.ts never sets it directly from client input.
+// below being the legacy-consent input to the F2 five-gate evaluator —
+// routes/growCalls.ts never sets recordingPermitted directly from client
+// input.  F2 only enables it after in-call disclosure/confirmation and all
+// five independently evaluated gates pass.
 //
 // Deliberately does NOT reuse apps/api/src/lib/communications/consent.ts —
 // that module is EMAIL/SMS marketing/transactional consent, and the
@@ -66,8 +73,8 @@ export interface CaptureRecordingConsentInput {
 }
 
 /** Re-resolves partyId against the ACTING request's own brokerageId — never trusts a client-supplied id. */
-async function assertPartyInBrokerage(brokerageId: number, partyId: number): Promise<void> {
-  const [party] = await db
+async function assertPartyInBrokerage(brokerageId: number, partyId: number, tx: ConsentTransaction | typeof db = db): Promise<void> {
+  const [party] = await tx
     .select({ id: parties.id })
     .from(parties)
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)))
@@ -78,56 +85,62 @@ async function assertPartyInBrokerage(brokerageId: number, partyId: number): Pro
 }
 
 export async function captureRecordingConsent(input: CaptureRecordingConsentInput): Promise<GrowCallRecordingConsent> {
-  await assertPartyInBrokerage(input.brokerageId, input.partyId);
+  return withConsentBrokerageLock(input.brokerageId, async (tx) => {
+    await assertPartyInBrokerage(input.brokerageId, input.partyId, tx);
 
-  let session: typeof growCallSessions.$inferSelect | undefined;
-  if (input.callSessionId !== null && input.callSessionId !== undefined) {
-    const [row] = await db
-      .select()
-      .from(growCallSessions)
-      .where(
-        and(
-          eq(growCallSessions.id, input.callSessionId),
-          eq(growCallSessions.brokerageId, input.brokerageId),
-          eq(growCallSessions.partyId, input.partyId),
-        ),
-      )
-      .limit(1);
-    if (!row) {
-      throw new GrowCallConsentNotFoundError("Call session not found for this contact in this brokerage.");
+    let session: typeof growCallSessions.$inferSelect | undefined;
+    if (input.callSessionId !== null && input.callSessionId !== undefined) {
+      const [row] = await tx
+        .select()
+        .from(growCallSessions)
+        .where(
+          and(
+            eq(growCallSessions.id, input.callSessionId),
+            eq(growCallSessions.brokerageId, input.brokerageId),
+            eq(growCallSessions.partyId, input.partyId),
+          ),
+        )
+        .limit(1);
+      if (!row) {
+        throw new GrowCallConsentNotFoundError("Call session not found for this contact in this brokerage.");
+      }
+      session = row;
     }
-    session = row;
-  }
 
-  const [consent] = await db
-    .insert(growCallRecordingConsents)
-    .values({
-      brokerageId: input.brokerageId,
-      partyId: input.partyId,
-      scope: input.scope,
-      status: "ACTIVE",
-      source: input.source,
-      jurisdiction: input.jurisdiction ?? null,
-      consentVersion: input.consentVersion ?? null,
-      capturedByUserId: input.capturedByUserId,
-      expiresAt: input.expiresAt ?? null,
-      evidenceMetadata: input.evidenceMetadata ?? null,
-    })
-    .returning();
+    const [consent] = await tx
+      .insert(growCallRecordingConsents)
+      .values({
+        brokerageId: input.brokerageId,
+        partyId: input.partyId,
+        scope: input.scope,
+        status: "ACTIVE",
+        source: input.source,
+        jurisdiction: input.jurisdiction ?? null,
+        consentVersion: input.consentVersion ?? null,
+        capturedByUserId: input.capturedByUserId,
+        expiresAt: input.expiresAt ?? null,
+        evidenceMetadata: input.evidenceMetadata ?? null,
+      })
+      .returning();
 
-  await logAudit({
-    userId: input.capturedByUserId,
-    action: "grow_call_recording_consent_captured",
-    recordType: "grow_call_recording_consent",
-    recordId: String(consent.id),
-    updatedValue: JSON.stringify({ scope: consent.scope, source: consent.source, partyId: consent.partyId }),
+    await logAudit(
+      {
+        brokerageId: input.brokerageId,
+        userId: input.capturedByUserId,
+        action: "grow_call_recording_consent_captured",
+        recordType: "grow_call_recording_consent",
+        recordId: String(consent.id),
+        updatedValue: JSON.stringify({ scope: consent.scope, source: consent.source, partyId: consent.partyId }),
+      },
+      { write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
+    );
+
+    if (session) {
+      await recomputeSessionRecordingPermission(session.id, consent.id, tx);
+    }
+
+    return consent;
   });
-
-  if (session) {
-    await recomputeSessionRecordingPermission(session.id, consent.id);
-  }
-
-  return consent;
 }
 
 export interface WithdrawRecordingConsentInput {
@@ -138,51 +151,60 @@ export interface WithdrawRecordingConsentInput {
 }
 
 export async function withdrawRecordingConsent(input: WithdrawRecordingConsentInput): Promise<GrowCallRecordingConsent> {
-  const [existing] = await db
-    .select()
-    .from(growCallRecordingConsents)
-    .where(and(eq(growCallRecordingConsents.id, input.consentId), eq(growCallRecordingConsents.brokerageId, input.brokerageId)))
-    .limit(1);
-  if (!existing) {
-    throw new GrowCallConsentNotFoundError("Recording consent not found in this brokerage.");
-  }
-  if (existing.status === "WITHDRAWN") {
-    throw new GrowCallConsentValidationError("This consent has already been withdrawn.");
-  }
+  return withConsentBrokerageLock(input.brokerageId, async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(growCallRecordingConsents)
+      .where(and(eq(growCallRecordingConsents.id, input.consentId), eq(growCallRecordingConsents.brokerageId, input.brokerageId)))
+      .limit(1);
+    if (!existing) {
+      throw new GrowCallConsentNotFoundError("Recording consent not found in this brokerage.");
+    }
+    if (existing.status === "WITHDRAWN") {
+      throw new GrowCallConsentValidationError("This consent has already been withdrawn.");
+    }
 
-  const [updated] = await db
-    .update(growCallRecordingConsents)
-    .set({
-      status: "WITHDRAWN",
-      withdrawnAt: new Date(),
-      withdrawnByUserId: input.withdrawnByUserId,
-      withdrawalReason: input.withdrawalReason ?? null,
-      updatedAt: new Date(),
-    })
-    .where(eq(growCallRecordingConsents.id, existing.id))
-    .returning();
+    const [updated] = await tx
+      .update(growCallRecordingConsents)
+      .set({
+        status: "WITHDRAWN",
+        withdrawnAt: new Date(),
+        withdrawnByUserId: input.withdrawnByUserId,
+        withdrawalReason: input.withdrawalReason ?? null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(growCallRecordingConsents.id, existing.id), eq(growCallRecordingConsents.status, existing.status)))
+      .returning();
+    if (!updated) {
+      throw new GrowCallConsentValidationError("This consent changed concurrently; retry the withdrawal.");
+    }
 
-  await logAudit({
-    userId: input.withdrawnByUserId,
-    action: "grow_call_recording_consent_withdrawn",
-    recordType: "grow_call_recording_consent",
-    recordId: String(updated.id),
-    previousValue: existing.status,
-    updatedValue: "WITHDRAWN",
+    await logAudit(
+      {
+        brokerageId: input.brokerageId,
+        userId: input.withdrawnByUserId,
+        action: "grow_call_recording_consent_withdrawn",
+        recordType: "grow_call_recording_consent",
+        recordId: String(updated.id),
+        previousValue: existing.status,
+        updatedValue: "WITHDRAWN",
+      },
+      { write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
+    );
+
+    // Any call session currently pointing at this consent must be
+    // re-resolved — a withdrawal happening mid-call must fail closed
+    // immediately, never leave a stale recordingPermitted = true in place.
+    const affectedSessions = await tx
+      .select({ id: growCallSessions.id })
+      .from(growCallSessions)
+      .where(and(eq(growCallSessions.brokerageId, input.brokerageId), eq(growCallSessions.recordingConsentId, existing.id)));
+    for (const affected of affectedSessions) {
+      await recomputeSessionRecordingPermission(affected.id, existing.id, tx);
+    }
+
+    return updated;
   });
-
-  // Any call session currently pointing at this consent must be
-  // re-resolved — a withdrawal happening mid-call must fail closed
-  // immediately, never leave a stale recordingPermitted = true in place.
-  const affectedSessions = await db
-    .select({ id: growCallSessions.id })
-    .from(growCallSessions)
-    .where(and(eq(growCallSessions.brokerageId, input.brokerageId), eq(growCallSessions.recordingConsentId, existing.id)));
-  for (const affected of affectedSessions) {
-    await recomputeSessionRecordingPermission(affected.id, existing.id);
-  }
-
-  return updated;
 }
 
 function consentIsCurrentlyActive(consent: GrowCallRecordingConsent, now: Date): boolean {
@@ -203,15 +225,25 @@ export async function resolveRecordingPermission(input: {
   partyId: number;
   recordingRequested: boolean;
   existingRecordingConsentId?: number | null;
-}): Promise<{ permitted: boolean; recordingStatus: "NOT_REQUESTED" | "DENIED" | "PERMITTED_NOT_CAPTURED"; recordingConsentId: number | null }> {
+  /** F2 requires the legacy consent jurisdiction to match the call. */
+  expectedJurisdiction?: string | null;
+  tx?: ConsentTransaction;
+}): Promise<{
+  permitted: boolean;
+  recordingStatus: "NOT_REQUESTED" | "DENIED" | "PERMITTED_NOT_CAPTURED";
+  recordingConsentId: number | null;
+  recordingConsentJurisdiction: string | null;
+}> {
   if (!input.recordingRequested) {
-    return { permitted: false, recordingStatus: "NOT_REQUESTED", recordingConsentId: null };
+    return { permitted: false, recordingStatus: "NOT_REQUESTED", recordingConsentId: null, recordingConsentJurisdiction: null };
   }
 
   const now = new Date();
 
+  const executor = input.tx ?? db;
+
   if (input.existingRecordingConsentId) {
-    const [consent] = await db
+    const [consent] = await executor
       .select()
       .from(growCallRecordingConsents)
       .where(
@@ -222,13 +254,27 @@ export async function resolveRecordingPermission(input: {
         ),
       )
       .limit(1);
-    if (consent && consentIsCurrentlyActive(consent, now)) {
-      return { permitted: true, recordingStatus: "PERMITTED_NOT_CAPTURED", recordingConsentId: consent.id };
+    if (
+      consent &&
+      consentIsCurrentlyActive(consent, now) &&
+      (!input.expectedJurisdiction || consent.jurisdiction === input.expectedJurisdiction)
+    ) {
+      return {
+        permitted: true,
+        recordingStatus: "PERMITTED_NOT_CAPTURED",
+        recordingConsentId: consent.id,
+        recordingConsentJurisdiction: consent.jurisdiction,
+      };
     }
-    return { permitted: false, recordingStatus: "DENIED", recordingConsentId: null };
+    return {
+      permitted: false,
+      recordingStatus: "DENIED",
+      recordingConsentId: null,
+      recordingConsentJurisdiction: consent?.jurisdiction ?? null,
+    };
   }
 
-  const standingConsents = await db
+  const standingConsents = await executor
     .select()
     .from(growCallRecordingConsents)
     .where(
@@ -241,16 +287,30 @@ export async function resolveRecordingPermission(input: {
       ),
     );
 
-  const validStanding = standingConsents.find((c) => consentIsCurrentlyActive(c, now));
+  const validStanding = standingConsents.find(
+    (c) =>
+      consentIsCurrentlyActive(c, now) &&
+      (!input.expectedJurisdiction || c.jurisdiction === input.expectedJurisdiction),
+  );
   if (validStanding) {
-    return { permitted: true, recordingStatus: "PERMITTED_NOT_CAPTURED", recordingConsentId: validStanding.id };
+    return {
+      permitted: true,
+      recordingStatus: "PERMITTED_NOT_CAPTURED",
+      recordingConsentId: validStanding.id,
+      recordingConsentJurisdiction: validStanding.jurisdiction,
+    };
   }
 
-  return { permitted: false, recordingStatus: "DENIED", recordingConsentId: null };
+  return { permitted: false, recordingStatus: "DENIED", recordingConsentId: null, recordingConsentJurisdiction: null };
 }
 
-async function recomputeSessionRecordingPermission(callSessionId: number, consentIdJustChanged: number): Promise<void> {
-  const [session] = await db.select().from(growCallSessions).where(eq(growCallSessions.id, callSessionId)).limit(1);
+async function recomputeSessionRecordingPermission(
+  callSessionId: number,
+  consentIdJustChanged: number,
+  tx?: ConsentTransaction,
+): Promise<void> {
+  const executor = tx ?? db;
+  const [session] = await executor.select().from(growCallSessions).where(eq(growCallSessions.id, callSessionId)).limit(1);
   if (!session) return;
 
   const resolved = await resolveRecordingPermission({
@@ -258,26 +318,47 @@ async function recomputeSessionRecordingPermission(callSessionId: number, consen
     partyId: session.partyId,
     recordingRequested: session.recordingRequested,
     existingRecordingConsentId: consentIdJustChanged,
+    expectedJurisdiction: session.destinationCountry,
+    ...(tx ? { tx } : {}),
   });
 
   const previousPermitted = session.recordingPermitted;
-  await db
+  // F2 deliberately keeps recording disabled until an in-call disclosure and
+  // explicit confirmation have completed.  A newly captured consent is only
+  // evidence that the legacy F1 consent gate may pass; it is never a
+  // pre-call recording grant.
+  const nextStatus = !session.recordingRequested
+    ? "NOT_REQUESTED"
+    : resolved.permitted
+      ? session.recordingStatus === "DISCLOSED"
+        ? "DISCLOSED"
+        : session.recordingStatus === "UNRECORDED" || session.recordingStatus === "DENIED"
+          ? "DISCLOSURE_REQUIRED"
+          : "UNRECORDED"
+      : "UNRECORDED";
+  const [updated] = await executor
     .update(growCallSessions)
     .set({
-      recordingPermitted: resolved.permitted,
-      recordingStatus: resolved.recordingStatus,
+      recordingPermitted: false,
+      recordingStatus: nextStatus,
       recordingConsentId: resolved.recordingConsentId,
       updatedAt: new Date(),
     })
-    .where(eq(growCallSessions.id, callSessionId));
+    .where(and(eq(growCallSessions.id, callSessionId), eq(growCallSessions.status, session.status)))
+    .returning();
+  if (!updated) return;
 
   if (previousPermitted && !resolved.permitted) {
-    await logAudit({
-      action: "grow_call_recording_permission_denied",
-      recordType: "grow_call_session",
-      recordId: String(callSessionId),
-      previousValue: "PERMITTED_NOT_CAPTURED",
-      updatedValue: resolved.recordingStatus,
-    });
+    await logAudit(
+      {
+        brokerageId: session.brokerageId,
+        action: "grow_call_recording_permission_denied",
+        recordType: "grow_call_session",
+        recordId: String(callSessionId),
+        previousValue: "PERMITTED_NOT_CAPTURED",
+        updatedValue: resolved.recordingStatus,
+      },
+      tx ? { write: (auditInput) => writeAuditInTransaction(tx, auditInput) } : {},
+    );
   }
 }

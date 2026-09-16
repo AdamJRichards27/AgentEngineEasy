@@ -1,5 +1,20 @@
 import type { GrowCallSessionStatus } from "@aee/db";
 
+/**
+ * F2 recording substates intentionally remain in the existing text-backed
+ * recording_status column.  Keeping this union local avoids a schema or
+ * migration change for values that are independently state-machine guarded.
+ */
+export type GrowCallRecordingStatus =
+  | "NOT_REQUESTED"
+  | "DISCLOSURE_REQUIRED"
+  | "DISCLOSED"
+  | "CONFIRMED"
+  | "DECLINED"
+  | "UNRECORDED"
+  | "DENIED"
+  | "PERMITTED_NOT_CAPTURED";
+
 // AE GROW Priority 6 Stage F1 — Call Foundation.
 //
 // §7 — the single source of truth for valid call-session state
@@ -10,13 +25,11 @@ import type { GrowCallSessionStatus } from "@aee/db";
 // transitions" (§7) meaningful rather than a check duplicated ad hoc at
 // each call site.
 //
-// Recording (grow_call_sessions.recordingPermitted/recordingStatus) is
-// intentionally NOT modelled as part of this state machine — §7 is explicit
-// that "call exists" must never be treated as equivalent to "recording
-// authorised". Recording state is resolved independently by
-// apps/api/src/lib/telephony/consent.ts's resolveRecordingPermission() and
-// can change (e.g. a standing consent withdrawn) without any call-session
-// state transition occurring at all.
+// Recording (grow_call_sessions.recordingPermitted/recordingStatus) is an
+// orthogonal sub-state machine below — §7 is explicit that "call exists" must
+// never be treated as equivalent to "recording authorised". Recording
+// transitions never alter the call lifecycle and can change (e.g. a standing
+// consent withdrawn) without a call-session state transition.
 //
 // Parameters are typed as plain `string` (rather than the narrower
 // GrowCallSessionStatus union) wherever a value may have come from a
@@ -61,5 +74,43 @@ export class CallSessionTransitionError extends Error {
 export function assertValidCallSessionTransition(from: string, to: string): void {
   if (!isValidCallSessionTransition(from, to)) {
     throw new CallSessionTransitionError(from, to);
+  }
+}
+
+/**
+ * Recording is intentionally a second axis: these transitions never alter
+ * the call-session status above.  In particular, a missing recording gate
+ * settles at UNRECORDED while the base call can continue to COMPLETED.
+ */
+const ALLOWED_RECORDING_TRANSITIONS: Record<GrowCallRecordingStatus, readonly GrowCallRecordingStatus[]> = {
+  NOT_REQUESTED: ["DISCLOSURE_REQUIRED"],
+  DISCLOSURE_REQUIRED: ["DISCLOSED", "DECLINED", "UNRECORDED"],
+  DISCLOSED: ["CONFIRMED", "DECLINED", "UNRECORDED"],
+  CONFIRMED: ["PERMITTED_NOT_CAPTURED", "UNRECORDED", "DECLINED"],
+  DECLINED: [],
+  UNRECORDED: ["DISCLOSURE_REQUIRED", "DISCLOSED", "DECLINED"],
+  DENIED: ["DISCLOSURE_REQUIRED", "UNRECORDED"],
+  PERMITTED_NOT_CAPTURED: ["UNRECORDED"],
+};
+
+export function isValidRecordingTransition(from: string, to: string): boolean {
+  const allowedFrom = (ALLOWED_RECORDING_TRANSITIONS as Record<string, readonly string[]>)[from];
+  return allowedFrom?.includes(to) ?? false;
+}
+
+export class RecordingStateTransitionError extends Error {
+  readonly from: string;
+  readonly to: string;
+  constructor(from: string, to: string) {
+    super(`Invalid recording state transition: ${from} -> ${to}`);
+    this.name = "RecordingStateTransitionError";
+    this.from = from;
+    this.to = to;
+  }
+}
+
+export function assertValidRecordingTransition(from: string, to: string): void {
+  if (!isValidRecordingTransition(from, to)) {
+    throw new RecordingStateTransitionError(from, to);
   }
 }

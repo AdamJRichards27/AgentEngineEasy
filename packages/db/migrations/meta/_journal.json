@@ -134,6 +134,34 @@
       "when": 1789182067821,
       "tag": "0018_ae_grow_priority_6_stage_f1_call_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789550466479,
+      "tag": "0019_rich_hellion",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1789551111490,
+      "tag": "0020_lyrical_ultron",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1789556939655,
+      "tag": "0021_hard_maria_hill",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1789557405203,
+      "tag": "0022_complete_mariko_yashida",
+      "breakpoints": true
     }
   ]
 }

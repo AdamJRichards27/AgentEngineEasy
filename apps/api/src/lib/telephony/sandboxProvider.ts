@@ -23,6 +23,11 @@ export function sandboxProviderCallId(callSessionId: number): string {
 
 export class SandboxTelephonyProvider implements TelephonyProvider {
   readonly name = "sandbox";
+  // The sandbox deliberately has no recording/transcription capability.  This
+  // keeps a positive consent decision from accidentally becoming live audio
+  // capture while retaining a provider-neutral capability contract for tests
+  // and a future reviewed adapter.
+  readonly capabilities = { recording: false, transcription: false } as const;
 
   async dial(request: TelephonyDialRequest): Promise<TelephonyDialResult> {
     return { providerCallId: sandboxProviderCallId(request.callSessionId) };

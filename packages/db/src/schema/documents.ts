@@ -1,4 +1,17 @@
-import { pgTable, serial, integer, text, boolean, timestamp, jsonb, unique, foreignKey } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  serial,
+  integer,
+  text,
+  boolean,
+  timestamp,
+  jsonb,
+  unique,
+  uniqueIndex,
+  check,
+  foreignKey,
+} from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { properties } from "./property";
@@ -20,18 +33,53 @@ export const documentPackages = pgTable("document_packages", {
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
-export const documents = pgTable("documents", {
-  id: serial("id").primaryKey(),
-  propertyId: integer("property_id").notNull().references(() => properties.id),
-  packageId: integer("package_id").references(() => documentPackages.id),
-  documentType: text("document_type").notNull(), // e.g. AgencyAgreement, Disclosure, Form
-  title: text("title").notNull(),
-  status: text("status").notNull().default("Draft"), // Draft | Generated | Signed
-  objectStorageKey: text("object_storage_key"),
-  metadata: jsonb("metadata"),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+export const documents = pgTable(
+  "documents",
+  {
+    id: serial("id").primaryKey(),
+    // Property-backed documents retain their property tenant owner. Internal
+    // logical records (for example a propertyless telephony call) instead set
+    // brokerageId + logicalOwnerType + logicalOwnerId.
+    propertyId: integer("property_id").references(() => properties.id),
+    brokerageId: integer("brokerage_id").references(() => brokerages.id),
+    logicalOwnerType: text("logical_owner_type"),
+    logicalOwnerId: integer("logical_owner_id"),
+    packageId: integer("package_id").references(() => documentPackages.id),
+    documentType: text("document_type").notNull(), // e.g. AgencyAgreement, Disclosure, Form
+    title: text("title").notNull(),
+    status: text("status").notNull().default("Draft"), // Draft | Generated | Signed
+    objectStorageKey: text("object_storage_key"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    logicalOwnerUnique: uniqueIndex("documents_logical_owner_unique").on(
+      t.brokerageId,
+      t.logicalOwnerType,
+      t.logicalOwnerId,
+    ),
+    ownershipModeCheck: check(
+      "documents_ownership_mode_check",
+      sql`(
+        (
+          ${t.propertyId} IS NOT NULL
+          AND ${t.brokerageId} IS NULL
+          AND ${t.logicalOwnerType} IS NULL
+          AND ${t.logicalOwnerId} IS NULL
+        )
+        OR
+        (
+          ${t.propertyId} IS NULL
+          AND ${t.brokerageId} IS NOT NULL
+          AND ${t.logicalOwnerType} IS NOT NULL
+          AND ${t.logicalOwnerId} IS NOT NULL
+          AND ${t.packageId} IS NULL
+        )
+      )`,
+    ),
+  }),
+);
 
 /**
  * Immutable object metadata for each stored document version. Existing
@@ -49,9 +97,7 @@ export const documentObjectVersions = pgTable(
     brokerageId: integer("brokerage_id")
       .notNull()
       .references(() => brokerages.id),
-    propertyId: integer("property_id")
-      .notNull()
-      .references(() => properties.id),
+    propertyId: integer("property_id").references(() => properties.id),
     packageId: integer("package_id").references(() => documentPackages.id),
     storageObjectKey: text("storage_object_key").notNull(),
     version: integer("version").notNull(),

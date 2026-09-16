@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lte, ne, sql } from "drizzle-orm";
 import {
   db,
   auditLogs,
@@ -68,11 +68,23 @@ export interface IngestDocumentVersionInput {
   replacementReason?: string;
   retentionClass?: string;
   retainUntil?: Date;
-  source: "upload" | "generated" | "esign";
+  source: "upload" | "generated" | "esign" | "telephony";
   sourceProvider?: string;
   providerDocumentId?: string;
   webhookVerified?: boolean;
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * Logical ownership is deliberately metadata-driven so the immutable
+ * document/version ledger can support non-property records without creating a
+ * parallel storage table.  The owner is checked while the document advisory
+ * lock is held, not only in a caller preflight query.
+ */
+interface LogicalDocumentOwner {
+  kind: string;
+  brokerageId: number;
+  ownerId: number;
 }
 
 export interface IngestDocumentVersionResult {
@@ -266,6 +278,174 @@ function sha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function logicalDocumentOwner(value: unknown): LogicalDocumentOwner | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, "logicalOwner")) return null;
+  const owner = record.logicalOwner;
+  if (!owner || typeof owner !== "object" || Array.isArray(owner)) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Logical document owner metadata is malformed",
+    );
+  }
+  const candidate = owner as Record<string, unknown>;
+  if (
+    typeof candidate.kind !== "string" ||
+    !Number.isSafeInteger(candidate.brokerageId) ||
+    !Number.isSafeInteger(candidate.ownerId)
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Logical document owner metadata is malformed",
+    );
+  }
+  return {
+    kind: candidate.kind,
+    brokerageId: candidate.brokerageId as number,
+    ownerId: candidate.ownerId as number,
+  };
+}
+
+function assertLogicalDocumentOwnershipWithinLock(input: {
+  current: DocumentObjectVersion | null;
+  document: Document;
+  brokerageId: number;
+  source: IngestDocumentVersionInput["source"];
+  retentionClass: string;
+  metadata: Record<string, unknown> | undefined;
+}): void {
+  const requestedOwner = logicalDocumentOwner(input.metadata);
+  const existingDocumentOwner =
+    input.document.brokerageId !== null &&
+    input.document.logicalOwnerType !== null &&
+    input.document.logicalOwnerId !== null
+      ? {
+          kind: input.document.logicalOwnerType,
+          brokerageId: input.document.brokerageId,
+          ownerId: input.document.logicalOwnerId,
+        }
+      : null;
+  const existingVersionOwner = input.current
+    ? logicalDocumentOwner(input.current.metadata)
+    : null;
+  const existingOwner = existingVersionOwner ?? existingDocumentOwner;
+
+  if (existingOwner && input.source !== "telephony") {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Logical documents may only receive telephony versions",
+    );
+  }
+  if (
+    existingDocumentOwner &&
+    input.current &&
+    !existingVersionOwner
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "A stored logical document version is missing its logical owner",
+    );
+  }
+  if (
+    existingDocumentOwner &&
+    existingVersionOwner &&
+    (existingDocumentOwner.kind !== existingVersionOwner.kind ||
+      existingDocumentOwner.brokerageId !== existingVersionOwner.brokerageId ||
+      existingDocumentOwner.ownerId !== existingVersionOwner.ownerId)
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Document and version logical owners disagree",
+    );
+  }
+  if (
+    existingOwner &&
+    input.current &&
+    input.current.source !== "telephony"
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Stored logical document versions must use the telephony source",
+    );
+  }
+  if (
+    input.document.propertyId === null &&
+    existingOwner === null &&
+    requestedOwner === null
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "A propertyless document requires a complete logical owner",
+    );
+  }
+  if (existingOwner && !requestedOwner) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "A logical document owner is required for this document",
+    );
+  }
+  if (!requestedOwner) return;
+  if (requestedOwner.brokerageId !== input.brokerageId) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Logical document owner does not belong to the requested brokerage",
+    );
+  }
+  if (
+    input.document.propertyId !== null &&
+    existingOwner === null
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "A property-backed document cannot be claimed by a logical non-property owner",
+    );
+  }
+  if (input.document.propertyId === null && existingDocumentOwner === null) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "A propertyless document cannot be claimed without its stored logical owner",
+    );
+  }
+  if (
+    existingOwner &&
+    (existingOwner.kind !== requestedOwner.kind ||
+      existingOwner.brokerageId !== requestedOwner.brokerageId ||
+      existingOwner.ownerId !== requestedOwner.ownerId)
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Document is already owned by a different logical record",
+    );
+  }
+  if (
+    input.document.brokerageId !== null &&
+    input.document.brokerageId !== requestedOwner.brokerageId
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Document tenant owner does not match the requested logical owner",
+    );
+  }
+  if (input.source !== "telephony") {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "Logical document versions must use the telephony source",
+    );
+  }
+  if (
+    input.current &&
+    existingOwner &&
+    input.current.source === "telephony" &&
+    input.current.retentionClass !== input.retentionClass
+  ) {
+    throw new DocumentStorageError(
+      "DOCUMENT_UNAVAILABLE",
+      "The logical recording owner has an authoritative retention class",
+    );
+  }
+}
+
 function normaliseMimeType(value: string): string {
   return value.split(";", 1)[0].trim().toLowerCase();
 }
@@ -343,12 +523,34 @@ function validateDocumentBytes(
 async function loadDocumentInBrokerage(
   documentId: number,
   brokerageId: number,
+  access?: LogicalDocumentOwner,
 ): Promise<Document | null> {
+  if (access) {
+    const [row] = await db
+      .select({ document: documents })
+      .from(documents)
+      .where(
+        and(
+          eq(documents.id, documentId),
+          eq(documents.brokerageId, brokerageId),
+          eq(documents.brokerageId, access.brokerageId),
+          eq(documents.logicalOwnerType, access.kind),
+          eq(documents.logicalOwnerId, access.ownerId),
+          isNull(documents.propertyId),
+        ),
+      );
+    return row?.document ?? null;
+  }
   const [row] = await db
     .select({ document: documents })
     .from(documents)
     .innerJoin(properties, eq(documents.propertyId, properties.id))
-    .where(and(eq(documents.id, documentId), eq(properties.brokerageId, brokerageId)));
+    .where(
+      and(
+        eq(documents.id, documentId),
+        eq(properties.brokerageId, brokerageId),
+      ),
+    );
   return row?.document ?? null;
 }
 
@@ -368,6 +570,9 @@ async function validateDocumentVersionIngestionInput(
   const document = await loadDocumentInBrokerage(
     input.documentId,
     input.brokerageId,
+    input.source === "telephony"
+      ? logicalDocumentOwner(input.metadata) ?? undefined
+      : undefined,
   );
   if (!document) {
     throw new DocumentStorageError(
@@ -598,6 +803,17 @@ export async function ingestDocumentVersion(
 
   const pending = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(${input.documentId})`);
+    const [lockedDocument] = await tx
+      .select()
+      .from(documents)
+      .where(eq(documents.id, input.documentId))
+      .limit(1);
+    if (!lockedDocument) {
+      throw new DocumentStorageError(
+        "DOCUMENT_NOT_FOUND",
+        `Document ${input.documentId} not found`,
+      );
+    }
     const [current] = await tx
       .select()
       .from(documentObjectVersions)
@@ -609,6 +825,14 @@ export async function ingestDocumentVersion(
       )
       .orderBy(desc(documentObjectVersions.version))
       .limit(1);
+    assertLogicalDocumentOwnershipWithinLock({
+      current: current ?? null,
+      document: lockedDocument,
+      brokerageId: input.brokerageId,
+      source: input.source,
+      retentionClass,
+      metadata: input.metadata,
+    });
 
     const sameBytes =
       current?.contentSha256 === validated.contentSha256 &&
@@ -643,10 +867,10 @@ export async function ingestDocumentVersion(
     const [created] = await tx
       .insert(documentObjectVersions)
       .values({
-        documentId: document.id,
+        documentId: lockedDocument.id,
         brokerageId: input.brokerageId,
-        propertyId: document.propertyId,
-        packageId: document.packageId,
+        propertyId: lockedDocument.propertyId,
+        packageId: lockedDocument.packageId,
         storageObjectKey: key,
         version: versionNumber,
         previousVersionId: current?.id ?? null,
@@ -853,6 +1077,14 @@ export async function ingestDocumentVersionBatch(
       )
       .orderBy(desc(documentObjectVersions.version))
       .limit(1);
+    assertLogicalDocumentOwnershipWithinLock({
+      current: current ?? null,
+      document: row.document,
+      brokerageId: input.brokerageId,
+      source: input.source,
+      retentionClass,
+      metadata: input.metadata,
+    });
     const sameBytes =
       current?.contentSha256 === validated.contentSha256 &&
       current.byteSize === input.bytes.length;
@@ -1277,11 +1509,12 @@ export async function reconcilePendingDocumentVersions(
   return result;
 }
 
-export async function getStoredDocumentContent(
+async function getStoredDocumentContentWithAccess(
   documentId: number,
   brokerageId: number,
+  access?: LogicalDocumentOwner,
 ): Promise<StoredDocumentContent | null> {
-  const document = await loadDocumentInBrokerage(documentId, brokerageId);
+  const document = await loadDocumentInBrokerage(documentId, brokerageId, access);
   if (!document || !document.objectStorageKey) return null;
   const version = await versionForKey(
     documentId,
@@ -1326,6 +1559,26 @@ export async function getStoredDocumentContent(
   }
 }
 
+/**
+ * Internal telephony-only loader. Generic document routes must use
+ * getStoredDocumentContent(), which intentionally resolves property-backed
+ * documents only.
+ */
+export async function getStoredLogicalDocumentContent(
+  documentId: number,
+  brokerageId: number,
+  access: LogicalDocumentOwner,
+): Promise<StoredDocumentContent | null> {
+  return getStoredDocumentContentWithAccess(documentId, brokerageId, access);
+}
+
+export async function getStoredDocumentContent(
+  documentId: number,
+  brokerageId: number,
+): Promise<StoredDocumentContent | null> {
+  return getStoredDocumentContentWithAccess(documentId, brokerageId);
+}
+
 export async function createDocumentSignedDownload(
   documentId: number,
   brokerageId: number,
@@ -1344,7 +1597,41 @@ export async function createDocumentSignedDownload(
   }
   // Verify the exact bytes before issuing access. Redemption verifies again,
   // so corruption or quarantine after link creation still fails closed.
-  await getStoredDocumentContent(documentId, brokerageId);
+  await getStoredDocumentContentWithAccess(documentId, brokerageId);
+  const expiresAt = new Date(Date.now() + configuredSignedDownloadSeconds() * 1_000);
+  const expires = Math.floor(expiresAt.getTime() / 1_000);
+  const payload = `${version.id}\n${expires}`;
+  const signature = createHmac("sha256", configuredSignedDownloadSecret())
+    .update(payload)
+    .digest("base64url");
+  return {
+    version,
+    download: {
+      url: `/api/documents/signed-download/${version.id}?expires=${expires}&signature=${signature}`,
+      expiresAt,
+    },
+  };
+}
+
+/** Internal telephony-only signed-reference loader. */
+export async function createLogicalDocumentSignedDownload(
+  documentId: number,
+  brokerageId: number,
+  access: LogicalDocumentOwner,
+): Promise<{ version: DocumentObjectVersion; download: { url: string; expiresAt: Date } }> {
+  const document = await loadDocumentInBrokerage(documentId, brokerageId, access);
+  const version = document?.objectStorageKey
+    ? await versionForKey(documentId, brokerageId, document.objectStorageKey)
+    : null;
+  if (
+    !document ||
+    !version ||
+    version.objectStatus !== "Active" ||
+    document.objectStorageKey !== version.storageObjectKey
+  ) {
+    throw new DocumentStorageError("DOCUMENT_NOT_FOUND", `Document ${documentId} not found`);
+  }
+  await getStoredDocumentContentWithAccess(documentId, brokerageId, access);
   const expiresAt = new Date(Date.now() + configuredSignedDownloadSeconds() * 1_000);
   const expires = Math.floor(expiresAt.getTime() / 1_000);
   const payload = `${version.id}\n${expires}`;
@@ -1431,6 +1718,32 @@ export async function quarantineDocument(
   brokerageId: number,
 ): Promise<DocumentObjectVersion> {
   const document = await loadDocumentInBrokerage(documentId, brokerageId);
+  const version = document?.objectStorageKey
+    ? await versionForKey(documentId, brokerageId, document.objectStorageKey)
+    : null;
+  if (!document || !version || version.objectStatus !== "Active") {
+    throw new DocumentStorageError("DOCUMENT_NOT_FOUND", `Document ${documentId} not found`);
+  }
+  const [updated] = await db
+    .update(documentObjectVersions)
+    .set({ objectStatus: "Quarantined", quarantinedAt: new Date() })
+    .where(
+      and(
+        eq(documentObjectVersions.id, version.id),
+        eq(documentObjectVersions.brokerageId, brokerageId),
+      ),
+    )
+    .returning();
+  return updated;
+}
+
+/** Internal telephony-only quarantine loader. */
+export async function quarantineLogicalDocument(
+  documentId: number,
+  brokerageId: number,
+  access: LogicalDocumentOwner,
+): Promise<DocumentObjectVersion> {
+  const document = await loadDocumentInBrokerage(documentId, brokerageId, access);
   const version = document?.objectStorageKey
     ? await versionForKey(documentId, brokerageId, document.objectStorageKey)
     : null;

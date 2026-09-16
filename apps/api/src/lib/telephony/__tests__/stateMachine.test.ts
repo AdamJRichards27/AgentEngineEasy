@@ -6,6 +6,9 @@ import {
   assertValidCallSessionTransition,
   CallSessionTransitionError,
   TERMINAL_CALL_SESSION_STATUSES,
+  isValidRecordingTransition,
+  assertValidRecordingTransition,
+  RecordingStateTransitionError,
 } from "../stateMachine.js";
 
 test("the full happy-path lifecycle is a chain of valid transitions", () => {
@@ -56,4 +59,22 @@ test("assertValidCallSessionTransition throws a typed error naming both states o
 
 test("assertValidCallSessionTransition does not throw on a valid transition", () => {
   assert.doesNotThrow(() => assertValidCallSessionTransition("DRAFT", "READY"));
+});
+
+test("recording sub-state is orthogonal and requires in-call disclosure before confirmation", () => {
+  assert.equal(isValidRecordingTransition("DISCLOSURE_REQUIRED", "DISCLOSED"), true);
+  assert.equal(isValidRecordingTransition("DISCLOSED", "CONFIRMED"), true);
+  assert.equal(isValidRecordingTransition("DISCLOSURE_REQUIRED", "CONFIRMED"), false);
+  assert.equal(isValidRecordingTransition("CONFIRMED", "UNRECORDED"), true);
+  assert.equal(isValidRecordingTransition("UNRECORDED", "CONNECTED"), false);
+});
+
+test("recording sub-state transition errors identify both recording states", () => {
+  assert.throws(
+    () => assertValidRecordingTransition("DISCLOSURE_REQUIRED", "CONFIRMED"),
+    (err: unknown) =>
+      err instanceof RecordingStateTransitionError &&
+      err.from === "DISCLOSURE_REQUIRED" &&
+      err.to === "CONFIRMED",
+  );
 });
