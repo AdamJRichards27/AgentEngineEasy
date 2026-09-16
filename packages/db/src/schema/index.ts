@@ -45,3 +45,7 @@ export * from "./propertyIntelligence";
 // AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and Sandbox
 // Telephony.
 export * from "./telephony";
+// AE GROW Priority 6 Stage F2 step 1 — provider-neutral consent recording
+// controls, versioned AU/NZ policy data, DNCR observations, suppression
+// events, and immutable decision evidence.
+export * from "./consentControls";
