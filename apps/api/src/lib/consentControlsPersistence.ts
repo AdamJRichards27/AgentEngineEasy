@@ -34,15 +34,32 @@ import {
   type SuppressionForEvaluation,
 } from "./consentControls.js";
 
-type ConsentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type ConsentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 const CONSENT_ADVISORY_LOCK_NAMESPACE = 2076418031;
 
-async function writeAuditInTransaction(tx: ConsentTransaction, input: AuditLogInput): Promise<void> {
+export async function writeAuditInTransaction(tx: ConsentTransaction, input: AuditLogInput): Promise<void> {
   await tx.insert(auditLogs).values(input);
 }
 
 async function lockConsentBrokerage(tx: ConsentTransaction, brokerageId: number): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(${CONSENT_ADVISORY_LOCK_NAMESPACE}, ${brokerageId})`);
+}
+
+/**
+ * Session lifecycle claims and consent writers must share this exact
+ * transaction-scoped brokerage lock.  Callers that already hold the
+ * transaction use the `...InTransaction` evaluator below; calling the public
+ * evaluator from inside this callback would attempt to acquire the same
+ * advisory lock on a second connection and can deadlock.
+ */
+export async function withConsentBrokerageLock<T>(
+  brokerageId: number,
+  callback: (tx: ConsentTransaction) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await lockConsentBrokerage(tx, brokerageId);
+    return callback(tx);
+  });
 }
 
 export class ConsentControlsNotFoundError extends Error {
@@ -492,97 +509,101 @@ export interface RecordedConsentDecision {
  * Resolves all current inputs under one brokerage and appends one immutable
  * decision-evidence row. This function does not call a DNCR service.
  */
-export async function evaluateAndRecordConsentDecision(input: EvaluateAndRecordConsentDecisionInput): Promise<RecordedConsentDecision> {
-  return db.transaction(async (tx) => {
-    await lockConsentBrokerage(tx, input.brokerageId);
-    await assertPartyInBrokerage(tx, input.brokerageId, input.partyId);
-    if (input.decidedByUserId !== null && input.decidedByUserId !== undefined) {
-      await assertUserInBrokerage(tx, input.brokerageId, input.decidedByUserId);
-    }
-    if (!input.purpose.trim() || !input.scope.trim()) {
-      throw new Error("Consent decision purpose and scope are required.");
-    }
-    if (!GROW_CONSENT_CHANNELS.includes(input.channel)) {
-      throw new Error(`Unsupported consent channel: ${input.channel}`);
-    }
+export async function evaluateAndRecordConsentDecisionInTransaction(
+  tx: ConsentTransaction,
+  input: EvaluateAndRecordConsentDecisionInput,
+): Promise<RecordedConsentDecision> {
+  await assertPartyInBrokerage(tx, input.brokerageId, input.partyId);
+  if (input.decidedByUserId !== null && input.decidedByUserId !== undefined) {
+    await assertUserInBrokerage(tx, input.brokerageId, input.decidedByUserId);
+  }
+  if (!input.purpose.trim() || !input.scope.trim()) {
+    throw new Error("Consent decision purpose and scope are required.");
+  }
+  if (!GROW_CONSENT_CHANNELS.includes(input.channel)) {
+    throw new Error(`Unsupported consent channel: ${input.channel}`);
+  }
 
-    // Eligibility timing is trusted server time; callers cannot replay an
-    // evaluation at an arbitrary instant.
-    const now = new Date();
-    const consent = await latestConsent(tx, input.brokerageId, input.partyId, input.channel, input.purpose, input.scope);
-    // Caller jurisdiction is only a consistency assertion. It cannot supply a
-    // jurisdiction missing from the recorded consent.
-    const jurisdiction = consent?.jurisdiction ?? null;
-    const policy = await policyFor(tx, input.brokerageId, jurisdiction, now);
-    const dncr = await latestDncr(tx, input.brokerageId, input.partyId, input.channel);
-    const suppression = await latestSuppression(tx, input.brokerageId, input.partyId, input.channel, now);
+  // Eligibility timing is trusted server time; callers cannot replay an
+  // evaluation at an arbitrary instant.
+  const now = new Date();
+  const consent = await latestConsent(tx, input.brokerageId, input.partyId, input.channel, input.purpose, input.scope);
+  // Caller jurisdiction is only a consistency assertion. It cannot supply a
+  // jurisdiction missing from the recorded consent.
+  const jurisdiction = consent?.jurisdiction ?? null;
+  const policy = await policyFor(tx, input.brokerageId, jurisdiction, now);
+  const dncr = await latestDncr(tx, input.brokerageId, input.partyId, input.channel);
+  const suppression = await latestSuppression(tx, input.brokerageId, input.partyId, input.channel, now);
 
-    const evaluationInput: EvaluateConsentDecisionInput = {
+  const evaluationInput: EvaluateConsentDecisionInput = {
+    channel: input.channel,
+    purpose: input.purpose,
+    scope: input.scope,
+    jurisdiction: input.jurisdiction,
+    consent: consent as ConsentRecordForEvaluation | null,
+    dncr: dncr as DncrStatusForEvaluation | null,
+    suppression: suppression as SuppressionForEvaluation | null,
+    policy: policy as ConsentPolicyForEvaluation | null,
+    now,
+  };
+  const evaluation = evaluateConsentDecision(evaluationInput);
+
+  // These rows and the evidence snapshot are read inside the same
+  // transaction as the decision and its audit row.
+  const evidence = {
+    request: {
+      brokerageId: input.brokerageId,
+      partyId: input.partyId,
       channel: input.channel,
       purpose: input.purpose,
       scope: input.scope,
-      jurisdiction: input.jurisdiction,
-      consent: consent as ConsentRecordForEvaluation | null,
-      dncr: dncr as DncrStatusForEvaluation | null,
-      suppression: suppression as SuppressionForEvaluation | null,
-      policy: policy as ConsentPolicyForEvaluation | null,
-      now,
-    };
-    const evaluation = evaluateConsentDecision(evaluationInput);
+      requestedJurisdiction: input.jurisdiction ?? null,
+    },
+    consentSnapshot: consent,
+    dncrSnapshot: dncr,
+    suppressionSnapshot: suppression,
+    policySnapshot: policy,
+    evaluation,
+  };
+  const [decision] = await tx
+    .insert(growConsentDecisions)
+    .values({
+      brokerageId: input.brokerageId,
+      partyId: input.partyId,
+      channel: input.channel,
+      decision: evaluation.decision,
+      reasonCode: evaluation.reasonCode,
+      reasonCodes: evaluation.reasonCodes,
+      consentId: consent?.id ?? null,
+      dncrStatusId: dncr?.id ?? null,
+      suppressionId: suppression?.id ?? null,
+      policyVersionId: policy?.id ?? null,
+      jurisdiction: evaluation.jurisdiction,
+      policyVersion: evaluation.policyVersion,
+      evaluatedAt: now,
+      decidedByUserId: input.decidedByUserId ?? null,
+      evidence,
+    })
+    .returning();
 
-    // These rows and the evidence snapshot are read inside the same
-    // transaction as the decision and its audit row.
-    const evidence = {
-      request: {
-        brokerageId: input.brokerageId,
-        partyId: input.partyId,
-        channel: input.channel,
-        purpose: input.purpose,
-        scope: input.scope,
-        requestedJurisdiction: input.jurisdiction ?? null,
-      },
-      consentSnapshot: consent,
-      dncrSnapshot: dncr,
-      suppressionSnapshot: suppression,
-      policySnapshot: policy,
-      evaluation,
-    };
-    const [decision] = await tx
-      .insert(growConsentDecisions)
-      .values({
-        brokerageId: input.brokerageId,
-        partyId: input.partyId,
-        channel: input.channel,
-        decision: evaluation.decision,
-        reasonCode: evaluation.reasonCode,
-        reasonCodes: evaluation.reasonCodes,
-        consentId: consent?.id ?? null,
-        dncrStatusId: dncr?.id ?? null,
-        suppressionId: suppression?.id ?? null,
-        policyVersionId: policy?.id ?? null,
-        jurisdiction: evaluation.jurisdiction,
-        policyVersion: evaluation.policyVersion,
-        evaluatedAt: now,
-        decidedByUserId: input.decidedByUserId ?? null,
-        evidence,
-      })
-      .returning();
+  await logAudit(
+    {
+      brokerageId: input.brokerageId,
+      userId: input.decidedByUserId ?? undefined,
+      action: "grow_consent_decision_recorded",
+      recordType: "grow_consent_decision",
+      recordId: String(decision.id),
+      updatedValue: JSON.stringify(decision),
+      providerReference: `grow-consent-decision:${decision.id}`,
+    },
+    { strict: true, write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
+  );
 
-    await logAudit(
-      {
-        brokerageId: input.brokerageId,
-        userId: input.decidedByUserId ?? undefined,
-        action: "grow_consent_decision_recorded",
-        recordType: "grow_consent_decision",
-        recordId: String(decision.id),
-        updatedValue: JSON.stringify(decision),
-        providerReference: `grow-consent-decision:${decision.id}`,
-      },
-      { strict: true, write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
-    );
+  return { decision, evaluation };
+}
 
-    return { decision, evaluation };
-  });
+export async function evaluateAndRecordConsentDecision(input: EvaluateAndRecordConsentDecisionInput): Promise<RecordedConsentDecision> {
+  return withConsentBrokerageLock(input.brokerageId, (tx) => evaluateAndRecordConsentDecisionInTransaction(tx, input));
 }
 
 // Short aliases keep the library usable by future callers without exposing a

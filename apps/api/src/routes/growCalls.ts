@@ -4,6 +4,9 @@
 // Authenticated call-session surface, entitlement-gated by
 // grow.calling.access (session lifecycle) and grow.calling.recording
 // (consent capture/withdrawal) — see packages/db/src/schema/billing.ts.
+// F2 routes all outbound creation/confirmation and eligibility checks through
+// the audited canonical PHONE_CALL decision; recording disclosure/confirmation
+// remains an orthogonal in-call state machine.
 // Nothing here places a real call: every session this router creates is
 // provider = "sandbox" (lib/telephony/sandboxProvider.ts), and lifecycle
 // progression beyond DIAL_REQUESTED only ever happens via the separate,
@@ -39,8 +42,13 @@ import {
   confirmCallSession,
   cancelCallSession,
   getCallSessionForBrokerage,
+  recordInCallRecordingDisclosure,
+  confirmInCallRecording,
+  declineInCallRecording,
+  assertCallSessionActorAuthorized,
   GrowCallSessionValidationError,
   GrowCallSessionNotFoundError,
+  GrowCallSessionAuthorizationError,
 } from "../lib/telephony/callSessions.js";
 import {
   captureRecordingConsent,
@@ -49,6 +57,7 @@ import {
   GrowCallConsentNotFoundError,
 } from "../lib/telephony/consent.js";
 import { CallSessionTransitionError } from "../lib/telephony/stateMachine.js";
+import { CallConsentEligibilityError, evaluateOutboundCallEligibility } from "../lib/telephony/eligibility.js";
 
 export const growCallsRouter = Router();
 
@@ -83,16 +92,177 @@ growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.c
   }
 
   try {
-    normalizePhoneNumber(party.mobile);
-    res.json({ eligible: true, reason: "OK", displayNumber: party.mobile, requiresCountryConfirmation: false });
+    const normalized = normalizePhoneNumber(party.mobile);
+    try {
+      const decision = await evaluateOutboundCallEligibility({
+        brokerageId: authedUser.brokerageId,
+        partyId,
+        decidedByUserId: authedUser.id,
+        jurisdiction: normalized.country,
+      });
+      res.json({
+        eligible: true,
+        reason: "OK",
+        displayNumber: party.mobile,
+        requiresCountryConfirmation: false,
+        consentDecisionId: decision.decision.id,
+      });
+    } catch (err) {
+      if (err instanceof CallConsentEligibilityError) {
+        res.json({
+          eligible: false,
+          reason: err.reasonCode,
+          displayNumber: party.mobile,
+          requiresCountryConfirmation: false,
+          consentDecisionId: err.decisionId,
+        });
+        return;
+      }
+      throw err;
+    }
   } catch (err) {
     if (err instanceof PhoneNumberValidationError && err.code === "AMBIGUOUS") {
-      res.json({ eligible: true, reason: "OK", displayNumber: party.mobile, requiresCountryConfirmation: true });
+      // An ambiguous national number has no authoritative country/jurisdiction
+      // yet.  Record the conservative PHONE_CALL decision where possible, but
+      // never advertise it as dial-eligible until creation receives an
+      // explicit assumedCountry.
+      let consentDecisionId: number | null = null;
+      let reason = "COUNTRY_CONFIRMATION_REQUIRED";
+      try {
+        const decision = await evaluateOutboundCallEligibility({
+          brokerageId: authedUser.brokerageId,
+          partyId,
+          decidedByUserId: authedUser.id,
+          jurisdiction: null,
+        });
+        consentDecisionId = decision.decision.id;
+        reason = "COUNTRY_CONFIRMATION_REQUIRED";
+      } catch (decisionError) {
+        if (decisionError instanceof CallConsentEligibilityError) {
+          consentDecisionId = decisionError.decisionId;
+          reason = decisionError.reasonCode;
+        } else {
+          throw decisionError;
+        }
+      }
+      res.json({ eligible: false, reason, displayNumber: party.mobile, requiresCountryConfirmation: true, consentDecisionId });
       return;
     }
-    res.json({ eligible: false, reason: "INVALID_PHONE_NUMBER", displayNumber: party.mobile, requiresCountryConfirmation: false });
+    if (err instanceof PhoneNumberValidationError) {
+      res.json({ eligible: false, reason: "INVALID_PHONE_NUMBER", displayNumber: party.mobile, requiresCountryConfirmation: false });
+      return;
+    }
+    throw err;
   }
 });
+
+/**
+ * Recording is an orthogonal in-call state machine.  Disclosure is accepted
+ * only after CONNECTED and never gates creation or dialling.  Confirmation
+ * re-evaluates all five recording gates and leaves the base call untouched
+ * when recording remains UNRECORDED.
+ */
+async function handleRecordingDisclosure(req: import("express").Request, res: import("express").Response) {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const callSession = await recordInCallRecordingDisclosure({
+      brokerageId: authedUser.brokerageId,
+      callSessionId: id,
+      disclosedByUserId: authedUser.id,
+      disclosedByUserRole: authedUser.role,
+    });
+    res.json({ callSession });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionValidationError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+async function handleRecordingConfirmation(req: import("express").Request, res: import("express").Response) {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const callSession = await confirmInCallRecording({
+      brokerageId: authedUser.brokerageId,
+      callSessionId: id,
+      confirmedByUserId: authedUser.id,
+      actorRole: authedUser.role,
+    });
+    res.json({ callSession });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionValidationError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+async function handleRecordingDecline(req: import("express").Request, res: import("express").Response) {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const callSession = await declineInCallRecording({
+      brokerageId: authedUser.brokerageId,
+      callSessionId: id,
+      declinedByUserId: authedUser.id,
+      declinedByUserRole: authedUser.role,
+    });
+    res.json({ callSession });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionValidationError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+for (const path of ["/:id/recording/disclosure", "/:id/recording/disclose"]) {
+  growCallsRouter.post(path, requireEntitlement("grow.calling.access"), handleRecordingDisclosure);
+}
+growCallsRouter.post("/:id/recording/confirm", requireEntitlement("grow.calling.access"), handleRecordingConfirmation);
+growCallsRouter.post("/:id/recording/decline", requireEntitlement("grow.calling.access"), handleRecordingDecline);
 
 const createCallSchema = z.object({
   partyId: z.number().int().positive(),
@@ -135,11 +305,15 @@ growCallsRouter.get("/:id", requireEntitlement("grow.calling.access"), async (re
   }
   const authedUser = req.authedUser!;
   try {
-    const session = await getCallSessionForBrokerage(authedUser.brokerageId, id);
+    const session = await getCallSessionForBrokerage(authedUser.brokerageId, id, { id: authedUser.id, role: authedUser.role });
     res.json({ callSession: session });
   } catch (err) {
     if (err instanceof GrowCallSessionNotFoundError) {
       res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
       return;
     }
     throw err;
@@ -154,7 +328,12 @@ growCallsRouter.post("/:id/confirm", requireEntitlement("grow.calling.access"), 
   }
   const authedUser = req.authedUser!;
   try {
-    const session = await confirmCallSession({ brokerageId: authedUser.brokerageId, callSessionId: id, confirmedByUserId: authedUser.id });
+    const session = await confirmCallSession({
+      brokerageId: authedUser.brokerageId,
+      callSessionId: id,
+      confirmedByUserId: authedUser.id,
+      confirmedByUserRole: authedUser.role,
+    });
     res.json({ callSession: session });
   } catch (err) {
     if (err instanceof GrowCallSessionNotFoundError) {
@@ -163,6 +342,14 @@ growCallsRouter.post("/:id/confirm", requireEntitlement("grow.calling.access"), 
     }
     if (err instanceof CallSessionTransitionError) {
       res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionValidationError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
       return;
     }
     throw err;
@@ -188,6 +375,7 @@ growCallsRouter.post("/:id/cancel", requireEntitlement("grow.calling.access"), a
       brokerageId: authedUser.brokerageId,
       callSessionId: id,
       cancelledByUserId: authedUser.id,
+      cancelledByUserRole: authedUser.role,
       reason: parsed.data.reason ?? null,
     });
     res.json({ callSession: session });
@@ -198,6 +386,10 @@ growCallsRouter.post("/:id/cancel", requireEntitlement("grow.calling.access"), a
     }
     if (err instanceof GrowCallSessionValidationError || err instanceof CallSessionTransitionError) {
       res.status(409).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
       return;
     }
     throw err;
@@ -227,7 +419,7 @@ growCallsRouter.post("/:id/consent", requireEntitlement("grow.calling.recording"
   }
   const authedUser = req.authedUser!;
   try {
-    const session = await getCallSessionForBrokerage(authedUser.brokerageId, id);
+    const session = await getCallSessionForBrokerage(authedUser.brokerageId, id, { id: authedUser.id, role: authedUser.role });
     const consent = await captureRecordingConsent({
       brokerageId: authedUser.brokerageId,
       partyId: session.partyId,
@@ -248,6 +440,10 @@ growCallsRouter.post("/:id/consent", requireEntitlement("grow.calling.recording"
     }
     if (err instanceof GrowCallConsentValidationError) {
       res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionAuthorizationError) {
+      res.status(403).json({ error: err.message });
       return;
     }
     throw err;

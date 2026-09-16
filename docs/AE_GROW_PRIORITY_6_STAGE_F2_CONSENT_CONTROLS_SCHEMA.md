@@ -148,3 +148,5 @@ append-only boundary, but because this step does not hand-edit migrations or
 install DB triggers, direct database-admin `UPDATE`/`DELETE` writes are not
 prevented by the database itself. The implementation uses no live capability,
 credential, SDK, real vendor, route, or UI.
+
+F2 step 2 implementation note: F1 foundation hardened by F2 eligibility enforcement.

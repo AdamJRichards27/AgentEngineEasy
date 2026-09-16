@@ -48,6 +48,25 @@ export async function processInboundTelephonyWebhook(input: TelephonyWebhookInpu
     .from(growCallWebhookEvents)
     .where(and(eq(growCallWebhookEvents.provider, input.provider), eq(growCallWebhookEvents.providerEventId, input.providerEventId)));
   if (existingEvent) {
+    // The base lifecycle is already idempotent for an applied terminal
+    // target. Re-enter that no-op path for a terminal replay so a recording
+    // closure/audit that failed after the first delivery can be retried
+    // without ever duplicating the core audit or timeline activity.
+    if (input.eventType === "call.completed" || input.eventType === "call.failed") {
+      const [session] = await db
+        .select({ id: growCallSessions.id, status: growCallSessions.status })
+        .from(growCallSessions)
+        .where(and(eq(growCallSessions.provider, input.provider), eq(growCallSessions.providerCallId, input.providerCallId)));
+      const targetStatus = input.eventType === "call.completed" ? "COMPLETED" : "FAILED";
+      if (session?.status === targetStatus) {
+        try {
+          await applySandboxLifecycleEvent(session.id, EVENT_TYPE_TO_LIFECYCLE_EVENT[input.eventType]);
+        } catch {
+          // Preserve duplicate-delivery semantics even if a retryable
+          // recording-only sink remains unavailable.
+        }
+      }
+    }
     return { status: "DUPLICATE", webhookEventId: existingEvent.id, detail: "Already processed." };
   }
 

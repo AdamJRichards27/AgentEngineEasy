@@ -85,6 +85,11 @@ import {
   growCallSessions,
   growCallRecordingConsents,
   growCallWebhookEvents,
+  growContactChannelConsents,
+  growConsentDecisions,
+  growConsentPolicyVersions,
+  growContactDncrStatuses,
+  growContactChannelSuppressions,
 } from "@aee/db";
 
 // Foundation Remediation Stage 4: shared helpers for the new lifecycle test
@@ -605,6 +610,11 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   }
   await db.delete(growCallSessions).where(inArray(growCallSessions.brokerageId, ids));
   await db.delete(growCallRecordingConsents).where(inArray(growCallRecordingConsents.brokerageId, ids));
+  await db.delete(growConsentDecisions).where(inArray(growConsentDecisions.brokerageId, ids));
+  await db.delete(growContactDncrStatuses).where(inArray(growContactDncrStatuses.brokerageId, ids));
+  await db.delete(growContactChannelSuppressions).where(inArray(growContactChannelSuppressions.brokerageId, ids));
+  await db.delete(growContactChannelConsents).where(inArray(growContactChannelConsents.brokerageId, ids));
+  await db.delete(growConsentPolicyVersions).where(inArray(growConsentPolicyVersions.brokerageId, ids));
 
   // F-05: Grow (grow_activities / grow_opportunities / grow_relationships) rows are deleted
   // first and scoped directly by brokerageId -- all three have non-cascading FKs onto
@@ -776,6 +786,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(aiInteractions).where(inArray(aiInteractions.brokerageId, ids));
 
   await db.delete(domainEvents).where(inArray(domainEvents.brokerageId, ids));
+  await db.delete(auditLogs).where(inArray(auditLogs.brokerageId, ids));
   await db.delete(parties).where(inArray(parties.brokerageId, ids));
 
   // Payments IDOR fix regression coverage: paymentMethods.payerId is
