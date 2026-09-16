@@ -127,6 +127,13 @@
       "when": 1789160467821,
       "tag": "0017_ae_grow_priority_5_property_intelligence",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789182067821,
+      "tag": "0018_ae_grow_priority_6_stage_f1_call_foundation",
+      "breakpoints": true
     }
   ]
 }

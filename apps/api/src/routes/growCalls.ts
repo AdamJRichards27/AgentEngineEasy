@@ -1,0 +1,331 @@
+// AE GROW Priority 6 Stage F1 — Call Foundation, Consent Model and Sandbox
+// Telephony.
+//
+// Authenticated call-session surface, entitlement-gated by
+// grow.calling.access (session lifecycle) and grow.calling.recording
+// (consent capture/withdrawal) — see packages/db/src/schema/billing.ts.
+// Nothing here places a real call: every session this router creates is
+// provider = "sandbox" (lib/telephony/sandboxProvider.ts), and lifecycle
+// progression beyond DIAL_REQUESTED only ever happens via the separate,
+// signature-verified webhook route (routes/growCallsWebhooks.ts).
+//
+// §13 — Contact 360 integration point. GET .../eligibility is the cheap
+// pre-check a "Call" button/action would use to decide whether to render
+// at all (entitlement + a usable phone number); POST / is "select Call"
+// (prepares a sandbox session and returns the exact number that would be
+// dialled, matching the "Call Sarah Mitchell / 0412 XXX XXX / [Confirm
+// Call] [Cancel]" UI example in the governing authorisation); POST
+// /:id/confirm is the explicit user confirmation before anything — even a
+// sandbox call — begins. This is a new, additive router rather than a
+// change to the existing, already well-tested contactsRouter
+// (routes/contacts.ts) — see the Stage F1 completion report for the full
+// reasoning.
+//
+// Every route re-resolves its own party/session against req.authedUser's
+// brokerageId — never trusts a client-supplied brokerageId or partyId
+// beyond what that lookup itself proves, matching this codebase's
+// established tenant-isolation convention (see e.g. growCommitmentActions.ts's
+// own header comment).
+
+import { Router } from "express";
+import { z } from "zod";
+import { and, eq } from "drizzle-orm";
+import { db, parties } from "@aee/db";
+import { requireAuth } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+import { normalizePhoneNumber, PhoneNumberValidationError } from "../lib/telephony/phoneNumber.js";
+import {
+  createCallSession,
+  confirmCallSession,
+  cancelCallSession,
+  getCallSessionForBrokerage,
+  GrowCallSessionValidationError,
+  GrowCallSessionNotFoundError,
+} from "../lib/telephony/callSessions.js";
+import {
+  captureRecordingConsent,
+  withdrawRecordingConsent,
+  GrowCallConsentValidationError,
+  GrowCallConsentNotFoundError,
+} from "../lib/telephony/consent.js";
+import { CallSessionTransitionError } from "../lib/telephony/stateMachine.js";
+
+export const growCallsRouter = Router();
+
+growCallsRouter.use(requireAuth);
+
+function parseIdParam(raw: string): number | null {
+  const id = Number(raw);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.calling.access"), async (req, res) => {
+  const partyId = parseIdParam(req.params.partyId);
+  if (partyId === null) {
+    res.status(400).json({ error: "Invalid contact id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+
+  const [party] = await db
+    .select()
+    .from(parties)
+    .where(and(eq(parties.id, partyId), eq(parties.brokerageId, authedUser.brokerageId)))
+    .limit(1);
+  if (!party) {
+    res.status(404).json({ error: "Contact not found." });
+    return;
+  }
+
+  if (!party.mobile || party.mobile.trim().length === 0) {
+    res.json({ eligible: false, reason: "NO_PHONE_NUMBER", displayNumber: null, requiresCountryConfirmation: false });
+    return;
+  }
+
+  try {
+    normalizePhoneNumber(party.mobile);
+    res.json({ eligible: true, reason: "OK", displayNumber: party.mobile, requiresCountryConfirmation: false });
+  } catch (err) {
+    if (err instanceof PhoneNumberValidationError && err.code === "AMBIGUOUS") {
+      res.json({ eligible: true, reason: "OK", displayNumber: party.mobile, requiresCountryConfirmation: true });
+      return;
+    }
+    res.json({ eligible: false, reason: "INVALID_PHONE_NUMBER", displayNumber: party.mobile, requiresCountryConfirmation: false });
+  }
+});
+
+const createCallSchema = z.object({
+  partyId: z.number().int().positive(),
+  destinationRaw: z.string().min(1).optional(),
+  assumedCountry: z.enum(["AU", "NZ"]).optional(),
+  recordingRequested: z.boolean().optional(),
+});
+
+growCallsRouter.post("/", requireEntitlement("grow.calling.access"), async (req, res) => {
+  const parsed = createCallSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const session = await createCallSession({
+      brokerageId: authedUser.brokerageId,
+      partyId: parsed.data.partyId,
+      initiatedByUserId: authedUser.id,
+      destinationRaw: parsed.data.destinationRaw ?? null,
+      assumedCountry: parsed.data.assumedCountry,
+      recordingRequested: parsed.data.recordingRequested ?? false,
+    });
+    res.status(201).json({ callSession: session });
+  } catch (err) {
+    if (err instanceof GrowCallSessionValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+growCallsRouter.get("/:id", requireEntitlement("grow.calling.access"), async (req, res) => {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const session = await getCallSessionForBrokerage(authedUser.brokerageId, id);
+    res.json({ callSession: session });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+growCallsRouter.post("/:id/confirm", requireEntitlement("grow.calling.access"), async (req, res) => {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const session = await confirmCallSession({ brokerageId: authedUser.brokerageId, callSessionId: id, confirmedByUserId: authedUser.id });
+    res.json({ callSession: session });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof CallSessionTransitionError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+const cancelCallSchema = z.object({ reason: z.string().max(500).optional() });
+
+growCallsRouter.post("/:id/cancel", requireEntitlement("grow.calling.access"), async (req, res) => {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const parsed = cancelCallSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const session = await cancelCallSession({
+      brokerageId: authedUser.brokerageId,
+      callSessionId: id,
+      cancelledByUserId: authedUser.id,
+      reason: parsed.data.reason ?? null,
+    });
+    res.json({ callSession: session });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallSessionValidationError || err instanceof CallSessionTransitionError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+const captureConsentSchema = z.object({
+  scope: z.enum(["PER_CALL", "STANDING"]),
+  source: z.enum(["VERBAL_ON_CALL", "WRITTEN", "ELECTRONIC", "OTHER"]),
+  jurisdiction: z.string().max(64).optional(),
+  consentVersion: z.string().max(128).optional(),
+  expiresAt: z.string().datetime().optional(),
+  evidenceMetadata: z.record(z.unknown()).optional(),
+});
+
+/** Captures consent associated with an EXISTING call session (either scope). */
+growCallsRouter.post("/:id/consent", requireEntitlement("grow.calling.recording"), async (req, res) => {
+  const id = parseIdParam(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const parsed = captureConsentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const session = await getCallSessionForBrokerage(authedUser.brokerageId, id);
+    const consent = await captureRecordingConsent({
+      brokerageId: authedUser.brokerageId,
+      partyId: session.partyId,
+      scope: parsed.data.scope,
+      source: parsed.data.source,
+      capturedByUserId: authedUser.id,
+      jurisdiction: parsed.data.jurisdiction ?? null,
+      consentVersion: parsed.data.consentVersion ?? null,
+      expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : null,
+      evidenceMetadata: parsed.data.evidenceMetadata ?? null,
+      callSessionId: session.id,
+    });
+    res.status(201).json({ consent });
+  } catch (err) {
+    if (err instanceof GrowCallSessionNotFoundError || err instanceof GrowCallConsentNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallConsentValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+const captureStandingConsentSchema = captureConsentSchema.extend({ scope: z.literal("STANDING") });
+
+/** Captures a STANDING consent proactively, independent of any specific call session. */
+growCallsRouter.post("/contacts/:partyId/consent", requireEntitlement("grow.calling.recording"), async (req, res) => {
+  const partyId = parseIdParam(req.params.partyId);
+  if (partyId === null) {
+    res.status(400).json({ error: "Invalid contact id." });
+    return;
+  }
+  const parsed = captureStandingConsentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request — only STANDING consent may be captured outside a specific call session.", details: parsed.error.flatten() });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const consent = await captureRecordingConsent({
+      brokerageId: authedUser.brokerageId,
+      partyId,
+      scope: "STANDING",
+      source: parsed.data.source,
+      capturedByUserId: authedUser.id,
+      jurisdiction: parsed.data.jurisdiction ?? null,
+      consentVersion: parsed.data.consentVersion ?? null,
+      expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : null,
+      evidenceMetadata: parsed.data.evidenceMetadata ?? null,
+    });
+    res.status(201).json({ consent });
+  } catch (err) {
+    if (err instanceof GrowCallConsentNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallConsentValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+const withdrawConsentSchema = z.object({ reason: z.string().max(500).optional() });
+
+growCallsRouter.post("/consent/:consentId/withdraw", requireEntitlement("grow.calling.recording"), async (req, res) => {
+  const consentId = parseIdParam(req.params.consentId);
+  if (consentId === null) {
+    res.status(400).json({ error: "Invalid consent id." });
+    return;
+  }
+  const parsed = withdrawConsentSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const consent = await withdrawRecordingConsent({
+      brokerageId: authedUser.brokerageId,
+      consentId,
+      withdrawnByUserId: authedUser.id,
+      withdrawalReason: parsed.data.reason ?? null,
+    });
+    res.json({ consent });
+  } catch (err) {
+    if (err instanceof GrowCallConsentNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err instanceof GrowCallConsentValidationError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
