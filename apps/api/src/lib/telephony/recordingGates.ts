@@ -1,11 +1,17 @@
 import type { GrowCallSession } from "@aee/db";
 import type { ConsentTransaction } from "../consentControlsPersistence.js";
 import { resolveEntitlements } from "../entitlements/resolver.js";
-import { evaluateOutboundCallEligibility, evaluateOutboundCallEligibilityInTransaction } from "./eligibility.js";
+import {
+  evaluateOutboundCallEligibility,
+  evaluateOutboundCallEligibilityInTransaction,
+  evaluateOutboundCallEligibilityReadOnly,
+} from "./eligibility.js";
 import { resolveRecordingPermission } from "./consent.js";
 import type { TelephonyProviderCapabilities } from "./provider.js";
 
-type OutboundDecision = Awaited<ReturnType<typeof evaluateOutboundCallEligibility>>;
+type OutboundDecision =
+  | Awaited<ReturnType<typeof evaluateOutboundCallEligibility>>
+  | Awaited<ReturnType<typeof evaluateOutboundCallEligibilityReadOnly>>;
 export const LIVE_RECORDING_APPROVAL_ENV = "LIVE_RECORDING_APPROVED" as const;
 
 export interface RecordingGateEvidence {
@@ -13,8 +19,14 @@ export interface RecordingGateEvidence {
   requested: boolean;
   allPassed: boolean;
   gates: {
-    entitlement: { passed: boolean; entitlementKey: "grow.calling.recording"; reason: string };
-    legalPolicy: { passed: boolean; jurisdiction: string | null; policyVersion: string | null; reason: string };
+    entitlement: { passed: boolean; entitlementKey: "grow.calling.recording"; reason: string; humanReason: string };
+    legalPolicy: {
+      passed: boolean;
+      jurisdiction: string | null;
+      policyVersion: string | null;
+      reason: string;
+      humanReason: string;
+    };
     legacyConsentAndDisclosure: {
       passed: boolean;
       consentId: number | null;
@@ -22,9 +34,10 @@ export interface RecordingGateEvidence {
       disclosedInCall: boolean;
       confirmedInCall: boolean;
       reason: string;
+      humanReason: string;
     };
-    adapterCapability: { passed: boolean; provider: string; reason: string };
-    operationalApproval: { passed: boolean; flag: string; reason: string };
+    adapterCapability: { passed: boolean; provider: string; reason: string; humanReason: string };
+    operationalApproval: { passed: boolean; flag: string; reason: string; humanReason: string };
   };
   outboundDecisionId: number | null;
   outboundReasonCode: string | null;
@@ -103,18 +116,44 @@ function capabilityAllows(capabilities: TelephonyProviderCapabilities | null | u
   return capabilities?.recording === true;
 }
 
+function recordingGateHumanReason(reason: string, providerName?: string): string {
+  const labels: Record<string, string> = {
+    ENTITLEMENT_ACTIVE: "Recording entitlement is active.",
+    ENTITLEMENT_MISSING: "Recording entitlement is not active.",
+    RECORDING_POLICY_ALLOWED: "The current recording policy allows this jurisdiction.",
+    RECORDING_POLICY_NOT_CONFIGURED: "No recording policy is configured for this jurisdiction.",
+    RECORDING_POLICY_JURISDICTION_MISMATCH: "The recording policy does not cover this jurisdiction.",
+    RECORDING_POLICY_NOT_ALLOWED: "The current recording policy does not allow recording.",
+    LEGACY_RECORDING_CONSENT_INVALID: "No active recording consent covers this call.",
+    IN_CALL_DISCLOSURE_REQUIRED: "In-call disclosure is required before recording can be considered.",
+    IN_CALL_CONFIRMATION_REQUIRED: "In-call confirmation is required before recording can be considered.",
+    LEGACY_CONSENT_AND_DISCLOSURE_CONFIRMED: "Consent and in-call disclosure and confirmation are present.",
+    ADAPTER_RECORDING_CAPABLE: "The active telephony adapter can record.",
+    ADAPTER_RECORDING_UNAVAILABLE: `The ${providerName ?? "active"} telephony adapter cannot record.`,
+    OPERATIONAL_RECORDING_APPROVED: "Operational recording approval is enabled.",
+    OPERATIONAL_RECORDING_NOT_APPROVED: "Operational recording approval is not enabled.",
+  };
+  return labels[reason] ?? reason.replaceAll("_", " ").toLowerCase();
+}
+
 /**
- * Evaluate exactly the five F2 recording gates.  `recordingRequested` is an
- * input to the operation, not a sixth permission gate.  This function is
- * called at the enable action (after in-call disclosure and confirmation),
- * never at READY/pre-call time.
+ * Evaluate exactly the five F2 recording gates. `recordingRequested` is an
+ * input to the operation, not a sixth permission gate. Mutating callers use
+ * the canonical audited evaluator at enable time; presentation callers may
+ * set readOnly=true, which uses the same current state and pure evaluator
+ * without inserting a consent decision. Pre-call presentation deliberately
+ * supplies missing disclosure/confirmation as false.
  */
 export async function evaluateRecordingGates(input: {
-  session: GrowCallSession;
+  session: Pick<
+    GrowCallSession,
+    "brokerageId" | "partyId" | "recordingRequested" | "recordingStatus" | "recordingConsentId" | "destinationCountry"
+  >;
   actor: { id: number; role: string; brokerageId: number };
   providerName: string;
   providerCapabilities: TelephonyProviderCapabilities;
   tx?: ConsentTransaction;
+  readOnly?: boolean;
 }): Promise<RecordingGateEvaluation> {
   const session = input.session;
   const evaluatedAt = new Date().toISOString();
@@ -134,6 +173,14 @@ export async function evaluateRecordingGates(input: {
         jurisdiction: session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null,
       });
       if (recorded.evaluation.decision === "ELIGIBLE") outboundDecision = recorded;
+    } else if (input.readOnly) {
+      outboundDecision = await evaluateOutboundCallEligibilityReadOnly({
+        brokerageId: session.brokerageId,
+        partyId: session.partyId,
+        decidedByUserId: input.actor.id,
+        jurisdiction: session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null,
+        throwIfIneligible: false,
+      });
     } else {
       outboundDecision = await evaluateOutboundCallEligibility({
         brokerageId: session.brokerageId,
@@ -151,10 +198,15 @@ export async function evaluateRecordingGates(input: {
   const entitlementKeys = await resolveEntitlements(input.actor).catch(() => new Set<string>());
   const entitlementPassed = entitlementKeys.has("grow.calling.recording");
 
-  const decisionEvidence = outboundDecision?.decision.evidence;
+  const decisionEvidence = outboundDecision
+    ? "evidence" in outboundDecision
+      ? outboundDecision.evidence
+      : outboundDecision.decision.evidence
+    : undefined;
   const evidenceRecord = asRecord(decisionEvidence);
   const policySnapshot = evidenceRecord?.policySnapshot;
-  const jurisdiction = outboundDecision?.evaluation.jurisdiction ?? session.destinationCountry ?? null;
+  const sessionJurisdiction = session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null;
+  const jurisdiction = outboundDecision?.evaluation.jurisdiction ?? sessionJurisdiction;
   const policyResult = legalRecordingPolicyAllows(policySnapshot, jurisdiction);
 
   const legacyConsent = await resolveRecordingPermission({
@@ -184,12 +236,14 @@ export async function evaluateRecordingGates(input: {
         passed: entitlementPassed,
         entitlementKey: "grow.calling.recording",
         reason: entitlementPassed ? "ENTITLEMENT_ACTIVE" : "ENTITLEMENT_MISSING",
+        humanReason: recordingGateHumanReason(entitlementPassed ? "ENTITLEMENT_ACTIVE" : "ENTITLEMENT_MISSING"),
       },
       legalPolicy: {
         passed: policyResult.passed,
         jurisdiction,
         policyVersion: outboundDecision?.evaluation.policyVersion ?? null,
         reason: policyResult.reason,
+        humanReason: recordingGateHumanReason(policyResult.reason),
       },
       legacyConsentAndDisclosure: {
         passed: legacyAndDisclosurePassed,
@@ -204,19 +258,35 @@ export async function evaluateRecordingGates(input: {
             : !confirmedInCall
               ? "IN_CALL_CONFIRMATION_REQUIRED"
               : "LEGACY_CONSENT_AND_DISCLOSURE_CONFIRMED",
+        humanReason: recordingGateHumanReason(
+          !legacyConsent.permitted
+            ? "LEGACY_RECORDING_CONSENT_INVALID"
+            : !disclosedInCall
+              ? "IN_CALL_DISCLOSURE_REQUIRED"
+              : !confirmedInCall
+                ? "IN_CALL_CONFIRMATION_REQUIRED"
+                : "LEGACY_CONSENT_AND_DISCLOSURE_CONFIRMED",
+        ),
       },
       adapterCapability: {
         passed: capabilityPassed,
         provider: input.providerName,
         reason: capabilityPassed ? "ADAPTER_RECORDING_CAPABLE" : "ADAPTER_RECORDING_UNAVAILABLE",
+        humanReason: recordingGateHumanReason(
+          capabilityPassed ? "ADAPTER_RECORDING_CAPABLE" : "ADAPTER_RECORDING_UNAVAILABLE",
+          input.providerName,
+        ),
       },
       operationalApproval: {
         passed: operationalPassed,
         flag: LIVE_RECORDING_APPROVAL_ENV,
         reason: operationalPassed ? "OPERATIONAL_RECORDING_APPROVED" : "OPERATIONAL_RECORDING_NOT_APPROVED",
+        humanReason: recordingGateHumanReason(
+          operationalPassed ? "OPERATIONAL_RECORDING_APPROVED" : "OPERATIONAL_RECORDING_NOT_APPROVED",
+        ),
       },
     },
-    outboundDecisionId: outboundDecision?.decision.id ?? null,
+    outboundDecisionId: outboundDecision?.decision?.id ?? null,
     outboundReasonCode: outboundDecision?.evaluation.reasonCode ?? null,
   };
   // Exactly five recording gates are represented above.  `requested` is the
@@ -230,4 +300,36 @@ export async function evaluateRecordingGates(input: {
 
 export function recordingEvidenceSummary(evaluation: RecordingGateEvaluation): string {
   return JSON.stringify(evaluation.evidence);
+}
+
+/**
+ * A Contact 360 eligibility read has no persisted call session yet. Evaluate
+ * the same five gates against an explicit pre-call shape so the UI can show
+ * every current gate without treating standing consent as a recording grant.
+ * Disclosure and confirmation are intentionally false until the connected
+ * call actions capture them; this function is read-only and never creates a
+ * session or a consent decision.
+ */
+export async function evaluatePreCallRecordingGates(input: {
+  brokerageId: number;
+  partyId: number;
+  actor: { id: number; role: string; brokerageId: number };
+  jurisdiction: "AU" | "NZ" | null;
+  providerName: string;
+  providerCapabilities: TelephonyProviderCapabilities;
+}): Promise<RecordingGateEvaluation> {
+  return evaluateRecordingGates({
+    session: {
+      brokerageId: input.brokerageId,
+      partyId: input.partyId,
+      destinationCountry: input.jurisdiction ?? "UNKNOWN",
+      recordingRequested: true,
+      recordingConsentId: null,
+      recordingStatus: "UNRECORDED",
+    },
+    actor: input.actor,
+    providerName: input.providerName,
+    providerCapabilities: input.providerCapabilities,
+    readOnly: true,
+  });
 }

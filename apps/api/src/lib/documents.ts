@@ -372,7 +372,7 @@ export interface DocumentContentResult {
   contentType: string;
   displayFilename: string;
   versionId: number | null;
-  propertyId: number;
+  propertyId: number | null;
 }
 
 /**

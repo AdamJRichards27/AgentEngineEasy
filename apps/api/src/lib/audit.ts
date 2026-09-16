@@ -8,7 +8,7 @@ export interface AuditLogInput {
   action: string;
   recordType: string;
   recordId: string;
-  propertyId?: number;
+  propertyId?: number | null;
   previousValue?: string;
   updatedValue?: string;
   providerReference?: string;

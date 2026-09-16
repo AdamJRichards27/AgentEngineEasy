@@ -35,6 +35,7 @@ import {
 } from "./consentControls.js";
 
 export type ConsentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type ConsentExecutor = ConsentTransaction | typeof db;
 const CONSENT_ADVISORY_LOCK_NAMESPACE = 2076418031;
 
 export async function writeAuditInTransaction(tx: ConsentTransaction, input: AuditLogInput): Promise<void> {
@@ -96,7 +97,7 @@ export interface CaptureConsentStateInput {
   supersedesConsentId?: number | null;
 }
 
-async function assertPartyInBrokerage(tx: ConsentTransaction, brokerageId: number, partyId: number): Promise<void> {
+async function assertPartyInBrokerage(tx: ConsentExecutor, brokerageId: number, partyId: number): Promise<void> {
   const [party] = await tx
     .select({ id: parties.id })
     .from(parties)
@@ -407,7 +408,7 @@ export async function recordConsentSuppression(input: RecordSuppressionInput) {
 }
 
 async function latestConsent(
-  tx: ConsentTransaction,
+  tx: ConsentExecutor,
   brokerageId: number,
   partyId: number,
   channel: string,
@@ -433,7 +434,7 @@ async function latestConsent(
   return row ?? null;
 }
 
-async function latestDncr(tx: ConsentTransaction, brokerageId: number, partyId: number, channel: string) {
+async function latestDncr(tx: ConsentExecutor, brokerageId: number, partyId: number, channel: string) {
   const [row] = await tx
     .select()
     .from(growContactDncrStatuses)
@@ -449,7 +450,7 @@ async function latestDncr(tx: ConsentTransaction, brokerageId: number, partyId: 
   return row ?? null;
 }
 
-async function latestSuppression(tx: ConsentTransaction, brokerageId: number, partyId: number, channel: string, now: Date) {
+async function latestSuppression(tx: ConsentExecutor, brokerageId: number, partyId: number, channel: string, now: Date) {
   const [row] = await tx
     .select()
     .from(growContactChannelSuppressions)
@@ -467,7 +468,7 @@ async function latestSuppression(tx: ConsentTransaction, brokerageId: number, pa
 }
 
 async function policyFor(
-  tx: ConsentTransaction,
+  tx: ConsentExecutor,
   brokerageId: number,
   jurisdiction: string | null | undefined,
   now = new Date(),
@@ -503,6 +504,68 @@ export interface EvaluateAndRecordConsentDecisionInput {
 export interface RecordedConsentDecision {
   decision: typeof growConsentDecisions.$inferSelect;
   evaluation: ConsentDecisionResult;
+}
+
+/**
+ * Presentation reads use the same current-state lookups and pure evaluator as
+ * the audited decision boundary, but deliberately do not append a decision or
+ * audit row.  A read must never manufacture an id that could be mistaken for
+ * an enforcement decision; mutating call actions continue to use
+ * RecordedConsentDecision above.
+ */
+export interface ReadonlyConsentDecision {
+  decision: null;
+  evaluation: ConsentDecisionResult;
+  evidence: {
+    consentSnapshot: unknown;
+    dncrSnapshot: unknown;
+    suppressionSnapshot: unknown;
+    policySnapshot: unknown;
+  };
+}
+
+export async function evaluateConsentDecisionReadOnly(
+  input: EvaluateAndRecordConsentDecisionInput,
+): Promise<ReadonlyConsentDecision> {
+  await assertPartyInBrokerage(db, input.brokerageId, input.partyId);
+  if (!input.purpose.trim() || !input.scope.trim()) {
+    throw new Error("Consent decision purpose and scope are required.");
+  }
+  if (!GROW_CONSENT_CHANNELS.includes(input.channel)) {
+    throw new Error(`Unsupported channel: ${input.channel}`);
+  }
+
+  const now = new Date();
+  const consent = await latestConsent(db, input.brokerageId, input.partyId, input.channel, input.purpose, input.scope);
+  // Keep the jurisdiction and policy resolution exactly aligned with the
+  // audited evaluator. The caller's jurisdiction remains an assertion only;
+  // recorded consent is the canonical policy jurisdiction.
+  const jurisdiction = consent?.jurisdiction ?? null;
+  const policy = await policyFor(db, input.brokerageId, jurisdiction, now);
+  const dncr = await latestDncr(db, input.brokerageId, input.partyId, input.channel);
+  const suppression = await latestSuppression(db, input.brokerageId, input.partyId, input.channel, now);
+  const evaluation = evaluateConsentDecision({
+    channel: input.channel,
+    purpose: input.purpose,
+    scope: input.scope,
+    jurisdiction: input.jurisdiction,
+    consent: consent as ConsentRecordForEvaluation | null,
+    dncr: dncr as DncrStatusForEvaluation | null,
+    suppression: suppression as SuppressionForEvaluation | null,
+    policy: policy as ConsentPolicyForEvaluation | null,
+    now,
+  });
+
+  return {
+    decision: null,
+    evaluation,
+    evidence: {
+      consentSnapshot: consent,
+      dncrSnapshot: dncr,
+      suppressionSnapshot: suppression,
+      policySnapshot: policy,
+    },
+  };
 }
 
 /**

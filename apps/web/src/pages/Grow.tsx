@@ -200,6 +200,143 @@ interface GrowContact360 {
   intelligence: ContactIntelligenceSummary;
 }
 
+type CallEligibilityStatus =
+  | "Ready to call"
+  | "Consent needs review"
+  | "Do Not Call check required"
+  | "Calling unavailable at this time";
+
+interface GrowCallFiveGateResult {
+  evaluatedAt: string;
+  permitted: boolean;
+  allPassed: boolean;
+  gates: {
+    entitlement: { passed: boolean; entitlementKey: string; reason: string; humanReason: string };
+    legalPolicy: {
+      passed: boolean;
+      jurisdiction: string | null;
+      policyVersion: string | null;
+      reason: string;
+      humanReason: string;
+    };
+    legacyConsentAndDisclosure: {
+      passed: boolean;
+      consentId: number | null;
+      consentJurisdiction: string | null;
+      disclosedInCall: boolean;
+      confirmedInCall: boolean;
+      reason: string;
+      humanReason: string;
+    };
+    adapterCapability: { passed: boolean; provider: string; reason: string; humanReason: string };
+    operationalApproval: { passed: boolean; flag: string; reason: string; humanReason: string };
+  };
+  outboundDecisionId: number | null;
+  outboundReasonCode: string | null;
+}
+
+interface GrowCallEligibility {
+  eligible: boolean;
+  status: CallEligibilityStatus;
+  eligibilityStatus?: CallEligibilityStatus;
+  reason: string;
+  displayNumber: string | null;
+  requiresCountryConfirmation: boolean;
+  consentDecisionId?: number | null;
+  recording: {
+    available: boolean;
+    permitted: boolean;
+    status: "Recording not permitted" | "Recording available";
+    statusCode: string;
+    reason: string;
+    provider: string;
+    fiveGateResult: GrowCallFiveGateResult;
+  };
+}
+
+interface GrowCallSession {
+  id: number;
+  partyId: number;
+  destinationRaw: string;
+  destinationNormalized: string;
+  destinationCountry: string;
+  provider: string;
+  providerCallId: string | null;
+  status: string;
+  recordingRequested: boolean;
+  recordingPermitted: boolean;
+  recordingStatus: string;
+  confirmedAt: string | null;
+  startedAt: string | null;
+  answeredAt: string | null;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  failureReason: string | null;
+  cancelledReason: string | null;
+}
+
+interface GrowCallSessionRead {
+  callSession: GrowCallSession;
+  recording: {
+    available: boolean;
+    permitted: boolean;
+    status: "Recording not permitted" | "Recording available";
+    statusCode: string;
+    provider: string;
+    fiveGateResult: GrowCallFiveGateResult;
+  };
+}
+
+const TERMINAL_CALL_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+
+function sandboxCallStatusLabel(status: string): string {
+  switch (status) {
+    case "READY":
+      return "Ready to confirm";
+    case "DIAL_REQUESTED":
+      return "Sandbox dial requested";
+    case "RINGING":
+      return "Sandbox ringing";
+    case "CONNECTED":
+      return "Connected in sandbox";
+    case "COMPLETED":
+      return "Sandbox call completed";
+    case "FAILED":
+      return "Sandbox call failed";
+    case "CANCELLED":
+      return "Sandbox call cancelled";
+    default:
+      return "Preparing sandbox call";
+  }
+}
+
+function callErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.friendly : fallback;
+}
+
+function recordingGateName(key: string): string {
+  return key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, (first) => first.toUpperCase())
+    .trim();
+}
+
+function RecordingGateReasons({ result }: { result: GrowCallFiveGateResult }) {
+  return (
+    <ul className="grow-call-gates">
+      {Object.entries(result.gates).map(([key, gate]) => (
+        <li key={key}>
+          <div>
+            <strong>{recordingGateName(key)}</strong>
+            <div className="muted">{gate.humanReason}</div>
+          </div>
+          <span className={gate.passed ? "text-success" : "muted"}>{gate.passed ? "Passed" : "Not passed"}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // Minimal proving UI for Stage A (ARCHITECTURE.md Grow Subscription/Entitlement/Core Data
 // build): a locked upgrade screen for brokerages without grow.access, and a real workspace once
 // entitled. This page's own /grow/access check is a rendering convenience only - every
@@ -1003,6 +1140,300 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
   );
 }
 
+function GrowContactCallPanel({ partyId, contactName }: { partyId: number; contactName: string }) {
+  const queryClient = useQueryClient();
+  const [recordingRequested, setRecordingRequested] = useState(false);
+  const [assumedCountry, setAssumedCountry] = useState<"" | "AU" | "NZ">("");
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  const [sessionFromMutation, setSessionFromMutation] = useState<GrowCallSession | null>(null);
+
+  const eligibility = useQuery<GrowCallEligibility>({
+    queryKey: ["grow-call-eligibility", partyId, assumedCountry],
+    queryFn: () =>
+      apiFetch(
+        `/grow/calls/contacts/${partyId}/eligibility${assumedCountry ? `?assumedCountry=${assumedCountry}` : ""}`,
+      ),
+  });
+
+  const session = useQuery<GrowCallSessionRead>({
+    queryKey: ["grow-call-session", activeSessionId],
+    queryFn: () => apiFetch(`/grow/calls/${activeSessionId}`),
+    enabled: activeSessionId !== null,
+    refetchInterval: (query) => {
+      const currentStatus = query.state.data?.callSession.status;
+      return activeSessionId !== null && (!currentStatus || !TERMINAL_CALL_STATUSES.has(currentStatus)) ? 3000 : false;
+    },
+  });
+
+  function refreshSession(sessionId: number) {
+    queryClient.invalidateQueries({ queryKey: ["grow-call-session", sessionId] });
+  }
+
+  const createCall = useMutation<{ callSession: GrowCallSession }, unknown, void>({
+    mutationFn: () =>
+      apiFetch("/grow/calls", {
+        method: "POST",
+        body: JSON.stringify({
+          partyId,
+          ...(assumedCountry ? { assumedCountry } : {}),
+          recordingRequested,
+        }),
+      }),
+    onSuccess: (result) => {
+      setActiveSessionId(result.callSession.id);
+      setSessionFromMutation(result.callSession);
+    },
+  });
+
+  const confirmCall = useMutation<{ callSession: GrowCallSession }, unknown, number>({
+    mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/confirm`, { method: "POST" }),
+    onSuccess: (result, sessionId) => {
+      setSessionFromMutation(result.callSession);
+      refreshSession(sessionId);
+    },
+  });
+
+  const cancelCall = useMutation<{ callSession: GrowCallSession }, unknown, number>({
+    mutationFn: (sessionId) =>
+      apiFetch(`/grow/calls/${sessionId}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "Cancelled from Contact 360." }),
+      }),
+    onSuccess: (result, sessionId) => {
+      setSessionFromMutation(result.callSession);
+      refreshSession(sessionId);
+    },
+  });
+
+  const discloseRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
+    mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/disclosure`, { method: "POST" }),
+    onSuccess: (result, sessionId) => {
+      setSessionFromMutation(result.callSession);
+      refreshSession(sessionId);
+    },
+  });
+
+  const confirmRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
+    mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/confirm`, { method: "POST" }),
+    onSuccess: (result, sessionId) => {
+      setSessionFromMutation(result.callSession);
+      refreshSession(sessionId);
+    },
+  });
+
+  const declineRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
+    mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/decline`, { method: "POST" }),
+    onSuccess: (result, sessionId) => {
+      setSessionFromMutation(result.callSession);
+      refreshSession(sessionId);
+    },
+  });
+
+  const activeSession = session.data?.callSession ?? sessionFromMutation;
+  const recordingPresentation = session.data?.recording;
+  const mutationError =
+    createCall.error ??
+    confirmCall.error ??
+    cancelCall.error ??
+    discloseRecording.error ??
+    confirmRecording.error ??
+    declineRecording.error;
+  const isMutating =
+    createCall.isPending ||
+    confirmCall.isPending ||
+    cancelCall.isPending ||
+    discloseRecording.isPending ||
+    confirmRecording.isPending ||
+    declineRecording.isPending;
+  const eligibilityStatus = eligibility.data?.status;
+  const statusPillClass =
+    eligibilityStatus === "Ready to call" ? "pill-success" : eligibilityStatus ? "pill-warning" : "";
+
+  function startAnotherSandboxCall() {
+    setActiveSessionId(null);
+    setSessionFromMutation(null);
+    setRecordingRequested(false);
+    setAssumedCountry("");
+    createCall.reset();
+    confirmCall.reset();
+    cancelCall.reset();
+    discloseRecording.reset();
+    confirmRecording.reset();
+    declineRecording.reset();
+  }
+
+  return (
+    <section className="card grow-call-panel">
+      <div className="grow-call-panel-header">
+        <div>
+          <h2>Call {contactName}</h2>
+          <p className="muted">Sandbox only — no live call is placed.</p>
+        </div>
+        {!activeSession && eligibilityStatus && <span className={`pill ${statusPillClass}`}>{eligibilityStatus}</span>}
+      </div>
+
+      {eligibility.isLoading && <p className="muted">Checking call eligibility…</p>}
+      {eligibility.isError && (
+        <p className="error-text">
+          {callErrorMessage(eligibility.error, "Call eligibility could not be loaded. Refresh and try again.")}
+        </p>
+      )}
+      {eligibility.data && !activeSession && (
+        <>
+          <p className="muted">
+            {eligibility.data.displayNumber ? `Number on file: ${eligibility.data.displayNumber}` : "No callable phone number on file."}
+          </p>
+          <p className="muted">
+            Recording: <strong>{eligibility.data.recording.status}</strong>. {eligibility.data.recording.reason}
+          </p>
+          <RecordingGateReasons result={eligibility.data.recording.fiveGateResult} />
+          {eligibility.data.requiresCountryConfirmation && (
+            <label className="grow-call-country">
+              Phone country
+              <select value={assumedCountry} onChange={(event) => setAssumedCountry(event.target.value as "" | "AU" | "NZ")} disabled={isMutating}>
+                <option value="">Select country</option>
+                <option value="AU">Australia (AU)</option>
+                <option value="NZ">New Zealand (NZ)</option>
+              </select>
+              <span className="muted">The server will re-validate the selected country and consent before preparing the call.</span>
+            </label>
+          )}
+          {eligibility.data.eligible && (
+            <label className="grow-call-recording-request">
+              <input
+                type="checkbox"
+                checked={recordingRequested}
+                onChange={(event) => setRecordingRequested(event.target.checked)}
+                disabled={isMutating}
+              />{" "}
+              Request recording (the server re-checks this in-call)
+            </label>
+          )}
+          <div className="grow-call-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              disabled={!eligibility.data.eligible || (eligibility.data.requiresCountryConfirmation && !assumedCountry) || isMutating}
+              onClick={() => createCall.mutate()}
+            >
+              {createCall.isPending ? "Preparing…" : "Call"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {activeSession && (
+        <div className="grow-call-session">
+          <div className="grow-call-session-header">
+            <div>
+              <div className="eyebrow">Call status</div>
+              <strong>{sandboxCallStatusLabel(activeSession.status)}</strong>
+            </div>
+            <span className="pill">{activeSession.provider === "sandbox" ? "Sandbox" : activeSession.provider}</span>
+          </div>
+          <p className="muted">
+            Number prepared by the server: {activeSession.destinationNormalized}
+          </p>
+          {activeSession.status === "READY" && (
+            <p className="muted">
+              Confirm to request the sandbox dial. The number is checked again by the server before dialling.
+            </p>
+          )}
+          {activeSession.status === "DIAL_REQUESTED" || activeSession.status === "RINGING" ? (
+            <p className="muted">Sandbox lifecycle updates appear here when the server receives them; no live connection is promised.</p>
+          ) : null}
+          {activeSession.status === "CONNECTED" && <p className="muted">The sandbox reports this call as connected.</p>}
+          {activeSession.status === "FAILED" && activeSession.failureReason && <p className="error-text">{activeSession.failureReason}</p>}
+          {activeSession.status === "CANCELLED" && activeSession.cancelledReason && <p className="muted">{activeSession.cancelledReason}</p>}
+          {activeSession.status === "COMPLETED" && activeSession.durationSeconds !== null && (
+            <p className="muted">Sandbox duration: {activeSession.durationSeconds}s</p>
+          )}
+
+          {session.isLoading && <p className="muted">Refreshing call status…</p>}
+          {session.isError && (
+            <p className="error-text">
+              {callErrorMessage(session.error, "Call status could not be refreshed. Try again.")}
+            </p>
+          )}
+          {activeSession.status === "READY" && (
+            <div className="grow-call-actions">
+              <button
+                type="button"
+                className="btn btn-primary btn-small"
+                disabled={isMutating}
+                onClick={() => confirmCall.mutate(activeSession.id)}
+              >
+                {confirmCall.isPending ? "Confirming…" : "Confirm Call"}
+              </button>
+              <button type="button" className="btn btn-secondary btn-small" disabled={isMutating} onClick={() => cancelCall.mutate(activeSession.id)}>
+                Cancel
+              </button>
+            </div>
+          )}
+
+          <div className="grow-call-recording">
+            <div className="eyebrow">Recording decision</div>
+            {!recordingPresentation && session.isLoading && <p className="muted">Checking the server recording gates…</p>}
+            {recordingPresentation && (
+              <>
+                <p>
+                  <strong>{recordingPresentation.status}</strong>
+                  <span className="muted"> · {recordingPresentation.provider} provider</span>
+                </p>
+                <RecordingGateReasons result={recordingPresentation.fiveGateResult} />
+                {activeSession.status === "CONNECTED" && activeSession.recordingRequested && (
+                  <div className="grow-call-actions">
+                    {(recordingPresentation.statusCode === "DISCLOSURE_REQUIRED" ||
+                      recordingPresentation.statusCode === "UNRECORDED") && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-small"
+                        disabled={isMutating}
+                        onClick={() => discloseRecording.mutate(activeSession.id)}
+                      >
+                        {discloseRecording.isPending ? "Saving disclosure…" : "Disclose recording"}
+                      </button>
+                    )}
+                    {recordingPresentation.statusCode === "DISCLOSED" && (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-small"
+                          disabled={isMutating}
+                          onClick={() => confirmRecording.mutate(activeSession.id)}
+                        >
+                          {confirmRecording.isPending ? "Checking gates…" : "Confirm recording"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-small"
+                          disabled={isMutating}
+                          onClick={() => declineRecording.mutate(activeSession.id)}
+                        >
+                          {declineRecording.isPending ? "Saving…" : "Decline recording"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {mutationError ? (
+            <p className="error-text">{callErrorMessage(mutationError, "The server did not apply that call action. Refresh and try again.")}</p>
+          ) : null}
+          {TERMINAL_CALL_STATUSES.has(activeSession.status) && (
+            <button type="button" className="btn btn-link btn-small" onClick={startAnotherSandboxCall}>
+              Start another sandbox call
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // AE GROW Priority 2 §11 — Contact 360 detail. One request (GET /grow/contacts/:partyId, built
 // in this priority's API layer) backs the whole screen — header/identity, relationship-role
 // summary, household relationships, properties, the Relationship Timeline, notes/activities/
@@ -1172,6 +1603,8 @@ function GrowContactDetail({
           })}
         </div>
       </div>
+
+      <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />
 
       <div className="stat-tiles">
         <StatTile label="Related Properties" value={data.intelligence.relatedPropertyCount} />

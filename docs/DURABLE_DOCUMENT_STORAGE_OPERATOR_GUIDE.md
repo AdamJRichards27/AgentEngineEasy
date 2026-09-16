@@ -105,6 +105,7 @@ is invalid.
 | `DOCUMENT_STORAGE_SIGNED_DOWNLOAD_SECONDS` | Optional integer, 1–900; defaults to 300. |
 | `DOCUMENT_STORAGE_SIGNING_SECRET` | Dedicated random secret of at least 32 bytes for revocable application download links. |
 | `DOCUMENT_STORAGE_RETENTION_CLASSES` | Optional comma-separated safe class names; coordinate it with provider retention policy. |
+| `TELEPHONY_RECORDING_RETENTION_CLASS` | Optional named class for the Step 3 internal call-recording metadata seam; defaults to `legal-pending`, which is a legal-review label and not a statutory retention period. The value must appear in `DOCUMENT_STORAGE_RETENTION_CLASSES`. |
 
 The S3 adapter sets `x-amz-acl: private` and server-side encryption on every write. The endpoint
 must accept `PUT`, `GET`, `HEAD`, and `DELETE`, checksum and metadata headers, SSE-S3 (`AES256`)

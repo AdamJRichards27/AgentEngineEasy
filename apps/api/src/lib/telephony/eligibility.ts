@@ -1,8 +1,10 @@
 import {
   evaluateAndRecordConsentDecision,
   evaluateAndRecordConsentDecisionInTransaction,
+  evaluateConsentDecisionReadOnly,
   type ConsentTransaction,
   type EvaluateAndRecordConsentDecisionInput,
+  type ReadonlyConsentDecision,
   type RecordedConsentDecision,
 } from "../consentControlsPersistence.js";
 import type { GrowConsentDecisionStatus } from "@aee/db";
@@ -81,10 +83,46 @@ export async function evaluateOutboundCallEligibility(input: {
   return recorded;
 }
 
+/**
+ * Read-only counterpart for status/presentation polling. It uses the same
+ * canonical current-state lookups and pure evaluator but never appends
+ * consent-decision evidence. Call creation, confirmation, and recording
+ * enablement must continue using evaluateOutboundCallEligibility() or its
+ * transaction-scoped equivalent below.
+ */
+export async function evaluateOutboundCallEligibilityReadOnly(input: {
+  brokerageId: number;
+  partyId: number;
+  decidedByUserId?: number | null;
+  jurisdiction?: "AU" | "NZ" | null;
+  throwIfIneligible?: boolean;
+}): Promise<ReadonlyConsentDecision> {
+  let evaluated: ReadonlyConsentDecision;
+  try {
+    evaluated = await evaluateConsentDecisionReadOnly(outboundDecisionInput(input));
+  } catch (err) {
+    throw new CallConsentEligibilityError(
+      err instanceof Error ? err.message : "Outbound call consent could not be evaluated.",
+      { reasonCode: "CONSENT_EVIDENCE_UNAVAILABLE" },
+    );
+  }
+  if (evaluated.evaluation.decision !== "ELIGIBLE" && input.throwIfIneligible !== false) {
+    throw new CallConsentEligibilityError(
+      `Outbound call consent is ${evaluated.evaluation.decision.toLowerCase()}: ${evaluated.evaluation.reasonCode}.`,
+      {
+        decisionId: null,
+        decision: evaluated.evaluation.decision,
+        reasonCode: evaluated.evaluation.reasonCode,
+      },
+    );
+  }
+  return evaluated;
+}
+
 function outboundDecisionInput(input: {
   brokerageId: number;
   partyId: number;
-  decidedByUserId: number;
+  decidedByUserId?: number | null;
   jurisdiction?: "AU" | "NZ" | null;
 }): EvaluateAndRecordConsentDecisionInput {
   return {
