@@ -1,5 +1,5 @@
 import { logger } from "@aee/events";
-import { mustForceMockVoiceTranscriptionProvider } from "../../env.js";
+import { mustForceMockCallTranscriptionProvider, mustForceMockVoiceTranscriptionProvider } from "../../env.js";
 import { MockTranscriptionProvider } from "./mockTranscriptionProvider.js";
 import { DeepgramTranscriptionProvider } from "./deepgramTranscriptionProvider.js";
 import { TranscriptionProviderError } from "./types.js";
@@ -78,6 +78,55 @@ export function buildVoiceTranscriptionProvider(config: VoiceTranscriptionConfig
         'Live voice transcription is not yet approved for this environment (LIVE_VOICE_TRANSCRIPTION_APPROVED is not set to "true").',
       );
     }
+    const apiKey = process.env.DEEPGRAM_API_KEY;
+    if (typeof apiKey !== "string" || apiKey.length === 0) {
+      throw new TranscriptionProviderError("deepgram", "missing_credentials", "DEEPGRAM_API_KEY is not configured.");
+    }
+    return new DeepgramTranscriptionProvider(apiKey);
+  }
+
+  throw new TranscriptionProviderError(config.provider, "provider_error", `Unknown transcription provider "${config.provider}".`);
+}
+
+/**
+ * Builds the provider used for recorded call audio (F3 Part B).
+ *
+ * This intentionally shares the Stage E provider classes and interface, but
+ * has its own approval gate. In particular, LIVE_VOICE_TRANSCRIPTION_APPROVED
+ * and LIVE_TELEPHONY_APPROVED must never unlock this factory. The gate is
+ * checked before the test seam can return a non-mock fake, so tests cannot
+ * accidentally create a path that production would not be allowed to use.
+ */
+export function buildCallTranscriptionProvider(config: VoiceTranscriptionConfig): TranscriptionProvider {
+  if (config.provider === "mock") {
+    // A mock is safe in every environment. A non-mock test seam, however,
+    // must not be able to masquerade as the mock without the call approval.
+    if (providerOverride !== null && providerOverride.name !== "mock" && mustForceMockCallTranscriptionProvider()) {
+      logger.warn("call_transcription_provider_locked_to_mock_pilot_policy", { requestedProvider: config.provider });
+      throw new TranscriptionProviderError(
+        providerOverride.name,
+        "live_provider_disabled",
+        'Live call transcription is not approved (LIVE_CALL_TRANSCRIPTION_APPROVED is not set to "true").',
+      );
+    }
+    return providerOverride ?? new MockTranscriptionProvider();
+  }
+
+  if (config.provider === "deepgram") {
+    // Unlike the Stage E voice-input gate, this is fail-closed in every
+    // environment, not only NODE_ENV=production.
+    if (mustForceMockCallTranscriptionProvider()) {
+      logger.warn("call_transcription_provider_locked_to_mock_pilot_policy", { requestedProvider: config.provider });
+      throw new TranscriptionProviderError(
+        "deepgram",
+        "live_provider_disabled",
+        'Live call transcription is not approved (LIVE_CALL_TRANSCRIPTION_APPROVED is not set to "true").',
+      );
+    }
+    // The existing seam remains useful for provider-independent tests, but
+    // only after the call-specific approval above has passed.
+    if (providerOverride !== null) return providerOverride;
+
     const apiKey = process.env.DEEPGRAM_API_KEY;
     if (typeof apiKey !== "string" || apiKey.length === 0) {
       throw new TranscriptionProviderError("deepgram", "missing_credentials", "DEEPGRAM_API_KEY is not configured.");

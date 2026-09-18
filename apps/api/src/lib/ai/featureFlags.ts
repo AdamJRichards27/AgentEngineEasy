@@ -26,3 +26,10 @@ export function isRoleEnabled(role: AiRole): boolean {
   if (isAiEnabled() === false) return false;
   return envBool(ROLE_FLAG_ENV[role], role === "copilot");
 }
+
+// Optional internal call-transcription drafting uses the same master-switch
+// and boolean parsing policy as role flags, without inventing another role.
+export function isGrowCallSummaryEnabled(): boolean {
+  if (isAiEnabled() === false) return false;
+  return envBool("AI_GROW_CALL_SUMMARY_ENABLED", false);
+}
