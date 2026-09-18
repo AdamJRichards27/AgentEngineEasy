@@ -124,6 +124,34 @@ export function mustForceMockVoiceTranscriptionProvider(): boolean {
 }
 
 /**
+ * AE GROW Priority 6 F3 Part B — call transcription provider lock.
+ *
+ * True only when an operator has explicitly set LIVE_CALL_TRANSCRIPTION_APPROVED
+ * to the literal string "true". This is deliberately independent from both
+ * Stage E's voice-input approval and the telephony approval gate: permission
+ * to send a standalone voice recording or to use live telephony does not
+ * approve sending recorded call audio to a transcription provider.
+ *
+ * Unlike the older Stage E voice gate, this lock applies in every
+ * environment. A real call-transcription provider must never be constructed
+ * until this separate, explicit approval exists, including in development and
+ * test. The mock provider remains available without approval.
+ */
+export function isLiveCallTranscriptionApproved(): boolean {
+  return process.env.LIVE_CALL_TRANSCRIPTION_APPROVED === "true";
+}
+
+/**
+ * True whenever live call transcription has not been explicitly approved.
+ * This is intentionally not production-scoped: F3 Part B must require the
+ * literal approval flag before a real provider is ever used in any
+ * environment.
+ */
+export function mustForceMockCallTranscriptionProvider(): boolean {
+  return !isLiveCallTranscriptionApproved();
+}
+
+/**
  * AE GROW Priority 6 Stage F1 — Call Foundation.
  *
  * True only when an operator has explicitly set LIVE_TELEPHONY_APPROVED to

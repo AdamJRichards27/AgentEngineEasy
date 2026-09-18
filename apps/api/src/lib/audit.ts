@@ -3,7 +3,7 @@ import { logger } from "@aee/events";
 
 export interface AuditLogInput {
   brokerageId?: number;
-  userId?: number;
+  userId?: number | null;
   userEmail?: string;
   action: string;
   recordType: string;
