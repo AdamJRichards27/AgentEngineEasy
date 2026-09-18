@@ -12,6 +12,7 @@
     "bootstrap-admin": "tsx src/scripts/bootstrapAdmin.ts",
     "documents:inventory": "tsx src/scripts/inventoryDocumentStorageMigration.ts",
     "documents:reconcile-pending": "tsx src/scripts/reconcilePendingDocumentStorage.ts",
+    "reconcile-transcriptions": "tsx src/scripts/reconcileCallTranscriptions.ts",
     "backup:run": "tsx src/ops/backup/backup.ts",
     "backup:restore": "tsx src/ops/backup/restore.ts"
   },

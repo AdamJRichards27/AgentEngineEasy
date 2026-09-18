@@ -60,6 +60,18 @@ import { CallSessionTransitionError } from "../lib/telephony/stateMachine.js";
 import { CallConsentEligibilityError, evaluateOutboundCallEligibility } from "../lib/telephony/eligibility.js";
 import { evaluatePreCallRecordingGates, evaluateRecordingGates } from "../lib/telephony/recordingGates.js";
 import { SandboxTelephonyProvider } from "../lib/telephony/sandboxProvider.js";
+import {
+  CallTranscriptionError,
+  initiateCallTranscription,
+} from "../lib/telephony/callTranscriptions.js";
+import {
+  CallTranscriptionReviewError,
+  discardCallTranscription,
+  getCallTranscriptionForReview,
+  listCallTranscriptionsForContact,
+  saveCallTranscriptionReview,
+} from "../lib/telephony/callTranscriptionReview.js";
+import { persistApprovedCallSummaryActivity } from "../lib/telephony/callTranscriptionTimeline.js";
 
 export const growCallsRouter = Router();
 
@@ -442,6 +454,166 @@ for (const path of ["/:id/recording/disclosure", "/:id/recording/disclose"]) {
 }
 growCallsRouter.post("/:id/recording/confirm", requireEntitlement("grow.calling.access"), handleRecordingConfirmation);
 growCallsRouter.post("/:id/recording/decline", requireEntitlement("grow.calling.access"), handleRecordingDecline);
+
+const initiateTranscriptionSchema = z.object({
+  recordingReference: z.number().int().positive(),
+});
+
+/**
+ * F3 submits only the canonical immutable recording-version reference. The
+ * service, rather than this transport, resolves session ownership, active
+ * recording content, F2 evidence, and the existing recording entitlement.
+ */
+growCallsRouter.post("/:id/transcription", requireEntitlement("grow.calling.transcription"), async (req, res) => {
+  const callSessionId = parseIdParam(req.params.id);
+  if (callSessionId === null) {
+    res.status(400).json({ error: "Invalid call session id." });
+    return;
+  }
+  const parsed = initiateTranscriptionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const transcription = await initiateCallTranscription({
+      brokerageId: authedUser.brokerageId,
+      callSessionId,
+      recordingReference: parsed.data.recordingReference,
+      actor: {
+        userId: authedUser.id,
+        role: authedUser.role,
+        brokerageId: authedUser.brokerageId,
+      },
+    });
+    res.status(transcription.processingState === "PENDING" ? 202 : 200).json({ transcription });
+  } catch (error) {
+    if (error instanceof CallTranscriptionError) {
+      const status = error.code === "CALL_NOT_FOUND" ? 404
+        : error.code === "ACCESS_DENIED" || error.code === "ENTITLEMENT_REQUIRED" ? 403
+          : error.code === "INVALID_INPUT" ? 400 : 409;
+      res.status(status).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
+});
+
+function transcriptionReviewErrorStatus(error: CallTranscriptionReviewError): number {
+  if (error.code === "INVALID_INPUT") return 400;
+  if (error.code === "NOT_FOUND") return 404;
+  if (error.code === "ACCESS_DENIED" || error.code === "ENTITLEMENT_REQUIRED") return 403;
+  return 409;
+}
+
+/**
+ * F3 review reads are tenant- and call-owner-scoped.  In particular, this
+ * route never returns every transcription for a party merely because the
+ * party itself is visible: listCallTranscriptionsForContact filters each
+ * underlying call session through the same ownership rule as call reads.
+ */
+growCallsRouter.get("/contacts/:partyId/transcriptions", requireEntitlement("grow.calling.transcription"), async (req, res) => {
+  const partyId = parseIdParam(req.params.partyId);
+  if (partyId === null) {
+    res.status(400).json({ error: "Invalid contact id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const transcriptions = await listCallTranscriptionsForContact({
+      brokerageId: authedUser.brokerageId,
+      partyId,
+      actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
+    });
+    res.json({ transcriptions });
+  } catch (error) {
+    if (error instanceof CallTranscriptionReviewError) {
+      res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
+});
+
+growCallsRouter.get("/:id/transcription/:transcriptionId", requireEntitlement("grow.calling.transcription"), async (req, res) => {
+  const callSessionId = parseIdParam(req.params.id);
+  const transcriptionId = parseIdParam(req.params.transcriptionId);
+  if (callSessionId === null || transcriptionId === null) {
+    res.status(400).json({ error: "Invalid call session or transcription id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const transcription = await getCallTranscriptionForReview({
+      brokerageId: authedUser.brokerageId,
+      callSessionId,
+      transcriptionId,
+      actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
+    });
+    res.json({ transcription });
+  } catch (error) {
+    if (error instanceof CallTranscriptionReviewError) {
+      res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
+});
+
+growCallsRouter.post("/:id/transcription/:transcriptionId/review", requireEntitlement("grow.calling.transcription"), async (req, res) => {
+  const callSessionId = parseIdParam(req.params.id);
+  const transcriptionId = parseIdParam(req.params.transcriptionId);
+  if (callSessionId === null || transcriptionId === null) {
+    res.status(400).json({ error: "Invalid call session or transcription id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const transcription = await saveCallTranscriptionReview({
+      brokerageId: authedUser.brokerageId,
+      callSessionId,
+      transcriptionId,
+      actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
+      body: req.body,
+    }, persistApprovedCallSummaryActivity);
+    // Part F: explicit Save has atomically committed approval plus one passive
+    // Timeline snapshot. Discard and background processing never use this hook.
+    res.json({ transcription });
+  } catch (error) {
+    if (error instanceof CallTranscriptionReviewError) {
+      res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
+});
+
+growCallsRouter.post("/:id/transcription/:transcriptionId/discard", requireEntitlement("grow.calling.transcription"), async (req, res) => {
+  const callSessionId = parseIdParam(req.params.id);
+  const transcriptionId = parseIdParam(req.params.transcriptionId);
+  if (callSessionId === null || transcriptionId === null) {
+    res.status(400).json({ error: "Invalid call session or transcription id." });
+    return;
+  }
+  const authedUser = req.authedUser!;
+  try {
+    const transcription = await discardCallTranscription({
+      brokerageId: authedUser.brokerageId,
+      callSessionId,
+      transcriptionId,
+      actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
+      body: req.body,
+    });
+    res.json({ transcription });
+  } catch (error) {
+    if (error instanceof CallTranscriptionReviewError) {
+      res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
+});
 
 /**
  * Read-only recording presentation for the Contact 360 call panel.  The
