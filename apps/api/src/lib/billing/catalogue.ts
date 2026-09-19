@@ -42,7 +42,7 @@ const ENTITLEMENT_DEFS: Record<(typeof ENTITLEMENT_KEYS)[number], string> = {
   "grow.propertyIntelligence.manage": "Confirm or reject property matches, review or dismiss opportunity signals, and promote a signal into a Grow opportunity.",
   "grow.calling.access": "Initiate and manage sandbox call sessions and check contact call eligibility.",
   "grow.calling.recording": "Capture, grant and withdraw call recording consent, separate from call access.",
-  "grow.calling.transcription": "Reserved for a later phase; granting it enables no capability in F1.",
+  "grow.calling.transcription": "Transcribe a consented call recording, review and edit its draft summary, and propose governed follow-ups from the approved items.",
 };
 
 const GROW_ENTITLEMENT_KEYS = ENTITLEMENT_KEYS.filter((key) => key !== "run.access");
@@ -76,7 +76,15 @@ async function ensurePrice(productId: number, amountCents: number, billingInterv
 
 async function ensureEntitlementDefinition(key: string, description: string): Promise<number> {
   const [existing] = await db.select().from(entitlementDefinitions).where(eq(entitlementDefinitions.key, key));
-  if (existing) return existing.id;
+  if (existing) {
+    // Descriptions are operator-facing: a key whose capability has since shipped
+    // (grow.calling.transcription) must not keep describing itself as reserved on
+    // an already-seeded database. Only the description is refreshed here.
+    if (existing.description !== description) {
+      await db.update(entitlementDefinitions).set({ description }).where(eq(entitlementDefinitions.id, existing.id));
+    }
+    return existing.id;
+  }
   const [created] = await db.insert(entitlementDefinitions).values({ key, name: key, description }).returning();
   return created.id;
 }

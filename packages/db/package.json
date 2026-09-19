@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/migrate.ts"
+    "db:migrate": "tsx src/migrate.ts",
+    "db:preflight": "node scripts/preflight-migrations.mjs"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",

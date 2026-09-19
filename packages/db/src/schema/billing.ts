@@ -101,9 +101,10 @@ export const subscriptionItems = pgTable("billing_subscription_items", {
 // sandbox call, the Contact 360 eligibility check) — see routes/growCalls.ts. grow.calling.
 // recording gates capturing/withdrawing call-recording consent — a SEPARATE key from
 // grow.calling.access, since being entitled to place a (sandbox) call must never imply being
-// entitled to manage recording consent for it. grow.calling.transcription is reserved for a
-// later, separately-gated phase (F3) — nothing in F1 checks it, and it enables no real
-// capability by existing; see the Stage F1 completion report.
+// entitled to manage recording consent for it. grow.calling.transcription gates Stage F3/F4 —
+// transcribing a consented recording, the human review/edit/discard of its draft summary, and
+// proposing governed follow-ups from the approved items (routes/growCalls.ts,
+// routes/growCallFollowups.ts).
 export const ENTITLEMENT_KEYS = [
   "run.access",
   "grow.access",

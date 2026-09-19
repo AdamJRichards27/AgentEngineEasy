@@ -3,7 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import { apiRouter } from "./routes/index.js";
 import { loadSession } from "./middlewares/auth.js";
-import { requestId } from "./middlewares/requestId.js";
+import { requestId, CORRELATION_ID_HEADER } from "./middlewares/requestId.js";
 import { httpMetrics } from "./middlewares/httpMetrics.js";
 import { globalRateLimiter } from "./middlewares/rateLimit.js";
 import { corsOriginCallback } from "./lib/cors.js";
@@ -48,7 +48,10 @@ export function createApp() {
   // lib/cors.ts for the allowlist itself (CORS_ALLOWED_ORIGINS env var;
   // fails closed at boot in production — see assertCorsConfigured() in
   // index.ts).
-  app.use(cors({ origin: corsOriginCallback, credentials: true }));
+  // exposedHeaders: a cross-origin browser can otherwise not read
+  // X-Correlation-Id, so a pilot user's error screen has no support
+  // reference to quote (apps/web/src/lib/api.ts reads this header).
+  app.use(cors({ origin: corsOriginCallback, credentials: true, exposedHeaders: [CORRELATION_ID_HEADER] }));
 
   // Generous global throttle (300 req/min/IP in real environments) — see
   // middlewares/rateLimit.ts for the thresholds and its test-environment
