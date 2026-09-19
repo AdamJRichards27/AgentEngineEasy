@@ -89,14 +89,29 @@ export async function applySessionTimezone(client: Pick<ClientBase, "query">): P
  *   whole process. The pool already discards the broken client, so logging
  *   is all that is needed; the next checkout opens a fresh connection.
  * - the UTC session time zone on every new connection, unless opted out.
+ * - an optional PG_POOL_MAX size cap (see configuredPoolMax).
  */
+function configuredPoolMax(): number | undefined {
+  const raw = process.env.PG_POOL_MAX?.trim();
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 export function createSafePool(
   connectionString: string,
   opts?: { setSessionTimezone?: boolean; extra?: Omit<PoolConfig, "connectionString" | "onConnect"> },
 ): Pool {
   const setTimezone = opts?.setSessionTimezone ?? isSessionTimezoneSetEnabled();
+  // pg's default of 10 clients suits one API process, but a test run starts a
+  // pool per test file: on a many-core machine that can exceed the server's
+  // max_connections, and a refused connection surfaces as a confusing 401
+  // (the session lookup fails) rather than a connection error. PG_POOL_MAX
+  // caps it; an absent or invalid value keeps pg's default.
+  const poolMax = configuredPoolMax();
   const created = new Pool({
     ...opts?.extra,
+    ...(poolMax === undefined ? {} : { max: poolMax }),
     connectionString,
     ...(setTimezone ? { onConnect: applySessionTimezone } : {}),
   });

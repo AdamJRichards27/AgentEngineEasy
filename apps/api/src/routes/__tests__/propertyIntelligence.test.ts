@@ -91,6 +91,11 @@ before(async () => {
     // 404 there can only mean tenant isolation, never an entitlement
     // decision, matching this file's own tenant-isolation convention.
     await grant(brokerageId, "grow.contacts.read");
+    // The "stale previous appraisal" test seeds through the real appraisal
+    // lifecycle, and Grow appraisal mutations now require this key (pilot
+    // readiness: /grow/appraisals was previously reachable by a brokerage
+    // holding no Grow entitlement at all).
+    await grant(brokerageId, "grow.opportunities.manage");
   }
   await grant(C.brokerageId, "grow.access");
 });
