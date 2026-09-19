@@ -10,7 +10,8 @@
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/migrate.ts",
-    "db:preflight": "node scripts/preflight-migrations.mjs"
+    "db:preflight": "node scripts/preflight-migrations.mjs",
+    "db:audit-grow-grants": "node scripts/audit-grow-entitlements.mjs"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",

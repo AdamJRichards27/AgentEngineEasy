@@ -54,7 +54,13 @@ const countingTranscriptionProvider: TranscriptionProvider = {
   },
 };
 
+// The cap only fires when it is enforced (see isDailyAiCapEnforced): by default
+// that means "a real AI provider is approved", which the pilot's mock provider
+// is not. These tests are about the cap itself, so they turn it on explicitly.
+const previousCapEnforced = process.env.AI_DAILY_CAP_ENFORCED;
+
 before(async () => {
+  process.env.AI_DAILY_CAP_ENFORCED = "true";
   MockAiProvider.prototype.generate = async function (this: MockAiProvider, request) {
     providerCalls += 1;
     return originalGenerate.call(this, request);
@@ -76,6 +82,8 @@ beforeEach(() => {
 });
 
 after(async () => {
+  if (previousCapEnforced === undefined) delete process.env.AI_DAILY_CAP_ENFORCED;
+  else process.env.AI_DAILY_CAP_ENFORCED = previousCapEnforced;
   MockAiProvider.prototype.generate = originalGenerate;
   setVoiceTranscriptionProviderForTests(null);
   await cleanupBrokerages(cleanupIds);

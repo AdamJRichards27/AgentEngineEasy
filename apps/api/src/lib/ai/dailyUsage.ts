@@ -68,11 +68,36 @@ export async function countBrokerageAiRequestsToday(brokerageId: number): Promis
 }
 
 /**
+ * Whether the cap is enforced.
+ *
+ * The per-tier numbers in TIER_CAPABILITIES were written when nothing read them, and they are
+ * per brokerage, not per user (STARTER = 20/day for an entire brokerage). Turning them on
+ * unconditionally would be a product change — a ten-agent Starter brokerage that used Copilot
+ * freely yesterday would start getting 429s — so enforcement follows the money instead:
+ *
+ * - AI_DAILY_CAP_ENFORCED=true / false always wins when set.
+ * - Otherwise the cap applies exactly when a real AI provider is approved for use
+ *   (LIVE_AI_PROVIDER_APPROVED=true, see lib/env.ts). With the mock provider — the pilot default
+ *   — no provider spend exists, so no brokerage is throttled.
+ *
+ * The counting, refusal, audit and 429 paths are always built and tested; only whether the
+ * refusal fires depends on this. Tuning the numbers (and whether they should be per user) is a
+ * Project Owner decision recorded in docs/AE_GROW_PILOT_READINESS_REPORT.md.
+ */
+export function isDailyAiCapEnforced(): boolean {
+  const explicit = process.env.AI_DAILY_CAP_ENFORCED?.trim().toLowerCase();
+  if (explicit === "true") return true;
+  if (explicit === "false") return false;
+  return process.env.LIVE_AI_PROVIDER_APPROVED?.trim() === "true";
+}
+
+/**
  * Throws AiDailyCapExceededError when the brokerage has already used its tier's daily quota.
  * Must be called before any provider call. `tier` may be passed when the caller already
  * resolved it (it is always resolved via resolveBrokerageTier()); otherwise it is resolved here.
  */
 export async function assertDailyAiCapNotReached(brokerageId: number, tier?: SubscriptionTier): Promise<void> {
+  if (!isDailyAiCapEnforced()) return;
   const resolvedTier = tier ?? (await resolveBrokerageTier(brokerageId));
   const limit = TIER_CAPABILITIES[resolvedTier].maxAiRequestsPerDay;
   const used = await countBrokerageAiRequestsToday(brokerageId);

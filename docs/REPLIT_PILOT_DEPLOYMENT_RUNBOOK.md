@@ -468,6 +468,25 @@ Entitlements are granted **per brokerage** (the catalogue lives in
 Granting a key is what makes the corresponding surface reachable for that brokerage's users — it is
 a per-brokerage product decision, not part of deploying the build.
 
+### 12.1 Audit the grants before you rely on a Grow surface
+
+Grow is gated **per key**, not by `grow.access` alone. A brokerage that buys Grow (or the bundle)
+receives every `grow.*` key automatically; a brokerage granted `grow.access` **by hand** — the usual
+pilot shortcut — may hold only that one key, and is then refused Ask AE, the Business Coach and
+voice (`grow.ai.use`), appraisal edits (`grow.opportunities.manage`) and Grow thread messaging
+(`grow.contacts.manage`).
+
+Run the read-only audit against the target database before deploying:
+
+```bash
+DATABASE_URL=... pnpm --filter @aee/db run db:audit-grow-grants
+```
+
+It lists every brokerage holding `grow.access`, reports the keys each one is missing, and flags
+brokerages carrying manual grants. Grant anything missing through a Grow or bundle subscription, or
+by an explicit recorded manual grant. Calling keys are reported separately and never counted as
+"missing", because a pilot may deliberately withhold them (see below).
+
 Three keys govern the calling/transcription/follow-up surface:
 
 | Entitlement key | What granting it enables |
