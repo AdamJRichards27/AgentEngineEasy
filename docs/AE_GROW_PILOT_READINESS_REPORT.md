@@ -27,7 +27,7 @@ Findings were classified P0 (security, tenant isolation, data integrity or pilot
 
 - **Grow Appraisals had no Grow entitlement check.** Every route had only `requireAuth`, so a Starter/Run-only brokerage could create appraisals, run AI generation and send them to contacts (confirmed live: brokerage without Grow created appraisal #20). Now `grow.access` on every route, `grow.opportunities.manage` on all 15 mutations, `run.access` retained on the Run handoff.
 - **Cross-tenant appraisal owner.** `ownerUserId` was written unvalidated and joined without a tenant filter, leaking another brokerage's agent name into the pipeline and generated presentations. Now validated and tenant-scoped in both lookups.
-- **The per-tier daily AI cap was never enforced** (`maxAiRequestsPerDay` was referenced nowhere). Now enforced from durable interaction rows since 00:00 UTC, before any provider call, returning 429 and auditing the refusal.
+- **The per-tier daily AI cap was never enforced** (`maxAiRequestsPerDay` was referenced nowhere). It is now enforced from durable interaction rows since 00:00 UTC, before any provider call, returning 429 and auditing the refusal — but only when a real AI provider is approved (see the decision in §6.1), so the mock-provider pilot is never throttled.
 - **A valid session was bounced to the login screen** once the strict per-IP auth limit was reached, because the SPA's session probe consumed the credential budget. The probe now has its own generous limiter. Proxy trust is explicit (`TRUST_PROXY`) so a pilot behind a balancer rate-limits per client IP instead of sharing one budget; it fails safe to trusting nothing.
 - **The exception scan lock was a check-then-insert race** between the manual ops trigger and the interval timer. Now a session-level advisory lock held for the whole sweep, with crash recovery that no longer depends on wall-clock arithmetic.
 - **Sign-in could leave the app on the login screen** until an unrelated refetch (the session cache was written in the wrong shape).
@@ -58,6 +58,13 @@ Test reliability: advisory-locked and tenant-scopeable sweeps, per-run webhook e
 | Synthetic production startup | Passed |
 | `pnpm audit --prod` | No known vulnerabilities |
 | Live browser smoke journey | See §7 |
+
+## 6.1 Project Owner decisions this phase surfaced
+
+1. **Daily AI cap numbers.** `TIER_CAPABILITIES.maxAiRequestsPerDay` (STARTER 20, GROW 200, PRO 1000) is **per brokerage, not per user**, and was written when nothing read it. Enforcing it as-is would be a product change: a ten-agent Starter brokerage that used Copilot freely would begin seeing 429s, and a provider outage consumes quota because failed calls count. The mechanism is built, tested and off unless a real AI provider is approved (`LIVE_AI_PROVIDER_APPROVED`), with `AI_DAILY_CAP_ENFORCED` as an explicit override. **Decide the numbers, and whether the cap should be per user, before approving a live AI provider.**
+2. **Grow entitlement grants for pilot brokerages.** Grow is gated per key. A brokerage granted `grow.access` by hand holds only that key and is refused Ask AE, the Coach, voice, appraisal edits and Grow thread messaging. `pnpm --filter @aee/db run db:audit-grow-grants` reports exactly what is missing per brokerage; granting the keys is a product decision, not a deployment step.
+3. **Calling entitlements for the pilot** — see §8: there is no product path to record call consent or Do Not Call status, so `grow.calling.*` should stay ungranted unless you decide otherwise.
+4. **Single always-on instance** for the deployment (in-process schedulers, per-process limiters and alert cooldowns), which is a hosting-plan decision.
 
 ## 6. Remaining non-blocking technical debt
 
