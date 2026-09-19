@@ -11,6 +11,7 @@ import {
   type ReviewDraftItem,
   type ReviewItemType,
 } from "../lib/callTranscriptReview";
+import { GrowCallFollowupsSection } from "./GrowCallFollowupsSection";
 
 interface CallTranscription {
   id: number;
@@ -53,9 +54,12 @@ function itemTypeLabel(type: ReviewItemType) {
 
 export function GrowContactTranscriptPanel({
   partyId,
+  contactName,
   onReviewSaved,
 }: {
   partyId: number;
+  // Stage F4.3: shown on follow-up proposal cards only (display context).
+  contactName?: string;
   onReviewSaved?: (transcription: CallTranscription) => void;
 }) {
   const queryClient = useQueryClient();
@@ -86,6 +90,7 @@ export function GrowContactTranscriptPanel({
 
   const selected = list.data?.transcriptions.find((row) => row.id === selectedId) ?? null;
   const reviewable = selected?.processingState === "AWAITING_AGENT_REVIEW";
+  const saved = selected?.processingState === "APPROVED" || selected?.processingState === "PARTIALLY_APPROVED";
 
   useEffect(() => {
     if (selected && initializedId.current !== selected.id) {
@@ -217,6 +222,18 @@ export function GrowContactTranscriptPanel({
       )}
       {selected && !reviewable && (
         <p className="muted">This transcript is {transcriptionStatusLabel(selected.processingState, selected.failureReason).toLowerCase()}.</p>
+      )}
+      {/* Stage F4.3: governed follow-ups from a saved review only. Nothing is
+          proposed until the agent selects items, confirms each due date, and
+          clicks Propose; approval is a further explicit click per proposal. */}
+      {selected && saved && (
+        <GrowCallFollowupsSection
+          key={selected.id}
+          callSessionId={selected.callSessionId}
+          transcriptionId={selected.id}
+          partyId={partyId}
+          contactName={contactName ?? null}
+        />
       )}
     </section>
   );
