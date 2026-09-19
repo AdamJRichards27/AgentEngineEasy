@@ -9,7 +9,7 @@ import { mock } from "node:test";
 const targets = [
   { category: "commitments", path: "growCommitmentActions", functions: ["createApprovedGrowCommitment"] },
   { category: "proposals", path: "ai/actionRequests", functions: ["proposeAIAction"] },
-  { category: "proposals", path: "ai/executionGateway", functions: ["executeAIAction"] },
+  { category: "proposals", path: "ai/executionGateway", functions: ["executeAIAction", "executeAIActionAsSystem"] },
   { category: "communications", path: "communications/messages",
     functions: ["createDraftMessage", "sendMessageNow", "requeueMessage"] },
   { category: "communications", path: "communications/outbox",

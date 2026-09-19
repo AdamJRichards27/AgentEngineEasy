@@ -14,6 +14,7 @@ import { ContactCommunicationsSection } from "../components/CommunicationsSectio
 // rather than a second bespoke screen.
 import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
 import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptPanel";
+import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
@@ -1613,6 +1614,7 @@ function GrowContactDetail({
       <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />
       <GrowContactTranscriptPanel
         partyId={partyId}
+        contactName={c.displayName}
         onReviewSaved={() => {
           // The API writes the approved call-summary activity atomically with Save.
           // Refresh only read models here; the browser never persists the activity.
@@ -1839,6 +1841,11 @@ function GrowContactDetail({
             ))}
           </ul>
         )}
+
+        {/* Stage F4.3: the caller's own pending CREATE_GROW_COMMITMENT
+            proposals for this contact, approved/rejected only by explicit
+            clicks on the shared review card. Renders nothing when empty. */}
+        {canManageActivities && <GrowPendingCommitmentProposals partyId={partyId} contactName={c.displayName} />}
 
         <h3>Commitments</h3>
         {data.commitments.length === 0 && <p className="empty-state">No commitments recorded.</p>}

@@ -26,6 +26,7 @@ import { growAppraisalsRouter } from "./growAppraisals.js";
 import { propertyIntelligenceRouter } from "./propertyIntelligence.js";
 import { growCallsRouter } from "./growCalls.js";
 import { growCallsWebhooksRouter } from "./growCallsWebhooks.js";
+import { growCallFollowupsRouter } from "./growCallFollowups.js";
 import { tasksRouter } from "./tasks.js";
 import { exceptionsRouter } from "./exceptions.js";
 import { launchRouter } from "./launch.js";
@@ -123,6 +124,13 @@ apiRouter.use("/grow/property-intelligence", propertyIntelligenceRouter);
 // before growCallsRouter's prefix match is even reached.
 apiRouter.use(growCallsWebhooksRouter);
 apiRouter.use("/grow/calls", growCallsRouter);
+// AE GROW Priority 6 Stage F4.1 — governed call follow-ups. A separate
+// router (never imported by growCalls.ts, keeping F3 free of F4 code),
+// mounted on the same prefix after growCallsRouter: its paths
+// (.../transcription/:id/followups[/propose]) match no growCallsRouter
+// route, so requests fall through to it after growCallsRouter's blanket
+// requireAuth. It applies its own requireAuth + entitlement gates too.
+apiRouter.use("/grow/calls", growCallFollowupsRouter);
 apiRouter.use("/tasks", tasksRouter);
 // Agent Engine 2.0 — Exception & Risk Engine (Priority 4). Mounted
 // unprefixed: exceptionsRouter's own route paths are already fully

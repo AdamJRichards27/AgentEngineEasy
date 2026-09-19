@@ -88,6 +88,9 @@ test("item decisions stay local until Save, while Save and Discard call only the
         source === "virtual:review-test-jsx"
       ) return "\0review-test-jsx";
       if (source === "@tanstack/react-query" || source === "virtual:review-test-query") return "\0review-test-query";
+      // Stage F4.3: the panel now (transitively, via the shared proposal
+      // card) imports wouter's Link; it is never rendered in this test.
+      if (source === "wouter" || source === "virtual:review-test-wouter") return "\0review-test-wouter";
       if (source.endsWith("/lib/api") || source === "../lib/api") return "\0review-test-api";
       return null;
     },
@@ -119,6 +122,9 @@ test("item decisions stay local until Save, while Save and Discard call only the
             },
           });
         `;
+      }
+      if (id === "\0review-test-wouter") {
+        return `export const Link = (props) => ({ type: "a", props });`;
       }
       if (id === "\0review-test-api") {
         return `
@@ -153,6 +159,7 @@ test("item decisions stay local until Save, while Save and Discard call only the
         { find: /^react$/, replacement: "virtual:review-test-react" },
         { find: /^react\/jsx-(dev-)?runtime$/, replacement: "virtual:review-test-jsx" },
         { find: /^@tanstack\/react-query$/, replacement: "virtual:review-test-query" },
+        { find: /^wouter$/, replacement: "virtual:review-test-wouter" },
       ],
     },
     plugins: [virtualMocks],

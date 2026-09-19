@@ -15,16 +15,33 @@
 // an expired proposal from an already-actioned one (both currently
 // surfaced as the same 409 status) can do so without this file inventing
 // a parallel, route-specific error-parsing path of its own.
+//
+// AE GROW Priority 6 Stage F4.3 — `code` and `sideEffectApplied` are
+// likewise additive. The F4.1 call follow-up routes return a machine-readable
+// `code` (e.g. "CONSENT_WITHDRAWN", "AUDIT_INCOMPLETE") and the governed
+// execute route returns `sideEffectApplied: true` alongside reason
+// "COMPLETED_AFTER_RECOVERY" (the commitment may already exist, so the UI
+// must never offer a retry). Existing call sites never read either field.
 export class ApiError extends Error {
   status: number;
   friendly: string;
   reason?: string;
+  code?: string;
+  sideEffectApplied?: boolean;
 
-  constructor(status: number, friendly: string, technical?: string, reason?: string) {
+  constructor(
+    status: number,
+    friendly: string,
+    technical?: string,
+    reason?: string,
+    extras?: { code?: string; sideEffectApplied?: boolean },
+  ) {
     super(technical ?? friendly);
     this.status = status;
     this.friendly = friendly;
     this.reason = reason;
+    this.code = extras?.code;
+    this.sideEffectApplied = extras?.sideEffectApplied;
   }
 }
 
@@ -62,14 +79,21 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   if (!res.ok) {
     let serverMessage: string | undefined;
     let serverReason: string | undefined;
+    let serverCode: string | undefined;
+    let sideEffectApplied: boolean | undefined;
     try {
       const body = await res.json();
       serverMessage = typeof body?.error === "string" ? body.error : undefined;
       serverReason = typeof body?.reason === "string" ? body.reason : undefined;
+      serverCode = typeof body?.code === "string" ? body.code : undefined;
+      sideEffectApplied = typeof body?.sideEffectApplied === "boolean" ? body.sideEffectApplied : undefined;
     } catch {
       // Non-JSON error body — fall through with no server message.
     }
-    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage), `API ${path} failed: ${res.status}`, serverReason);
+    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage), `API ${path} failed: ${res.status}`, serverReason, {
+      code: serverCode,
+      sideEffectApplied,
+    });
   }
   if (res.status === 204) {
     return undefined as T;

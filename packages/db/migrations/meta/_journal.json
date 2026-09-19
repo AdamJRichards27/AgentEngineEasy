@@ -176,6 +176,13 @@
       "when": 1789628428585,
       "tag": "0024_flaky_masked_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1789806192677,
+      "tag": "0025_sturdy_umar",
+      "breakpoints": true
     }
   ]
 }

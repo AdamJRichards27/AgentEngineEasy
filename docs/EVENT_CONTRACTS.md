@@ -86,7 +86,7 @@ That brings the original Build Brief §17 set to 32 events in the current array 
 in the old comment referred only to the transaction-lifecycle subsequence, which is itself
 one likely source of the eventual confusion.
 
-### 2.2 AI Governance, Authority & Action Control Architecture — Stage G7 (10)
+### 2.2 AI Governance, Authority & Action Control Architecture — Stage G7 (10) + Stage F4.0 (1)
 
 | Event type | Description |
 | --- | --- |
@@ -97,6 +97,7 @@ one likely source of the eventual confusion.
 | `AI_ACTION_EXECUTED` | An AI action request was executed through the AI Action Execution Gateway. |
 | `AI_ACTION_FAILED` | An AI action request passed policy and approval but failed during execution. |
 | `AI_ACTION_BLOCKED` | An AI action request was blocked by policy evaluation before approval or execution. |
+| `AI_ACTION_EXPIRED` | An AI action request passed its expiry time before being approved or executed and was transitioned to EXPIRED. (Stage F4.0) |
 | `AI_WORKFLOW_CHANGE_PROPOSED` | The AI proposed a workflow change as a new draft version without altering the active version. |
 | `AI_WORKFLOW_CHANGE_APPROVED` | An authorised human approved a proposed AI workflow change. |
 | `AI_WORKFLOW_VERSION_ACTIVATED` | A new workflow version was activated by an authorised human. |

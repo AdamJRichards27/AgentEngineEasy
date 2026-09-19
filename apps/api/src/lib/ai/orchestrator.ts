@@ -22,7 +22,13 @@ import {
 } from "./coaching/responseBuilder.js";
 import type { CoachingPeriodKey } from "./coaching/period.js";
 import { resolveCoachingTimeZone, localDateKey } from "./coaching/timezone.js";
-import { proposeAIAction, findOpenActionRequestByResource } from "./actionRequests.js";
+import {
+  proposeAIAction,
+  findOpenActionRequestByResource,
+  canActorAccessActionRequest,
+  actorHoldsActionEntitlement,
+} from "./actionRequests.js";
+import { getActionDefinition } from "./actions/registry.js";
 import type { PolicyActor } from "./policyEngine.js";
 import { AUTO_EXECUTE_CEILING, AiEntitlementError, AiFeatureDisabledError, RISK_LEVEL_DESCRIPTIONS } from "./types.js";
 import type {
@@ -330,15 +336,29 @@ export async function proposeGrowCommitmentIfGrounded(
     return undefined;
   }
 
+  // F4.0 D1: never surface an existing proposal to someone who does not
+  // currently hold the action's entitlement (the new-proposal path below
+  // is gated by the same entitlement inside evaluateAIAction()).
+  const definition = getActionDefinition("CREATE_GROW_COMMITMENT");
+  if (!definition || !(await actorHoldsActionEntitlement(definition, actor))) {
+    return undefined;
+  }
+
   const { timeZone } = await resolveCoachingTimeZone(actor.brokerageId);
   // A deterministic key derived only from already-tenant-scoped ids/dates
   // this same server-side computation produced — never from client or
   // model input — so a repeat Ask AE/Coach call for the same underlying
-  // follow-up cannot be tricked into a different dedup bucket.
-  const resourceId = `party:${candidate.partyId}:due:${localDateKey(dueAt, timeZone)}`;
+  // follow-up cannot be tricked into a different dedup bucket. F4.0 D1:
+  // the requesting user is part of the key, so dedup (and the partial
+  // unique index behind it) is per user: two agents asking about the same
+  // contact/due date each get their own proposal, never each other's.
+  const resourceId = `user:${actor.id}:party:${candidate.partyId}:due:${localDateKey(dueAt, timeZone)}`;
 
   const existing = await findOpenActionRequestByResource("CREATE_GROW_COMMITMENT", actor.brokerageId, resourceId);
   if (existing !== null) {
+    // Defence in depth: the per-user key already scopes this lookup, but an
+    // existing request is only ever summarised for someone allowed to see it.
+    if (!canActorAccessActionRequest(existing, actor)) return undefined;
     return summarizeGrowCommitmentProposal(existing, candidate, timeZone);
   }
 

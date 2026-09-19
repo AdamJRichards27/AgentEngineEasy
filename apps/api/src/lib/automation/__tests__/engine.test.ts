@@ -42,9 +42,14 @@ import {
 import { publishDomainEvent, newCorrelationId, type DomainEvent } from "@aee/events";
 import { configureEvents } from "../../events.js";
 import { registerAutomationEngine } from "../bootstrap.js";
-import { handleAutomationDomainEvent, retryAutomationAction, mapDecisionToAuthorityDecision } from "../engine.js";
+import {
+  handleAutomationDomainEvent,
+  retryAutomationAction,
+  mapDecisionToAuthorityDecision,
+  resetStuckAiActionSweepThrottleForTests,
+} from "../engine.js";
 import { createAutomationRule, createRuleVersion, approveAndActivateRuleVersion } from "../rules.js";
-import { approveAIActionRequest } from "../../ai/actionRequests.js";
+import { approveAIActionRequest, proposeAIAction, STUCK_EXECUTING_RECOVERED_MESSAGE } from "../../ai/actionRequests.js";
 import type { AutomationConditionGroup } from "../conditions.js";
 
 configureEvents();
@@ -609,4 +614,42 @@ test("scenario 12 — audit and correlation continuity: the execution and its co
   assert.equal(completion!.causationId, event.id);
   assert.equal(completion!.correlationId, event.correlationId);
   assert.equal((completion!.metadata as Record<string, unknown>).executionId, execution.id);
+});
+
+// ---------------------------------------------------------------------
+// AE GROW Priority 6 Stage F4.0 (D5) — the engine's per-event processing
+// is the periodic path that recovers stuck EXECUTING AI action requests.
+// ---------------------------------------------------------------------
+
+test("F4.0 D5: handling any domain event sweeps a stale EXECUTING automation (SYSTEM, null resourceId) AI action request to FAILED, throttled to one bounded sweep per interval", async (t) => {
+  const brokerageId = await createBrokerage("Engine Test - F4.0 D5 stuck sweep");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const admin = { id: adminId, role: "Brokerage Administrator", brokerageId };
+
+  const stuckRequest = async (note: string) => {
+    const { request } = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: admin, actorType: "SYSTEM", rawInput: { propertyId, note } });
+    assert.equal(request!.resourceId, null);
+    await db
+      .update(aiActionRequests)
+      .set({ status: "EXECUTING", updatedAt: new Date(Date.now() - 60 * 60_000) })
+      .where(eq(aiActionRequests.id, request!.id));
+    return request!.id;
+  };
+
+  const firstId = await stuckRequest("stuck automation action");
+  resetStuckAiActionSweepThrottleForTests();
+  await publishAgencyAgreementSigned({ brokerageId, propertyId, agentId }); // dispatches to handleAutomationDomainEvent
+
+  const [first] = await db.select().from(aiActionRequests).where(eq(aiActionRequests.id, firstId));
+  assert.equal(first.status, "FAILED");
+  assert.equal(first.errorMessage, STUCK_EXECUTING_RECOVERED_MESSAGE);
+
+  // Throttled: a second stale row is left for the next interval's sweep.
+  const secondId = await stuckRequest("stuck again");
+  await publishAgencyAgreementSigned({ brokerageId, propertyId, agentId });
+  const [second] = await db.select().from(aiActionRequests).where(eq(aiActionRequests.id, secondId));
+  assert.equal(second.status, "EXECUTING");
 });

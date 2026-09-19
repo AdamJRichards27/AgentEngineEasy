@@ -12,7 +12,8 @@
 // Non-negotiable structural decision carried over unchanged from
 // docs/stage-wf/WF1_DISCOVERY.md: action execution goes through the SAME
 // AI Governance pipeline every other actor uses — evaluateAIAction() via
-// proposeAIAction(), then executeAIAction() as the sole caller of an
+// proposeAIAction(), then the Execution Gateway (executeAIActionAsSystem(),
+// its SYSTEM-only entry point since Stage F4.0) as the sole caller of an
 // action definition's execute(). This module never calls execute()
 // directly and never re-implements policy/authority/entitlement logic —
 // see policyEngine.ts, executionGateway.ts, actionRequests.ts.
@@ -66,8 +67,8 @@ import {
 } from "@aee/db";
 import { publishDomainEvent, logger, incrementCounter, type DomainEvent } from "@aee/events";
 import { getActionDefinition } from "../ai/actions/registry.js";
-import { proposeAIAction } from "../ai/actionRequests.js";
-import { executeAIAction } from "../ai/executionGateway.js";
+import { proposeAIAction, recoverStuckExecutingActionRequests, DEFAULT_STUCK_EXECUTING_THRESHOLD_MS } from "../ai/actionRequests.js";
+import { executeAIActionAsSystem } from "../ai/executionGateway.js";
 import type { PolicyActor, PolicyDecision } from "../ai/policyEngine.js";
 import { buildFacts, type AutomationFacts } from "./facts.js";
 import { evaluateConditionGroup, type AutomationConditionGroup } from "./conditions.js";
@@ -141,7 +142,43 @@ async function markReceiptFailed(receiptId: number, error: unknown): Promise<voi
 // without depending on a redelivery mechanism that does not exist yet.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// AE GROW Priority 6 Stage F4.0 (D5) — stuck-EXECUTING AI action recovery.
+// There is no AI-action scheduler, and recoverAbandonedRunning()
+// (operations.ts) has no production caller, so the automation engine's own
+// per-event processing is the periodic path: at most once per
+// STUCK_AI_ACTION_SWEEP_INTERVAL_MS per process, one bounded, unscoped
+// recoverStuckExecutingActionRequests() batch runs (it only ever marks
+// stale EXECUTING rows FAILED and audits them; it never executes
+// anything). The throttle timestamp is taken BEFORE the sweep, so the
+// AI_ACTION_FAILED events the sweep itself publishes (which are dispatched
+// back into this handler) never re-enter it. A sweep failure is logged
+// and never affects event handling.
+// ---------------------------------------------------------------------
+export const STUCK_AI_ACTION_SWEEP_INTERVAL_MS = 5 * 60_000;
+const STUCK_AI_ACTION_SWEEP_BATCH = 100;
+let lastStuckAiActionSweepAt = 0;
+
+export async function sweepStuckAiActionRequestsIfDue(now: number = Date.now()): Promise<number> {
+  if (now - lastStuckAiActionSweepAt < STUCK_AI_ACTION_SWEEP_INTERVAL_MS) return 0;
+  lastStuckAiActionSweepAt = now;
+  try {
+    const recovered = await recoverStuckExecutingActionRequests(DEFAULT_STUCK_EXECUTING_THRESHOLD_MS, { limit: STUCK_AI_ACTION_SWEEP_BATCH });
+    return recovered.length;
+  } catch (err) {
+    logger.error("automation_stuck_ai_action_sweep_failed", { error: err });
+    return 0;
+  }
+}
+
+/** Test-only: make the next sweepStuckAiActionRequestsIfDue() call run immediately. */
+export function resetStuckAiActionSweepThrottleForTests(): void {
+  lastStuckAiActionSweepAt = 0;
+}
+
 export async function handleAutomationDomainEvent(event: DomainEvent): Promise<void> {
+  await sweepStuckAiActionRequestsIfDue();
+
   // Fail closed: automation is inherently tenant-scoped (component 10).
   // A brokerageId-less event (there is no such canonical event today, but
   // nothing enforces that at the type level) can never be matched to a
@@ -445,7 +482,10 @@ async function executeAutomationAction(input: {
   }
 
   await db.update(automationActions).set({ status: "RUNNING", startedAt: new Date() }).where(eq(automationActions.id, row.id));
-  const execResult = await executeAIAction(request.id, rule.brokerageId);
+  // Stage F4.0: the explicitly named SYSTEM execution path. It refuses any
+  // request that is not actorType "SYSTEM" + auto-execute-eligible, so a
+  // human-approval-required action can never be run from here.
+  const execResult = await executeAIActionAsSystem(request.id, rule.brokerageId);
 
   if (execResult.ok) {
     await db

@@ -80,6 +80,77 @@
   width: 100%;
 }
 
+/* AE GROW Priority 6 Stage F4.3 — "Follow-ups from this call"
+   (GrowCallFollowupsSection) and the shared proposal card's header row
+   (GrowCommitmentProposalCard). Reuses .grow-review-item/.pill/.eyebrow;
+   no new colour token. */
+.grow-call-followups {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.grow-followup-item-header,
+.grow-commitment-proposal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.grow-commitment-proposal-meta {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.grow-followup-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.grow-followup-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  flex-wrap: wrap;
+}
+
+.grow-followup-controls label.grow-followup-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.grow-followup-controls label.grow-followup-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.grow-followup-controls input[type="checkbox"],
+.grow-review-item .grow-followup-controls input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+.grow-review-item .grow-followup-controls input[type="date"] {
+  width: auto;
+  max-width: 100%;
+}
+
+.grow-pending-proposals {
+  margin-bottom: 1rem;
+}
+
+.grow-pending-proposals .grow-commitment-proposal:first-of-type {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0.5rem;
+}
+
 @media (max-width: 640px) {
   .grow-transcript-row {
     grid-template-columns: 1fr;

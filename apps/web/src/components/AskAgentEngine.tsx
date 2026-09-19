@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
+// AE GROW Priority 6 Stage F4.3 — the Stage D proposal review card now lives
+// in its own module so the call follow-up and Contact 360 surfaces reuse
+// exactly the same governed approve/reject/execute behaviour.
+import { GrowCommitmentProposalCard } from "./GrowCommitmentProposalCard";
+import { viewFromAskAgentProposal, type AskAgentCommitmentProposal } from "../lib/commitmentProposals";
 // AE GROW Priority 6 Stage E — Voice as Input. The recording lifecycle
 // itself (permission/MIME/duration/error handling, the state machine) is
 // extracted into lib/voiceRecording.ts so it can be unit tested without a
@@ -97,23 +102,9 @@ interface CoachingSupportingMetric {
 // never to return to a client — this UI only ever needs enough to show a
 // human what is being proposed and to call the existing, unmodified
 // governance endpoints (`/ai/actions/requests/:id/{approve,reject,execute}`)
-// by id.
-interface GrowCommitmentProposalSummary {
-  actionRequestId: number;
-  actionKey: "CREATE_GROW_COMMITMENT";
-  humanReadableSummary: string;
-  contactName: string;
-  partyId: number;
-  dueAt: string;
-  timeZone: string;
-  relatedPropertyId: number | null;
-  relatedOpportunityId: number | null;
-  reason: string;
-  evidenceSummary: string | null;
-  status: "AWAITING_APPROVAL" | "APPROVED";
-  expiresAt: string | null;
-  reviewUrl: string;
-}
+// by id. Since Stage F4.3 the shape itself lives in lib/commitmentProposals.ts
+// alongside the shared card's pure logic.
+type GrowCommitmentProposalSummary = AskAgentCommitmentProposal;
 
 interface AiStructuredResponse {
   // AE GROW Priority 6 Stage B: "summary" and "indicator" are additive -
@@ -285,265 +276,6 @@ function formatDataFreshness(iso: string): string {
     return iso;
   }
   return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
-
-// AE GROW Priority 6 Stage D — the review-surface states this card can be
-// in. Mirrors the Stage D specification's required UI-state list exactly:
-// "review" is Ready-for-review, "approving"/"executing"/"rejecting" are the
-// three Loading variants, "approved" covers both a brief mid-flow moment
-// and (its real, persistent use) an already-approved-but-not-yet-executed
-// proposal found on mount, "executed"/"rejected" are the two terminal
-// success outcomes, "dismissed" is Cancel-close-without-deciding (never
-// calls any endpoint), and "expired"/"already_actioned"/"permission_denied"
-// /"validation_error"/"recoverable_failure" cover every denial reason the
-// existing, unmodified governance endpoints can return.
-type ProposalCardState =
-  | "review"
-  | "approving"
-  | "approved"
-  | "executing"
-  | "executed"
-  | "rejecting"
-  | "rejected"
-  | "dismissed"
-  | "expired"
-  | "already_actioned"
-  | "permission_denied"
-  | "validation_error"
-  | "recoverable_failure";
-
-// Maps an ApiError from the existing governance endpoints to one of the
-// states above. 403/404 are unambiguous (the routes never return them for
-// any other reason on these specific verbs — see routes/ai-actions.ts's
-// statusForApprovalReason/statusForExecutionReason). A 409 is ambiguous by
-// HTTP status alone (WRONG_STATUS/EXPIRED/PAYLOAD_TAMPERED/POLICY_DENIED/
-// EXECUTION_FAILED/etc. all map to 409), so this relies on ApiError's
-// additive `.reason` field (see lib/api.ts) to tell an already-actioned
-// request apart from a genuinely expired one; anything else 409 (a
-// tamper/policy/execution failure — all rare, and in every case nothing
-// further was created) falls back to the generic recoverable-failure state
-// rather than a misleading, more specific one this UI cannot actually
-// confirm.
-function stateForApiError(err: ApiError): ProposalCardState {
-  if (err.status === 403) return "permission_denied";
-  if (err.status === 404) return "already_actioned";
-  if (err.status === 400) return "validation_error";
-  if (err.reason === "EXPIRED") return "expired";
-  if (err.reason === "WRONG_STATUS") return "already_actioned";
-  return "recoverable_failure";
-}
-
-interface GrowCommitmentExecutionResult {
-  id: number;
-}
-
-// AE GROW Priority 6 Stage D — the human review/approval surface itself.
-// Renders only when AiStructuredResponse.proposedCommitment is present
-// (see the render call in AskAgentEngine below); every existing response
-// shape (RUN Copilot, plain Grow Ask AE without a grounded follow-up,
-// Business Coach without one) is completely unaffected since this
-// component simply never mounts for them.
-//
-// Deliberately calls the existing, unmodified generic governance router
-// (`/ai/actions/requests/:id/{approve,reject,execute}`) by the
-// actionRequestId the backend already resolved and validated server-side —
-// this component never re-implements any policy/ownership/tamper check
-// itself, and never lets the agent pick which action or actor type runs;
-// it only ever acts on the one specific, already-proposed request it was
-// handed.
-//
-// "Approve & Create Commitment" is one deliberate click from the agent's
-// point of view, per the Stage D specification's explicit-outcome-label
-// requirement — the two-step approve-then-execute state machine
-// underneath (unmodified Action Requests / Execution Gateway) is not
-// something this UI asks the agent to trigger as two separate clicks. The
-// one case where a second, explicit click is required is a proposal this
-// card is handed already in "APPROVED" status (a repeat question that
-// deduplicated onto an earlier approval that was never executed) — there
-// is no approval step left to chain from, so the card shows a dedicated
-// "Create commitment" button for that case instead of auto-executing on
-// mount, since executing a real write should never happen without an
-// explicit click on this render.
-function GrowCommitmentProposalCard({ proposal }: { proposal: GrowCommitmentProposalSummary }) {
-  const [state, setState] = useState<ProposalCardState>(proposal.status === "APPROVED" ? "approved" : "review");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [showRejectForm, setShowRejectForm] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
-  const [createdCommitmentId, setCreatedCommitmentId] = useState<number | null>(null);
-
-  async function runExecute() {
-    setState("executing");
-    setErrorMessage(null);
-    try {
-      const result = await apiFetch<{ request: { id: number; status: string }; result: GrowCommitmentExecutionResult | null }>(
-        `/ai/actions/requests/${proposal.actionRequestId}/execute`,
-        { method: "POST" },
-      );
-      setCreatedCommitmentId(result.result !== null ? result.result.id : null);
-      setState("executed");
-    } catch (err) {
-      const apiErr = err instanceof ApiError ? err : null;
-      setErrorMessage(apiErr?.friendly ?? "Something went wrong. Try again.");
-      setState(apiErr !== null ? stateForApiError(apiErr) : "recoverable_failure");
-    }
-  }
-
-  async function handleApprove() {
-    setState("approving");
-    setErrorMessage(null);
-    try {
-      await apiFetch(`/ai/actions/requests/${proposal.actionRequestId}/approve`, { method: "POST" });
-    } catch (err) {
-      const apiErr = err instanceof ApiError ? err : null;
-      setErrorMessage(apiErr?.friendly ?? "Something went wrong. Try again.");
-      setState(apiErr !== null ? stateForApiError(apiErr) : "recoverable_failure");
-      return;
-    }
-    // Approval succeeded — immediately execute, so the agent's one click
-    // reads through to "Executed" without a separate "now click execute"
-    // step. A failure here is still reported as its own state (e.g. a
-    // concurrent second tab could have already executed it in the gap
-    // between these two calls) rather than silently swallowed.
-    await runExecute();
-  }
-
-  async function handleReject() {
-    const reasonText = rejectReason.trim().length > 0 ? rejectReason.trim() : "Not needed right now.";
-    setState("rejecting");
-    setErrorMessage(null);
-    try {
-      await apiFetch(`/ai/actions/requests/${proposal.actionRequestId}/reject`, {
-        method: "POST",
-        body: JSON.stringify({ reason: reasonText }),
-      });
-      setState("rejected");
-    } catch (err) {
-      const apiErr = err instanceof ApiError ? err : null;
-      setErrorMessage(apiErr?.friendly ?? "Something went wrong. Try again.");
-      setState(apiErr !== null ? stateForApiError(apiErr) : "recoverable_failure");
-    }
-  }
-
-  if (state === "dismissed") {
-    return null;
-  }
-
-  const dueDate = new Date(proposal.dueAt);
-  const dueLabel = Number.isNaN(dueDate.getTime()) ? proposal.dueAt : dueDate.toLocaleDateString(undefined, { dateStyle: "medium" });
-
-  return (
-    <div className="ai-copilot-proposal" aria-live="polite" aria-atomic="true">
-      <div className="eyebrow ai-copilot-kind-advisory">Proposed follow-up — nothing created yet</div>
-      <p>{proposal.humanReadableSummary}</p>
-      <ul className="ai-copilot-proposal-details">
-        <li>Contact: {proposal.contactName}</li>
-        <li>
-          Due: {dueLabel} · {proposal.timeZone}
-        </li>
-        <li>Why AE suggested this: {proposal.reason}</li>
-        {proposal.evidenceSummary !== null && <li>Evidence: {proposal.evidenceSummary}</li>}
-      </ul>
-
-      {errorMessage !== null && <p className="error-text">{errorMessage}</p>}
-
-      {state === "review" && (
-        <>
-          <div className="ai-copilot-proposal-actions">
-            <button type="button" className="btn btn-primary btn-small" onClick={handleApprove}>
-              Approve &amp; Create Commitment
-            </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => setShowRejectForm((v) => !v)}>
-              Reject
-            </button>
-            <button type="button" className="btn btn-link btn-small" onClick={() => setState("dismissed")}>
-              Not now
-            </button>
-          </div>
-          {showRejectForm && (
-            <form
-              className="stack grow-inline-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleReject();
-              }}
-            >
-              <label htmlFor={`grow-commitment-reject-reason-${proposal.actionRequestId}`}>Reason (optional)</label>
-              <input
-                id={`grow-commitment-reject-reason-${proposal.actionRequestId}`}
-                type="text"
-                placeholder="e.g. Already followed up"
-                value={rejectReason}
-                onChange={(e) => setRejectReason(e.target.value)}
-              />
-              <button className="btn btn-secondary btn-small" type="submit">
-                Confirm rejection
-              </button>
-            </form>
-          )}
-        </>
-      )}
-
-      {state === "approving" && (
-        <p className="ai-copilot-loading">
-          <span className="ai-copilot-spinner" aria-hidden="true" />
-          Approving…
-        </p>
-      )}
-
-      {state === "approved" && (
-        <div className="ai-copilot-proposal-actions">
-          <p className="muted">Already approved — the commitment has not been created yet.</p>
-          <button type="button" className="btn btn-primary btn-small" onClick={runExecute}>
-            Create commitment
-          </button>
-        </div>
-      )}
-
-      {state === "executing" && (
-        <p className="ai-copilot-loading">
-          <span className="ai-copilot-spinner" aria-hidden="true" />
-          Creating the commitment…
-        </p>
-      )}
-
-      {state === "executed" && (
-        <p>
-          Commitment created.{" "}
-          <Link href={proposal.reviewUrl}>{createdCommitmentId !== null ? `View in Grow (#${createdCommitmentId})` : "View in Grow"}</Link>
-        </p>
-      )}
-
-      {state === "rejecting" && (
-        <p className="ai-copilot-loading">
-          <span className="ai-copilot-spinner" aria-hidden="true" />
-          Rejecting…
-        </p>
-      )}
-
-      {state === "rejected" && <p className="muted">Rejected. No commitment was created.</p>}
-
-      {state === "expired" && <p className="muted">This proposal has expired. Ask AE again to generate a fresh one if it&rsquo;s still needed.</p>}
-
-      {state === "already_actioned" && (
-        <p className="muted">This proposal has already been actioned (approved, rejected, or executed elsewhere) — no further action is possible here.</p>
-      )}
-
-      {state === "permission_denied" && (
-        <p className="error-text">You don&rsquo;t have authority to approve this. Ask a Brokerage Administrator if you believe this is wrong.</p>
-      )}
-
-      {state === "validation_error" && <p className="error-text">That didn&rsquo;t go through. Check the details and try again.</p>}
-
-      {state === "recoverable_failure" && (
-        <div className="ai-copilot-proposal-actions">
-          <p className="muted">Nothing further was created. You can try again.</p>
-          <button type="button" className="btn btn-secondary btn-small" onClick={() => setState("review")}>
-            Try again
-          </button>
-        </div>
-      )}
-    </div>
-  );
 }
 
 // Minimal contextual "Ask Agent Engine" UI - the one real role implementation
@@ -1082,7 +814,7 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
             renders once, right after whichever answer was shown, rather
             than being duplicated inside each block above. */}
         {result !== null && result.response.proposedCommitment !== undefined && (
-          <GrowCommitmentProposalCard proposal={result.response.proposedCommitment} />
+          <GrowCommitmentProposalCard proposal={viewFromAskAgentProposal(result.response.proposedCommitment)} />
         )}
       </div>
     </section>
