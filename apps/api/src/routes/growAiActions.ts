@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { listAwaitingApprovalForUser } from "../lib/ai/actionRequests.js";
+import { parseCallFollowupResourceId } from "../lib/growCallFollowups.js";
 
 // AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
 // Actions.
@@ -31,13 +32,29 @@ growAiActionsRouter.get(
       return;
     }
 
+    // Stage F4.1: optional ?partyId=<int> narrows the SAME caller-own,
+    // brokerage-scoped, non-expired list to one contact (e.g. Contact 360).
+    // It can only ever remove rows, never widen the scope.
+    let partyId: number | null = null;
+    if (req.query.partyId !== undefined) {
+      const raw = req.query.partyId;
+      partyId = typeof raw === "string" && /^[1-9][0-9]*$/.test(raw) ? Number(raw) : NaN;
+      if (!Number.isSafeInteger(partyId)) {
+        res.status(400).json({ error: "partyId must be a positive integer." });
+        return;
+      }
+    }
+
     // Stage F4.0: only the caller's OWN requests (never a colleague's), and
     // expired proposals are transitioned to EXPIRED (audited) and excluded.
-    const requests = await listAwaitingApprovalForUser(
+    const allRequests = await listAwaitingApprovalForUser(
       CREATE_GROW_COMMITMENT_ACTION_KEY,
       authedUser.brokerageId,
       authedUser.id,
     );
+    const requests = partyId === null
+      ? allRequests
+      : allRequests.filter((r) => (r.inputPayload as { partyId?: unknown } | null)?.partyId === partyId);
 
     // Every field returned here is either the request's own governance
     // metadata (id, status, timestamps) or a field already defined and
@@ -55,6 +72,9 @@ growAiActionsRouter.get(
         status: r.status,
         createdAt: r.createdAt.toISOString(),
         expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
+        // Stage F4.1: ids-only provenance for call-review follow-ups, parsed
+        // from the server-built resourceId (null for any other proposal).
+        provenance: parseCallFollowupResourceId(r.resourceId),
       })),
     });
   },
