@@ -17,17 +17,17 @@
 //      against a real detected exception rather than a hand-built one),
 //      and auto-resolved once the anomaly is corrected.
 //
-// Plus: the concurrent-scan guard, per-run summary bookkeeping, and the
+// Plus: the single-flight (advisory-lock) scan guard, tenant-scoped scans, per-run summary bookkeeping, and the
 // "a throwing rule never stops its siblings or auto-resolves on a failed
 // pass" isolation guarantee (Build Instructions §3/§19).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, properties, offers, riskExceptions, riskExceptionTransitions, riskExceptionScanRuns, type RiskException } from "@aee/db";
 import { publishDomainEvent, newCorrelationId, type DomainEvent } from "@aee/events";
-import { runScheduledScan, handleExceptionDomainEvent, type ScanSummary } from "../engine.js";
+import { runScheduledScan, handleExceptionDomainEvent, type ScanSummary, type RunScanResult } from "../engine.js";
 import { RISK_RULES, type RiskRule } from "../registry.js";
 import { createOrUpdateException, resolveExceptionManually, RiskExceptionError } from "../model.js";
 import { createBrokerageWithUsers, createListedProperty, createTransactionFromListedProperty, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
@@ -42,6 +42,7 @@ let server: Server;
 let baseUrl: string;
 const suffix = Date.now();
 let A: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
+let B: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
 
 before(async () => {
   const { configureEvents } = await import("../../events.js");
@@ -55,10 +56,11 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 
   A = await createBrokerageWithUsers(baseUrl, `Exceptions Engine A ${suffix}`);
+  B = await createBrokerageWithUsers(baseUrl, `Exceptions Engine B ${suffix}`);
 });
 
 after(async () => {
-  const ids = [A?.brokerageId].filter((id): id is number => typeof id === "number");
+  const ids = [A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number");
   await cleanupBrokerages(ids);
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
@@ -74,15 +76,16 @@ async function createProperty(cookie: string, address: string): Promise<number> 
   return property.id;
 }
 
-// Retries a scheduled scan when it's transiently refused because another
-// scan (from a concurrently-running test file against the same shared test
-// database) currently holds the scan_runs lock — a real, correct outcome
+// Scans ONLY this file's own tenant (so a concurrently-running test file
+// sharing the database is never touched) and retries when the scan is
+// transiently refused because another file's scan currently holds the
+// engine's global single-flight advisory lock — a real, correct outcome
 // under concurrent test execution, not a bug in the engine under test.
-async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL"): Promise<ScanSummary> {
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const result = await runScheduledScan(trigger);
+async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL", brokerageIds: number[] = [A.brokerageId]): Promise<ScanSummary> {
+  for (let attempt = 0; attempt < 120; attempt++) {
+    const result = await runScheduledScan(trigger, { brokerageIds });
     if (result.ok) return result.summary;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error("runScheduledScan did not succeed after retries — another scan kept the lock held throughout");
 }
@@ -227,17 +230,99 @@ test("CRITICAL scenario: two offers independently marked Accepted for one proper
 // Scan orchestration.
 // ---------------------------------------------------------------------
 
-test("runScheduledScan refuses to start a second sweep while one is already RUNNING and not stale", async () => {
-  const [fakeRun] = await db.insert(riskExceptionScanRuns).values({ status: "RUNNING", trigger: "MANUAL" }).returning();
+test("two overlapping scans: exactly one runs — the second is refused atomically by the advisory lock while the first is mid-sweep", async () => {
+  let signalEntered!: () => void;
+  const entered = new Promise<"entered">((resolve) => {
+    signalEntered = () => resolve("entered");
+  });
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const blockingRule: RiskRule = {
+    ruleId: `TEST_BLOCKING_RULE_${Date.now()}`,
+    version: 1,
+    category: "WORKFLOW_OPERATIONAL",
+    name: "Test blocking rule",
+    description: "Parks the sweep mid-scan so a second scan can be attempted while the first provably holds the lock.",
+    triggerEventTypes: [],
+    async scanBrokerage() {
+      signalEntered();
+      await gate;
+      return [];
+    },
+  };
+  RISK_RULES.push(blockingRule);
+  let first: Promise<RunScanResult> | null = null;
   try {
-    const result = await runScheduledScan("MANUAL");
-    assert.equal(result.ok, false);
-    if (!result.ok) {
-      assert.match(result.skippedReason, new RegExp(fakeRun!.id));
+    // Another test file's scan may hold the global lock at the moment we
+    // start — keep trying until OUR first scan is provably inside its sweep.
+    for (let attempt = 0; attempt < 120 && !first; attempt++) {
+      const candidate = runScheduledScan("MANUAL", { brokerageIds: [A.brokerageId] });
+      const winner = await Promise.race([entered, candidate]);
+      if (winner === "entered") {
+        first = candidate;
+      } else {
+        assert.equal(winner.ok, false, "a scan that completed without reaching the blocking rule is impossible");
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    assert.ok(first, "the first scan never acquired the lock");
+
+    const [second, third] = await Promise.all([
+      runScheduledScan("SCHEDULED", { brokerageIds: [A.brokerageId] }),
+      runScheduledScan("MANUAL"),
+    ]);
+    assert.equal(second.ok, false, "a second scan must be refused while the first holds the lock");
+    assert.equal(third.ok, false, "an unscoped scan is refused too — the lock is global");
+    if (!second.ok) assert.match(second.skippedReason, /already running/);
+
+    releaseGate();
+    const firstResult = await first!;
+    assert.equal(firstResult.ok, true);
+    if (firstResult.ok) {
+      const [row] = await db.select().from(riskExceptionScanRuns).where(eq(riskExceptionScanRuns.id, firstResult.summary.scanRunId));
+      assert.equal(row!.status, "COMPLETED");
     }
   } finally {
-    await db.update(riskExceptionScanRuns).set({ status: "COMPLETED", completedAt: new Date() }).where(eq(riskExceptionScanRuns.id, fakeRun!.id));
+    releaseGate();
+    if (first) await first.catch(() => undefined);
+    const idx = RISK_RULES.indexOf(blockingRule);
+    if (idx >= 0) RISK_RULES.splice(idx, 1);
   }
+});
+
+test("a leftover RUNNING scan_runs row from a crashed process never blocks the next sweep and is closed out as abandoned (lock-based, no wall-clock window)", async () => {
+  const [orphan] = await db.insert(riskExceptionScanRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
+  try {
+    const summary = await scanOrRetry("MANUAL");
+    assert.notEqual(summary.scanRunId, orphan!.id);
+    const [row] = await db.select().from(riskExceptionScanRuns).where(eq(riskExceptionScanRuns.id, orphan!.id));
+    assert.equal(row!.status, "FAILED");
+    assert.match(row!.errorMessage ?? "", /Abandoned/);
+    assert.ok(row!.completedAt);
+  } finally {
+    await db.update(riskExceptionScanRuns).set({ status: "FAILED", completedAt: new Date() }).where(and(eq(riskExceptionScanRuns.id, orphan!.id), eq(riskExceptionScanRuns.status, "RUNNING")));
+  }
+});
+
+test("a scan scoped with brokerageIds only evaluates the listed brokerages", async () => {
+  const { propertyId: bPropertyId } = await createListedProperty(baseUrl, B.agent.cookie, { address: "1 Scoped Scan Other Tenant Rd" });
+  await db.update(properties).set({ suburb: null }).where(eq(properties.id, bPropertyId));
+
+  const scopedToA = await scanOrRetry("MANUAL", [A.brokerageId]);
+  assert.equal(scopedToA.brokeragesScanned, 1);
+  assert.equal(scopedToA.rulesEvaluated, RISK_RULES.length);
+  const afterA = await db.select().from(riskExceptions).where(eq(riskExceptions.propertyId, bPropertyId));
+  assert.equal(afterA.length, 0, "a scan scoped to A must never create exceptions for B");
+
+  const empty = await scanOrRetry("MANUAL", []);
+  assert.equal(empty.brokeragesScanned, 0);
+
+  const scopedToB = await scanOrRetry("MANUAL", [B.brokerageId, B.brokerageId]);
+  assert.equal(scopedToB.brokeragesScanned, 1, "duplicate ids are scanned once");
+  const afterB = await db.select().from(riskExceptions).where(eq(riskExceptions.propertyId, bPropertyId));
+  assert.ok(afterB.some((r) => r.ruleId === "B07_LISTING_LIVE_MISSING_REQUIRED_INFO" && r.brokerageId === B.brokerageId));
 });
 
 test("a completed scan run records its summary counts and evaluates every registered rule at least once", async () => {

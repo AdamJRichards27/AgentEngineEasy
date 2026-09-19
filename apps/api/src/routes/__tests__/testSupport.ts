@@ -1,4 +1,4 @@
-import { eq, inArray, and } from "drizzle-orm";
+import { eq, inArray, and, isNull, sql } from "drizzle-orm";
 import { createHmac } from "node:crypto";
 import {
   db,
@@ -603,10 +603,28 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   // FK ordering this block depends on. Placed here, ahead of the
   // parties/users deletes further down, alongside every other
   // brokerage-scoped block added by a later priority.
-  const growCallSessionRows = await db.select({ id: growCallSessions.id }).from(growCallSessions).where(inArray(growCallSessions.brokerageId, ids));
+  const growCallSessionRows = await db
+    .select({ id: growCallSessions.id, provider: growCallSessions.provider, providerCallId: growCallSessions.providerCallId })
+    .from(growCallSessions)
+    .where(inArray(growCallSessions.brokerageId, ids));
   const growCallSessionIds = growCallSessionRows.map((s) => s.id);
   if (growCallSessionIds.length > 0) {
     await db.delete(growCallWebhookEvents).where(inArray(growCallWebhookEvents.relatedCallSessionId, growCallSessionIds));
+  }
+  // Orphan receipts: a webhook that was received but never linked to its
+  // session (FAILED transitions, rejected/stale deliveries) keeps
+  // relatedCallSessionId NULL, so the delete above misses it. Attribute it
+  // through the immutable stored routing field instead — (provider,
+  // providerCallId) is unique per call session, so matching only THIS
+  // brokerage's sessions' pairs, and only unlinked receipts, can never delete
+  // another tenant's row.
+  for (const session of growCallSessionRows) {
+    if (!session.providerCallId) continue;
+    await db.delete(growCallWebhookEvents).where(and(
+      isNull(growCallWebhookEvents.relatedCallSessionId),
+      eq(growCallWebhookEvents.provider, session.provider),
+      sql`${growCallWebhookEvents.payload}->>'providerCallId' = ${session.providerCallId}`,
+    ));
   }
   await db.delete(growCallSessions).where(inArray(growCallSessions.brokerageId, ids));
   await db.delete(growCallRecordingConsents).where(inArray(growCallRecordingConsents.brokerageId, ids));

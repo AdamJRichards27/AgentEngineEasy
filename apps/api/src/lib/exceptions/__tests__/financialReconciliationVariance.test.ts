@@ -97,11 +97,14 @@ async function createPaymentRequest(brokerageId: number, cookie: string, opts?: 
 // shares the same test database as every other exceptions/integrations
 // suite, so a concurrently-running scan can transiently hold the
 // scan_runs lock.
+// Scoped to this file's own tenants (A and B) so a scan here never touches
+// another concurrently-running file's brokerages; the retry covers the
+// global single-flight scan lock being held by another file's scan.
 async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL"): Promise<ScanSummary> {
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const result = await runScheduledScan(trigger);
+  for (let attempt = 0; attempt < 120; attempt++) {
+    const result = await runScheduledScan(trigger, { brokerageIds: [A.brokerageId, B.brokerageId] });
     if (result.ok) return result.summary;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error("runScheduledScan did not succeed after retries — another scan kept the lock held throughout");
 }

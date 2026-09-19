@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
   db,
@@ -37,6 +37,8 @@ import {
   approveAIActionRequest,
   rejectAIActionRequest,
   hashInputPayload,
+  verifyInputPayloadHash,
+  LEGACY_UNKEYED_HASH_SUNSET,
   recoverStuckExecutingActionRequests,
   STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "../actionRequests.js";
@@ -370,6 +372,117 @@ test("tamper protection: a payload altered after auto-approval is rejected at ex
 
   const after = await getAIActionRequest(request!.id, brokerageId);
   assert.equal(after!.status, "FAILED");
+});
+
+// ---------------------------------------------------------------------------
+// 8b. Keyed (v2) tamper hash — AE GROW Pilot Readiness WP2b
+// ---------------------------------------------------------------------------
+function sortKeysForTest(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeysForTest);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeysForTest(v)]));
+  }
+  return value;
+}
+// What an attacker WITHOUT the server key can compute: the old, unkeyed format.
+function plainSha256ForTest(payload: unknown): string {
+  return createHash("sha256").update(JSON.stringify(sortKeysForTest(payload ?? null))).digest("hex");
+}
+
+test("WP2b keyed hash: v2-prefixed HMAC, differs from plain SHA-256, key-order independent, and bound to the server key", () => {
+  const payload = { propertyId: 7, note: "hello", nested: { b: 2, a: [1, { z: 1, y: 2 }] } };
+  const hash = hashInputPayload(payload);
+  assert.match(hash, /^v2:[0-9a-f]{64}$/);
+  assert.notEqual(hash.slice(3), plainSha256ForTest(payload), "the keyed hash must not equal the unkeyed SHA-256");
+  assert.equal(hashInputPayload({ nested: { a: [1, { y: 2, z: 1 }], b: 2 }, note: "hello", propertyId: 7 }), hash);
+  assert.notEqual(hashInputPayload({ ...payload, note: "hello!" }), hash);
+
+  const previous = process.env.AI_ACTION_PAYLOAD_HMAC_KEY;
+  try {
+    process.env.AI_ACTION_PAYLOAD_HMAC_KEY = "wp2b-explicit-test-only-payload-hmac-key-0123456789";
+    const explicitKeyHash = hashInputPayload(payload);
+    assert.match(explicitKeyHash, /^v2:[0-9a-f]{64}$/);
+    assert.notEqual(explicitKeyHash, hash, "the explicit key takes precedence over the SESSION_SECRET-derived key");
+    process.env.AI_ACTION_PAYLOAD_HMAC_KEY = "too-short";
+    assert.throws(() => hashInputPayload(payload), /AI_ACTION_PAYLOAD_HMAC_KEY must contain at least 32 bytes/);
+  } finally {
+    if (previous === undefined) delete process.env.AI_ACTION_PAYLOAD_HMAC_KEY;
+    else process.env.AI_ACTION_PAYLOAD_HMAC_KEY = previous;
+  }
+  assert.equal(hashInputPayload(payload), hash);
+});
+
+test("WP2b tamper at approval: an attacker without the key who swaps the payload and recomputes plain SHA-256 is rejected", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - WP2b keyless forgery at approval");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  const { request } = await proposeAIAction({ actionKey: "WORKFLOW_VERSION_ACTIVATE", actor: admin, actorType: "USER", rawInput: { proposalId: 515151 } });
+  assert.ok(request);
+  assert.match(request!.inputPayloadHash, /^v2:/);
+  const forgedPayload = { proposalId: 1 };
+  await db.update(aiActionRequests).set({ inputPayload: forgedPayload, inputPayloadHash: plainSha256ForTest(forgedPayload) }).where(eq(aiActionRequests.id, request!.id));
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, admin);
+  assert.equal(approval.ok, false);
+  assert.equal(approval.reason, "PAYLOAD_TAMPERED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "REJECTED");
+});
+
+test("WP2b tamper at execution: keyless forgeries (plain SHA-256, or plain SHA-256 dressed as v2) are rejected by the Execution Gateway", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - WP2b keyless forgery at execution");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+
+  for (const format of ["plain", "v2-prefixed-plain"] as const) {
+    const { request } = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: `original ${format}` } });
+    assert.equal(request!.status, "APPROVED");
+    const forgedPayload = { propertyId, note: `forged ${format}` };
+    const forgedHash = format === "plain" ? plainSha256ForTest(forgedPayload) : `v2:${plainSha256ForTest(forgedPayload)}`;
+    await db.update(aiActionRequests).set({ inputPayload: forgedPayload, inputPayloadHash: forgedHash }).where(eq(aiActionRequests.id, request!.id));
+
+    const result = await executeAIAction(request!.id, brokerageId, agent);
+    assert.equal(result.ok, false, format);
+    assert.equal(result.reason, "PAYLOAD_TAMPERED", format);
+    assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "FAILED", format);
+  }
+});
+
+test("WP2b legacy compatibility: an unprefixed SHA-256 row created before the upgrade still approves/executes; the same hash on a post-upgrade row or after the sunset does not verify", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - WP2b legacy hash");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "legacy row" } });
+  assert.equal(request!.status, "APPROVED");
+  const legacyHash = plainSha256ForTest(request!.inputPayload);
+  // Simulate a row written by the previous release: unkeyed hash, created
+  // before this process (and therefore this module) started.
+  const legacyCreatedAt = new Date(Date.now() - 60 * 60 * 1000);
+  await db.update(aiActionRequests).set({ inputPayloadHash: legacyHash, createdAt: legacyCreatedAt }).where(eq(aiActionRequests.id, request!.id));
+  const legacyRow = (await getAIActionRequest(request!.id, brokerageId))!;
+
+  const beforeSunset = new Date(LEGACY_UNKEYED_HASH_SUNSET.getTime() - 1);
+  assert.equal(verifyInputPayloadHash(legacyRow, beforeSunset), true);
+  assert.equal(verifyInputPayloadHash(legacyRow, LEGACY_UNKEYED_HASH_SUNSET), false, "the legacy path is dead after the sunset");
+  assert.equal(verifyInputPayloadHash({ ...legacyRow, createdAt: new Date(Date.now() + 1_000) }, beforeSunset), false, "an unprefixed hash on a row created after the upgrade is a forgery");
+  assert.equal(verifyInputPayloadHash({ ...legacyRow, inputPayload: { propertyId, note: "changed" } }, beforeSunset), false);
+  assert.equal(verifyInputPayloadHash({ ...legacyRow, inputPayloadHash: "v3:" + legacyHash }, beforeSunset), false, "unknown hash versions fail closed");
+
+  // End-to-end through the real Execution Gateway (wall clock). Once the
+  // hard sunset has passed, the legacy row must instead be refused.
+  const result = await executeAIAction(request!.id, brokerageId, agent);
+  if (Date.now() < LEGACY_UNKEYED_HASH_SUNSET.getTime()) {
+    assert.equal(result.ok, true, `legacy row should still execute, got ${result.reason}`);
+    assert.equal(result.request?.status, "COMPLETED");
+  } else {
+    assert.equal(result.reason, "PAYLOAD_TAMPERED");
+  }
 });
 
 // ---------------------------------------------------------------------------

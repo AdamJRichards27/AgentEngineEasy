@@ -58,7 +58,7 @@ import { evaluateAIAction, type PolicyActor } from "./policyEngine.js";
 import { getActionDefinition, type AIActionDefinition, type ActionExecutionContext, type ActorType } from "./actions/registry.js";
 import {
   getAIActionRequest,
-  hashInputPayload,
+  verifyInputPayloadHash,
   canActorAccessActionRequest,
   isBrokerageAdminActor,
   actorHoldsActionEntitlement,
@@ -210,7 +210,7 @@ async function runExecution(requestId: number, brokerageId: number, caller: Exec
     return { ok: false, reason: "EXPIRED" };
   }
 
-  if (hashInputPayload(row.inputPayload) !== row.inputPayloadHash) {
+  if (!verifyInputPayloadHash(row)) {
     const failed = await markFailed(row, "APPROVED", "Input payload failed tamper check at execution time.");
     if (failed) await publishAiActionEvent(failed, "AI_ACTION_BLOCKED", { reason: "PAYLOAD_TAMPERED", stage: "EXECUTION" });
     return { ok: false, reason: "PAYLOAD_TAMPERED" };
