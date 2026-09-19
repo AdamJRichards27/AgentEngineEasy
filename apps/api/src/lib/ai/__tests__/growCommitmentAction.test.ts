@@ -1187,3 +1187,152 @@ test("F4.0 system path: executeAIActionAsSystem refuses an approved CREATE_GROW_
   const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
   assert.equal(commitments.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// F4.0 security-gate remediation D1 — Ask AE Grow proposal dedup is per user
+// and never surfaces another user's proposal.
+// ---------------------------------------------------------------------------
+
+test("F4.0 D1: user B asking about the same contact and due date as user A gets their own proposal - never A's id or content - and the dedup key is per user", async (t) => {
+  const brokerageId = await createBrokerage("f4-d1-per-user");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentA = await createUser(brokerageId, "Agent");
+  const agentB = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const candidate = makeCandidate({ partyId, contactName: "Sarah", dueAt: new Date().toISOString(), reason: "A's private reason" });
+
+  const forA = await proposeGrowCommitmentIfGrounded(
+    makeContext(brokerageId, agentA, emptyGrowContext({ focusedItem: candidate })),
+    actorOf(agentA, "Agent", brokerageId),
+    null,
+  );
+  const forB = await proposeGrowCommitmentIfGrounded(
+    makeContext(brokerageId, agentB, emptyGrowContext({ focusedItem: candidate })),
+    actorOf(agentB, "Agent", brokerageId),
+    null,
+  );
+  assert.ok(forA);
+  assert.ok(forB);
+  assert.notEqual(forB!.actionRequestId, forA!.actionRequestId, "B must never be handed A's proposal");
+
+  const rowA = await getAIActionRequest(forA!.actionRequestId, brokerageId);
+  const rowB = await getAIActionRequest(forB!.actionRequestId, brokerageId);
+  assert.equal(rowA!.userId, agentA);
+  assert.equal(rowB!.userId, agentB);
+  assert.match(rowA!.resourceId!, new RegExp(`^user:${agentA}:party:${partyId}:due:`));
+  assert.match(rowB!.resourceId!, new RegExp(`^user:${agentB}:party:${partyId}:due:`));
+
+  // Repeat calls still dedup per user.
+  const againB = await proposeGrowCommitmentIfGrounded(
+    makeContext(brokerageId, agentB, emptyGrowContext({ focusedItem: candidate })),
+    actorOf(agentB, "Agent", brokerageId),
+    null,
+  );
+  assert.equal(againB!.actionRequestId, forB!.actionRequestId);
+});
+
+test("F4.0 D1: a user without grow.activities.manage gets no proposal summary at all, even while a colleague's proposal for the same contact and due date is open", async (t) => {
+  const brokerageId = await createBrokerage("f4-d1-unentitled");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentA = await createUser(brokerageId, "Agent");
+  const agentB = await createUser(brokerageId, "Agent");
+  await grantUserEntitlement(brokerageId, agentA); // B holds no grant
+  const partyId = await createParty(brokerageId, "Sarah");
+  const candidate = makeCandidate({ partyId, contactName: "Sarah", dueAt: new Date().toISOString() });
+
+  const forA = await proposeGrowCommitmentIfGrounded(
+    makeContext(brokerageId, agentA, emptyGrowContext({ focusedItem: candidate })),
+    actorOf(agentA, "Agent", brokerageId),
+    null,
+  );
+  assert.ok(forA);
+
+  const forB = await proposeGrowCommitmentIfGrounded(
+    makeContext(brokerageId, agentB, emptyGrowContext({ focusedItem: candidate })),
+    actorOf(agentB, "Agent", brokerageId),
+    null,
+  );
+  assert.equal(forB, undefined);
+  const rowsForB = await db
+    .select()
+    .from(aiActionRequests)
+    .where(and(eq(aiActionRequests.brokerageId, brokerageId), eq(aiActionRequests.userId, agentB)));
+  assert.equal(rowsForB.length, 0);
+
+  // A's own entitlement lapses: A no longer gets even their own open proposal surfaced.
+  await revokeUserEntitlement(brokerageId, agentA);
+  const forALapsed = await proposeGrowCommitmentIfGrounded(
+    makeContext(brokerageId, agentA, emptyGrowContext({ focusedItem: candidate })),
+    actorOf(agentA, "Agent", brokerageId),
+    null,
+  );
+  assert.equal(forALapsed, undefined);
+});
+
+test("F4.0 D1: the concurrent-race loser never receives another user's request - only the requester (or an admin) gets the surviving request back", async (t) => {
+  const brokerageId = await createBrokerage("f4-d1-race-loser");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentA = await createUser(brokerageId, "Agent");
+  const agentB = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  // A shared slot key (e.g. a pre-D1 `party:<id>:due:<date>` row still open).
+  const resourceId = `party:${partyId}:due:2026-04-04`;
+
+  const winner = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorOf(agentA, "Agent", brokerageId),
+    actorType: "AI",
+    rawInput: commitmentInput(partyId, "A's private follow-up"),
+    resourceId,
+  });
+  assert.ok(winner.request);
+
+  const loserB = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorOf(agentB, "Agent", brokerageId),
+    actorType: "AI",
+    rawInput: commitmentInput(partyId),
+    resourceId,
+  });
+  assert.equal(loserB.deduplicated, true);
+  assert.equal(loserB.request, null, "B must receive no request id or content");
+
+  const loserRequester = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorOf(agentA, "Agent", brokerageId),
+    actorType: "AI",
+    rawInput: commitmentInput(partyId),
+    resourceId,
+  });
+  assert.equal(loserRequester.request!.id, winner.request!.id);
+
+  const loserAdmin = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorOf(adminId, "Brokerage Administrator", brokerageId),
+    actorType: "AI",
+    rawInput: commitmentInput(partyId),
+    resourceId,
+  });
+  assert.equal(loserAdmin.request!.id, winner.request!.id, "an admin may see it, as with every other read");
+
+  const rows = await db.select().from(aiActionRequests).where(eq(aiActionRequests.resourceId, resourceId));
+  assert.equal(rows.length, 1);
+  // Truly concurrent: A and B race for a fresh shared slot. Whoever loses
+  // gets either nothing or their OWN request, never the other user's.
+  const raceSlot = `party:${partyId}:due:2026-05-05`;
+  const racers = [agentA, agentB, agentA, agentB];
+  const results = await Promise.all(
+    racers.map((userId) =>
+      proposeAIAction({ actionKey: ACTION_KEY, actor: actorOf(userId, "Agent", brokerageId), actorType: "AI", rawInput: commitmentInput(partyId), resourceId: raceSlot }),
+    ),
+  );
+  const raceRows = await db.select().from(aiActionRequests).where(eq(aiActionRequests.resourceId, raceSlot));
+  assert.equal(raceRows.length, 1);
+  results.forEach((result, i) => {
+    if (result.request !== null) assert.equal(result.request.userId, racers[i], "a racer may only ever receive its own request");
+  });
+  assert.ok(results.some((r) => r.request === null), "the other user's racers must have received nothing");
+});

@@ -245,9 +245,10 @@ export async function expireStaleOpenActionRequests(scope: ActionRequestScope, n
 //
 // Invoked (scoped, bounded) from: proposeAIAction() before a resource-
 // keyed insert, findOpenActionRequestByResource(), and
-// getAIActionRequestForActor() (GET /ai/actions/requests/:id). There is
-// no AI-action scheduler in this codebase; this function is exported so an
-// operator/scheduler can also run it unscoped.
+// getAIActionRequestForActor() (GET /ai/actions/requests/:id); and
+// (unscoped, bounded, throttled) from the automation engine's per-event
+// processing -- lib/automation/engine.ts sweepStuckAiActionRequestsIfDue()
+// -- which is what recovers automation requests (null resourceId).
 // ---------------------------------------------------------------------
 
 export const DEFAULT_STUCK_EXECUTING_THRESHOLD_MS = 15 * 60_000; // mirrors automation's DEFAULT_STALE_RUNNING_THRESHOLD_MS
@@ -336,8 +337,8 @@ export interface ProposeAIActionResult {
   request: AiActionRequest | null;
   decision: PolicyDecision;
   // True when a concurrent proposal for the same open resource slot won
-  // the race (partial unique index) and the existing open request was
-  // returned instead of a new one.
+  // the race (partial unique index). `request` is then the existing open
+  // request if the actor may access it, otherwise null (F4.0 D1).
   deduplicated?: boolean;
 }
 
@@ -443,7 +444,15 @@ export async function proposeAIAction(input: ProposeAIActionInput): Promise<Prop
     // new was created.
     if (resourceId !== null && isOpenResourceUniqueViolation(err)) {
       const existing = await selectOpenActionRequestByResource(input.actionKey, input.actor.brokerageId, resourceId, new Date());
-      if (existing) return { request: existing, decision, deduplicated: true };
+      // F4.0 D1: the surviving request is only ever handed back to someone
+      // allowed to see it (its requester or a brokerage administrator; the
+      // actor's entitlement was already re-checked by evaluateAIAction()
+      // above). Anyone else gets "no proposal" -- never another user's
+      // request id or content.
+      if (existing && canActorAccessActionRequest(existing, input.actor)) {
+        return { request: existing, decision, deduplicated: true };
+      }
+      if (existing) return { request: null, decision, deduplicated: true };
     }
     throw err;
   }
@@ -518,17 +527,19 @@ async function authorizeDecisionMaker(
   actor: PolicyActor,
   roleForbiddenReason: "APPROVER_ROLE_FORBIDDEN" | "REJECTOR_ROLE_FORBIDDEN",
 ): Promise<ApprovalDenialReason | null> {
+  // Access FIRST (F4.0 D3): only the human the request was proposed on
+  // behalf of, or an authorised brokerage administrator. Anyone else gets
+  // exactly the answer a missing id gets -- checked before the role check
+  // so a role-forbidden colleague cannot distinguish an existing id (403)
+  // from a missing one (404).
+  if (!canActorAccessActionRequest(row, actor)) {
+    return "NOT_FOUND";
+  }
   // Golden Rule applies to the approver/rejector too: only a role that
   // could perform this action manually may decide it for the AI.
   const definition = getActionDefinition(row.actionKey);
   if (!definition || !definition.allowedRoles.some((role) => role === actor.role)) {
     return roleForbiddenReason;
-  }
-  // Only the human the request was proposed on behalf of, or an
-  // authorised brokerage administrator. Anyone else gets the same answer
-  // as a missing id.
-  if (!canActorAccessActionRequest(row, actor)) {
-    return "NOT_FOUND";
   }
   // The decision-maker must hold the action's required entitlement right
   // now (e.g. grow.activities.manage for CREATE_GROW_COMMITMENT).

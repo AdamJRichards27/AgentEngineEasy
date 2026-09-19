@@ -44,10 +44,13 @@
 //     currently registered authority/risk), so an action that requires
 //     human approval can never be executed through it.
 //
-// markFailed is conditional on the status the caller last observed, and
-// rows stuck in EXECUTING after a crash are handled by
-// recoverStuckExecutingActionRequests() (actionRequests.ts) -- which marks
-// them FAILED and never re-executes.
+// markFailed AND the COMPLETED transition are conditional on the status
+// the caller last observed, and rows stuck in EXECUTING after a crash are
+// handled by recoverStuckExecutingActionRequests() (actionRequests.ts) --
+// which marks them FAILED and never re-executes. A success that arrives
+// after such a recovery never flips the row back to COMPLETED: it is
+// audited as a late completion and reported as COMPLETED_AFTER_RECOVERY
+// with sideEffectApplied = true.
 
 import { db, users, aiActionRequests, type AiActionRequest, type UserRole } from "@aee/db";
 import { and, eq } from "drizzle-orm";
@@ -62,6 +65,8 @@ import {
   transitionActionRequestToExpired,
 } from "./actionRequests.js";
 import { publishAiActionEvent } from "./actionEvents.js";
+import { logAudit } from "../audit.js";
+import { logger } from "@aee/events";
 import { isAutoExecuteEligible, riskTierForLevel, type AuthorityLevel } from "./authority.js";
 import type { RiskLevel } from "./types.js";
 
@@ -80,7 +85,11 @@ export type ExecutionDenialReason =
   | "EXECUTOR_ROLE_FORBIDDEN"
   | "ENTITLEMENT_DENIED"
   // F4.0 system-path refusal (never changes request state).
-  | "SYSTEM_PATH_FORBIDDEN";
+  | "SYSTEM_PATH_FORBIDDEN"
+  // F4.0 D2: execute() succeeded only after the stuck-EXECUTING recovery had
+  // already marked the row FAILED. The side effect ran (sideEffectApplied);
+  // the row stays FAILED and the late completion is audited.
+  | "COMPLETED_AFTER_RECOVERY";
 
 export interface ExecutionResult {
   ok: boolean;
@@ -89,7 +98,13 @@ export interface ExecutionResult {
   request?: AiActionRequest;
   result?: unknown;
   errorMessage?: string;
+  // Set only with COMPLETED_AFTER_RECOVERY: the action's side effect ran.
+  sideEffectApplied?: boolean;
 }
+
+export const LATE_COMPLETION_AFTER_RECOVERY_MESSAGE =
+  "STUCK_EXECUTING_RECOVERED then LATE_COMPLETION: execute() returned successfully after this request had already been " +
+  "recovered as stuck; the side effect WAS applied. Status left FAILED for manual reconciliation; never retried automatically.";
 
 type ExecutionCaller = { kind: "user"; actor: PolicyActor } | { kind: "system" };
 
@@ -117,7 +132,15 @@ async function authorizeHumanExecutor(
   executor: PolicyActor,
 ): Promise<ExecutionDenialReason | null> {
   const isAdmin = isBrokerageAdminActor(executor);
-  if (row.requiresApproval) {
+  // F4.0 D6: a stored requiresApproval=false is only trusted while the
+  // action is STILL auto-execute-eligible under both the stored and the
+  // currently registered authority/risk. If policy has tightened (or the
+  // row was edited), the request is treated as approval-required, so it
+  // needs a recorded human approval -- fail closed, no state change.
+  const storedEligible = isAutoExecuteEligible(row.authorityLevel as AuthorityLevel, riskTierForLevel(row.riskLevel as RiskLevel));
+  const currentEligible = !definition || isAutoExecuteEligible(definition.authorityLevel, riskTierForLevel(definition.riskLevel));
+  const needsHumanApproval = row.requiresApproval || !storedEligible || !currentEligible;
+  if (needsHumanApproval) {
     // An approval-required request can only be APPROVED by a recorded
     // human approval; a row without one was not approved through
     // approveAIActionRequest() and is never executable by a human.
@@ -248,19 +271,76 @@ async function runExecution(requestId: number, brokerageId: number, caller: Exec
     actorType: row.actorType as ActorType,
   };
 
+  let result: unknown;
   try {
-    const result = await definition.execute(ctx, decision.parsedInput);
-    const [completed] = await db
-      .update(aiActionRequests)
-      .set({ status: "COMPLETED", executionResult: (result ?? null) as AiActionRequest["executionResult"], executedAt: new Date(), updatedAt: new Date() })
-      .where(eq(aiActionRequests.id, row.id))
-      .returning();
-    await publishAiActionEvent(completed, "AI_ACTION_EXECUTED", { result: result ?? null });
-    return { ok: true, request: completed, result };
+    result = await definition.execute(ctx, decision.parsedInput);
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : "Unknown execution error";
+    // Conditional on EXECUTING: if the stuck-EXECUTING recovery already
+    // failed this row, its record (and its single AI_ACTION_FAILED event)
+    // stands; the late error is only logged + audited, never overwritten.
     const failed = await markFailed(claimed, "EXECUTING", errorMessage);
-    if (failed) await publishAiActionEvent(failed, "AI_ACTION_FAILED", { errorMessage });
+    if (failed) {
+      await publishAiActionEvent(failed, "AI_ACTION_FAILED", { errorMessage });
+    } else {
+      logger.warn("ai_action_late_failure_after_recovery", { requestId: row.id, actionKey: row.actionKey, brokerageId: row.brokerageId });
+      await logAudit({
+        userId: row.userId,
+        action: "ai_action_late_failure_after_recovery",
+        recordType: "ai_action_request",
+        recordId: String(row.id),
+        updatedValue: `execute() threw after the request had already left EXECUTING: ${errorMessage}`,
+      });
+    }
     return { ok: false, reason: "EXECUTION_FAILED", request: failed ?? undefined, errorMessage };
   }
+
+  // Conditional on EXECUTING (F4.0 D2): a success that arrives after the
+  // stuck-EXECUTING recovery already marked the row FAILED must not flip it
+  // back to COMPLETED or publish AI_ACTION_EXECUTED -- the audit trail
+  // would contradict itself.
+  const [completed] = await db
+    .update(aiActionRequests)
+    .set({ status: "COMPLETED", executionResult: (result ?? null) as AiActionRequest["executionResult"], executedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(aiActionRequests.id, row.id), eq(aiActionRequests.status, "EXECUTING")))
+    .returning();
+  if (completed) {
+    await publishAiActionEvent(completed, "AI_ACTION_EXECUTED", { result: result ?? null });
+    return { ok: true, request: completed, result };
+  }
+
+  // Late completion after recovery. The side effect DID run; record that
+  // fact on the (still FAILED) row and in the audit log, and tell the caller
+  // explicitly. Never re-executes. LATE_COMPLETION_AFTER_RECOVERY_MESSAGE
+  // keeps the STUCK_EXECUTING_RECOVERED token, so automation classifies it
+  // as terminal and never retries into a second execution.
+  logger.warn("ai_action_late_completion_after_recovery", { requestId: row.id, actionKey: row.actionKey, brokerageId: row.brokerageId });
+  const [annotated] = await db
+    .update(aiActionRequests)
+    .set({
+      executionResult: (result ?? null) as AiActionRequest["executionResult"],
+      executedAt: new Date(),
+      errorMessage: LATE_COMPLETION_AFTER_RECOVERY_MESSAGE,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(aiActionRequests.id, row.id), eq(aiActionRequests.status, "FAILED")))
+    .returning();
+  // Record-scoped audit row, same shape as the neighbouring recovery audits
+  // (operations.ts recoverAbandonedRunning, propertyNotes.ts): no brokerageId.
+  await logAudit({
+    userId: row.userId,
+    action: "ai_action_late_completion_after_recovery",
+    recordType: "ai_action_request",
+    recordId: String(row.id),
+    previousValue: "FAILED (STUCK_EXECUTING_RECOVERED)",
+    updatedValue: "execute() completed after recovery; side effect applied; status left FAILED",
+  });
+  return {
+    ok: false,
+    reason: "COMPLETED_AFTER_RECOVERY",
+    request: annotated ?? undefined,
+    result,
+    sideEffectApplied: true,
+    errorMessage: LATE_COMPLETION_AFTER_RECOVERY_MESSAGE,
+  };
 }

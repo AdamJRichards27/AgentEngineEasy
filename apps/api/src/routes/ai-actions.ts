@@ -214,6 +214,8 @@ aiActionsRouter.post("/requests/:id/execute", requireAuth, async (req, res) => {
         error: "Could not execute this request",
         reason: result.reason,
         policyReason: result.policyReason,
+        // F4.0 D2: true only for COMPLETED_AFTER_RECOVERY -- the side effect ran.
+        sideEffectApplied: result.sideEffectApplied,
       });
       return;
     }

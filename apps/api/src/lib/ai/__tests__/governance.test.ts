@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   db,
   brokerages,
@@ -24,6 +24,7 @@ import {
   aiActionRequests,
   workflowChangeProposals,
   automationAttentionItems,
+  auditLogs,
   type UserRole,
 } from "@aee/db";
 import { configureEventStore } from "@aee/events";
@@ -39,7 +40,7 @@ import {
   recoverStuckExecutingActionRequests,
   STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "../actionRequests.js";
-import { executeAIAction, executeAIActionAsSystem } from "../executionGateway.js";
+import { executeAIAction, executeAIActionAsSystem, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "../executionGateway.js";
 import { getActionDefinition } from "../actions/registry.js";
 import { classifyActionFailure } from "../../automation/operations.js";
 import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js";
@@ -274,9 +275,18 @@ test("approval ownership: only a role that could perform the action manually may
   });
   assert.ok(request);
 
+  // F4.0 D3: a same-brokerage user who is neither the requester nor an
+  // admin is refused at the access check first, with the same NOT_FOUND a
+  // missing id gets (no ROLE_FORBIDDEN existence oracle).
   const deniedApproval = await approveAIActionRequest(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(deniedApproval.ok, false);
-  assert.equal(deniedApproval.reason, "APPROVER_ROLE_FORBIDDEN");
+  assert.equal(deniedApproval.reason, "NOT_FOUND");
+
+  // The requester themself, whose role no longer allows the action (e.g.
+  // demoted since proposing), still gets the Golden Rule's role denial.
+  const demotedRequester = await approveAIActionRequest(request!.id, brokerageId, actorOf(adminId, "Agent", brokerageId));
+  assert.equal(demotedRequester.ok, false);
+  assert.equal(demotedRequester.reason, "APPROVER_ROLE_FORBIDDEN");
 
   const stillWaiting = await getAIActionRequest(request!.id, brokerageId);
   assert.equal(stillWaiting!.status, "AWAITING_APPROVAL");
@@ -852,4 +862,96 @@ test("F4.0 cross-tenant: approve/reject/execute/read against another brokerage's
   assert.equal((await executeAIAction(request!.id, brokerageB, foreignAdmin)).reason, "NOT_FOUND");
   assert.equal((await executeAIActionAsSystem(request!.id, brokerageB)).reason, "NOT_FOUND");
   assert.equal((await getAIActionRequest(request!.id, brokerageA))!.status, "AWAITING_APPROVAL");
+});
+
+test("F4.0 D2 late completion: if recovery fails the row while execute() is in flight and execute() then succeeds, the row stays FAILED, no AI_ACTION_EXECUTED is published, and the late completion is audited and reported", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 D2 late completion");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+  const since = testEventStore.events.length;
+
+  const { request } = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "late" } });
+
+  let executeCalls = 0;
+  const result = await withWrappedExecute(
+    "PROPERTY_NOTE_ADD",
+    (original) => async (...args) => {
+      executeCalls += 1;
+      // Another process judges this execution abandoned and recovers it...
+      await db
+        .update(aiActionRequests)
+        .set({ updatedAt: new Date(Date.now() - 60 * 60_000) })
+        .where(eq(aiActionRequests.id, request!.id));
+      await recoverStuckExecutingActionRequests(15 * 60_000, { requestId: request!.id });
+      // ...and then the real side effect completes anyway.
+      return original(...args);
+    },
+    () => executeAIAction(request!.id, brokerageId, agent),
+  );
+
+  assert.equal(executeCalls, 1, "never re-executed");
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "COMPLETED_AFTER_RECOVERY");
+  assert.equal(result.sideEffectApplied, true);
+  assert.deepEqual(result.result, { propertyId });
+
+  const after = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(after!.status, "FAILED", "a late success must not flip a recovered row back to COMPLETED");
+  assert.equal(after!.errorMessage, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE);
+  assert.deepEqual(after!.executionResult, { propertyId });
+  assert.equal(classifyActionFailure({ authorityDecision: "ALLOW", errorMessage: LATE_COMPLETION_AFTER_RECOVERY_MESSAGE }), "TERMINAL_TECHNICAL");
+
+  const types = eventsForRequest(request!.id, since).map((e) => e.eventType);
+  assert.ok(!types.includes("AI_ACTION_EXECUTED"), "the audit trail must not claim both FAILED and EXECUTED");
+  assert.equal(types.filter((type) => type === "AI_ACTION_FAILED").length, 1);
+
+  const audit = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.recordType, "ai_action_request"), eq(auditLogs.recordId, String(request!.id))));
+  assert.ok(audit.some((row) => row.action === "ai_action_late_completion_after_recovery"), "late completion must be audited");
+  await db.delete(auditLogs).where(and(eq(auditLogs.recordType, "ai_action_request"), eq(auditLogs.recordId, String(request!.id))));
+});
+
+test("F4.0 D6: a human cannot execute a request stored as requiresApproval=false when its action (as stored or as currently registered) requires approval and no approver is recorded", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 D6 stale requiresApproval");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  // (a) Row edited to look auto-approved for an approval-required action.
+  const gated = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: agent,
+    actorType: "USER",
+    rawInput: { propertyId, protectedActionKey: "PUBLISH_LISTING", reason: "D6" },
+  });
+  await db.update(aiActionRequests).set({ status: "APPROVED", requiresApproval: false }).where(eq(aiActionRequests.id, gated.request!.id));
+  for (const caller of [agent, admin]) {
+    const refused = await executeAIAction(gated.request!.id, brokerageId, caller);
+    assert.equal(refused.reason, "APPROVAL_MISSING");
+  }
+  assert.equal((await getAIActionRequest(gated.request!.id, brokerageId))!.status, "APPROVED", "refusal never changes state");
+
+  // (b) Genuinely auto-approved row, but the action's CURRENT registered
+  // policy has since been tightened so it now requires approval.
+  const auto = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "D6" } });
+  assert.equal(auto.request!.requiresApproval, false);
+  const definition = getActionDefinition("PROPERTY_NOTE_ADD")!;
+  const originalRisk = definition.riskLevel;
+  definition.riskLevel = 2;
+  try {
+    const refused = await executeAIAction(auto.request!.id, brokerageId, agent);
+    assert.equal(refused.reason, "APPROVAL_MISSING");
+  } finally {
+    definition.riskLevel = originalRisk;
+  }
+  assert.equal((await getAIActionRequest(auto.request!.id, brokerageId))!.status, "APPROVED");
+  // With the policy back as registered, the requester can execute it.
+  assert.equal((await executeAIAction(auto.request!.id, brokerageId, agent)).ok, true);
 });

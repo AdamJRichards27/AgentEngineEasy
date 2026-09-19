@@ -218,9 +218,11 @@ test("an action requiring approval sits at AWAITING_APPROVAL and cannot be execu
     method: "POST",
     headers: { cookie: A.agent.cookie },
   });
-  assert.equal(wrongRoleApproveRes.status, 403);
+  // F4.0 D3: the Agent is neither the requester nor an admin, so the access
+  // check (run before the role check) answers exactly like a missing id.
+  assert.equal(wrongRoleApproveRes.status, 404);
   const wrongRoleBody = (await wrongRoleApproveRes.json()) as { reason: string };
-  assert.equal(wrongRoleBody.reason, "APPROVER_ROLE_FORBIDDEN");
+  assert.equal(wrongRoleBody.reason, "NOT_FOUND");
 
   const approveRes = await fetch(`${baseUrl}/api/ai/actions/requests/${request.id}/approve`, {
     method: "POST",
@@ -434,4 +436,29 @@ test("F4.0: the action's required entitlement is enforced on approve/reject/exec
   const requesterExecute = await post(requestUrl(first.request!.id, "execute"), A.agent.cookie);
   assert.equal(requesterExecute.status, 409);
   assert.equal(((await requesterExecute.json()) as { policyReason: string }).policyReason, "ENTITLEMENT_DENIED");
+});
+
+test("F4.0 D3: a same-brokerage non-requester non-admin gets an identical 404 for an existing and a nonexistent id on GET/approve/reject/execute (no existence oracle, even for an action their role cannot perform)", async () => {
+  // WORKFLOW_VERSION_ACTIVATE is admin-only: before D3, an Agent approving
+  // it got 403 ROLE_FORBIDDEN for a real id but 404 for a missing one.
+  const proposeRes = await post(proposeUrl("WORKFLOW_VERSION_ACTIVATE"), A.admin.cookie, { input: { proposalId: 999997 } });
+  assert.equal(proposeRes.status, 201);
+  const { request } = (await proposeRes.json()) as { request: { id: number } };
+  const missingId = 2147483001;
+
+  const probe = async (id: number) => {
+    const out: Array<{ status: number; body: unknown }> = [];
+    const get = await fetch(requestUrl(id), { headers: { cookie: colleagueA.cookie } });
+    out.push({ status: get.status, body: await get.json() });
+    for (const [verb, body] of [["approve", undefined], ["reject", { reason: "x" }], ["execute", undefined]] as const) {
+      const res = await post(requestUrl(id, verb), colleagueA.cookie, body);
+      out.push({ status: res.status, body: await res.json() });
+    }
+    return out;
+  };
+
+  const existing = await probe(request.id);
+  const missing = await probe(missingId);
+  assert.deepEqual(existing, missing);
+  assert.ok(existing.every((r) => r.status === 404));
 });
