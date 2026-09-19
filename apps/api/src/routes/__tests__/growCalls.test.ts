@@ -545,10 +545,21 @@ test("invalid state transitions are rejected: confirming twice, cancelling a COM
   // A "ringing" event delivered again after the call already COMPLETED is an invalid
   // transition — the webhook route reports it as a processing FAILED outcome rather than
   // silently reopening a terminal call.
+  //
+  // AE GROW Pilot Readiness WP6a (D10): that FAILED outcome is now answered
+  // 422, not 500. The event is permanently unprocessable — the same payload
+  // will fail identically forever — so answering 5xx only made a real provider
+  // retry it on its full backoff schedule. The receipt is still recorded
+  // FAILED and the call session is still not reopened; only the status code
+  // (and therefore whether the provider redelivers) changed. See
+  // routes/__tests__/growCallsWebhookRetryClassification.test.ts for the full
+  // retryable-vs-permanent matrix, including a transient database failure
+  // still answering 500.
   const staleEventRes = await postWebhookEvent("evt-stale-ringing", "call.ringing", happyPathProviderCallId);
-  const staleEventBody = (await staleEventRes.json()) as { status: string };
-  assert.equal(staleEventRes.status, 500);
+  const staleEventBody = (await staleEventRes.json()) as { status: string; retryable?: boolean };
+  assert.equal(staleEventRes.status, 422);
   assert.equal(staleEventBody.status, "FAILED");
+  assert.equal(staleEventBody.retryable, false);
 });
 
 test("tenant isolation: Brokerage B cannot read, confirm, or cancel Brokerage A's call session", async () => {

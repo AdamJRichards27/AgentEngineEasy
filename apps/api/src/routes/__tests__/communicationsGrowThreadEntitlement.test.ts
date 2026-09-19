@@ -164,7 +164,14 @@ test("WP1 P2-3: another brokerage holding grow.contacts.manage still gets 404 (n
 
   assert.equal((await post(`/communications/threads/${thread.id}/messages`, B.agent.cookie, { channel: "EMAIL", classification: "TRANSACTIONAL", bodyText: "x" })).status, 404);
   assert.equal((await post(`/communications/messages/${message.id}/send`, B.agent.cookie, { expectedVersion: message.version })).status, 404);
-  assert.equal((await post(`/communications/messages/abc/send`, B.agent.cookie, { expectedVersion: 0 })).status, 404);
+  // AE GROW Pilot Readiness WP6a (D1-residual): "abc" is not a tenant case at
+  // all — it is a malformed id, and is now rejected as one (400) before the
+  // Grow gate ever looks anything up. That discloses nothing: the answer is
+  // identical for every caller, entitled or not, in any brokerage, because the
+  // id cannot name a resource in the first place. Tenant isolation for a
+  // WELL-FORMED foreign id is what the two assertions above cover, and both
+  // still answer 404.
+  assert.equal((await post(`/communications/messages/abc/send`, B.agent.cookie, { expectedVersion: 0 })).status, 400);
 });
 
 test("WP1 P2-3: property-scoped (RUN) threads are unchanged -- a brokerage with no Grow entitlements can still draft and send on them", async () => {

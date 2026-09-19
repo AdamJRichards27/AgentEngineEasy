@@ -29,6 +29,23 @@ import { goLiveProperty } from "../lib/goLive.js";
 export const propertiesRouter = Router();
 const propertyDataProvider = createPropertyDataProvider();
 
+// AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
+// request (400), not a server fault (500). Before this guard, `Number("abc")`
+// produced NaN and `Number("1e20")` an integer outside Postgres' int4 range,
+// and both were passed straight into a `where(eq(properties.id, ...))` bind
+// the driver rejects — a 500 with a database diagnostic in the log for what
+// is simply a mistyped URL. Bounded by MAX_SIGNED_INT4 because properties.id
+// is a `serial` (packages/db/src/schema/property.ts), i.e. an int4. Same
+// shape as routes/contacts.ts's parsePositiveId and routes/growCalls.ts's
+// parseIdParam; this codebase has no shared cross-router helper today, each
+// route module declares its own.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
 const READY_TO_LIST_STEPS = [
   { stepKey: "VerifySellers", label: "Verify Sellers", sequence: 1 },
   { stepKey: "AgencyAgreement", label: "Agency Agreement", sequence: 2 },
@@ -134,7 +151,8 @@ propertiesRouter.get("/", requireAuth, async (req, res) => {
 // #123 — tenant scoping: previously matched by id alone, so any
 // authenticated user from any brokerage could read any property by id.
 propertiesRouter.get("/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
@@ -148,7 +166,8 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
 // response shaped for "what needs to happen next", not fifteen sub-screens.
 // #123 — same tenant-scoping fix as GET /:id above.
 propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
@@ -265,7 +284,8 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
 // file; canViewFinancials gates the financial-entitlement boundary
 // (commission/funds/agent-paid figures) inside getPropertyTimeline itself.
 propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(user.role);
   try {
@@ -282,7 +302,8 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
 const ownershipReviewSchema = z.object({ notes: z.string().optional() });
 
 propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = ownershipReviewSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -332,7 +353,8 @@ const listingDetailsSchema = z.object({
 });
 
 propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = listingDetailsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -378,7 +400,8 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
 // live state (lib/workflowSteps.ts). Ownership review, by contrast,
 // intentionally does NOT gate this — see lib/ownership.ts / Build Brief §8.
 propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
@@ -510,7 +533,8 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 // shared with Launch's own confirmLaunchLive() — this route is a thin
 // HTTP wrapper over it, not a second implementation.
 propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {

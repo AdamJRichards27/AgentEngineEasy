@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import { logger } from "@aee/events";
-import type { AiActionRequest } from "@aee/db";
+import { db, aiActionRequests, type AiActionRequest } from "@aee/db";
 import { buildContext } from "./context/contextEngine.js";
 import { runAllTools } from "./tools/registry.js";
 import { generateWithGateway, loadAiGatewayConfig } from "./gateway.js";
@@ -280,6 +281,40 @@ export function selectGrowCommitmentCandidate(context: AiContextPackage): GrowTo
   return candidate;
 }
 
+/**
+ * AE GROW Pilot Readiness WP6a (D7) — "has a request for this exact resource
+ * already been executed?".
+ *
+ * A deliberately narrow, read-only existence check rather than a new general
+ * lookup in actionRequests.ts: it answers one question, for one action key,
+ * always scoped to one brokerage and one deterministic, server-computed
+ * resourceId (see its construction in proposeGrowCommitmentIfGrounded — it
+ * embeds the requesting user, so this cannot read across users either), and
+ * it returns a boolean rather than a row, so it can never become a way to
+ * surface another actor's request. It intentionally does NOT expire, recover,
+ * or otherwise mutate anything the way findOpenActionRequestByResource does;
+ * COMPLETED is terminal.
+ */
+async function hasCompletedActionRequestForResource(
+  actionKey: string,
+  brokerageId: number,
+  resourceId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: aiActionRequests.id })
+    .from(aiActionRequests)
+    .where(
+      and(
+        eq(aiActionRequests.actionKey, actionKey),
+        eq(aiActionRequests.brokerageId, brokerageId),
+        eq(aiActionRequests.resourceId, resourceId),
+        eq(aiActionRequests.status, "COMPLETED"),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 function summarizeGrowCommitmentProposal(
   request: AiActionRequest,
   candidate: GrowTodayItemView,
@@ -361,6 +396,27 @@ export async function proposeGrowCommitmentIfGrounded(
     // existing request is only ever summarised for someone allowed to see it.
     if (!canActorAccessActionRequest(existing, actor)) return undefined;
     return summarizeGrowCommitmentProposal(existing, candidate, timeZone);
+  }
+
+  // AE GROW Pilot Readiness WP6a (D7). The lookup above only covers OPEN
+  // requests (AWAITING_APPROVAL / APPROVED / EXECUTING — see
+  // OPEN_ACTION_REQUEST_STATUSES in actionRequests.ts), which is correct for
+  // its own purpose: it is the read-side partner of the partial unique index
+  // that stops two *live* proposals for one resource existing at once. It is
+  // not, on its own, an "has this already been done?" check — and that is the
+  // question this call site is actually asking. Once the agent approves a
+  // proposal and the Execution Gateway runs it, the request leaves the open
+  // set for COMPLETED and the commitment exists, so the very next Ask AE /
+  // Business Coach question re-derived the same candidate and proposed the
+  // identical follow-up again, as if nothing had happened.
+  //
+  // A COMPLETED request for this resourceId therefore means "already
+  // actioned": propose nothing. Deliberately only COMPLETED — a REJECTED,
+  // EXPIRED, CANCELLED or FAILED request represents a follow-up that was NOT
+  // created, and must still allow a fresh proposal, so dedup is not widened
+  // beyond the one case that was wrong.
+  if (await hasCompletedActionRequestForResource("CREATE_GROW_COMMITMENT", actor.brokerageId, resourceId)) {
+    return undefined;
   }
 
   const rawInput = {

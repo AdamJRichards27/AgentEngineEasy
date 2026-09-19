@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { authRateLimiter } from "../middlewares/rateLimit.js";
+import { authSurfaceRateLimiter } from "../middlewares/rateLimit.js";
 import { authRouter } from "./auth.js";
 import { privacyRouter } from "./privacy.js";
 import { healthRouter } from "./health.js";
@@ -42,9 +42,18 @@ import { integrationsWebhooksRouter } from "./integrationsWebhooks.js";
 export const apiRouter = Router();
 
 // Stricter rate limit than the app-wide default (see middlewares/rateLimit.ts)
-// — sign-in/session endpoints are the highest-value target for
-// credential-stuffing / brute-force-style abuse.
-apiRouter.use("/auth", authRateLimiter, authRouter);
+// — sign-in endpoints are the highest-value target for credential-stuffing /
+// brute-force-style abuse.
+//
+// AE GROW Pilot Readiness WP6a (D3): this is authSurfaceRateLimiter, not the
+// strict authRateLimiter directly. The strict 20/min budget still applies to
+// every credential-bearing endpoint under /auth, but the read-only session
+// probe GET /auth/me is routed to a separate generous limiter — the SPA calls
+// it on every page load, so charging it to the sign-in budget signed a
+// legitimate user out (the probe 429s, the web client reads that as "session
+// gone" and redirects to /login) after roughly twenty navigations, while the
+// rest of the API kept answering 200 for that same session.
+apiRouter.use("/auth", authSurfaceRateLimiter, authRouter);
 // Critical Blocker Remediation, Phase 8 — application privacy controls
 // (consent-version lookup, data export/deletion request queue). Unprefixed
 // mount, same reasoning as several routers below — privacyRouter's own
