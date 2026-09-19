@@ -14,6 +14,8 @@ import {
 } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { saveCallTranscriptionReview } from "../../lib/telephony/callTranscriptionReview.js";
+import { setCallTranscriptionProviderForTests } from "../../lib/telephony/callTranscriptions.js";
+import { setCallTranscriptionDraftGatewayForTests } from "../../lib/telephony/callTranscriptionDrafts.js";
 import { persistApprovedCallSummaryActivity } from "../../lib/telephony/callTranscriptionTimeline.js";
 import {
   cleanupBrokerages,
@@ -335,6 +337,56 @@ test("cross-brokerage transcription initiation is uniformly not found for existi
   for (const header of ["content-type", "content-length", "etag", "cache-control", "server-timing"]) {
     assert.equal(existingTupleResponse.headers.get(header), absentTupleResponse.headers.get(header), header);
     assert.equal(existingTupleResponse.headers.get(header), missingCallResponse.headers.get(header), header);
+  }
+});
+
+test("same-brokerage non-owner POST transcription is denied with no row data and no owner-row mutation in any state", async () => {
+  let providerCalls = 0;
+  let draftCalls = 0;
+  setCallTranscriptionProviderForTests({
+    name: "mock",
+    async transcribe() {
+      providerCalls += 1;
+      return { provider: "mock", transcript: "must not be produced", durationSeconds: null, latencyMs: 1 };
+    },
+  });
+  setCallTranscriptionDraftGatewayForTests(async () => {
+    draftCalls += 1;
+    throw new Error("must not be called");
+  });
+  try {
+    for (const state of ["AWAITING_AGENT_REVIEW", "APPROVED", "PENDING", "TRANSCRIBING"] as const) {
+      const fixture = await createFixture();
+      await db.update(growCallTranscriptions).set({
+        processingState: state,
+        retryCount: state === "TRANSCRIBING" ? 1 : 0,
+        approvedBy: state === "APPROVED" ? A.agent.user.id : null,
+        approvedAt: state === "APPROVED" ? new Date() : null,
+      }).where(eq(growCallTranscriptions.id, fixture.transcriptionId));
+      const snapshot = async () => db.select({
+        row: growCallTranscriptions,
+        updatedAtToken: sql<string>`${growCallTranscriptions.updatedAt}::text`,
+      }).from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixture.transcriptionId));
+      const before = await snapshot();
+      const response = await fetch(url(`/${fixture.sessionId}/transcription`), {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: other.cookie },
+        body: JSON.stringify({ recordingReference: fixture.versionId }),
+      });
+      const text = await response.text();
+      assert.equal(response.status, 403, `${state}: ${text}`);
+      const body = JSON.parse(text) as Record<string, unknown>;
+      assert.equal(body.code, "ACCESS_DENIED");
+      assert.deepEqual(Object.keys(body).sort(), ["code", "error"], state);
+      assert.doesNotMatch(text, /Route machine|Route point|Route commitment|Route follow-up|transcript"|draft/i, state);
+      assert.deepEqual(await snapshot(), before, `${state} owner row must be byte-identical`);
+      assert.equal((await activitiesFor(fixture.transcriptionId)).length, 0);
+    }
+    assert.equal(providerCalls, 0);
+    assert.equal(draftCalls, 0);
+  } finally {
+    setCallTranscriptionProviderForTests(null);
+    setCallTranscriptionDraftGatewayForTests(null);
   }
 });
 

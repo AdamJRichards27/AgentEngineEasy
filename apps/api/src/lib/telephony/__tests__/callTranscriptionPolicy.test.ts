@@ -62,6 +62,7 @@ test("documented failureReason vocabulary is exact and only three terminal reaso
     "RECORDING_REFERENCE_MISMATCH",
     "F2_EVIDENCE_MISSING",
     "F2_EVIDENCE_INVALID",
+    "CONSENT_WITHDRAWN",
     "LIVE_PROVIDER_DISABLED",
     "MISSING_PROVIDER_CREDENTIALS",
     "PROVIDER_CONFIGURATION_ERROR",

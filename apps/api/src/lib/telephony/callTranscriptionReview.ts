@@ -18,7 +18,9 @@ import {
   GrowCallSessionAuthorizationError,
   GrowCallSessionNotFoundError,
 } from "./callSessions.js";
-import type { ConsentTransaction } from "../consentControlsPersistence.js";
+import { logAudit } from "../audit.js";
+import { type ConsentTransaction, writeAuditInTransaction } from "../consentControlsPersistence.js";
+import { shouldFailCallTranscriptionAuditForTests } from "./callTranscriptions.js";
 
 const MAX_REVIEW_ITEMS = 500;
 const MAX_ITEM_ID_LENGTH = 256;
@@ -42,7 +44,8 @@ export class CallTranscriptionReviewError extends Error {
       | "ENTITLEMENT_REQUIRED"
       | "STALE"
       | "TERMINAL"
-      | "CONCURRENT",
+      | "CONCURRENT"
+      | "AUDIT_FAILURE",
     message: string,
   ) {
     super(message);
@@ -223,6 +226,69 @@ async function loadReviewRow(
   return row;
 }
 
+type ReviewDecisionCounts = {
+  approved: number;
+  rejected: number;
+  total: number;
+  byItemType: Partial<Record<TranscriptionReviewItemInput["itemType"], { approved: number; rejected: number }>>;
+};
+
+function reviewDecisionCounts(items: Array<Pick<TranscriptionReviewItemInput, "itemType" | "decision">>): ReviewDecisionCounts {
+  const counts: ReviewDecisionCounts = { approved: 0, rejected: 0, total: items.length, byItemType: {} };
+  for (const item of items) {
+    const byType = counts.byItemType[item.itemType] ??= { approved: 0, rejected: 0 };
+    if (item.decision === "APPROVED") {
+      counts.approved += 1;
+      byType.approved += 1;
+    } else {
+      counts.rejected += 1;
+      byType.rejected += 1;
+    }
+  }
+  return counts;
+}
+
+/**
+ * Strict, same-transaction audit for agent review decisions. IDs, states, and
+ * counts only: never transcript, edited text, rejection reasons, or contact
+ * PII. A failed write throws inside the transaction so the review mutation
+ * (and, for Save, its Timeline snapshot) rolls back with it.
+ */
+async function strictReviewAuditInTransaction(
+  tx: ConsentTransaction,
+  input: {
+    action: "grow_call_transcription_review_saved" | "grow_call_transcription_discarded";
+    actorUserId: number;
+    previous: GrowCallTranscription;
+    updated: GrowCallTranscription;
+    decisionCounts?: ReviewDecisionCounts;
+  },
+): Promise<void> {
+  try {
+    if (shouldFailCallTranscriptionAuditForTests(input.action)) {
+      throw new Error("synthetic strict audit outage");
+    }
+    await logAudit({
+      brokerageId: input.updated.brokerageId,
+      userId: input.actorUserId,
+      action: input.action,
+      recordType: "grow_call_transcription",
+      recordId: String(input.updated.id),
+      previousValue: input.previous.processingState,
+      updatedValue: JSON.stringify({
+        transcriptionId: input.updated.id,
+        callSessionId: input.updated.callSessionId,
+        partyId: input.updated.partyId,
+        processingState: input.updated.processingState,
+        ...(input.decisionCounts ? { decisionCounts: input.decisionCounts } : {}),
+      }),
+      providerReference: `call:${input.updated.callSessionId}:recording:${input.updated.recordingReference}`,
+    }, { strict: true, write: (audit) => writeAuditInTransaction(tx, audit) });
+  } catch {
+    throw new CallTranscriptionReviewError("AUDIT_FAILURE", "The transcription review audit could not be recorded.");
+  }
+}
+
 function assertMutable(row: GrowCallTranscription): void {
   if (row.processingState === "APPROVED" || row.processingState === "PARTIALLY_APPROVED" ||
       row.processingState === "DISCARDED" || row.processingState === "DELETED" ||
@@ -344,6 +410,7 @@ export async function saveCallTranscriptionReview(input: {
       processingState,
       approvedBy: input.actor.userId,
       approvedAt: new Date(reviewedAt),
+      updatedAt: new Date(reviewedAt),
     }).where(and(
       eq(growCallTranscriptions.id, locked.id),
       eq(growCallTranscriptions.processingState, "AWAITING_AGENT_REVIEW"),
@@ -353,6 +420,14 @@ export async function saveCallTranscriptionReview(input: {
     // The row lock and terminal-state guard reject both retries and concurrent
     // duplicates. A failed snapshot write rolls the approval back as well.
     await onReviewSaved?.(tx, updated);
+    // Audited last so an audit outage also rolls back the Timeline snapshot.
+    await strictReviewAuditInTransaction(tx, {
+      action: "grow_call_transcription_review_saved",
+      actorUserId: input.actor.userId,
+      previous: locked,
+      updated,
+      decisionCounts: reviewDecisionCounts(items),
+    });
     return updated;
   });
 }
@@ -379,12 +454,18 @@ export async function discardCallTranscription(input: {
     if (!locked) throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
     await assertSourceLedger(tx, locked, true);
     assertMutable(locked);
-    const [updated] = await tx.update(growCallTranscriptions).set({ processingState: "DISCARDED" })
+    const [updated] = await tx.update(growCallTranscriptions).set({ processingState: "DISCARDED", updatedAt: new Date() })
       .where(and(
         eq(growCallTranscriptions.id, locked.id),
         eq(growCallTranscriptions.processingState, "AWAITING_AGENT_REVIEW"),
       )).returning();
     if (!updated) throw new CallTranscriptionReviewError("CONCURRENT", "Review changed concurrently; retry.");
+    await strictReviewAuditInTransaction(tx, {
+      action: "grow_call_transcription_discarded",
+      actorUserId: input.actor.userId,
+      previous: locked,
+      updated,
+    });
     return updated;
   });
 }

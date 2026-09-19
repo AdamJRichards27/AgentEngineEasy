@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { afterEach, test } from "node:test";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { ObjectStorageProvider } from "@aee/integration-object-storage";
 import {
   auditLogs,
@@ -42,6 +42,7 @@ import {
   boundedCallTranscriptionTimeout,
 } from "../callTranscriptionPolicy.js";
 import { quarantineCallRecording } from "../recordingStorage.js";
+import { withdrawRecordingConsent } from "../consent.js";
 import { cleanupBrokerages } from "../../../routes/__tests__/testSupport.js";
 
 class MemoryStorage implements ObjectStorageProvider {
@@ -1568,4 +1569,258 @@ test("sanitizes timeout configuration to a positive value and the 120 second cap
     if (previous === undefined) delete process.env.AI_TRANSCRIPTION_TIMEOUT_MS;
     else process.env.AI_TRANSCRIPTION_TIMEOUT_MS = previous;
   }
+});
+/**
+ * Independent-review remediation A: ownership is resolved before any existing
+ * artifact is read or transitioned.
+ */
+async function transcriptionSnapshot(id: number) {
+  const [snapshot] = await db.select({
+    row: growCallTranscriptions,
+    updatedAtToken: sql<string>`${growCallTranscriptions.updatedAt}::text`,
+  }).from(growCallTranscriptions).where(eq(growCallTranscriptions.id, id));
+  assert.ok(snapshot);
+  return snapshot;
+}
+
+test("same-brokerage non-owner is denied for completed, approved, pending, and transcribing owner rows without data or mutation", async () => {
+  await withDraftFlag(true, async () => {
+    let providerCalls = 0;
+    let draftCalls = 0;
+    setCallTranscriptionDraftGatewayForTests(async () => {
+      draftCalls += 1;
+      return draftGatewayResponse(validDraftPayload);
+    });
+    setCallTranscriptionProviderForTests({
+      name: "mock",
+      async transcribe() {
+        providerCalls += 1;
+        return { provider: "mock", transcript: "must never be produced for a non-owner", durationSeconds: null, latencyMs: 1 };
+      },
+    });
+    const nonOwner = { userId: otherUserId, role: "Agent", brokerageId };
+    for (const state of ["AWAITING_AGENT_REVIEW", "APPROVED", "PENDING", "TRANSCRIBING"] as const) {
+      const source = await createLegitimateAuditedRecording();
+      const completed = state === "AWAITING_AGENT_REVIEW" || state === "APPROVED";
+      const [owned] = await db.insert(growCallTranscriptions).values({
+        brokerageId, callSessionId: source.sessionId, partyId, recordingReference: source.recordingReference,
+        processingState: state,
+        retryCount: state === "TRANSCRIBING" ? 1 : 0,
+        transcript: completed ? "Owner-only transcript." : null,
+        draftSummary: completed ? "Owner-only summary." : null,
+        draftKeyPoints: completed ? [{ id: "kp-1", text: "Owner-only key point." }] : null,
+        draftCommitments: completed ? [{ id: "commitment-1", text: "Owner-only commitment." }] : null,
+        draftFollowups: completed ? [{ id: "followup-1", text: "Owner-only follow-up." }] : null,
+        failureReason: state === "TRANSCRIBING" ? "PROVIDER_ERROR" : null,
+        lastError: state === "TRANSCRIBING" ? "PROVIDER_ERROR" : null,
+        approvedBy: state === "APPROVED" ? userId : null,
+        approvedAt: state === "APPROVED" ? new Date() : null,
+      }).returning();
+      const before = await transcriptionSnapshot(owned!.id);
+      let caught: unknown;
+      try {
+        await initiateCallTranscription({
+          brokerageId, callSessionId: source.sessionId, recordingReference: source.recordingReference, actor: nonOwner,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught instanceof CallTranscriptionError, state);
+      assert.equal(caught.code, "ACCESS_DENIED", state);
+      assert.doesNotMatch(JSON.stringify({ ...caught, message: caught.message }), /Owner-only/, state);
+      assert.deepEqual(await transcriptionSnapshot(owned!.id), before, `${state} owner row must be byte-identical`);
+      // The caller's rejection is audited against the call session (there is
+      // no transcription id at that point), so its recordId can numerically
+      // equal an unrelated transcription id. Exclude it by action and prove it
+      // separately rather than counting it as a transition of the owner row.
+      const rowAudits = await db.select().from(auditLogs).where(and(
+        eq(auditLogs.brokerageId, brokerageId),
+        eq(auditLogs.recordType, "grow_call_transcription"),
+        eq(auditLogs.recordId, String(owned!.id)),
+        sql`${auditLogs.action} <> 'grow_call_transcription_rejected'`,
+      ));
+      assert.equal(rowAudits.length, 0, `${state} owner row must not be transitioned or audited as transitioned`);
+      const rejectionAudits = await db.select().from(auditLogs).where(and(
+        eq(auditLogs.brokerageId, brokerageId),
+        eq(auditLogs.action, "grow_call_transcription_rejected"),
+        eq(auditLogs.userId, otherUserId),
+        eq(auditLogs.providerReference, `call:${source.sessionId}:recording:${source.recordingReference}`),
+      ));
+      assert.equal(rejectionAudits.length, 1, `${state} non-owner denial is audited exactly once`);
+      assert.equal(rejectionAudits[0]!.updatedValue, "ACCESS_DENIED", state);
+      if (completed) {
+        // Control: the owner's replay still receives the unchanged terminal row.
+        const replay = await initiateCallTranscription({
+          brokerageId, callSessionId: source.sessionId, recordingReference: source.recordingReference, actor: actor(),
+        });
+        assert.equal(replay.id, owned!.id);
+        assert.equal(replay.transcript, "Owner-only transcript.");
+        assert.deepEqual(await transcriptionSnapshot(owned!.id), before);
+      }
+    }
+    assert.equal(providerCalls, 0);
+    assert.equal(draftCalls, 0);
+  });
+});
+
+/**
+ * Independent-review remediation B: withdrawn consent blocks every new
+ * transcription/AI attempt. Calls are completed first so the F2 session
+ * association is retained, exactly as in production after a call ends.
+ */
+async function completeCallAndGetConsentId(callSessionId: number): Promise<number> {
+  const [session] = await db.update(growCallSessions).set({ status: "COMPLETED" })
+    .where(eq(growCallSessions.id, callSessionId)).returning();
+  assert.ok(session?.recordingConsentId);
+  return session.recordingConsentId;
+}
+
+async function withdrawCaptureConsent(consentId: number): Promise<void> {
+  await withdrawRecordingConsent({
+    brokerageId, consentId, withdrawnByUserId: userId, withdrawalReason: "Contact withdrew consent.",
+  });
+}
+
+async function assertRecordingRetained(recordingReferenceId: number, consentId: number): Promise<void> {
+  const [version] = await db.select().from(documentObjectVersions)
+    .where(eq(documentObjectVersions.id, recordingReferenceId));
+  assert.equal(version?.objectStatus, "Active", "withdrawal must not delete the recording");
+  assert.equal(version?.deletedAt, null);
+  const [consent] = await db.select().from(growCallRecordingConsents)
+    .where(eq(growCallRecordingConsents.id, consentId));
+  assert.equal(consent?.status, "WITHDRAWN", "consent evidence is retained, not deleted");
+}
+
+test("withdrawn consent after capture denies new initiation without a provider call, row, or deletion; active consent still transcribes", async () => {
+  let providerCalls = 0;
+  setCallTranscriptionProviderForTests({
+    name: "mock",
+    async transcribe() {
+      providerCalls += 1;
+      return { provider: "mock", transcript: "Active-consent control transcript.", durationSeconds: null, latencyMs: 1 };
+    },
+  });
+  const withdrawn = await createLegitimateAuditedRecording();
+  const withdrawnConsentId = await completeCallAndGetConsentId(withdrawn.sessionId);
+  await withdrawCaptureConsent(withdrawnConsentId);
+  await assertNoArtifactAfterDenied(
+    { brokerageId, callSessionId: withdrawn.sessionId, recordingReference: withdrawn.recordingReference, actor: actor() },
+    "CONSENT_WITHDRAWN",
+  );
+  assert.equal(providerCalls, 0);
+  await assertRecordingRetained(withdrawn.recordingReference, withdrawnConsentId);
+
+  // An owned PENDING row is a source-validity transition, not a request reject.
+  const pendingSource = await createLegitimateAuditedRecording();
+  const pendingConsentId = await completeCallAndGetConsentId(pendingSource.sessionId);
+  const [pending] = await db.insert(growCallTranscriptions).values({
+    brokerageId, callSessionId: pendingSource.sessionId, partyId,
+    recordingReference: pendingSource.recordingReference, processingState: "PENDING",
+  }).returning();
+  await withdrawCaptureConsent(pendingConsentId);
+  const failed = await initiateCallTranscription({
+    brokerageId, callSessionId: pendingSource.sessionId, recordingReference: pendingSource.recordingReference, actor: actor(),
+  });
+  assert.equal(failed.id, pending!.id);
+  assert.equal(failed.processingState, "FAILED");
+  assert.equal(failed.failureReason, "CONSENT_WITHDRAWN");
+  assert.equal(failed.transcript, null);
+  assert.equal(providerCalls, 0);
+
+  const control = await createLegitimateAuditedRecording();
+  await completeCallAndGetConsentId(control.sessionId);
+  const completed = await initiateCallTranscription({
+    brokerageId, callSessionId: control.sessionId, recordingReference: control.recordingReference, actor: actor(),
+  });
+  assert.equal(completed.processingState, "AWAITING_AGENT_REVIEW");
+  assert.equal(completed.transcript, "Active-consent control transcript.");
+  assert.equal(providerCalls, 1);
+});
+
+test("consent withdrawn during transcription stops before AI drafting and stores no transcript", async () => {
+  await withDraftFlag(true, async () => {
+    let providerCalls = 0;
+    let draftCalls = 0;
+    setCallTranscriptionDraftGatewayForTests(async () => {
+      draftCalls += 1;
+      return draftGatewayResponse(validDraftPayload);
+    });
+    const source = await createLegitimateAuditedRecording();
+    const consentId = await completeCallAndGetConsentId(source.sessionId);
+    setCallTranscriptionProviderForTests({
+      name: "mock",
+      async transcribe() {
+        providerCalls += 1;
+        await withdrawCaptureConsent(consentId);
+        return { provider: "mock", transcript: "Must not reach AI after withdrawal.", durationSeconds: null, latencyMs: 1 };
+      },
+    });
+    const result = await initiateCallTranscription({
+      brokerageId, callSessionId: source.sessionId, recordingReference: source.recordingReference, actor: actor(),
+    });
+    assert.equal(providerCalls, 1);
+    assert.equal(draftCalls, 0);
+    assert.equal(result.processingState, "FAILED");
+    assert.equal(result.failureReason, "CONSENT_WITHDRAWN");
+    assert.equal(result.retryCount, 0);
+    assert.equal(result.transcript, null);
+    assert.equal(result.draftSummary, null);
+    await assertRecordingRetained(source.recordingReference, consentId);
+  });
+});
+
+test("consent withdrawn during AI drafting prevents the transcript and drafts from being committed", async () => {
+  await withDraftFlag(true, async () => {
+    let providerCalls = 0;
+    let draftCalls = 0;
+    const source = await createLegitimateAuditedRecording();
+    const consentId = await completeCallAndGetConsentId(source.sessionId);
+    setCallTranscriptionDraftGatewayForTests(async () => {
+      draftCalls += 1;
+      await withdrawCaptureConsent(consentId);
+      return draftGatewayResponse(validDraftPayload);
+    });
+    setCallTranscriptionProviderForTests({
+      name: "mock",
+      async transcribe() {
+        providerCalls += 1;
+        return { provider: "mock", transcript: "Transcript produced before withdrawal.", durationSeconds: null, latencyMs: 1 };
+      },
+    });
+    const result = await initiateCallTranscription({
+      brokerageId, callSessionId: source.sessionId, recordingReference: source.recordingReference, actor: actor(),
+    });
+    assert.equal(providerCalls, 1);
+    assert.equal(draftCalls, 1);
+    assert.equal(result.processingState, "FAILED");
+    assert.equal(result.failureReason, "CONSENT_WITHDRAWN");
+    assert.equal(result.transcript, null);
+    assert.equal(result.draftSummary, null);
+    assert.equal(result.draftKeyPoints, null);
+  });
+});
+
+test("consent withdrawn before a retry stops the next provider submission", async () => {
+  let providerCalls = 0;
+  const source = await createLegitimateAuditedRecording();
+  const consentId = await completeCallAndGetConsentId(source.sessionId);
+  setCallTranscriptionProviderForTests({
+    name: "mock",
+    async transcribe() {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        await withdrawCaptureConsent(consentId);
+        throw new Error("retryable first failure");
+      }
+      throw new Error("must not run after withdrawal");
+    },
+  });
+  const result = await initiateCallTranscription({
+    brokerageId, callSessionId: source.sessionId, recordingReference: source.recordingReference, actor: actor(),
+  });
+  assert.equal(providerCalls, 1);
+  assert.equal(result.processingState, "FAILED");
+  assert.equal(result.failureReason, "CONSENT_WITHDRAWN");
+  assert.equal(result.retryCount, 1);
+  assert.equal(result.transcript, null);
 });

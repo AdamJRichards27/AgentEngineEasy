@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { and, eq, inArray } from "drizzle-orm";
 import {
+  auditLogs,
   brokerages,
   db,
   documentObjectVersions,
   documents,
   entitlementGrants,
+  growActivities,
   growCallSessions,
   growCallTranscriptions,
   parties,
@@ -21,6 +23,8 @@ import {
   listCallTranscriptionsForContact,
   saveCallTranscriptionReview,
 } from "../callTranscriptionReview.js";
+import { setCallTranscriptionAuditFailureForTests } from "../callTranscriptions.js";
+import { persistApprovedCallSummaryActivity } from "../callTranscriptionTimeline.js";
 
 let brokerageId: number;
 let foreignBrokerageId: number;
@@ -155,7 +159,7 @@ test("full approval, partial mixed decisions, manual items, transcript edits, an
   assert.equal(allRejectedSaved.processingState, "PARTIALLY_APPROVED");
 });
 
-test("save is atomic, preserves raw transcript/drafts, writes exactly the four review columns, and discard only changes processing state", async () => {
+test("save is atomic, preserves raw transcript/drafts, writes only the review columns plus updatedAt, and discard only changes processing state and updatedAt", async () => {
   const fixture = await createFixture();
   const before = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixture.transcription.id));
   const saved = await saveCallTranscriptionReview({
@@ -288,4 +292,131 @@ test("keeps authorized reads visible but redacts transcript data when the source
     }),
     (error: unknown) => error instanceof CallTranscriptionReviewError && error.code === "ACCESS_DENIED",
   );
+});
+
+/**
+ * Independent-review remediation C: agent Save and Discard are strictly
+ * audited inside the same transaction as the state mutation.
+ */
+async function reviewAudits(transcriptionId: number) {
+  return db.select().from(auditLogs).where(and(
+    eq(auditLogs.brokerageId, brokerageId),
+    eq(auditLogs.recordType, "grow_call_transcription"),
+    eq(auditLogs.recordId, String(transcriptionId)),
+  ));
+}
+
+async function callSummaryActivities(transcriptionId: number) {
+  return db.select().from(growActivities).where(and(
+    eq(growActivities.brokerageId, brokerageId),
+    eq(growActivities.source, "grow_call_transcriptions"),
+    eq(growActivities.sourceId, String(transcriptionId)),
+  ));
+}
+
+const mixedReview = () => review([
+  transcriptReview("Sensitive edited transcript text."),
+  { itemType: "SUMMARY", itemId: "summary", decision: "APPROVED", editedText: "Sensitive summary text." },
+  { itemType: "KEY_POINT", itemId: "kp-1", decision: "REJECTED", rejectionReason: "Sensitive rejection reason." },
+  { itemType: "COMMITMENT", itemId: "com-1", decision: "APPROVED" },
+  { itemType: "FOLLOWUP", itemId: "fu-1", decision: "APPROVED" },
+]);
+
+test("save and discard each write exactly one strict audit row with ids, states, and decision counts only", async () => {
+  const saved = await createFixture();
+  const savedBefore = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, saved.transcription.id));
+  const savedRow = await saveCallTranscriptionReview({
+    brokerageId, callSessionId: saved.session.id, transcriptionId: saved.transcription.id, actor: actor(),
+    body: mixedReview(),
+  }, persistApprovedCallSummaryActivity);
+  assert.equal(savedRow.processingState, "PARTIALLY_APPROVED");
+  assert.ok(savedRow.updatedAt.getTime() >= savedBefore[0]!.updatedAt.getTime());
+  assert.equal(savedRow.updatedAt.getTime(), savedRow.approvedAt!.getTime());
+  const saveAudits = await reviewAudits(saved.transcription.id);
+  assert.equal(saveAudits.length, 1);
+  const saveAudit = saveAudits[0]!;
+  assert.equal(saveAudit.action, "grow_call_transcription_review_saved");
+  assert.equal(saveAudit.userId, ownerId);
+  assert.equal(saveAudit.brokerageId, brokerageId);
+  assert.equal(saveAudit.previousValue, "AWAITING_AGENT_REVIEW");
+  assert.equal(saveAudit.providerReference, `call:${saved.session.id}:recording:${saved.version.id}`);
+  assert.ok(saveAudit.createdAt);
+  assert.deepEqual(JSON.parse(saveAudit.updatedValue!), {
+    transcriptionId: saved.transcription.id,
+    callSessionId: saved.session.id,
+    partyId: saved.party.id,
+    processingState: "PARTIALLY_APPROVED",
+    decisionCounts: {
+      approved: 4,
+      rejected: 1,
+      total: 5,
+      byItemType: {
+        TRANSCRIPT: { approved: 1, rejected: 0 },
+        SUMMARY: { approved: 1, rejected: 0 },
+        KEY_POINT: { approved: 0, rejected: 1 },
+        COMMITMENT: { approved: 1, rejected: 0 },
+        FOLLOWUP: { approved: 1, rejected: 0 },
+      },
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(saveAudit), /Sensitive|Machine|Fixture/);
+
+  const discarded = await createFixture();
+  const discardBefore = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, discarded.transcription.id));
+  const discardedRow = await discardCallTranscription({
+    brokerageId, callSessionId: discarded.session.id, transcriptionId: discarded.transcription.id, actor: actor(), body: {},
+  });
+  assert.equal(discardedRow.processingState, "DISCARDED");
+  assert.ok(discardedRow.updatedAt.getTime() >= discardBefore[0]!.updatedAt.getTime());
+  const discardAudits = await reviewAudits(discarded.transcription.id);
+  assert.equal(discardAudits.length, 1);
+  const discardAudit = discardAudits[0]!;
+  assert.equal(discardAudit.action, "grow_call_transcription_discarded");
+  assert.equal(discardAudit.userId, ownerId);
+  assert.equal(discardAudit.brokerageId, brokerageId);
+  assert.equal(discardAudit.previousValue, "AWAITING_AGENT_REVIEW");
+  assert.deepEqual(JSON.parse(discardAudit.updatedValue!), {
+    transcriptionId: discarded.transcription.id,
+    callSessionId: discarded.session.id,
+    partyId: discarded.party.id,
+    processingState: "DISCARDED",
+  });
+  assert.doesNotMatch(JSON.stringify(discardAudit), /Machine|Fixture/);
+});
+
+test("a strict review audit outage rolls back save (including its Timeline snapshot) and discard", async () => {
+  for (const operation of ["save", "discard"] as const) {
+    const fixture = await createFixture();
+    const [before] = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixture.transcription.id));
+    setCallTranscriptionAuditFailureForTests(
+      operation === "save" ? "grow_call_transcription_review_saved" : "grow_call_transcription_discarded",
+    );
+    try {
+      await assert.rejects(
+        operation === "save"
+          ? saveCallTranscriptionReview({
+            brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(),
+            body: mixedReview(),
+          }, persistApprovedCallSummaryActivity)
+          : discardCallTranscription({
+            brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(), body: {},
+          }),
+        (error: unknown) => error instanceof CallTranscriptionReviewError && error.code === "AUDIT_FAILURE",
+      );
+    } finally {
+      setCallTranscriptionAuditFailureForTests(null);
+    }
+    const [after] = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixture.transcription.id));
+    assert.deepEqual(after, before, `${operation} state must roll back`);
+    assert.equal((await callSummaryActivities(fixture.transcription.id)).length, 0, `${operation} Timeline must roll back`);
+    assert.equal((await reviewAudits(fixture.transcription.id)).length, 0, `${operation} audits must roll back`);
+  }
+  // Control: once the audit store recovers, Save commits state, Timeline, and audit together.
+  const recovered = await createFixture();
+  await saveCallTranscriptionReview({
+    brokerageId, callSessionId: recovered.session.id, transcriptionId: recovered.transcription.id, actor: actor(),
+    body: mixedReview(),
+  }, persistApprovedCallSummaryActivity);
+  assert.equal((await callSummaryActivities(recovered.transcription.id)).length, 1);
+  assert.equal((await reviewAudits(recovered.transcription.id)).length, 1);
 });

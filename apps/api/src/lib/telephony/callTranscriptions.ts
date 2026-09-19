@@ -71,6 +71,7 @@ export type CallTranscriptionErrorCode =
   | "RECORDING_REFERENCE_MISMATCH"
   | "F2_EVIDENCE_MISSING"
   | "F2_EVIDENCE_INVALID"
+  | "CONSENT_WITHDRAWN"
   | "PROVIDER_FAILED"
   | "TENANT_MISMATCH"
   | "LIVE_PROVIDER_DISABLED";
@@ -148,6 +149,7 @@ function durableFailureReason(error: unknown): CallTranscriptionFailureReason {
       value === "TENANT_MISMATCH" ||
       value === "F2_EVIDENCE_MISSING" ||
       value === "F2_EVIDENCE_INVALID" ||
+      value === "CONSENT_WITHDRAWN" ||
       value === "ACCESS_DENIED" ||
       value === "ENTITLEMENT_REQUIRED" ||
       value === "INVALID_INPUT" ||
@@ -158,6 +160,21 @@ function durableFailureReason(error: unknown): CallTranscriptionFailureReason {
     if (value === "PROVIDER_FAILED") return "AUDIT_FAILURE";
   }
   return classifyCallTranscriptionFailure(error);
+}
+
+/**
+ * Denials that describe the caller rather than the recording source. These
+ * must never be converted into a durable state transition on an artifact the
+ * caller did not claim: a non-owner, unentitled, or mismatched actor cannot
+ * fail somebody else's transcription.
+ */
+function isActorSpecificDenial(error: unknown): boolean {
+  return error instanceof CallTranscriptionError && (
+    error.code === "ACCESS_DENIED" ||
+    error.code === "ENTITLEMENT_REQUIRED" ||
+    error.code === "TENANT_MISMATCH" ||
+    error.code === "INVALID_INPUT"
+  );
 }
 
 function isDeletedRecordingStatus(status: string | null | undefined): boolean {
@@ -377,6 +394,40 @@ async function assertPersistedF2Evidence(input: InitiateCallTranscriptionInput, 
   await reject(input, enabledAudits.length === 0 ? "F2_EVIDENCE_MISSING" : "F2_EVIDENCE_INVALID", "The recording is not supported by complete persisted F2 confirmation evidence.");
 }
 
+function isRecordingConsentWithdrawn(consent: {
+  status: string;
+  withdrawnAt: Date | null;
+} | undefined): boolean {
+  // Deny by default: only a present, never-withdrawn consent row permits new
+  // processing. Withdrawal never deletes the recording, transcript, or evidence.
+  return !consent || consent.status === "WITHDRAWN" || consent.withdrawnAt !== null;
+}
+
+/**
+ * F2 evidence proves consent existed at capture time. Withdrawal is a later,
+ * current-state fact: re-read the persisted consent row before every provider
+ * submission and before any transcript is sent to AI drafting.
+ */
+async function assertRecordingConsentNotWithdrawn(
+  input: InitiateCallTranscriptionInput,
+  consentId: number | null,
+  partyId: number,
+): Promise<void> {
+  const [consent] = validId(consentId)
+    ? await db.select({
+      status: growCallRecordingConsents.status,
+      withdrawnAt: growCallRecordingConsents.withdrawnAt,
+    }).from(growCallRecordingConsents).where(and(
+      eq(growCallRecordingConsents.id, consentId),
+      eq(growCallRecordingConsents.brokerageId, input.brokerageId),
+      eq(growCallRecordingConsents.partyId, partyId),
+    )).limit(1)
+    : [];
+  if (isRecordingConsentWithdrawn(consent)) {
+    await reject(input, "CONSENT_WITHDRAWN", "Recording consent has been withdrawn; no new transcription or AI processing is permitted.");
+  }
+}
+
 async function validateSource(input: InitiateCallTranscriptionInput) {
   let session;
   try {
@@ -408,6 +459,11 @@ async function validateSource(input: InitiateCallTranscriptionInput) {
       },
     });
   } catch (error) {
+    if (error instanceof CallRecordingStorageError && error.code === "RECORDING_ACCESS_DENIED") {
+      // Caller-specific (owner/admin or recording entitlement) denial, not a
+      // source failure: it must never fail an artifact on the caller's behalf.
+      return reject(input, "ACCESS_DENIED", "The transcription actor cannot access this recording.");
+    }
     if (error instanceof CallRecordingStorageError) {
       // If storage failed, only inspect the version through the same tenant
       // and logical-owner binding as the recording loader. Never use a bare
@@ -465,6 +521,11 @@ async function validateSource(input: InitiateCallTranscriptionInput) {
     metadata: recording.metadata,
     callSession: session,
   });
+  await assertRecordingConsentNotWithdrawn(
+    input,
+    recording.metadata.recordingConsentIdAtCapture,
+    recording.metadata.partyId,
+  );
   return { session, recording };
 }
 
@@ -511,7 +572,27 @@ async function findArtifact(input: InitiateCallTranscriptionInput): Promise<Grow
 async function lockActiveRecordingForCommit(
   tx: ConsentTransaction,
   input: InitiateCallTranscriptionInput,
+  consent: { consentId: number | null; partyId: number },
 ): Promise<void> {
+  // Lock the capture consent as well, so a withdrawal that commits while AI
+  // drafting was in flight can never be overtaken by this transcript commit.
+  const [currentConsent] = validId(consent.consentId)
+    ? await tx.select({
+      status: growCallRecordingConsents.status,
+      withdrawnAt: growCallRecordingConsents.withdrawnAt,
+    }).from(growCallRecordingConsents).where(and(
+      eq(growCallRecordingConsents.id, consent.consentId),
+      eq(growCallRecordingConsents.brokerageId, input.brokerageId),
+      eq(growCallRecordingConsents.partyId, consent.partyId),
+    )).for("update")
+    : [];
+  if (isRecordingConsentWithdrawn(currentConsent)) {
+    throw new CallTranscriptionError(
+      "CONSENT_WITHDRAWN",
+      "Recording consent has been withdrawn; no new transcription or AI processing is permitted.",
+    );
+  }
+
   const [source] = await tx.select({
     document: documents,
     version: documentObjectVersions,
@@ -583,6 +664,23 @@ export async function initiateCallTranscription(
   if (!await hasEntitlement({ id: input.actor.userId, role: input.actor.role, brokerageId: input.brokerageId }, "grow.calling.transcription")) {
     return reject(input, "ENTITLEMENT_REQUIRED", "Call transcription requires the grow.calling.transcription entitlement.");
   }
+  // Ownership is resolved before any existing artifact is read, returned, or
+  // transitioned. A same-brokerage non-owner must never receive transcript or
+  // draft data and must never be able to fail the owner's in-flight row.
+  try {
+    await getCallSessionForBrokerage(input.brokerageId, input.callSessionId, {
+      id: input.actor.userId,
+      role: input.actor.role,
+    });
+  } catch (error) {
+    if (error instanceof GrowCallSessionNotFoundError) {
+      return reject(input, "CALL_NOT_FOUND", error.message);
+    }
+    if (error instanceof GrowCallSessionAuthorizationError) {
+      return reject(input, "ACCESS_DENIED", error.message);
+    }
+    throw error;
+  }
 
   const existingForKey = await db.select({
     row: growCallTranscriptions,
@@ -643,6 +741,8 @@ export async function initiateCallTranscription(
     try {
       await validateSource(input);
     } catch (error) {
+      // Caller-specific denials are request rejections, never transitions.
+      if (isActorSpecificDenial(error)) throw error;
       return failOwned(existingSnapshot!, durableFailureReason(error));
     }
     return existing;
@@ -655,7 +755,9 @@ export async function initiateCallTranscription(
   try {
     source = await validateSource(input);
   } catch (error) {
-    if (existingSnapshot) return failOwned(existingSnapshot, durableFailureReason(error));
+    if (existingSnapshot && !isActorSpecificDenial(error)) {
+      return failOwned(existingSnapshot, durableFailureReason(error));
+    }
     throw error;
   }
   const insertion = await db.transaction(async (tx) => {
@@ -786,7 +888,9 @@ export async function initiateCallTranscription(
       if (!transcript) {
         throw new TranscriptionProviderError(activeProvider.name, "empty_transcript", "Provider returned an empty transcript.");
       }
-      // Never let a result cross a changed provenance boundary.
+      // Never let a result cross a changed provenance boundary. This also
+      // re-reads current consent: a withdrawal during transcription stops the
+      // transcript from ever reaching the AI drafting gateway.
       await validateSource(input);
       // The transcript provider and draft generator are separate trust
       // boundaries. Re-resolve actor membership and transcription entitlement
@@ -824,10 +928,13 @@ export async function initiateCallTranscription(
       }
       // AI may wait while the source or caller authorization changes. Only
       // commit transcript and drafts after both are revalidated again.
-      await validateSource(input);
+      const committedSource = await validateSource(input);
       await assertCurrentAttemptAuthorization(input);
       const completed = await db.transaction(async (tx) => {
-        await lockActiveRecordingForCommit(tx, input);
+        await lockActiveRecordingForCommit(tx, input, {
+          consentId: committedSource.recording.metadata.recordingConsentIdAtCapture,
+          partyId: committedSource.recording.metadata.partyId,
+        });
         const [updated] = await tx.update(growCallTranscriptions).set({
           processingState: "AWAITING_AGENT_REVIEW",
           transcript,
