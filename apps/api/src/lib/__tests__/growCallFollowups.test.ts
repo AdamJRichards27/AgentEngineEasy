@@ -267,6 +267,51 @@ test("happy path: owner proposes approved COMMITMENT + FOLLOWUP with confirmed d
   assert.equal((await requestsFor(fixture)).length, 2);
 });
 
+/** UTC midnight of the next first Sunday of `monthIndex` (0-based) after now. */
+function nextFirstSundayUtcMidnight(monthIndex: number): string {
+  const now = new Date();
+  for (let year = now.getUTCFullYear(); ; year += 1) {
+    const first = new Date(Date.UTC(year, monthIndex, 1));
+    const sunday = new Date(Date.UTC(year, monthIndex, 1 + ((7 - first.getUTCDay()) % 7)));
+    if (sunday.getTime() > now.getTime()) return sunday.toISOString();
+  }
+}
+
+function calendarDateIn(iso: string | Date, timeZone: string): string {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date(iso)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+test("date semantics: a confirmed calendar date (UTC midnight of the chosen day) is stored unchanged on the commitment and falls on that day in every Australian zone, including DST transition days", async () => {
+  const fixture = await createFixture();
+  // Sydney/Melbourne/Hobart/Adelaide change clocks on the first Sunday of
+  // October (AEST -> AEDT) and of April (AEDT -> AEST).
+  const dstStart = nextFirstSundayUtcMidnight(9);
+  const dstEnd = nextFirstSundayUtcMidnight(3);
+  const result = await propose(fixture, owner, [
+    { itemType: "COMMITMENT", itemId: "com-1", dueAt: dstStart },
+    { itemType: "FOLLOWUP", itemId: "fu-1", dueAt: dstEnd },
+  ]);
+  assert.deepEqual(result.proposals.map((p) => p.status), ["PROPOSED", "PROPOSED"]);
+
+  for (const request of await requestsFor(fixture)) {
+    assert.equal((await approveAIActionRequest(request.id, brokerageId, policyActorOf(owner))).ok, true);
+    assert.equal((await executeAIAction(request.id, brokerageId, policyActorOf(owner))).ok, true);
+  }
+
+  const commitments = await commitmentsFor(fixture);
+  for (const [text, due] of [[APPROVED_COMMITMENT, dstStart], [EDITED_FOLLOWUP, dstEnd]] as const) {
+    const row = commitments.find((c) => c.description === text);
+    assert.ok(row, text);
+    assert.equal(row.dueAt.toISOString(), due, "the confirmed date is stored exactly as sent");
+    for (const zone of ["Australia/Brisbane", "Australia/Sydney", "Australia/Melbourne", "Australia/Hobart", "Australia/Adelaide", "Australia/Darwin", "Australia/Perth"]) {
+      assert.equal(calendarDateIn(row.dueAt, zone), due.slice(0, 10), `${zone} shows the confirmed calendar date`);
+    }
+  }
+});
+
 test("rejected, SUMMARY, KEY_POINT, TRANSCRIPT, and unknown items are refused; unsaved or discarded reviews are refused", async () => {
   const fixture = await createFixture();
   for (const item of [

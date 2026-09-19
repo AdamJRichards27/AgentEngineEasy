@@ -237,7 +237,12 @@ test("follow-ups: pre-filled date alone never enables proposing; only an explici
       assert.equal(calls.length, 0, "rendering never proposes anything");
 
       const due = byId(tree, "grow-followup-71-COMMITMENT-c-1-due")!;
-      assert.equal(due.props!.value, "2026-10-01", "suggested date is pre-filled");
+      // The pre-fill is the suggestion's calendar date in the viewer's own
+      // zone (2026-10-01 in every Australian zone; the date semantics are
+      // covered per zone in callFollowups.test.ts).
+      const localSuggestedDate = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" })
+        .format(new Date("2026-10-01T00:00:00.000Z"));
+      assert.equal(due.props!.value, localSuggestedDate, "suggested date is pre-filled in the viewer's zone");
       assert.equal(due.props!.type, "date");
       assert.ok(due.props!["aria-label"], "date input is labelled");
       const confirm = byId(tree, "grow-followup-71-COMMITMENT-c-1-confirm")!;

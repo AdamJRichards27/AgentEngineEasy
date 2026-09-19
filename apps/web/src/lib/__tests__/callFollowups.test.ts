@@ -70,13 +70,93 @@ test("dateInputToIso converts a YYYY-MM-DD date to an ISO-8601 UTC-midnight time
 });
 
 test("isoToDateInput pre-fills a date input from a suggested ISO timestamp", () => {
-  assert.equal(isoToDateInput("2026-10-01T00:00:00.000Z"), "2026-10-01");
+  assert.equal(isoToDateInput("2026-10-01T00:00:00.000Z", "Australia/Brisbane"), "2026-10-01");
   assert.equal(isoToDateInput(null), "");
   assert.equal(isoToDateInput("not a date"), "");
 });
 
+// Date semantics (F4 date remediation): the pre-filled date is the calendar
+// date on which the suggested instant falls in the agent's time zone — the
+// same date Grow displays for that instant — never the UTC calendar date.
+test("AEST (Brisbane, UTC+10, no DST): a suggestion is pre-filled with its Brisbane calendar date, including across UTC and local midnight", () => {
+  const zone = "Australia/Brisbane";
+  assert.equal(isoToDateInput("2026-09-24T23:00:00.000Z", zone), "2026-09-25", "9am Fri 25 Sep AEST is still the 24th in UTC");
+  assert.equal(isoToDateInput("2026-09-24T13:59:59.000Z", zone), "2026-09-24", "23:59:59 local stays on the 24th");
+  assert.equal(isoToDateInput("2026-09-24T14:00:00.000Z", zone), "2026-09-25", "local midnight starts the 25th");
+  assert.equal(isoToDateInput("2026-09-25T00:00:00.000Z", zone), "2026-09-25", "UTC midnight is 10am the same day");
+  assert.equal(isoToDateInput("2026-09-25T13:59:59.999Z", zone), "2026-09-25");
+});
+
+test("AEDT (Sydney in summer, UTC+11) and ACDT (Adelaide, UTC+10:30): suggestions are pre-filled with the local calendar date", () => {
+  assert.equal(isoToDateInput("2026-01-14T13:00:00.000Z", "Australia/Sydney"), "2026-01-15", "AEDT local midnight");
+  assert.equal(isoToDateInput("2026-01-14T12:59:59.000Z", "Australia/Sydney"), "2026-01-14");
+  assert.equal(isoToDateInput("2026-01-14T22:00:00.000Z", "Australia/Sydney"), "2026-01-15", "9am AEDT on the 15th");
+  assert.equal(isoToDateInput("2026-01-14T13:30:00.000Z", "Australia/Adelaide"), "2026-01-15", "ACDT local midnight");
+  assert.equal(isoToDateInput("2026-01-14T13:29:59.000Z", "Australia/Adelaide"), "2026-01-14");
+  assert.equal(isoToDateInput("2026-01-14T16:00:00.000Z", "Australia/Perth"), "2026-01-15", "AWST local midnight (UTC+8)");
+});
+
+test("UTC boundary: UTC-midnight and just-before-UTC-midnight suggestions resolve per zone, and UTC itself is unchanged", () => {
+  for (const zone of ["Australia/Brisbane", "Australia/Sydney", "Australia/Melbourne", "Australia/Adelaide", "Australia/Darwin", "Australia/Perth", "Australia/Hobart"]) {
+    assert.equal(isoToDateInput("2026-10-01T00:00:00.000Z", zone), "2026-10-01", `${zone}: UTC midnight is the same calendar day`);
+    assert.equal(isoToDateInput("2026-09-30T23:59:59.000Z", zone), "2026-10-01", `${zone}: 23:59:59 UTC is already the next day locally`);
+  }
+  assert.equal(isoToDateInput("2026-09-30T23:59:59.000Z", "UTC"), "2026-09-30");
+  assert.equal(isoToDateInput("2026-10-01T00:00:00.000Z", "UTC"), "2026-10-01");
+});
+
+test("DST transitions (Sydney): the local calendar date is correct either side of the October and April clock changes", () => {
+  const zone = "Australia/Sydney";
+  // Clocks go forward at 02:00 AEST on Sunday 4 October 2026.
+  assert.equal(isoToDateInput("2026-10-03T13:59:59.000Z", zone), "2026-10-03", "last second of Sat 3 Oct (AEST)");
+  assert.equal(isoToDateInput("2026-10-03T14:00:00.000Z", zone), "2026-10-04", "00:00 AEST Sun 4 Oct");
+  assert.equal(isoToDateInput("2026-10-03T16:00:00.000Z", zone), "2026-10-04", "03:00 AEDT, just after the change");
+  assert.equal(isoToDateInput("2026-10-04T12:59:59.000Z", zone), "2026-10-04", "last second of Sun 4 Oct (AEDT)");
+  assert.equal(isoToDateInput("2026-10-04T13:00:00.000Z", zone), "2026-10-05", "00:00 AEDT Mon 5 Oct");
+  // Clocks go back at 03:00 AEDT on Sunday 5 April 2026.
+  assert.equal(isoToDateInput("2026-04-04T13:00:00.000Z", zone), "2026-04-05", "00:00 AEDT Sun 5 Apr");
+  assert.equal(isoToDateInput("2026-04-04T16:30:00.000Z", zone), "2026-04-05", "during the repeated 02:00-03:00 hour");
+  assert.equal(isoToDateInput("2026-04-05T13:59:59.000Z", zone), "2026-04-05", "last second of Sun 5 Apr (AEST)");
+  assert.equal(isoToDateInput("2026-04-05T14:00:00.000Z", zone), "2026-04-06", "00:00 AEST Mon 6 Apr");
+  // Brisbane has no DST: the same instants keep a fixed UTC+10 offset.
+  assert.equal(isoToDateInput("2026-10-04T13:00:00.000Z", "Australia/Brisbane"), "2026-10-04");
+});
+
+test("confirmed date round trip: the payload date is UTC midnight of the confirmed day and displays as that day in every Australian zone", () => {
+  for (const zone of ["Australia/Brisbane", "Australia/Sydney", "Australia/Adelaide", "Australia/Darwin", "Australia/Perth", "Australia/Hobart"]) {
+    for (const day of ["2026-01-15", "2026-04-05", "2026-04-06", "2026-10-04", "2026-10-05", "2026-12-31"]) {
+      const iso = dateInputToIso(day)!;
+      assert.equal(iso, `${day}T00:00:00.000Z`);
+      assert.equal(isoToDateInput(iso, zone), day, `${zone}: ${day} displays as the same day`);
+    }
+  }
+});
+
+test("an Australian pre-fill still requires explicit confirmation, and only the confirmed day is sent", () => {
+  const suggested = candidate({ suggestedDueAt: "2026-09-24T23:00:00.000Z" });
+  let drafts = createFollowupDrafts([suggested], "Australia/Brisbane");
+  const key = followupKey(suggested);
+  assert.equal(drafts[key]!.dueDate, "2026-09-25", "Brisbane agent sees Friday 25 September");
+  assert.equal(drafts[key]!.confirmedDueDate, null);
+  drafts = { ...drafts, [key]: { ...drafts[key]!, selected: true } };
+  assert.deepEqual(buildProposePayload([suggested], drafts, false).items, [], "selected but unconfirmed sends nothing");
+  drafts = { ...drafts, [key]: setDraftDueDateConfirmed(drafts[key]!, true) };
+  assert.deepEqual(buildProposePayload([suggested], drafts, false).items, [
+    { itemType: suggested.itemType, itemId: suggested.itemId, dueAt: "2026-09-25T00:00:00.000Z" },
+  ]);
+  const merged = mergeFollowupDrafts({}, [suggested], "Australia/Sydney");
+  assert.equal(merged[key]!.dueDate, "2026-09-25", "merge applies the same zone rule");
+});
+
+test("an unrecognised time zone falls back to the agent's zone instead of throwing", () => {
+  for (const iso of ["2026-10-01T00:00:00.000Z", "2026-09-30T23:30:00.000Z", "2026-10-01T12:00:00.000Z"]) {
+    assert.equal(isoToDateInput(iso, "Not/AZone"), isoToDateInput(iso), "fallback is the agent's own zone");
+    assert.equal(isoToDateInput(iso, ""), isoToDateInput(iso));
+  }
+});
+
 test("a suggested due date is pre-filled but never counts as confirmed", () => {
-  const drafts = createFollowupDrafts([candidate({ suggestedDueAt: "2026-10-01T00:00:00.000Z" })]);
+  const drafts = createFollowupDrafts([candidate({ suggestedDueAt: "2026-10-01T00:00:00.000Z" })], "Australia/Brisbane");
   const draft = drafts[followupKey({ itemType: "COMMITMENT", itemId: "c-1" })]!;
   assert.equal(draft.dueDate, "2026-10-01");
   assert.equal(draft.confirmedDueDate, null);
@@ -165,7 +245,7 @@ test("proposeDisabledReason explains exactly why the propose button is disabled"
 test("mergeFollowupDrafts keeps local edits and never auto-confirms new items", () => {
   const first = [candidate({ itemId: "a" })];
   const current = { "COMMITMENT:a": confirmedDraft("2026-10-01") };
-  const merged = mergeFollowupDrafts(current, [...first, candidate({ itemId: "b", suggestedDueAt: "2026-10-09T00:00:00.000Z" })]);
+  const merged = mergeFollowupDrafts(current, [...first, candidate({ itemId: "b", suggestedDueAt: "2026-10-09T00:00:00.000Z" })], "Australia/Brisbane");
   assert.deepEqual(merged["COMMITMENT:a"], current["COMMITMENT:a"]);
   assert.deepEqual(merged["COMMITMENT:b"], { selected: false, dueDate: "2026-10-09", confirmedDueDate: null });
 });

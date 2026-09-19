@@ -110,23 +110,47 @@ export function dateInputToIso(value: string): string | null {
   return date.toISOString();
 }
 
-/** ISO-8601 -> YYYY-MM-DD for pre-filling a date input ("" when invalid). */
-export function isoToDateInput(iso: string | null | undefined): string {
+/**
+ * The YYYY-MM-DD calendar date on which `date` falls in `timeZone` (an IANA
+ * zone; the agent's own zone when omitted or unrecognised). This is the same
+ * calendar date the rest of Grow shows for that instant, because commitment
+ * dates are displayed with toLocaleDateString in the viewer's zone.
+ */
+export function calendarDateInTimeZone(date: Date, timeZone?: string): string {
+  let format: Intl.DateTimeFormat;
+  try {
+    format = new Intl.DateTimeFormat("en-CA-u-nu-latn", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+  } catch {
+    format = new Intl.DateTimeFormat("en-CA-u-nu-latn", { year: "numeric", month: "2-digit", day: "2-digit" });
+  }
+  const parts = Object.fromEntries(format.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+/**
+ * ISO-8601 instant -> YYYY-MM-DD for pre-filling a date input ("" when
+ * invalid). The pre-fill is the calendar date of the suggested instant in the
+ * agent's time zone, not in UTC: an AI suggestion of 2026-09-24T23:00:00Z
+ * (9am Friday 25 September in Brisbane) pre-fills 2026-09-25. The confirmed
+ * date is sent as UTC midnight of the chosen day (dateInputToIso), which
+ * every Australian zone displays as that same day.
+ */
+export function isoToDateInput(iso: string | null | undefined, timeZone?: string): string {
   if (!iso) return "";
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+  return Number.isNaN(date.getTime()) ? "" : calendarDateInTimeZone(date, timeZone);
 }
 
 export function canProposeCandidate(candidate: CallFollowupCandidate, consentBlocked: boolean): boolean {
   return !consentBlocked && !candidate.consentBlocked && candidate.canPropose;
 }
 
-export function createFollowupDrafts(candidates: CallFollowupCandidate[]): Record<string, FollowupDraft> {
+export function createFollowupDrafts(candidates: CallFollowupCandidate[], timeZone?: string): Record<string, FollowupDraft> {
   const drafts: Record<string, FollowupDraft> = {};
   for (const candidate of candidates) {
     drafts[followupKey(candidate)] = {
       selected: false,
-      dueDate: isoToDateInput(candidate.suggestedDueAt),
+      dueDate: isoToDateInput(candidate.suggestedDueAt, timeZone),
       // Pre-filled is not confirmed.
       confirmedDueDate: null,
     };
@@ -138,8 +162,9 @@ export function createFollowupDrafts(candidates: CallFollowupCandidate[]): Recor
 export function mergeFollowupDrafts(
   current: Record<string, FollowupDraft>,
   candidates: CallFollowupCandidate[],
+  timeZone?: string,
 ): Record<string, FollowupDraft> {
-  const fresh = createFollowupDrafts(candidates);
+  const fresh = createFollowupDrafts(candidates, timeZone);
   for (const key of Object.keys(fresh)) {
     if (current[key]) fresh[key] = current[key]!;
   }
