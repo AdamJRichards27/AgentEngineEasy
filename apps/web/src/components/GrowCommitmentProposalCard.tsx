@@ -9,6 +9,8 @@ import {
   initialProposalState,
   isProposalBusy,
   permissionDeniedMessage,
+  proposalCardHeading,
+  proposalCardHeadingAccentClass,
   proposalCardStatusLabel,
   provenanceLabel,
   stateForProposalError,
@@ -149,7 +151,9 @@ export function GrowCommitmentProposalCard({
   return (
     <div className="ai-copilot-proposal grow-commitment-proposal" aria-live="polite" aria-atomic="true">
       <div className="grow-commitment-proposal-header">
-        <div className="eyebrow ai-copilot-kind-advisory">Proposed follow-up — nothing created yet</div>
+        {/* AE GROW Pilot Readiness WP6b (P3-c) — follows the card's live state
+            rather than permanently claiming nothing has been created. */}
+        <div className={`eyebrow ${proposalCardHeadingAccentClass(state)}`}>{proposalCardHeading(state, proposal.status)}</div>
         <div className="grow-commitment-proposal-meta">
           {sourceLabel !== null && <span className="pill">{sourceLabel}</span>}
           <span className="pill">{proposalCardStatusLabel(state, proposal.status)}</span>

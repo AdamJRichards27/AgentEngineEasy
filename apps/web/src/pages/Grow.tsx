@@ -16,6 +16,16 @@ import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePan
 import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptPanel";
 import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
 import { ErrorBoundary } from "../components/ErrorBoundary";
+// AE GROW Pilot Readiness WP6b (D6) — the shared loading/failed/empty region
+// presentation, and the pure state logic behind it and the tab bar.
+import { GrowDataRegionStatus } from "../components/GrowDataRegion";
+import {
+  contactsEmptyMessage,
+  growTabClickState,
+  growTabLabel,
+  GROW_TABS,
+  type GrowTab,
+} from "../lib/growWorkspace";
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
@@ -413,17 +423,6 @@ export default function Grow() {
   return <GrowWorkspace />;
 }
 
-type GrowTab = "today" | "opportunities" | "contacts" | "nurture" | "performance" | "askAE";
-
-const GROW_TABS: Array<{ key: GrowTab; label: string }> = [
-  { key: "today", label: "Today" },
-  { key: "opportunities", label: "Opportunities" },
-  { key: "contacts", label: "Contacts" },
-  { key: "nurture", label: "Nurture" },
-  { key: "performance", label: "Performance" },
-  { key: "askAE", label: "Ask AE" },
-];
-
 function GrowWorkspace() {
   const [tab, setTab] = useState<GrowTab>("today");
   // AE GROW Priority 2 §12 — Priority 1 integration. The only state this priority adds at the
@@ -461,6 +460,18 @@ function GrowWorkspace() {
     setTab("contacts");
   }
 
+  // AE GROW Pilot Readiness WP6b (P3-e) — clicking a tab in the bar below goes
+  // to that tab's own landing view. For Contacts that is the contact list, so
+  // the click also closes any open Contact 360 (previously it set `tab` to the
+  // tab that was already active and appeared to do nothing). The jump-straight
+  // -to-a-contact paths above are untouched. See lib/growWorkspace.ts.
+  function selectTab(next: GrowTab) {
+    const state = growTabClickState(next, { tab, contactPartyId, pendingComposeChannel });
+    setTab(state.tab);
+    setContactPartyId(state.contactPartyId);
+    setPendingComposeChannel(state.pendingComposeChannel);
+  }
+
   // Re-uses the "grow-access" query the outer Grow() component already fetched (react-query
   // dedupes by key, so this is not a second network request) purely to read
   // billingProviderName for the sandbox-billing note below.
@@ -486,7 +497,7 @@ function GrowWorkspace() {
             type="button"
             className={`pc-tab${tab === t.key ? " active" : ""}`}
             aria-current={tab === t.key ? "page" : undefined}
-            onClick={() => setTab(t.key)}
+            onClick={() => selectTab(t.key)}
           >
             {t.label}
           </button>
@@ -495,7 +506,7 @@ function GrowWorkspace() {
 
       {/* AE GROW Pilot Readiness WP5 — one failing tab shows a contained
           fallback; the tab bar above stays usable and switching tab resets it. */}
-      <ErrorBoundary label={`the ${GROW_TABS.find((t) => t.key === tab)?.label ?? "Grow"} tab`} resetKey={tab}>
+      <ErrorBoundary label={`the ${growTabLabel(tab)} tab`} resetKey={tab}>
         {tab === "today" && (
           <GrowToday
             onAskAE={() => setTab("askAE")}
@@ -939,37 +950,19 @@ function GrowComingSoon({ title, description }: { title: string; description: st
   );
 }
 
-// Voice command readiness (AE GROW Priority 1): architectural/visual seam ONLY. No speech-to-text
-// provider, no microphone stream, and no voice-driven action exists anywhere in this build -- the
-// button below is permanently disabled and says so, rather than pretending to listen.
+// AE GROW Pilot Readiness WP6b (P3-a): the "Voice command — coming soon" seam card that used to
+// sit below AskAgentEngine here has been removed. It was Priority 1's placeholder for an entry
+// point Stage E then actually shipped — the real, working mic control now lives inside
+// AskAgentEngine itself (see its Stage E header comment), so the card was telling the agent that
+// the control they had just successfully used did not exist yet. Nothing replaces it: voice is
+// part of Ask AE's own input row, not a separate surface.
 // AE GROW Priority 6 Stage B: AskAgentEngine now gets contextType="grow" here (previously
 // "business" - the Grow tab's Ask AE was never actually Grow-scoped before this stage, despite
 // living on this page). AskAgentEngine itself required no changes to accept this beyond its own
 // Stage B extension (see that component's header comment) - it is still the exact same shared
 // component, not a second Ask AE surface.
 function GrowAskAETab() {
-  return (
-    <div>
-      <AskAgentEngine contextType="grow" contextId={null} />
-      <section className="card grow-voice-seam">
-        <h2>Voice command</h2>
-        <p className="muted">
-          Asking Agent Engine by voice is planned for a future release. This is a placeholder for that entry point
-          only -- no microphone, speech-to-text, or voice-driven action is active yet, and nothing here records or
-          transcribes audio.
-        </p>
-        <button
-          type="button"
-          className="btn btn-secondary btn-small"
-          disabled
-          aria-label="Voice command (coming soon)"
-          title="Voice command — coming soon"
-        >
-          🎤 Voice command — coming soon
-        </button>
-      </section>
-    </div>
-  );
+  return <AskAgentEngine contextType="grow" contextId={null} />;
 }
 
 // AE GROW Priority 6 Stage C — AI Business Coach. Replaces this tab's
@@ -1073,8 +1066,16 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
           </button>
         </form>
 
-        {contacts.isLoading && <p className="muted">Loading…</p>}
-        {contacts.data?.contacts.length === 0 && <p className="empty-state">No contacts found.</p>}
+        {/* AE GROW Pilot Readiness WP6b (D6) — an explicit failed state with a
+            Try again that refetches this region's own query, plus a distinct
+            "nothing matched that search" vs "no contacts at all" empty state. */}
+        <GrowDataRegionStatus
+          query={contacts}
+          itemCount={contacts.data?.contacts.length}
+          errorFallback="Couldn't load contacts."
+          emptyMessage={contactsEmptyMessage(committedSearch)}
+          onRetry={() => void contacts.refetch()}
+        />
         {contacts.data && contacts.data.contacts.length > 0 && (
           <table className="grow-table">
             <thead>
@@ -1108,8 +1109,13 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
       <section className="card">
         <h2>Relationships</h2>
         <p className="muted">Every person linked to a property, with why the link exists - never just an owner field.</p>
-        {relationships.isLoading && <p className="muted">Loading…</p>}
-        {relationships.data?.relationships.length === 0 && <p className="empty-state">No relationships yet.</p>}
+        <GrowDataRegionStatus
+          query={relationships}
+          itemCount={relationships.data?.relationships.length}
+          errorFallback="Couldn't load relationships."
+          emptyMessage="No relationships yet."
+          onRetry={() => void relationships.refetch()}
+        />
         {relationships.data && relationships.data.relationships.length > 0 && (
           <table className="grow-table">
             <thead>
@@ -1144,8 +1150,13 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
 
       <section className="card">
         <h2>Recent activity</h2>
-        {activities.isLoading && <p className="muted">Loading…</p>}
-        {activities.data?.activities.length === 0 && <p className="empty-state">No activity logged yet.</p>}
+        <GrowDataRegionStatus
+          query={activities}
+          itemCount={activities.data?.activities.length}
+          errorFallback="Couldn't load recent activity."
+          emptyMessage="No activity logged yet."
+          onRetry={() => void activities.refetch()}
+        />
         {activities.data && activities.data.activities.length > 0 && (
           <ul className="timeline">
             {activities.data.activities.map((a) => (
@@ -2022,8 +2033,14 @@ function GrowOpportunitiesTab() {
     <section className="card">
       <h2>Opportunities</h2>
       <p className="muted">Explainable by design - every opportunity carries a reason, never just a score.</p>
-      {opportunities.isLoading && <p className="muted">Loading…</p>}
-      {opportunities.data?.opportunities.length === 0 && <p className="empty-state">No opportunities yet.</p>}
+      {/* AE GROW Pilot Readiness WP6b (D6) — see GrowContactList above. */}
+      <GrowDataRegionStatus
+        query={opportunities}
+        itemCount={opportunities.data?.opportunities.length}
+        errorFallback="Couldn't load opportunities."
+        emptyMessage="No opportunities yet."
+        onRetry={() => void opportunities.refetch()}
+      />
       {opportunities.data && opportunities.data.opportunities.length > 0 && (
         <table className="grow-table">
           <thead>

@@ -165,6 +165,61 @@ export function proposalCardStatusLabel(state: ProposalCardState, status: string
   }
 }
 
+// AE GROW Pilot Readiness WP6b (P3-c) — the card's header line. It used to be
+// the fixed string "Proposed follow-up — nothing created yet", which stayed on
+// screen after the agent approved the proposal and the commitment had actually
+// been created: the card's body said "Commitment created" while its own
+// heading still said nothing had been. The heading now follows the same live
+// state the status pill does.
+export function proposalCardHeading(state: ProposalCardState, status: string): string {
+  switch (state) {
+    case "executed":
+      return "Follow-up commitment created";
+    case "executing":
+      return "Proposed follow-up — creating the commitment…";
+    case "approved":
+      return "Proposed follow-up — approved, not created yet";
+    case "approving":
+      return "Proposed follow-up — approving…";
+    case "rejecting":
+      return "Proposed follow-up — rejecting…";
+    case "rejected":
+      return "Proposed follow-up — rejected, nothing created";
+    case "expired":
+      return "Proposed follow-up — expired, nothing created";
+    case "already_actioned":
+      return "Proposed follow-up — already actioned";
+    case "not_available":
+      return "Proposed follow-up — no longer available";
+    case "completed_after_recovery":
+      return "Follow-up commitment may already have been created";
+    default:
+      // review / permission_denied / validation_error / recoverable_failure —
+      // every one of these leaves nothing created.
+      return status === "APPROVED" ? "Proposed follow-up — approved, not created yet" : "Proposed follow-up — nothing created yet";
+  }
+}
+
+/** Verified (not advisory) accent once the commitment actually exists. */
+export function proposalCardHeadingAccentClass(state: ProposalCardState): string {
+  return state === "executed" ? "ai-copilot-kind-verified" : "ai-copilot-kind-advisory";
+}
+
+// AE GROW Pilot Readiness WP6b (P3-d) — the API builds a proposal's
+// humanReadableSummary from the action registry's summarize() (see
+// apps/api/src/lib/ai/actions/registry.ts CREATE_GROW_COMMITMENT), which has
+// only the input ids to work with and so renders "for contact #289". Every
+// adapter below already carries the contact's real name alongside that
+// summary, so the raw id reference is replaced client-side rather than shown
+// to an agent. Only the *matching* party id is substituted: a summary that
+// mentioned some other contact's id must never be relabelled with this
+// contact's name. Nothing else about the summary is rewritten.
+export function humaniseContactReference(summary: string, partyId: number | null, contactName: string | null): string {
+  const name = contactName?.trim();
+  if (!name || partyId === null || !Number.isFinite(partyId)) return summary;
+  return summary.replace(new RegExp(`\\bcontact #${partyId}\\b`, "gi"), name);
+}
+
 /** The card's state on mount (never auto-executes an approved proposal). */
 export function initialProposalState(view: Pick<CommitmentProposalView, "status" | "expiresAt">, now: Date = new Date()): ProposalCardState {
   if (view.status === "APPROVED") return "approved";
@@ -205,7 +260,7 @@ export interface AskAgentCommitmentProposal {
 export function viewFromAskAgentProposal(proposal: AskAgentCommitmentProposal): CommitmentProposalView {
   return {
     actionRequestId: proposal.actionRequestId,
-    summary: proposal.humanReadableSummary,
+    summary: humaniseContactReference(proposal.humanReadableSummary, proposal.partyId, proposal.contactName),
     contactName: proposal.contactName,
     dueAt: proposal.dueAt,
     timeZone: proposal.timeZone,
@@ -234,9 +289,12 @@ export function viewFromPendingProposal(row: PendingCommitmentProposal, contactN
   const input = (row.input && typeof row.input === "object" ? row.input : {}) as Record<string, unknown>;
   const description = typeof input.description === "string" ? input.description : null;
   const fromCall = row.provenance?.source === "call_review";
+  const partyId = typeof input.partyId === "number" ? input.partyId : null;
   return {
     actionRequestId: row.id,
-    summary: description ?? row.humanReadableSummary,
+    // WP6b P3-d: the fallback summary is the same server-built string, so it
+    // gets the same "contact #289" → name treatment.
+    summary: description ?? humaniseContactReference(row.humanReadableSummary, partyId, contactName),
     contactName,
     dueAt: typeof input.dueAt === "string" ? input.dueAt : null,
     timeZone: null,
