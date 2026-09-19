@@ -9,6 +9,7 @@ import { isRoleEnabled } from "./featureFlags.js";
 import { isRoleEntitled } from "./entitlements.js";
 import { logAiInteraction, logAiUsage } from "./audit.js";
 import { assertGrowRateLimit, GrowRateLimitError } from "./growRateLimiter.js";
+import { assertDailyAiCapNotReached, AiDailyCapExceededError } from "./dailyUsage.js";
 import {
   buildCoachFocusAreas,
   buildCoachHeadline,
@@ -533,6 +534,32 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
       status: "blocked_entitlement",
     });
     throw new AiEntitlementError("Grow-scoped Ask AE requires a Grow or Pro plan.");
+  }
+
+  // AE GROW Pilot Readiness WP1 (P1-3) — durable per-brokerage daily AI request
+  // cap (TIER_CAPABILITIES.maxAiRequestsPerDay), counted from ai_interactions
+  // (see dailyUsage.ts). Applies to every askCopilot() caller (RUN Copilot,
+  // Grow Ask AE, Business Coach, appraisal market-position drafts), after the
+  // entitlement checks and before any tool run or provider call. context.tier
+  // is resolveBrokerageTier()'s answer (contextEngine.ts). A refused request is
+  // audited as blocked (never counted), mirroring the rate-limit branch above.
+  try {
+    await assertDailyAiCapNotReached(input.brokerageId, context.tier);
+  } catch (err) {
+    if (err instanceof AiDailyCapExceededError) {
+      await logAiInteraction({
+        requestId,
+        brokerageId: input.brokerageId,
+        userId: input.userId,
+        aiRole: role,
+        contextType: input.contextType ?? undefined,
+        question: input.question,
+        riskLevel: 0,
+        status: "blocked_flag",
+        errorMessage: err.message,
+      });
+    }
+    throw err;
   }
 
   // Stage G9 note (Ask Agent Engine Action Interface / AI Context Security

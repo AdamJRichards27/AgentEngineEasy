@@ -23,11 +23,12 @@
 // above unchanged — those never assumed a propertyId, only a threadId
 // resolvable within the caller's own brokerage.
 
-import { Router, type Response } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import {
   createThread,
   getThread,
@@ -94,6 +95,76 @@ function handleCommunicationsError(err: unknown, res: Response): boolean {
     return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------
+// AE GROW Pilot Readiness WP1 (P2-3): Grow entitlement on contact-first
+// thread mutations. The generic /communications/threads/:threadId/... and
+// /communications/messages/:messageId/... mutation routes below are shared
+// by property-scoped (RUN) threads and contact-first (Grow) threads. A
+// contact-first thread (propertyId IS NULL -- the CHECK constraint then
+// guarantees a partyId) can only be CREATED with grow.contacts.manage, so
+// every subsequent mutation on it (participants, drafting, request-approval,
+// approval, send, requeue) must require that same key too -- otherwise a
+// brokerage/user without Grow could keep driving a Grow thread by id.
+// Property-scoped threads are unchanged (no Grow check at all). Cancel is
+// deliberately NOT gated: it can only withdraw an unsent message, never
+// send one, and must stay available to stop an outbound message after an
+// entitlement lapses.
+//
+// Returns true when the request may proceed; otherwise it has already
+// written the response (404 for an unknown/foreign thread via
+// handleCommunicationsError, 403 in the requireEntitlement() shape).
+// ---------------------------------------------------------------------
+
+async function ensureGrowEntitlementForThread(
+  req: Request,
+  res: Response,
+  resolveThreadId: () => Promise<number>,
+): Promise<boolean> {
+  const user = req.authedUser!;
+  try {
+    const threadId = await resolveThreadId();
+    if (!Number.isInteger(threadId) || threadId <= 0) throw new CommunicationTenancyError();
+    const thread = await getThread(threadId, user.brokerageId);
+    if (thread.propertyId !== null) return true;
+    const decision = await explainEntitlementDecision(user, "grow.contacts.manage");
+    if (decision.allowed) return true;
+    res.status(403).json({
+      error: "Not entitled",
+      reason: decision.reason,
+      entitlementKey: "grow.contacts.manage",
+      upgrade: { action: "grow.checkout", productCode: "grow" },
+    });
+    return false;
+  } catch (err) {
+    if (handleCommunicationsError(err, res)) return false;
+    logger.error("communications_grow_thread_entitlement_failed_closed", { userId: user.id, error: err });
+    res.status(403).json({ error: "Not entitled", reason: "ENTITLEMENT_MISSING", entitlementKey: "grow.contacts.manage" });
+    return false;
+  }
+}
+
+function requireGrowForContactThreadByThreadId() {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    if (await ensureGrowEntitlementForThread(req, res, async () => Number(req.params.threadId))) next();
+  };
+}
+
+function requireGrowForContactThreadByMessageId() {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const user = req.authedUser!;
+    if (
+      await ensureGrowEntitlementForThread(req, res, async () => {
+        const messageId = Number(req.params.messageId);
+        if (!Number.isInteger(messageId) || messageId <= 0) throw new CommunicationTenancyError();
+        const message = await getMessage(messageId, user.brokerageId);
+        return message.threadId;
+      })
+    ) {
+      next();
+    }
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -279,7 +350,7 @@ communicationsRouter.get(
 
 const addParticipantFromPartySchema = z.object({ partyId: z.coerce.number().int(), role: z.string().min(1) });
 
-communicationsRouter.post("/communications/threads/:threadId/participants", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/threads/:threadId/participants", requireAuth, requireGrowForContactThreadByThreadId(), async (req, res) => {
   const user = req.authedUser!;
   const threadId = Number(req.params.threadId);
   const body = addParticipantFromPartySchema.safeParse(req.body);
@@ -306,7 +377,7 @@ const addManualParticipantSchema = z.object({
   reason: z.string().min(1),
 });
 
-communicationsRouter.post("/communications/threads/:threadId/participants/manual", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/threads/:threadId/participants/manual", requireAuth, requireGrowForContactThreadByThreadId(), async (req, res) => {
   const user = req.authedUser!;
   const threadId = Number(req.params.threadId);
   const body = addManualParticipantSchema.safeParse(req.body);
@@ -358,7 +429,7 @@ const createDraftMessageSchema = z.object({
   placeholderValues: z.record(z.string()).optional(),
 });
 
-communicationsRouter.post("/communications/threads/:threadId/messages", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/threads/:threadId/messages", requireAuth, requireGrowForContactThreadByThreadId(), async (req, res) => {
   const user = req.authedUser!;
   const threadId = Number(req.params.threadId);
   const body = createDraftMessageSchema.safeParse(req.body);
@@ -408,7 +479,7 @@ communicationsRouter.get("/communications/messages/:messageId", requireAuth, asy
 const versionedActionSchema = z.object({ expectedVersion: z.coerce.number().int().min(0) });
 const cancelActionSchema = versionedActionSchema.extend({ reason: z.string().optional() });
 
-communicationsRouter.post("/communications/messages/:messageId/request-approval", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/request-approval", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
   const messageId = Number(req.params.messageId);
   const body = versionedActionSchema.safeParse(req.body);
@@ -421,7 +492,7 @@ communicationsRouter.post("/communications/messages/:messageId/request-approval"
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/approve", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/approve", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
   const messageId = Number(req.params.messageId);
   const body = versionedActionSchema.safeParse(req.body);
@@ -447,7 +518,7 @@ communicationsRouter.post("/communications/messages/:messageId/cancel", requireA
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/send", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/send", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
   const messageId = Number(req.params.messageId);
   const body = versionedActionSchema.safeParse(req.body);
@@ -460,7 +531,7 @@ communicationsRouter.post("/communications/messages/:messageId/send", requireAut
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/requeue", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/requeue", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
   const messageId = Number(req.params.messageId);
   const body = versionedActionSchema.safeParse(req.body);

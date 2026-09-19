@@ -28,6 +28,7 @@ import {
 } from "../lib/growAppraisalIntegrations.js";
 import type { ComparableSaleInput, MarketCompetitionInput } from "../lib/growAppraisalIntegrations.js";
 import { AiFeatureDisabledError, AiEntitlementError } from "../lib/ai/types.js";
+import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
 
 export const growAppraisalsRouter = Router();
 
@@ -46,10 +47,22 @@ function handleGrowAppraisalError(err: unknown, res: import("express").Response)
     res.status(403).json({ error: err.message });
     return;
   }
+  // market-position/generate goes through askCopilot(), so it shares the daily AI cap.
+  if (err instanceof AiDailyCapExceededError) {
+    res.status(429).json({ error: err.message });
+    return;
+  }
   res.status(400).json({ error: (err as Error).message });
 }
 
 const requiresRunAccess = requireEntitlement("run.access");
+// WP1 P1-1: every Appraisal Workspace route is a Grow surface, so every route requires
+// grow.access (checked before any work). Every mutating route additionally requires
+// grow.opportunities.manage -- the same "manage" key Grow uses for its own opportunity
+// pipeline writes (routes/grow.ts). /:id/run-handoff keeps run.access AND requires
+// grow.access, because the Grow -> Run handoff originates in Grow.
+const requiresGrowAccess = requireEntitlement("grow.access");
+const requiresGrowManage = requireEntitlement("grow.opportunities.manage");
 
 /* ---------------------------------------------------------------------
  * Sec 7/8 -- Create from Contact 360 or from a Grow Opportunity.
@@ -59,7 +72,7 @@ const createFromContactSchema = z.object({
   propertyId: z.coerce.number().int().positive(),
 });
 
-growAppraisalsRouter.post("/from-contact", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createFromContactSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -83,7 +96,7 @@ const createFromOpportunitySchema = z.object({
   opportunityId: z.coerce.number().int().positive(),
 });
 
-growAppraisalsRouter.post("/from-opportunity", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/from-opportunity", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createFromOpportunitySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -110,7 +123,7 @@ const pipelineQuerySchema = z.object({
   ownerUserId: z.coerce.number().int().positive().optional(),
 });
 
-growAppraisalsRouter.get("/pipeline", requireAuth, async (req, res) => {
+growAppraisalsRouter.get("/pipeline", requireAuth, requiresGrowAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = pipelineQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -132,7 +145,7 @@ growAppraisalsRouter.get("/pipeline", requireAuth, async (req, res) => {
 /* ---------------------------------------------------------------------
  * Sec 9 -- the Appraisal Workspace itself.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.get("/:id", requireAuth, async (req, res) => {
+growAppraisalsRouter.get("/:id", requireAuth, requiresGrowAccess, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   try {
@@ -159,7 +172,7 @@ const updateWorkspaceSchema = z.object({
   ownerUserId: z.coerce.number().int().positive().nullable().optional(),
 });
 
-growAppraisalsRouter.patch("/:id", requireAuth, async (req, res) => {
+growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = updateWorkspaceSchema.safeParse(req.body);
@@ -185,7 +198,7 @@ growAppraisalsRouter.patch("/:id", requireAuth, async (req, res) => {
  * -----------------------------------------------------------------*/
 const statusSchema = z.object({ toStatus: z.string().min(1) });
 
-growAppraisalsRouter.post("/:id/status", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/status", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = statusSchema.safeParse(req.body);
@@ -215,7 +228,7 @@ const outcomeSchema = z.object({
   outcomeNotes: z.string().nullable().optional(),
 });
 
-growAppraisalsRouter.post("/:id/outcome", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/outcome", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = outcomeSchema.safeParse(req.body);
@@ -246,7 +259,7 @@ const followUpSchema = z.object({
   followUpNotes: z.string().nullable().optional(),
 });
 
-growAppraisalsRouter.post("/:id/follow-up", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/follow-up", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = followUpSchema.safeParse(req.body);
@@ -276,7 +289,7 @@ const sendSchema = z.object({
   bodyText: z.string().optional(),
 });
 
-growAppraisalsRouter.post("/:id/send", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = sendSchema.safeParse(req.body);
@@ -301,7 +314,7 @@ growAppraisalsRouter.post("/:id/send", requireAuth, async (req, res) => {
 /* ---------------------------------------------------------------------
  * Sec 12 -- AI Market Position draft.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   try {
@@ -320,7 +333,7 @@ growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, async (r
 /* ---------------------------------------------------------------------
  * Sec 13/14 -- presentation document generation.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   try {
@@ -339,7 +352,7 @@ growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, async (req,
  * Sec 19/20 -- Grow -> Run handoff, gated behind the same run.access
  * entitlement Run uses everywhere else.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresRunAccess, async (req, res) => {
+growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresGrowAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   try {
@@ -378,7 +391,7 @@ function normalizeSaleDate(saleDate: string | null | undefined): Date | null | u
   return saleDate ? new Date(saleDate) : null;
 }
 
-growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = comparableSaleSchema.safeParse(req.body);
@@ -397,7 +410,7 @@ growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, async (req, res)
   }
 });
 
-growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, async (req, res) => {
+growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const saleId = Number(req.params.saleId);
@@ -417,7 +430,7 @@ growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, async (
   }
 });
 
-growAppraisalsRouter.delete("/:id/comparable-sales/:saleId", requireAuth, async (req, res) => {
+growAppraisalsRouter.delete("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const saleId = Number(req.params.saleId);
@@ -443,7 +456,7 @@ const marketCompetitionSchema = z.object({
   displayOrder: z.coerce.number().int().optional(),
 });
 
-growAppraisalsRouter.post("/:id/market-competition", requireAuth, async (req, res) => {
+growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const parsed = marketCompetitionSchema.safeParse(req.body);
@@ -459,7 +472,7 @@ growAppraisalsRouter.post("/:id/market-competition", requireAuth, async (req, re
   }
 });
 
-growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, async (req, res) => {
+growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const itemId = Number(req.params.itemId);
@@ -476,7 +489,7 @@ growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, async
   }
 });
 
-growAppraisalsRouter.delete("/:id/market-competition/:itemId", requireAuth, async (req, res) => {
+growAppraisalsRouter.delete("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = Number(req.params.id);
   const itemId = Number(req.params.itemId);

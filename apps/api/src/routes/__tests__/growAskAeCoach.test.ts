@@ -158,6 +158,7 @@ test("POST /api/ai/ask rejects mode 'coach' paired with any contextType other th
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Schema Refine ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
 
     const nullContext = await askCoach(fresh.agent.cookie, { contextType: null });
     assert.equal(nullContext.status, 400);
@@ -176,6 +177,7 @@ test("POST /api/ai/ask (mode: coach) rejects an invalid period value with 400", 
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Invalid Period ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await askCoach(fresh.agent.cookie, { period: "yesterday" });
     assert.equal(res.status, 400);
   } finally {
@@ -199,6 +201,7 @@ test("POST /api/ai/ask (mode: coach) succeeds for a Grow-entitled brokerage and 
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Success ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await askCoach(fresh.agent.cookie, { period: "last30days" });
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
@@ -248,6 +251,7 @@ test("GET /api/ai/capabilities reports businessCoachEnabled alongside the existi
   try {
     await revokeRunAccess(fresh.brokerageId);
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await fetch(`${baseUrl}/api/ai/capabilities`, { headers: { cookie: fresh.agent.cookie } });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { tier: string; copilotEnabled: boolean; businessCoachEnabled: boolean };
@@ -263,6 +267,7 @@ test("POST /api/ai/ask (mode: coach) shares the Grow per-brokerage rate limit en
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Rate Limit ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     let lastStatus = 0;
     for (let i = 0; i < 21; i++) {
       const res = await askCoach(fresh.agent.cookie, { question: `Rate limit fixture question #${i}` });
@@ -282,7 +287,9 @@ test("POST /api/ai/ask (mode: coach) never leaks one brokerage's coaching metric
   const B = await createBrokerageWithUsers(baseUrl, `Coach Route Cross Tenant B ${suffix}`);
   try {
     await grant(A.brokerageId, "grow.access");
+    await grant(A.brokerageId, "grow.ai.use");
     await grant(B.brokerageId, "grow.access");
+    await grant(B.brokerageId, "grow.ai.use");
     await grant(A.brokerageId, "grow.opportunities.manage");
 
     const propRes = await fetch(`${baseUrl}/api/properties`, {
@@ -320,6 +327,7 @@ test("POST /api/ai/ask (mode: coach) ignores a client-supplied timeZone override
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route TZ Override ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await askCoach(fresh.agent.cookie, { period: "last7days", timeZone: "Pacific/Fiji" });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { response: { period?: { timeZone: string; timeZoneSource: string } } };
@@ -372,6 +380,7 @@ test("POST /api/ai/ask (mode: coach) with a grounded, dated follow-up produces a
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route Commitment Proposal ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     await grant(fresh.brokerageId, "grow.opportunities.manage");
     // AE GROW Priority 6 Stage D remediation pass (CI-diagnosed fix):
     // CREATE_GROW_COMMITMENT's own registry entry (actions/registry.ts)
@@ -441,6 +450,7 @@ test("POST /api/ai/ask (mode: coach) creates no proposal when no concrete, dated
   const fresh = await createBrokerageWithUsers(baseUrl, `Coach Route No Grounded Follow-up ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     await grant(fresh.brokerageId, "grow.opportunities.manage");
     const propertyId = await createProperty(fresh.agent.cookie, "11 Coach No Followup Ave");
     const partyId = await createParty(fresh.agent.cookie, propertyId, { firstName: "Noor", lastName: "NoFollowup" });
@@ -477,8 +487,10 @@ test("POST /api/ai/ask (mode: coach) never proposes a commitment against, or lea
   const foreign = await createBrokerageWithUsers(baseUrl, `Coach Route Tenant Isolation Foreign ${suffix}`);
   try {
     await grant(ours.brokerageId, "grow.access");
+    await grant(ours.brokerageId, "grow.ai.use");
     await grant(ours.brokerageId, "grow.opportunities.manage");
     await grant(foreign.brokerageId, "grow.access");
+    await grant(foreign.brokerageId, "grow.ai.use");
     await grant(foreign.brokerageId, "grow.opportunities.manage");
 
     const foreignPropertyId = await createProperty(foreign.agent.cookie, "13 Zenith Foreign Ave");

@@ -129,6 +129,7 @@ test("POST /api/ai/ask (grow) rejects an oversized question (>2000 chars) and an
   const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Route Validation ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
 
     const oversizedQuestion = await askGrow(fresh.agent.cookie, { question: "x".repeat(2001) });
     assert.equal(oversizedQuestion.status, 400);
@@ -147,6 +148,7 @@ test("POST /api/ai/ask (grow) succeeds for an entitled brokerage and returns the
   const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Route Success ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await askGrow(fresh.agent.cookie);
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
@@ -174,6 +176,7 @@ test("POST /api/ai/ask (grow) with growFocusItemId set returns a suggestedNextSt
   const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Route Focus ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     // createOverdueOpportunity below POSTs/PATCHes /api/grow/opportunities,
     // which requires its own separate grow.opportunities.manage entitlement
     // (apps/api/src/routes/grow.ts) - grow.access alone only gates the GET routes.
@@ -211,6 +214,7 @@ test("POST /api/ai/ask (grow) enforces the per-brokerage rate limit end to end: 
   const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Route Rate Limit ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     let lastStatus = 0;
     for (let i = 0; i < 21; i++) {
       const res = await askGrow(fresh.agent.cookie, { question: `Rate limit fixture question #${i}` });
@@ -230,7 +234,9 @@ test("POST /api/ai/ask (grow) never leaks one brokerage's Grow data into another
   const B = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Route Cross Tenant B ${suffix}`);
   try {
     await grant(A.brokerageId, "grow.access");
+    await grant(A.brokerageId, "grow.ai.use");
     await grant(B.brokerageId, "grow.access");
+    await grant(B.brokerageId, "grow.ai.use");
     // createOverdueOpportunity below (brokerage A only) needs
     // grow.opportunities.manage separately from grow.access.
     await grant(A.brokerageId, "grow.opportunities.manage");
