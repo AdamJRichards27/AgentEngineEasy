@@ -173,9 +173,15 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<VoiceRecordingState, readonly 
   unsupported: [],
   idle: ["requesting_permission"],
   requesting_permission: ["recording", "permission_denied", "no_microphone", "cancelled", "transcription_failed"],
-  recording: ["stopping", "duration_limit_reached", "cancelled"],
+  // "transcription_failed" is reachable from every in-flight recording state,
+  // not only from "transcribing": the MediaRecorder can fail mid-recording
+  // (rec.onerror), and a stop can produce a zero-byte blob that must never be
+  // uploaded. Without those edges setState() silently refused the transition,
+  // so the control stayed on "recording"/"stopping" for good — the agent saw
+  // the error text under a spinner that never cleared, with no way back.
+  recording: ["stopping", "duration_limit_reached", "cancelled", "transcription_failed"],
   duration_limit_reached: ["stopping"],
-  stopping: ["transcribing", "cancelled"],
+  stopping: ["transcribing", "cancelled", "transcription_failed"],
   transcribing: [
     "transcript_ready",
     "upload_too_large",
