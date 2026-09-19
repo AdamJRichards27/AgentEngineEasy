@@ -285,6 +285,7 @@ async function runExecution(requestId: number, brokerageId: number, caller: Exec
     } else {
       logger.warn("ai_action_late_failure_after_recovery", { requestId: row.id, actionKey: row.actionKey, brokerageId: row.brokerageId });
       await logAudit({
+        brokerageId: row.brokerageId,
         userId: row.userId,
         action: "ai_action_late_failure_after_recovery",
         recordType: "ai_action_request",
@@ -325,9 +326,10 @@ async function runExecution(requestId: number, brokerageId: number, caller: Exec
     })
     .where(and(eq(aiActionRequests.id, row.id), eq(aiActionRequests.status, "FAILED")))
     .returning();
-  // Record-scoped audit row, same shape as the neighbouring recovery audits
-  // (operations.ts recoverAbandonedRunning, propertyNotes.ts): no brokerageId.
+  // Tenant-attributed so brokerage-filtered audit views surface this side
+  // effect for manual reconciliation.
   await logAudit({
+    brokerageId: row.brokerageId,
     userId: row.userId,
     action: "ai_action_late_completion_after_recovery",
     recordType: "ai_action_request",

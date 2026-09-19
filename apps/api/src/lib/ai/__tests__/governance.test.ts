@@ -112,6 +112,8 @@ async function cleanupBrokerage(brokerageId: number): Promise<void> {
   await db.delete(automationAttentionItems).where(eq(automationAttentionItems.brokerageId, brokerageId));
   await db.delete(workflowChangeProposals).where(eq(workflowChangeProposals.brokerageId, brokerageId));
   await db.delete(properties).where(eq(properties.brokerageId, brokerageId));
+  // F4.0: late-completion/failure-after-recovery audits are tenant-attributed.
+  await db.delete(auditLogs).where(eq(auditLogs.brokerageId, brokerageId));
   await db.delete(users).where(eq(users.brokerageId, brokerageId));
   await db.delete(brokerages).where(eq(brokerages.id, brokerageId));
 }
@@ -911,7 +913,9 @@ test("F4.0 D2 late completion: if recovery fails the row while execute() is in f
     .select()
     .from(auditLogs)
     .where(and(eq(auditLogs.recordType, "ai_action_request"), eq(auditLogs.recordId, String(request!.id))));
-  assert.ok(audit.some((row) => row.action === "ai_action_late_completion_after_recovery"), "late completion must be audited");
+  const lateCompletion = audit.find((row) => row.action === "ai_action_late_completion_after_recovery");
+  assert.ok(lateCompletion, "late completion must be audited");
+  assert.equal(lateCompletion.brokerageId, request!.brokerageId, "late completion audit must be tenant-attributed");
   await db.delete(auditLogs).where(and(eq(auditLogs.recordType, "ai_action_request"), eq(auditLogs.recordId, String(request!.id))));
 });
 
