@@ -37,13 +37,22 @@ export class ApiError extends Error {
   code?: string;
   sideEffectApplied?: boolean;
   correlationId?: string;
+  // AE GROW Pilot Readiness WP8 — the raw `error` string from the JSON body,
+  // before humanizeApiError() turned it into `.friendly`. It exists to answer
+  // one question no other field can: did this error actually come from the
+  // API? Every API failure, 500 included, answers `{ "error": "…" }` (see
+  // apps/api/src/middlewares/errorHandler.ts), so a 5xx with no server message
+  // was authored by something in FRONT of the API — a dev proxy or load
+  // balancer reporting that the API itself could not be reached. lib/
+  // sessionProbe.ts is the only current reader.
+  serverMessage?: string;
 
   constructor(
     status: number,
     friendly: string,
     technical?: string,
     reason?: string,
-    extras?: { code?: string; sideEffectApplied?: boolean; correlationId?: string },
+    extras?: { code?: string; sideEffectApplied?: boolean; correlationId?: string; serverMessage?: string },
   ) {
     super(technical ?? friendly);
     this.status = status;
@@ -52,6 +61,7 @@ export class ApiError extends Error {
     this.code = extras?.code;
     this.sideEffectApplied = extras?.sideEffectApplied;
     this.correlationId = extras?.correlationId;
+    this.serverMessage = extras?.serverMessage;
   }
 }
 
@@ -197,6 +207,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
       code: serverCode,
       sideEffectApplied,
       correlationId,
+      serverMessage,
     });
   }
   if (res.status === 204) {

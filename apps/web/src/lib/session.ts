@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError, setSessionExpiredHandler } from "./api";
 import { createSessionEndedNotice, createSessionExpiryCoordinator } from "./sessionExpiry";
+import { classifySessionProbe, type SessionProbeState } from "./sessionProbe";
 
 export interface SessionUser {
   id: number;
@@ -31,6 +32,14 @@ interface SessionResponse {
 // identical queryKey ["session"], so react-query dedupes them to a single request automatically.
 // `select` projects out just `.user` here, so this hook's external contract
 // ({user, isLoading, isSignedIn}) is unchanged byte-for-byte for every existing caller.
+//
+// AE GROW Pilot Readiness WP8 — `probe` and `retryProbe` are additive, for the
+// one caller (App.tsx) that gates the whole app on this query. `isLoading` and
+// `isSignedIn` are computed exactly as before, so every other caller is
+// unaffected; `probe` additionally separates "the API never answered" from
+// "you have no session" so a hard reload against a down API shows a
+// connectivity state with a retry instead of a sign-in form nobody can use.
+// See lib/sessionProbe.ts for the classification rules.
 export function useSession() {
   const query = useQuery<SessionResponse, ApiError, SessionUser>({
     queryKey: ["session"],
@@ -38,7 +47,24 @@ export function useSession() {
     select: (data) => data.user,
     retry: false,
   });
-  return { user: query.data, isLoading: query.isLoading, isSignedIn: !!query.data && !query.isError };
+  const probe: SessionProbeState = classifySessionProbe({
+    isLoading: query.isLoading,
+    hasUser: !!query.data,
+    error: query.isError ? query.error : null,
+  });
+  return {
+    user: query.data,
+    isLoading: query.isLoading,
+    isSignedIn: !!query.data && !query.isError,
+    probe,
+    // Re-runs GET /auth/me. Safe to call from the connectivity screen: it
+    // refetches this one query rather than navigating, so there is no
+    // redirect to loop on — a still-unreachable API simply leaves the same
+    // screen in place, and a 401 resolves to the normal signed-out redirect.
+    retryProbe: () => {
+      void query.refetch();
+    },
+  };
 }
 
 // AE GROW Priority 0.5 — Workstream 1: frontend entitlement awareness. Product-surface

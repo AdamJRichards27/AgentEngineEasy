@@ -1462,6 +1462,19 @@ ul.pc-item-list li {
   border-radius: var(--radius-sm);
 }
 
+/* AE GROW Pilot Readiness WP8 (D11) — "recording couldn't be turned on".
+   Warning, not danger: the call itself is never blocked by a recording
+   refusal, so this must not read like a failed call action (.error-text). */
+
+.grow-call-recording-notice {
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+
 .grow-call-gates {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1517,6 +1530,14 @@ ul.pc-item-list li {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.75rem;
+}
+
+/* AE GROW Pilot Readiness WP8 — the initial session probe couldn't reach the
+   API (App.tsx ApiUnreachable). Reuses the full-screen error-boundary card,
+   toned to warning: nothing has failed permanently and nothing was lost. */
+
+.api-unreachable {
+  border-left-color: var(--color-warning-text);
 }
 
 .session-ended-notice {

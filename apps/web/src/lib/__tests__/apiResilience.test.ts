@@ -143,6 +143,42 @@ test("apiFetch turns a network failure into a friendly ApiError with status 0", 
   );
 });
 
+// AE GROW Pilot Readiness WP8 — lib/sessionProbe.ts tells "the API is broken"
+// apart from "the API was never reached" by whether the failure carried a
+// server-authored message, so apiFetch has to keep that raw string.
+test("apiFetch keeps the raw server message alongside the friendly one", async () => {
+  await withFetch(
+    async () => jsonResponse(500, { error: "boom: stack trace" }),
+    async () => {
+      const error = (await apiFetch("/auth/me").catch((e) => e)) as ApiError;
+      assert.equal(error.serverMessage, "boom: stack trace");
+      // The agent still only ever sees the humanised text.
+      assert.equal(error.friendly, "Something went wrong on our end. Try again in a moment.");
+    },
+  );
+});
+
+test("apiFetch leaves serverMessage unset when nothing authored a JSON error body", async () => {
+  // What Vite's dev proxy actually returns when its target refuses the
+  // connection: 500 with an empty body. No server message means no API answer.
+  await withFetch(
+    async () => new Response("", { status: 500 }),
+    async () => {
+      const error = (await apiFetch("/auth/me").catch((e) => e)) as ApiError;
+      assert.equal(error.status, 500);
+      assert.equal(error.serverMessage, undefined);
+    },
+  );
+  await withFetch(
+    async () => new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "Content-Type": "text/html" } }),
+    async () => {
+      const error = (await apiFetch("/auth/me").catch((e) => e)) as ApiError;
+      assert.equal(error.status, 502);
+      assert.equal(error.serverMessage, undefined);
+    },
+  );
+});
+
 test("apiFetch rethrows an AbortError untouched", async () => {
   await withFetch(
     async () => {

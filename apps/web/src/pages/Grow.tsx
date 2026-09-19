@@ -19,6 +19,9 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 // AE GROW Pilot Readiness WP6b (D6) — the shared loading/failed/empty region
 // presentation, and the pure state logic behind it and the tab bar.
 import { GrowDataRegionStatus } from "../components/GrowDataRegion";
+// AE GROW Pilot Readiness WP8 (D11) — turns the server's fail-closed recording
+// outcome into one plain sentence for the agent; see that module's header.
+import { describeRecordingRefusal } from "../lib/callRecording";
 import {
   contactsEmptyMessage,
   growTabClickState,
@@ -1238,14 +1241,14 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
     },
   });
 
-  const discloseRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
-    mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/disclosure`, { method: "POST" }),
-    onSuccess: (result, sessionId) => {
-      setSessionFromMutation(result.callSession);
-      refreshSession(sessionId);
-    },
-  });
-
+  // AE GROW Pilot Readiness WP8 — D11. This route answers 200 whether or not
+  // recording was actually enabled: the server records the attestation,
+  // re-evaluates the five recording gates and settles on either
+  // PERMITTED_NOT_CAPTURED (on) or UNRECORDED (refused), because a denied gate
+  // must never fail the call itself. The refusal therefore never reaches the
+  // mutationError path below, which is why the panel used to drop straight
+  // back to "Disclose recording" with nothing said. `.data` is kept and read
+  // back out via describeRecordingRefusal() at render time.
   const confirmRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
     mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/confirm`, { method: "POST" }),
     onSuccess: (result, sessionId) => {
@@ -1254,8 +1257,22 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
     },
   });
 
+  const discloseRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
+    mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/disclosure`, { method: "POST" }),
+    // A fresh disclosure starts a new recording attempt, so the previous
+    // attempt's refusal message must not linger over it.
+    onMutate: () => confirmRecording.reset(),
+    onSuccess: (result, sessionId) => {
+      setSessionFromMutation(result.callSession);
+      refreshSession(sessionId);
+    },
+  });
+
   const declineRecording = useMutation<{ callSession: GrowCallSession }, unknown, number>({
     mutationFn: (sessionId) => apiFetch(`/grow/calls/${sessionId}/recording/decline`, { method: "POST" }),
+    // Declining settles the recording question outright — an earlier refusal
+    // is no longer the reason recording is off.
+    onMutate: () => confirmRecording.reset(),
     onSuccess: (result, sessionId) => {
       setSessionFromMutation(result.callSession);
       refreshSession(sessionId);
@@ -1264,6 +1281,15 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
 
   const activeSession = session.data?.callSession ?? sessionFromMutation;
   const recordingPresentation = session.data?.recording;
+  // Present only after a confirmation attempt that came back with recording
+  // still off. The gate result comes from the session read refreshed by that
+  // same attempt, so the reason shown is the post-confirmation one (the
+  // in-call disclosure/confirmation gates have already been satisfied by
+  // then), not the stale pre-confirmation evaluation.
+  const recordingRefusal = describeRecordingRefusal(
+    confirmRecording.data?.callSession ?? null,
+    recordingPresentation?.fiveGateResult ?? null,
+  );
   const mutationError =
     createCall.error ??
     confirmCall.error ??
@@ -1407,6 +1433,16 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
           <div className="grow-call-recording">
             <div className="eyebrow">Recording decision</div>
             {!recordingPresentation && session.isLoading && <p className="muted">Checking the server recording gates…</p>}
+            {/* AE GROW Pilot Readiness WP8 (D11) — a confirmation the server
+                accepted but which did not turn recording on. Rendered outside
+                the recordingPresentation block below so it still appears if the
+                follow-up session read is slow or fails, and styled as a notice
+                rather than an error: the call itself is unaffected. */}
+            {recordingRefusal && (
+              <p className="grow-call-recording-notice" role="status">
+                {recordingRefusal}
+              </p>
+            )}
             {recordingPresentation && (
               <>
                 <p>
