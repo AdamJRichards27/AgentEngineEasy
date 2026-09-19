@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
-import type { SessionUser } from "../lib/session";
+import { useCompleteSignIn, type SessionUser } from "../lib/session";
 
 // Critical Blocker Remediation, Phases 2/4/8 — the ONLY way an account is
 // ever created for the pilot. A Brokerage Administrator issues an
@@ -22,7 +22,7 @@ import type { SessionUser } from "../lib/session";
 export default function AcceptInvitation({ params }: { params: { token: string } }) {
   const { token } = params;
   const [, setLocation] = useLocation();
-  const queryClient = useQueryClient();
+  const completeSignIn = useCompleteSignIn();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [acceptedTerms, setAcceptedTerms] = useState(false);
@@ -45,8 +45,8 @@ export default function AcceptInvitation({ params }: { params: { token: string }
         method: "POST",
         body: JSON.stringify({ password, acceptedTerms, acceptedPrivacyPolicy }),
       }),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["session"], data.user);
+    onSuccess: async () => {
+      await completeSignIn();
       setLocation("/");
     },
   });

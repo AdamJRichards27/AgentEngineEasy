@@ -1,5 +1,7 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, ApiError } from "./api";
+import { useSyncExternalStore } from "react";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { apiFetch, ApiError, setSessionExpiredHandler } from "./api";
+import { createSessionEndedNotice, createSessionExpiryCoordinator } from "./sessionExpiry";
 
 export interface SessionUser {
   id: number;
@@ -64,8 +66,62 @@ export function useEntitlements() {
 export function useLogout() {
   const queryClient = useQueryClient();
   return async () => {
+    sessionEndedNotice.set(false);
     await apiFetch("/auth/logout", { method: "POST" }).catch(() => undefined);
     queryClient.setQueryData(["session"], undefined);
     queryClient.clear();
+  };
+}
+
+// AE GROW Pilot Readiness WP5 — session expiry. One app-wide notice, set when
+// an authenticated call 401s mid-session and shown on the sign-in screen
+// ("Your session has ended — please sign in again."); cleared on sign-in,
+// sign-out, or when the re-check shows the session is actually still valid.
+export const sessionEndedNotice = createSessionEndedNotice();
+
+export function useSessionEndedNotice(): boolean {
+  return useSyncExternalStore(sessionEndedNotice.subscribe, sessionEndedNotice.get, sessionEndedNotice.get);
+}
+
+const isSessionQuery = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === "session";
+
+// Called once from main.tsx. Wires apiFetch's global 401 path to the
+// ["session"] query: re-fetching /auth/me turns the session query into its
+// error state, which App.tsx already treats as signed-out and redirects to
+// /login — no separate navigation (and so no redirect loop) is needed here.
+export function installSessionExpiryHandling(queryClient: QueryClient): () => void {
+  const coordinator = createSessionExpiryCoordinator(
+    {
+      isSignedIn: () => {
+        const state = queryClient.getQueryState(["session"]);
+        return !!state?.data && state.status === "success";
+      },
+      cancelOtherQueries: () => {
+        void queryClient.cancelQueries({ predicate: (query) => !isSessionQuery(query) });
+      },
+      refreshSession: async () => {
+        await queryClient.invalidateQueries({ queryKey: ["session"], exact: true });
+        return queryClient.getQueryState(["session"])?.status === "success" ? "signed-in" : "signed-out";
+      },
+    },
+    sessionEndedNotice,
+  );
+  setSessionExpiredHandler(coordinator.handle);
+  return () => setSessionExpiredHandler(null);
+}
+
+// Shared post-sign-in step for Login / AcceptInvitation. Drops any cached
+// data from a previous (possibly different) user's session, clears the
+// session-ended notice, then re-fetches the full /auth/me response so both
+// useSession() and useEntitlements() see {user, entitlements}. (Writing the
+// login response's bare `user` into ["session"] directly, as before, left the
+// cache in the wrong shape for useSession's `select`, so the app still
+// looked signed-out until the next refetch.)
+export function useCompleteSignIn() {
+  const queryClient = useQueryClient();
+  return async () => {
+    sessionEndedNotice.set(false);
+    queryClient.removeQueries({ predicate: (query) => !isSessionQuery(query) });
+    await queryClient.invalidateQueries({ queryKey: ["session"], exact: true });
   };
 }

@@ -19,6 +19,7 @@ import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
 import { buildProductNavLinks, resolveLandingRoute } from "./lib/productNav";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -156,25 +157,30 @@ function SidebarLayout({
       </nav>
       <div className="app-content">
         <main>
-          <Switch>
-            <Route path="/" component={Home} />
-            <Route path="/today" component={CommandCentre} />
-            <Route path="/properties" component={PropertiesList} />
-            <Route path="/properties/start" component={StartProperty} />
-            <Route path="/properties/:id" component={PropertyWorkspace} />
-            <Route path="/exceptions" component={Exceptions} />
-            <Route path="/communications" component={CommunicationsHub} />
-            <Route path="/financial" component={FinancialOperations} />
-            <Route path="/pit-crew" component={PitCrewCommandCentre} />
-            <Route path="/grow" component={Grow} />
-            <Route path="/grow/import" component={GrowImport} />
-            <Route path="/settings" component={Settings} />
-            <Route path="/settings/integrations" component={SettingsIntegrations} />
-            <Route path="/settings/users" component={SettingsUsers} />
-            <Route>
-              <p>Page not found.</p>
-            </Route>
-          </Switch>
+          {/* AE GROW Pilot Readiness WP5 — a page that fails to render shows a
+              contained fallback here (sidebar stays usable); navigating away
+              resets it. */}
+          <ErrorBoundary label="this page" resetKey={location}>
+            <Switch>
+              <Route path="/" component={Home} />
+              <Route path="/today" component={CommandCentre} />
+              <Route path="/properties" component={PropertiesList} />
+              <Route path="/properties/start" component={StartProperty} />
+              <Route path="/properties/:id" component={PropertyWorkspace} />
+              <Route path="/exceptions" component={Exceptions} />
+              <Route path="/communications" component={CommunicationsHub} />
+              <Route path="/financial" component={FinancialOperations} />
+              <Route path="/pit-crew" component={PitCrewCommandCentre} />
+              <Route path="/grow" component={Grow} />
+              <Route path="/grow/import" component={GrowImport} />
+              <Route path="/settings" component={Settings} />
+              <Route path="/settings/integrations" component={SettingsIntegrations} />
+              <Route path="/settings/users" component={SettingsUsers} />
+              <Route>
+                <p>Page not found.</p>
+              </Route>
+            </Switch>
+          </ErrorBoundary>
         </main>
       </div>
     </>

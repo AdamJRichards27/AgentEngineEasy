@@ -15,6 +15,7 @@ import { ContactCommunicationsSection } from "../components/CommunicationsSectio
 import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
 import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptPanel";
 import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
@@ -492,31 +493,35 @@ function GrowWorkspace() {
         ))}
       </nav>
 
-      {tab === "today" && (
-        <GrowToday
-          onAskAE={() => setTab("askAE")}
-          onViewContact={viewContact}
-          onEmailContact={emailContact}
-          onSmsContact={smsContact}
-        />
-      )}
-      {tab === "opportunities" && <GrowOpportunitiesTab />}
-      {tab === "contacts" && (
-        <GrowContactsTab
-          selectedPartyId={contactPartyId}
-          onSelectPartyId={setContactPartyId}
-          pendingComposeChannel={pendingComposeChannel}
-          onComposeHandled={() => setPendingComposeChannel(null)}
-        />
-      )}
-      {tab === "nurture" && (
-        <GrowComingSoon
-          title="Nurture"
-          description="Automated nurture sequences and campaigns are planned for a future Grow release. Nothing here is active yet."
-        />
-      )}
-      {tab === "performance" && <GrowBusinessCoachTab />}
-      {tab === "askAE" && <GrowAskAETab />}
+      {/* AE GROW Pilot Readiness WP5 — one failing tab shows a contained
+          fallback; the tab bar above stays usable and switching tab resets it. */}
+      <ErrorBoundary label={`the ${GROW_TABS.find((t) => t.key === tab)?.label ?? "Grow"} tab`} resetKey={tab}>
+        {tab === "today" && (
+          <GrowToday
+            onAskAE={() => setTab("askAE")}
+            onViewContact={viewContact}
+            onEmailContact={emailContact}
+            onSmsContact={smsContact}
+          />
+        )}
+        {tab === "opportunities" && <GrowOpportunitiesTab />}
+        {tab === "contacts" && (
+          <GrowContactsTab
+            selectedPartyId={contactPartyId}
+            onSelectPartyId={setContactPartyId}
+            pendingComposeChannel={pendingComposeChannel}
+            onComposeHandled={() => setPendingComposeChannel(null)}
+          />
+        )}
+        {tab === "nurture" && (
+          <GrowComingSoon
+            title="Nurture"
+            description="Automated nurture sequences and campaigns are planned for a future Grow release. Nothing here is active yet."
+          />
+        )}
+        {tab === "performance" && <GrowBusinessCoachTab />}
+        {tab === "askAE" && <GrowAskAETab />}
+      </ErrorBoundary>
     </div>
   );
 }
@@ -999,17 +1004,27 @@ function GrowContactsTab({
   pendingComposeChannel: "EMAIL" | "SMS" | null;
   onComposeHandled: () => void;
 }) {
-  if (selectedPartyId !== null) {
-    return (
-      <GrowContactDetail
-        partyId={selectedPartyId}
-        onBack={() => onSelectPartyId(null)}
-        pendingComposeChannel={pendingComposeChannel}
-        onComposeHandled={onComposeHandled}
-      />
-    );
-  }
-  return <GrowContactList onSelectPartyId={onSelectPartyId} />;
+  // AE GROW Pilot Readiness WP5 — Contact 360 gets its own boundary so a
+  // failing contact detail offers "Back to contacts" (and resets when a
+  // different contact, or the list, is shown) without losing the Grow tabs.
+  return (
+    <ErrorBoundary
+      label={selectedPartyId !== null ? "Contact 360" : "contacts"}
+      resetKey={selectedPartyId}
+      secondaryAction={selectedPartyId !== null ? { label: "Back to contacts", onClick: () => onSelectPartyId(null) } : undefined}
+    >
+      {selectedPartyId !== null ? (
+        <GrowContactDetail
+          partyId={selectedPartyId}
+          onBack={() => onSelectPartyId(null)}
+          pendingComposeChannel={pendingComposeChannel}
+          onComposeHandled={onComposeHandled}
+        />
+      ) : (
+        <GrowContactList onSelectPartyId={onSelectPartyId} />
+      )}
+    </ErrorBoundary>
+  );
 }
 
 function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: number) => void }) {
