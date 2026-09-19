@@ -1,3 +1,10 @@
+// AE GROW Pilot Readiness WP2a: these two MUST stay the first imports.
+// asyncRouteErrors patches Express so a rejected async route/middleware is
+// forwarded to next(err) (see that module) before any router is used;
+// installProcessSafetyHandlers() below runs before start() kicks off any
+// background work (schedulers, seeds) — see lib/processSafety.ts.
+import "./lib/asyncRouteErrors.js";
+import { installProcessSafetyHandlers } from "./lib/processSafety.js";
 import { logger } from "@aee/events";
 import { createApp } from "./app.js";
 import { configureEvents } from "./lib/events.js";
@@ -23,6 +30,10 @@ import {
 import { registerDocumentStorageReconciler } from "./lib/documentStorageReconciler.js";
 import { registerCallTranscriptionReconciler } from "./lib/telephony/callTranscriptionReconciler.js";
 import { assertESignProviderConfigured } from "@aee/integration-esign";
+import { assertDatabaseSessionTimezoneUtc } from "./lib/dbTimezone.js";
+import { runTrackedStartupTask } from "./lib/startupHealth.js";
+
+installProcessSafetyHandlers();
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
 // request, if SESSION_SECRET is missing or too weak. A process that
@@ -53,6 +64,12 @@ assertDocumentStorageConfigured();
 assertESignProviderConfigured();
 
 async function start(): Promise<void> {
+// AE GROW Pilot Readiness WP2a (P0-3): every timestamp column is
+// `timestamp without time zone` in UTC; a non-UTC database session silently
+// shifts DB-computed timestamps. Refuses to start in production (warns
+// elsewhere) — see lib/dbTimezone.ts.
+await assertDatabaseSessionTimezoneUtc();
+
 if (process.env.NODE_ENV === "production") {
   const storageReadiness = await checkDocumentStorageReadiness();
   if (!storageReadiness.ready) {
@@ -108,20 +125,41 @@ registerCallTranscriptionReconciler();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.
-ensureCatalogueSeeded().catch((err) => logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
+// AE GROW Pilot Readiness WP2a: a failure is still logged under its original
+// event name, and is now ALSO alerted and recorded so GET /api/health/ready
+// reports this instance not-ready (lib/startupHealth.ts) — a broken
+// entitlement catalogue must be visible, not just a log line. Boot continues.
+void runTrackedStartupTask("entitlement_catalogue_seed", () =>
+  ensureCatalogueSeeded().catch((err) => {
+    logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }),
+);
 
 // AE GROW Priority 0.5 — Workstream 3: idempotent, non-destructive backfill granting every
 // pre-existing brokerage the run.access entitlement they implicitly always had, before that
 // key existed to gate anything. Fire-and-forget, non-blocking, same pattern as
 // ensureCatalogueSeeded above. See lib/billing/runAccessBackfill.ts's own module comment.
-ensureRunAccessBackfilled().catch((err) => logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) }));
+// Readiness-tracked and alerted exactly like the catalogue seed above.
+void runTrackedStartupTask("run_access_backfill", () =>
+  ensureRunAccessBackfilled().catch((err) => {
+    logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }),
+);
 
 // Agent Engine 2.0 — Run Transaction Vertical Slice. Idempotent per-brokerage
 // install+activate sweep for the WAE Stage 2 workflow catalogue (see
 // lib/automation/catalogueBootstrap.ts) — closes the confirmed gap where
 // templates.ts's five workflow templates had zero production call sites.
 // Fire-and-forget, non-blocking, same pattern as ensureCatalogueSeeded above.
-ensureStage2CatalogueSeeded().catch((err) => logger.error("boot_ensure_stage2_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) }));
+// Readiness-tracked and alerted exactly like the catalogue seed above.
+void runTrackedStartupTask("stage2_workflow_catalogue_seed", () =>
+  ensureStage2CatalogueSeeded().catch((err) => {
+    logger.error("boot_ensure_stage2_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }),
+);
 
 const app = createApp();
 const port = Number(process.env.PORT ?? 8080);

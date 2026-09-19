@@ -30,12 +30,35 @@
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool } from "pg";
+import { Pool, type ClientBase } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const migrationsFolder = path.join(__dirname, "..", "migrations");
+
+// AE GROW Pilot Readiness WP2a: mirrors ./index.ts's createSafePool()
+// deliberately inline rather than importing ./index.ts — importing it would
+// construct the application pool as a side effect and replace this runner's
+// own "Refusing to run migrations" DATABASE_URL message.
+const SESSION_TIMEZONE_SQL = "SET TIME ZONE 'UTC'";
+
+function reportPoolProblem(event: string, err: unknown): void {
+  const e = err as { name?: unknown; code?: unknown; message?: unknown } | null | undefined;
+  console.error(
+    JSON.stringify({
+      level: "error",
+      event,
+      time: new Date().toISOString(),
+      errorName: typeof e?.name === "string" ? e.name : undefined,
+      errorCode: typeof e?.code === "string" ? e.code : undefined,
+      errorMessage:
+        typeof e?.message === "string"
+          ? e.message.replace(/postgres(ql)?:\/\/\S+/gi, "[redacted-connection-string]")
+          : undefined,
+    }),
+  );
+}
 
 async function main() {
   if (!process.env.DATABASE_URL) {
@@ -44,7 +67,28 @@ async function main() {
     );
   }
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  // AE GROW Pilot Readiness WP2a: same process-safety behaviour as the
+  // application pool (./index.ts createSafePool) — an idle-client error must
+  // not crash the runner with an unhandled 'error' event, and every
+  // migration session runs in UTC (awaited onConnect hook) so any
+  // now()/defaultNow() evaluated by a migration matches the application's
+  // UTC wall-clock convention. Opt out with DB_SET_SESSION_TIMEZONE=false.
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ...(process.env.DB_SET_SESSION_TIMEZONE !== "false"
+      ? {
+          onConnect: async (client: ClientBase) => {
+            try {
+              await client.query(SESSION_TIMEZONE_SQL);
+            } catch (err) {
+              reportPoolProblem("db_migrate_session_timezone_set_failed", err);
+              throw err;
+            }
+          },
+        }
+      : {}),
+  });
+  pool.on("error", (err) => reportPoolProblem("db_migrate_pool_idle_client_error", err));
   const db = drizzle(pool);
 
   console.log(`Applying migrations from ${migrationsFolder} ...`);

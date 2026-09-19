@@ -45,6 +45,8 @@ import {
   type GrowCallTranscription,
 } from "@aee/db";
 import { logAudit } from "./audit.js";
+import { logger } from "@aee/events";
+import { summarizeErrorCause } from "./errorCause.js";
 import { explainEntitlementDecision } from "./entitlements/resolver.js";
 import {
   canActorAccessActionRequest,
@@ -422,7 +424,17 @@ async function strictFollowupAudit(input: {
         ...input.value,
       }),
     }, { strict: true });
-  } catch {
+  } catch (err) {
+    // WP2a: log the underlying cause (ids only — never transcript or
+    // proposal text) before the unchanged typed fail-closed error.
+    logger.error("grow_call_followup_strict_audit_failed", {
+      action: input.action,
+      brokerageId: input.brokerageId,
+      callSessionId: input.callSessionId,
+      transcriptionId: input.transcriptionId,
+      failureCode: input.failureCode,
+      ...summarizeErrorCause(err),
+    });
     throw new GrowCallFollowupError(
       input.failureCode,
       input.failureCode === "AUDIT_FAILURE"

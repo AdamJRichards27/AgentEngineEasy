@@ -66,16 +66,39 @@ test("buildVoiceTranscriptionProvider returns a MockTranscriptionProvider for pr
   assert.equal(provider.name, "mock");
 });
 
-test("buildVoiceTranscriptionProvider throws missing_credentials for deepgram with no API key configured (non-production)", () => {
+// AE GROW Pilot Readiness WP2a: the voice lock now applies in every
+// environment, so the missing-credential path is only reachable once the
+// approval flag is set. (Previously this test ran without approval in
+// NODE_ENV=test and relied on the lock being production-only.)
+test("buildVoiceTranscriptionProvider throws missing_credentials for deepgram with approval but no API key configured (non-production)", () => {
   const snapshot = snapshotEnv();
   try {
     process.env.NODE_ENV = "test";
     delete process.env.DEEPGRAM_API_KEY;
-    delete process.env.LIVE_VOICE_TRANSCRIPTION_APPROVED;
+    process.env.LIVE_VOICE_TRANSCRIPTION_APPROVED = "true";
     assert.throws(
       () => buildVoiceTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 }),
       (err: unknown) => err instanceof TranscriptionProviderError && err.code === "missing_credentials",
     );
+  } finally {
+    restoreEnv(snapshot);
+  }
+});
+
+test("buildVoiceTranscriptionProvider throws live_provider_disabled OUTSIDE production too when live voice transcription is not approved, even with a credential present (WP2a)", () => {
+  const snapshot = snapshotEnv();
+  try {
+    for (const nodeEnv of ["test", "development", undefined]) {
+      if (nodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = nodeEnv;
+      process.env.DEEPGRAM_API_KEY = "a-real-looking-key";
+      delete process.env.LIVE_VOICE_TRANSCRIPTION_APPROVED;
+      assert.throws(
+        () => buildVoiceTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 }),
+        (err: unknown) => err instanceof TranscriptionProviderError && err.code === "live_provider_disabled",
+        `NODE_ENV=${nodeEnv ?? "(unset)"} must not construct a live provider without approval`,
+      );
+    }
   } finally {
     restoreEnv(snapshot);
   }

@@ -24,6 +24,8 @@ import {
 } from "../ai/voice/types.js";
 import { validateVoiceAudioUpload } from "../ai/voice/audioValidation.js";
 import { logAudit } from "../audit.js";
+import { logger } from "@aee/events";
+import { summarizeErrorCause } from "../errorCause.js";
 import { hasEntitlement } from "../entitlements/resolver.js";
 import { type ConsentTransaction, writeAuditInTransaction } from "../consentControlsPersistence.js";
 import {
@@ -216,7 +218,16 @@ async function strictAudit(
       providerReference: `call:${input.callSessionId}:recording:${input.recordingReference}`,
       updatedValue: input.reason,
     }, { strict: true });
-  } catch {
+  } catch (err) {
+    // WP2a: log the underlying cause (references only — no transcript or
+    // recording content) before the unchanged typed fail-closed error.
+    logger.error("call_transcription_strict_audit_failed", {
+      action: input.action,
+      brokerageId: input.brokerageId,
+      callSessionId: input.callSessionId,
+      transcriptionId: input.transcriptionId,
+      ...summarizeErrorCause(err),
+    });
     throw new CallTranscriptionError("PROVIDER_FAILED", "The transcription state audit could not be recorded.");
   }
 }
@@ -236,7 +247,15 @@ async function strictAuditInTransaction(
       providerReference: `call:${input.callSessionId}:recording:${input.recordingReference}`,
       updatedValue: input.reason,
     }, { strict: true, write: (audit) => writeAuditInTransaction(tx, audit) });
-  } catch {
+  } catch (err) {
+    logger.error("call_transcription_strict_audit_failed", {
+      action: input.action,
+      brokerageId: input.brokerageId,
+      callSessionId: input.callSessionId,
+      transcriptionId: input.transcriptionId,
+      inTransaction: true,
+      ...summarizeErrorCause(err),
+    });
     // Throw inside the transaction so the paired state write is rolled back,
     // while giving the route a typed fail-closed error.
     throw new CallTranscriptionError("PROVIDER_FAILED", "The transcription state audit could not be recorded.");
