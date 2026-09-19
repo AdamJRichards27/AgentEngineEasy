@@ -46,6 +46,58 @@ function parsePositiveId(value: unknown): number | null {
   return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
 }
 
+/* ---------------------------------------------------------------------
+ * AE GROW Pilot Readiness WP9 — internal error text must never reach a
+ * client. Same shape as routes/growAppraisals.ts's handleGrowAppraisalError
+ * and routes/propertyIntelligence.ts's handlePropertyIntelligenceError.
+ * -----------------------------------------------------------------*/
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_PROPERTY_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** Driver/ORM text, as a second line of defence behind the prototype test below. */
+const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
+
+/**
+ * True only for a plain `new Error("...")` — the shape lib/timeline.ts's
+ * assertPropertyInBrokerage uses for its operator-authored, caller-facing
+ * "Property 12 not found" (deliberately uniform for a missing property AND a
+ * cross-tenant one, so the two are indistinguishable), which is kept with
+ * this route's existing 404.
+ *
+ * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
+ * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
+ * the `Failed query: select "id", "brokerage_id" ... from ...` text live
+ * smoke testing found in real response bodies), pg's DatabaseError, and
+ * RangeError/TypeError/SyntaxError. DrizzleQueryError notably does NOT
+ * override `name` — it reports "Error" — so a name check alone would let the
+ * leak straight through; only the prototype identity separates them.
+ */
+function isOperatorAuthoredError(err: unknown): err is Error {
+  return err instanceof Error && Object.getPrototypeOf(err) === Error.prototype && !DRIVER_TEXT.test(err.message);
+}
+
+/**
+ * The expected not-found error keeps its 404 and its own message; anything
+ * else is an unrecognised server fault, logged in full server-side with this
+ * request's correlation id and answered generically. (The structured logger
+ * already attaches the ambient correlationId itself — see
+ * packages/events/src/logger.ts — but this router threads it explicitly
+ * everywhere else it logs, so it does so here too.)
+ */
+function handlePropertyError(err: unknown, res: import("express").Response, expectedStatus: number): void {
+  if (isOperatorAuthoredError(err)) {
+    res.status(expectedStatus).json({ error: err.message });
+    return;
+  }
+  logger.error("property_route_unhandled_error", {
+    correlationId: currentCorrelationId(),
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_PROPERTY_ERROR });
+}
+
 const READY_TO_LIST_STEPS = [
   { stepKey: "VerifySellers", label: "Verify Sellers", sequence: 1 },
   { stepKey: "AgencyAgreement", label: "Agency Agreement", sequence: 2 },
@@ -292,7 +344,11 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
     const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
     res.json({ timeline });
   } catch (err) {
-    res.status(404).json({ error: (err as Error).message });
+    // getPropertyTimeline's only expected failure is assertPropertyInBrokerage's
+    // own "Property <id> not found" — the 404 this route has always answered.
+    // A driver fault used to be returned here verbatim as a 404 carrying the
+    // driver's message; it is now a logged, generic 500.
+    handlePropertyError(err, res, 404);
   }
 });
 

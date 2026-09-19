@@ -1,6 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import {
@@ -35,6 +36,85 @@ import {
 // app. See lib/documents.ts's own "Tenant chokepoints" comment for the
 // fetch-time discipline this relies on.
 export const documentsRouter = Router();
+
+// AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
+// routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
+// routes/propertyIntelligence.ts already use (each keeps its own local copy;
+// this is deliberately not a shared module). Every route below took a raw
+// `Number(req.params...)` straight into a tenant-scoped fetch, so "abc"
+// reached Postgres as NaN and an id past int4 as an unbindable value — the
+// driver error was then caught and returned to the caller as a 400 carrying
+// its own "Failed query: select ..." text. Bounded by MAX_SIGNED_INT4
+// because properties.id, documentPackages.id, documents.id and
+// documentObjectVersions.id are all `serial` columns, i.e. int4.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/** Resolves a route id, answering 400 itself and returning null when malformed. */
+function readIdParam(
+  res: Response,
+  value: unknown,
+  label: "property" | "document package" | "document" | "document version",
+): number | null {
+  const id = parsePositiveId(value);
+  if (id === null) {
+    res.status(400).json({ error: `Invalid ${label} id` });
+    return null;
+  }
+  return id;
+}
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_DOCUMENT_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** Driver/ORM text, as a second line of defence behind the prototype test below. */
+const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
+
+/**
+ * True only for a plain `new Error("...")` — the shape lib/documents.ts uses
+ * for its operator-authored, caller-facing messages ("Property 12 not found",
+ * "DocumentPackage 3 not found", "Document package is not ready to send — all
+ * documents must be generated first.", "At least one seller with an email
+ * address is required to send for signature."). Those are deliberately kept
+ * with this router's existing 400, and routes/__tests__/documents.test.ts
+ * asserts two of them verbatim.
+ *
+ * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
+ * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
+ * the `Failed query: select "id", "brokerage_id" ... from ...` text live
+ * smoke testing found in real response bodies), pg's DatabaseError, and
+ * RangeError/TypeError/SyntaxError. DrizzleQueryError notably does NOT
+ * override `name` — it reports "Error" — so a name check alone would let the
+ * leak straight through; only the prototype identity separates them.
+ */
+function isOperatorAuthoredError(err: unknown): err is Error {
+  return err instanceof Error && Object.getPrototypeOf(err) === Error.prototype && !DRIVER_TEXT.test(err.message);
+}
+
+/**
+ * Expected domain errors keep this router's existing 400 and their own
+ * messages; anything else is an unrecognised server fault, logged in full
+ * server-side (the structured logger attaches the ambient correlationId
+ * itself — see packages/events/src/logger.ts) and answered generically.
+ * Mirrors handleGrowAppraisalError / handlePropertyIntelligenceError.
+ * (DocumentStorageError, this router's one typed error class, is mapped at
+ * its own call sites below and never reaches here.)
+ */
+function handleDocumentError(err: unknown, res: Response): void {
+  if (isOperatorAuthoredError(err)) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  logger.error("document_route_unhandled_error", {
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_DOCUMENT_ERROR });
+}
 const documentUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -66,7 +146,8 @@ const agencyTermsSchema = z
   });
 
 documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const parsed = agencyTermsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -87,36 +168,39 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, async (r
 
     res.json({ terms });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleDocumentError(err, res);
   }
 });
 
 documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const user = req.authedUser!;
   try {
     const terms = await getAgencyAgreementTerms(propertyId, user.brokerageId);
     res.json({ terms });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleDocumentError(err, res);
   }
 });
 
 // Template population — idempotent/incremental, safe to call again after
 // agency terms are captured or a prior partial run (see lib/documents.ts).
 documentsRouter.post("/packages/:packageId/populate", requireAuth, async (req, res) => {
-  const packageId = Number(req.params.packageId);
+  const packageId = readIdParam(res, req.params.packageId, "document package");
+  if (packageId === null) return;
   const user = req.authedUser!;
   try {
     const result = await populateDocumentPackage(packageId, user.brokerageId);
     res.json(result);
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleDocumentError(err, res);
   }
 });
 
 documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, async (req, res) => {
-  const packageId = Number(req.params.packageId);
+  const packageId = readIdParam(res, req.params.packageId, "document package");
+  if (packageId === null) return;
   const user = req.authedUser!;
   try {
     const { signatureRequest, created } = await sendPackageForSignature({
@@ -133,7 +217,7 @@ documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, asy
     });
     res.status(created ? 201 : 200).json({ signatureRequest, created });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleDocumentError(err, res);
   }
 });
 
@@ -176,7 +260,8 @@ documentsRouter.post("/webhook", async (req, res) => {
 });
 
 documentsRouter.get("/signed-download/:versionId", async (req, res) => {
-  const versionId = Number(req.params.versionId);
+  const versionId = readIdParam(res, req.params.versionId, "document version");
+  if (versionId === null) return;
   const expires = Number(req.query.expires);
   const signature = typeof req.query.signature === "string" ? req.query.signature : "";
   try {
@@ -202,7 +287,8 @@ documentsRouter.get("/signed-download/:versionId", async (req, res) => {
 // before sending it, or review what was actually sent (Phase 5 "completed
 // document storage" needs to be genuinely retrievable, not just a key).
 documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
-  const documentId = Number(req.params.documentId);
+  const documentId = readIdParam(res, req.params.documentId, "document");
+  if (documentId === null) return;
   const user = req.authedUser!;
   try {
     const result = await getDocumentContent(documentId, user.brokerageId);
@@ -223,7 +309,7 @@ documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
       propertyId: result.propertyId,
     });
     res.send(result.content);
-  } catch (err) {
+  } catch {
     res.status(404).json({ error: "Stored content could not be read" });
   }
 });
@@ -233,7 +319,8 @@ documentsRouter.post(
   requireAuth,
   documentUpload.single("file"),
   async (req, res) => {
-    const documentId = Number(req.params.documentId);
+    const documentId = readIdParam(res, req.params.documentId, "document");
+    if (documentId === null) return;
     const user = req.authedUser!;
     if (!req.file) {
       res.status(400).json({ error: "A document file is required" });
@@ -298,7 +385,8 @@ documentsRouter.post(
 );
 
 documentsRouter.post("/:documentId/signed-download", requireAuth, async (req, res) => {
-  const documentId = Number(req.params.documentId);
+  const documentId = readIdParam(res, req.params.documentId, "document");
+  if (documentId === null) return;
   const user = req.authedUser!;
   try {
     const { version, download } = await createDocumentSignedDownload(
@@ -326,7 +414,8 @@ documentsRouter.post("/:documentId/signed-download", requireAuth, async (req, re
 });
 
 documentsRouter.post("/:documentId/quarantine", requireAuth, async (req, res) => {
-  const documentId = Number(req.params.documentId);
+  const documentId = readIdParam(res, req.params.documentId, "document");
+  if (documentId === null) return;
   const user = req.authedUser!;
   if (user.role !== "Brokerage Administrator") {
     res.status(403).json({ error: "Administrator access is required" });
@@ -352,7 +441,8 @@ documentsRouter.post("/:documentId/quarantine", requireAuth, async (req, res) =>
 });
 
 documentsRouter.get("/packages/by-property/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const user = req.authedUser!;
   const result = await getPackageByProperty(propertyId, user.brokerageId);
   res.json(result);

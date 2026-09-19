@@ -1,12 +1,84 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
 export const offersRouter = Router();
+
+// AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
+// routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
+// routes/propertyIntelligence.ts already use (each keeps its own local copy;
+// this is deliberately not a shared module). Every :propertyId / :id route
+// below took a raw `Number(req.params...)` straight into a
+// `where(eq(..., ...))` bind, so "abc" reached Postgres as NaN and an id past
+// int4 as an unbindable value. Bounded by MAX_SIGNED_INT4 because offers.id
+// and properties.id are `serial` columns, i.e. int4. GET /public/:shareToken
+// is deliberately not covered: a share token is an opaque string column, not
+// an id, and getOfferByShareToken already answers 404 for anything unknown.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/** Resolves a route id, answering 400 itself and returning null when malformed. */
+function readIdParam(res: Response, value: unknown, label: "property" | "offer"): number | null {
+  const id = parsePositiveId(value);
+  if (id === null) {
+    res.status(400).json({ error: `Invalid ${label} id` });
+    return null;
+  }
+  return id;
+}
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_OFFER_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** Driver/ORM text, as a second line of defence behind the prototype test below. */
+const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
+
+/**
+ * True only for a plain `new Error("...")` — the shape lib/offers.ts and
+ * lib/transactions.ts use for their operator-authored, caller-facing messages
+ * ("Offer 3 cannot be withdrawn from status Accepted", "A buyerPartyId or
+ * buyer contact details are required to record an offer."), which are
+ * deliberately kept with this router's existing 400.
+ *
+ * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
+ * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
+ * the `Failed query: select "id", "brokerage_id" ... from ...` text live
+ * smoke testing found in real response bodies), pg's DatabaseError, and
+ * RangeError/TypeError/SyntaxError. DrizzleQueryError notably does NOT
+ * override `name` — it reports "Error" — so a name check alone would let the
+ * leak straight through; only the prototype identity separates them.
+ */
+function isOperatorAuthoredError(err: unknown): err is Error {
+  return err instanceof Error && Object.getPrototypeOf(err) === Error.prototype && !DRIVER_TEXT.test(err.message);
+}
+
+/**
+ * Expected domain errors keep this router's existing 400 and their own
+ * messages; anything else is an unrecognised server fault, logged in full
+ * server-side (the structured logger attaches the ambient correlationId
+ * itself — see packages/events/src/logger.ts) and answered generically.
+ * Mirrors handleGrowAppraisalError / handlePropertyIntelligenceError.
+ */
+function handleOfferError(err: unknown, res: Response): void {
+  if (isOperatorAuthoredError(err)) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  logger.error("offer_route_unhandled_error", {
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_OFFER_ERROR });
+}
 
 // #123 — tenant scoping. None of these routes previously verified that the
 // offer's (or property's) brokerage matched the caller's — a property id
@@ -32,7 +104,8 @@ const createOfferSchema = z.object({
 });
 
 offersRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const parsed = createOfferSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -56,12 +129,13 @@ offersRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
     });
     res.status(201).json({ offer });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleOfferError(err, res);
   }
 });
 
 offersRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const user = req.authedUser!;
   if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
     res.status(404).json({ error: "Not found" });
@@ -72,7 +146,8 @@ offersRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
 });
 
 offersRouter.get("/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = readIdParam(res, req.params.id, "offer");
+  if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
   if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
@@ -86,7 +161,8 @@ offersRouter.get("/:id", requireAuth, async (req, res) => {
 // idempotent, and auto-declines every other still-open offer on the
 // property (see lib/transactions.ts acceptOffer).
 offersRouter.post("/:id/accept", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = readIdParam(res, req.params.id, "offer");
+  if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
   if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
@@ -97,12 +173,13 @@ offersRouter.post("/:id/accept", requireAuth, async (req, res) => {
     const result = await acceptOffer({ offerId: id, userId: user.id, brokerageId: user.brokerageId });
     res.status(result.created ? 201 : 200).json(result);
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleOfferError(err, res);
   }
 });
 
 offersRouter.post("/:id/decline", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = readIdParam(res, req.params.id, "offer");
+  if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
   if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
@@ -113,12 +190,13 @@ offersRouter.post("/:id/decline", requireAuth, async (req, res) => {
     const updated = await declineOffer(id, user.id);
     res.json({ offer: updated });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleOfferError(err, res);
   }
 });
 
 offersRouter.post("/:id/withdraw", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = readIdParam(res, req.params.id, "offer");
+  if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
   if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
@@ -129,7 +207,7 @@ offersRouter.post("/:id/withdraw", requireAuth, async (req, res) => {
     const updated = await withdrawOffer(id, user.id);
     res.json({ offer: updated });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleOfferError(err, res);
   }
 });
 
