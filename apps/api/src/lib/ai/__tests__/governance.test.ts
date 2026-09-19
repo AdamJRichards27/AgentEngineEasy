@@ -23,6 +23,7 @@ import {
   properties,
   aiActionRequests,
   workflowChangeProposals,
+  automationAttentionItems,
   type UserRole,
 } from "@aee/db";
 import { configureEventStore } from "@aee/events";
@@ -31,11 +32,16 @@ import { evaluateAIAction, type PolicyActor } from "../policyEngine.js";
 import {
   proposeAIAction,
   getAIActionRequest,
+  getAIActionRequestForActor,
   approveAIActionRequest,
   rejectAIActionRequest,
   hashInputPayload,
+  recoverStuckExecutingActionRequests,
+  STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "../actionRequests.js";
-import { executeAIAction } from "../executionGateway.js";
+import { executeAIAction, executeAIActionAsSystem } from "../executionGateway.js";
+import { getActionDefinition } from "../actions/registry.js";
+import { classifyActionFailure } from "../../automation/operations.js";
 import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js";
 import { riskTierForLevel } from "../authority.js";
 
@@ -100,6 +106,9 @@ async function createProperty(brokerageId: number, agentId: number): Promise<num
 
 async function cleanupBrokerage(brokerageId: number): Promise<void> {
   await db.delete(aiActionRequests).where(eq(aiActionRequests.brokerageId, brokerageId));
+  // F4.0: REQUEST_ACTION_APPROVAL executions raise an attention item that
+  // references the fixture property (non-cascading FK).
+  await db.delete(automationAttentionItems).where(eq(automationAttentionItems.brokerageId, brokerageId));
   await db.delete(workflowChangeProposals).where(eq(workflowChangeProposals.brokerageId, brokerageId));
   await db.delete(properties).where(eq(properties.brokerageId, brokerageId));
   await db.delete(users).where(eq(users.brokerageId, brokerageId));
@@ -175,7 +184,7 @@ test("org isolation: execution fails when the proposed resource belongs to a dif
   assert.ok(request);
   assert.equal(request!.status, "APPROVED");
 
-  const result = await executeAIAction(request!.id, brokerageA);
+  const result = await executeAIAction(request!.id, brokerageA, actorOf(agentA, "Agent", brokerageA));
   assert.equal(result.ok, false);
   assert.equal(result.reason, "EXECUTION_FAILED");
 });
@@ -290,11 +299,11 @@ test("duplicate execution is prevented: a second execute call on an already-exec
   });
   assert.ok(request);
 
-  const first = await executeAIAction(request!.id, brokerageId);
+  const first = await executeAIAction(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(first.ok, true);
   assert.equal(first.request?.status, "COMPLETED");
 
-  const second = await executeAIAction(request!.id, brokerageId);
+  const second = await executeAIAction(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(second.ok, false);
   assert.equal(second.reason, "WRONG_STATUS");
 });
@@ -343,7 +352,7 @@ test("tamper protection: a payload altered after auto-approval is rejected at ex
 
   await db.update(aiActionRequests).set({ inputPayload: { propertyId, note: "tampered note" } }).where(eq(aiActionRequests.id, request!.id));
 
-  const result = await executeAIAction(request!.id, brokerageId);
+  const result = await executeAIAction(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(result.ok, false);
   assert.equal(result.reason, "PAYLOAD_TAMPERED");
 
@@ -431,7 +440,7 @@ test("workflow overwrite prevention: activating a new version supersedes the old
       },
     });
     assert.ok(propose.request);
-    const proposeExec = await executeAIAction(propose.request!.id, brokerageId);
+    const proposeExec = await executeAIAction(propose.request!.id, brokerageId, admin);
     assert.equal(proposeExec.ok, true);
     const proposalId = (proposeExec.result as { id: number }).id;
 
@@ -444,7 +453,7 @@ test("workflow overwrite prevention: activating a new version supersedes the old
     assert.ok(activate.request);
     const approval = await approveAIActionRequest(activate.request!.id, brokerageId, admin);
     assert.equal(approval.ok, true);
-    const activateExec = await executeAIAction(activate.request!.id, brokerageId);
+    const activateExec = await executeAIAction(activate.request!.id, brokerageId, admin);
     assert.equal(activateExec.ok, true);
     return proposalId;
   }
@@ -508,7 +517,7 @@ test("audit completeness: every lifecycle transition of an auto-approved action 
   });
   assert.ok(request);
 
-  const exec = await executeAIAction(request!.id, brokerageId);
+  const exec = await executeAIAction(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(exec.ok, true);
 
   const publishedForThisRequest = testEventStore.events
@@ -519,4 +528,328 @@ test("audit completeness: every lifecycle transition of an auto-approved action 
   assert.ok(publishedForThisRequest.includes("AI_ACTION_PROPOSED"));
   assert.ok(!publishedForThisRequest.includes("AI_ACTION_APPROVAL_REQUIRED"));
   assert.ok(publishedForThisRequest.includes("AI_ACTION_EXECUTED"));
+});
+
+// ---------------------------------------------------------------------------
+// 12. AE GROW Priority 6 Stage F4.0 — governance hardening (D2/D4)
+// ---------------------------------------------------------------------------
+
+function eventsForRequest(requestId: number, since: number): DomainEvent[] {
+  return testEventStore.events.slice(since).filter((e) => (e.metadata as Record<string, unknown>).requestId === requestId);
+}
+
+// Temporarily wraps a registered action's execute() so a test can count
+// (or interleave with) real executions, always restoring the original.
+async function withWrappedExecute<T>(
+  actionKey: string,
+  wrap: (original: (...args: any[]) => Promise<unknown>) => (...args: any[]) => Promise<unknown>,
+  body: () => Promise<T>,
+): Promise<T> {
+  const definition = getActionDefinition(actionKey)!;
+  const original = definition.execute;
+  definition.execute = wrap(original) as typeof definition.execute;
+  try {
+    return await body();
+  } finally {
+    definition.execute = original;
+  }
+}
+
+test("F4.0 access: a same-brokerage colleague who is neither the requester nor an admin cannot read, approve, reject, or execute the request", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 colleague denied");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const requesterId = await createUser(brokerageId, "Agent");
+  const colleagueId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const propertyId = await createProperty(brokerageId, requesterId);
+  const requester = actorOf(requesterId, "Agent", brokerageId);
+  const colleague = actorOf(colleagueId, "Agent", brokerageId);
+
+  const awaiting = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: requester,
+    actorType: "USER",
+    rawInput: { propertyId, protectedActionKey: "PUBLISH_LISTING", reason: "F4.0 colleague test" },
+  });
+  assert.equal(awaiting.request!.status, "AWAITING_APPROVAL");
+  const id = awaiting.request!.id;
+
+  assert.equal(await getAIActionRequestForActor(id, colleague), null, "colleague must not be able to read the payload");
+  assert.equal((await approveAIActionRequest(id, brokerageId, colleague)).reason, "NOT_FOUND");
+  assert.equal((await rejectAIActionRequest(id, brokerageId, colleague, "not mine")).reason, "NOT_FOUND");
+
+  assert.ok(await getAIActionRequestForActor(id, requester), "requester can read");
+  assert.ok(await getAIActionRequestForActor(id, actorOf(adminId, "Brokerage Administrator", brokerageId)), "admin can read");
+  assert.equal((await getAIActionRequest(id, brokerageId))!.status, "AWAITING_APPROVAL", "denied attempts never change state");
+
+  // Auto-approved request: a colleague cannot execute it either, and the
+  // attempt leaves it APPROVED (no markFailed on an authority denial).
+  const auto = await proposeAIAction({
+    actionKey: "PROPERTY_NOTE_ADD",
+    actor: requester,
+    actorType: "USER",
+    rawInput: { propertyId, note: "F4.0 auto-approved" },
+  });
+  const denied = await executeAIAction(auto.request!.id, brokerageId, colleague);
+  assert.equal(denied.ok, false);
+  assert.equal(denied.reason, "NOT_FOUND");
+  assert.equal((await getAIActionRequest(auto.request!.id, brokerageId))!.status, "APPROVED");
+});
+
+test("F4.0 execute: only the approver or a brokerage admin may execute an approval-required request - the requester who did not approve it is refused", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 executor must be approver");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const requesterId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const propertyId = await createProperty(brokerageId, requesterId);
+  const requester = actorOf(requesterId, "Agent", brokerageId);
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: requester,
+    actorType: "USER",
+    rawInput: { propertyId, protectedActionKey: "ENGAGE_SUPPLIER", reason: "F4.0 approver test" },
+  });
+  const approval = await approveAIActionRequest(request!.id, brokerageId, admin);
+  assert.equal(approval.ok, true, "a brokerage admin may approve another user's request");
+  assert.equal(approval.request!.approvedByUserId, adminId);
+
+  const byRequester = await executeAIAction(request!.id, brokerageId, requester);
+  assert.equal(byRequester.ok, false);
+  assert.equal(byRequester.reason, "EXECUTOR_NOT_AUTHORISED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "APPROVED");
+
+  const byAdmin = await executeAIAction(request!.id, brokerageId, admin);
+  assert.equal(byAdmin.ok, true, JSON.stringify(byAdmin));
+  assert.equal(byAdmin.request!.status, "COMPLETED");
+});
+
+test("F4.0 execute: an approval-required request that is APPROVED without a recorded approver is never executable by a human", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 approval missing");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const requesterId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const propertyId = await createProperty(brokerageId, requesterId);
+
+  const { request } = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: actorOf(requesterId, "Agent", brokerageId),
+    actorType: "USER",
+    rawInput: { propertyId, protectedActionKey: "PUBLISH_LISTING", reason: "forged approval" },
+  });
+  // Simulate a direct DB edit that skipped approveAIActionRequest().
+  await db.update(aiActionRequests).set({ status: "APPROVED" }).where(eq(aiActionRequests.id, request!.id));
+
+  const result = await executeAIAction(request!.id, brokerageId, actorOf(adminId, "Brokerage Administrator", brokerageId));
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "APPROVAL_MISSING");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "APPROVED");
+});
+
+test("F4.0 tamper at approval: the request is REJECTED (conditionally) and the rejection is audited as AI_ACTION_BLOCKED", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 tamper audited");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+  const since = testEventStore.events.length;
+
+  const { request } = await proposeAIAction({ actionKey: "WORKFLOW_VERSION_ACTIVATE", actor: admin, actorType: "USER", rawInput: { proposalId: 424242 } });
+  await db.update(aiActionRequests).set({ inputPayload: { proposalId: 1 } }).where(eq(aiActionRequests.id, request!.id));
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, admin);
+  assert.equal(approval.reason, "PAYLOAD_TAMPERED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "REJECTED");
+
+  const blocked = eventsForRequest(request!.id, since).filter((e) => e.eventType === "AI_ACTION_BLOCKED");
+  assert.equal(blocked.length, 1);
+  assert.equal((blocked[0].payload as Record<string, unknown>).reason, "PAYLOAD_TAMPERED");
+  assert.equal((blocked[0].payload as Record<string, unknown>).stage, "APPROVAL");
+  assert.equal((blocked[0].metadata as Record<string, unknown>).status, "REJECTED");
+});
+
+test("F4.0 expiry: AWAITING_APPROVAL -> EXPIRED at approval and APPROVED -> EXPIRED at execution are both audited exactly once", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 expiry audited");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+  const since = testEventStore.events.length;
+
+  const awaiting = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: agent,
+    actorType: "USER",
+    rawInput: { propertyId, protectedActionKey: "PUBLISH_LISTING", reason: "expiry" },
+  });
+  await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, awaiting.request!.id));
+  assert.equal((await approveAIActionRequest(awaiting.request!.id, brokerageId, agent)).reason, "EXPIRED");
+  assert.equal((await approveAIActionRequest(awaiting.request!.id, brokerageId, agent)).reason, "WRONG_STATUS");
+  const expiredAwaiting = eventsForRequest(awaiting.request!.id, since).filter((e) => e.eventType === "AI_ACTION_EXPIRED");
+  assert.equal(expiredAwaiting.length, 1);
+  assert.equal((expiredAwaiting[0].payload as Record<string, unknown>).previousStatus, "AWAITING_APPROVAL");
+
+  const auto = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "expiry" } });
+  await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, auto.request!.id));
+  const exec = await executeAIAction(auto.request!.id, brokerageId, agent);
+  assert.equal(exec.reason, "EXPIRED");
+  assert.equal((await getAIActionRequest(auto.request!.id, brokerageId))!.status, "EXPIRED");
+  const expiredApproved = eventsForRequest(auto.request!.id, since).filter((e) => e.eventType === "AI_ACTION_EXPIRED");
+  assert.equal(expiredApproved.length, 1);
+  assert.equal((expiredApproved[0].payload as Record<string, unknown>).previousStatus, "APPROVED");
+});
+
+test("F4.0 stuck EXECUTING: recovery marks only stale EXECUTING rows FAILED with an audit event, never re-executes, and is classified terminal for automation", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 stuck executing");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+  const since = testEventStore.events.length;
+
+  const stale = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "stale" } });
+  const fresh = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "fresh" } });
+  await db
+    .update(aiActionRequests)
+    .set({ status: "EXECUTING", updatedAt: new Date(Date.now() - 60 * 60_000) })
+    .where(eq(aiActionRequests.id, stale.request!.id));
+  await db.update(aiActionRequests).set({ status: "EXECUTING", updatedAt: new Date() }).where(eq(aiActionRequests.id, fresh.request!.id));
+
+  await assert.rejects(() => recoverStuckExecutingActionRequests(0), RangeError, "an unbounded (zero) threshold is refused");
+
+  let executeCalls = 0;
+  const recovered = await withWrappedExecute(
+    "PROPERTY_NOTE_ADD",
+    (original) => async (...args) => {
+      executeCalls += 1;
+      return original(...args);
+    },
+    async () => {
+      const rows = await recoverStuckExecutingActionRequests(15 * 60_000, { brokerageId });
+      // Neither a retry of execution nor any other verb can resurrect it.
+      const again = await executeAIAction(stale.request!.id, brokerageId, agent);
+      assert.equal(again.reason, "WRONG_STATUS");
+      return rows;
+    },
+  );
+  assert.equal(executeCalls, 0, "recovery must never call execute()");
+  assert.deepEqual(recovered.map((r) => r.id), [stale.request!.id]);
+
+  const staleAfter = await getAIActionRequest(stale.request!.id, brokerageId);
+  assert.equal(staleAfter!.status, "FAILED");
+  assert.equal(staleAfter!.errorMessage, STUCK_EXECUTING_RECOVERED_MESSAGE);
+  assert.equal((await getAIActionRequest(fresh.request!.id, brokerageId))!.status, "EXECUTING", "an in-flight execution is never touched");
+
+  const failedEvents = eventsForRequest(stale.request!.id, since).filter((e) => e.eventType === "AI_ACTION_FAILED");
+  assert.equal(failedEvents.length, 1);
+  assert.equal((failedEvents[0].payload as Record<string, unknown>).reason, "STUCK_EXECUTING_RECOVERED");
+
+  assert.equal(classifyActionFailure({ authorityDecision: "ALLOW", errorMessage: STUCK_EXECUTING_RECOVERED_MESSAGE }), "TERMINAL_TECHNICAL");
+
+  // Reading the request lazily recovers a stale EXECUTING row too.
+  await db
+    .update(aiActionRequests)
+    .set({ status: "EXECUTING", updatedAt: new Date(Date.now() - 60 * 60_000) })
+    .where(eq(aiActionRequests.id, fresh.request!.id));
+  const viaRead = await getAIActionRequestForActor(fresh.request!.id, agent);
+  assert.equal(viaRead!.status, "FAILED");
+});
+
+test("F4.0 markFailed is conditional: an execution error never overwrites a status another actor already recorded", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 conditional markFailed");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  const propertyId = await createProperty(brokerageId, agentId);
+  const agent = actorOf(agentId, "Agent", brokerageId);
+  const since = testEventStore.events.length;
+
+  const { request } = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: agent, actorType: "USER", rawInput: { propertyId, note: "race" } });
+
+  const result = await withWrappedExecute(
+    "PROPERTY_NOTE_ADD",
+    () => async () => {
+      // While this execution is in flight, the stuck-EXECUTING recovery
+      // (e.g. another process judging it abandoned) fails the row first.
+      await db
+        .update(aiActionRequests)
+        .set({ updatedAt: new Date(Date.now() - 60 * 60_000) })
+        .where(eq(aiActionRequests.id, request!.id));
+      await recoverStuckExecutingActionRequests(15 * 60_000, { requestId: request!.id });
+      throw new Error("simulated late execution error");
+    },
+    () => executeAIAction(request!.id, brokerageId, agent),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "EXECUTION_FAILED");
+
+  const after = await getAIActionRequest(request!.id, brokerageId);
+  assert.equal(after!.status, "FAILED");
+  assert.equal(after!.errorMessage, STUCK_EXECUTING_RECOVERED_MESSAGE, "the late error must not overwrite the recovery's record");
+  const failedEvents = eventsForRequest(request!.id, since).filter((e) => e.eventType === "AI_ACTION_FAILED");
+  assert.equal(failedEvents.length, 1, "exactly one FAILED audit event, from the transition that actually happened");
+});
+
+test("F4.0 system path: executeAIActionAsSystem runs a risk-0 SYSTEM request but refuses non-SYSTEM requests and anything requiring human approval", async (t) => {
+  const brokerageId = await createBrokerage("Gov Test - F4.0 system path");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  const propertyId = await createProperty(brokerageId, adminId);
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  // USER-originated, auto-approved: not the system's to run.
+  const userAuto = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: admin, actorType: "USER", rawInput: { propertyId, note: "user" } });
+  const refusedUser = await executeAIActionAsSystem(userAuto.request!.id, brokerageId);
+  assert.equal(refusedUser.reason, "SYSTEM_PATH_FORBIDDEN");
+  assert.equal((await getAIActionRequest(userAuto.request!.id, brokerageId))!.status, "APPROVED");
+
+  // SYSTEM-originated but approval-required, even after a human approved it.
+  const systemGated = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: admin,
+    actorType: "SYSTEM",
+    rawInput: { propertyId, protectedActionKey: "PUBLISH_LISTING", reason: "system gated" },
+  });
+  assert.equal(systemGated.request!.status, "AWAITING_APPROVAL");
+  assert.equal((await executeAIActionAsSystem(systemGated.request!.id, brokerageId)).reason, "SYSTEM_PATH_FORBIDDEN");
+  assert.equal((await approveAIActionRequest(systemGated.request!.id, brokerageId, admin)).ok, true);
+  const refusedGated = await executeAIActionAsSystem(systemGated.request!.id, brokerageId);
+  assert.equal(refusedGated.reason, "SYSTEM_PATH_FORBIDDEN");
+  assert.equal((await getAIActionRequest(systemGated.request!.id, brokerageId))!.status, "APPROVED", "refusal never changes state");
+
+  // A SYSTEM row whose stored risk no longer satisfies the authority
+  // formula (e.g. edited in the DB) is refused even though requiresApproval=false.
+  const forged = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: admin, actorType: "SYSTEM", rawInput: { propertyId, note: "forged risk" } });
+  await db.update(aiActionRequests).set({ riskLevel: 2 }).where(eq(aiActionRequests.id, forged.request!.id));
+  assert.equal((await executeAIActionAsSystem(forged.request!.id, brokerageId)).reason, "SYSTEM_PATH_FORBIDDEN");
+
+  // The legitimate case still works.
+  const systemAuto = await proposeAIAction({ actionKey: "PROPERTY_NOTE_ADD", actor: admin, actorType: "SYSTEM", rawInput: { propertyId, note: "system" } });
+  const ran = await executeAIActionAsSystem(systemAuto.request!.id, brokerageId);
+  assert.equal(ran.ok, true, JSON.stringify(ran));
+  assert.equal(ran.request!.status, "COMPLETED");
+
+  assert.equal(classifyActionFailure({ authorityDecision: "ALLOW", errorMessage: "SYSTEM_PATH_FORBIDDEN" }), "VALIDATION_OR_POLICY");
+});
+
+test("F4.0 cross-tenant: approve/reject/execute/read against another brokerage's request id all behave as not found", async (t) => {
+  const brokerageA = await createBrokerage("Gov Test - F4.0 cross-tenant A");
+  const brokerageB = await createBrokerage("Gov Test - F4.0 cross-tenant B");
+  t.after(() => Promise.all([cleanupBrokerage(brokerageA), cleanupBrokerage(brokerageB)]));
+  const agentA = await createUser(brokerageA, "Agent");
+  const adminB = await createUser(brokerageB, "Brokerage Administrator");
+  const propertyA = await createProperty(brokerageA, agentA);
+  const foreignAdmin = actorOf(adminB, "Brokerage Administrator", brokerageB);
+
+  const { request } = await proposeAIAction({
+    actionKey: "REQUEST_ACTION_APPROVAL",
+    actor: actorOf(agentA, "Agent", brokerageA),
+    actorType: "USER",
+    rawInput: { propertyId: propertyA, protectedActionKey: "PUBLISH_LISTING", reason: "cross tenant" },
+  });
+  assert.equal(await getAIActionRequestForActor(request!.id, foreignAdmin), null);
+  assert.equal((await approveAIActionRequest(request!.id, brokerageB, foreignAdmin)).reason, "NOT_FOUND");
+  assert.equal((await rejectAIActionRequest(request!.id, brokerageB, foreignAdmin, "x")).reason, "NOT_FOUND");
+  assert.equal((await executeAIAction(request!.id, brokerageB, foreignAdmin)).reason, "NOT_FOUND");
+  assert.equal((await executeAIActionAsSystem(request!.id, brokerageB)).reason, "NOT_FOUND");
+  assert.equal((await getAIActionRequest(request!.id, brokerageA))!.status, "AWAITING_APPROVAL");
 });

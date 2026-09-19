@@ -294,7 +294,7 @@ test("F-03: executeAIAction publishes AI_ACTION_EXECUTED with metadata.status re
     actorType: "USER",
     rawInput: { propertyId, note: "execute test" },
   });
-  const result = await executeAIAction(request!.id, brokerageId);
+  const result = await executeAIAction(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(result.ok, true, `execute should succeed: ${"reason" in result ? result.reason : ""}`);
 
   const rows = await eventsFor(request!.id, brokerageId);
@@ -326,7 +326,7 @@ test("F-03: a tampered payload blocks execution and publishes AI_ACTION_BLOCKED 
     .set({ inputPayload: { propertyId, note: "TAMPERED" } })
     .where(eq(aiActionRequests.id, request!.id));
 
-  const result = await executeAIAction(request!.id, brokerageId);
+  const result = await executeAIAction(request!.id, brokerageId, actorOf(agentId, "Agent", brokerageId));
   assert.equal(result.ok, false);
   assert.equal(result.reason, "PAYLOAD_TAMPERED");
 

@@ -31,6 +31,8 @@ growAiActionsRouter.get(
       return;
     }
 
+    // Stage F4.0: only the caller's OWN requests (never a colleague's), and
+    // expired proposals are transitioned to EXPIRED (audited) and excluded.
     const requests = await listAwaitingApprovalForUser(
       CREATE_GROW_COMMITMENT_ACTION_KEY,
       authedUser.brokerageId,

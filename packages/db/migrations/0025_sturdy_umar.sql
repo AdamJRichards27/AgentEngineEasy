@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "ai_action_requests_open_grow_commitment_resource_uidx" ON "ai_action_requests" USING btree ("action_key","brokerage_id","resource_id") WHERE "ai_action_requests"."action_key" = 'CREATE_GROW_COMMITMENT' AND "ai_action_requests"."resource_id" IS NOT NULL AND "ai_action_requests"."status" IN ('AWAITING_APPROVAL', 'APPROVED', 'EXECUTING');

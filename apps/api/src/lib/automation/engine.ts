@@ -12,7 +12,8 @@
 // Non-negotiable structural decision carried over unchanged from
 // docs/stage-wf/WF1_DISCOVERY.md: action execution goes through the SAME
 // AI Governance pipeline every other actor uses — evaluateAIAction() via
-// proposeAIAction(), then executeAIAction() as the sole caller of an
+// proposeAIAction(), then the Execution Gateway (executeAIActionAsSystem(),
+// its SYSTEM-only entry point since Stage F4.0) as the sole caller of an
 // action definition's execute(). This module never calls execute()
 // directly and never re-implements policy/authority/entitlement logic —
 // see policyEngine.ts, executionGateway.ts, actionRequests.ts.
@@ -67,7 +68,7 @@ import {
 import { publishDomainEvent, logger, incrementCounter, type DomainEvent } from "@aee/events";
 import { getActionDefinition } from "../ai/actions/registry.js";
 import { proposeAIAction } from "../ai/actionRequests.js";
-import { executeAIAction } from "../ai/executionGateway.js";
+import { executeAIActionAsSystem } from "../ai/executionGateway.js";
 import type { PolicyActor, PolicyDecision } from "../ai/policyEngine.js";
 import { buildFacts, type AutomationFacts } from "./facts.js";
 import { evaluateConditionGroup, type AutomationConditionGroup } from "./conditions.js";
@@ -445,7 +446,10 @@ async function executeAutomationAction(input: {
   }
 
   await db.update(automationActions).set({ status: "RUNNING", startedAt: new Date() }).where(eq(automationActions.id, row.id));
-  const execResult = await executeAIAction(request.id, rule.brokerageId);
+  // Stage F4.0: the explicitly named SYSTEM execution path. It refuses any
+  // request that is not actorType "SYSTEM" + auto-execute-eligible, so a
+  // human-approval-required action can never be run from here.
+  const execResult = await executeAIActionAsSystem(request.id, rule.brokerageId);
 
   if (execResult.ok) {
     await db

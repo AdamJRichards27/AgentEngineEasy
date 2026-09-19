@@ -46,6 +46,9 @@ export const AGENT_ENGINE_EASY_EVENT_TYPES = [
   "AI_ACTION_EXECUTED",
   "AI_ACTION_FAILED",
   "AI_ACTION_BLOCKED",
+  // AE GROW Priority 6 Stage F4.0 — audit for the (previously unaudited)
+  // AWAITING_APPROVAL/APPROVED -> EXPIRED transition.
+  "AI_ACTION_EXPIRED",
   "AI_WORKFLOW_CHANGE_PROPOSED",
   "AI_WORKFLOW_CHANGE_APPROVED",
   "AI_WORKFLOW_VERSION_ACTIVATED",
@@ -219,6 +222,7 @@ export const EVENT_TYPE_REGISTRY: Record<AgentEngineEasyEventType, { version: nu
   AI_ACTION_EXECUTED: { version: 1, description: "An AI action request was executed through the AI Action Execution Gateway." },
   AI_ACTION_FAILED: { version: 1, description: "An AI action request passed policy and approval but failed during execution." },
   AI_ACTION_BLOCKED: { version: 1, description: "An AI action request was blocked by policy evaluation before approval or execution." },
+  AI_ACTION_EXPIRED: { version: 1, description: "An AI action request passed its expiry time before being approved or executed and was transitioned to EXPIRED." },
   AI_WORKFLOW_CHANGE_PROPOSED: { version: 1, description: "The AI proposed a workflow change as a new draft version without altering the active version." },
   AI_WORKFLOW_CHANGE_APPROVED: { version: 1, description: "An authorised human approved a proposed AI workflow change." },
   AI_WORKFLOW_VERSION_ACTIVATED: { version: 1, description: "A new workflow version was activated by an authorised human." },

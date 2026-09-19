@@ -12,13 +12,27 @@
 // This router deliberately exposes only the narrow verbs the state
 // machine defines -- propose / approve / reject / execute -- never a
 // generic "run this action" or "edit this request" endpoint.
+//
+// AE GROW Priority 6 Stage F4.0 (Project Owner decisions D2/D4): the
+// action key is dynamic (route param for propose, stored on the request
+// for everything else), so the per-action required entitlement cannot be
+// a static requireEntitlement() middleware here. It is enforced in the
+// service layer instead, for the authenticated caller on every verb:
+//   - propose: evaluateAIAction() (via proposeAIAction) checks the
+//     caller's own entitlement -> 403 "Action denied by policy";
+//   - approve/reject: approveAIActionRequest()/rejectAIActionRequest()
+//     -> 403 ENTITLEMENT_DENIED;
+//   - execute: executeAIAction() -> 403 ENTITLEMENT_DENIED.
+// Reads and every verb on a specific request are limited to the requester
+// or a brokerage administrator (execute: the approver or an administrator);
+// anyone else gets exactly the 404 a missing/cross-tenant id gets.
 
 import { Router } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { listActionDefinitions } from "../lib/ai/actions/registry.js";
-import { proposeAIAction, getAIActionRequest, approveAIActionRequest, rejectAIActionRequest } from "../lib/ai/actionRequests.js";
+import { proposeAIAction, getAIActionRequestForActor, approveAIActionRequest, rejectAIActionRequest } from "../lib/ai/actionRequests.js";
 import { executeAIAction } from "../lib/ai/executionGateway.js";
 import type { PolicyActor } from "../lib/ai/policyEngine.js";
 
@@ -101,7 +115,9 @@ aiActionsRouter.get("/requests/:id", requireAuth, async (req, res) => {
     res.status(400).json({ error: "Invalid request id" });
     return;
   }
-  const request = await getAIActionRequest(id, authedUser.brokerageId);
+  // Requester or brokerage administrator only; a same-brokerage colleague
+  // gets the same 404 as a missing or cross-tenant id (never the payload).
+  const request = await getAIActionRequestForActor(id, actorFrom(authedUser));
   if (!request) {
     res.status(404).json({ error: "AI action request not found" });
     return;
@@ -116,6 +132,8 @@ function statusForApprovalReason(reason: string | undefined): number {
     case "NOT_FOUND":
       return 404;
     case "APPROVER_ROLE_FORBIDDEN":
+    case "REJECTOR_ROLE_FORBIDDEN":
+    case "ENTITLEMENT_DENIED":
       return 403;
     default:
       return 409;
@@ -169,6 +187,10 @@ function statusForExecutionReason(reason: string | undefined): number {
   switch (reason) {
     case "NOT_FOUND":
       return 404;
+    case "EXECUTOR_NOT_AUTHORISED":
+    case "EXECUTOR_ROLE_FORBIDDEN":
+    case "ENTITLEMENT_DENIED":
+      return 403;
     default:
       return 409;
   }
@@ -186,7 +208,7 @@ aiActionsRouter.post("/requests/:id/execute", requireAuth, async (req, res) => {
     return;
   }
   try {
-    const result = await executeAIAction(id, authedUser.brokerageId);
+    const result = await executeAIAction(id, authedUser.brokerageId, actorFrom(authedUser));
     if (!result.ok) {
       res.status(statusForExecutionReason(result.reason)).json({
         error: "Could not execute this request",

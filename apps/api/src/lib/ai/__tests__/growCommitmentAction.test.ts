@@ -33,8 +33,10 @@ import {
   rejectAIActionRequest,
   findOpenActionRequestByResource,
   listAwaitingApprovalForUser,
+  getAIActionRequestForActor,
+  OPEN_GROW_COMMITMENT_RESOURCE_UNIQUE_INDEX,
 } from "../actionRequests.js";
-import { executeAIAction } from "../executionGateway.js";
+import { executeAIAction, executeAIActionAsSystem } from "../executionGateway.js";
 import { isAutoExecuteEligible, riskTierForLevel, AUTHORITY_LEVELS } from "../authority.js";
 import { createApprovedGrowCommitment, GrowCommitmentValidationError } from "../../growCommitmentActions.js";
 import {
@@ -403,21 +405,21 @@ test("end-to-end: execution before approval is refused (WRONG_STATUS), and appro
   assert.ok(request);
   assert.equal(request!.status, "AWAITING_APPROVAL");
 
-  const premature = await executeAIAction(request!.id, brokerageId);
+  const premature = await executeAIAction(request!.id, brokerageId, actor);
   assert.equal(premature.ok, false);
   assert.equal(premature.reason, "WRONG_STATUS");
 
   const approval = await approveAIActionRequest(request!.id, brokerageId, actor);
   assert.equal(approval.ok, true);
 
-  const executed = await executeAIAction(request!.id, brokerageId);
+  const executed = await executeAIAction(request!.id, brokerageId, actor);
   assert.equal(executed.ok, true);
   assert.equal(executed.request?.status, "COMPLETED");
 
   const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
   assert.equal(commitments.length, 1);
 
-  const second = await executeAIAction(request!.id, brokerageId);
+  const second = await executeAIAction(request!.id, brokerageId, actor);
   assert.equal(second.ok, false);
   assert.equal(second.reason, "WRONG_STATUS");
 
@@ -447,7 +449,7 @@ test("end-to-end: rejection prevents execution and creates no commitment", async
   const afterRejection = await getAIActionRequest(request!.id, brokerageId);
   assert.equal(afterRejection!.status, "REJECTED");
 
-  const executeAttempt = await executeAIAction(request!.id, brokerageId);
+  const executeAttempt = await executeAIAction(request!.id, brokerageId, actor);
   assert.equal(executeAttempt.ok, false);
 
   const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
@@ -748,7 +750,7 @@ test("executeAIAction: a proposal that expires after approval but before executi
 
   await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, request!.id));
 
-  const execution = await executeAIAction(request!.id, brokerageId);
+  const execution = await executeAIAction(request!.id, brokerageId, actor);
   assert.equal(execution.ok, false);
   assert.equal(execution.reason, "EXPIRED");
 
@@ -784,7 +786,7 @@ test("cross-tenant: approve/reject/execute against a foreign brokerage's request
   assert.equal(foreignReject.ok, false);
   assert.equal(foreignReject.reason, "NOT_FOUND");
 
-  const foreignExecute = await executeAIAction(request!.id, brokerageB);
+  const foreignExecute = await executeAIAction(request!.id, brokerageB, actorB);
   assert.equal(foreignExecute.ok, false);
   assert.equal(foreignExecute.reason, "NOT_FOUND");
 
@@ -862,7 +864,7 @@ test("revoking the entitlement between approval and execution denies execution a
     .where(and(eq(entitlementGrants.brokerageId, brokerageId), eq(entitlementGrants.entitlementKey, ENTITLEMENT_KEY)));
   invalidateEntitlementCache(brokerageId);
 
-  const execution = await executeAIAction(request!.id, brokerageId);
+  const execution = await executeAIAction(request!.id, brokerageId, actor);
   assert.equal(execution.ok, false);
   assert.equal(execution.reason, "POLICY_DENIED");
   assert.equal(execution.policyReason, "ENTITLEMENT_DENIED");
@@ -953,4 +955,235 @@ test("approveAIActionRequest: replaying approval against an already-APPROVED req
   const replay = await approveAIActionRequest(request!.id, brokerageId, actor);
   assert.equal(replay.ok, false);
   assert.equal(replay.reason, "WRONG_STATUS");
+});
+
+// ---------------------------------------------------------------------------
+// AE GROW Priority 6 Stage F4.0 — governance hardening (D2/D4) for the
+// CREATE_GROW_COMMITMENT flow.
+// ---------------------------------------------------------------------------
+
+async function grantUserEntitlement(brokerageId: number, userId: number): Promise<void> {
+  await db.insert(entitlementGrants).values({
+    brokerageId,
+    entitlementKey: ENTITLEMENT_KEY,
+    granteeType: "user",
+    granteeId: userId,
+    sourceType: "manual",
+    status: "Active",
+  });
+  invalidateEntitlementCache(brokerageId);
+}
+
+async function revokeUserEntitlement(brokerageId: number, userId: number): Promise<void> {
+  await db
+    .update(entitlementGrants)
+    .set({ status: "Revoked" })
+    .where(
+      and(
+        eq(entitlementGrants.brokerageId, brokerageId),
+        eq(entitlementGrants.entitlementKey, ENTITLEMENT_KEY),
+        eq(entitlementGrants.granteeType, "user"),
+        eq(entitlementGrants.granteeId, userId),
+      ),
+    );
+  invalidateEntitlementCache(brokerageId);
+}
+
+function commitmentInput(partyId: number, description = "Follow up with Sarah") {
+  return { partyId, description, dueAt: new Date().toISOString(), reason: "Overdue" };
+}
+
+test("F4.0: a same-brokerage colleague (not requester, not admin) cannot read, list, approve, reject, or execute a proposal; an entitled admin can approve and execute it, and the requester who did not approve it cannot execute", async (t) => {
+  const brokerageId = await createBrokerage("f4-colleague-matrix");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const requesterId = await createUser(brokerageId, "Agent");
+  const colleagueId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const requester = actorOf(requesterId, "Agent", brokerageId);
+  const colleague = actorOf(colleagueId, "Agent", brokerageId);
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  const { request } = await proposeAIAction({ actionKey: ACTION_KEY, actor: requester, actorType: "AI", rawInput: commitmentInput(partyId) });
+  assert.ok(request);
+
+  assert.equal(await getAIActionRequestForActor(request!.id, colleague), null);
+  assert.equal((await listAwaitingApprovalForUser(ACTION_KEY, brokerageId, colleagueId)).length, 0);
+  assert.equal((await approveAIActionRequest(request!.id, brokerageId, colleague)).reason, "NOT_FOUND");
+  assert.equal((await rejectAIActionRequest(request!.id, brokerageId, colleague, "not mine")).reason, "NOT_FOUND");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "AWAITING_APPROVAL");
+
+  const approval = await approveAIActionRequest(request!.id, brokerageId, admin);
+  assert.equal(approval.ok, true);
+
+  assert.equal((await executeAIAction(request!.id, brokerageId, colleague)).reason, "NOT_FOUND");
+  assert.equal((await executeAIAction(request!.id, brokerageId, requester)).reason, "EXECUTOR_NOT_AUTHORISED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "APPROVED", "denied executors never change state");
+
+  const executed = await executeAIAction(request!.id, brokerageId, admin);
+  assert.equal(executed.ok, true, JSON.stringify(executed));
+  const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
+  assert.equal(commitments.length, 1);
+});
+
+test("F4.0: an approver or rejector without grow.activities.manage is denied (ENTITLEMENT_DENIED) and the proposal stays AWAITING_APPROVAL", async (t) => {
+  const brokerageId = await createBrokerage("f4-approver-entitlement");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const requesterId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  await grantUserEntitlement(brokerageId, requesterId); // the admin holds NO grant
+  const partyId = await createParty(brokerageId, "Sarah");
+  const requester = actorOf(requesterId, "Agent", brokerageId);
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  const { request } = await proposeAIAction({ actionKey: ACTION_KEY, actor: requester, actorType: "AI", rawInput: commitmentInput(partyId) });
+  assert.ok(request);
+
+  assert.equal((await approveAIActionRequest(request!.id, brokerageId, admin)).reason, "ENTITLEMENT_DENIED");
+  assert.equal((await rejectAIActionRequest(request!.id, brokerageId, admin, "no")).reason, "ENTITLEMENT_DENIED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "AWAITING_APPROVAL");
+
+  // The requester's own entitlement lapses: they can no longer decide it either.
+  await revokeUserEntitlement(brokerageId, requesterId);
+  assert.equal((await approveAIActionRequest(request!.id, brokerageId, requester)).reason, "ENTITLEMENT_DENIED");
+  assert.equal((await rejectAIActionRequest(request!.id, brokerageId, requester, "no")).reason, "ENTITLEMENT_DENIED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "AWAITING_APPROVAL");
+});
+
+test("F4.0: the executor's own entitlement is re-checked - revoking the approving admin's grant between approval and execution denies that admin, creates no commitment, and leaves the request APPROVED", async (t) => {
+  const brokerageId = await createBrokerage("f4-executor-entitlement");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const requesterId = await createUser(brokerageId, "Agent");
+  const adminId = await createUser(brokerageId, "Brokerage Administrator");
+  await grantUserEntitlement(brokerageId, requesterId);
+  await grantUserEntitlement(brokerageId, adminId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const admin = actorOf(adminId, "Brokerage Administrator", brokerageId);
+
+  const { request } = await proposeAIAction({
+    actionKey: ACTION_KEY,
+    actor: actorOf(requesterId, "Agent", brokerageId),
+    actorType: "AI",
+    rawInput: commitmentInput(partyId),
+  });
+  assert.equal((await approveAIActionRequest(request!.id, brokerageId, admin)).ok, true);
+
+  await revokeUserEntitlement(brokerageId, adminId);
+  const execution = await executeAIAction(request!.id, brokerageId, admin);
+  assert.equal(execution.ok, false);
+  assert.equal(execution.reason, "ENTITLEMENT_DENIED");
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "APPROVED");
+  const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
+  assert.equal(commitments.length, 0);
+});
+
+test("F4.0 expiry: an expired proposal is transitioned to EXPIRED, excluded from the pending list and from dedup, and a new proposal for the same resource can then be created", async (t) => {
+  const brokerageId = await createBrokerage("f4-expiry-dedup");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+  const resourceId = `party:${partyId}:due:2026-01-01`;
+
+  const first = await proposeAIAction({ actionKey: ACTION_KEY, actor, actorType: "AI", rawInput: commitmentInput(partyId), resourceId });
+  assert.ok(first.request);
+  assert.equal((await findOpenActionRequestByResource(ACTION_KEY, brokerageId, resourceId))!.id, first.request!.id);
+
+  await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, first.request!.id));
+
+  const pending = await listAwaitingApprovalForUser(ACTION_KEY, brokerageId, agentId);
+  assert.equal(pending.length, 0, "an expired proposal must never be listed as pending");
+  assert.equal(await findOpenActionRequestByResource(ACTION_KEY, brokerageId, resourceId), null, "an expired proposal must never block dedup");
+  assert.equal((await getAIActionRequest(first.request!.id, brokerageId))!.status, "EXPIRED");
+
+  const second = await proposeAIAction({ actionKey: ACTION_KEY, actor, actorType: "AI", rawInput: commitmentInput(partyId), resourceId });
+  assert.ok(second.request);
+  assert.notEqual(second.request!.id, first.request!.id);
+  assert.equal(second.deduplicated, undefined);
+  assert.equal((await findOpenActionRequestByResource(ACTION_KEY, brokerageId, resourceId))!.id, second.request!.id);
+});
+
+test("F4.0 expiry: proposing directly for a resource whose open request has expired (but was never transitioned) frees the slot instead of hitting the unique index", async (t) => {
+  const brokerageId = await createBrokerage("f4-expiry-insert");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+  const resourceId = `party:${partyId}:due:2026-02-02`;
+
+  const first = await proposeAIAction({ actionKey: ACTION_KEY, actor, actorType: "AI", rawInput: commitmentInput(partyId), resourceId });
+  await db.update(aiActionRequests).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiActionRequests.id, first.request!.id));
+
+  const second = await proposeAIAction({ actionKey: ACTION_KEY, actor, actorType: "AI", rawInput: commitmentInput(partyId), resourceId });
+  assert.ok(second.request);
+  assert.notEqual(second.request!.id, first.request!.id);
+  assert.equal((await getAIActionRequest(first.request!.id, brokerageId))!.status, "EXPIRED");
+});
+
+test("F4.0 dedup: concurrent proposals for the same resource produce exactly one open request (DB-level partial unique index), every caller gets that request back", async (t) => {
+  const brokerageId = await createBrokerage("f4-concurrent-dedup");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+  const resourceId = `party:${partyId}:due:2026-03-03`;
+
+  const results = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      proposeAIAction({ actionKey: ACTION_KEY, actor, actorType: "AI", rawInput: commitmentInput(partyId), resourceId }),
+    ),
+  );
+  const ids = new Set(results.map((r) => r.request?.id));
+  assert.equal(ids.size, 1, "every concurrent caller must resolve to the same single open request");
+  assert.ok(results.every((r) => r.request !== null));
+  // proposeAIAction() itself does no pre-insert lookup, so every loser of
+  // the race genuinely hit the unique index and was resolved to the winner.
+  assert.equal(results.filter((r) => r.deduplicated === true).length, results.length - 1);
+
+  const open = await db
+    .select()
+    .from(aiActionRequests)
+    .where(and(eq(aiActionRequests.brokerageId, brokerageId), eq(aiActionRequests.resourceId, resourceId)));
+  assert.equal(open.length, 1);
+
+  // The index itself (not just the application check) rejects a second
+  // open row for the same slot.
+  const { id: _id, createdAt: _c, updatedAt: _u, ...clone } = open[0];
+  await assert.rejects(
+    () => db.insert(aiActionRequests).values(clone),
+    (err: any) => {
+      const pgErr = err?.cause ?? err;
+      assert.equal(pgErr?.code, "23505");
+      assert.equal(pgErr?.constraint, OPEN_GROW_COMMITMENT_RESOURCE_UNIQUE_INDEX);
+      return true;
+    },
+  );
+  // ...but a closed (REJECTED) row for the same slot is allowed.
+  await db.insert(aiActionRequests).values({ ...clone, status: "REJECTED" });
+});
+
+test("F4.0 system path: executeAIActionAsSystem refuses an approved CREATE_GROW_COMMITMENT (AI-originated, human-approval-required) and creates no commitment", async (t) => {
+  const brokerageId = await createBrokerage("f4-system-path-refuses-grow");
+  t.after(() => cleanupBrokerage(brokerageId));
+  const agentId = await createUser(brokerageId, "Agent");
+  await grantEntitlement(brokerageId);
+  const partyId = await createParty(brokerageId, "Sarah");
+  const actor = actorOf(agentId, "Agent", brokerageId);
+
+  const { request } = await proposeAIAction({ actionKey: ACTION_KEY, actor, actorType: "AI", rawInput: commitmentInput(partyId) });
+  assert.equal((await executeAIActionAsSystem(request!.id, brokerageId)).reason, "SYSTEM_PATH_FORBIDDEN");
+  assert.equal((await approveAIActionRequest(request!.id, brokerageId, actor)).ok, true);
+  assert.equal((await executeAIActionAsSystem(request!.id, brokerageId)).reason, "SYSTEM_PATH_FORBIDDEN");
+
+  // Even relabelled as SYSTEM in the DB it stays approval-required, so still refused.
+  await db.update(aiActionRequests).set({ actorType: "SYSTEM" }).where(eq(aiActionRequests.id, request!.id));
+  assert.equal((await executeAIActionAsSystem(request!.id, brokerageId)).reason, "SYSTEM_PATH_FORBIDDEN");
+
+  assert.equal((await getAIActionRequest(request!.id, brokerageId))!.status, "APPROVED");
+  const commitments = await db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId));
+  assert.equal(commitments.length, 0);
 });

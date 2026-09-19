@@ -1,4 +1,5 @@
-import { pgTable, serial, integer, text, boolean, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, timestamp, jsonb, numeric, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -120,7 +121,23 @@ export const aiActionRequests = pgTable("ai_action_requests", {
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Priority 6 Stage F4.0 — DB-level backstop for the Grow
+  // follow-up-commitment dedup (actionRequests.ts's
+  // findOpenActionRequestByResource + proposeAIAction's unique-violation
+  // handling): at most one OPEN CREATE_GROW_COMMITMENT request per
+  // (brokerage, deterministic resourceId). Deliberately scoped to that one
+  // action: every other action either proposes with a null resourceId
+  // (automation) or accepts a client-supplied resourceId via
+  // POST /ai/actions/:actionKey/propose, where several open requests for
+  // the same resource are legitimate. The status list must match
+  // OPEN_ACTION_REQUEST_STATUSES in actionRequests.ts.
+  openGrowCommitmentResourceUnique: uniqueIndex("ai_action_requests_open_grow_commitment_resource_uidx")
+    .on(table.actionKey, table.brokerageId, table.resourceId)
+    .where(
+      sql`${table.actionKey} = 'CREATE_GROW_COMMITMENT' AND ${table.resourceId} IS NOT NULL AND ${table.status} IN ('AWAITING_APPROVAL', 'APPROVED', 'EXECUTING')`,
+    ),
+}));
 
 export const insertAiConfigurationSchema = createInsertSchema(aiConfigurations).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertAiPromptVersionSchema = createInsertSchema(aiPromptVersions).omit({ id: true, createdAt: true });

@@ -46,8 +46,10 @@ export type FailureClassification =
 // engine.ts BLOCKED-path denial reasons (mapDecisionToAuthorityDecision)
 // plus executionGateway.ts's own tamper/policy denial reasons, extended
 // (not duplicated) here.
+// Stage F4.0: SYSTEM_PATH_FORBIDDEN is the Execution Gateway's refusal to
+// run a non-SYSTEM / approval-required request via executeAIActionAsSystem().
 const VALIDATION_OR_POLICY_PATTERN =
-  /PAYLOAD_TAMPERED|POLICY_DENIED|BLOCK_POLICY_CONFLICT|BLOCK_MISSING_ENTITLEMENT|BLOCK_MISSING_CONTEXT|not registered|is not a registered/i;
+  /PAYLOAD_TAMPERED|POLICY_DENIED|SYSTEM_PATH_FORBIDDEN|BLOCK_POLICY_CONFLICT|BLOCK_MISSING_ENTITLEMENT|BLOCK_MISSING_CONTEXT|not registered|is not a registered/i;
 
 // A curated set of clearly non-transient, investigation-required failures
 // -- data/config problems, not infrastructure blips. Deliberately narrow:
@@ -60,8 +62,12 @@ const VALIDATION_OR_POLICY_PATTERN =
 // already caps the blast radius, whereas failing closed to terminal on
 // every unknown error would silently stop retrying things that were only
 // ever a momentary blip).
+// Stage F4.0: STUCK_EXECUTING_RECOVERED marks an AI action request whose
+// execution outcome is unknown (actionRequests.ts's
+// recoverStuckExecutingActionRequests) -- it must never be auto-retried
+// into a possible second execution.
 const TERMINAL_TECHNICAL_PATTERN =
-  /ACTION_NOT_FOUND|not registered|Property not found|Transaction not found|no longer exists|no longer registered|is not a function|Cannot read propert|undefined is not|TypeError/i;
+  /STUCK_EXECUTING_RECOVERED|ACTION_NOT_FOUND|not registered|Property not found|Transaction not found|no longer exists|no longer registered|is not a function|Cannot read propert|undefined is not|TypeError/i;
 
 export function classifyActionFailure(input: {
   authorityDecision: string | null;
