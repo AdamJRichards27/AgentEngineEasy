@@ -14,6 +14,7 @@ import {
   withConsentBrokerageLock,
   writeAuditInTransaction,
 } from "../consentControlsPersistence.js";
+import { TERMINAL_CALL_SESSION_STATUSES } from "./stateMachine.js";
 
 // AE GROW Priority 6 Stage F1 — Call Foundation.
 //
@@ -132,7 +133,7 @@ export async function captureRecordingConsent(input: CaptureRecordingConsentInpu
         recordId: String(consent.id),
         updatedValue: JSON.stringify({ scope: consent.scope, source: consent.source, partyId: consent.partyId }),
       },
-      { write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
+      { strict: true, write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
     );
 
     if (session) {
@@ -189,7 +190,7 @@ export async function withdrawRecordingConsent(input: WithdrawRecordingConsentIn
         previousValue: existing.status,
         updatedValue: "WITHDRAWN",
       },
-      { write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
+      { strict: true, write: (auditInput) => writeAuditInTransaction(tx, auditInput) },
     );
 
     // Any call session currently pointing at this consent must be
@@ -312,6 +313,9 @@ async function recomputeSessionRecordingPermission(
   const executor = tx ?? db;
   const [session] = await executor.select().from(growCallSessions).where(eq(growCallSessions.id, callSessionId)).limit(1);
   if (!session) return;
+  // Consent evidence may change, but an in-call decline or closed call must
+  // retain its recording outcome and original consent association.
+  if (session.recordingStatus === "DECLINED" || TERMINAL_CALL_SESSION_STATUSES.includes(session.status)) return;
 
   const resolved = await resolveRecordingPermission({
     brokerageId: session.brokerageId,
@@ -358,7 +362,7 @@ async function recomputeSessionRecordingPermission(
         previousValue: "PERMITTED_NOT_CAPTURED",
         updatedValue: resolved.recordingStatus,
       },
-      tx ? { write: (auditInput) => writeAuditInTransaction(tx, auditInput) } : {},
+      tx ? { strict: true, write: (auditInput) => writeAuditInTransaction(tx, auditInput) } : {},
     );
   }
 }

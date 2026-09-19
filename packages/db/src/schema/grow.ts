@@ -72,6 +72,7 @@ export const growRelationships = pgTable("grow_relationships", {
 
 export const GROW_ACTIVITY_TYPES = [
   "call",
+  "call_summary",
   "email",
   "sms",
   "meeting",

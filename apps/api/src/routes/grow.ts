@@ -268,6 +268,12 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
     res.status(400).json({ error: "activityType and summary are required" });
     return;
   }
+  // Reviewed call summaries require server-authenticated approval provenance.
+  // They can only be created by the explicit transcription review Save route.
+  if (activityType === "call_summary") {
+    res.status(400).json({ error: "Call summaries must be saved through transcription review." });
+    return;
+  }
 
   const partyId = typeof req.body?.partyId === "number" ? req.body.partyId : null;
   const propertyId = typeof req.body?.propertyId === "number" ? req.body.propertyId : null;

@@ -21,6 +21,7 @@ import {
   checkDocumentStorageReadiness,
 } from "./lib/documentStorage.js";
 import { registerDocumentStorageReconciler } from "./lib/documentStorageReconciler.js";
+import { registerCallTranscriptionReconciler } from "./lib/telephony/callTranscriptionReconciler.js";
 import { assertESignProviderConfigured } from "@aee/integration-esign";
 
 // Foundation Remediation Stage 1.2: fail closed at boot, not at first
@@ -103,6 +104,7 @@ registerIntegrationsEngine();
 // Matching bytes are finalized; missing/corrupt terminal states are
 // quarantined with audit evidence rather than silently discarded.
 registerDocumentStorageReconciler();
+registerCallTranscriptionReconciler();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.
 // Never gates server startup on the seed completing.

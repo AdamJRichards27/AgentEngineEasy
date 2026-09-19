@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "grow_call_transcriptions_call_recording_unique" ON "grow_call_transcriptions" USING btree ("call_session_id","recording_reference");

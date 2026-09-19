@@ -13,6 +13,7 @@ import { ContactCommunicationsSection } from "../components/CommunicationsSectio
 // anchor="property". See that component's own header comment for why this is a shared panel
 // rather than a second bespoke screen.
 import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
+import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptPanel";
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
@@ -45,6 +46,11 @@ interface GrowActivity {
   activityType: string;
   occurredAt: string;
   summary: string;
+}
+
+function growActivityTypeLabel(activityType: string): string {
+  if (activityType === "call_summary") return "Call summary";
+  return activityType.replace(/_/g, " ");
 }
 
 interface GrowOpportunity {
@@ -1129,8 +1135,8 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
             {activities.data.activities.map((a) => (
               <li key={a.id}>
                 <span className="when">{new Date(a.occurredAt).toLocaleString()}</span>
-                <div className="eyebrow">{a.activityType}</div>
-                <p>{a.summary}</p>
+                <div className="eyebrow">{growActivityTypeLabel(a.activityType)}</div>
+                <p style={a.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{a.summary}</p>
               </li>
             ))}
           </ul>
@@ -1605,6 +1611,15 @@ function GrowContactDetail({
       </div>
 
       <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />
+      <GrowContactTranscriptPanel
+        partyId={partyId}
+        onReviewSaved={() => {
+          // The API writes the approved call-summary activity atomically with Save.
+          // Refresh only read models here; the browser never persists the activity.
+          queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+          queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
+        }}
+      />
 
       <div className="stat-tiles">
         <StatTile label="Related Properties" value={data.intelligence.relatedPropertyCount} />
@@ -1802,7 +1817,7 @@ function GrowContactDetail({
               <li key={e.id}>
                 <span className="when">{new Date(e.occurredAt).toLocaleString()}</span>
                 <div className="eyebrow">{e.type.replace(/_/g, " ")}</div>
-                <p>{e.summary}</p>
+                <p style={{ whiteSpace: "pre-wrap" }}>{e.summary}</p>
               </li>
             ))}
           </ul>
@@ -1818,8 +1833,8 @@ function GrowContactDetail({
             {data.activities.map((a) => (
               <li key={a.id}>
                 <span className="when">{new Date(a.occurredAt).toLocaleString()}</span>
-                <div className="eyebrow">{a.activityType}</div>
-                <p>{a.summary}</p>
+                <div className="eyebrow">{growActivityTypeLabel(a.activityType)}</div>
+                <p style={a.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{a.summary}</p>
               </li>
             ))}
           </ul>

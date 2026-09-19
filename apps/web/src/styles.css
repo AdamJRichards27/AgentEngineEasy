@@ -1,3 +1,94 @@
+.grow-transcript-panel {
+  margin-top: 1rem;
+}
+
+.grow-transcript-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.85rem;
+}
+
+.grow-transcript-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) auto;
+  gap: 0.25rem 0.75rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.35rem;
+  color: inherit;
+  background: var(--color-surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.grow-transcript-row.active {
+  border-color: var(--color-primary);
+  background: var(--color-warning-bg);
+}
+
+.grow-transcript-row small {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+}
+
+.grow-transcript-review {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.grow-review-advisory {
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid var(--color-warning-text);
+  background: var(--color-warning-bg);
+  color: var(--color-text);
+}
+
+.grow-transcript-review label,
+.grow-review-item {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.grow-transcript-review textarea,
+.grow-review-item textarea {
+  width: 100%;
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
+.grow-review-group {
+  margin-top: 1rem;
+}
+
+.grow-review-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+  text-transform: capitalize;
+}
+
+.grow-review-item {
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.grow-review-item input {
+  width: 100%;
+}
+
+@media (max-width: 640px) {
+  .grow-transcript-row {
+    grid-template-columns: 1fr;
+  }
+
+  .grow-transcript-row .pill {
+    justify-self: start;
+  }
+}
 /* AgentEngineEasy — base styles.
    Design system matches the reference "Agent Engine" app: dark sidebar
    navigation (#424242), orange accent (#E05A1B), Inter type, white

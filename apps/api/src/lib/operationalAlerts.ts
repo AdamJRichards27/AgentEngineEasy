@@ -7,6 +7,7 @@ export type OperationalAlertType =
   | "STORAGE_READINESS_FAILURE"
   | "DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED"
   | "DOCUMENT_STORAGE_PENDING_RECONCILIATION_FAILURE"
+  | "CALL_TRANSCRIPTION_RECONCILIATION_FAILURE"
   | "AUTH_ANOMALY"
   | "BACKUP_FAILURE"
   | "INTEGRATION_WEBHOOK_FAILURE"
@@ -26,6 +27,7 @@ export const OPERATIONAL_ALERT_POLICIES: Readonly<Record<OperationalAlertType, A
   STORAGE_READINESS_FAILURE: { severity: "critical", owner: "api-platform", runbook: "document-storage-readiness" },
   DOCUMENT_STORAGE_INGESTION_RETRY_REQUIRED: { severity: "high", owner: "integrations", runbook: "document-storage-ingestion-retry" },
   DOCUMENT_STORAGE_PENDING_RECONCILIATION_FAILURE: { severity: "high", owner: "operations", runbook: "document-storage-pending-reconciliation" },
+  CALL_TRANSCRIPTION_RECONCILIATION_FAILURE: { severity: "high", owner: "operations", runbook: "call-transcription-reconciliation" },
   AUTH_ANOMALY: { severity: "high", owner: "security", runbook: "authentication-anomaly" },
   BACKUP_FAILURE: { severity: "critical", owner: "operations", runbook: "backup-restore" },
   INTEGRATION_WEBHOOK_FAILURE: { severity: "high", owner: "integrations", runbook: "integration-webhook-failure" },

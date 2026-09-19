@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   loadVoiceTranscriptionConfig,
   buildVoiceTranscriptionProvider,
+  buildCallTranscriptionProvider,
   setVoiceTranscriptionProviderForTests,
 } from "../gateway.js";
 import { MockTranscriptionProvider } from "../mockTranscriptionProvider.js";
@@ -16,6 +17,8 @@ const ENV_KEYS = [
   "AI_TRANSCRIPTION_TIMEOUT_MS",
   "DEEPGRAM_API_KEY",
   "LIVE_VOICE_TRANSCRIPTION_APPROVED",
+  "LIVE_CALL_TRANSCRIPTION_APPROVED",
+  "LIVE_TELEPHONY_APPROVED",
 ] as const;
 
 function snapshotEnv(): Record<string, string | undefined> {
@@ -127,6 +130,102 @@ test("buildVoiceTranscriptionProvider throws a typed provider_error for an unkno
     () => buildVoiceTranscriptionProvider({ provider: "some-unsupported-provider", timeoutMs: 5000 }),
     (err: unknown) => err instanceof TranscriptionProviderError && err.code === "provider_error",
   );
+});
+
+test("mustForceMockCallTranscriptionProvider requires the literal true approval in every environment", async () => {
+  const { mustForceMockCallTranscriptionProvider } = await import("../../../env.js");
+  const snapshot = snapshotEnv();
+  try {
+    for (const nodeEnv of ["development", "test", "production"]) {
+      process.env.NODE_ENV = nodeEnv;
+      delete process.env.LIVE_CALL_TRANSCRIPTION_APPROVED;
+      assert.equal(mustForceMockCallTranscriptionProvider(), true, `${nodeEnv} unset must remain locked`);
+      process.env.LIVE_CALL_TRANSCRIPTION_APPROVED = "false";
+      assert.equal(mustForceMockCallTranscriptionProvider(), true, `${nodeEnv} false must remain locked`);
+      process.env.LIVE_CALL_TRANSCRIPTION_APPROVED = "true";
+      assert.equal(mustForceMockCallTranscriptionProvider(), false, `${nodeEnv} literal true must unlock`);
+    }
+  } finally {
+    restoreEnv(snapshot);
+  }
+});
+
+test("buildCallTranscriptionProvider always allows the mock provider across environments without approval", () => {
+  const snapshot = snapshotEnv();
+  try {
+    delete process.env.LIVE_CALL_TRANSCRIPTION_APPROVED;
+    for (const nodeEnv of ["development", "test", "production"]) {
+      process.env.NODE_ENV = nodeEnv;
+      const provider = buildCallTranscriptionProvider({ provider: "mock", timeoutMs: 5000 });
+      assert.ok(provider instanceof MockTranscriptionProvider);
+      assert.equal(provider.name, "mock");
+    }
+  } finally {
+    restoreEnv(snapshot);
+  }
+});
+
+test("buildCallTranscriptionProvider does not use Stage E voice or telephony approval to unlock Deepgram", () => {
+  const snapshot = snapshotEnv();
+  try {
+    process.env.NODE_ENV = "test";
+    process.env.DEEPGRAM_API_KEY = "synthetic-test-key";
+    process.env.LIVE_VOICE_TRANSCRIPTION_APPROVED = "true";
+    process.env.LIVE_TELEPHONY_APPROVED = "true";
+    delete process.env.LIVE_CALL_TRANSCRIPTION_APPROVED;
+    assert.throws(
+      () => buildCallTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 }),
+      (err: unknown) => err instanceof TranscriptionProviderError && err.code === "live_provider_disabled",
+    );
+    process.env.LIVE_CALL_TRANSCRIPTION_APPROVED = "false";
+    assert.throws(
+      () => buildCallTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 }),
+      (err: unknown) => err instanceof TranscriptionProviderError && err.code === "live_provider_disabled",
+    );
+  } finally {
+    restoreEnv(snapshot);
+  }
+});
+
+test("buildCallTranscriptionProvider constructs Deepgram only with its own literal true approval", () => {
+  const snapshot = snapshotEnv();
+  try {
+    process.env.NODE_ENV = "test";
+    process.env.DEEPGRAM_API_KEY = "synthetic-test-key";
+    delete process.env.LIVE_VOICE_TRANSCRIPTION_APPROVED;
+    delete process.env.LIVE_TELEPHONY_APPROVED;
+    process.env.LIVE_CALL_TRANSCRIPTION_APPROVED = "true";
+    const provider = buildCallTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 });
+    assert.ok(provider instanceof DeepgramTranscriptionProvider);
+    assert.equal(provider.name, "deepgram");
+  } finally {
+    restoreEnv(snapshot);
+  }
+});
+
+test("buildCallTranscriptionProvider keeps the call lock ahead of a non-mock test seam", () => {
+  const snapshot = snapshotEnv();
+  const fake: TranscriptionProvider = {
+    name: "fake-call-provider",
+    async transcribe(): Promise<TranscriptionResponse> {
+      return { provider: "fake-call-provider", transcript: "fake", durationSeconds: null, latencyMs: 1 };
+    },
+  };
+  try {
+    process.env.NODE_ENV = "test";
+    delete process.env.LIVE_CALL_TRANSCRIPTION_APPROVED;
+    setVoiceTranscriptionProviderForTests(fake);
+    assert.throws(
+      () => buildCallTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 }),
+      (err: unknown) => err instanceof TranscriptionProviderError && err.code === "live_provider_disabled",
+    );
+
+    process.env.LIVE_CALL_TRANSCRIPTION_APPROVED = "true";
+    assert.equal(buildCallTranscriptionProvider({ provider: "deepgram", timeoutMs: 5000 }), fake);
+  } finally {
+    setVoiceTranscriptionProviderForTests(null);
+    restoreEnv(snapshot);
+  }
 });
 
 test("setVoiceTranscriptionProviderForTests overrides selection regardless of provider config, and is reset afterwards", async () => {

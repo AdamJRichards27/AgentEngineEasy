@@ -99,6 +99,24 @@ function callsUrl(path: string) {
   return `${baseUrl}/api/grow/calls${path}`;
 }
 
+test("F3 transcription route requires authentication and its separate entitlement before inspecting a call", async () => {
+  const unauthenticated = await fetch(callsUrl("/1/transcription"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ recordingReference: 1 }),
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  const denied = await fetch(callsUrl("/1/transcription"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ recordingReference: 1 }),
+  });
+  assert.equal(denied.status, 403);
+  const body = await denied.json() as { entitlementKey?: string };
+  assert.equal(body.entitlementKey, "grow.calling.transcription");
+});
+
 async function createProperty(cookie: string, address: string) {
   const res = await fetch(`${baseUrl}/api/properties`, {
     method: "POST",
@@ -527,6 +545,9 @@ test("invalid state transitions are rejected: confirming twice, cancelling a COM
 test("tenant isolation: Brokerage B cannot read, confirm, or cancel Brokerage A's call session", async () => {
   await grant(B.brokerageId, "grow.calling.access");
   await grant(B.brokerageId, "grow.calling.recording");
+  // Grant F3 explicitly so the cross-tenant assertion reaches the service
+  // lookup instead of being masked by the entitlement middleware's 403.
+  await grant(B.brokerageId, "grow.calling.transcription");
 
   const getRes = await fetch(callsUrl(`/${happyPathSessionId}`), { headers: { cookie: B.agent.cookie } });
   assert.equal(getRes.status, 404);
@@ -1752,6 +1773,7 @@ test("every grow-calls route rejects Brokerage B's cross-tenant actor, party, se
     { path: `/${sessionId}/recording/disclose`, method: "POST", body: { disclosedByUserId: A.agent.user.id, provider: "live" } },
     { path: `/${sessionId}/recording/confirm`, method: "POST", body: { confirmedByUserId: A.agent.user.id, liveApproval: true } },
     { path: `/${sessionId}/recording/decline`, method: "POST", body: { declinedByUserId: A.agent.user.id, liveApproval: true } },
+    { path: `/${sessionId}/transcription`, method: "POST", body: { recordingReference: 1 } },
     { path: `/${sessionId}/consent`, method: "POST", body: { scope: "PER_CALL", source: "VERBAL_ON_CALL", jurisdiction: "AU", capturedByUserId: A.agent.user.id } },
     { path: `/consent/${consentBody.consent.id}/withdraw`, method: "POST", body: { withdrawnByUserId: A.agent.user.id, reason: "cross-tenant" } },
     { path: `/contacts/${partyId}/consent`, method: "POST", body: { scope: "STANDING", source: "VERBAL_ON_CALL", jurisdiction: "AU", capturedByUserId: A.agent.user.id } },

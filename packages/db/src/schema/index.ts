@@ -49,3 +49,5 @@ export * from "./telephony";
 // controls, versioned AU/NZ policy data, DNCR observations, suppression
 // events, and immutable decision evidence.
 export * from "./consentControls";
+// AE GROW Priority 6 Stage F3 — separate transcription and human-review artefacts.
+export * from "./callTranscriptions";

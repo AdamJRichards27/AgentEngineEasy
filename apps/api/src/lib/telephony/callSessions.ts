@@ -460,6 +460,17 @@ const SANDBOX_EVENT_TARGET_STATUS: Record<SandboxLifecycleEvent, GrowCallSession
 
 export interface ApplySandboxLifecycleEventOptions {
   /**
+   * Receipt coordination runs inside the base lifecycle transaction, after
+   * acquiring the brokerage lock. claim must lock the receipt and return false
+   * for an already committed delivery; complete commits the receipt alongside
+   * the successful transition, core audit and activity. Denial evidence still
+   * commits without completing the receipt. Recording closure stays outside.
+   */
+  receipt?: {
+    claim: (tx: ConsentTransaction) => Promise<boolean>;
+    complete: (tx: ConsentTransaction) => Promise<void>;
+  };
+  /**
    * Fault-injection seam for the recording-only audit. Production callers
    * leave this unset. A recording audit failure must never roll back the
    * already-committed terminal call lifecycle.
@@ -583,6 +594,7 @@ export async function applySandboxLifecycleEvent(
   if (!initial) throw new GrowCallSessionNotFoundError();
   const targetStatus = SANDBOX_EVENT_TARGET_STATUS[event];
   const result = await withConsentBrokerageLock(initial.brokerageId, async (tx) => {
+    const shouldApply = options.receipt ? await options.receipt.claim(tx) : true;
     const [session] = await tx.select().from(growCallSessions).where(eq(growCallSessions.id, callSessionId)).limit(1);
     if (!session) throw new GrowCallSessionNotFoundError();
 
@@ -593,6 +605,12 @@ export async function applySandboxLifecycleEvent(
         ? { previousRecordingStatus: session.recordingStatus, terminalStatus: targetStatus }
         : null;
 
+    // A committed receipt is authoritative even if a later event has advanced
+    // the session. Never repeat eligibility decisions or nonterminal audits.
+    if (!shouldApply) {
+      return { updated: session, deniedReason: null, recordingClosure: session.status === targetStatus ? recordingClosure : null };
+    }
+
     // A fresh provider event id can repeat an already-applied terminal event.
     // Accept the same terminal target idempotently while allowing recording
     // closure/audit retry below.
@@ -602,6 +620,7 @@ export async function applySandboxLifecycleEvent(
         .set({ recordingPermitted: false, updatedAt: new Date() })
         .where(and(eq(growCallSessions.id, session.id), eq(growCallSessions.status, targetStatus)))
         .returning();
+      await options.receipt?.complete(tx);
       return { updated: safeTerminal ?? session, deniedReason: null, recordingClosure };
     }
 
@@ -682,6 +701,7 @@ export async function applySandboxLifecycleEvent(
         sourceId: String(updated.id),
       });
     }
+    await options.receipt?.complete(tx);
     return { updated, deniedReason: null, recordingClosure };
   });
   if (result.deniedReason) {

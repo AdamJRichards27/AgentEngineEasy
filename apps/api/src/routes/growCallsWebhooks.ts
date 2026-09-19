@@ -68,13 +68,20 @@ growCallsWebhooksRouter.post("/grow/calls/webhooks/sandbox", async (req, res) =>
     return;
   }
 
-  const result = await processInboundTelephonyWebhook({
-    provider: SANDBOX_TELEPHONY_PROVIDER,
-    providerEventId: parsed.data.eventId,
-    eventType: parsed.data.eventType,
-    providerCallId: parsed.data.providerCallId,
-    payload: req.body as Record<string, unknown>,
-  });
+  try {
+    const result = await processInboundTelephonyWebhook({
+      provider: SANDBOX_TELEPHONY_PROVIDER,
+      providerEventId: parsed.data.eventId,
+      eventType: parsed.data.eventType,
+      providerCallId: parsed.data.providerCallId,
+      payload: req.body as Record<string, unknown>,
+    });
 
-  res.status(result.status === "FAILED" ? 500 : 200).json(result);
+    res.status(result.status === "FAILED" ? 500 : 200).json(result);
+  } catch {
+    // Express 4 does not handle rejected async handlers. Include receipt
+    // SELECT/INSERT and failure-bookkeeping errors in this boundary; never
+    // expose database diagnostics or acknowledge an uncommitted delivery.
+    res.status(500).json({ status: "FAILED", detail: "Unable to process telephony webhook. Please retry." });
+  }
 });
