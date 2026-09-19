@@ -40,10 +40,18 @@ export const contactsRouter = Router();
 const CONTACT_FREE_TEXT_MAX = 2000;
 
 /** A positive integer id, or null when the value is not one (so callers can 400 instead of
- * handing NaN to Postgres and surfacing a 500). */
+ * handing NaN to Postgres and surfacing a 500).
+ *
+ * Bounded by MAX_SIGNED_INT4, matching routes/grow.ts and routes/communications.ts: every id
+ * this router resolves is a `serial` column, i.e. int4. Without the ceiling a value like
+ * "99999999999999999999" or "2147483648" IS an integer as far as Number.isInteger is
+ * concerned, so it passed the guard and reached Postgres as an unbindable bind value —
+ * producing exactly the 500 this helper exists to prevent. */
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
 function parsePositiveId(value: unknown): number | null {
   const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
-  return Number.isInteger(n) && n > 0 ? n : null;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
 }
 
 // AE GROW Pilot Readiness WP1 (P2-1): every contact-intelligence mutation below is audited via

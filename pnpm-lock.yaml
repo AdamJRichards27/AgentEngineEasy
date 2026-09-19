@@ -77,7 +77,7 @@ importers:
         specifier: ^2.4.0
         version: 2.4.0
       pg:
-        specifier: ^8.13.0
+        specifier: ^8.16.0
         version: 8.23.0
       xlsx:
         specifier: file:../../vendor/xlsx-0.20.3.tgz
@@ -148,7 +148,7 @@ importers:
         specifier: ^0.5.1
         version: 0.5.1(drizzle-orm@0.45.2)(zod@3.25.76)
       pg:
-        specifier: ^8.13.0
+        specifier: ^8.16.0
         version: 8.23.0
       zod:
         specifier: ^3.25.76

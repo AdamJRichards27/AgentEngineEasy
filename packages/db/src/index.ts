@@ -36,6 +36,14 @@ if (!process.env.DATABASE_URL) {
  * effective session time zone at startup (apps/api/src/lib/dbTimezone.ts)
  * and refuses to start in production if it is not UTC, whichever path is
  * used. Any value other than the literal string "false" keeps the SET on.
+ *
+ * DEPENDENCY FLOOR (independent-review remediation): `onConnect` only exists
+ * in recent pg/pg-pool. This package and apps/api therefore declare
+ * `"pg": "^8.16.0"`, not the older `^8.13.0` — under the old range a
+ * non-frozen install could resolve a pg without `onConnect`, in which case
+ * the option below would be accepted, ignored, and every connection would
+ * silently skip `SET TIME ZONE 'UTC'` with no error anywhere. Keep both
+ * package.json ranges and the lockfile in step when changing this.
  */
 export function isSessionTimezoneSetEnabled(): boolean {
   return process.env.DB_SET_SESSION_TIMEZONE !== "false";

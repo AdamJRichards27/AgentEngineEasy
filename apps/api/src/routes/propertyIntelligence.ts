@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
@@ -33,6 +34,40 @@ export const propertyIntelligenceRouter = Router();
 const requireRead = requireEntitlement("grow.propertyIntelligence.read");
 const requireManage = requireEntitlement("grow.propertyIntelligence.manage");
 
+// Route-id validation, the same bounded guard routes/grow.ts,
+// routes/communications.ts and routes/growAppraisals.ts use (each keeps its
+// own local copy; this is deliberately not a shared module). Every route
+// below took a raw `Number(req.params...)` and handed it straight to a
+// Drizzle bind, so `GET /grow/property-intelligence/contact/abc` reached
+// Postgres as NaN and came back as a 400 whose body was the driver's own
+// "Failed query: select ..." text — internal schema detail returned to any
+// authenticated caller. Bounded by MAX_SIGNED_INT4 because every id these
+// routes resolve is a `serial` column, i.e. int4.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/** Resolves a route id, answering 400 itself and returning null when malformed. */
+function readIdParam(
+  res: import("express").Response,
+  value: unknown,
+  label: "property" | "contact" | "match" | "signal",
+): number | null {
+  const id = parsePositiveId(value);
+  if (id === null) {
+    res.status(400).json({ error: `Invalid ${label} id` });
+    return null;
+  }
+  return id;
+}
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_PROPERTY_INTELLIGENCE_ERROR =
+  "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
 function handlePropertyIntelligenceError(err: unknown, res: import("express").Response): void {
   if (err instanceof PropertyIntelligenceAccessError) {
     res.status(404).json({ error: err.message });
@@ -42,7 +77,16 @@ function handlePropertyIntelligenceError(err: unknown, res: import("express").Re
     res.status(409).json({ error: err.message });
     return;
   }
-  res.status(400).json({ error: (err as Error).message });
+  // Anything else is an unrecognised server fault, not one of this feature's
+  // expected client-facing errors. `(err as Error).message` was returning the
+  // Postgres driver's "Failed query: select ..." text (table and column names
+  // included) to the caller, as a 400. The typed branches above keep their own
+  // user-facing messages; this one never does.
+  logger.error("property_intelligence_route_unhandled_error", {
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? err.name : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_PROPERTY_INTELLIGENCE_ERROR });
 }
 
 /* ---------------------------------------------------------------------
@@ -51,7 +95,8 @@ function handlePropertyIntelligenceError(err: unknown, res: import("express").Re
 
 propertyIntelligenceRouter.get("/property/:propertyId", requireAuth, requireRead, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   try {
     const summary = await getPropertyIntelligenceSummary(propertyId, user.brokerageId);
     res.json(summary);
@@ -62,7 +107,8 @@ propertyIntelligenceRouter.get("/property/:propertyId", requireAuth, requireRead
 
 propertyIntelligenceRouter.get("/contact/:partyId", requireAuth, requireRead, async (req, res) => {
   const user = req.authedUser!;
-  const partyId = Number(req.params.partyId);
+  const partyId = readIdParam(res, req.params.partyId, "contact");
+  if (partyId === null) return;
   try {
     const entries = await getContactPropertyIntelligenceSummary(partyId, user.brokerageId);
     res.json({ properties: entries });
@@ -75,7 +121,8 @@ const matchQuerySchema = z.object({ status: z.enum(["PendingReview", "Confirmed"
 
 propertyIntelligenceRouter.get("/property/:propertyId/matches", requireAuth, requireRead, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const parsed = matchQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -93,7 +140,8 @@ const signalQuerySchema = z.object({ status: z.enum(["Active", "Reviewed", "Dism
 
 propertyIntelligenceRouter.get("/property/:propertyId/signals", requireAuth, requireRead, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const parsed = signalQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -113,7 +161,8 @@ propertyIntelligenceRouter.get("/property/:propertyId/signals", requireAuth, req
 
 propertyIntelligenceRouter.post("/matches/:identifierId/confirm", requireAuth, requireManage, async (req, res) => {
   const user = req.authedUser!;
-  const identifierId = Number(req.params.identifierId);
+  const identifierId = readIdParam(res, req.params.identifierId, "match");
+  if (identifierId === null) return;
   try {
     const match = await confirmMatch({ identifierId, brokerageId: user.brokerageId, userId: user.id });
     res.json({ match });
@@ -126,7 +175,8 @@ const rejectMatchSchema = z.object({ rejectedReason: z.string().nullable().optio
 
 propertyIntelligenceRouter.post("/matches/:identifierId/reject", requireAuth, requireManage, async (req, res) => {
   const user = req.authedUser!;
-  const identifierId = Number(req.params.identifierId);
+  const identifierId = readIdParam(res, req.params.identifierId, "match");
+  if (identifierId === null) return;
   const parsed = rejectMatchSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -146,7 +196,8 @@ propertyIntelligenceRouter.post("/matches/:identifierId/reject", requireAuth, re
 
 propertyIntelligenceRouter.post("/signals/:signalId/review", requireAuth, requireManage, async (req, res) => {
   const user = req.authedUser!;
-  const signalId = Number(req.params.signalId);
+  const signalId = readIdParam(res, req.params.signalId, "signal");
+  if (signalId === null) return;
   try {
     const signal = await reviewSignal({ signalId, brokerageId: user.brokerageId, userId: user.id });
     res.json({ signal });
@@ -159,7 +210,8 @@ const dismissSignalSchema = z.object({ dismissedReason: z.string().min(1) });
 
 propertyIntelligenceRouter.post("/signals/:signalId/dismiss", requireAuth, requireManage, async (req, res) => {
   const user = req.authedUser!;
-  const signalId = Number(req.params.signalId);
+  const signalId = readIdParam(res, req.params.signalId, "signal");
+  if (signalId === null) return;
   const parsed = dismissSignalSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -175,7 +227,8 @@ propertyIntelligenceRouter.post("/signals/:signalId/dismiss", requireAuth, requi
 
 propertyIntelligenceRouter.post("/signals/:signalId/promote", requireAuth, requireManage, async (req, res) => {
   const user = req.authedUser!;
-  const signalId = Number(req.params.signalId);
+  const signalId = readIdParam(res, req.params.signalId, "signal");
+  if (signalId === null) return;
   try {
     const result = await promoteSignal({ signalId, brokerageId: user.brokerageId, userId: user.id });
     res.json(result);
@@ -192,7 +245,8 @@ propertyIntelligenceRouter.post("/signals/:signalId/promote", requireAuth, requi
 
 propertyIntelligenceRouter.post("/property/:propertyId/recalculate", requireAuth, requireManage, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   try {
     const signals = await recalculateSignalsForProperty(propertyId, user.brokerageId);
     res.json({ signals });

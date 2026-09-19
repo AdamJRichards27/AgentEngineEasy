@@ -16,7 +16,7 @@
   "dependencies": {
     "drizzle-orm": "^0.45.2",
     "drizzle-zod": "^0.5.1",
-    "pg": "^8.13.0",
+    "pg": "^8.16.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

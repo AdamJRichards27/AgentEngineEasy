@@ -81,9 +81,10 @@ async function createProperty(cookie: string, address: string): Promise<number> 
 // transiently refused because another file's scan currently holds the
 // engine's global single-flight advisory lock — a real, correct outcome
 // under concurrent test execution, not a bug in the engine under test.
-async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL", brokerageIds: number[] = [A.brokerageId]): Promise<ScanSummary> {
+// `null` means an UNSCOPED sweep (the production shape: every brokerage).
+async function scanOrRetry(trigger: "SCHEDULED" | "MANUAL" = "MANUAL", brokerageIds: number[] | null = [A.brokerageId]): Promise<ScanSummary> {
   for (let attempt = 0; attempt < 120; attempt++) {
-    const result = await runScheduledScan(trigger, { brokerageIds });
+    const result = await runScheduledScan(trigger, brokerageIds === null ? {} : { brokerageIds });
     if (result.ok) return result.summary;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -292,17 +293,73 @@ test("two overlapping scans: exactly one runs — the second is refused atomical
   }
 });
 
-test("a leftover RUNNING scan_runs row from a crashed process never blocks the next sweep and is closed out as abandoned (lock-based, no wall-clock window)", async () => {
+test("a leftover RUNNING scan_runs row from a crashed process never blocks the next sweep and is closed out as abandoned by an UNSCOPED sweep (lock-based, no wall-clock window)", async () => {
   const [orphan] = await db.insert(riskExceptionScanRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
+  // The unscoped sweep is the production path (bootstrap.ts's scheduler and
+  // POST /exceptions/ops/scan), and it is the only path that performs the
+  // abandoned-row cleanup — see the next test for why. An unscoped sweep
+  // visits EVERY brokerage in this shared test database, so the rule registry
+  // is emptied for its duration: the run-row bookkeeping under test is
+  // unaffected, and no other test file's tenants get exceptions created or
+  // auto-resolved underneath them (the same isolation `brokerageIds` gives
+  // every other scan in this file).
+  const savedRules = RISK_RULES.splice(0, RISK_RULES.length);
   try {
-    const summary = await scanOrRetry("MANUAL");
+    const summary = await scanOrRetry("MANUAL", null);
     assert.notEqual(summary.scanRunId, orphan!.id);
+    assert.equal(summary.rulesEvaluated, 0, "the registry was emptied for this sweep");
     const [row] = await db.select().from(riskExceptionScanRuns).where(eq(riskExceptionScanRuns.id, orphan!.id));
     assert.equal(row!.status, "FAILED");
     assert.match(row!.errorMessage ?? "", /Abandoned/);
     assert.ok(row!.completedAt);
   } finally {
+    RISK_RULES.push(...savedRules);
     await db.update(riskExceptionScanRuns).set({ status: "FAILED", completedAt: new Date() }).where(and(eq(riskExceptionScanRuns.id, orphan!.id), eq(riskExceptionScanRuns.status, "RUNNING")));
+  }
+});
+
+test("a SCOPED scan never closes out a RUNNING scan_runs row it does not own", async () => {
+  // Independent-review remediation. risk_exception_scan_runs has no scope
+  // column, so "every RUNNING row" is strictly wider than a scoped run's own
+  // scope: a scoped test/ops run sharing this database used to stamp FAILED +
+  // "Abandoned" onto another tenant's genuinely in-flight run row, corrupting
+  // the very observability signal GET /exceptions/ops/health reads. A scoped
+  // run's own scope contains no pre-existing rows, so it must leave them alone.
+  const [otherTenantsRun] = await db.insert(riskExceptionScanRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
+  try {
+    const summary = await scanOrRetry("MANUAL", [A.brokerageId]);
+    assert.notEqual(summary.scanRunId, otherTenantsRun!.id);
+    const [row] = await db.select().from(riskExceptionScanRuns).where(eq(riskExceptionScanRuns.id, otherTenantsRun!.id));
+    assert.equal(row!.status, "RUNNING", "a scoped scan must not close out a run row outside its scope");
+    assert.equal(row!.completedAt, null);
+    assert.equal(row!.errorMessage, null);
+
+    // The scoped scan's OWN row is still completed normally.
+    const [ownRow] = await db.select().from(riskExceptionScanRuns).where(eq(riskExceptionScanRuns.id, summary.scanRunId));
+    assert.equal(ownRow!.status, "COMPLETED");
+  } finally {
+    await db
+      .update(riskExceptionScanRuns)
+      .set({ status: "FAILED", completedAt: new Date() })
+      .where(and(eq(riskExceptionScanRuns.id, otherTenantsRun!.id), eq(riskExceptionScanRuns.status, "RUNNING")));
+  }
+});
+
+test("tryHoldExceptionScanLockForTests is a test-only seam: outside NODE_ENV=test it refuses rather than taking the global scan lock", async () => {
+  const { tryHoldExceptionScanLockForTests } = await import("../engine.js");
+  const original = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    await assert.rejects(() => tryHoldExceptionScanLockForTests(), /test-only seam/);
+  } finally {
+    process.env.NODE_ENV = original;
+  }
+  // Still usable in tests, and releasing it leaves the lock free.
+  const release = await tryHoldExceptionScanLockForTests();
+  if (release) {
+    const refused = await runScheduledScan("MANUAL", { brokerageIds: [A.brokerageId] });
+    assert.equal(refused.ok, false, "the held lock must refuse a concurrent scan");
+    await release();
   }
 });
 

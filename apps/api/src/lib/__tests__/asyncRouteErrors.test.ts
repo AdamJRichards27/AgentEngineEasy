@@ -179,3 +179,110 @@ ${CHILD_SERVER_SNIPPET}
   assert.doesNotMatch(result.body, /SENSITIVE_CHILD_DETAIL/);
   assert.equal((JSON.parse(result.body) as { error: string }).error, GENERIC);
 });
+
+/* ---------------------------------------------------------------------
+ * Independent-review remediation — the Express-major guard.
+ *
+ * This module re-implements Express 4's Layer internals. On an Express 5
+ * bump those methods are renamed, so the patch would assign two methods
+ * nobody calls: a SILENT no-op, with async rejections back to hanging the
+ * request and killing the process. Installation therefore asserts the shape
+ * it expects and fails loudly instead.
+ * -----------------------------------------------------------------*/
+
+test("the guard accepts the Express 4 Layer shape this patch targets", async () => {
+  const { assertPatchableLayerPrototype, TARGETED_EXPRESS_MAJOR } = await import("../asyncRouteErrors.js");
+  assert.equal(TARGETED_EXPRESS_MAJOR, 4);
+  // The real, live prototype must pass — this is the regression guard that
+  // the assertion itself is not over-strict.
+  assert.doesNotThrow(() =>
+    assertPatchableLayerPrototype({ handle_request: () => undefined, handle_error: () => undefined }),
+  );
+  const probe = express.Router();
+  probe.use((_req, _res, next) => next());
+  const liveProto = (probe as unknown as { stack: Array<{ constructor: { prototype: object } }> }).stack[0].constructor.prototype;
+  assert.doesNotThrow(() => assertPatchableLayerPrototype(liveProto));
+});
+
+test("the guard rejects an Express 5-shaped Layer prototype with an actionable message", async () => {
+  const { assertPatchableLayerPrototype, UnsupportedExpressLayerError } = await import("../asyncRouteErrors.js");
+  // Express 5 renames handle_request/handle_error to handleRequest/handleError.
+  const express5Shape = { handleRequest: () => undefined, handleError: () => undefined } as unknown as Record<string, unknown>;
+  assert.throws(
+    () => assertPatchableLayerPrototype(express5Shape),
+    (err: unknown) => {
+      assert.ok(err instanceof UnsupportedExpressLayerError, "must be the typed error");
+      assert.match(err.message, /handle_request/);
+      assert.match(err.message, /handle_error/);
+      assert.match(err.message, /Express 4/, "must name the express major it targets");
+      assert.match(err.message, /no-op/, "must say what goes wrong silently");
+      return true;
+    },
+  );
+});
+
+test("the guard rejects a partially-renamed prototype too (only one method missing)", async () => {
+  const { assertPatchableLayerPrototype } = await import("../asyncRouteErrors.js");
+  assert.throws(() => assertPatchableLayerPrototype({ handle_request: () => undefined }), /handle_error/);
+  assert.throws(() => assertPatchableLayerPrototype({ handle_error: () => undefined }), /handle_request/);
+  assert.throws(() => assertPatchableLayerPrototype({}), /handle_request and no handle_error/);
+});
+
+test("in production an unsupported Express is a boot failure, not a silent no-op", () => {
+  // The whole point is that the process must not come up. Proven in a child
+  // process because the check runs as an import side effect: the child stubs
+  // express's Layer prototype into the Express 5 shape BEFORE importing this
+  // module, with NODE_ENV=production.
+  const child = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", `
+import express from "express";
+const probe = express.Router();
+probe.use((_req, _res, next) => next());
+const proto = probe.stack[0].constructor.prototype;
+// Simulate Express 5: the methods this patch overwrites no longer exist.
+proto.handleRequest = proto.handle_request;
+proto.handleError = proto.handle_error;
+delete proto.handle_request;
+delete proto.handle_error;
+try {
+  await import("./src/lib/asyncRouteErrors.ts");
+  console.log("RESULT booted");
+} catch (err) {
+  console.log("RESULT threw " + (err && err.name));
+}
+`],
+    { cwd: API_ROOT, env: { ...process.env, NODE_ENV: "production" }, encoding: "utf8", timeout: 60_000 },
+  );
+  const line = child.stdout.split("\n").find((l) => l.startsWith("RESULT "));
+  assert.ok(line, `no RESULT line; stdout=${child.stdout} stderr=${child.stderr.slice(0, 2000)}`);
+  assert.equal(line.trim(), "RESULT threw UnsupportedExpressLayerError", `stderr=${child.stderr.slice(0, 2000)}`);
+});
+
+test("outside production an unsupported Express logs loudly and does not throw", () => {
+  const child = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", `
+import express from "express";
+const probe = express.Router();
+probe.use((_req, _res, next) => next());
+const proto = probe.stack[0].constructor.prototype;
+proto.handleRequest = proto.handle_request;
+proto.handleError = proto.handle_error;
+delete proto.handle_request;
+delete proto.handle_error;
+try {
+  await import("./src/lib/asyncRouteErrors.ts");
+  console.log("RESULT booted");
+} catch (err) {
+  console.log("RESULT threw " + (err && err.name));
+}
+`],
+    { cwd: API_ROOT, env: { ...process.env, NODE_ENV: "development", LOG_LEVEL: "error" }, encoding: "utf8", timeout: 60_000 },
+  );
+  const line = child.stdout.split("\n").find((l) => l.startsWith("RESULT "));
+  assert.ok(line, `no RESULT line; stdout=${child.stdout} stderr=${child.stderr.slice(0, 2000)}`);
+  assert.equal(line.trim(), "RESULT booted");
+  const logged = `${child.stdout}\n${child.stderr}`;
+  assert.match(logged, /async_route_error_forwarding_unsupported_express/, "the failure must still be loud");
+});

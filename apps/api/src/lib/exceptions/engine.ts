@@ -181,8 +181,19 @@ export async function runScheduledScan(trigger: "SCHEDULED" | "MANUAL" = "SCHEDU
  * exercise the "scan already running" path deterministically — and
  * exercise the manual-scan route without sweeping every tenant in a shared
  * test database.
+ *
+ * Independent-review remediation: this is exported from production code, and
+ * an exported "hold the global scan lock indefinitely" helper is a denial of
+ * service against the entire scheduled sweep for anything that can reach it.
+ * It is therefore gated on NODE_ENV === "test", the same seam shape the rest
+ * of this repo uses for test-only entry points (lib/growCallFollowups.ts,
+ * lib/telephony/callTranscriptions.ts). Outside tests it throws rather than
+ * taking the lock.
  */
 export async function tryHoldExceptionScanLockForTests(): Promise<(() => Promise<void>) | null> {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("tryHoldExceptionScanLockForTests is a test-only seam and is unavailable outside tests.");
+  }
   const client = await db.$client.connect();
   try {
     const result = await client.query<{ locked: boolean }>("select pg_try_advisory_lock($1::int4, $2::int4) as locked", [SCAN_LOCK_NAMESPACE, SCAN_LOCK_KEY]);
@@ -208,14 +219,30 @@ export async function tryHoldExceptionScanLockForTests(): Promise<(() => Promise
 }
 
 async function runScanWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: RunScheduledScanOptions): Promise<RunScanResult> {
-  // We hold the global scan lock, so no other sweep is running: any row
-  // still RUNNING belongs to a process that died mid-scan.
-  await db
-    .update(riskExceptionScanRuns)
-    .set({ status: "FAILED", completedAt: new Date(), errorMessage: "Abandoned: the scan did not complete (its process stopped while running)." })
-    .where(eq(riskExceptionScanRuns.status, "RUNNING"));
-
   const scopedBrokerageIds = options.brokerageIds ? [...new Set(options.brokerageIds)] : null;
+
+  // Close out abandoned run rows. We hold the global scan lock, so no other
+  // sweep is running: any row still RUNNING belongs to a process that died
+  // mid-scan.
+  //
+  // Independent-review remediation: this is done ONLY for an unscoped sweep —
+  // the production path (bootstrap.ts's scheduler and the manual ops route,
+  // neither of which passes brokerageIds). risk_exception_scan_runs has no
+  // scope column, so for a scoped run "every RUNNING row" is strictly wider
+  // than that run's own scope: a scoped test/ops run sharing a database would
+  // otherwise stamp FAILED + "Abandoned" onto an unrelated tenant's genuinely
+  // in-flight run row, corrupting the observability signal
+  // (GET /exceptions/ops/health) it exists to provide. A scoped run's own
+  // scope contains no pre-existing rows — it inserts its row below — so
+  // scoping this cleanup correctly means not performing it at all. Real
+  // abandoned rows are still closed by the next unscoped sweep, which is the
+  // only path that runs in production.
+  if (!scopedBrokerageIds) {
+    await db
+      .update(riskExceptionScanRuns)
+      .set({ status: "FAILED", completedAt: new Date(), errorMessage: "Abandoned: the scan did not complete (its process stopped while running)." })
+      .where(eq(riskExceptionScanRuns.status, "RUNNING"));
+  }
 
   const [scanRun] = await db.insert(riskExceptionScanRuns).values({ status: "RUNNING", trigger }).returning();
   const summary: ScanSummary = {

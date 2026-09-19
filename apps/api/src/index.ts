@@ -129,6 +129,10 @@ registerCallTranscriptionReconciler();
 // event name, and is now ALSO alerted and recorded so GET /api/health/ready
 // reports this instance not-ready (lib/startupHealth.ts) — a broken
 // entitlement catalogue must be visible, not just a log line. Boot continues.
+// runTrackedStartupTask retries with bounded backoff before it marks anything
+// not-ready, so a database still coming up at boot self-heals rather than
+// taking the single always-on pilot instance permanently out of rotation; the
+// per-attempt logger.error below therefore fires once per failed attempt.
 void runTrackedStartupTask("entitlement_catalogue_seed", () =>
   ensureCatalogueSeeded().catch((err) => {
     logger.error("boot_ensure_catalogue_seeded_failed", { error: err instanceof Error ? err.message : String(err) });

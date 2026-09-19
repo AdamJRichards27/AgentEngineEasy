@@ -24,8 +24,24 @@
  * without it: middlewares/auth.ts (imported by app.ts and by every route
  * module) and index.ts both import this file. installAsyncRouteErrorForwarding()
  * is idempotent.
+ *
+ * EXPRESS MAJOR THIS TARGETS: 4 (see TARGETED_EXPRESS_MAJOR / package.json's
+ * "express": "^4.x"). This patch re-implements Express 4's OWN internals —
+ * Layer.prototype.handle_request / handle_error, their arity checks, their
+ * try/catch. Express 5 renamed those methods (handleRequest / handleError)
+ * and forwards async rejections natively, so on a major bump this module
+ * would find nothing to patch and would silently define two methods nobody
+ * calls: a NO-OP, with async rejections quietly back to hanging the request
+ * and killing the process. That is exactly the failure class this file
+ * exists to prevent, so installation now ASSERTS the shape it expects
+ * (assertPatchableLayerPrototype below) and refuses to fail quietly:
+ * it throws in production (the import is a boot-time side effect, so the
+ * process refuses to start) and logs a loud error elsewhere. On Express 5
+ * the correct action is to DELETE this module, not to repair it.
  */
 import express from "express";
+import { logger } from "@aee/events";
+import { isProductionEnvironment } from "./env.js";
 
 type Next = (err?: unknown) => void;
 type LayerLike = {
@@ -35,6 +51,36 @@ type LayerLike = {
 };
 
 const INSTALLED = Symbol.for("aee.asyncRouteErrorForwarding.installed");
+
+/** The Express major whose Layer internals the patch below re-implements. */
+export const TARGETED_EXPRESS_MAJOR = 4;
+
+/** Thrown when the installed Express is not the one this patch re-implements. */
+export class UnsupportedExpressLayerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedExpressLayerError";
+  }
+}
+
+/**
+ * Cheap install-time shape check. Express 4's Layer prototype defines both
+ * `handle_request` and `handle_error` as functions; any Express where either
+ * is missing (notably Express 5, which renamed them) is one where assigning
+ * over them patches nothing at all. Exported so it can be tested directly
+ * against a synthetic prototype, without installing a different Express.
+ */
+export function assertPatchableLayerPrototype(proto: Partial<Record<keyof LayerLike, unknown>>): void {
+  const missing = (["handle_request", "handle_error"] as const).filter((method) => typeof proto[method] !== "function");
+  if (missing.length === 0) return;
+  throw new UnsupportedExpressLayerError(
+    `asyncRouteErrors: this module re-implements Express ${TARGETED_EXPRESS_MAJOR}'s Layer internals, but the installed ` +
+      `Express's Layer prototype has no ${missing.join(" and no ")} — the patch would be a silent no-op and rejected ` +
+      `async route/middleware promises would again hang the request and terminate the process. Express 5 renamed these to ` +
+      `handleRequest/handleError and forwards async rejections natively: on that version DELETE this module (and its ` +
+      `imports in index.ts and middlewares/auth.ts) rather than repairing it.`,
+  );
+}
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
   return (
@@ -61,6 +107,25 @@ function resolveLayerPrototype(): LayerLike {
 export function installAsyncRouteErrorForwarding(): void {
   const proto = resolveLayerPrototype() as LayerLike & { [INSTALLED]?: boolean };
   if (proto[INSTALLED]) return;
+
+  // Fail loudly, never silently, if this is not the Express this patch was
+  // written against — see the module comment.
+  try {
+    assertPatchableLayerPrototype(proto);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("async_route_error_forwarding_unsupported_express", {
+      targetedExpressMajor: TARGETED_EXPRESS_MAJOR,
+      error: message,
+    });
+    // Production: refuse to boot. This module is imported for its side effect
+    // at the very top of index.ts, so throwing here stops the process rather
+    // than letting it serve traffic with unhandled async rejections.
+    if (isProductionEnvironment()) throw err;
+    // Elsewhere: the logged error above is the loud warning; do not write
+    // methods the running Express will never call.
+    return;
+  }
 
   // Re-implements Express 4's own handle_request/handle_error bodies (same
   // arity checks, same synchronous try/catch) and additionally observes the

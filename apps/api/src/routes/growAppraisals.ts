@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
@@ -32,6 +33,42 @@ import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
 
 export const growAppraisalsRouter = Router();
 
+// Route-id validation, the same bounded guard routes/grow.ts and
+// routes/communications.ts already use (deliberately duplicated locally, as
+// they duplicate it from each other, rather than introduced as a shared
+// module). Every route below took a raw `Number(req.params.id)` and handed
+// the result straight to a Drizzle bind, so a non-numeric id reached Postgres
+// as NaN and an id past int4 reached it as an unbindable value — both a 500
+// for what is an ordinary client error. Bounded by MAX_SIGNED_INT4 because
+// every id these routes resolve is a `serial` column, i.e. int4.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/**
+ * Resolves a route id, answering 400 itself (in this router's existing
+ * `{ error }` shape) and returning null when it is malformed — so each
+ * handler's guard stays a single early-return line.
+ */
+function readIdParam(
+  res: import("express").Response,
+  value: unknown,
+  label: "appraisal" | "comparable sale" | "market competition entry",
+): number | null {
+  const id = parsePositiveId(value);
+  if (id === null) {
+    res.status(400).json({ error: `Invalid ${label} id` });
+    return null;
+  }
+  return id;
+}
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_APPRAISAL_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
 /** Maps this feature's typed errors to the same shape/status style the
  * rest of the API already uses (see routes/appraisals.ts, routes/ai.ts). */
 function handleGrowAppraisalError(err: unknown, res: import("express").Response): void {
@@ -52,7 +89,18 @@ function handleGrowAppraisalError(err: unknown, res: import("express").Response)
     res.status(429).json({ error: err.message });
     return;
   }
-  res.status(400).json({ error: (err as Error).message });
+  // Anything reaching here is NOT one of this feature's expected, typed,
+  // client-facing errors — it is an unrecognised server fault (a bug, a
+  // database error, a failing dependency). Returning `(err as Error).message`
+  // both leaked internal detail (constraint names, SQL fragments, provider
+  // messages) to any authenticated caller and mislabelled a server fault as a
+  // client error. The typed branches above keep their own messages, which are
+  // written for users; this one does not.
+  logger.error("grow_appraisal_route_unhandled_error", {
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? err.name : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_APPRAISAL_ERROR });
 }
 
 const requiresRunAccess = requireEntitlement("run.access");
@@ -147,7 +195,8 @@ growAppraisalsRouter.get("/pipeline", requireAuth, requiresGrowAccess, async (re
  * -----------------------------------------------------------------*/
 growAppraisalsRouter.get("/:id", requireAuth, requiresGrowAccess, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   try {
     const workspace = await getAppraisalWorkspace(appraisalId, user.brokerageId);
     res.json(workspace);
@@ -174,7 +223,8 @@ const updateWorkspaceSchema = z.object({
 
 growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = updateWorkspaceSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -200,7 +250,8 @@ const statusSchema = z.object({ toStatus: z.string().min(1) });
 
 growAppraisalsRouter.post("/:id/status", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = statusSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -230,7 +281,8 @@ const outcomeSchema = z.object({
 
 growAppraisalsRouter.post("/:id/outcome", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = outcomeSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -261,7 +313,8 @@ const followUpSchema = z.object({
 
 growAppraisalsRouter.post("/:id/follow-up", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = followUpSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -291,7 +344,8 @@ const sendSchema = z.object({
 
 growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = sendSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -316,7 +370,8 @@ growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requires
  * -----------------------------------------------------------------*/
 growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   try {
     const result = await generateMarketPositionDraft({
       appraisalId,
@@ -335,7 +390,8 @@ growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requires
  * -----------------------------------------------------------------*/
 growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   try {
     const result = await generateAppraisalPresentation({
       appraisalId,
@@ -354,7 +410,8 @@ growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGro
  * -----------------------------------------------------------------*/
 growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresGrowAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   try {
     const result = await prepareAppraisalRunHandoff({
       appraisalId,
@@ -393,7 +450,8 @@ function normalizeSaleDate(saleDate: string | null | undefined): Date | null | u
 
 growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = comparableSaleSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -412,8 +470,10 @@ growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAcce
 
 growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
-  const saleId = Number(req.params.saleId);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
+  const saleId = readIdParam(res, req.params.saleId, "comparable sale");
+  if (saleId === null) return;
   const parsed = comparableSaleSchema.partial().safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -432,8 +492,10 @@ growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, require
 
 growAppraisalsRouter.delete("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
-  const saleId = Number(req.params.saleId);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
+  const saleId = readIdParam(res, req.params.saleId, "comparable sale");
+  if (saleId === null) return;
   try {
     await deleteComparableSale(appraisalId, user.brokerageId, saleId);
     res.status(204).send();
@@ -458,7 +520,8 @@ const marketCompetitionSchema = z.object({
 
 growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
   const parsed = marketCompetitionSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -474,8 +537,10 @@ growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAc
 
 growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
-  const itemId = Number(req.params.itemId);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
+  const itemId = readIdParam(res, req.params.itemId, "market competition entry");
+  if (itemId === null) return;
   const parsed = marketCompetitionSchema.partial().safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -491,8 +556,10 @@ growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requi
 
 growAppraisalsRouter.delete("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
-  const appraisalId = Number(req.params.id);
-  const itemId = Number(req.params.itemId);
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
+  const itemId = readIdParam(res, req.params.itemId, "market competition entry");
+  if (itemId === null) return;
   try {
     await deleteMarketCompetitionItem(appraisalId, user.brokerageId, itemId);
     res.status(204).send();

@@ -137,24 +137,39 @@ function legacyUnkeyedInputPayloadHash(payload: unknown): string {
 }
 
 // Backward compatibility for rows proposed by the previous release (plain,
-// unprefixed SHA-256). Because an unkeyed hash can be forged by anyone who
-// can edit the row, a legacy hash is honoured only when ALL of these hold:
+// unprefixed SHA-256). A legacy hash is honoured only when ALL of these hold:
 //   - the row's createdAt is before this process loaded this module — this
 //     code never writes an unprefixed hash, so an unprefixed hash on a row
 //     created afterwards can only be a forgery (e.g. an attacker who swapped
 //     the payload and recomputed plain SHA-256) and is rejected;
-//   - the current time is before LEGACY_UNKEYED_HASH_SUNSET, a fixed hard
-//     stop after which the legacy path is dead (legacy rows expire within
-//     24h of creation anyway, so any real legacy row is long gone by then);
+//   - the current time is before LEGACY_UNKEYED_HASH_SUNSET (see below);
 //   - the recomputed plain SHA-256 matches.
-// Residual risk (documented, accepted): until the sunset, an attacker with
-// direct write access to the table who ALSO backdates createdAt can still
-// downgrade a row to the legacy format; the keyed format is what closes
-// that for every row written from now on. createdAt is a timestamp without
-// time zone written by the database clock, so this comparison assumes the
-// UTC database the deployment runbook requires.
+//
+// BE HONEST ABOUT WHAT THIS IS. The legacy path is a DEPLOY-WINDOW
+// CONVENIENCE, NOT A SECURITY CONTROL. An unkeyed hash can be recomputed by
+// anyone who can edit the row, and anyone who can write inputPayload /
+// inputPayloadHash can write createdAt just as freely — so the "created
+// before this module loaded" condition stops accidents and stale replays,
+// not a determined writer of that table. The only thing that actually closes
+// the downgrade is the window SHUTTING: from that moment an unprefixed hash
+// never verifies, whatever its createdAt claims, and every row written by
+// this code carries the keyed "v2:" format.
+//
+// The window is therefore measured from module load rather than a fixed
+// calendar date, so it closes itself ~2 days after each deploy with no
+// follow-up code change and no long-lived weak path. 48h comfortably exceeds
+// DEFAULT_EXPIRY_MS (24h): any genuine pre-upgrade row has already expired
+// well before the window shuts, so nothing real is lost when it does. (The
+// previous hard-coded 2026-12-31 sunset left this path open for ~15 months
+// to accommodate rows that cannot outlive 24h — far longer than necessary.)
+//
+// createdAt is a timestamp without time zone written by the database clock,
+// so this comparison assumes the UTC database the deployment runbook requires.
 const MODULE_LOADED_AT_MS = Date.now();
-export const LEGACY_UNKEYED_HASH_SUNSET = new Date("2026-12-31T00:00:00.000Z");
+/** How long after process start an unprefixed (pre-WP2b) hash may still verify. */
+export const LEGACY_UNKEYED_HASH_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** Instant after which no unprefixed hash verifies, whatever its createdAt claims. */
+export const LEGACY_UNKEYED_HASH_SUNSET = new Date(MODULE_LOADED_AT_MS + LEGACY_UNKEYED_HASH_WINDOW_MS);
 
 function constantTimeEqualText(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");

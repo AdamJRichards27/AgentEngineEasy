@@ -301,3 +301,44 @@ test("WP1 P1-2: a pre-existing bad row whose ownerUserId points at another broke
     await db.update(appraisals).set({ ownerUserId: null }).where(eq(appraisals.id, appraisalId));
   }
 });
+
+/* ---------------------------------------------------------------------
+ * Independent-review remediation — handleGrowAppraisalError.
+ *
+ * Every typed, expected error this feature raises keeps its own
+ * client-facing message and status (404 / 409 / 403 / 429). Anything else
+ * used to be answered as `400 { error: (err as Error).message }`, which both
+ * leaked internal detail (here: a raw JS/driver message) and mislabelled a
+ * server fault as a client error.
+ * -----------------------------------------------------------------*/
+
+test("an unrecognised error returns a generic 500, never the raw error message", async () => {
+  const { appraisalId } = await createAppraisal(GROW.admin.cookie, "6 Generic Error St");
+
+  // followUpAt passes the route schema (a non-empty string) but is not a
+  // parseable date, so `new Date(...)` produces an Invalid Date and the write
+  // throws an untyped RangeError from deep inside the driver — exactly the
+  // "unrecognised error" class this branch exists for.
+  const res = await call("POST", `/appraisals/${appraisalId}/follow-up`, GROW.admin.cookie, {
+    followUpAt: "not-a-real-date",
+  });
+
+  assert.equal(res.status, 500, `expected a server error, got ${res.status}`);
+  const body = (await res.json()) as { error: string };
+  assert.equal(body.error, "An unexpected error occurred. Please try again or contact support if the problem persists.");
+  assert.doesNotMatch(body.error, /Invalid time value|RangeError|appraisals|SELECT|INSERT|UPDATE/i);
+});
+
+test("typed, expected errors keep their own messages and statuses", async () => {
+  const { appraisalId } = await createAppraisal(GROW.admin.cookie, "7 Typed Error St");
+
+  // AppraisalAccessError -> 404 with its own message.
+  const missing = await call("GET", "/appraisals/2000000000", GROW.admin.cookie);
+  assert.equal(missing.status, 404);
+  assert.equal(((await missing.json()) as { error: string }).error, "Appraisal not found");
+
+  // AppraisalTransitionError -> 409 with its own message.
+  const badTransition = await call("POST", `/appraisals/${appraisalId}/status`, GROW.admin.cookie, { toStatus: "WON" });
+  assert.equal(badTransition.status, 409, await badTransition.clone().text());
+  assert.match(((await badTransition.json()) as { error: string }).error, /recordOutcome/);
+});

@@ -841,3 +841,47 @@ test("Relationship Timeline and Property Timeline integration — signal review/
   const ownPropertyRes = await getPropertyTimelineHttp(reviewPropertyId, cookie);
   assert.equal(ownPropertyRes.status, 200);
 });
+
+/* ---------------------------------------------------------------------
+ * Live smoke re-run of the hardened branch — no raw SQL in a client body.
+ *
+ * `GET /grow/property-intelligence/contact/abc` answered 400 with the
+ * Postgres driver's own "Failed query: select ..." text: the id was handed
+ * straight to a Drizzle bind as NaN, and handlePropertyIntelligenceError
+ * returned `(err as Error).message` verbatim. The id is now rejected before
+ * any query runs, and an unrecognised error can never carry a driver message.
+ * -----------------------------------------------------------------*/
+
+test("a malformed route id is rejected before any query, and never returns driver/SQL text", async () => {
+  const cookie = A.admin.cookie;
+  for (const path of ["/contact/abc", "/property/abc", "/property/abc/matches", "/property/abc/signals"]) {
+    const res = await fetch(piUrl(path), { headers: { cookie } });
+    assert.equal(res.status, 400, `GET ${path} expected 400, got ${res.status}`);
+    const text = await res.text();
+    assert.doesNotMatch(text, /Failed query/i, `GET ${path} leaked the driver's failed-query text: ${text}`);
+    assert.doesNotMatch(text, /select /i, `GET ${path} leaked SQL: ${text}`);
+    assert.match(((JSON.parse(text) as { error: string }).error), /^Invalid (property|contact) id$/);
+  }
+
+  for (const path of ["/matches/abc/confirm", "/signals/abc/review", "/property/abc/recalculate"]) {
+    const res = await fetch(piUrl(path), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400, `POST ${path} expected 400, got ${res.status}`);
+    const text = await res.text();
+    assert.doesNotMatch(text, /Failed query|select /i, `POST ${path} leaked SQL: ${text}`);
+  }
+
+  // An id past int4 is an integer, but still unbindable — the same leak.
+  const pastInt4 = await fetch(piUrl("/contact/2147483648"), { headers: { cookie } });
+  assert.equal(pastInt4.status, 400);
+  assert.doesNotMatch(await pastInt4.text(), /Failed query|select /i);
+
+  // Unchanged: a well-formed id that simply does not exist is still a 404
+  // carrying the typed error's own message, not the generic one.
+  const unknown = await fetch(piUrl("/property/2000000000"), { headers: { cookie } });
+  assert.equal(unknown.status, 404);
+  assert.equal(typeof ((await unknown.json()) as { error: string }).error, "string");
+});

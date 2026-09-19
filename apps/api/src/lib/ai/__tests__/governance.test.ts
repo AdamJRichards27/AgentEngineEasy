@@ -39,6 +39,7 @@ import {
   hashInputPayload,
   verifyInputPayloadHash,
   LEGACY_UNKEYED_HASH_SUNSET,
+  LEGACY_UNKEYED_HASH_WINDOW_MS,
   recoverStuckExecutingActionRequests,
   STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "../actionRequests.js";
@@ -451,7 +452,23 @@ test("WP2b tamper at execution: keyless forgeries (plain SHA-256, or plain SHA-2
   }
 });
 
-test("WP2b legacy compatibility: an unprefixed SHA-256 row created before the upgrade still approves/executes; the same hash on a post-upgrade row or after the sunset does not verify", async (t) => {
+test("WP2b legacy window: the unkeyed-hash sunset is measured from module load and is short (<= 48h), not a fixed calendar date months away", () => {
+  // The legacy path is a deploy-window convenience, not a security control
+  // (see actionRequests.ts's comment): it must close itself shortly after
+  // deploy. A regression to a hard-coded far-future date would show up here.
+  assert.equal(LEGACY_UNKEYED_HASH_WINDOW_MS, 48 * 60 * 60 * 1000);
+  const remainingMs = LEGACY_UNKEYED_HASH_SUNSET.getTime() - Date.now();
+  assert.ok(remainingMs > 0, "the window must still be open in the process that just loaded the module");
+  assert.ok(
+    remainingMs <= LEGACY_UNKEYED_HASH_WINDOW_MS,
+    `the sunset must be within ${LEGACY_UNKEYED_HASH_WINDOW_MS}ms of module load, got ${remainingMs}ms`,
+  );
+  // Action requests expire in 24h, so the window must still outlast any real
+  // legacy row — otherwise a legitimate pending row would be rejected.
+  assert.ok(remainingMs > 24 * 60 * 60 * 1000, "the window must outlast a legacy row's own 24h expiry");
+});
+
+test("WP2b legacy compatibility: an unprefixed SHA-256 row created before the upgrade still approves/executes; the same hash on a post-upgrade row or outside the module-load window does not verify", async (t) => {
   const brokerageId = await createBrokerage("Gov Test - WP2b legacy hash");
   t.after(() => cleanupBrokerage(brokerageId));
   const agentId = await createUser(brokerageId, "Agent");
@@ -468,14 +485,21 @@ test("WP2b legacy compatibility: an unprefixed SHA-256 row created before the up
   const legacyRow = (await getAIActionRequest(request!.id, brokerageId))!;
 
   const beforeSunset = new Date(LEGACY_UNKEYED_HASH_SUNSET.getTime() - 1);
-  assert.equal(verifyInputPayloadHash(legacyRow, beforeSunset), true);
-  assert.equal(verifyInputPayloadHash(legacyRow, LEGACY_UNKEYED_HASH_SUNSET), false, "the legacy path is dead after the sunset");
+  assert.equal(verifyInputPayloadHash(legacyRow, beforeSunset), true, "inside the window a genuine legacy row still verifies");
+  assert.equal(verifyInputPayloadHash(legacyRow, new Date()), true, "and it verifies right now, during the deploy window");
+  assert.equal(verifyInputPayloadHash(legacyRow, LEGACY_UNKEYED_HASH_SUNSET), false, "the legacy path is dead at the sunset");
+  assert.equal(
+    verifyInputPayloadHash(legacyRow, new Date(LEGACY_UNKEYED_HASH_SUNSET.getTime() + 60 * 60 * 1000)),
+    false,
+    "and stays dead afterwards, however old the row claims to be",
+  );
   assert.equal(verifyInputPayloadHash({ ...legacyRow, createdAt: new Date(Date.now() + 1_000) }, beforeSunset), false, "an unprefixed hash on a row created after the upgrade is a forgery");
   assert.equal(verifyInputPayloadHash({ ...legacyRow, inputPayload: { propertyId, note: "changed" } }, beforeSunset), false);
   assert.equal(verifyInputPayloadHash({ ...legacyRow, inputPayloadHash: "v3:" + legacyHash }, beforeSunset), false, "unknown hash versions fail closed");
 
-  // End-to-end through the real Execution Gateway (wall clock). Once the
-  // hard sunset has passed, the legacy row must instead be refused.
+  // End-to-end through the real Execution Gateway (wall clock). The window is
+  // measured from module load, so in this process it is open by construction;
+  // the branch is kept so the assertion stays honest if that ever changes.
   const result = await executeAIAction(request!.id, brokerageId, agent);
   if (Date.now() < LEGACY_UNKEYED_HASH_SUNSET.getTime()) {
     assert.equal(result.ok, true, `legacy row should still execute, got ${result.reason}`);

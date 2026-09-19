@@ -64,6 +64,12 @@ before(async () => {
     "grow.relationships.manage",
     "grow.contacts.read",
     "grow.contacts.manage",
+    // Required by the contact-commitment routes and by every /grow/appraisals
+    // mutation exercised below — without it the entitlement middleware answers
+    // 403 before the id guard under test ever runs.
+    "grow.activities.manage",
+    "grow.propertyIntelligence.read",
+    "grow.propertyIntelligence.manage",
   ]) {
     await db.insert(entitlementGrants).values({
       brokerageId: A.brokerageId,
@@ -91,7 +97,7 @@ after(async () => {
 });
 
 interface RouteUnderTest {
-  method: "GET" | "POST" | "PATCH";
+  method: "GET" | "POST" | "PATCH" | "DELETE";
   /** Path with {id} standing in for the parameter under test. */
   path: string;
   body?: unknown;
@@ -175,6 +181,129 @@ test("grow: the relationship id guard covers out-of-range integers too", async (
   // PATCH /grow/relationships/:id already rejected "abc"; it did not reject an
   // id past int4, which produced the same 500 as an unguarded route.
   await assertRejectsMalformedIds([{ method: "PATCH", path: "/api/grow/relationships/{id}", body: { status: "Active" } }]);
+});
+
+// ---------------------------------------------------------------------
+// Independent-review remediation: the two routers the original pass missed.
+//
+// routes/growAppraisals.ts had NO id guard at all (raw Number(req.params.id)
+// at every site); routes/contacts.ts's parsePositiveId had no int4 ceiling,
+// so it rejected "abc" but let "2147483648" through to the same 500.
+// ---------------------------------------------------------------------
+
+test("grow appraisals: every :id route rejects a malformed id (there was no guard at all)", async () => {
+  await assertRejectsMalformedIds([
+    { method: "GET", path: "/api/grow/appraisals/{id}" },
+    { method: "PATCH", path: "/api/grow/appraisals/{id}", body: { pricingCommentary: "x" } },
+    { method: "POST", path: "/api/grow/appraisals/{id}/status", body: { toStatus: "PREPARING" } },
+    { method: "POST", path: "/api/grow/appraisals/{id}/outcome", body: { outcome: "WON" } },
+    { method: "POST", path: "/api/grow/appraisals/{id}/follow-up", body: { followUpAt: "2030-01-01T00:00:00.000Z" } },
+    { method: "POST", path: "/api/grow/appraisals/{id}/send", body: {} },
+    { method: "POST", path: "/api/grow/appraisals/{id}/market-position/generate" },
+    { method: "POST", path: "/api/grow/appraisals/{id}/presentation/generate" },
+    { method: "POST", path: "/api/grow/appraisals/{id}/run-handoff" },
+    { method: "POST", path: "/api/grow/appraisals/{id}/comparable-sales", body: { address: "1 Test St" } },
+    { method: "POST", path: "/api/grow/appraisals/{id}/market-competition", body: { address: "1 Test St" } },
+  ]);
+});
+
+test("grow appraisals: the SECOND id param (sale/competition entry) is guarded too", async () => {
+  // The appraisal id is well-formed in each of these, so only the nested id
+  // can be responsible for the 400.
+  for (const id of MALFORMED_IDS) {
+    for (const path of [
+      `/api/grow/appraisals/1/comparable-sales/${id}`,
+      `/api/grow/appraisals/1/market-competition/${id}`,
+    ]) {
+      for (const method of ["PATCH", "DELETE"] as const) {
+        const res = await fetch(`${baseUrl}${path}`, {
+          method,
+          headers: method === "PATCH" ? { cookie, "content-type": "application/json" } : { cookie },
+          body: method === "PATCH" ? JSON.stringify({ address: "1 Test St" }) : undefined,
+        });
+        assert.equal(res.status, 400, `${method} ${path} must answer 400, got ${res.status}: ${await res.clone().text()}`);
+        const body = (await res.json()) as { error?: unknown };
+        assert.equal(typeof body.error, "string");
+      }
+    }
+  }
+});
+
+test("grow contacts: the id guard now covers out-of-range integers, not only non-numerics", async () => {
+  await assertRejectsMalformedIds([
+    { method: "GET", path: "/api/grow/contacts/{id}" },
+    { method: "POST", path: "/api/grow/contacts/{id}/roles", body: { role: "Owner" } },
+    { method: "POST", path: "/api/grow/contacts/{id}/relationships", body: { relatedPartyId: 1, relationshipType: "Spouse" } },
+    { method: "POST", path: "/api/grow/contacts/{id}/commitments", body: { commitmentText: "x", dueAt: "2030-01-01T00:00:00.000Z" } },
+    { method: "DELETE", path: "/api/grow/contacts/relationships/{id}" },
+    { method: "PATCH", path: "/api/grow/contacts/commitments/{id}", body: { status: "Completed" } },
+  ]);
+});
+
+test("grow property intelligence: every :id route rejects a malformed id (there was no guard at all)", async () => {
+  await assertRejectsMalformedIds([
+    { method: "GET", path: "/api/grow/property-intelligence/property/{id}" },
+    { method: "GET", path: "/api/grow/property-intelligence/contact/{id}" },
+    { method: "GET", path: "/api/grow/property-intelligence/property/{id}/matches" },
+    { method: "GET", path: "/api/grow/property-intelligence/property/{id}/signals" },
+    { method: "POST", path: "/api/grow/property-intelligence/property/{id}/recalculate", body: {} },
+    { method: "POST", path: "/api/grow/property-intelligence/matches/{id}/confirm", body: {} },
+    { method: "POST", path: "/api/grow/property-intelligence/matches/{id}/reject", body: {} },
+    { method: "POST", path: "/api/grow/property-intelligence/signals/{id}/review", body: {} },
+    { method: "POST", path: "/api/grow/property-intelligence/signals/{id}/dismiss", body: {} },
+    { method: "POST", path: "/api/grow/property-intelligence/signals/{id}/promote", body: {} },
+  ]);
+});
+
+// ---------------------------------------------------------------------
+// Live smoke re-run of the hardened branch: these two exact requests
+// answered 400 with the Postgres driver's own "Failed query: select ..."
+// text in the body — the schema of an internal query returned to any
+// authenticated caller. The guard must reject the id BEFORE any query runs,
+// and no unrecognised error may ever surface a driver/query message.
+// ---------------------------------------------------------------------
+
+test("smoke re-run: a malformed id never returns raw SQL / driver text in the body", async () => {
+  const repros = [
+    "/api/grow/appraisals/abc",
+    "/api/grow/property-intelligence/contact/abc",
+    // The same shape, for every other id param these two routers own.
+    "/api/grow/property-intelligence/property/abc",
+    "/api/grow/property-intelligence/matches/abc/confirm",
+    "/api/grow/property-intelligence/signals/abc/promote",
+    "/api/grow/appraisals/abc/comparable-sales",
+  ];
+  for (const path of repros) {
+    const method = path.includes("/confirm") || path.includes("/promote") || path.endsWith("/comparable-sales") ? "POST" : "GET";
+    const res = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: method === "POST" ? { cookie, "content-type": "application/json" } : { cookie },
+      body: method === "POST" ? JSON.stringify({}) : undefined,
+    });
+    assert.equal(res.status, 400, `${method} ${path} must answer 400, got ${res.status}`);
+    const text = await res.text();
+    assert.doesNotMatch(text, /Failed query/i, `${path} leaked the driver's failed-query text: ${text}`);
+    assert.doesNotMatch(text, /select /i, `${path} leaked SQL: ${text}`);
+    assert.doesNotMatch(text, /\bfrom "?\w+"?\b/i, `${path} leaked a table reference: ${text}`);
+    assert.equal(typeof (JSON.parse(text) as { error?: unknown }).error, "string");
+  }
+});
+
+test("grow appraisals/contacts: a well-formed but unknown id is still a normal 404, never 400", async () => {
+  const unknownButValid = String(2_000_000_000);
+  for (const path of [`/api/grow/appraisals/${unknownButValid}`, `/api/grow/contacts/${unknownButValid}`]) {
+    const res = await fetch(`${baseUrl}${path}`, { headers: { cookie } });
+    assert.equal(res.status, 404, `${path} expected 404, got ${res.status}: ${await res.clone().text()}`);
+  }
+  // int4's ceiling itself must remain a valid id in both routers.
+  for (const path of [`/api/grow/appraisals/${LAST_IN_RANGE_ID}`, `/api/grow/contacts/${LAST_IN_RANGE_ID}`]) {
+    const res = await fetch(`${baseUrl}${path}`, { headers: { cookie } });
+    assert.equal(res.status, 404, `${path} expected 404, got ${res.status}`);
+  }
+  for (const path of [`/api/grow/appraisals/${FIRST_OUT_OF_RANGE_ID}`, `/api/grow/contacts/${FIRST_OUT_OF_RANGE_ID}`]) {
+    const res = await fetch(`${baseUrl}${path}`, { headers: { cookie } });
+    assert.equal(res.status, 400, `${path} expected 400, got ${res.status}`);
+  }
 });
 
 // ---------------------------------------------------------------------
