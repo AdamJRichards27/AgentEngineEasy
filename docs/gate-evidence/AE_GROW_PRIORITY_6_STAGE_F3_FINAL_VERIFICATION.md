@@ -1,76 +1,126 @@
 # AE GROW Priority 6 — Stage F3 final verification
 
-Date: 2026-09-18. No commit, push, PR, staging operation, or production feature change was performed.
+Branch: `feat/ae-grow-priority-6-stage-f3-transcription-review` (PR #43). Updated 2026-09-19 after the independent-review remediation (findings A–D below).
 
-## Decision
+## Status
 
-**Not ready for commit/push.** The audit exposes a tenant-existence disclosure and an unresolved state-reachability requirement. These are not the previously excluded voice-recording or preview-runtime defects.
+**Pending independent re-review.** This report does not claim merge readiness. No push, merge, staging operation, live-flag change, or production deployment is described or implied by this document.
 
-1. A cross-brokerage transcription initiation request for an existing foreign `(call_session_id, recording_reference)` receives HTTP 409 with `TENANT_MISMATCH` and “The transcription belongs to another brokerage.” The same foreign session with an absent tuple receives HTTP 404 with `CALL_NOT_FOUND`. No transcript content is returned and no foreign artifact or Timeline entry is modified, but the distinction discloses existence. The new regression requires uniform not-found behavior and is intentionally retained as failing.
-2. `MEDIA_PROCESSING`, `DELETION_SCHEDULED`, and `DELETED` are accepted by the schema and recognized by consumers, but no production operation enters these states. Database fixture updates do not establish production reachability. Either implement and test the required lifecycle transitions or explicitly approve a narrower requirement for reserved states.
+## Scope of changes on this branch
 
-## Test-coverage audit
+Stage F3 is not a test-only change. The branch adds:
 
-| Requirement | Real test evidence / conclusion |
+- Production API code: call transcription initiation (`apps/api/src/lib/telephony/callTranscriptions.ts`), shared policy vocabulary (`callTranscriptionPolicy.ts`), AI drafting (`callTranscriptionDrafts.ts`), human review persistence (`callTranscriptionReview.ts`), the approved `call_summary` Timeline write-through (`callTranscriptionTimeline.ts`), stale-processing reconciliation (`callTranscriptionReconciliation.ts`, `callTranscriptionReconciler.ts`), and the transcription routes in `apps/api/src/routes/growCalls.ts`.
+- Database schema and migrations: `packages/db/src/schema/callTranscriptions.ts` with migrations `0023_natural_lorna_dane.sql` and `0024_flaky_masked_marvel.sql` (plus their Drizzle snapshots/journal entries).
+- Web review panel and helpers, tests, and this report.
+
+The remediation described below changed production API code and tests only. It added **no** migration, schema change, dependency, package manifest/lockfile change, workflow change, or live-flag change. The durable `failure_reason` column is unconstrained `text`; the failure vocabulary is a TypeScript allowlist, so the one new reason (`CONSENT_WITHDRAWN`) needs no migration.
+
+## Tenant isolation of initiation (earlier finding, resolved)
+
+An earlier draft of this report recorded that a cross-brokerage initiation for an existing foreign `(call_session_id, recording_reference)` tuple returned HTTP 409 `TENANT_MISMATCH`, which disclosed existence. That is no longer the behaviour: cross-brokerage initiation is uniformly HTTP 404 `CALL_NOT_FOUND` ("Call session not found in this brokerage.") for existing and absent tuples and for absent calls, with identical bodies and headers. Covered by `apps/api/src/routes/__tests__/callTranscriptionReview.test.ts` ("cross-brokerage transcription initiation is uniformly not found for existing and absent recording tuples") and the service test "rejects an existing foreign artifact as CALL_NOT_FOUND without mutating it".
+
+## Remediation (independent review findings A–D)
+
+### A — Same-brokerage ownership before any existing transcription is read or transitioned
+
+Defect: `initiateCallTranscription` loaded the existing row for the call/recording tuple before checking call ownership. A same-brokerage, non-privileged agent holding `grow.calling.transcription` could receive a terminal row (transcript and drafts) as-is, and for PENDING/TRANSCRIBING rows the caller's own `ACCESS_DENIED` went through `failOwned`, marking the owner's row FAILED.
+
+Fix (`apps/api/src/lib/telephony/callTranscriptions.ts`):
+
+- After the actor/tenant/entitlement checks and **before** the existing-row lookup, the service resolves the call with `getCallSessionForBrokerage(…, actor)`. This uses the same rule as every other call read (initiator or brokerage-admin role). Not found maps to `CALL_NOT_FOUND` (404) and unauthorised maps to `ACCESS_DENIED` (403). Both are strict-audited rejections against the call session, never state transitions of the row.
+- `isActorSpecificDenial` (`ACCESS_DENIED`, `ENTITLEMENT_REQUIRED`, `TENANT_MISMATCH`, `INVALID_INPUT`) now makes the pre-claim PENDING/TRANSCRIBING paths rethrow instead of calling `failOwned`. Source-validity failures (recording deleted/unavailable, reference mismatch, F2 evidence missing/invalid, consent withdrawn) can still fail an owned row when an authorised caller discovers them, as before.
+- A recording-loader `RECORDING_ACCESS_DENIED` (caller-specific owner/recording-entitlement denial) is now surfaced as `ACCESS_DENIED` rather than being disguised as `RECORDING_UNAVAILABLE`, so it cannot become a durable source failure.
+- The route (`POST /grow/calls/:id/transcription`) maps `ACCESS_DENIED` to 403 and `CALL_NOT_FOUND` to 404, matching `transcriptionReviewErrorStatus` for the other transcription routes. The body is `{ error, code }` only, with no row.
+- Unchanged: after an authorised caller has claimed the row itself, a mid-flight loss of that caller's own access or entitlement still fails the caller's own claim. This is existing, tested behaviour ("actor access revoked while the provider is in flight…", "rechecks entitlement before every retry…").
+
+Tests:
+
+- `apps/api/src/lib/telephony/__tests__/callTranscriptions.test.ts`: "same-brokerage non-owner is denied for completed, approved, pending, and transcribing owner rows without data or mutation". It covers owner rows in AWAITING_AGENT_REVIEW, APPROVED, PENDING, and TRANSCRIBING. For each: `ACCESS_DENIED`; the error carries no transcript or draft text; the owner row is identical, including the raw `updated_at::text` token, `processingState`, `retryCount`, transcript, drafts, and `failureReason`; no transition audit is written for the row; zero transcription-provider and zero AI-gateway calls. An owner replay control still receives the unchanged terminal row.
+- `apps/api/src/routes/__tests__/callTranscriptionReview.test.ts`: "same-brokerage non-owner POST transcription is denied with no row data and no owner-row mutation in any state". This is the HTTP equivalent: 403, a body containing only `code`/`error`, no transcript or draft content, a byte-identical owner row, no Timeline entry, and zero provider/AI calls.
+
+### B — Withdrawn consent blocks any new transcription or AI processing (deny by default)
+
+Defect: `assertPersistedF2Evidence` verified the consent *as captured* but never the consent's current withdrawal state. `recomputeSessionRecordingPermission` deliberately leaves terminal calls unchanged. That is an F2 fix and was not modified. As a result, a withdrawal after the call ended did not stop later transcription.
+
+Fix (`apps/api/src/lib/telephony/callTranscriptions.ts`):
+
+- `assertRecordingConsentNotWithdrawn` re-reads the current persisted capture consent (`grow_call_recording_consents` by capture consent id, brokerage, and party). A missing row, `status = 'WITHDRAWN'`, or a non-null `withdrawn_at` rejects with `CONSENT_WITHDRAWN`. It runs inside `validateSource`, so it executes:
+  - before a new or existing-PENDING initiation;
+  - at the start of **every** provider attempt, including each bounded retry;
+  - after the provider returns and **before** the transcript is sent to AI drafting;
+  - after AI drafting and before commit.
+- The commit transaction (`lockActiveRecordingForCommit`) also locks the consent row `FOR UPDATE` and re-checks it. A withdrawal that commits while AI drafting is in flight therefore cannot be overtaken by the transcript/draft commit.
+- A withdrawal found during an attempt fails that attempt durably with `failureReason = CONSENT_WITHDRAWN`. It is non-retryable and stores no transcript or drafts. A new initiation with no row is rejected (HTTP 409) and creates no row.
+- `CONSENT_WITHDRAWN` was added to `CallTranscriptionFailureReason` / `CALL_TRANSCRIPTION_FAILURE_REASONS` in `callTranscriptionPolicy.ts` and to the error-code union. The policy and schema vocabulary tests were updated.
+- Nothing is deleted: the recording, its document version, the consent row, F2 evidence, and any existing transcript remain.
+- The stale-processing reconciler never calls a transcription provider or the AI gateway (it only fails abandoned rows), so it needs no consent gate.
+
+Tests (`apps/api/src/lib/telephony/__tests__/callTranscriptions.test.ts`):
+
+- "withdrawn consent after capture denies new initiation without a provider call, row, or deletion; active consent still transcribes". Covers withdrawal after the call completed via `withdrawRecordingConsent`: rejected with `CONSENT_WITHDRAWN` and strict-audited, no row, zero provider calls, recording still Active, consent row retained. An existing owned PENDING row fails with `CONSENT_WITHDRAWN` without a provider call. The non-withdrawn control completes normally.
+- "consent withdrawn during transcription stops before AI drafting and stores no transcript": one provider call, zero AI-gateway calls, FAILED/`CONSENT_WITHDRAWN`, retryCount 0.
+- "consent withdrawn during AI drafting prevents the transcript and drafts from being committed".
+- "consent withdrawn before a retry stops the next provider submission": exactly one provider call, retryCount 1, FAILED/`CONSENT_WITHDRAWN`.
+
+### C — Strict in-transaction audit for agent Save and Discard
+
+Fix (`apps/api/src/lib/telephony/callTranscriptionReview.ts`):
+
+- `strictReviewAuditInTransaction` writes through `logAudit(…, { strict: true, write: writeAuditInTransaction(tx, …) })`, the same strict in-transaction pattern F3 uses elsewhere.
+  - Save writes `grow_call_transcription_review_saved`. Its audit is written after the Timeline `call_summary` snapshot, in the same transaction.
+  - Discard writes `grow_call_transcription_discarded`.
+- Recorded fields:
+  - Actor `userId`, `brokerageId`, `recordType = grow_call_transcription`, `recordId = transcriptionId`, and `previousValue` (prior processing state).
+  - `providerReference = call:<callSessionId>:recording:<recordingReference>`.
+  - `updatedValue` as JSON: `transcriptionId`, `callSessionId`, `partyId`, and the new `processingState`. Save also records `decisionCounts`: approved, rejected, and total, plus per-item-type approved/rejected counts.
+  - The timestamp is the audit row's `createdAt`.
+  - IDs, states, and counts only: no transcript, edited text, rejection reason, or contact PII.
+- Save now sets `updatedAt` (to the review timestamp); Discard sets `updatedAt`.
+- An audit failure throws `CallTranscriptionReviewError("AUDIT_FAILURE")` inside the transaction (HTTP 409 via the existing review error mapping). The state change, the Timeline activity (Save), and the audit all roll back together.
+
+Tests (`apps/api/src/lib/telephony/__tests__/callTranscriptionReview.test.ts`):
+
+- "save and discard each write exactly one strict audit row with ids, states, and decision counts only".
+- "a strict review audit outage rolls back save (including its Timeline snapshot) and discard". It uses the existing test-only strict-audit outage seam (`setCallTranscriptionAuditFailureForTests`) and proves the transcription row, Timeline activities, and audits are unchanged and that an error surfaces. A recovery control proves Save then commits state, Timeline, and audit together.
+- The existing Save/Discard column test was retitled to reflect `updatedAt`.
+
+### D — This report
+
+Rewritten to remove the stale "Not ready for commit/push" decision, the stale `TENANT_MISMATCH` 409 description, and the incorrect claim that production code and migrations were unchanged. Adds this remediation section and the product decisions below.
+
+## Product decisions recorded
+
+- **Withdrawn consent** blocks any *new* transcription or AI processing attempt (deny by default). It does **not** imply deletion of recordings, transcripts, drafts, reviews, Timeline entries, or evidence. Retention and deletion after withdrawal is a separate, still-open product/legal decision.
+- **Timeline visibility**: saved `call_summary` Timeline entries (approved content snapshot only) follow the existing brokerage/contact Timeline permissions. Transcript, draft, and review data remain restricted to the call owner and brokerage administrators (the call-session ownership rule). No transcript access was broadened.
+
+## Known open items (unchanged, explicitly out of scope of this remediation)
+
+- `MEDIA_PROCESSING`, `DELETION_SCHEDULED`, and `DELETED` are accepted by the schema and handled by consumers/reconciliation, but no production operation enters them. Reachability needs either an implemented lifecycle or an approved narrower requirement for reserved states.
+- The remediation deliberately did not change these deferred items: webhook payload passthrough, permanent-failure HTTP status mapping, inline retries/backoff timer, deletion states, UTC timestamp debt, multer, and the zero-byte voice recording defect.
+
+## Test-coverage map
+
+| Requirement | Covering suites |
 |---|---|
-| Table shape, defaults, JSONB, unique tuple | New `packages/db/src/schema/callTranscriptions.test.ts` exercises the migrated database, JSONB round-trips, CHECK rejection, default metadata, and duplicate tuple rejection. Review item shape, duplicates, and forged metadata are covered by the existing service review validation tests. |
-| All processing states reachable | Seven production-entry states are exercised: PENDING, TRANSCRIBING, AWAITING_AGENT_REVIEW, APPROVED, PARTIALLY_APPROVED, DISCARDED, FAILED. The three additional states above remain an audit gap; enum storage tests are not presented as transition proof. |
-| Call approval flag | New policy tests prove default false, literal-true semantics, and independence from voice/telephony approvals. Existing real service tests prove mock use without approval and real-provider rejection without approval. |
-| Eligibility / entitlement / F2 evidence | Service tests deny missing/revoked entitlement, reject each denied or forged persisted F2 gate, and revalidate source access. New in-flight revocation tests cover actor access and removed/invalidated F2 evidence. The production implementation continues to use persisted F2 proof, not a new recording policy. |
-| Idempotency | Real concurrent/replayed initiation tests and the new database uniqueness test cover the immutable call/recording tuple. |
-| Failure reasons | All 18 policy reasons have triggering service/reconciliation/validation tests. New cases cover missing provider credentials, unknown provider configuration, and in-flight access/F2 changes; invalid-audio and audit-failure assertions now include terminal state and retry count. `INVALID_INPUT` and `RECORDING_REFERENCE_MISMATCH` are correctly rejected before artifact creation; claiming a terminal artifact for those initial denials would be incorrect. |
-| Exact retry cap | Timeout, provider error, and malformed output tests assert exactly four attempts total, retryCount 3, terminal FAILED, no resubmission, and late-result protection. Non-retryable failures assert zero retries. |
-| Reconciliation | Existing sweep tests seed abandoned MEDIA_PROCESSING and TRANSCRIBING artifacts and prove FAILED, counters/audits, and no provider resubmission. This proves recovery from those stored states, not production entry into MEDIA_PROCESSING. |
-| AI drafting | Existing flag-off, success, provider error, timeout, malformed JSON/schema, and post-provider entitlement-revocation cases retain a reviewable transcript where appropriate. No vendor or action-capable AI path was introduced. |
-| Human review | Five normal lifecycle labels are covered, plus “Recording unavailable” as an availability/deletion override. Independent undecided/accepted/rejected item tests and full/partial/discard API tests pass. New component-handler behavior coverage executes the actual component with controlled hook/query/API adapters, proves item decisions make zero writes, and proves explicit Save/Discard call their corresponding write routes. This is a component unit test, not browser E2E. |
-| Timeline | Route tests prove source type/source ID/activity provenance, approved-only content, sequential/concurrent duplicate-save safety, atomic rollback/retry, and no pre-save/discard write. The expanded independence test preserves and reads the snapshot after actual recording destruction, transcript and draft/review redaction, transcription deletion, recording metadata deletion, and session deletion. |
-| F4 boundary | Part G remains unchanged. Its tests remain part of the mandatory full API test command; no separate boundary-only re-run was requested or performed in this phase. |
-| Tenant isolation | Recording/transcription/review/list/Timeline read/write denials and unchanged foreign state are exercised. The new initiation regression exposes the existence oracle above and fails; this requirement is not marked fully satisfied. |
+| Table shape, defaults, JSONB, CHECKs, unique tuple, failure vocabulary | `packages/db/src/schema/callTranscriptions.test.ts`; `apps/api/src/lib/telephony/__tests__/callTranscriptionPolicy.test.ts` |
+| F2 evidence, entitlement, source revalidation, retries, idempotency, provider gating | `apps/api/src/lib/telephony/__tests__/callTranscriptions.test.ts` |
+| Same-brokerage ownership on initiation (A) | `callTranscriptions.test.ts`; `apps/api/src/routes/__tests__/callTranscriptionReview.test.ts` |
+| Consent withdrawal before transcription, retries, AI drafting, and commit (B) | `callTranscriptions.test.ts` |
+| AI drafting (flag, schema, failures, prompt-injection framing) | `callTranscriptionDrafts.test.ts`, `callTranscriptions.test.ts` |
+| Reconciliation of abandoned processing (no resubmission) | `callTranscriptionReconciler.test.ts` |
+| Human review validation, owner scoping, Save/Discard audit and rollback (C) | `apps/api/src/lib/telephony/__tests__/callTranscriptionReview.test.ts`; `apps/api/src/routes/__tests__/callTranscriptionReview.test.ts` |
+| Timeline snapshot provenance, duplicate safety, rollback, independence | `apps/api/src/routes/__tests__/callTranscriptionReview.test.ts` |
+| Tenant isolation across calls/recording/transcription routes | `apps/api/src/routes/__tests__/growCalls.test.ts`, `callTranscriptionReview.test.ts` |
+| F4 boundary (no commitments/actions/communications/tasks) | `apps/api/src/routes/__tests__/callTranscriptionBoundary.test.ts`, `apps/api/src/lib/telephony/__tests__/callTranscriptionBoundaryImports.test.ts` |
+| F2 consent/recording regressions | `consentRegression.test.ts`, `recordingGates.test.ts`, `recordingStorage.test.ts` |
 
-### Failure-reason nuance
+## Verification results
 
-Storage tests accept all documented reason strings on FAILED rows, but runtime proof comes from the separate service/reconciliation tests, not those inserts. A strict audit outage during an ambiguous provider-failure transition intentionally leaves the claim TRANSCRIBING and does not resubmit; reconciliation is the recovery boundary. That fail-closed case is not claimed to have reached a terminal state immediately.
-
-## Full-suite instability
-
-The earlier privacy teardown FK/listener leak is already fixed in the current code: shared brokerage cleanup runs in a `try` and server closure in `finally`. That historical defect is not asserted to be the cause of the later Part D setup-hook timeouts.
-
-The original Part D timeout logs are unavailable in this environment, so their exact cause cannot be conclusively reconstructed. For this final run the mitigation is explicit serial file execution (`--test-concurrency=1`), Node 24, a fresh migrated database, a sanitized test environment, and the original 120000 ms timeout. No timeout increase, test filtering, force-exit flag, or setup-hook bypass is used.
-
-The final invocation completed from 07:22:36 to 07:43:30 UTC (about 20m54s): **1190 passed, 1 failed, 1 skipped, 0 cancelled**, with no setup-hook timeout or hook failure. Its only failure is the new F3 tenant regression. This demonstrates a complete run with the mitigation; it does not establish the historical timeout's root cause.
-
-An earlier attempt was interrupted by a workspace restart before producing final totals and is not counted as a completed gate. Final-run logs are preserved under `.local/f3-final-gates-run/` rather than ephemeral `/tmp`.
-
-## Gate results
-
-Counts for command gates refer to checks/commands, not invented unit-test totals. Suite selections overlap and must not be summed.
-
-| Gate | Passed | Failed | Skipped | Detail |
-|---|---:|---:|---:|---|
-| Workspace typecheck | 12 | 0 | 0 | All workspace typecheck scripts; latest web and DB tests also rechecked. |
-| Clean migration and replay | 2 | 0 | 0 | 25 migration journal entries; clean application and idempotent replay. |
-| Schema drift | 1 | 0 | 0 | Generate against an isolated copy of migration snapshots; no changes, byte-identical tree. |
-| Schema contract tests | 4 | 0 | 0 | New PostgreSQL-backed contract suite. |
-| Full API suite | 1190 | 1 | 1 | One complete invocation across all 134 files selected by the package script; 1192 tests, 82 suites, zero cancellations. |
-| Additional API coaching tests | 90 | 0 | 0 | All four existing API test files omitted by the package script, run separately on another disposable database. |
-| API build | 1 | 0 | 0 | Production esbuild bundle. |
-| Web build | 1 | 0 | 0 | Production Vite bundle; size warning only. |
-| Synthetic production startup | 1 | 0 | 0 | Existing CI script; encrypted S3-compatible lifecycle and readiness both pass. |
-| Security / tenant selection | 123 | 1 | 0 | Only failure is the new F3 initiation disclosure regression. |
-| Full web tests (additional evidence) | 57 | 1 | 0 | Only failure is the excluded zero-byte voiceRecording defect. |
-
-The API skip is the existing test “entitlement restriction: no currently registered action requires a paid entitlement.” Its declared reason is that none of the three demonstration actions sets `requiredEntitlementKey`; entitlement routing has separate direct tests. It was not introduced or skipped by this audit. The additional coaching files are `metrics`, `period`, `responseBuilder`, and `timezone` under `apps/api/src/lib/ai/coaching/__tests__/`. The package script was not changed.
+Final test and typecheck results for this revision are recorded in the PR #43 / CI run rather than in this document. No counts are asserted here. Run database-backed suites serially (`--test-concurrency=1`) against a freshly created and migrated disposable PostgreSQL database in UTC. Several suites use fixed IDs and cross-tenant reconciler fixtures that clash on a reused database or under parallel file execution.
 
 ### Reproduction and environment controls
 
-- Runtime: Node 24.13.0, pnpm 8.15.5, PostgreSQL 16.10.
-- Full API command: the exact `apps/api/package.json` test selection, with `--test-concurrency=1 --test-reporter=tap` added; all configured globs are retained.
-- Security selection: env/session/auth, middleware, webhook freshness, auth routes, AML tenant scoping, privacy, Grow calls, and F3 review/Timeline routes.
-- All database-backed commands use separately created disposable local databases. The configured development database and staging were not queried or migrated.
-- Synthetic startup uses the repository CI harness, local HTTPS mocks, dummy credentials and legal documents, and false live-approval settings. Unit tests exercise flag permutations only within synthetic test processes.
-- An initial startup attempt selected the wrong pnpm major after environment sanitization. The original lock/workspace files were restored exactly, dependencies restored with the frozen lockfile, and the temporary runner explicitly pinned to pnpm 8.15.5 before the final gates. No package/configuration diff remains.
-- The normal Node 20/argon2 preview defect was neither exercised nor repaired. Normal preview workflows remain untouched.
-
-## Scope of changes
-
-Changes are new/strengthened tests, this verification report, and agent notes about isolated gate tooling. Production implementation, migrations, package manifests/lockfile, workflows, live flags, and staging remain unchanged. The failing security regression is preserved, not skipped or weakened.
+- Runtime: Node 24, pnpm 8.15.5, PostgreSQL 16.
+- All database-backed commands use disposable local databases. The configured development database and staging are not queried or migrated.
+- Unit tests exercise live-approval flag permutations only within synthetic test processes. Transcription providers and the AI gateway are replaced through test-only seams that throw outside `NODE_ENV=test`.
