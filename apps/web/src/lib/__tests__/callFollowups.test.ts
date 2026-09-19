@@ -199,6 +199,28 @@ test("status labels cover proposed, expired, completed and already-proposed item
   );
 });
 
+test("a request whose commitment may already exist (late completion after recovery) is labelled 'check Commitments', never 'propose again'", () => {
+  const mayExist = followupStatus(candidate({
+    canPropose: false,
+    existingProposal: { visibility: "VISIBLE", actionRequest: request({ status: "FAILED", commitmentMayExist: true }) },
+  }), NOW);
+  assert.deepEqual(mayExist, { label: "Commitment may already exist — check Commitments", tone: "warning" });
+  assert.deepEqual(
+    followupStatus(candidate({ canPropose: false, latestProposalStatus: "COMMITMENT_MAY_EXIST" }), NOW),
+    { label: "Commitment may already exist — check Commitments", tone: "warning" },
+  );
+  assert.doesNotMatch(mayExist.label, /propose it again/);
+  // A FAILED request with no possible side effect keeps the retry copy.
+  assert.equal(
+    followupStatus(candidate({ latestProposalStatus: "FAILED" }), NOW).label,
+    "Previous proposal didn’t complete — you can propose it again",
+  );
+  assert.equal(
+    followupStatus(candidate({ canPropose: false, existingProposal: { visibility: "VISIBLE", actionRequest: request({ status: "COMPLETED", commitmentMayExist: true }) } }), NOW).label,
+    "Commitment created",
+  );
+});
+
 test("an already-proposed-by-another-user item never exposes any proposal details or card", () => {
   const other = candidate({ canPropose: false, existingProposal: { visibility: "ALREADY_PROPOSED" } });
   assert.equal(cardRequestForCandidate(other, {}), null);

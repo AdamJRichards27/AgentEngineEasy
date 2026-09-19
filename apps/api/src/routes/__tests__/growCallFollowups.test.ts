@@ -7,7 +7,7 @@
  * can be replaced by counting, throwing mocks BEFORE the app is imported.
  */
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
@@ -36,7 +36,7 @@ import {
   type DevLoginResult,
 } from "./testSupport.js";
 
-const EXPECTED_TESTS = 6;
+const EXPECTED_TESTS = 8;
 
 if (!process.execArgv.includes("--experimental-test-module-mocks")) {
   test("F4.1 governed call follow-ups suite (isolated module-mock process)", async (t) => {
@@ -69,6 +69,29 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET && process.env.SESSION_S
 process.env.ALLOW_DEV_AUTH = "true";
 const { installF4ForbiddenCalls } = await import("./support/f4ForbiddenCalls.js");
 const forbiddenCalls = await installF4ForbiddenCalls();
+// Controllable pass-through around the REAL proposeAIAction, used only by
+// the C3 tests to force a mid-loop policy denial or failure. "real" (the
+// default for every other test) delegates unchanged.
+type ActionRequestsModule = typeof import("../../lib/ai/actionRequests.js");
+const proposeControl: { mode: "real" | "denyAfterFirst" | "denyAll" | "throw"; calls: number } = { mode: "real", calls: 0 };
+const actionRequestsUrl = new URL("../../lib/ai/actionRequests.ts", import.meta.url).href;
+const realActionRequests = await import(actionRequestsUrl) as ActionRequestsModule;
+const actionRequestsMock = mock.module(actionRequestsUrl, {
+  cache: true,
+  namedExports: {
+    ...realActionRequests,
+    proposeAIAction: async (input: Parameters<ActionRequestsModule["proposeAIAction"]>[0]) => {
+      proposeControl.calls += 1;
+      if (proposeControl.mode === "throw") throw new Error("synthetic proposal failure");
+      if (proposeControl.mode === "denyAll" || (proposeControl.mode === "denyAfterFirst" && proposeControl.calls > 1)) {
+        return { request: null, decision: { allowed: false, reason: "ENTITLEMENT_DENIED" } };
+      }
+      return realActionRequests.proposeAIAction(input);
+    },
+  },
+});
+const { proposeCallFollowups, GrowCallFollowupError, setGrowCallFollowupAuditFailureForTests } =
+  await import("../../lib/growCallFollowups.js");
 const { saveCallTranscriptionReview } = await import("../../lib/telephony/callTranscriptionReview.js");
 const { persistApprovedCallSummaryActivity } = await import("../../lib/telephony/callTranscriptionTimeline.js");
 const { withdrawRecordingConsent } = await import("../../lib/telephony/consent.js");
@@ -197,6 +220,91 @@ after(async () => {
   await cleanupBrokerages(brokerageIds);
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   forbiddenCalls.restore();
+  actionRequestsMock.restore();
+});
+
+async function withProposeMode<T>(mode: typeof proposeControl.mode, run: () => Promise<T>): Promise<T> {
+  proposeControl.mode = mode;
+  proposeControl.calls = 0;
+  try {
+    return await run();
+  } finally {
+    proposeControl.mode = "real";
+    setGrowCallFollowupAuditFailureForTests(null);
+  }
+}
+
+const twoItems = () => ({ items: [
+  { itemType: "COMMITMENT", itemId: "com-1", dueAt: inDays(3) },
+  { itemType: "FOLLOWUP", itemId: "fu-1", dueAt: inDays(3) },
+] });
+
+test("C3: a policy denial after earlier items were proposed says so (403 POLICY_DENIED, {error, code}); a first-item denial says nothing was proposed", async () => {
+  const partial = await createFixture();
+  const res = await withProposeMode("denyAfterFirst", () => post(followupsUrl(partial, "/propose"), A.agent.cookie, twoItems()));
+  assert.equal(res.status, 403);
+  const body = await res.json() as Record<string, string>;
+  assert.deepEqual(Object.keys(body).sort(), ["code", "error"]);
+  assert.equal(body.code, "POLICY_DENIED");
+  assert.match(body.error, /after some items had already been proposed/);
+  assert.match(body.error, /refresh/i);
+  const created = await requestsFor(partial);
+  assert.equal(created.length, 1);
+  assert.equal(created[0]!.status, "AWAITING_APPROVAL");
+
+  const none = await createFixture();
+  const denied = await withProposeMode("denyAll", () => post(followupsUrl(none, "/propose"), A.agent.cookie, twoItems()));
+  assert.equal(denied.status, 403);
+  const deniedBody = await denied.json() as Record<string, string>;
+  assert.equal(deniedBody.code, "POLICY_DENIED");
+  assert.match(deniedBody.error, /Nothing was proposed/);
+  assert.doesNotMatch(deniedBody.error, /already been proposed/);
+  assert.equal((await requestsFor(none)).length, 0);
+});
+
+test("C3: AUDIT_INCOMPLETE is only claimed when this call created a proposal; otherwise the original failure is surfaced", async () => {
+  const call = (fixture: Fixture) => proposeCallFollowups({
+    brokerageId: A.brokerageId,
+    actor: { userId: A.agent.user.id, role: A.agent.user.role, brokerageId: A.brokerageId },
+    callSessionId: fixture.sessionId, transcriptionId: fixture.transcriptionId, body: twoItems(),
+  });
+
+  // Loop throws before anything is created AND the closing audit fails.
+  const thrown = await createFixture();
+  await withProposeMode("throw", async () => {
+    setGrowCallFollowupAuditFailureForTests("grow_call_followup_proposed");
+    await assert.rejects(call(thrown), (error: unknown) =>
+      !(error instanceof GrowCallFollowupError) && error instanceof Error && error.message === "synthetic proposal failure");
+  });
+  assert.equal((await requestsFor(thrown)).length, 0);
+
+  // First-item policy denial AND the closing audit fails: POLICY_DENIED, not AUDIT_INCOMPLETE.
+  const denied = await createFixture();
+  await withProposeMode("denyAll", async () => {
+    setGrowCallFollowupAuditFailureForTests("grow_call_followup_proposed");
+    await assert.rejects(call(denied), (error: unknown) =>
+      error instanceof GrowCallFollowupError && error.code === "POLICY_DENIED" && /Nothing was proposed/.test(error.message));
+  });
+  assert.equal((await requestsFor(denied)).length, 0);
+
+  // Nothing new (all EXISTING) AND the closing audit fails: AUDIT_FAILURE.
+  const existing = await createFixture();
+  await call(existing);
+  await withProposeMode("real", async () => {
+    setGrowCallFollowupAuditFailureForTests("grow_call_followup_proposed");
+    await assert.rejects(call(existing), (error: unknown) =>
+      error instanceof GrowCallFollowupError && error.code === "AUDIT_FAILURE");
+  });
+  assert.equal((await requestsFor(existing)).length, 2);
+
+  // Control: one item created, then denied, then the audit fails -> AUDIT_INCOMPLETE is accurate.
+  const partial = await createFixture();
+  await withProposeMode("denyAfterFirst", async () => {
+    setGrowCallFollowupAuditFailureForTests("grow_call_followup_proposed");
+    await assert.rejects(call(partial), (error: unknown) =>
+      error instanceof GrowCallFollowupError && error.code === "AUDIT_INCOMPLETE");
+  });
+  assert.equal((await requestsFor(partial)).length, 1);
 });
 
 test("HTTP: authenticated owner lists candidates and proposes; human approval + governed execution creates the commitments; no side effects", async () => {

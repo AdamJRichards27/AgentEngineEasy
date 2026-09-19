@@ -17,6 +17,7 @@ import {
   documentObjectVersions,
   documents,
   entitlementGrants,
+  growActivities,
   growCallRecordingConsents,
   growCallSessions,
   growCallTranscriptions,
@@ -28,8 +29,8 @@ import { cleanupBrokerages } from "../../routes/__tests__/testSupport.js";
 import { saveCallTranscriptionReview, discardCallTranscription } from "../telephony/callTranscriptionReview.js";
 import { persistApprovedCallSummaryActivity } from "../telephony/callTranscriptionTimeline.js";
 import { withdrawRecordingConsent } from "../telephony/consent.js";
-import { approveAIActionRequest } from "../ai/actionRequests.js";
-import { executeAIAction } from "../ai/executionGateway.js";
+import { approveAIActionRequest, STUCK_EXECUTING_RECOVERED_MESSAGE } from "../ai/actionRequests.js";
+import { executeAIAction, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "../ai/executionGateway.js";
 import { getRelationshipTimeline } from "../relationshipTimeline.js";
 import { configureEvents } from "../events.js";
 import {
@@ -500,4 +501,89 @@ test("audit: strict ids-only rows bracket every proposal; an outage before propo
     JSON.parse(retryAudit[0]!.updatedValue!).outcomes.map((o: { actionRequestId: number }) => o.actionRequestId).sort(),
     pending.map((row) => row.id).sort(),
   );
+});
+
+test("C1: a request whose side effect ran or may have run (late completion / stuck-EXECUTING recovery) blocks re-proposal and is listed as COMMITMENT_MAY_EXIST", async () => {
+  for (const variant of ["late-completion", "stuck-recovered"] as const) {
+    const fixture = await createFixture();
+    const item = [{ itemType: "COMMITMENT", itemId: "com-1", dueAt: inDays(5) }];
+    const first = await propose(fixture, owner, item);
+    const requestId = first.proposals[0]!.actionRequest!.actionRequestId;
+    // Exactly the row shapes executionGateway.ts / recoverStuckExecutingActionRequests() leave behind.
+    await db.update(aiActionRequests).set(variant === "late-completion"
+      ? { status: "FAILED", executedAt: new Date(), executionResult: { id: 1 }, errorMessage: LATE_COMPLETION_AFTER_RECOVERY_MESSAGE }
+      : { status: "FAILED", errorMessage: STUCK_EXECUTING_RECOVERED_MESSAGE })
+      .where(eq(aiActionRequests.id, requestId));
+
+    const listed = await listCallFollowupCandidates({ brokerageId, actor: actorOf(owner), ...ids(fixture) });
+    const candidate = listed.candidates.find((c) => c.itemId === "com-1")!;
+    assert.equal(candidate.canPropose, false, variant);
+    assert.equal(candidate.latestProposalStatus, "COMMITMENT_MAY_EXIST", variant);
+    assert.equal(candidate.existingProposal.visibility, "VISIBLE");
+    assert.ok(candidate.existingProposal.visibility === "VISIBLE" && candidate.existingProposal.actionRequest.commitmentMayExist);
+    assert.equal(listed.candidates.find((c) => c.itemId === "fu-1")!.canPropose, true, "other items unaffected");
+
+    const again = await propose(fixture, owner, item);
+    assert.equal(again.proposals[0]!.status, "EXISTING", variant);
+    assert.equal(again.proposals[0]!.actionRequest!.actionRequestId, requestId);
+    assert.equal(again.proposals[0]!.actionRequest!.commitmentMayExist, true);
+    assert.equal((await requestsFor(fixture)).length, 1, `${variant}: no duplicate proposal`);
+  }
+
+  // Control: an ordinary FAILED request (execute() threw, no side effect) stays re-proposable.
+  const failed = await createFixture();
+  const item = [{ itemType: "COMMITMENT", itemId: "com-1", dueAt: inDays(5) }];
+  const first = await propose(failed, owner, item);
+  await db.update(aiActionRequests).set({ status: "FAILED", errorMessage: "Contact not found in this brokerage." })
+    .where(eq(aiActionRequests.id, first.proposals[0]!.actionRequest!.actionRequestId));
+  const listed = await listCallFollowupCandidates({ brokerageId, actor: actorOf(owner), ...ids(failed) });
+  const candidate = listed.candidates.find((c) => c.itemId === "com-1")!;
+  assert.equal(candidate.canPropose, true);
+  assert.equal(candidate.latestProposalStatus, "FAILED");
+  assert.equal((await propose(failed, owner, item)).proposals[0]!.status, "PROPOSED");
+});
+
+async function snapshotFor(fixture: Fixture) {
+  const [row] = await db.select().from(growActivities).where(and(
+    eq(growActivities.brokerageId, brokerageId),
+    eq(growActivities.activityType, "call_summary"),
+    eq(growActivities.sourceId, String(fixture.transcription.id)),
+  ));
+  return row!;
+}
+
+async function assertExcluded(fixture: Fixture, itemType: "COMMITMENT" | "FOLLOWUP", itemId: string, label: string) {
+  const listed = await listCallFollowupCandidates({ brokerageId, actor: actorOf(owner), ...ids(fixture) });
+  assert.equal(listed.candidates.some((c) => c.itemType === itemType && c.itemId === itemId), false, `${label}: excluded from candidates`);
+  await assert.rejects(propose(fixture, owner, [{ itemType, itemId, dueAt: inDays(3) }]), isCode("INVALID_INPUT"), `${label}: refused by propose`);
+  assert.equal((await requestsFor(fixture)).length, 0, `${label}: nothing proposed`);
+}
+
+test("C4: snapshot/review cross-check — a tampered snapshot text, or a snapshot item REJECTED or missing in review_state, is excluded and refused", async () => {
+  // 1. Snapshot text no longer matches the APPROVED review decision.
+  const tampered = await createFixture();
+  const tamperedSnapshot = await snapshotFor(tampered);
+  const details = structuredClone(tamperedSnapshot.details) as { approvedContent: { commitments: Array<{ id: string; text: string }> } };
+  details.approvedContent.commitments[0]!.text = "Tampered: transfer the deposit today.";
+  await db.update(growActivities).set({ details }).where(eq(growActivities.id, tamperedSnapshot.id));
+  await assertExcluded(tampered, "COMMITMENT", "com-1", "tampered snapshot");
+  const stillValid = await listCallFollowupCandidates({ brokerageId, actor: actorOf(owner), ...ids(tampered) });
+  assert.deepEqual(stillValid.candidates.map((c) => c.itemId), ["fu-1"], "consistent items remain available");
+
+  // 2. Snapshot lists the item but review_state records it as REJECTED.
+  const rejected = await createFixture();
+  const [rejectedRow] = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, rejected.transcription.id));
+  await db.update(growCallTranscriptions).set({
+    reviewState: rejectedRow!.reviewState.map((entry) =>
+      entry.itemType === "FOLLOWUP" && entry.itemId === "fu-1" ? { ...entry, decision: "REJECTED" as const } : entry),
+  }).where(eq(growCallTranscriptions.id, rejected.transcription.id));
+  await assertExcluded(rejected, "FOLLOWUP", "fu-1", "REJECTED in review_state");
+
+  // 3. Snapshot lists the item but review_state has no decision for it.
+  const missing = await createFixture();
+  const [missingRow] = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, missing.transcription.id));
+  await db.update(growCallTranscriptions).set({
+    reviewState: missingRow!.reviewState.filter((entry) => !(entry.itemType === "COMMITMENT" && entry.itemId === "com-1")),
+  }).where(eq(growCallTranscriptions.id, missing.transcription.id));
+  await assertExcluded(missing, "COMMITMENT", "com-1", "missing from review_state");
 });

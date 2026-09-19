@@ -21,7 +21,16 @@ export interface FollowupActionRequestSummary {
   proposedByUserId: number;
   createdAt: string;
   expiresAt: string | null;
+  // Server flag: this request's side effect ran or may have run (e.g. a
+  // late completion after stuck-execution recovery left it FAILED). The
+  // item is not proposable again.
+  commitmentMayExist?: boolean;
 }
+
+/** latestProposalStatus value the API reports for such an item. */
+export const COMMITMENT_MAY_EXIST_STATUS = "COMMITMENT_MAY_EXIST";
+
+export const COMMITMENT_MAY_EXIST_LABEL = "Commitment may already exist — check Commitments";
 
 export type FollowupExistingProposal =
   | { visibility: "NONE" }
@@ -217,6 +226,7 @@ export function followupStatus(candidate: CallFollowupCandidate, now: Date = new
   if (existing.visibility === "VISIBLE") {
     const request = existing.actionRequest;
     if (request.status === "COMPLETED") return { label: "Commitment created", tone: "success" };
+    if (request.commitmentMayExist) return { label: COMMITMENT_MAY_EXIST_LABEL, tone: "warning" };
     if (request.status === "APPROVED") return { label: "Approved — commitment not created yet", tone: "warning" };
     if (request.status === "EXECUTING") return { label: "Creating commitment…", tone: "warning" };
     if (request.status === "AWAITING_APPROVAL") {
@@ -232,6 +242,7 @@ export function followupStatus(candidate: CallFollowupCandidate, now: Date = new
     }
     return { label: `Proposal ${request.status.toLowerCase().replace(/_/g, " ")}`, tone: "neutral" };
   }
+  if (candidate.latestProposalStatus === COMMITMENT_MAY_EXIST_STATUS) return { label: COMMITMENT_MAY_EXIST_LABEL, tone: "warning" };
   if (candidate.latestProposalStatus === "EXPIRED") return { label: "Previous proposal expired — you can propose it again", tone: "danger" };
   if (candidate.latestProposalStatus === "REJECTED") return { label: "Previous proposal rejected — you can propose it again", tone: "neutral" };
   if (candidate.latestProposalStatus === "FAILED" || candidate.latestProposalStatus === "CANCELLED") {

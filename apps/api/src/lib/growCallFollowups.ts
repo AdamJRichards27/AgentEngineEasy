@@ -29,7 +29,7 @@
 // (`transcription:<id>:item:<type>:<itemId>`) plus its reason/evidence
 // fields (ids only) and the strict audit rows below are the provenance.
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import { z } from "zod";
 import {
   aiActionRequests,
@@ -50,7 +50,9 @@ import {
   canActorAccessActionRequest,
   findOpenActionRequestByResource,
   proposeAIAction,
+  STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "./ai/actionRequests.js";
+import { LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "./ai/executionGateway.js";
 import { isReasonableCommitmentDueDate } from "./ai/orchestrator.js";
 import type { PolicyActor } from "./ai/policyEngine.js";
 import {
@@ -304,7 +306,25 @@ export type FollowupActionRequestSummary = {
   proposedByUserId: number;
   createdAt: string;
   expiresAt: string | null;
+  // True when this request's side effect ran or may have run: COMPLETED,
+  // executedAt set (e.g. a late completion after stuck-EXECUTING recovery
+  // left the row FAILED), or a stuck-EXECUTING recovery marker (outcome
+  // unknown). Such an item is never proposed again.
+  commitmentMayExist: boolean;
 };
+
+// Latest-status value reported for an item whose commitment may already
+// exist even though its request row is not COMPLETED.
+export const COMMITMENT_MAY_EXIST_STATUS = "COMMITMENT_MAY_EXIST";
+
+const SIDE_EFFECT_MARKER_MESSAGES = [STUCK_EXECUTING_RECOVERED_MESSAGE, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE];
+
+export function actionRequestSideEffectMayHaveRun(
+  request: Pick<AiActionRequest, "status" | "executedAt" | "errorMessage">,
+): boolean {
+  return request.status === "COMPLETED" || request.executedAt !== null ||
+    (request.errorMessage !== null && SIDE_EFFECT_MARKER_MESSAGES.includes(request.errorMessage));
+}
 
 export type FollowupExistingProposal =
   | { visibility: "NONE" }
@@ -321,6 +341,7 @@ export function summarizeFollowupActionRequest(request: AiActionRequest): Follow
     proposedByUserId: request.userId,
     createdAt: request.createdAt.toISOString(),
     expiresAt: request.expiresAt ? request.expiresAt.toISOString() : null,
+    commitmentMayExist: actionRequestSideEffectMayHaveRun(request),
   };
 }
 
@@ -339,14 +360,31 @@ async function latestRequestForResource(brokerageId: number, resourceId: string)
   return row ?? null;
 }
 
+// The most recent request for this item whose side effect ran or may have
+// run (see actionRequestSideEffectMayHaveRun), in any status.
+async function sideEffectRequestForResource(brokerageId: number, resourceId: string): Promise<AiActionRequest | null> {
+  const [row] = await db.select().from(aiActionRequests).where(and(
+    eq(aiActionRequests.brokerageId, brokerageId),
+    eq(aiActionRequests.actionKey, GROW_CALL_FOLLOWUP_ACTION_KEY),
+    eq(aiActionRequests.resourceId, resourceId),
+    or(
+      eq(aiActionRequests.status, "COMPLETED"),
+      isNotNull(aiActionRequests.executedAt),
+      inArray(aiActionRequests.errorMessage, SIDE_EFFECT_MARKER_MESSAGES),
+    ),
+  )).orderBy(desc(aiActionRequests.createdAt), desc(aiActionRequests.id)).limit(1);
+  return row ?? null;
+}
+
 // The item's governing request: an open one (expired rows are transitioned
-// first, audited, by the existing helper), else a COMPLETED one — an item
-// whose commitment already exists is never proposed a second time.
+// first, audited, by the existing helper), else any request whose side
+// effect ran or may have run — COMPLETED, or FAILED after a late completion
+// / stuck-EXECUTING recovery. An item whose commitment already exists, or
+// may exist, is never proposed a second time.
 async function blockingRequestForResource(brokerageId: number, resourceId: string): Promise<AiActionRequest | null> {
   const open = await findOpenActionRequestByResource(GROW_CALL_FOLLOWUP_ACTION_KEY, brokerageId, resourceId);
   if (open) return open;
-  const latest = await latestRequestForResource(brokerageId, resourceId);
-  return latest?.status === "COMPLETED" ? latest : null;
+  return sideEffectRequestForResource(brokerageId, resourceId);
 }
 
 // ---------------------------------------------------------------------
@@ -388,7 +426,7 @@ async function strictFollowupAudit(input: {
     throw new GrowCallFollowupError(
       input.failureCode,
       input.failureCode === "AUDIT_FAILURE"
-        ? "The call follow-up audit could not be recorded; nothing was proposed."
+        ? "The call follow-up audit could not be recorded; no new proposal was created."
         : "Follow-up proposals were created and await human approval, but the completion audit could not be recorded. " +
           "Retry the same request: it is idempotent and records the audit.",
     );
@@ -475,7 +513,9 @@ export async function listCallFollowupCandidates(input: {
       suggestedDueAt: validSuggestedDueAt(source.transcription, item.itemType, item.itemId),
       consentBlocked,
       existingProposal: projectExisting(blocking, actor),
-      latestProposalStatus: latest && canActorAccessActionRequest(latest, actor) ? latest.status : null,
+      latestProposalStatus: latest && canActorAccessActionRequest(latest, actor)
+        ? (latest.status !== "COMPLETED" && actionRequestSideEffectMayHaveRun(latest) ? COMMITMENT_MAY_EXIST_STATUS : latest.status)
+        : null,
       canPropose: !consentBlocked && blocking === null,
     });
   }
@@ -495,6 +535,13 @@ export type CallFollowupProposalOutcome = {
   actionRequest: FollowupActionRequestSummary | null;
 };
 
+function policyDeniedError(reason: string, createdAny: boolean): GrowCallFollowupError {
+  return new GrowCallFollowupError("POLICY_DENIED", createdAny
+    ? `A follow-up proposal was denied by policy (${reason}) after some items had already been proposed. ` +
+      "Those proposals await human approval; refresh to see which items were proposed."
+    : `The follow-up proposal was denied by policy (${reason}). Nothing was proposed.`);
+}
+
 /**
  * Audit ordering: proposeAIAction() cannot join a caller transaction, so
  *   1. every validation runs first (nothing proposed on any failure);
@@ -507,7 +554,12 @@ export type CallFollowupProposalOutcome = {
  *      they are AWAITING_APPROVAL (never auto-executed), expire in 24h, and
  *      are already referenced by step 2's resourceIds. The caller receives
  *      AUDIT_INCOMPLETE; retrying the same request is idempotent (dedup
- *      returns the same requests) and writes both audits again.
+ *      returns the same requests) and writes both audits again. If this
+ *      call created no proposal, AUDIT_INCOMPLETE is never claimed: the
+ *      original loop failure / policy denial is surfaced, else AUDIT_FAILURE.
+ *   A policy denial after earlier items were proposed says so (POLICY_DENIED,
+ *   "refresh to see which items were proposed"); the {error, code} body
+ *   shape is kept, so the created outcomes are not returned inline.
  */
 export async function proposeCallFollowups(input: {
   brokerageId: number;
@@ -659,21 +711,30 @@ export async function proposeCallFollowups(input: {
     failure = error;
   }
 
-  await strictFollowupAudit({
-    action: "grow_call_followup_proposed",
-    ...auditContext,
-    value: {
-      partyId: source.transcription.partyId,
-      outcomes: outcomes.map(({ itemType, itemId, status, actionRequestId }) => ({ itemType, itemId, status, actionRequestId })),
-      ...(policyDenial ? { policyDenial } : {}),
-      ...(failure ? { failed: true } : {}),
-    },
-    failureCode: "AUDIT_INCOMPLETE",
-  });
+  // AUDIT_INCOMPLETE ("proposals were created") is only accurate when this
+  // call actually created at least one proposal. Otherwise the original
+  // failure/denial is surfaced, or AUDIT_FAILURE when nothing new was
+  // created and the only problem is the audit write.
+  const createdAny = outcomes.some((outcome) => outcome.status === "PROPOSED");
+  try {
+    await strictFollowupAudit({
+      action: "grow_call_followup_proposed",
+      ...auditContext,
+      value: {
+        partyId: source.transcription.partyId,
+        outcomes: outcomes.map(({ itemType, itemId, status, actionRequestId }) => ({ itemType, itemId, status, actionRequestId })),
+        ...(policyDenial ? { policyDenial } : {}),
+        ...(failure ? { failed: true } : {}),
+      },
+      failureCode: createdAny ? "AUDIT_INCOMPLETE" : "AUDIT_FAILURE",
+    });
+  } catch (auditError) {
+    if (!createdAny && failure) throw failure;
+    if (!createdAny && policyDenial) throw policyDeniedError(policyDenial, false);
+    throw auditError;
+  }
 
   if (failure) throw failure;
-  if (policyDenial) {
-    throw new GrowCallFollowupError("POLICY_DENIED", `The follow-up proposal was denied by policy (${policyDenial}).`);
-  }
+  if (policyDenial) throw policyDeniedError(policyDenial, createdAny);
   return { proposals: outcomes.map(({ actionRequestId: _id, ...outcome }) => outcome) };
 }
