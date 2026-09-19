@@ -381,6 +381,22 @@ be rolled back, treat the database migration and the application rollback as two
 decisions, and consult `docs/BACKUP_AND_RESTORE_RUNBOOK.md` if a schema rollback is genuinely
 needed.
 
+## 10.1 Proxy trust (`TRUST_PROXY`) — required behind a load balancer
+
+Rate limiting identifies a client by `req.ip`. Express trusts no proxy by default, so when the
+API is reached through a load balancer or reverse proxy (any Replit deployment is), every
+request appears to come from the balancer and **the whole user base shares one rate-limit
+budget** — the first users to sign in can exhaust it for everyone else.
+
+- Set `TRUST_PROXY` to the number of proxy hops in front of the API — normally `TRUST_PROXY=1`.
+- Leave it unset (or `false`) only when clients reach the API directly.
+- Do not set `true` unless every hop is trusted: a client can then spoof `X-Forwarded-For` and
+  bypass rate limiting entirely. `express-rate-limit` deliberately warns about that value.
+- Unset, empty, `false` and unparseable values all fail safe to trusting nothing, which is the
+  behaviour before this setting existed. The effective value is logged once at boot as
+  `trust_proxy_configured` (or `trust_proxy_invalid_value_ignored`) — confirm it in the boot log
+  after deploying.
+
 ## 11. Operations: the API must run as a single, always-on instance
 
 This is a **deployment configuration requirement to confirm with the Project Owner**, not a
