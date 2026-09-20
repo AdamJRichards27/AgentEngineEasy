@@ -27,6 +27,7 @@ export const PROTECTED_OPERATION_CATEGORIES = [
   "AI governance configuration itself (this registry, the Policy Engine, authority levels)",
   "User account creation, deletion, or credential changes",
   "Direct SQL, arbitrary API calls, or raw workflow-step edits",
+  "Outbound communication to a person outside the app (email, SMS, push/notification, dialling)",
 ] as const;
 
 // Name fragments that, if found in a registered actionKey (case-insensitive),
@@ -49,6 +50,31 @@ const FORBIDDEN_ACTION_KEY_FRAGMENTS = [
   "CREDENTIAL",
   "PASSWORD",
   "SQL",
+  // Outbound messaging. AE's hard guarantee is that nothing leaves the
+  // building addressed to a real person without a human deciding to send
+  // it. Until these fragments existed that guarantee held only because no
+  // provider was wired up -- an action registered as e.g.
+  // "SEND_SMS_TO_CONTACT" with riskLevel 0 would have passed this
+  // self-check and become automation-invokable. The guarantee is now
+  // structural: a send-shaped actionKey cannot reach the AI Action Registry
+  // at all, whatever riskLevel its author sets. An outbound message must be
+  // DRAFTED for a human (a draft is not a send) and dispatched through the
+  // Communications surface's own human-decision path, never through this
+  // registry.
+  //
+  // Checked against every actionKey currently registered
+  // (actions/registry.ts): PROPERTY_NOTE_ADD, WORKFLOW_CHANGE_PROPOSE,
+  // WORKFLOW_VERSION_ACTIVATE, CREATE_INTERNAL_TASK, CREATE_REMINDER,
+  // ASSIGN_TASK_OWNER, RAISE_ATTENTION_ITEM, REQUEST_ACTION_APPROVAL,
+  // CREATE_GROW_COMMITMENT -- none collide. "NOTIFY" is deliberately here
+  // while RAISE_ATTENTION_ITEM is not: raising an in-app attention item is
+  // an internal record, not an outbound message to a person.
+  "SEND",
+  "SMS",
+  "EMAIL",
+  "MESSAGE",
+  "NOTIFY",
+  "DIAL",
 ];
 
 export interface RegisteredActionLike {

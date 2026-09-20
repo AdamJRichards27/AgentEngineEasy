@@ -44,7 +44,7 @@ import {
   STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "../actionRequests.js";
 import { executeAIAction, executeAIActionAsSystem, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "../executionGateway.js";
-import { getActionDefinition } from "../actions/registry.js";
+import { ACTION_REGISTRY, getActionDefinition } from "../actions/registry.js";
 import { classifyActionFailure } from "../../automation/operations.js";
 import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js";
 import { riskTierForLevel } from "../authority.js";
@@ -223,6 +223,47 @@ test("restricted-action blocking: an actionKey matching a protected-operation fr
 
 test("restricted-action blocking: riskTierForLevel(4) resolves to RESTRICTED", () => {
   assert.equal(riskTierForLevel(4), "RESTRICTED");
+});
+
+// ---------------------------------------------------------------------------
+// 4b. Outbound messaging is denied by RULE, not by absence of the feature
+// (AE GROW W2-C, B-1).
+//
+// Before W2-C the denylist covered AML/ledger/entitlement/SQL and friends but
+// no messaging fragment at all, so an action registered as e.g.
+// "SEND_SMS_TO_CONTACT" with riskLevel 0 passed this self-check and would have
+// become automation-invokable the moment a provider was wired up. Each name
+// below is the shape a plausible future action would actually take -- the
+// point is that the author does not have to remember to set a high riskLevel,
+// because the NAME alone is refused.
+// ---------------------------------------------------------------------------
+const MESSAGING_ACTION_KEYS_THAT_MUST_BE_REFUSED = [
+  "SEND_SMS_TO_CONTACT",
+  "SMS_VENDOR_DISPATCH",
+  "EMAIL_VENDOR_UPDATE",
+  "MESSAGE_BUYER_AGENT",
+  "NOTIFY_SELLER_OF_OFFER",
+  "DIAL_CONTACT_NUMBER",
+];
+
+for (const actionKey of MESSAGING_ACTION_KEYS_THAT_MUST_BE_REFUSED) {
+  test(`outbound messaging denylist: "${actionKey}" at riskLevel 0 crashes the registry startup self-check`, () => {
+    assert.throws(
+      () => assertNoProtectedOperationsRegistered([{ actionKey, riskLevel: 0 }]),
+      /forbidden fragment/,
+      "a send-shaped actionKey must be refused on its NAME, whatever riskLevel its author set",
+    );
+  });
+}
+
+test("outbound messaging denylist: every currently registered action still passes the startup self-check", () => {
+  const registered = Object.values(ACTION_REGISTRY);
+  assert.equal(registered.length, 9, "update this test deliberately when the registered action set changes");
+  // The real call actions/registry.ts makes at module load. If the messaging
+  // fragments false-positived on a legitimate action key, importing the
+  // registry at the top of this file would already have crashed the suite --
+  // this asserts it explicitly so the reason is obvious rather than implicit.
+  assert.doesNotThrow(() => assertNoProtectedOperationsRegistered(registered));
 });
 
 // ---------------------------------------------------------------------------

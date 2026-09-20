@@ -115,7 +115,7 @@ test("classifyGrowResponseKind: every tool succeeds but every result is empty/nu
   const results = [
     ok("get_grow_today_items", []),
     ok("get_contact_relationship_summary", []),
-    ok("get_due_commitments", []),
+    ok("get_grow_today_due_items", []),
     ok("get_grow_opportunity_pipeline", []),
     ok("get_appraisal_followups", []),
     ok("get_property_intelligence_signals", []),
@@ -483,7 +483,7 @@ test("askCopilot: Grow context data containing prompt-injection-style text stays
   assert.equal(result.response.riskLevel, 0, "riskLevel must stay at the Level 0 ceiling regardless of question content");
   for (const toolName of result.response.toolsUsed) {
     assert.ok(
-      ["get_grow_today_items", "get_contact_relationship_summary", "get_due_commitments", "get_grow_opportunity_pipeline", "get_appraisal_followups", "get_property_intelligence_signals", "get_recent_relationship_activity", "explain_grow_today_item"].includes(toolName),
+      ["get_grow_today_items", "get_contact_relationship_summary", "get_grow_today_due_items", "get_grow_opportunity_pipeline", "get_appraisal_followups", "get_property_intelligence_signals", "get_recent_relationship_activity", "explain_grow_today_item"].includes(toolName),
       `toolsUsed must only ever contain registered Grow tools, got: ${toolName}`,
     );
   }

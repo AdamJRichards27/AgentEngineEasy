@@ -189,6 +189,19 @@ aiRouter.get("/capabilities", requireAuth, async (req, res) => {
 // the existing role model (BROKERAGE_ADMIN_ROLES, middlewares/auth.ts — "brokerage
 // users/settings/oversight"), the same role that already sees brokerage-wide oversight
 // surfaces elsewhere in this API; no new entitlement key was invented for it.
+//
+// AE GROW W2-C (C-10) — the same response now also carries TOKENS and ESTIMATED COST, read back
+// from ai_usage (which until now was written on every successful request and read by nothing),
+// for the caller and for their brokerage. A brokerage administrator additionally gets the
+// per-capability (aiRole) split and the median/p90/max distribution across active users — the
+// numbers a pilot needs to decide what a commercial allowance should be. Nothing here changes
+// what is ENFORCED: the ceilings still count requests only (lib/ai/dailyUsage.ts), because
+// denominating them in tokens or dollars is a commercial decision reserved for pilot evidence,
+// and this endpoint exists to produce that evidence rather than pre-empt it. Cost is always
+// accompanied by costEstimateBasis so a provider-side estimate is never read as a bill.
+//
+// Not covered here, and deliberately not papered over: voice transcription (routes/aiVoice.ts)
+// writes no ai_interactions or ai_usage row at all, so STT spend is absent from these totals.
 aiRouter.get("/usage", requireAuth, async (req, res) => {
   const authedUser = req.authedUser;
   if (authedUser === undefined) {
