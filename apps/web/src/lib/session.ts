@@ -15,9 +15,16 @@ export interface SessionUser {
 // sibling field alongside `user` (see apps/api/src/routes/auth.ts) — this is the full shape of
 // that response. Never merged into SessionUser: the entitlement set is a resolver decision
 // (apps/api/src/lib/entitlements/resolver.ts), not a property of the user record itself.
-interface SessionResponse {
+export interface SessionResponse {
   user: SessionUser;
   entitlements: string[];
+}
+
+// Keep the full authenticated payload in one query function. Login uses this
+// after the auth cookie is set so the session cache is populated with
+// entitlements before App.tsx computes the post-login landing route.
+export function fetchSession(): Promise<SessionResponse> {
+  return apiFetch<SessionResponse>("/auth/me");
 }
 
 // Whole-app auth check — Login/App.tsx use this to decide whether to show
@@ -32,7 +39,7 @@ interface SessionResponse {
 export function useSession() {
   const query = useQuery<SessionResponse, ApiError, SessionUser>({
     queryKey: ["session"],
-    queryFn: () => apiFetch<SessionResponse>("/auth/me"),
+    queryFn: fetchSession,
     select: (data) => data.user,
     retry: false,
   });
@@ -49,7 +56,7 @@ export function useSession() {
 export function useEntitlements() {
   const query = useQuery<SessionResponse, ApiError, string[]>({
     queryKey: ["session"],
-    queryFn: () => apiFetch<SessionResponse>("/auth/me"),
+    queryFn: fetchSession,
     select: (data) => data.entitlements,
     retry: false,
   });

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
+import { ActionCard } from "../components/ActionCard";
 import {
   type ActionItem,
   type ActivePropertySummary,
@@ -60,6 +61,10 @@ export default function CommandCentre() {
 
       {!isLoading && !isError && data && (
         <>
+          <details className="section today-count-summary">
+            <summary>
+              Activity counts · {data.summary.overdue} overdue · {data.summary.dueToday} due today
+            </summary>
           <div className="stat-tiles">
             <StatTile label="Critical" value={data.summary.critical} icon="🔴" />
             <StatTile label="Attention" value={data.summary.attention} icon="⚠️" />
@@ -69,15 +74,17 @@ export default function CommandCentre() {
             <StatTile label="Coming Up" value={data.summary.comingUp} icon="🔜" />
             <StatTile label="Pit Crew Active" value={data.summary.pcActive} icon="🔧" />
           </div>
+          </details>
 
-          <ActionSection title="Now" items={data.now} emptyText="Nothing urgent right now." />
-          <ActionSection title="Overdue" items={data.overdue} emptyText="Nothing overdue." />
-          <ActionSection title="Today" items={data.today} emptyText="Nothing due today." />
+          <ActionSection title="Now" items={data.now} emptyText="Nothing urgent right now." urgent />
+          <ActionSection title="Overdue" items={data.overdue} emptyText="Nothing overdue." urgent />
+          <ActionSection title="Today" items={data.today} emptyText="Nothing due today." urgent />
           <ActionSection
             title="Waiting On"
             items={data.waitingOn}
             emptyText="Nothing waiting on someone else."
             mode="waitingOn"
+            urgent
           />
 
           <CollapsibleActionSection
@@ -127,24 +134,37 @@ function ActionSection({
   items,
   emptyText,
   mode,
+  urgent = false,
 }: {
   title: string;
   items: ActionItem[];
   emptyText: string;
   mode?: ActionRowMode;
+  urgent?: boolean;
 }) {
-  return (
-    <section className="card">
-      <h2>{title}</h2>
-      {items.length === 0 ? (
+  if (items.length === 0) {
+    return (
+      <details className="section command-centre-zero">
+        <summary aria-label={`${title}: 0. ${emptyText}`}>
+          <span>{title}</span>
+          <span className="section-count">0</span>
+          <span className="muted">{emptyText}</span>
+        </summary>
         <p className="empty-state">{emptyText}</p>
-      ) : (
-        <ul className="item-list">
-          {items.map((item) => (
-            <ActionRow key={item.id} item={item} mode={mode} />
-          ))}
-        </ul>
-      )}
+      </details>
+    );
+  }
+
+  return (
+    <section className={`card command-centre-action-section${urgent ? " command-centre-urgent" : ""}`}>
+      <h2>
+        {title} <span className="section-count">({items.length})</span>
+      </h2>
+      <ul className="item-list">
+        {items.map((item) => (
+          <ActionRow key={item.id} item={item} mode={mode} />
+        ))}
+      </ul>
     </section>
   );
 }
@@ -161,10 +181,11 @@ function CollapsibleActionSection({
   mode?: ActionRowMode;
 }) {
   return (
-    <details className="section" open={items.length > 0}>
-      <summary>
+    <details className={`section${items.length === 0 ? " command-centre-zero" : ""}`} open={items.length > 0}>
+      <summary aria-label={`${title}: ${items.length}. ${items.length === 0 ? emptyText : "Show actions."}`}>
         {title}
-        {items.length > 0 ? ` (${items.length})` : ""}
+        <span className="section-count">({items.length})</span>
+        {items.length === 0 ? <span className="muted">{emptyText}</span> : null}
       </summary>
       {items.length === 0 ? (
         <p className="empty-state">{emptyText}</p>
@@ -182,30 +203,47 @@ function CollapsibleActionSection({
 function ActionRow({ item, mode }: { item: ActionItem; mode?: ActionRowMode }) {
   const due = formatDueDate(item.dueAt);
   const completedAt = mode === "completed" && item.completedAt ? formatGeneratedAt(item.completedAt) : null;
+  const explanation = item.description || sourceTypeLabel(item.sourceType);
+  const metadata = (
+    <>
+      {sourceTypeLabel(item.sourceType)}
+      {" · "}
+      {ownerTypeLabel(item.accountableOwnerType)}
+      {item.performingParty ? ` · performed by ${item.performingParty}` : null}
+      {item.category ? ` · ${item.category}` : null}
+      {item.status ? ` · ${item.status}` : null}
+      {mode === "waitingOn" && item.waitingOnParty ? ` · waiting on ${item.waitingOnParty}` : null}
+      {completedAt ? ` · completed ${completedAt}` : null}
+      {!completedAt && mode !== "waitingOn" && due ? ` · ${item.overdue ? "overdue" : "due"} ${due}` : null}
+    </>
+  );
+
   return (
     <li>
-      <Link href={item.deepLink}>
-        <span className={priorityPillClass(item.priority)}>{priorityLabel(item.priority)}</span>{" "}
-        <strong>{item.title}</strong> — {item.propertyAddress}
-      </Link>
-      <div className="muted">
-        {sourceTypeLabel(item.sourceType)}
-        {" · "}
-        {ownerTypeLabel(item.accountableOwnerType)}
-        {mode === "waitingOn" && item.waitingOnParty ? ` · waiting on ${item.waitingOnParty}` : null}
-        {completedAt ? ` · completed ${completedAt}` : null}
-        {!completedAt && mode !== "waitingOn" && due ? ` · ${item.overdue ? "overdue" : "due"} ${due}` : null}
-      </div>
+      <ActionCard
+        status={<span className={priorityPillClass(item.priority)}>{priorityLabel(item.priority)}</span>}
+        title={<Link href={item.deepLink}>{item.title}</Link>}
+        context={<Link href={item.deepLink}>{item.propertyAddress}</Link>}
+        explanation={explanation}
+        suggestedNextStep={item.recommendedAction || "Review this item in the property workspace."}
+        metadata={<span className="muted">{metadata}</span>}
+        primaryAction={
+          <Link href={item.deepLink} className="btn btn-primary btn-small">
+            Open property
+          </Link>
+        }
+      />
     </li>
   );
 }
 
 function ActivePropertiesSection({ properties }: { properties: ActivePropertySummary[] }) {
   return (
-    <details className="section" open={properties.length > 0}>
-      <summary>
+    <details className={`section${properties.length === 0 ? " command-centre-zero" : ""}`} open={properties.length > 0}>
+      <summary aria-label={`Active Properties: ${properties.length}.${properties.length === 0 ? " No active properties yet." : ""}`}>
         Active Properties
-        {properties.length > 0 ? ` (${properties.length})` : ""}
+        <span className="section-count">({properties.length})</span>
+        {properties.length === 0 ? <span className="muted">No active properties yet.</span> : null}
       </summary>
       {properties.length === 0 ? (
         <p className="empty-state">No active properties yet.</p>

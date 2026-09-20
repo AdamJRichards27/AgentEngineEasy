@@ -80,6 +80,70 @@ export function priorityPillClass(priority: GrowTodayPriority): string {
   return "pill";
 }
 
+export type GrowTodayBucketTone = "urgent" | "standard" | "quiet";
+
+export interface GrowTodayBucketPresentation {
+  label: string;
+  count: number;
+  tone: GrowTodayBucketTone;
+  isEmpty: boolean;
+  description: string;
+  emptyText: string;
+}
+
+/**
+ * Presentation metadata for the three existing, ranked Today buckets.
+ *
+ * This deliberately accepts a count rather than action data: it cannot alter
+ * ranking, filtering, or item contents, and gives the UI a deterministic way
+ * to emphasize non-empty urgent buckets while keeping zero buckets quiet.
+ */
+export function growTodayBucketPresentation(
+  priority: GrowTodayPriority,
+  count: number,
+): GrowTodayBucketPresentation {
+  const isEmpty = count === 0;
+
+  switch (priority) {
+    case "DoNow":
+      return {
+        label: "Do Now",
+        count,
+        tone: isEmpty ? "quiet" : "urgent",
+        isEmpty,
+        description: "Highest-priority actions that need attention now.",
+        emptyText: "No actions need immediate attention.",
+      };
+    case "DoToday":
+      return {
+        label: "Do Today",
+        count,
+        tone: isEmpty ? "quiet" : "urgent",
+        isEmpty,
+        description: "Actions to complete today.",
+        emptyText: "No actions are due today.",
+      };
+    case "KeepWarm":
+      return {
+        label: "Keep Warm",
+        count,
+        tone: isEmpty ? "quiet" : "standard",
+        isEmpty,
+        description: "Relationships to keep moving with a timely follow-up.",
+        emptyText: "No relationships need a keep-warm follow-up.",
+      };
+    default:
+      return {
+        label: priority,
+        count,
+        tone: isEmpty ? "quiet" : "standard",
+        isEmpty,
+        description: "Prioritized Grow actions.",
+        emptyText: "No actions in this bucket.",
+      };
+  }
+}
+
 export function formatWhen(iso: string | null): string | null {
   if (!iso) return null;
   return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
