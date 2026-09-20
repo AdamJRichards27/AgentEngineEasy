@@ -50,11 +50,14 @@ before(async () => {
   A = await createBrokerageWithUsers(baseUrl, brokerageAName);
   B = await createBrokerageWithUsers(baseUrl, brokerageBName);
 
-  // grow.access is the general Grow gate; grow.opportunities.manage is needed
-  // only to create the fixture opportunity used by the from-opportunity test.
+  // grow.access is the general Grow gate (every appraisal route); since WP1 P1-1,
+  // grow.opportunities.manage is required by every appraisal mutation too.
   await grant(A.brokerageId, "grow.access");
   await grant(A.brokerageId, "grow.opportunities.manage");
   await grant(B.brokerageId, "grow.access");
+  // WP1 P1-1: B also holds grow.opportunities.manage so the tenant-isolation
+  // tests below prove the row-level check (404), not merely a missing entitlement (403).
+  await grant(B.brokerageId, "grow.opportunities.manage");
 });
 
 after(async () => {

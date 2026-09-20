@@ -95,15 +95,27 @@ async function evaluateRuleForBrokerage(rule: RiskRule, brokerageId: number, now
 // ---------------------------------------------------------------------
 
 const BROKERAGE_BATCH_SIZE = 50;
-// Generous ceiling on how long one full sweep should ever take. A RUNNING
-// scan_runs row older than this is treated as abandoned (a crashed process,
-// not a genuinely still-running scan) rather than a permanent lock — the
-// same "index/read-then-write, not an airtight constraint" trade-off this
-// codebase already accepts elsewhere (automationTasks/automationAttentionItems'
-// own column comments) for a guard whose job is avoiding wasteful duplicate
-// work, not enforcing correctness — correctness here still comes from
-// model.ts's per-exception advisory lock, which this guard does not replace.
-const SCAN_STALE_WINDOW_MS = 30 * 60 * 1000;
+
+// Single-flight guard for the time-driven sweep. A session-level Postgres
+// advisory lock, held on ONE dedicated pooled connection for the entire
+// scan and released in `finally`, makes overlapping sweeps impossible — the
+// manual POST /exceptions/ops/scan trigger, bootstrap.ts's interval timer,
+// and any other API instance sharing the database all contend for the same
+// lock, and pg_try_advisory_lock is atomic, so exactly one caller wins and
+// every other caller is refused immediately (no check-then-insert race, the
+// defect the previous "is there a RUNNING scan_runs row?" guard had).
+//
+// Crash safety needs no wall-clock arithmetic: Postgres releases a session
+// advisory lock the moment its connection closes, so a crashed or killed
+// process can never wedge the lock. Any scan_runs row still marked RUNNING
+// when a new sweep successfully takes the lock is, by construction, not
+// running (its holder no longer holds the lock), so it is closed out as
+// FAILED/abandoned — purely lock-based, independent of the process or
+// database time zone. The two-int4 form of the lock lives in a different
+// advisory keyspace from model.ts's single-bigint hashtext() dedup locks,
+// so the two can never collide.
+const SCAN_LOCK_NAMESPACE = 0x41455245; // "AERE" — Agent Engine Risk Exceptions
+const SCAN_LOCK_KEY = 1;
 
 export interface ScanSummary {
   scanRunId: string;
@@ -117,15 +129,119 @@ export interface ScanSummary {
 
 export type RunScanResult = { ok: true; summary: ScanSummary } | { ok: false; skippedReason: string };
 
-export async function runScheduledScan(trigger: "SCHEDULED" | "MANUAL" = "SCHEDULED"): Promise<RunScanResult> {
-  const [stillRunning] = await db
-    .select()
-    .from(riskExceptionScanRuns)
-    .where(and(eq(riskExceptionScanRuns.status, "RUNNING"), gt(riskExceptionScanRuns.startedAt, new Date(Date.now() - SCAN_STALE_WINDOW_MS))))
-    .orderBy(desc(riskExceptionScanRuns.startedAt))
-    .limit(1);
-  if (stillRunning) {
-    return { ok: false, skippedReason: `A scan (${stillRunning.id}) is already running.` };
+export interface RunScheduledScanOptions {
+  /**
+   * Restrict the sweep to these brokerages only. Omitted (the production
+   * default — bootstrap.ts's scheduler and the manual ops route never pass
+   * it) means every brokerage, exactly as before. Exists so test files that
+   * share one database can scan only their own tenants and never create,
+   * update or auto-resolve another concurrently-running file's exceptions.
+   * The single-flight lock is still global either way.
+   */
+  brokerageIds?: number[];
+}
+
+export async function runScheduledScan(trigger: "SCHEDULED" | "MANUAL" = "SCHEDULED", options: RunScheduledScanOptions = {}): Promise<RunScanResult> {
+  const lockClient = await db.$client.connect();
+  let lockHeld = false;
+  let releaseError: Error | undefined;
+  try {
+    const lockResult = await lockClient.query<{ locked: boolean }>("select pg_try_advisory_lock($1::int4, $2::int4) as locked", [SCAN_LOCK_NAMESPACE, SCAN_LOCK_KEY]);
+    lockHeld = lockResult.rows[0]?.locked === true;
+    if (!lockHeld) {
+      const [running] = await db
+        .select({ id: riskExceptionScanRuns.id })
+        .from(riskExceptionScanRuns)
+        .where(eq(riskExceptionScanRuns.status, "RUNNING"))
+        .orderBy(desc(riskExceptionScanRuns.startedAt))
+        .limit(1);
+      return { ok: false, skippedReason: running ? `A scan (${running.id}) is already running.` : "A scan is already running." };
+    }
+    return await runScanWhileLocked(trigger, options);
+  } finally {
+    if (lockHeld) {
+      try {
+        await lockClient.query("select pg_advisory_unlock($1::int4, $2::int4)", [SCAN_LOCK_NAMESPACE, SCAN_LOCK_KEY]);
+      } catch (err) {
+        // Could not unlock cleanly — destroy the connection instead of
+        // returning it to the pool, which releases the session lock
+        // server-side and guarantees it can never leak to a later borrower.
+        releaseError = err instanceof Error ? err : new Error(String(err));
+        logger.error("exceptions_scan_lock_unlock_failed", { error: releaseError.message });
+      }
+    }
+    lockClient.release(releaseError);
+  }
+}
+
+/**
+ * Test-only: takes the global scan lock on its own dedicated connection, as
+ * a running sweep would, WITHOUT scanning anything. Returns a release
+ * function, or null if another scan currently holds the lock. Lets a test
+ * exercise the "scan already running" path deterministically — and
+ * exercise the manual-scan route without sweeping every tenant in a shared
+ * test database.
+ *
+ * Independent-review remediation: this is exported from production code, and
+ * an exported "hold the global scan lock indefinitely" helper is a denial of
+ * service against the entire scheduled sweep for anything that can reach it.
+ * It is therefore gated on NODE_ENV === "test", the same seam shape the rest
+ * of this repo uses for test-only entry points (lib/growCallFollowups.ts,
+ * lib/telephony/callTranscriptions.ts). Outside tests it throws rather than
+ * taking the lock.
+ */
+export async function tryHoldExceptionScanLockForTests(): Promise<(() => Promise<void>) | null> {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("tryHoldExceptionScanLockForTests is a test-only seam and is unavailable outside tests.");
+  }
+  const client = await db.$client.connect();
+  try {
+    const result = await client.query<{ locked: boolean }>("select pg_try_advisory_lock($1::int4, $2::int4) as locked", [SCAN_LOCK_NAMESPACE, SCAN_LOCK_KEY]);
+    if (result.rows[0]?.locked !== true) {
+      client.release();
+      return null;
+    }
+  } catch (err) {
+    client.release(err instanceof Error ? err : new Error(String(err)));
+    throw err;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    try {
+      await client.query("select pg_advisory_unlock($1::int4, $2::int4)", [SCAN_LOCK_NAMESPACE, SCAN_LOCK_KEY]);
+      client.release();
+    } catch (err) {
+      client.release(err instanceof Error ? err : new Error(String(err)));
+    }
+  };
+}
+
+async function runScanWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: RunScheduledScanOptions): Promise<RunScanResult> {
+  const scopedBrokerageIds = options.brokerageIds ? [...new Set(options.brokerageIds)] : null;
+
+  // Close out abandoned run rows. We hold the global scan lock, so no other
+  // sweep is running: any row still RUNNING belongs to a process that died
+  // mid-scan.
+  //
+  // Independent-review remediation: this is done ONLY for an unscoped sweep —
+  // the production path (bootstrap.ts's scheduler and the manual ops route,
+  // neither of which passes brokerageIds). risk_exception_scan_runs has no
+  // scope column, so for a scoped run "every RUNNING row" is strictly wider
+  // than that run's own scope: a scoped test/ops run sharing a database would
+  // otherwise stamp FAILED + "Abandoned" onto an unrelated tenant's genuinely
+  // in-flight run row, corrupting the observability signal
+  // (GET /exceptions/ops/health) it exists to provide. A scoped run's own
+  // scope contains no pre-existing rows — it inserts its row below — so
+  // scoping this cleanup correctly means not performing it at all. Real
+  // abandoned rows are still closed by the next unscoped sweep, which is the
+  // only path that runs in production.
+  if (!scopedBrokerageIds) {
+    await db
+      .update(riskExceptionScanRuns)
+      .set({ status: "FAILED", completedAt: new Date(), errorMessage: "Abandoned: the scan did not complete (its process stopped while running)." })
+      .where(eq(riskExceptionScanRuns.status, "RUNNING"));
   }
 
   const [scanRun] = await db.insert(riskExceptionScanRuns).values({ status: "RUNNING", trigger }).returning();
@@ -142,7 +258,13 @@ export async function runScheduledScan(trigger: "SCHEDULED" | "MANUAL" = "SCHEDU
   try {
     let lastId = 0;
     for (;;) {
-      const page = await db.select({ id: brokerages.id }).from(brokerages).where(gt(brokerages.id, lastId)).orderBy(brokerages.id).limit(BROKERAGE_BATCH_SIZE);
+      if (scopedBrokerageIds && scopedBrokerageIds.length === 0) break;
+      const page = await db
+        .select({ id: brokerages.id })
+        .from(brokerages)
+        .where(scopedBrokerageIds ? and(gt(brokerages.id, lastId), inArray(brokerages.id, scopedBrokerageIds)) : gt(brokerages.id, lastId))
+        .orderBy(brokerages.id)
+        .limit(BROKERAGE_BATCH_SIZE);
       if (page.length === 0) break;
       for (const { id: brokerageId } of page) {
         await scanBrokerageForExceptions(brokerageId, summary);

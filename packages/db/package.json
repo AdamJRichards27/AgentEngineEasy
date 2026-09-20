@@ -9,12 +9,14 @@
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/migrate.ts"
+    "db:migrate": "tsx src/migrate.ts",
+    "db:preflight": "node scripts/preflight-migrations.mjs",
+    "db:audit-grow-grants": "node scripts/audit-grow-entitlements.mjs"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
     "drizzle-zod": "^0.5.1",
-    "pg": "^8.13.0",
+    "pg": "^8.16.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

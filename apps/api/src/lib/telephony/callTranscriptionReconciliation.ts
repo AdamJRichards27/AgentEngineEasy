@@ -64,6 +64,13 @@ export interface CallTranscriptionReconciliationOptions {
   now?: Date;
   batchSize?: number;
   staleAfterMs?: number;
+  /**
+   * Restrict the sweep to one brokerage's transcription rows. Omitted (the
+   * production scheduler and CLI never pass it) means every tenant, exactly
+   * as before. Exists so tests sharing one database reconcile only their own
+   * tenant and never transition another concurrently-running file's rows.
+   */
+  brokerageId?: number;
 }
 
 export function configuredCallTranscriptionReconciliation(
@@ -209,6 +216,10 @@ export async function reconcileAbandonedCallTranscriptions(
 ): Promise<CallTranscriptionReconciliationResult> {
   const configured = configuredCallTranscriptionReconciliation();
   const { afterId, now, batchSize, staleAfterMs } = validateOptions(options, configured);
+  const scopedBrokerageId = options.brokerageId;
+  if (scopedBrokerageId !== undefined && (!Number.isSafeInteger(scopedBrokerageId) || scopedBrokerageId < 1)) {
+    throw new Error("Invalid call transcription reconciliation options");
+  }
   const cutoff = new Date(now.getTime() - staleAfterMs);
   const rows = await db
     .select({
@@ -228,6 +239,7 @@ export async function reconcileAbandonedCallTranscriptions(
       inArray(growCallTranscriptions.processingState, ["MEDIA_PROCESSING", "TRANSCRIBING"]),
       lte(growCallTranscriptions.updatedAt, cutoff),
       gt(growCallTranscriptions.id, afterId),
+      scopedBrokerageId === undefined ? undefined : eq(growCallTranscriptions.brokerageId, scopedBrokerageId),
     ))
     .orderBy(asc(growCallTranscriptions.id))
     .limit(batchSize);

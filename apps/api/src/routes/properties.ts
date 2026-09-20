@@ -29,6 +29,75 @@ import { goLiveProperty } from "../lib/goLive.js";
 export const propertiesRouter = Router();
 const propertyDataProvider = createPropertyDataProvider();
 
+// AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
+// request (400), not a server fault (500). Before this guard, `Number("abc")`
+// produced NaN and `Number("1e20")` an integer outside Postgres' int4 range,
+// and both were passed straight into a `where(eq(properties.id, ...))` bind
+// the driver rejects — a 500 with a database diagnostic in the log for what
+// is simply a mistyped URL. Bounded by MAX_SIGNED_INT4 because properties.id
+// is a `serial` (packages/db/src/schema/property.ts), i.e. an int4. Same
+// shape as routes/contacts.ts's parsePositiveId and routes/growCalls.ts's
+// parseIdParam; this codebase has no shared cross-router helper today, each
+// route module declares its own.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/* ---------------------------------------------------------------------
+ * AE GROW Pilot Readiness WP9 — internal error text must never reach a
+ * client. Same shape as routes/growAppraisals.ts's handleGrowAppraisalError
+ * and routes/propertyIntelligence.ts's handlePropertyIntelligenceError.
+ * -----------------------------------------------------------------*/
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_PROPERTY_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** Driver/ORM text, as a second line of defence behind the prototype test below. */
+const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
+
+/**
+ * True only for a plain `new Error("...")` — the shape lib/timeline.ts's
+ * assertPropertyInBrokerage uses for its operator-authored, caller-facing
+ * "Property 12 not found" (deliberately uniform for a missing property AND a
+ * cross-tenant one, so the two are indistinguishable), which is kept with
+ * this route's existing 404.
+ *
+ * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
+ * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
+ * the `Failed query: select "id", "brokerage_id" ... from ...` text live
+ * smoke testing found in real response bodies), pg's DatabaseError, and
+ * RangeError/TypeError/SyntaxError. DrizzleQueryError notably does NOT
+ * override `name` — it reports "Error" — so a name check alone would let the
+ * leak straight through; only the prototype identity separates them.
+ */
+function isOperatorAuthoredError(err: unknown): err is Error {
+  return err instanceof Error && Object.getPrototypeOf(err) === Error.prototype && !DRIVER_TEXT.test(err.message);
+}
+
+/**
+ * The expected not-found error keeps its 404 and its own message; anything
+ * else is an unrecognised server fault, logged in full server-side with this
+ * request's correlation id and answered generically. (The structured logger
+ * already attaches the ambient correlationId itself — see
+ * packages/events/src/logger.ts — but this router threads it explicitly
+ * everywhere else it logs, so it does so here too.)
+ */
+function handlePropertyError(err: unknown, res: import("express").Response, expectedStatus: number): void {
+  if (isOperatorAuthoredError(err)) {
+    res.status(expectedStatus).json({ error: err.message });
+    return;
+  }
+  logger.error("property_route_unhandled_error", {
+    correlationId: currentCorrelationId(),
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_PROPERTY_ERROR });
+}
+
 const READY_TO_LIST_STEPS = [
   { stepKey: "VerifySellers", label: "Verify Sellers", sequence: 1 },
   { stepKey: "AgencyAgreement", label: "Agency Agreement", sequence: 2 },
@@ -134,7 +203,8 @@ propertiesRouter.get("/", requireAuth, async (req, res) => {
 // #123 — tenant scoping: previously matched by id alone, so any
 // authenticated user from any brokerage could read any property by id.
 propertiesRouter.get("/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
@@ -148,7 +218,8 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
 // response shaped for "what needs to happen next", not fifteen sub-screens.
 // #123 — same tenant-scoping fix as GET /:id above.
 propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
@@ -265,14 +336,19 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
 // file; canViewFinancials gates the financial-entitlement boundary
 // (commission/funds/agent-paid figures) inside getPropertyTimeline itself.
 propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(user.role);
   try {
     const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
     res.json({ timeline });
   } catch (err) {
-    res.status(404).json({ error: (err as Error).message });
+    // getPropertyTimeline's only expected failure is assertPropertyInBrokerage's
+    // own "Property <id> not found" — the 404 this route has always answered.
+    // A driver fault used to be returned here verbatim as a 404 carrying the
+    // driver's message; it is now a logged, generic 500.
+    handlePropertyError(err, res, 404);
   }
 });
 
@@ -282,7 +358,8 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
 const ownershipReviewSchema = z.object({ notes: z.string().optional() });
 
 propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = ownershipReviewSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -332,7 +409,8 @@ const listingDetailsSchema = z.object({
 });
 
 propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = listingDetailsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -378,7 +456,8 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
 // live state (lib/workflowSteps.ts). Ownership review, by contrast,
 // intentionally does NOT gate this — see lib/ownership.ts / Build Brief §8.
 propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
@@ -510,7 +589,8 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 // shared with Launch's own confirmLaunchLive() — this route is a thin
 // HTTP wrapper over it, not a second implementation.
 propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {

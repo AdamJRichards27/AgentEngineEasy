@@ -3,16 +3,44 @@ import cors from "cors";
 import helmet from "helmet";
 import { apiRouter } from "./routes/index.js";
 import { loadSession } from "./middlewares/auth.js";
-import { requestId } from "./middlewares/requestId.js";
+import { requestId, CORRELATION_ID_HEADER } from "./middlewares/requestId.js";
 import { httpMetrics } from "./middlewares/httpMetrics.js";
-import { globalRateLimiter } from "./middlewares/rateLimit.js";
+import { globalRateLimiter, parseTrustProxySetting } from "./middlewares/rateLimit.js";
 import { corsOriginCallback } from "./lib/cors.js";
 import { globalErrorHandler } from "./middlewares/errorHandler.js";
 import { mountStaticWebIfPresent } from "./lib/staticWeb.js";
 import { configuredDocumentWebhookMaxBytes } from "./lib/documentStorage.js";
+import { logger } from "@aee/events";
 
 export function createApp() {
   const app = express();
+
+  // AE GROW Pilot Readiness WP6a (D3, part b) — explicit proxy trust.
+  // Express defaults `trust proxy` to false, so behind a load balancer every
+  // request's req.ip is the balancer's own address and express-rate-limit
+  // gives the ENTIRE user base one shared budget. That is not something an
+  // operator should have to discover from a support ticket, and it is also
+  // not something this app may silently opt into (trusting an untrusted hop
+  // lets a client spoof X-Forwarded-For and bypass rate limiting outright),
+  // so it is operator-configured via TRUST_PROXY and fails safe to "trust
+  // nothing" — this app's behaviour before the setting existed — for unset,
+  // empty, "false", and anything unparseable. See
+  // middlewares/rateLimit.ts#parseTrustProxySetting for the accepted values.
+  // Set before any limiter or route is mounted, since req.ip is derived from
+  // this setting on every request.
+  const trustProxy = parseTrustProxySetting(process.env.TRUST_PROXY);
+  app.set("trust proxy", trustProxy.value);
+  // Logged once per app construction (i.e. once at startup) so an operator
+  // can confirm from the boot log what the running process actually
+  // resolved, rather than what they believe they configured.
+  if (trustProxy.valid) {
+    logger.info("trust_proxy_configured", { trustProxy: trustProxy.value });
+  } else {
+    logger.warn("trust_proxy_invalid_value_ignored", {
+      trustProxy: trustProxy.value,
+      detail: 'TRUST_PROXY must be unset, "true", "false", or a non-negative integer hop count. Falling back to trusting no proxy.',
+    });
+  }
 
   // Standard security response headers (CSP, X-Frame-Options, HSTS,
   // X-Content-Type-Options, etc.) on every response — mounted first, ahead
@@ -48,7 +76,10 @@ export function createApp() {
   // lib/cors.ts for the allowlist itself (CORS_ALLOWED_ORIGINS env var;
   // fails closed at boot in production — see assertCorsConfigured() in
   // index.ts).
-  app.use(cors({ origin: corsOriginCallback, credentials: true }));
+  // exposedHeaders: a cross-origin browser can otherwise not read
+  // X-Correlation-Id, so a pilot user's error screen has no support
+  // reference to quote (apps/web/src/lib/api.ts reads this header).
+  app.use(cors({ origin: corsOriginCallback, credentials: true, exposedHeaders: [CORRELATION_ID_HEADER] }));
 
   // Generous global throttle (300 req/min/IP in real environments) — see
   // middlewares/rateLimit.ts for the thresholds and its test-environment

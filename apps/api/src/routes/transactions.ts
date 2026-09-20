@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, transactions, properties } from "@aee/db";
+import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import {
   getTransactionByProperty,
@@ -20,6 +21,91 @@ import { listConditions, addCondition, rescheduleConditionDueDate, resolveCondit
 
 export const transactionsRouter = Router();
 
+// AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
+// routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
+// routes/propertyIntelligence.ts already use (each keeps its own local copy;
+// this is deliberately not a shared module). Every route below took a raw
+// `Number(req.params...)` straight into a `where(eq(..., ...))` bind, so
+// "abc" reached Postgres as NaN and an id past int4 as an unbindable value —
+// and the resulting driver error was then answered as a 400 carrying its own
+// "Failed query: select ..." text. Bounded by MAX_SIGNED_INT4 because
+// transactions.id, properties.id and transactionConditions.id are `serial`
+// columns, i.e. int4.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/** Resolves a route id, answering 400 itself and returning null when malformed. */
+function readIdParam(res: Response, value: unknown, label: "transaction" | "property" | "condition"): number | null {
+  const id = parsePositiveId(value);
+  if (id === null) {
+    res.status(400).json({ error: `Invalid ${label} id` });
+    return null;
+  }
+  return id;
+}
+
+/**
+ * The :id of a route mounted behind requireTransactionAccess, which has
+ * already answered 400 for anything this could not parse and 404 for anything
+ * outside the caller's brokerage — so the assertion here is about middleware
+ * ordering, not about trusting the input.
+ */
+function accessCheckedTransactionId(req: Request): number {
+  return parsePositiveId(req.params.id)!;
+}
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_TRANSACTION_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** Driver/ORM text, as a second line of defence behind the prototype test below. */
+const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
+
+/**
+ * True only for a plain `new Error("...")` — the shape lib/transactions.ts
+ * and lib/transactionConditions.ts use for their operator-authored,
+ * caller-facing messages ("Transaction 7 cannot be exchanged before the
+ * contract is signed.", "Agency agreement terms have not been captured for
+ * this property — cannot calculate commission.", "Transaction 7 has already
+ * settled — cannot reschedule."), which are deliberately kept with this
+ * router's existing 400.
+ *
+ * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
+ * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
+ * the `Failed query: select "id", "brokerage_id" ... from ...` text live
+ * smoke testing found in real response bodies), pg's DatabaseError, and
+ * RangeError/TypeError/SyntaxError. DrizzleQueryError notably does NOT
+ * override `name` — it reports "Error" — so a name check alone would let the
+ * leak straight through; only the prototype identity separates them.
+ */
+function isOperatorAuthoredError(err: unknown): err is Error {
+  return err instanceof Error && Object.getPrototypeOf(err) === Error.prototype && !DRIVER_TEXT.test(err.message);
+}
+
+/**
+ * Expected domain errors keep this router's existing 400 and their own
+ * messages; anything else is an unrecognised server fault, logged in full
+ * server-side (the structured logger attaches the ambient correlationId
+ * itself — see packages/events/src/logger.ts) and answered generically.
+ * Mirrors handleGrowAppraisalError / handlePropertyIntelligenceError.
+ * TransactionClosureBlockedError, this router's one typed error class, keeps
+ * its own 409 in handle() below.
+ */
+function handleTransactionError(err: unknown, res: Response): void {
+  if (isOperatorAuthoredError(err)) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  logger.error("transaction_route_unhandled_error", {
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_TRANSACTION_ERROR });
+}
+
 async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
   const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
   return !!property && property.brokerageId === brokerageId;
@@ -31,7 +117,8 @@ async function propertyInBrokerage(propertyId: number, brokerageId: number): Pro
 // settlement-complete, close, etc.) relied on the id alone. This
 // middleware closes that gap once, for every route in this file.
 async function requireTransactionAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const id = Number(req.params.id);
+  const id = readIdParam(res, req.params.id, "transaction");
+  if (id === null) return;
   const user = req.authedUser!;
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, id));
   if (!transaction || !(await propertyInBrokerage(transaction.propertyId, user.brokerageId))) {
@@ -42,7 +129,8 @@ async function requireTransactionAccess(req: Request, res: Response, next: NextF
 }
 
 transactionsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const user = req.authedUser!;
   if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
     res.status(404).json({ error: "Not found" });
@@ -53,7 +141,7 @@ transactionsRouter.get("/by-property/:propertyId", requireAuth, async (req, res)
 });
 
 transactionsRouter.get("/:id", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, id));
   res.json({ transaction });
 });
@@ -67,18 +155,18 @@ async function handle(fn: () => Promise<unknown>, res: Response): Promise<void> 
       res.status(409).json({ error: err.message, blockers: err.blockers });
       return;
     }
-    res.status(400).json({ error: (err as Error).message });
+    handleTransactionError(err, res);
   }
 }
 
 transactionsRouter.post("/:id/contract-signed", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => recordContractSigned({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
 
 transactionsRouter.post("/:id/finance-approved", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => recordFinanceApproved({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
@@ -86,7 +174,7 @@ transactionsRouter.post("/:id/finance-approved", requireAuth, requireTransaction
 const settlementScheduleSchema = z.object({ settlementDate: z.coerce.date() });
 
 transactionsRouter.post("/:id/settlement-schedule", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const parsed = settlementScheduleSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -106,13 +194,13 @@ transactionsRouter.post("/:id/settlement-schedule", requireAuth, requireTransact
 });
 
 transactionsRouter.post("/:id/settlement-complete", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
 
 transactionsRouter.post("/:id/calculate-commission", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(
     () => calculateCommission({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force: req.body?.force === true }),
@@ -123,7 +211,7 @@ transactionsRouter.post("/:id/calculate-commission", requireAuth, requireTransac
 const fundsReceivedSchema = z.object({ amountCents: z.number().int().positive() });
 
 transactionsRouter.post("/:id/funds-received", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const parsed = fundsReceivedSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -150,7 +238,7 @@ transactionsRouter.post(
   requireTransactionAccess,
   requireRole(...BROKERAGE_ADMIN_ROLES),
   async (req, res) => {
-    const id = Number(req.params.id);
+    const id = accessCheckedTransactionId(req);
     const user = req.authedUser!;
     await handle(() => recordAgentPaid({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
   },
@@ -168,7 +256,7 @@ transactionsRouter.post(
   requireTransactionAccess,
   requireRole(...BROKERAGE_ADMIN_ROLES),
   async (req, res) => {
-    const id = Number(req.params.id);
+    const id = accessCheckedTransactionId(req);
     const user = req.authedUser!;
     const force = req.body?.force === true;
     await handle(() => closeTransaction({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force }), res);
@@ -178,7 +266,7 @@ transactionsRouter.post(
 // --- Stage E: Contract & Conditions (#118) ---
 
 transactionsRouter.get("/:id/conditions", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const conditions = await listConditions(id);
   res.json({ conditions });
 });
@@ -186,7 +274,7 @@ transactionsRouter.get("/:id/conditions", requireAuth, requireTransactionAccess,
 const addConditionSchema = z.object({ description: z.string().min(1), dueDate: z.coerce.date().optional() });
 
 transactionsRouter.post("/:id/conditions", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const parsed = addConditionSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -203,7 +291,7 @@ transactionsRouter.post("/:id/conditions", requireAuth, requireTransactionAccess
     });
     res.status(201).json({ condition });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleTransactionError(err, res);
   }
 });
 
@@ -214,7 +302,8 @@ const rescheduleConditionSchema = z.object({ newDueDate: z.coerce.date().nullabl
 // requireTransactionAccess, since the route param here is a conditionId,
 // not a transactionId.
 transactionsRouter.post("/conditions/:conditionId/reschedule", requireAuth, async (req, res) => {
-  const conditionId = Number(req.params.conditionId);
+  const conditionId = readIdParam(res, req.params.conditionId, "condition");
+  if (conditionId === null) return;
   const parsed = rescheduleConditionSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -230,7 +319,7 @@ transactionsRouter.post("/conditions/:conditionId/reschedule", requireAuth, asyn
     });
     res.json({ condition });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleTransactionError(err, res);
   }
 });
 
@@ -240,7 +329,8 @@ const resolveConditionSchema = z.object({
 });
 
 transactionsRouter.post("/conditions/:conditionId/resolve", requireAuth, async (req, res) => {
-  const conditionId = Number(req.params.conditionId);
+  const conditionId = readIdParam(res, req.params.conditionId, "condition");
+  if (conditionId === null) return;
   const parsed = resolveConditionSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -257,18 +347,18 @@ transactionsRouter.post("/conditions/:conditionId/resolve", requireAuth, async (
     });
     res.json({ condition });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleTransactionError(err, res);
   }
 });
 
 transactionsRouter.post("/:id/exchange", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => recordExchange({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
 
 transactionsRouter.post("/:id/unconditional", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   try {
     const transaction = await maybeRecordUnconditional({ transactionId: id, userId: user.id, brokerageId: user.brokerageId });
@@ -285,7 +375,7 @@ transactionsRouter.post("/:id/unconditional", requireAuth, requireTransactionAcc
     }
     res.json({ transaction });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleTransactionError(err, res);
   }
 });
 
@@ -297,7 +387,7 @@ const legalRepsSchema = z.object({
 });
 
 transactionsRouter.post("/:id/legal-representatives", requireAuth, requireTransactionAccess, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = accessCheckedTransactionId(req);
   const parsed = legalRepsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });

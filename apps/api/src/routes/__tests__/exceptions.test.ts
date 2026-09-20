@@ -27,6 +27,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { randomUUID } from "node:crypto";
 import { createOrUpdateException, newCorrelationId } from "../../lib/exceptions/model.js";
+import { tryHoldExceptionScanLockForTests } from "../../lib/exceptions/engine.js";
 import type { RiskFinding } from "../../lib/exceptions/types.js";
 import { createBrokerageWithUsers, devLogin, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -168,19 +169,28 @@ test("the ops surface (health, scan) is Brokerage Administrator only — 403 for
   const healthBody = await json<{ recentRuns: unknown[] }>(healthRes);
   assert.ok(Array.isArray(healthBody.recentRuns));
 
-  // The scan route may legitimately be refused with 409 if another test
-  // file's scheduled scan currently holds the engine's scan-run lock —
-  // that's a correct outcome under concurrent test execution against the
-  // same shared database, not a route-wiring bug, so both are accepted
-  // here; only the auth/role gate and the response shape are under test.
-  const scanRes = await fetch(`${baseUrl}/api/exceptions/ops/scan`, { method: "POST", headers: { cookie: A.admin.cookie } });
-  assert.ok([200, 409].includes(scanRes.status), `expected 200 or 409, got ${scanRes.status}`);
-  if (scanRes.status === 200) {
-    const scanBody = await json<{ summary: { scanRunId: string } }>(scanRes);
-    assert.equal(typeof scanBody.summary.scanRunId, "string");
-  } else {
+  // Only the auth/role gate and the response shape are under test here —
+  // the sweep itself is covered by lib/exceptions/__tests__ with
+  // tenant-scoped scans. Letting this route run a REAL scan would sweep
+  // every brokerage in the shared test database, including other files'
+  // tenants mid-setup/cleanup (e.g. a property deleted mid-scan -> FK
+  // violation -> 500). So hold the engine's single-flight lock ourselves:
+  // the admin must get past auth and receive the engine's 409 "already
+  // running" refusal, which is itself the production contract for an
+  // overlapping manual trigger.
+  let release: (() => Promise<void>) | null = null;
+  for (let attempt = 0; attempt < 120 && !release; attempt++) {
+    release = await tryHoldExceptionScanLockForTests();
+    if (!release) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.ok(release, "could not take the scan lock (another file's scan kept it held)");
+  try {
+    const scanRes = await fetch(`${baseUrl}/api/exceptions/ops/scan`, { method: "POST", headers: { cookie: A.admin.cookie } });
+    assert.equal(scanRes.status, 409);
     const scanBody = await json<{ error: string }>(scanRes);
-    assert.equal(typeof scanBody.error, "string");
+    assert.match(scanBody.error, /already running/);
+  } finally {
+    await release!();
   }
 });
 

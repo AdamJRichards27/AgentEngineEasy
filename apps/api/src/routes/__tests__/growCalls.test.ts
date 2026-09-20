@@ -15,7 +15,7 @@
 // Relationship Timeline event creation.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import { and, desc, eq } from "drizzle-orm";
 import {
@@ -294,8 +294,17 @@ function signGrowCallsWebhook(body: string, timestamp: string = String(Date.now(
   };
 }
 
+// Provider event ids are globally unique in telephony_webhook_receipts, so
+// every id this file sends carries a per-run suffix — a fixed literal would
+// collide with a previous (or concurrent) run's receipt and be treated as a
+// DUPLICATE instead of being applied.
+const webhookEventRunId = `${suffix}-${randomUUID().slice(0, 8)}`;
+function webhookEventId(label: string): string {
+  return `${label}-${webhookEventRunId}`;
+}
+
 async function postWebhookEvent(eventId: string, eventType: string, providerCallId: string, overrideHeaders?: Record<string, string>) {
-  const body = JSON.stringify({ eventId, eventType, providerCallId });
+  const body = JSON.stringify({ eventId: webhookEventId(eventId), eventType, providerCallId });
   const headers = overrideHeaders ?? signGrowCallsWebhook(body);
   return fetch(`${baseUrl}/api/grow/calls/webhooks/sandbox`, { method: "POST", headers, body });
 }
@@ -536,10 +545,21 @@ test("invalid state transitions are rejected: confirming twice, cancelling a COM
   // A "ringing" event delivered again after the call already COMPLETED is an invalid
   // transition — the webhook route reports it as a processing FAILED outcome rather than
   // silently reopening a terminal call.
+  //
+  // AE GROW Pilot Readiness WP6a (D10): that FAILED outcome is now answered
+  // 422, not 500. The event is permanently unprocessable — the same payload
+  // will fail identically forever — so answering 5xx only made a real provider
+  // retry it on its full backoff schedule. The receipt is still recorded
+  // FAILED and the call session is still not reopened; only the status code
+  // (and therefore whether the provider redelivers) changed. See
+  // routes/__tests__/growCallsWebhookRetryClassification.test.ts for the full
+  // retryable-vs-permanent matrix, including a transient database failure
+  // still answering 500.
   const staleEventRes = await postWebhookEvent("evt-stale-ringing", "call.ringing", happyPathProviderCallId);
-  const staleEventBody = (await staleEventRes.json()) as { status: string };
-  assert.equal(staleEventRes.status, 500);
+  const staleEventBody = (await staleEventRes.json()) as { status: string; retryable?: boolean };
+  assert.equal(staleEventRes.status, 422);
   assert.equal(staleEventBody.status, "FAILED");
+  assert.equal(staleEventBody.retryable, false);
 });
 
 test("tenant isolation: Brokerage B cannot read, confirm, or cancel Brokerage A's call session", async () => {
@@ -1032,7 +1052,7 @@ test("webhook signature verification: missing signature, invalid signature, and 
   const confirmBody = (await confirmRes.json()) as { callSession: { providerCallId: string } };
   webhookLifecycleProviderCallId = confirmBody.callSession.providerCallId;
 
-  const body = JSON.stringify({ eventId: "evt-no-sig", eventType: "call.ringing", providerCallId: webhookLifecycleProviderCallId });
+  const body = JSON.stringify({ eventId: webhookEventId("evt-no-sig"), eventType: "call.ringing", providerCallId: webhookLifecycleProviderCallId });
 
   const missingSigRes = await fetch(`${baseUrl}/api/grow/calls/webhooks/sandbox`, {
     method: "POST",
@@ -1067,7 +1087,7 @@ test("webhook signature verification: missing signature, invalid signature, and 
 });
 
 test("webhook idempotency: redelivering the same eventId is recognised as a duplicate and never re-applied", async () => {
-  const body = JSON.stringify({ eventId: "evt-connected-dup", eventType: "call.connected", providerCallId: webhookLifecycleProviderCallId });
+  const body = JSON.stringify({ eventId: webhookEventId("evt-connected-dup"), eventType: "call.connected", providerCallId: webhookLifecycleProviderCallId });
   const headers = signGrowCallsWebhook(body);
 
   const firstRes = await fetch(`${baseUrl}/api/grow/calls/webhooks/sandbox`, { method: "POST", headers, body });

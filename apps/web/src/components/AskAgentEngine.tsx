@@ -7,6 +7,9 @@ import { apiFetch, ApiError } from "../lib/api";
 // exactly the same governed approve/reject/execute behaviour.
 import { GrowCommitmentProposalCard } from "./GrowCommitmentProposalCard";
 import { viewFromAskAgentProposal, type AskAgentCommitmentProposal } from "../lib/commitmentProposals";
+// AE GROW Pilot Readiness WP6b (P3-b) — the feature-flag gate below, extracted
+// so "a disabled Grow tab still says something" is unit-testable.
+import { aiSurfaceAvailability, aiSurfaceUnavailableCopy } from "../lib/aiCapability";
 // AE GROW Priority 6 Stage E — Voice as Input. The recording lifecycle
 // itself (permission/MIME/duration/error handling, the state machine) is
 // extracted into lib/voiceRecording.ts so it can be unit tested without a
@@ -402,9 +405,25 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
     onSuccess: (data) => setResult(data),
   });
 
-  const capabilityEnabled = isCoach ? capabilities?.businessCoachEnabled : capabilities?.copilotEnabled;
-  if (capabilities !== undefined && capabilityEnabled === false) {
+  // AE GROW Pilot Readiness WP6b (P3-b) — when the surface's own feature flag
+  // is off, a Grow tab (Performance/Ask AE) now says so instead of rendering
+  // nothing at all: those tabs are destinations, and a blank one is
+  // indistinguishable from a broken screen. RUN Copilot's embedded panel on a
+  // property/transaction record keeps its existing behaviour (hidden
+  // entirely), since there the panel is one optional block on an otherwise
+  // full page. See lib/aiCapability.ts.
+  const availability = aiSurfaceAvailability(capabilities, { isGrow, isCoach });
+  if (availability === "hidden") {
     return null;
+  }
+  if (availability === "unavailable") {
+    const copy = aiSurfaceUnavailableCopy(isCoach);
+    return (
+      <section className="card ai-copilot">
+        <h2>{copy.title}</h2>
+        <p className="muted">{copy.body}</p>
+      </section>
+    );
   }
 
   const askQuestion = (text: string) => {

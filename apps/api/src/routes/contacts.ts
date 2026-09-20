@@ -17,6 +17,7 @@ import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
+import { logAudit } from "../lib/audit.js";
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
 //
@@ -33,6 +34,29 @@ import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
 // mutation path.
 
 export const contactsRouter = Router();
+
+// AE GROW Pilot Readiness WP1 (P2-4): free-text length bounds, matching the 2000-character
+// ceiling routes/ai.ts already applies to free text a user types into Grow.
+const CONTACT_FREE_TEXT_MAX = 2000;
+
+/** A positive integer id, or null when the value is not one (so callers can 400 instead of
+ * handing NaN to Postgres and surfacing a 500).
+ *
+ * Bounded by MAX_SIGNED_INT4, matching routes/grow.ts and routes/communications.ts: every id
+ * this router resolves is a `serial` column, i.e. int4. Without the ceiling a value like
+ * "99999999999999999999" or "2147483648" IS an integer as far as Number.isInteger is
+ * concerned, so it passed the guard and reached Postgres as an unbindable bind value —
+ * producing exactly the 500 this helper exists to prevent. */
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+// AE GROW Pilot Readiness WP1 (P2-1): every contact-intelligence mutation below is audited via
+// logAudit (lib/audit.ts) with ids/enum values only -- never free text (descriptions, notes,
+// cancel reasons), matching routes/grow.ts's own audit conventions.
 
 function displayName(party: { firstName: string | null; lastName: string | null; organisationName: string | null }): string {
   if (party.organisationName) return party.organisationName;
@@ -114,7 +138,7 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
 // seconds" UX goal (§11) rather than a screen that fires off five separate requests.
 contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
-  const partyId = Number(req.params.partyId);
+  const partyId = parsePositiveId(req.params.partyId);
   if (!partyId) {
     res.status(400).json({ error: "Invalid contact id" });
     return;
@@ -283,7 +307,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
 // a 500).
 contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const partyId = Number(req.params.partyId);
+  const partyId = parsePositiveId(req.params.partyId);
   const role = typeof req.body?.role === "string" ? req.body.role : undefined;
   if (!partyId || !role || !(GROW_CONTACT_ROLES as readonly string[]).includes(role)) {
     res.status(400).json({ error: `role must be one of: ${GROW_CONTACT_ROLES.join(", ")}` });
@@ -310,14 +334,26 @@ contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.con
     .insert(growContactRoles)
     .values({ brokerageId: user.brokerageId, partyId, role, assignedByUserId: user.id })
     .returning();
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_contact_role_assigned",
+    recordType: "grow_contact_role",
+    recordId: String(inserted.id),
+    updatedValue: JSON.stringify({ partyId, role }),
+  });
   res.status(201).json({ role: inserted });
 });
 
 // DELETE /grow/contacts/:partyId/roles/:role
 contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const partyId = Number(req.params.partyId);
+  const partyId = parsePositiveId(req.params.partyId);
   const role = req.params.role;
+  if (partyId === null) {
+    res.status(400).json({ error: "Invalid contact id" });
+    return;
+  }
 
   const [existing] = await db
     .select()
@@ -330,6 +366,14 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
   }
 
   await db.delete(growContactRoles).where(eq(growContactRoles.id, existing.id));
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_contact_role_removed",
+    recordType: "grow_contact_role",
+    recordId: String(existing.id),
+    previousValue: JSON.stringify({ partyId: existing.partyId, role: existing.role }),
+  });
   res.status(204).send();
 });
 
@@ -339,11 +383,16 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
 // brokerage before the row is created.
 contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const partyId = Number(req.params.partyId);
-  const relatedPartyId = Number(req.body?.relatedPartyId);
+  const partyId = parsePositiveId(req.params.partyId);
+  const relatedPartyId = parsePositiveId(req.body?.relatedPartyId);
   const relationshipType = typeof req.body?.relationshipType === "string" ? req.body.relationshipType : undefined;
   if (!partyId || !relatedPartyId || !relationshipType || !(GROW_CONTACT_RELATIONSHIP_TYPES as readonly string[]).includes(relationshipType)) {
     res.status(400).json({ error: `relatedPartyId and relationshipType (one of: ${GROW_CONTACT_RELATIONSHIP_TYPES.join(", ")}) are required` });
+    return;
+  }
+  const note = req.body?.note;
+  if (note !== undefined && note !== null && (typeof note !== "string" || note.length > CONTACT_FREE_TEXT_MAX)) {
+    res.status(400).json({ error: `note must be a string of at most ${CONTACT_FREE_TEXT_MAX} characters` });
     return;
   }
   if (partyId === relatedPartyId) {
@@ -391,6 +440,14 @@ contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("
       createdBy: user.id,
     })
     .returning();
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_contact_relationship_created",
+    recordType: "grow_contact_relationship",
+    recordId: String(inserted.id),
+    updatedValue: JSON.stringify({ partyId, relatedPartyId, relationshipType }),
+  });
   res.status(201).json({ relationship: inserted });
 });
 
@@ -398,7 +455,11 @@ contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("
 // either party record and does not cascade into any other Grow data.
 contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid relationship id" });
+    return;
+  }
   const [existing] = await db
     .select()
     .from(growContactRelationships)
@@ -409,6 +470,18 @@ contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("gro
     return;
   }
   await db.delete(growContactRelationships).where(eq(growContactRelationships.id, id));
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_contact_relationship_removed",
+    recordType: "grow_contact_relationship",
+    recordId: String(existing.id),
+    previousValue: JSON.stringify({
+      partyId: existing.partyId,
+      relatedPartyId: existing.relatedPartyId,
+      relationshipType: existing.relationshipType,
+    }),
+  });
   res.status(204).send();
 });
 
@@ -417,12 +490,25 @@ contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("gro
 // commitment is conceptually the same "structured Grow activity-adjacent record" surface.
 contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const partyId = Number(req.params.partyId);
+  const partyId = parsePositiveId(req.params.partyId);
   const description = typeof req.body?.description === "string" ? req.body.description : undefined;
   const dueAtRaw = req.body?.dueAt;
   const dueAt = typeof dueAtRaw === "string" ? new Date(dueAtRaw) : undefined;
   if (!partyId || !description || !dueAt || Number.isNaN(dueAt.getTime())) {
     res.status(400).json({ error: "description and a valid dueAt are required" });
+    return;
+  }
+  if (description.length > CONTACT_FREE_TEXT_MAX) {
+    res.status(400).json({ error: `description must be at most ${CONTACT_FREE_TEXT_MAX} characters` });
+    return;
+  }
+  // Non-numeric ids are a client error (400), never a NaN handed to Postgres (500).
+  const propertyIdSupplied = req.body?.propertyId !== undefined && req.body?.propertyId !== null;
+  const propertyId = propertyIdSupplied ? parsePositiveId(req.body.propertyId) : null;
+  const opportunityIdSupplied = req.body?.opportunityId !== undefined && req.body?.opportunityId !== null;
+  const opportunityId = opportunityIdSupplied ? parsePositiveId(req.body.opportunityId) : null;
+  if ((propertyIdSupplied && propertyId === null) || (opportunityIdSupplied && opportunityId === null)) {
+    res.status(400).json({ error: "propertyId and opportunityId, if supplied, must be valid ids" });
     return;
   }
 
@@ -432,8 +518,6 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
     return;
   }
 
-  const propertyIdSupplied = req.body?.propertyId !== undefined && req.body?.propertyId !== null;
-  const propertyId = propertyIdSupplied ? Number(req.body.propertyId) : null;
   if (propertyId !== null) {
     const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
     if (!property) {
@@ -442,8 +526,6 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
     }
   }
 
-  const opportunityIdSupplied = req.body?.opportunityId !== undefined && req.body?.opportunityId !== null;
-  const opportunityId = opportunityIdSupplied ? Number(req.body.opportunityId) : null;
   if (opportunityId !== null) {
     const [opportunity] = await db
       .select()
@@ -469,6 +551,15 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
       createdBy: user.id,
     })
     .returning();
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_commitment_created",
+    recordType: "grow_commitment",
+    recordId: String(inserted.id),
+    propertyId,
+    updatedValue: JSON.stringify({ partyId, propertyId, opportunityId, dueAt: dueAt.toISOString(), status: "Open" }),
+  });
   res.status(201).json({ commitment: inserted });
 });
 
@@ -478,10 +569,19 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
 // completion up through the ordinary activity feed without any special-casing.
 contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const id = Number(req.params.id);
+  const id = parsePositiveId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid commitment id" });
+    return;
+  }
   const status = req.body?.status;
   if (status !== "Completed" && status !== "Cancelled") {
     res.status(400).json({ error: "status must be Completed or Cancelled" });
+    return;
+  }
+  const cancelReason = req.body?.cancelReason;
+  if (cancelReason !== undefined && cancelReason !== null && (typeof cancelReason !== "string" || cancelReason.length > CONTACT_FREE_TEXT_MAX)) {
+    res.status(400).json({ error: `cancelReason must be a string of at most ${CONTACT_FREE_TEXT_MAX} characters` });
     return;
   }
 
@@ -499,30 +599,65 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     return;
   }
 
+  // AE GROW Pilot Readiness WP1 (P2-1): the UPDATE is conditional on status = 'Open' (and the
+  // caller's brokerage), so of two concurrent complete/cancel requests exactly one wins; the
+  // loser gets 409 and -- because the task_completion activity is written in the same
+  // transaction, only when the conditional UPDATE actually changed a row -- no duplicate
+  // Timeline activity. growCommitments has no cancelled-by column, so the canceller is recorded
+  // in the audit row below (userId + cancelledByUserId) rather than by adding a column.
   const now = new Date();
-  const [updated] = await db
-    .update(growCommitments)
-    .set(
-      status === "Completed"
-        ? { status, completedAt: now, completedByUserId: user.id, updatedAt: now }
-        : { status, cancelledAt: now, cancelReason: typeof req.body?.cancelReason === "string" ? req.body.cancelReason : null, updatedAt: now },
-    )
-    .where(eq(growCommitments.id, id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(growCommitments)
+      .set(
+        status === "Completed"
+          ? { status, completedAt: now, completedByUserId: user.id, updatedAt: now }
+          : { status, cancelledAt: now, cancelReason: typeof cancelReason === "string" ? cancelReason : null, updatedAt: now },
+      )
+      .where(and(eq(growCommitments.id, id), eq(growCommitments.brokerageId, user.brokerageId), eq(growCommitments.status, "Open")))
+      .returning();
+    if (!row) return null;
 
-  if (status === "Completed") {
-    await db.insert(growActivities).values({
-      brokerageId: user.brokerageId,
-      partyId: existing.partyId,
-      propertyId: existing.propertyId,
-      opportunityId: existing.opportunityId,
-      activityType: "task_completion",
-      occurredAt: now,
-      summary: `Commitment completed: ${existing.description}`,
-      responsibleUserId: user.id,
-      source: "manual",
-    });
+    if (status === "Completed") {
+      await tx.insert(growActivities).values({
+        brokerageId: user.brokerageId,
+        partyId: existing.partyId,
+        propertyId: existing.propertyId,
+        opportunityId: existing.opportunityId,
+        activityType: "task_completion",
+        occurredAt: now,
+        summary: `Commitment completed: ${existing.description}`,
+        responsibleUserId: user.id,
+        source: "manual",
+      });
+    }
+    return row;
+  });
+
+  if (!updated) {
+    const [current] = await db
+      .select({ status: growCommitments.status })
+      .from(growCommitments)
+      .where(and(eq(growCommitments.id, id), eq(growCommitments.brokerageId, user.brokerageId)))
+      .limit(1);
+    res.status(409).json({ error: `Commitment is already ${current?.status ?? "closed"}` });
+    return;
   }
+
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: status === "Completed" ? "grow_commitment_completed" : "grow_commitment_cancelled",
+    recordType: "grow_commitment",
+    recordId: String(updated.id),
+    propertyId: updated.propertyId,
+    previousValue: JSON.stringify({ status: "Open" }),
+    updatedValue: JSON.stringify(
+      status === "Completed"
+        ? { status, completedByUserId: user.id }
+        : { status, cancelledByUserId: user.id },
+    ),
+  });
 
   res.json({ commitment: updated });
 });

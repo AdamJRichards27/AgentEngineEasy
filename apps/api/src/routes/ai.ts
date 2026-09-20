@@ -7,6 +7,8 @@ import { isRoleEnabled } from "../lib/ai/featureFlags.js";
 import { resolveBrokerageTier, isRoleEntitled } from "../lib/ai/entitlements.js";
 import { AiEntitlementError, AiFeatureDisabledError } from "../lib/ai/types.js";
 import { GrowRateLimitError } from "../lib/ai/growRateLimiter.js";
+import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 
 export const aiRouter = Router();
 
@@ -64,6 +66,31 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  // AE GROW Pilot Readiness WP1 (P2-2) — grow.ai.use ("Ask Agent Engine questions scoped to
+  // Grow context", lib/billing/catalogue.ts) is required for every Grow-scoped request (Grow
+  // Ask AE and the Business Coach, which is only reachable with contextType "grow"). Checked
+  // per user via the same resolver requireEntitlement() uses, before askCopilot() does any
+  // work. Non-Grow (RUN Copilot) requests are deliberately untouched by this gate.
+  if (parsed.data.contextType === "grow") {
+    const isCoach = parsed.data.mode === "coach";
+    try {
+      const decision = await explainEntitlementDecision(authedUser, "grow.ai.use");
+      if (decision.allowed === false) {
+        res.status(403).json({
+          error: isCoach
+            ? "Your plan does not include the AI Business Coach (Grow AI is not enabled for this account)."
+            : "Grow-scoped Ask AE requires a Grow or Pro plan with Grow AI enabled.",
+          reason: decision.reason,
+          entitlementKey: "grow.ai.use",
+        });
+        return;
+      }
+    } catch (err) {
+      logger.error("ai_ask_grow_ai_entitlement_failed_closed", { error: err, userId: authedUser.id });
+      res.status(403).json({ error: "Not entitled", reason: "ENTITLEMENT_MISSING", entitlementKey: "grow.ai.use" });
+      return;
+    }
+  }
   try {
     const result = await askCopilot({
       brokerageId: authedUser.brokerageId,
@@ -90,6 +117,12 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
     // since this is neither a permission failure nor a server error.
     if (err instanceof GrowRateLimitError) {
       res.status(429).json({ error: err.message });
+      return;
+    }
+    // AE GROW Pilot Readiness WP1 (P1-3) — durable per-brokerage daily cap
+    // (lib/ai/dailyUsage.ts), enforced inside askCopilot() before any provider call.
+    if (err instanceof AiDailyCapExceededError) {
+      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier });
       return;
     }
     logger.error("ai_ask_route_failed", { error: err });

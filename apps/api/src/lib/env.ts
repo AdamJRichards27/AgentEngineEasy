@@ -106,9 +106,9 @@ export function isLiveVoiceTranscriptionApproved(): boolean {
 }
 
 /**
- * True only in production, when live voice transcription has NOT been
- * explicitly approved (isLiveVoiceTranscriptionApproved() above). While
- * true, apps/api/src/lib/ai/voice/gateway.ts's
+ * True whenever live voice transcription has NOT been explicitly approved
+ * (isLiveVoiceTranscriptionApproved() above). While true,
+ * apps/api/src/lib/ai/voice/gateway.ts's
  * buildVoiceTranscriptionProvider() refuses to construct a live (Deepgram)
  * provider even if AI_TRANSCRIPTION_PROVIDER=deepgram and a DEEPGRAM_API_KEY
  * are both configured — it throws a typed, fail-closed error instead
@@ -116,11 +116,16 @@ export function isLiveVoiceTranscriptionApproved(): boolean {
  * substitution of the mock provider for a caller who asked for a live
  * one — see that module's own header comment for why this stage
  * deliberately diverges from mustForceMockExternalProvider()'s "silently
- * return the mock/sandbox implementation" convention). Outside production
- * this has no effect, same as mustForceMockExternalProvider() above.
+ * return the mock/sandbox implementation" convention).
+ *
+ * AE GROW Pilot Readiness WP2a: this lock now applies in EVERY environment,
+ * matching mustForceMockCallTranscriptionProvider() below. Previously it was
+ * production-only, so a development/staging process with
+ * AI_TRANSCRIPTION_PROVIDER=deepgram and a key sent real recorded voice to
+ * Deepgram without the explicit approval the Stage E authorisation requires.
  */
 export function mustForceMockVoiceTranscriptionProvider(): boolean {
-  return isProductionEnvironment() && !isLiveVoiceTranscriptionApproved();
+  return !isLiveVoiceTranscriptionApproved();
 }
 
 /**
@@ -178,14 +183,47 @@ export function isLiveTelephonyApproved(): boolean {
 }
 
 /**
- * True only in production, when live telephony has NOT been explicitly
- * approved (isLiveTelephonyApproved() above). Symmetrical with
+ * True whenever live telephony has NOT been explicitly approved
+ * (isLiveTelephonyApproved() above). Symmetrical with
  * mustForceMockVoiceTranscriptionProvider() above; unused by any F1 code
  * path today (see isLiveTelephonyApproved()'s own comment), but defined
  * now so a future real TelephonyProvider adapter has this check ready to
  * call rather than needing it invented under time pressure once a
  * provider is actually being integrated.
+ *
+ * AE GROW Pilot Readiness WP2a: applies in EVERY environment (previously
+ * production-only), matching mustForceMockCallTranscriptionProvider() —
+ * real calls must never be placed from a dev/staging process without the
+ * explicit flag.
  */
 export function mustForceMockTelephonyProvider(): boolean {
-  return isProductionEnvironment() && !isLiveTelephonyApproved();
+  return !isLiveTelephonyApproved();
+}
+
+/**
+ * AE GROW Pilot Readiness WP2a — AI text-generation provider lock.
+ *
+ * True only when an operator has explicitly set LIVE_AI_PROVIDER_APPROVED to
+ * the literal string "true". Selecting a real model provider
+ * (AI_PROVIDER / AI_FALLBACK_PROVIDER other than "mock") plus a credential
+ * is no longer enough on its own to send brokerage/contact context to an
+ * external model: this separate, explicit approval must also exist. A
+ * SEPARATE flag from every other LIVE_*_APPROVED flag — approving voice,
+ * call transcription, telephony or external transactions never approves an
+ * external LLM.
+ */
+export function isLiveAiProviderApproved(): boolean {
+  return process.env.LIVE_AI_PROVIDER_APPROVED === "true";
+}
+
+/**
+ * True whenever the live AI provider has not been explicitly approved — in
+ * EVERY environment, like mustForceMockCallTranscriptionProvider(). While
+ * true, apps/api/src/lib/ai/gateway.ts's buildProvider() returns the mock
+ * provider for any requested real provider (see that function for why this
+ * gate follows the gateway's existing "fall back to mock, loudly" pattern
+ * rather than the transcription gates' typed-error pattern).
+ */
+export function mustForceMockAiProvider(): boolean {
+  return !isLiveAiProviderApproved();
 }

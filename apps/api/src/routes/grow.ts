@@ -18,6 +18,27 @@ import { logAudit } from "../lib/audit.js";
 
 export const growRouter = Router();
 
+// AE GROW Pilot Readiness WP6a (D1-residual): route-id validation, same
+// helper shape as routes/contacts.ts's parsePositiveId. PATCH
+// /grow/opportunities/:id previously passed `Number(req.params.id)` straight
+// into a `where(eq(growOpportunities.id, ...))` bind, so a non-numeric id
+// reached Postgres as NaN and returned 500 instead of 400. Bounded by
+// MAX_SIGNED_INT4 because these ids are `serial` columns
+// (packages/db/src/schema/grow.ts), i.e. int4 — an id like "1e20" is an
+// integer as far as Number.isInteger is concerned but still out of range for
+// the bind, which was the same 500.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+// Canonical growRelationships.status values (packages/db/src/schema/grow.ts column comment;
+// "PendingReview" is also what the import pipeline writes, lib/import/execute.ts).
+const GROW_RELATIONSHIP_STATUSES = ["Active", "Historical", "PendingReview"] as const;
+const GROW_RELATIONSHIP_ROLE_MAX = 200;
+
 // Every route below is authenticated first. Beyond that, /access is intentionally the ONLY
 // route that does not also requireEntitlement("grow.access") - it exists so the frontend can
 // ask "should I show the locked shell or the real one" without the answer itself ever being
@@ -202,7 +223,36 @@ growRouter.patch(
   requireEntitlement("grow.relationships.manage"),
   async (req, res) => {
     const user = req.authedUser!;
-    const id = Number(req.params.id);
+    const id = parsePositiveId(req.params.id);
+    if (id === null) {
+      res.status(400).json({ error: "Invalid relationship id" });
+      return;
+    }
+    // AE GROW Pilot Readiness WP1 (P2-4): status is validated against the canonical
+    // growRelationships.status values (packages/db/src/schema/grow.ts: Active | Historical |
+    // PendingReview); role is a documented free-text refinement (e.g. "Executor") with no
+    // canonical list, so it is bounded (non-empty string, trimmed, <= GROW_RELATIONSHIP_ROLE_MAX)
+    // rather than enumerated. Validated before any database read.
+    const rawStatus = req.body?.status;
+    if (rawStatus !== undefined && (typeof rawStatus !== "string" || !(GROW_RELATIONSHIP_STATUSES as readonly string[]).includes(rawStatus))) {
+      res.status(400).json({ error: `status must be one of: ${GROW_RELATIONSHIP_STATUSES.join(", ")}` });
+      return;
+    }
+    const rawRole = req.body?.role;
+    if (
+      rawRole !== undefined &&
+      rawRole !== null &&
+      (typeof rawRole !== "string" || rawRole.trim().length === 0 || rawRole.length > GROW_RELATIONSHIP_ROLE_MAX)
+    ) {
+      res.status(400).json({ error: `role must be a non-empty string of at most ${GROW_RELATIONSHIP_ROLE_MAX} characters` });
+      return;
+    }
+    const rawIsPrimary = req.body?.isPrimary;
+    if (rawIsPrimary !== undefined && typeof rawIsPrimary !== "boolean") {
+      res.status(400).json({ error: "isPrimary must be a boolean" });
+      return;
+    }
+
     const [existing] = await db
       .select()
       .from(growRelationships)
@@ -213,9 +263,10 @@ growRouter.patch(
       return;
     }
 
-    const status = typeof req.body?.status === "string" ? req.body.status : existing.status;
-    const role = typeof req.body?.role === "string" ? req.body.role : existing.role;
-    const isPrimary = typeof req.body?.isPrimary === "boolean" ? req.body.isPrimary : existing.isPrimary;
+    const status = typeof rawStatus === "string" ? rawStatus : existing.status;
+    // null (like an omitted role) leaves the existing role unchanged, exactly as before.
+    const role = typeof rawRole === "string" ? rawRole.trim() : existing.role;
+    const isPrimary = typeof rawIsPrimary === "boolean" ? rawIsPrimary : existing.isPrimary;
 
     const [updated] = await db
       .update(growRelationships)
@@ -417,7 +468,11 @@ growRouter.patch(
   requireEntitlement("grow.opportunities.manage"),
   async (req, res) => {
     const user = req.authedUser!;
-    const id = Number(req.params.id);
+    const id = parsePositiveId(req.params.id);
+    if (id === null) {
+      res.status(400).json({ error: "Invalid opportunity id" });
+      return;
+    }
     const [existing] = await db
       .select()
       .from(growOpportunities)

@@ -192,7 +192,7 @@ test("defaults are bounded and stale media/transcribing rows fail with counters 
   await db.update(growCallTranscriptions).set({
     updatedAt: sql`timestamp '2034-12-31 23:39:59.000456'`,
   }).where(eq(growCallTranscriptions.id, microsecond));
-  const result = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 100 });
+  const result = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 100, brokerageId });
   assert.deepEqual(
     {
       scanned: result.scanned,
@@ -218,15 +218,15 @@ test("defaults are bounded and stale media/transcribing rows fail with counters 
 test("bounded ascending cursors do not starve rows and repeated sweeps are no-ops", async () => {
   const ids = await Promise.all([1, 2, 3].map(async () => artifact("TRANSCRIBING", await source())));
   ids.sort((a, b) => a - b);
-  const first = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 2 });
+  const first = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 2, brokerageId });
   assert.equal(first.scanned, 2);
   assert.equal(first.failedAbandoned, 2);
   assert.equal(first.nextCursor, ids[1]);
-  const second = await reconcileAbandonedCallTranscriptions({ now, afterId: first.nextCursor!, batchSize: 2 });
+  const second = await reconcileAbandonedCallTranscriptions({ now, afterId: first.nextCursor!, batchSize: 2, brokerageId });
   assert.equal(second.scanned, 1);
   assert.equal(second.failedAbandoned, 1);
   assert.equal(second.nextCursor, null);
-  const repeat = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 100 });
+  const repeat = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 100, brokerageId });
   assert.deepEqual(repeat, {
     scanned: 0,
     failedAbandoned: 0,
@@ -244,7 +244,7 @@ test("terminal review states are untouched and source deletion/unavailability ha
   const failed = await artifact("FAILED", await source());
   const deleted = await artifact("TRANSCRIBING", await source({ status: "SoftDeleted", deletedAt: staleAt }));
   const unavailable = await artifact("MEDIA_PROCESSING", await source({ status: "Quarantined" }));
-  const result = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId });
+  const result = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, brokerageId });
   assert.equal(result.failedDeleted, 1);
   assert.equal(result.failedUnavailable, 1);
   assert.equal((await row(deleted))?.failureReason, "RECORDING_DELETED");
@@ -275,7 +275,7 @@ test("foreign linkage only fails the own artifact and never writes the foreign t
     { sessionId: ownSource.sessionId, versionId: foreign.versionId },
     staleAt,
   );
-  const result = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId });
+  const result = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, brokerageId });
   assert.equal(result.failedTenantMismatch, 1);
   assert.equal((await row(own))?.failureReason, "TENANT_MISMATCH");
   assert.equal((await row(foreignArtifact))?.processingState, "TRANSCRIBING");
@@ -288,13 +288,42 @@ test("foreign linkage only fails the own artifact and never writes the foreign t
   await db.delete(brokerages).where(eq(brokerages.id, foreignBrokerage.id));
 });
 
+test("a sweep scoped to one brokerage never scans or transitions another tenant's stale rows", async () => {
+  const [otherBrokerage] = await db.insert(brokerages).values({ name: `Reconciler scoped other ${Date.now()}` }).returning();
+  assert.ok(otherBrokerage);
+  const [otherParty] = await db.insert(parties).values({ brokerageId: otherBrokerage.id, firstName: "Other" }).returning();
+  assert.ok(otherParty);
+  const otherSource = await source({ brokerage: otherBrokerage.id, party: otherParty.id });
+  const otherStale = await artifact("TRANSCRIBING", otherSource, staleAt, 0, otherBrokerage.id, otherParty.id);
+  const ownStale = await artifact("TRANSCRIBING", await source());
+  try {
+    const scoped = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 100, brokerageId });
+    assert.equal(scoped.scanned, 1, "only this brokerage's stale row is scanned");
+    assert.equal((await row(ownStale))?.processingState, "FAILED");
+    assert.equal((await row(otherStale))?.processingState, "TRANSCRIBING", "another tenant's row is never touched by a scoped sweep");
+
+    const otherScoped = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 100, brokerageId: otherBrokerage.id });
+    assert.equal(otherScoped.scanned, 1);
+    assert.equal((await row(otherStale))?.processingState, "FAILED");
+    await assert.rejects(() => reconcileAbandonedCallTranscriptions({ now, brokerageId: 0 }), /Invalid call transcription reconciliation options/);
+  } finally {
+    await db.delete(auditLogs).where(eq(auditLogs.brokerageId, otherBrokerage.id));
+    await db.delete(growCallTranscriptions).where(eq(growCallTranscriptions.id, otherStale));
+    await db.delete(documentObjectVersions).where(eq(documentObjectVersions.id, otherSource.versionId));
+    await db.delete(documents).where(eq(documents.brokerageId, otherBrokerage.id));
+    await db.delete(growCallSessions).where(eq(growCallSessions.id, otherSource.sessionId));
+    await db.delete(parties).where(eq(parties.id, otherParty.id));
+    await db.delete(brokerages).where(eq(brokerages.id, otherBrokerage.id));
+  }
+});
+
 test("CAS skips progress races, and strict audit outages defer then recover", async () => {
   const raced = await artifact("TRANSCRIBING", await source());
   setCallTranscriptionReconciliationBeforeTransitionForTests(async (snapshot) => {
     await db.update(growCallTranscriptions).set({ retryCount: 1, updatedAt: new Date(now.getTime() - 1_000) })
       .where(eq(growCallTranscriptions.id, snapshot.transcription.id));
   });
-  const race = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId });
+  const race = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, brokerageId });
   assert.equal(race.skippedConcurrentTransition, 1);
   assert.equal((await row(raced))?.processingState, "TRANSCRIBING");
   setCallTranscriptionReconciliationBeforeTransitionForTests(null);
@@ -303,7 +332,7 @@ test("CAS skips progress races, and strict audit outages defer then recover", as
 
   const audited = await artifact("MEDIA_PROCESSING", await source());
   setCallTranscriptionAuditFailureForTests("grow_call_transcription_reconciled");
-  const deferred = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 1 });
+  const deferred = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 1, brokerageId });
   assert.equal(deferred.deferredTransitionError, 1);
   assert.equal(deferred.nextCursor, null, "deferred full batches must restart their cursor");
   assert.equal((await row(audited))?.processingState, "MEDIA_PROCESSING");
@@ -313,7 +342,7 @@ test("CAS skips progress races, and strict audit outages defer then recover", as
     eq(auditLogs.recordId, String(audited)),
   ))).length, 0);
   setCallTranscriptionAuditFailureForTests(null);
-  const recovered = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 1 });
+  const recovered = await reconcileAbandonedCallTranscriptions({ now, afterId: fixtureAfterId, batchSize: 1, brokerageId });
   assert.equal(recovered.failedAbandoned, 1);
   assert.equal((await row(audited))?.processingState, "FAILED");
 });

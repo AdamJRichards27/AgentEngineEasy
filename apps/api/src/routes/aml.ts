@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, amlVerifications, serviceOrders, properties } from "@aee/db";
@@ -27,6 +27,76 @@ import { logAudit } from "../lib/audit.js";
 // records created alongside each verification (see lib/aml.ts). Actually
 // charging a stored payment method for those ServiceOrders is Phase 6.
 export const amlRouter = Router();
+
+// AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
+// routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
+// routes/propertyIntelligence.ts already use (each keeps its own local copy;
+// this is deliberately not a shared module). Every :propertyId / :verificationId
+// route below took a raw `Number(req.params...)` straight into a
+// `where(eq(..., ...))` bind, so "abc" reached Postgres as NaN and an id past
+// int4 as an unbindable value. Bounded by MAX_SIGNED_INT4 because
+// properties.id and amlVerifications.id are `serial` columns, i.e. int4.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
+/** Resolves a route id, answering 400 itself and returning null when malformed. */
+function readIdParam(res: Response, value: unknown, label: "property" | "AML verification"): number | null {
+  const id = parsePositiveId(value);
+  if (id === null) {
+    res.status(400).json({ error: `Invalid ${label} id` });
+    return null;
+  }
+  return id;
+}
+
+/** What an unrecognised error is allowed to tell a client. */
+const GENERIC_AML_ERROR = "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** Driver/ORM text, as a second line of defence behind the prototype test below. */
+const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
+
+/**
+ * True only for a plain `new Error("...")` — the shape lib/aml.ts uses for
+ * its operator-authored, caller-facing messages ("Property 12 not found",
+ * "AmlVerification 3 is not in a retryable state (status: Passed)",
+ * "AmlVerification 3 has no exception to resolve (status: Passed)"), which
+ * are deliberately kept with this router's existing statuses.
+ *
+ * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
+ * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
+ * the `Failed query: select "id", "brokerage_id" ... from ...` text live
+ * smoke testing found in real response bodies), pg's DatabaseError, and
+ * RangeError/TypeError/SyntaxError. DrizzleQueryError notably does NOT
+ * override `name` — it reports "Error" — so a name check alone would let the
+ * leak straight through; only the prototype identity separates them.
+ */
+function isOperatorAuthoredError(err: unknown): err is Error {
+  return err instanceof Error && Object.getPrototypeOf(err) === Error.prototype && !DRIVER_TEXT.test(err.message);
+}
+
+/**
+ * Expected domain errors keep the status this route has always answered and
+ * their own messages; anything else is an unrecognised server fault, logged
+ * in full server-side (the structured logger attaches the ambient
+ * correlationId itself — see packages/events/src/logger.ts) and answered
+ * generically. Mirrors handleGrowAppraisalError /
+ * handlePropertyIntelligenceError.
+ */
+function handleAmlError(err: unknown, res: Response, expectedStatus: number): void {
+  if (isOperatorAuthoredError(err)) {
+    res.status(expectedStatus).json({ error: err.message });
+    return;
+  }
+  logger.error("aml_route_unhandled_error", {
+    error: err instanceof Error ? err.message : String(err),
+    errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
+  });
+  res.status(500).json({ error: GENERIC_AML_ERROR });
+}
 
 const requestSchema = z.object({
   propertyId: z.number(),
@@ -60,13 +130,16 @@ amlRouter.post("/request", requireAuth, async (req, res) => {
     // initiateAmlIfNeeded throws "not found" uniformly for a missing
     // property/party AND for a cross-tenant or unlinked one — a caller
     // outside the brokerage can never distinguish "doesn't exist" from
-    // "exists but isn't yours" from this response.
-    res.status(404).json({ error: (err as Error).message });
+    // "exists but isn't yours" from this response. That deliberate 404 is
+    // kept for its own operator-authored messages only; a driver fault used
+    // to be returned here verbatim as a 404 and is now a generic 500.
+    handleAmlError(err, res, 404);
   }
 });
 
 amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const user = req.authedUser!;
   // Joined onto properties and filtered by the caller's brokerageId in the
   // same query — a propertyId from another brokerage returns no rows here,
@@ -120,7 +193,8 @@ const resolveExceptionSchema = z.object({ notes: z.string().trim().min(1, "notes
 // non-empty notes so it can never be a silent one-click bypass of a failed
 // or flagged identity check.
 amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
-  const verificationId = Number(req.params.verificationId);
+  const verificationId = readIdParam(res, req.params.verificationId, "AML verification");
+  if (verificationId === null) return;
   const parsed = resolveExceptionSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -145,7 +219,7 @@ amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(..
     });
     res.json({ verification });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleAmlError(err, res, 400);
   }
 });
 
@@ -154,7 +228,8 @@ amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(..
 // authenticated user can retry; unlike resolve-exception this doesn't
 // override an outcome, it just asks the provider again.
 amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
-  const verificationId = Number(req.params.verificationId);
+  const verificationId = readIdParam(res, req.params.verificationId, "AML verification");
+  if (verificationId === null) return;
   const user = req.authedUser!;
 
   try {
@@ -168,7 +243,7 @@ amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
     });
     res.json({ verification });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    handleAmlError(err, res, 400);
   }
 });
 
@@ -176,7 +251,8 @@ amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
 // ServiceOrder rows created by initiateAmlIfNeeded, read-only here; actual
 // charging is Phase 6.
 amlRouter.get("/service-orders/by-property/:propertyId", requireAuth, async (req, res) => {
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = readIdParam(res, req.params.propertyId, "property");
+  if (propertyId === null) return;
   const user = req.authedUser!;
   // Same brokerage-scoped join as GET /by-property above — serviceOrders
   // carries no brokerageId of its own, and this is billing data, so a

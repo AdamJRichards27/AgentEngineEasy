@@ -45,7 +45,7 @@
 //   - CREATE_GROW_COMMITMENT open-resource dedup is backed by a partial
 //     unique index, and a lost insert race returns the surviving request.
 
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { db, aiActionRequests, type AiActionRequest, type InsertAiActionRequest } from "@aee/db";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, or, type SQL } from "drizzle-orm";
 import { logger } from "@aee/events";
@@ -82,12 +82,122 @@ function canonicalizeForHash(value: unknown): unknown {
 // before hashing makes the hash a function of the logical value only,
 // independent of key order, so legitimate approve/execute calls are
 // never falsely rejected as PAYLOAD_TAMPERED.
-export function hashInputPayload(payload: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalizeForHash(payload ?? null)))
-    .digest("hex");
+function canonicalPayloadJson(payload: unknown): string {
+  return JSON.stringify(canonicalizeForHash(payload ?? null));
 }
 
+// AE GROW Pilot Readiness WP2b — keyed tamper hash.
+//
+// The original inputPayloadHash was a plain SHA-256 of the canonical
+// payload. Anyone able to edit an aiActionRequests row (the exact threat
+// Part 25 guards against) could change inputPayload AND recompute that
+// unkeyed hash, defeating the check. New hashes are HMAC-SHA256 over the
+// canonical payload with a server-side key, stored as "v2:<hex>", so a
+// matching hash can only be produced by a holder of the key.
+//
+// Key source (never logged, never persisted):
+//   1. AI_ACTION_PAYLOAD_HMAC_KEY, if set (must be >= 32 bytes); otherwise
+//   2. derived deterministically from SESSION_SECRET (already mandatory and
+//      >= 32 chars — lib/session.ts refuses to boot without it) as
+//      HMAC-SHA256(SESSION_SECRET, AI_ACTION_PAYLOAD_KEY_DERIVATION_LABEL),
+//      so no new mandatory env var is introduced and the derived key is
+//      domain-separated from session-cookie signing.
+// Rotating whichever secret is in use invalidates the hashes of pending
+// requests (they fail closed as PAYLOAD_TAMPERED and must be re-proposed);
+// pending requests expire within DEFAULT_EXPIRY_MS (24h) regardless.
+const INPUT_PAYLOAD_HASH_V2_PREFIX = "v2:";
+const AI_ACTION_PAYLOAD_KEY_DERIVATION_LABEL = "aee:ai-action-request:input-payload-hash:v2";
+const MIN_PAYLOAD_HMAC_KEY_BYTES = 32;
+
+function inputPayloadHmacKey(env: NodeJS.ProcessEnv = process.env): Buffer {
+  const explicit = env.AI_ACTION_PAYLOAD_HMAC_KEY;
+  if (explicit !== undefined && explicit !== "") {
+    const bytes = Buffer.from(explicit, "utf8");
+    if (bytes.length < MIN_PAYLOAD_HMAC_KEY_BYTES) {
+      throw new Error(`AI_ACTION_PAYLOAD_HMAC_KEY must contain at least ${MIN_PAYLOAD_HMAC_KEY_BYTES} bytes`);
+    }
+    return bytes;
+  }
+  const sessionSecret = env.SESSION_SECRET;
+  if (!sessionSecret || sessionSecret.length < MIN_PAYLOAD_HMAC_KEY_BYTES) {
+    // Fail closed: never fall back to an unkeyed or well-known key.
+    throw new Error("AI action payload hashing requires AI_ACTION_PAYLOAD_HMAC_KEY or a configured SESSION_SECRET (>= 32 characters)");
+  }
+  return createHmac("sha256", sessionSecret).update(AI_ACTION_PAYLOAD_KEY_DERIVATION_LABEL).digest();
+}
+
+/** Keyed (v2) tamper hash of an action's canonical input payload: "v2:" + HMAC-SHA256 hex. The only format this module writes. */
+export function hashInputPayload(payload: unknown): string {
+  return INPUT_PAYLOAD_HASH_V2_PREFIX + createHmac("sha256", inputPayloadHmacKey()).update(canonicalPayloadJson(payload)).digest("hex");
+}
+
+/** The pre-WP2b unkeyed format (plain SHA-256 hex, no prefix). Only ever used to VERIFY legacy rows — never written. */
+function legacyUnkeyedInputPayloadHash(payload: unknown): string {
+  return createHash("sha256").update(canonicalPayloadJson(payload)).digest("hex");
+}
+
+// Backward compatibility for rows proposed by the previous release (plain,
+// unprefixed SHA-256). A legacy hash is honoured only when ALL of these hold:
+//   - the row's createdAt is before this process loaded this module — this
+//     code never writes an unprefixed hash, so an unprefixed hash on a row
+//     created afterwards can only be a forgery (e.g. an attacker who swapped
+//     the payload and recomputed plain SHA-256) and is rejected;
+//   - the current time is before LEGACY_UNKEYED_HASH_SUNSET (see below);
+//   - the recomputed plain SHA-256 matches.
+//
+// BE HONEST ABOUT WHAT THIS IS. The legacy path is a DEPLOY-WINDOW
+// CONVENIENCE, NOT A SECURITY CONTROL. An unkeyed hash can be recomputed by
+// anyone who can edit the row, and anyone who can write inputPayload /
+// inputPayloadHash can write createdAt just as freely — so the "created
+// before this module loaded" condition stops accidents and stale replays,
+// not a determined writer of that table. The only thing that actually closes
+// the downgrade is the window SHUTTING: from that moment an unprefixed hash
+// never verifies, whatever its createdAt claims, and every row written by
+// this code carries the keyed "v2:" format.
+//
+// The window is therefore measured from module load rather than a fixed
+// calendar date, so it closes itself ~2 days after each deploy with no
+// follow-up code change and no long-lived weak path. 48h comfortably exceeds
+// DEFAULT_EXPIRY_MS (24h): any genuine pre-upgrade row has already expired
+// well before the window shuts, so nothing real is lost when it does. (The
+// previous hard-coded 2026-12-31 sunset left this path open for ~15 months
+// to accommodate rows that cannot outlive 24h — far longer than necessary.)
+//
+// createdAt is a timestamp without time zone written by the database clock,
+// so this comparison assumes the UTC database the deployment runbook requires.
+const MODULE_LOADED_AT_MS = Date.now();
+/** How long after process start an unprefixed (pre-WP2b) hash may still verify. */
+export const LEGACY_UNKEYED_HASH_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** Instant after which no unprefixed hash verifies, whatever its createdAt claims. */
+export const LEGACY_UNKEYED_HASH_SUNSET = new Date(MODULE_LOADED_AT_MS + LEGACY_UNKEYED_HASH_WINDOW_MS);
+
+function constantTimeEqualText(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/**
+ * The single tamper check used by BOTH approval (verifyNotTampered below)
+ * and execution (executionGateway.ts). Returns true only if the row's
+ * stored inputPayload still matches its stored inputPayloadHash under the
+ * rules above.
+ */
+export function verifyInputPayloadHash(
+  row: Pick<AiActionRequest, "inputPayload" | "inputPayloadHash" | "createdAt">,
+  now: Date = new Date(),
+): boolean {
+  const stored = row.inputPayloadHash;
+  if (typeof stored !== "string" || stored.length === 0) return false;
+  if (stored.startsWith(INPUT_PAYLOAD_HASH_V2_PREFIX)) {
+    return constantTimeEqualText(hashInputPayload(row.inputPayload), stored);
+  }
+  if (stored.includes(":")) return false; // unknown future/garbage version — fail closed
+  const createdAtMs = row.createdAt instanceof Date ? row.createdAt.getTime() : Number.NaN;
+  if (!Number.isFinite(createdAtMs) || createdAtMs >= MODULE_LOADED_AT_MS) return false;
+  if (now.getTime() >= LEGACY_UNKEYED_HASH_SUNSET.getTime()) return false;
+  return constantTimeEqualText(legacyUnkeyedInputPayloadHash(row.inputPayload), stored);
+}
 
 // ---------------------------------------------------------------------
 // AE GROW Priority 6 Stage F4.0 — governance hardening helpers
@@ -515,7 +625,7 @@ export interface ApprovalResult {
 }
 
 async function verifyNotTampered(row: AiActionRequest): Promise<boolean> {
-  return hashInputPayload(row.inputPayload) === row.inputPayloadHash;
+  return verifyInputPayloadHash(row);
 }
 
 // Shared D2/D4 authority check for approve and reject. Runs BEFORE any

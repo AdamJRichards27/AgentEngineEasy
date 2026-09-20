@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import {
   db,
   appraisals,
@@ -235,6 +235,19 @@ export async function updateAppraisalWorkspace(input: UpdateAppraisalWorkspaceIn
     Number(input.priceRangeLow) > Number(input.priceRangeHigh)
   ) {
     throw new AppraisalTransitionError("Price range low cannot exceed price range high");
+  }
+  // WP1 P1-2: an appraisal owner must be a user of the SAME brokerage. Without this a caller
+  // could assign any user id in the system, and that foreign user's name would then surface in
+  // the pipeline and the generated presentation. A foreign/unknown id is reported exactly like
+  // any other out-of-tenant id (404 via AppraisalAccessError), never confirming it exists.
+  if (input.ownerUserId != null) {
+    const [owner] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, input.ownerUserId), eq(users.brokerageId, input.brokerageId)));
+    if (!owner) {
+      throw new AppraisalAccessError("Owner user not found");
+    }
   }
 
   const patch: Record<string, unknown> = { updatedAt: new Date() };
@@ -484,7 +497,9 @@ export async function listAppraisalPipeline(input: {
     .from(appraisals)
     .innerJoin(properties, eq(properties.id, appraisals.propertyId))
     .leftJoin(parties, eq(parties.id, appraisals.partyId))
-    .leftJoin(users, eq(users.id, appraisals.ownerUserId))
+    // WP1 P1-2: the owner join is tenant-scoped too, so even a pre-existing bad row whose
+    // ownerUserId points at another brokerage's user never exposes that user's name.
+    .leftJoin(users, and(eq(users.id, appraisals.ownerUserId), eq(users.brokerageId, input.brokerageId)))
     .where(eq(properties.brokerageId, input.brokerageId))
     .orderBy(desc(appraisals.updatedAt));
 

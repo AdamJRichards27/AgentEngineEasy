@@ -504,6 +504,9 @@ test("discard and reconciliation are terminal F3 operations with no F4 side effe
     now: new Date(),
     staleAfterMs: 120_000,
     batchSize: 100,
+    // Scoped to this file's tenant so this aggressive (2-minute) sweep never
+    // fails another concurrently-running test file's in-flight rows.
+    brokerageId,
   });
   assert.equal(result.scanned >= 1, true);
   assertNoBoundaryWrites(beforeReconcile, await boundaryCounts());

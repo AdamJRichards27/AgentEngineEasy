@@ -291,7 +291,12 @@ export async function generateAppraisalPresentation(
     ? await db.select().from(parties).where(eq(parties.id, appraisal.partyId))
     : [null];
   const [owner] = appraisal.ownerUserId
-    ? await db.select().from(users).where(eq(users.id, appraisal.ownerUserId))
+    ? // WP1 P1-2: tenant-scoped owner lookup -- a foreign-brokerage owner id (bad row) must
+      // never put another brokerage's user name into this brokerage's presentation.
+      await db
+        .select()
+        .from(users)
+        .where(and(eq(users.id, appraisal.ownerUserId), eq(users.brokerageId, input.brokerageId)))
     : [null];
   const [brokerage] = await db.select().from(brokerages).where(eq(brokerages.id, input.brokerageId));
 

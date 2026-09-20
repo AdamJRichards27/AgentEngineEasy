@@ -2,6 +2,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { installSessionExpiryHandling } from "./lib/session";
 import "./styles.css";
 
 // retry: false — an unauthenticated 401 (very common: it's how we detect
@@ -11,10 +13,16 @@ import "./styles.css";
 // something a silent retry would resolve.
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
+// AE GROW Pilot Readiness WP5 — a 401 from any authenticated call returns the
+// whole app to sign-in with a "your session has ended" message (lib/session.ts).
+installSessionExpiryHandling(queryClient);
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
+    <ErrorBoundary variant="page" label="Agent Engine">
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );

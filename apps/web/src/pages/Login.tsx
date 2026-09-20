@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useLocation } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
-import type { SessionUser } from "../lib/session";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
+import { apiFetch, ApiError, SESSION_ENDED_MESSAGE } from "../lib/api";
+import { useCompleteSignIn, useSessionEndedNotice, type SessionUser } from "../lib/session";
 
 interface KnownUser {
   id: number;
@@ -22,8 +22,10 @@ interface KnownUser {
 // more: accounts are created only by accepting an admin-issued invitation
 // (see AcceptInvitation.tsx), matching the invitation-only model.
 export default function Login() {
-  const [, setLocation] = useLocation();
-  const queryClient = useQueryClient();
+  // AE GROW Pilot Readiness WP5 — once the session is re-fetched, App.tsx's
+  // /login route redirects to the entitlement-aware landing route itself.
+  const completeSignIn = useCompleteSignIn();
+  const sessionEnded = useSessionEndedNotice();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showDevPicker, setShowDevPicker] = useState(true);
@@ -44,18 +46,12 @@ export default function Login() {
         method: "POST",
         body: JSON.stringify({ firstName: u.firstName, lastName: u.lastName, email: u.email, brokerageName: u.brokerageName ?? "" }),
       }),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["session"], data.user);
-      setLocation("/");
-    },
+    onSuccess: () => completeSignIn(),
   });
 
   const login = useMutation({
     mutationFn: () => apiFetch<{ user: SessionUser }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
-    onSuccess: (data) => {
-      queryClient.setQueryData(["session"], data.user);
-      setLocation("/");
-    },
+    onSuccess: () => completeSignIn(),
   });
 
   const submit = () => {
@@ -74,7 +70,13 @@ export default function Login() {
           </svg>
           <span>Agent Engine</span>
         </div>
-        <p className="muted">Sign in to get started.</p>
+        {sessionEnded ? (
+          <p className="session-ended-notice" role="status">
+            {SESSION_ENDED_MESSAGE}
+          </p>
+        ) : (
+          <p className="muted">Sign in to get started.</p>
+        )}
 
         {hasDevPicker ? (
           <div className="stack">

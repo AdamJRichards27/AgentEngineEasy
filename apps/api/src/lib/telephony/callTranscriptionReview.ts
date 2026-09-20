@@ -19,6 +19,8 @@ import {
   GrowCallSessionNotFoundError,
 } from "./callSessions.js";
 import { logAudit } from "../audit.js";
+import { logger } from "@aee/events";
+import { summarizeErrorCause } from "../errorCause.js";
 import { type ConsentTransaction, writeAuditInTransaction } from "../consentControlsPersistence.js";
 import { shouldFailCallTranscriptionAuditForTests } from "./callTranscriptions.js";
 
@@ -284,7 +286,16 @@ async function strictReviewAuditInTransaction(
       }),
       providerReference: `call:${input.updated.callSessionId}:recording:${input.updated.recordingReference}`,
     }, { strict: true, write: (audit) => writeAuditInTransaction(tx, audit) });
-  } catch {
+  } catch (err) {
+    // WP2a: log the underlying cause (ids only — never transcript text)
+    // before the unchanged typed fail-closed error.
+    logger.error("call_transcription_review_audit_failed", {
+      action: input.action,
+      brokerageId: input.updated.brokerageId,
+      transcriptionId: input.updated.id,
+      callSessionId: input.updated.callSessionId,
+      ...summarizeErrorCause(err),
+    });
     throw new CallTranscriptionReviewError("AUDIT_FAILURE", "The transcription review audit could not be recorded.");
   }
 }

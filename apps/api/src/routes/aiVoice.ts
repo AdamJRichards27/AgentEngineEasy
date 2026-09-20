@@ -7,6 +7,8 @@ import { requireAuth } from "../middlewares/auth.js";
 import { isRoleEnabled } from "../lib/ai/featureFlags.js";
 import { resolveBrokerageTier, isRoleEntitled } from "../lib/ai/entitlements.js";
 import type { AiRole, SubscriptionTier } from "../lib/ai/types.js";
+import { assertDailyAiCapNotReached, AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import {
   assertVoiceRateLimit,
   acquireVoiceConcurrencySlot,
@@ -187,6 +189,44 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
   // exempt), unlike askCopilot()'s own `isGrowRequest &&` guard.
   if (tier === "STARTER") {
     res.status(403).json({ error: "Grow-scoped Ask AE requires a Grow or Pro plan." });
+    return;
+  }
+
+  // AE GROW Pilot Readiness WP1 (P2-2) — voice is always Grow-scoped, so it
+  // requires grow.ai.use exactly like a Grow-scoped POST /api/ai/ask does
+  // (routes/ai.ts), checked per user via the same resolver requireEntitlement()
+  // uses. Fails closed on a resolver error.
+  let growAiAllowed = false;
+  try {
+    growAiAllowed = (await explainEntitlementDecision(authedUser, "grow.ai.use")).allowed;
+  } catch (err) {
+    logger.error("voice_transcription_grow_ai_entitlement_failed_closed", { error: err, userId: authedUser.id });
+  }
+  if (!growAiAllowed) {
+    res.status(403).json({
+      error: isCoachRequest
+        ? "Your plan does not include the AI Business Coach (Grow AI is not enabled for this account)."
+        : "Grow-scoped Ask AE requires a Grow or Pro plan with Grow AI enabled.",
+      entitlementKey: "grow.ai.use",
+    });
+    return;
+  }
+
+  // AE GROW Pilot Readiness WP1 (P1-3) — durable per-brokerage daily AI cap
+  // (lib/ai/dailyUsage.ts). Voice writes no durable per-request row of its own,
+  // so it is not itself counted; it is refused (before upload validation or any
+  // provider call) once the brokerage's durable Ask/Coach count for today has
+  // reached the tier cap, since the transcript's only use is as input to an
+  // Ask/Coach request that would itself be refused.
+  try {
+    await assertDailyAiCapNotReached(authedUser.brokerageId, tier);
+  } catch (err) {
+    if (err instanceof AiDailyCapExceededError) {
+      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier });
+      return;
+    }
+    logger.error("voice_transcription_daily_cap_check_failed", { error: err, brokerageId: authedUser.brokerageId });
+    res.status(500).json({ error: "Could not verify your plan right now. Try again in a moment." });
     return;
   }
 

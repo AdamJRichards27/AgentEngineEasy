@@ -133,6 +133,7 @@ test("POST /api/ai/voice/transcribe rejects a request with no audio part at all"
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route No File ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const form = new FormData();
     form.set("mode", "ask");
     const res = await fetch(`${baseUrl}/api/ai/voice/transcribe`, { method: "POST", headers: { cookie: fresh.agent.cookie }, body: form });
@@ -165,6 +166,7 @@ test("POST /api/ai/voice/transcribe succeeds for an entitled GROW-tier brokerage
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Grow Entitled ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
 
     const askRes = await uploadAudio(fresh.agent.cookie, wavBytes(), "audio/wav", { mode: "ask" });
     assert.equal(askRes.status, 200);
@@ -186,6 +188,7 @@ test("POST /api/ai/voice/transcribe succeeds for a genuine PRO subscription (gro
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Pro Entitled ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     await grant(fresh.brokerageId, "run.access");
     const res = await uploadAudio(fresh.agent.cookie, wavBytes(), "audio/wav", { mode: "ask" });
     assert.equal(res.status, 200);
@@ -198,6 +201,7 @@ test("POST /api/ai/voice/transcribe defaults mode to ask when omitted, exactly l
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Default Mode ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await uploadAudio(fresh.agent.cookie, wavBytes(), "audio/wav");
     assert.equal(res.status, 200);
   } finally {
@@ -209,6 +213,7 @@ test("POST /api/ai/voice/transcribe rejects an attempt to inject an extra multip
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route No Override ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await uploadAudio(fresh.agent.cookie, wavBytes(), "audio/wav", { mode: "ask", brokerageId: "999999" });
     assert.equal(res.status, 400);
     const body = (await res.json()) as { code?: string };
@@ -237,6 +242,7 @@ test("POST /api/ai/voice/transcribe rejects a second audio file in the same requ
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Second File ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const form = new FormData();
     form.set("mode", "ask");
     form.append("audio", new Blob([wavBytes()], { type: "audio/wav" }), "recording1.wav");
@@ -258,6 +264,7 @@ test("POST /api/ai/voice/transcribe rejects a declared type outside the allowlis
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Bad Mime ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await uploadAudio(fresh.agent.cookie, wavBytes(), "video/mp4", { mode: "ask" });
     assert.equal(res.status, 400);
     const body = (await res.json()) as { code?: string };
@@ -271,6 +278,7 @@ test("POST /api/ai/voice/transcribe rejects a declared type that does not match 
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Mime Mismatch ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     // WebM signature bytes, declared as audio/wav.
     const res = await uploadAudio(fresh.agent.cookie, webmBytes(), "audio/wav", { mode: "ask" });
     assert.equal(res.status, 400);
@@ -296,6 +304,7 @@ test("POST /api/ai/voice/transcribe rejects corrupt/garbage bytes that match no 
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Corrupt Bytes ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const garbage = Buffer.from("this-is-not-a-real-audio-container-just-plain-text-bytes");
     const res = await uploadAudio(fresh.agent.cookie, garbage, "audio/wav", { mode: "ask" });
     assert.equal(res.status, 400);
@@ -310,6 +319,7 @@ test("POST /api/ai/voice/transcribe rejects an empty (zero-byte) audio upload wi
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Empty Audio ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const res = await uploadAudio(fresh.agent.cookie, Buffer.alloc(0), "audio/wav", { mode: "ask" });
     assert.equal(res.status, 400);
     const body = (await res.json()) as { code?: string };
@@ -323,6 +333,7 @@ test("POST /api/ai/voice/transcribe rejects an upload larger than the configured
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Oversized ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const oversized = Buffer.alloc(5 * 1024 * 1024 + 1024, 0x41);
     const res = await uploadAudio(fresh.agent.cookie, oversized, "audio/wav", { mode: "ask" });
     assert.equal(res.status, 413);
@@ -337,6 +348,7 @@ test("POST /api/ai/voice/transcribe enforces the provider-reported duration limi
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Duration Exceeded ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     setVoiceTranscriptionProviderForTests(
       resultProvider(() => ({ provider: "fake", transcript: "hello", durationSeconds: 61, latencyMs: 1 })),
     );
@@ -354,6 +366,7 @@ test("POST /api/ai/voice/transcribe returns 422 when the provider's transcript i
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Blank Transcript ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     setVoiceTranscriptionProviderForTests(
       resultProvider(() => ({ provider: "fake", transcript: "   ", durationSeconds: null, latencyMs: 1 })),
     );
@@ -369,6 +382,7 @@ test("POST /api/ai/voice/transcribe truncates an overlong-but-plausible transcri
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Truncation ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const longTranscript = "a".repeat(2500);
     setVoiceTranscriptionProviderForTests(
       resultProvider(() => ({ provider: "fake", transcript: longTranscript, durationSeconds: null, latencyMs: 1 })),
@@ -387,6 +401,7 @@ test("POST /api/ai/voice/transcribe rejects an implausibly long (>20000 char) pr
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Sanity Ceiling ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     setVoiceTranscriptionProviderForTests(
       resultProvider(() => ({ provider: "fake", transcript: "a".repeat(20001), durationSeconds: null, latencyMs: 1 })),
     );
@@ -404,6 +419,7 @@ test("POST /api/ai/voice/transcribe maps every TranscriptionProviderError code t
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Provider Errors ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const cases: Array<[TranscriptionProviderErrorCode, number]> = [
       ["timeout", 504],
       ["provider_error", 502],
@@ -434,6 +450,7 @@ test("POST /api/ai/voice/transcribe enforces the per-user hourly rate limit end 
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Rate Limit ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     let lastStatus = 0;
     for (let i = 0; i < 9; i++) {
       const res = await uploadAudio(fresh.agent.cookie, wavBytes(), "audio/wav", { mode: "ask" });
@@ -452,6 +469,7 @@ test("POST /api/ai/voice/transcribe rejects a second concurrent request from the
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route Concurrency ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     setVoiceTranscriptionProviderForTests(
       resultProvider(() => ({ provider: "fake", transcript: "concurrent fixture", durationSeconds: null, latencyMs: 1 }), 150),
     );
@@ -471,6 +489,7 @@ test("POST /api/ai/voice/transcribe never creates an aiInteractions row and neve
   const fresh = await createBrokerageWithUsers(baseUrl, `Voice Route No Side Effects ${suffix}`);
   try {
     await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.ai.use");
     const before = await countAiInteractions(fresh.brokerageId);
 
     const res = await uploadAudio(fresh.agent.cookie, wavBytes(), "audio/wav", { mode: "ask" });
@@ -490,6 +509,7 @@ test("POST /api/ai/voice/transcribe never leaks one brokerage's entitlement into
   const B = await createBrokerageWithUsers(baseUrl, `Voice Route Cross Tenant B ${suffix}`);
   try {
     await grant(A.brokerageId, "grow.access");
+    await grant(A.brokerageId, "grow.ai.use");
     // B is deliberately left as STARTER (no grants).
 
     const resA = await uploadAudio(A.agent.cookie, wavBytes(), "audio/wav", { mode: "ask" });

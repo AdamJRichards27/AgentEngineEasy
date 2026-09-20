@@ -19,6 +19,7 @@ import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
 import { buildProductNavLinks, resolveLandingRoute } from "./lib/productNav";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -58,8 +59,16 @@ function initials(firstName?: string, lastName?: string): string {
 // entitlement-aware (resolveLandingRoute) rather than always "/". Every existing RUN route,
 // role gate, and the "/" fallback for a signed-in-but-not-Grow-entitled user are unchanged --
 // this is additive navigation/landing logic, not a rebuild of this route table.
+//
+// AE GROW Pilot Readiness WP8 -- the authenticated gate below now tells "you
+// have no session" apart from "the API never answered" (see
+// lib/sessionProbe.ts). A hard reload while the API is unreachable used to
+// fall straight through to `<Redirect to="/login" />`, showing a sign-in form
+// that could not possibly work; it now shows ApiUnreachable with a retry. The
+// public routes above are untouched, and a genuine 401 still redirects to
+// /login exactly as before.
 export default function App() {
-  const { user, isLoading, isSignedIn } = useSession();
+  const { user, isLoading, isSignedIn, probe, retryProbe } = useSession();
   const { entitlements } = useEntitlements();
   const logout = useLogout();
 
@@ -78,8 +87,10 @@ export default function App() {
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/reset-password/:token" component={ResetPassword} />
       <Route>
-        {isLoading ? (
+        {probe === "loading" || isLoading ? (
           <div className="app-loading">Loading…</div>
+        ) : probe === "api-unreachable" ? (
+          <ApiUnreachable onRetry={retryProbe} />
         ) : !isSignedIn ? (
           <Redirect to="/login" />
         ) : (
@@ -92,6 +103,33 @@ export default function App() {
         )}
       </Route>
     </Switch>
+  );
+}
+
+// AE GROW Pilot Readiness WP8 — shown instead of the sign-in form when the
+// initial session probe never reached the API. Deliberately does NOT redirect
+// anywhere: the current URL is preserved, so retrying once the API is back
+// lands the agent on the page they reloaded rather than bouncing them to
+// /login. "Try again" refetches GET /auth/me only (lib/session.ts
+// retryProbe), so there is no navigation to loop on.
+function ApiUnreachable({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="card error-boundary error-boundary-page api-unreachable" role="alert">
+      <h1>Agent Engine can't be reached</h1>
+      <p className="muted">
+        We couldn't connect to Agent Engine. This usually means your connection dropped, or the service is briefly
+        unavailable — it doesn't mean you've been signed out.
+      </p>
+      <p className="muted">Check your connection and try again. If it keeps happening, contact support.</p>
+      <div className="error-boundary-actions">
+        <button type="button" className="btn btn-primary" onClick={onRetry}>
+          Try again
+        </button>
+        <button type="button" className="btn btn-secondary" onClick={() => window.location.reload()}>
+          Reload page
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -156,25 +194,30 @@ function SidebarLayout({
       </nav>
       <div className="app-content">
         <main>
-          <Switch>
-            <Route path="/" component={Home} />
-            <Route path="/today" component={CommandCentre} />
-            <Route path="/properties" component={PropertiesList} />
-            <Route path="/properties/start" component={StartProperty} />
-            <Route path="/properties/:id" component={PropertyWorkspace} />
-            <Route path="/exceptions" component={Exceptions} />
-            <Route path="/communications" component={CommunicationsHub} />
-            <Route path="/financial" component={FinancialOperations} />
-            <Route path="/pit-crew" component={PitCrewCommandCentre} />
-            <Route path="/grow" component={Grow} />
-            <Route path="/grow/import" component={GrowImport} />
-            <Route path="/settings" component={Settings} />
-            <Route path="/settings/integrations" component={SettingsIntegrations} />
-            <Route path="/settings/users" component={SettingsUsers} />
-            <Route>
-              <p>Page not found.</p>
-            </Route>
-          </Switch>
+          {/* AE GROW Pilot Readiness WP5 — a page that fails to render shows a
+              contained fallback here (sidebar stays usable); navigating away
+              resets it. */}
+          <ErrorBoundary label="this page" resetKey={location}>
+            <Switch>
+              <Route path="/" component={Home} />
+              <Route path="/today" component={CommandCentre} />
+              <Route path="/properties" component={PropertiesList} />
+              <Route path="/properties/start" component={StartProperty} />
+              <Route path="/properties/:id" component={PropertyWorkspace} />
+              <Route path="/exceptions" component={Exceptions} />
+              <Route path="/communications" component={CommunicationsHub} />
+              <Route path="/financial" component={FinancialOperations} />
+              <Route path="/pit-crew" component={PitCrewCommandCentre} />
+              <Route path="/grow" component={Grow} />
+              <Route path="/grow/import" component={GrowImport} />
+              <Route path="/settings" component={Settings} />
+              <Route path="/settings/integrations" component={SettingsIntegrations} />
+              <Route path="/settings/users" component={SettingsUsers} />
+              <Route>
+                <p>Page not found.</p>
+              </Route>
+            </Switch>
+          </ErrorBoundary>
         </main>
       </div>
     </>

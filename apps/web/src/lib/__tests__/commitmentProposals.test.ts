@@ -7,7 +7,10 @@ import {
   initialProposalState,
   isProposalBusy,
   isProposalExpired,
+  humaniseContactReference,
   permissionDeniedMessage,
+  proposalCardHeading,
+  proposalCardHeadingAccentClass,
   proposalCardStatusLabel,
   provenanceLabel,
   stateForProposalError,
@@ -81,6 +84,41 @@ test("card status label follows the live card state", () => {
   assert.equal(proposalCardStatusLabel("executed", "AWAITING_APPROVAL"), "Commitment created");
   assert.equal(proposalCardStatusLabel("expired", "AWAITING_APPROVAL"), "Expired");
   assert.equal(proposalCardStatusLabel("completed_after_recovery", "APPROVED"), "May already be created");
+});
+
+// AE GROW Pilot Readiness WP6b P3-c — the header used to be the fixed string
+// "Proposed follow-up — nothing created yet", even once the commitment existed.
+test("card heading follows the live card state and never contradicts the outcome", () => {
+  assert.equal(proposalCardHeading("review", "AWAITING_APPROVAL"), "Proposed follow-up — nothing created yet");
+  assert.match(proposalCardHeading("executed", "AWAITING_APPROVAL"), /created/);
+  assert.doesNotMatch(proposalCardHeading("executed", "AWAITING_APPROVAL"), /nothing created yet/);
+  assert.doesNotMatch(proposalCardHeading("executing", "AWAITING_APPROVAL"), /nothing created yet/);
+  assert.doesNotMatch(proposalCardHeading("completed_after_recovery", "APPROVED"), /nothing created yet/);
+  assert.equal(proposalCardHeading("approved", "APPROVED"), "Proposed follow-up — approved, not created yet");
+  // A card mounted straight into "approved" must not claim it is unapproved.
+  assert.equal(proposalCardHeading("review", "APPROVED"), "Proposed follow-up — approved, not created yet");
+  for (const state of ["rejected", "expired", "already_actioned", "not_available", "permission_denied", "validation_error", "recoverable_failure"] as const) {
+    assert.doesNotMatch(proposalCardHeading(state, "AWAITING_APPROVAL"), /^Follow-up commitment created/, `${state} never claims a commitment exists`);
+  }
+  assert.equal(proposalCardHeadingAccentClass("executed"), "ai-copilot-kind-verified");
+  assert.equal(proposalCardHeadingAccentClass("review"), "ai-copilot-kind-advisory");
+});
+
+// AE GROW Pilot Readiness WP6b P3-d — the API's summarize() only has ids, so
+// its summary reads "for contact #289"; the adapters know the real name.
+test("a raw contact id reference in the server summary is replaced with the contact's name", () => {
+  assert.equal(
+    humaniseContactReference('Create a follow-up commitment for contact #289: "Call back" (due 2026-09-25)', 289, "Jo Citizen"),
+    'Create a follow-up commitment for Jo Citizen: "Call back" (due 2026-09-25)',
+  );
+  // Only the matching id — another contact's id is never relabelled.
+  assert.equal(humaniseContactReference("commitment for contact #12", 289, "Jo Citizen"), "commitment for contact #12");
+  assert.equal(humaniseContactReference("commitment for contact #2891", 289, "Jo Citizen"), "commitment for contact #2891");
+  // Nothing to substitute with — the summary is left exactly as the API sent it.
+  assert.equal(humaniseContactReference("contact #289", 289, null), "contact #289");
+  assert.equal(humaniseContactReference("contact #289", 289, "  "), "contact #289");
+  assert.equal(humaniseContactReference("contact #289", null, "Jo Citizen"), "contact #289");
+  assert.equal(humaniseContactReference("nothing to replace", 289, "Jo Citizen"), "nothing to replace");
 });
 
 test("provenance label appears only for call-review proposals", () => {

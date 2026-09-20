@@ -22,9 +22,9 @@ let intervalHandle: NodeJS.Timeout | null = null;
 // 15 minutes: frequent enough that a time-sensitive severity escalation
 // (e.g. a settlement crossing its due date) is caught well within the hour,
 // bounded enough that a full sweep across every brokerage/rule never runs
-// back-to-back with itself under normal load (see engine.ts's
-// SCAN_STALE_WINDOW_MS — the scan-run guard is the actual safety net if a
-// sweep ever does run long).
+// back-to-back with itself under normal load (engine.ts's advisory-lock
+// single-flight guard is the actual safety net if a sweep ever does run
+// long — an overlapping tick is refused, never run concurrently).
 const SCAN_INTERVAL_MS = 15 * 60 * 1000;
 
 export interface RegisterExceptionEngineOptions {

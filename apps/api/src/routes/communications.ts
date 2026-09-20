@@ -23,11 +23,12 @@
 // above unchanged — those never assumed a propertyId, only a threadId
 // resolvable within the caller's own brokerage.
 
-import { Router, type Response } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import {
   createThread,
   getThread,
@@ -72,6 +73,27 @@ import {
 
 export const communicationsRouter = Router();
 
+// AE GROW Pilot Readiness WP6a (D1-residual): every :id route parameter is
+// validated BEFORE it reaches the database or the lib layer. A malformed id
+// is a malformed request (400), not a server fault (500) — and until this
+// guard existed it was the latter: `Number("abc")` is NaN and
+// `Number("1e20")` is an integer far outside Postgres' int4 range, and both
+// reach the driver as a bind value it rejects, surfacing as a 500 with a
+// database diagnostic in the logs for what is simply a mistyped URL.
+//
+// Same shape (and same `{ error }` response shape) as routes/contacts.ts's
+// parsePositiveId and routes/growCalls.ts's parseIdParam, additionally
+// bounded by MAX_SIGNED_INT4 because every id this router resolves is a
+// `serial` primary key (packages/db/src/schema/communications.ts), i.e. an
+// int4. There is no shared cross-router helper in this codebase today — each
+// route module declares its own, which is the convention this follows.
+const MAX_SIGNED_INT4 = 2_147_483_647;
+
+function parsePositiveId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
+}
+
 function handleCommunicationsError(err: unknown, res: Response): boolean {
   if (err instanceof CommunicationConcurrencyError) {
     res.status(409).json({ error: err.message });
@@ -94,6 +116,83 @@ function handleCommunicationsError(err: unknown, res: Response): boolean {
     return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------
+// AE GROW Pilot Readiness WP1 (P2-3): Grow entitlement on contact-first
+// thread mutations. The generic /communications/threads/:threadId/... and
+// /communications/messages/:messageId/... mutation routes below are shared
+// by property-scoped (RUN) threads and contact-first (Grow) threads. A
+// contact-first thread (propertyId IS NULL -- the CHECK constraint then
+// guarantees a partyId) can only be CREATED with grow.contacts.manage, so
+// every subsequent mutation on it (participants, drafting, request-approval,
+// approval, send, requeue) must require that same key too -- otherwise a
+// brokerage/user without Grow could keep driving a Grow thread by id.
+// Property-scoped threads are unchanged (no Grow check at all). Cancel is
+// deliberately NOT gated: it can only withdraw an unsent message, never
+// send one, and must stay available to stop an outbound message after an
+// entitlement lapses.
+//
+// Returns true when the request may proceed; otherwise it has already
+// written the response (404 for an unknown/foreign thread via
+// handleCommunicationsError, 403 in the requireEntitlement() shape).
+// ---------------------------------------------------------------------
+
+async function ensureGrowEntitlementForThread(
+  req: Request,
+  res: Response,
+  resolveThreadId: () => Promise<number>,
+): Promise<boolean> {
+  const user = req.authedUser!;
+  try {
+    const threadId = await resolveThreadId();
+    if (!Number.isInteger(threadId) || threadId <= 0) throw new CommunicationTenancyError();
+    const thread = await getThread(threadId, user.brokerageId);
+    if (thread.propertyId !== null) return true;
+    const decision = await explainEntitlementDecision(user, "grow.contacts.manage");
+    if (decision.allowed) return true;
+    res.status(403).json({
+      error: "Not entitled",
+      reason: decision.reason,
+      entitlementKey: "grow.contacts.manage",
+      upgrade: { action: "grow.checkout", productCode: "grow" },
+    });
+    return false;
+  } catch (err) {
+    if (handleCommunicationsError(err, res)) return false;
+    logger.error("communications_grow_thread_entitlement_failed_closed", { userId: user.id, error: err });
+    res.status(403).json({ error: "Not entitled", reason: "ENTITLEMENT_MISSING", entitlementKey: "grow.contacts.manage" });
+    return false;
+  }
+}
+
+// AE GROW Pilot Readiness WP6a (D1-residual): these gates run BEFORE the
+// route handler, so a malformed id has to be rejected here too — otherwise
+// the handler's own 400 is unreachable and the caller sees whatever this
+// gate decided instead (previously a misleading 404, via the
+// CommunicationTenancyError below, or a 500 once the id reached getMessage).
+function requireGrowForContactThreadByThreadId() {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const threadId = parsePositiveId(req.params.threadId);
+    if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
+    if (await ensureGrowEntitlementForThread(req, res, async () => threadId)) next();
+  };
+}
+
+function requireGrowForContactThreadByMessageId() {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const user = req.authedUser!;
+    const messageId = parsePositiveId(req.params.messageId);
+    if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
+    if (
+      await ensureGrowEntitlementForThread(req, res, async () => {
+        const message = await getMessage(messageId, user.brokerageId);
+        return message.threadId;
+      })
+    ) {
+      next();
+    }
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -132,7 +231,8 @@ const createThreadSchema = z.object({
 
 communicationsRouter.get("/properties/:propertyId/communications/threads", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = parsePositiveId(req.params.propertyId);
+  if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
   try {
     const threads = await listThreadsForProperty(propertyId, user.brokerageId);
     res.json({ threads });
@@ -143,7 +243,8 @@ communicationsRouter.get("/properties/:propertyId/communications/threads", requi
 
 communicationsRouter.post("/properties/:propertyId/communications/threads", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = parsePositiveId(req.params.propertyId);
+  if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
   const body = createThreadSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -163,7 +264,8 @@ communicationsRouter.post("/properties/:propertyId/communications/threads", requ
 // Section 11: recipient candidates resolved from the property's existing parties.
 communicationsRouter.get("/properties/:propertyId/communications/recipients", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const propertyId = Number(req.params.propertyId);
+  const propertyId = parsePositiveId(req.params.propertyId);
+  if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
   try {
     const candidates = await listRecipientCandidatesForProperty(propertyId, user.brokerageId);
     res.json({ candidates });
@@ -174,7 +276,8 @@ communicationsRouter.get("/properties/:propertyId/communications/recipients", re
 
 communicationsRouter.get("/communications/threads/:threadId", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const threadId = Number(req.params.threadId);
+  const threadId = parsePositiveId(req.params.threadId);
+  if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
   try {
     const thread = await getThread(threadId, user.brokerageId);
     const [participants, messages] = await Promise.all([
@@ -222,7 +325,8 @@ communicationsRouter.get(
   requireEntitlement("grow.contacts.read"),
   async (req, res) => {
     const user = req.authedUser!;
-    const partyId = Number(req.params.partyId);
+    const partyId = parsePositiveId(req.params.partyId);
+    if (partyId === null) return void res.status(400).json({ error: "Invalid contact id." });
     try {
       const threads = await listThreadsForParty(partyId, user.brokerageId);
       res.json({ threads });
@@ -238,7 +342,8 @@ communicationsRouter.post(
   requireEntitlement("grow.contacts.manage"),
   async (req, res) => {
     const user = req.authedUser!;
-    const partyId = Number(req.params.partyId);
+    const partyId = parsePositiveId(req.params.partyId);
+    if (partyId === null) return void res.status(400).json({ error: "Invalid contact id." });
     const body = createContactThreadSchema.safeParse(req.body);
     if (!body.success) return void res.status(400).json({ error: "Invalid request." });
     try {
@@ -267,7 +372,8 @@ communicationsRouter.get(
   requireEntitlement("grow.contacts.read"),
   async (req, res) => {
     const user = req.authedUser!;
-    const partyId = Number(req.params.partyId);
+    const partyId = parsePositiveId(req.params.partyId);
+    if (partyId === null) return void res.status(400).json({ error: "Invalid contact id." });
     const candidate = await getContactRecipientCandidate(partyId, user.brokerageId);
     res.json({ candidates: candidate ? [candidate] : [] });
   },
@@ -279,9 +385,10 @@ communicationsRouter.get(
 
 const addParticipantFromPartySchema = z.object({ partyId: z.coerce.number().int(), role: z.string().min(1) });
 
-communicationsRouter.post("/communications/threads/:threadId/participants", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/threads/:threadId/participants", requireAuth, requireGrowForContactThreadByThreadId(), async (req, res) => {
   const user = req.authedUser!;
-  const threadId = Number(req.params.threadId);
+  const threadId = parsePositiveId(req.params.threadId);
+  if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
   const body = addParticipantFromPartySchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -306,9 +413,10 @@ const addManualParticipantSchema = z.object({
   reason: z.string().min(1),
 });
 
-communicationsRouter.post("/communications/threads/:threadId/participants/manual", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/threads/:threadId/participants/manual", requireAuth, requireGrowForContactThreadByThreadId(), async (req, res) => {
   const user = req.authedUser!;
-  const threadId = Number(req.params.threadId);
+  const threadId = parsePositiveId(req.params.threadId);
+  if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
   const body = addManualParticipantSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -358,9 +466,10 @@ const createDraftMessageSchema = z.object({
   placeholderValues: z.record(z.string()).optional(),
 });
 
-communicationsRouter.post("/communications/threads/:threadId/messages", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/threads/:threadId/messages", requireAuth, requireGrowForContactThreadByThreadId(), async (req, res) => {
   const user = req.authedUser!;
-  const threadId = Number(req.params.threadId);
+  const threadId = parsePositiveId(req.params.threadId);
+  if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
   const body = createDraftMessageSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -396,7 +505,8 @@ communicationsRouter.post("/communications/threads/:threadId/messages", requireA
 
 communicationsRouter.get("/communications/messages/:messageId", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const messageId = Number(req.params.messageId);
+  const messageId = parsePositiveId(req.params.messageId);
+  if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
   try {
     const message = await getMessage(messageId, user.brokerageId);
     res.json(message);
@@ -408,9 +518,10 @@ communicationsRouter.get("/communications/messages/:messageId", requireAuth, asy
 const versionedActionSchema = z.object({ expectedVersion: z.coerce.number().int().min(0) });
 const cancelActionSchema = versionedActionSchema.extend({ reason: z.string().optional() });
 
-communicationsRouter.post("/communications/messages/:messageId/request-approval", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/request-approval", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
-  const messageId = Number(req.params.messageId);
+  const messageId = parsePositiveId(req.params.messageId);
+  if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
   const body = versionedActionSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -421,9 +532,10 @@ communicationsRouter.post("/communications/messages/:messageId/request-approval"
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/approve", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/approve", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
-  const messageId = Number(req.params.messageId);
+  const messageId = parsePositiveId(req.params.messageId);
+  if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
   const body = versionedActionSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -436,7 +548,8 @@ communicationsRouter.post("/communications/messages/:messageId/approve", require
 
 communicationsRouter.post("/communications/messages/:messageId/cancel", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const messageId = Number(req.params.messageId);
+  const messageId = parsePositiveId(req.params.messageId);
+  if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
   const body = cancelActionSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -447,9 +560,10 @@ communicationsRouter.post("/communications/messages/:messageId/cancel", requireA
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/send", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/send", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
-  const messageId = Number(req.params.messageId);
+  const messageId = parsePositiveId(req.params.messageId);
+  if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
   const body = versionedActionSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -460,9 +574,10 @@ communicationsRouter.post("/communications/messages/:messageId/send", requireAut
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/requeue", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/requeue", requireAuth, requireGrowForContactThreadByMessageId(), async (req, res) => {
   const user = req.authedUser!;
-  const messageId = Number(req.params.messageId);
+  const messageId = parsePositiveId(req.params.messageId);
+  if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
   const body = versionedActionSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -527,7 +642,8 @@ const createTemplateVersionSchema = z.object({
 
 communicationsRouter.post("/communications/templates/:templateId/versions", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const templateId = Number(req.params.templateId);
+  const templateId = parsePositiveId(req.params.templateId);
+  if (templateId === null) return void res.status(400).json({ error: "Invalid template id." });
   const body = createTemplateVersionSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   try {
@@ -541,7 +657,8 @@ communicationsRouter.post("/communications/templates/:templateId/versions", requ
 
 communicationsRouter.post("/communications/templates/:templateId/activate", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const templateId = Number(req.params.templateId);
+  const templateId = parsePositiveId(req.params.templateId);
+  if (templateId === null) return void res.status(400).json({ error: "Invalid template id." });
   try {
     const template = await activateTemplate(templateId, user.brokerageId, user.id);
     res.json(template);
@@ -553,7 +670,8 @@ communicationsRouter.post("/communications/templates/:templateId/activate", requ
 
 communicationsRouter.post("/communications/templates/:templateId/archive", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const templateId = Number(req.params.templateId);
+  const templateId = parsePositiveId(req.params.templateId);
+  if (templateId === null) return void res.status(400).json({ error: "Invalid template id." });
   try {
     const template = await archiveTemplate(templateId, user.brokerageId, user.id);
     res.json(template);

@@ -4,6 +4,7 @@ import type { AiProvider } from "./providers/provider.js";
 import { AiProviderError } from "./types.js";
 import type { AiProviderRequest, AiProviderResponse } from "./types.js";
 import { logger } from "@aee/events";
+import { mustForceMockAiProvider } from "../env.js";
 
 // AI Gateway: the one place that knows how to reach a model provider. Config is
 // env-driven today (AI_PROVIDER, AI_MODEL, ... - see .env.example), mirroring
@@ -46,7 +47,31 @@ export function loadAiGatewayConfig(): AiGatewayConfig {
   };
 }
 
+// AE GROW Pilot Readiness WP2a: a real provider additionally requires
+// LIVE_AI_PROVIDER_APPROVED=true, in every environment (lib/env.ts
+// mustForceMockAiProvider). Without it the gateway falls back to the mock
+// provider with a warning — the same pattern this function already uses for
+// a missing ANTHROPIC_API_KEY, and the mustForceMockExternalProvider()
+// convention. Chosen over the transcription gates' typed-error pattern
+// because an AI response is always labelled with the provider that actually
+// answered (AiProviderResponse.provider, recorded in audit/telemetry) and the
+// mock's own text says it is a placeholder, so nothing is passed off as real
+// model output; failing every AI request instead would break the app for a
+// configuration that is simply not yet approved.
+const unapprovedProviderWarned = new Set<string>();
+
 function buildProvider(name: string): AiProvider {
+  if (name !== "mock" && mustForceMockAiProvider()) {
+    // Once per process per requested provider — this runs on every request.
+    if (!unapprovedProviderWarned.has(name)) {
+      unapprovedProviderWarned.add(name);
+      logger.warn("ai_provider_not_approved_fallback_to_mock", {
+        requestedProvider: name,
+        approvalFlag: "LIVE_AI_PROVIDER_APPROVED",
+      });
+    }
+    return new MockAiProvider();
+  }
   if (name === "anthropic") {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (typeof apiKey === "string" && apiKey.length > 0) {
