@@ -20,7 +20,7 @@ import pg from "pg";
 
 // Keys whose absence removes a capability from a brokerage that is meant to
 // have Grow. Kept in step with apps/api/src/lib/billing/catalogue.ts.
-const GROW_KEYS = [
+const CORE_GROW_PILOT_KEYS = [
   "grow.access",
   "grow.contacts.read",
   "grow.contacts.manage",
@@ -41,7 +41,7 @@ const GROW_KEYS = [
 // Calling keys are deliberately excluded from the "missing" report: a pilot may
 // intentionally withhold them (there is no product path to record call consent
 // or Do Not Call status yet). They are reported separately when present.
-const CALLING_KEYS = ["grow.calling.access", "grow.calling.recording", "grow.calling.transcription"];
+const LIVE_CALLING_KEYS = ["grow.calling.access", "grow.calling.recording", "grow.calling.transcription"];
 
 async function main() {
   const connectionString = process.env.DATABASE_URL;
@@ -72,30 +72,46 @@ async function main() {
     }
 
     let incomplete = 0;
+    let withCalling = 0;
     for (const [id, entry] of byBrokerage) {
       if (!entry.keys.has("grow.access")) continue;
-      const missing = GROW_KEYS.filter((key) => !entry.keys.has(key));
-      const calling = CALLING_KEYS.filter((key) => entry.keys.has(key));
+      const missing = CORE_GROW_PILOT_KEYS.filter((key) => !entry.keys.has(key));
+      const calling = LIVE_CALLING_KEYS.filter((key) => entry.keys.has(key));
       const label = `#${id} ${entry.name}${entry.manual ? " (has manual grants)" : ""}`;
       if (missing.length === 0) {
-        console.log(`OK        ${label}${calling.length ? ` — calling keys granted: ${calling.join(", ")}` : ""}`);
-        continue;
+        console.log(`READY       ${label} — core Grow pilot entitlements complete`);
+      } else {
+        incomplete += 1;
+        console.warn(`INCOMPLETE  ${label} — core Grow pilot entitlements missing`);
+        console.warn(`            ${missing.join(", ")}`);
       }
-      incomplete += 1;
-      console.warn(`INCOMPLETE ${label}`);
-      console.warn(`           missing: ${missing.join(", ")}`);
-      if (calling.length) console.warn(`           calling keys granted: ${calling.join(", ")}`);
+      // Live calling is a separate readiness question and is never required
+      // for a brokerage to be ready for a Grow pilot.
+      if (calling.length) {
+        withCalling += 1;
+        console.warn(`            live calling entitlements GRANTED: ${calling.join(", ")}`);
+      } else {
+        console.log("            live calling entitlements: none (expected for a pilot)");
+      }
     }
 
     if (incomplete > 0) {
       console.warn(
-        `\n${incomplete} brokerage(s) hold grow.access without every Grow key. They will be refused the ` +
-          "surfaces listed above (Ask AE / Coach / voice, appraisal edits, Grow thread messaging, and so on). " +
-          "Grant the missing keys through a Grow or bundle subscription, or by an explicit recorded manual grant, " +
-          "before relying on those surfaces.",
+        `\n${incomplete} brokerage(s) hold grow.access without the full CORE GROW PILOT key set. They will be ` +
+          "refused the surfaces listed above (Ask AE / Coach / voice, appraisal edits, Grow thread messaging, and " +
+          "so on). Grant the missing keys through a Grow or bundle subscription, or by an explicit recorded manual " +
+          "grant, before relying on those surfaces.",
       );
     } else {
-      console.log("\nEvery brokerage holding grow.access holds the full Grow key set.");
+      console.log("\nEvery brokerage holding grow.access holds the full core Grow pilot key set.");
+    }
+    if (withCalling > 0) {
+      console.warn(
+        `\n${withCalling} brokerage(s) hold LIVE CALLING entitlements (grow.calling.*). AE has no product path yet ` +
+          "for establishing and recording call consent, recording authority or Do Not Call status, and live " +
+          "telephony/recording/transcription activation additionally requires a provider decision and AU/NZ legal " +
+          "review. Revoke these for a controlled pilot unless the Project Owner has decided otherwise.",
+      );
     }
   } finally {
     await client.end();
