@@ -338,16 +338,55 @@ test("I-1/I-3: EXPLAIN confirms the new predicates constrain the leading index c
       `the bounded lookup must be servable from properties_pkey:\n${boundedProperties}`,
     );
 
-    // I-3. Each of these tables' indexes leads with brokerage_id, so only the scoped predicate
-    // can seek. WHICH brokerage-leading index Postgres picks is a cost decision that shifts
-    // with table size and is deliberately not asserted — grow_activities alone has three, and
-    // any of them bounds the scan to one tenant equally well. What is asserted is the part that
-    // does not shift: whether brokerage_id made it into the Index Cond at all.
+    // I-3, part 1 — the structural claim, read straight from pg_indexes. This is the part that
+    // is genuinely invariant: it is a fact about the schema, independent of table size, row
+    // distribution and planner cost estimates. WHICH index Postgres picks among several equally
+    // tenant-bounding ones is a cost decision that shifts as a table grows (grow_activities
+    // alone has three), so no index NAME is asserted anywhere in this test.
+    const leadingColumnsByTable = new Map<string, Set<string>>();
+    const indexRows = await tx.execute(
+      sql.raw(
+        `SELECT tablename, indexdef FROM pg_indexes
+         WHERE tablename IN ('grow_relationships','grow_activities','grow_opportunities','grow_commitments','grow_contact_roles')`,
+      ),
+    );
+    for (const row of indexRows.rows as Array<Record<string, unknown>>) {
+      const table = String(row.tablename);
+      // The first column inside the index definition's parenthesised column list.
+      const leading = String(row.indexdef).match(/\(([^,)]+)/)?.[1]?.trim();
+      if (!leading) continue;
+      if (!leadingColumnsByTable.has(table)) leadingColumnsByTable.set(table, new Set());
+      leadingColumnsByTable.get(table)!.add(leading);
+    }
+
+    for (const table of ["grow_relationships", "grow_activities", "grow_opportunities", "grow_commitments"]) {
+      const leading = leadingColumnsByTable.get(table) ?? new Set<string>();
+      assert.ok(
+        !leading.has("party_id"),
+        `precondition: no index on ${table} leads with party_id, which is why the predicate this fix replaced could not seek. Leading columns present: ${[...leading].join(", ")}`,
+      );
+      assert.ok(
+        leading.has("brokerage_id"),
+        `${table} must have a brokerage_id-leading index for the new predicate to seek on. Leading columns present: ${[...leading].join(", ")}`,
+      );
+    }
+
+    // grow_contact_roles is deliberately excluded from the loop above and asserted separately:
+    // it DOES carry a party_id-leading index (the (party_id, role) unique), so its party_id-only
+    // lookup was never one of the unbounded scans. Adding brokerage_id to it is a consistency
+    // and defence-in-depth change, not a plan fix — asserted here so that distinction survives.
+    assert.ok(
+      (leadingColumnsByTable.get("grow_contact_roles") ?? new Set()).has("party_id"),
+      "grow_contact_roles is expected to have a party_id-leading index; if that changed, its query is now an unbounded scan too and belongs in the loop above",
+    );
+
+    // I-3, part 2 — the same claim observed in real plans. Asserted on Index Cond only: whether
+    // brokerage_id, the leading column, made it into the seek condition at all.
     for (const table of ["grow_relationships", "grow_activities", "grow_opportunities", "grow_commitments"]) {
       const bare = await plan(`SELECT * FROM ${table} WHERE party_id = ${aPartyId}`);
       assert.ok(
         !indexCond(bare).includes("brokerage_id"),
-        `precondition: ${table} has no index that can seek on party_id alone, so the predicate this fix replaced left the scan spanning every tenant's rows:\n${bare}`,
+        `${table}: the predicate this fix replaced cannot bound the scan to a tenant:\n${bare}`,
       );
 
       const scoped = await plan(`SELECT * FROM ${table} WHERE brokerage_id = ${A.brokerageId} AND party_id = ${aPartyId}`);
@@ -356,13 +395,6 @@ test("I-1/I-3: EXPLAIN confirms the new predicates constrain the leading index c
         `${table}'s scan must be bounded to the caller's tenant by the index, not merely filtered after reading every row:\n${scoped}`,
       );
     }
-
-    // grow_contact_roles is deliberately absent from the loop above: it also carries a
-    // (party_id, role) unique index, so its party_id-only lookup could already seek and was
-    // never one of the unbounded scans. Adding brokerage_id to it is a consistency and
-    // defence-in-depth change, not a plan fix — recorded here so the distinction is not lost.
-    const rolesBare = await plan(`SELECT * FROM grow_contact_roles WHERE party_id = ${aPartyId}`);
-    assert.match(rolesBare, /grow_contact_roles_party_role_unique/, rolesBare);
   });
 });
 
