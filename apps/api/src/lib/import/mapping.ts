@@ -32,6 +32,13 @@ export const CANONICAL_FIELDS = [
   "property.address.postcode",
   "property.type",
   "property.ownership",
+  // AE GROW "Brokerage-wide Signal Sweep" stage 2. The one piece of data the
+  // long_ownership_tenure rule genuinely needs and could not previously get:
+  // WHEN the owner acquired the property. Almost every real CRM/trust-account
+  // export carries it under one of the aliases below, and until now the
+  // pipeline dropped it on the floor, which is why the tenure rule could only
+  // ever have measured how long AE had known about the row.
+  "property.ownershipStartDate",
   "property.notes",
   "relationship.type",
 ] as const;
@@ -113,6 +120,24 @@ const ALIASES: Record<string, CanonicalField> = {
   "full address": "property.address.full",
   "property type": "property.type",
   "ownership": "property.ownership",
+  // Ownership start date. Every alias here names the start of an OWNERSHIP;
+  // deliberately absent is a bare "sale date" / "last sold", which is a fact
+  // about the property rather than about the person currently recorded as its
+  // owner (the same distinction lib/ownershipStart.ts's
+  // PROVIDER_OWNERSHIP_START_KEYS draws). As with every alias in this table,
+  // these are suggestions only and remain fully editable in the mapping step.
+  "ownership start date": "property.ownershipStartDate",
+  "ownership start": "property.ownershipStartDate",
+  "owned since": "property.ownershipStartDate",
+  "owner since": "property.ownershipStartDate",
+  "date acquired": "property.ownershipStartDate",
+  "acquired date": "property.ownershipStartDate",
+  "acquired": "property.ownershipStartDate",
+  "acquisition date": "property.ownershipStartDate",
+  "purchase date": "property.ownershipStartDate",
+  "date purchased": "property.ownershipStartDate",
+  "date of purchase": "property.ownershipStartDate",
+  "settlement date": "property.ownershipStartDate",
   "notes": "property.notes",
   "comments": "property.notes",
   "relationship": "relationship.type",

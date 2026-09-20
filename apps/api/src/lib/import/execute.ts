@@ -40,7 +40,7 @@
 // never silently deleted. Matched (not created) existing records are
 // NEVER touched by rollback.
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -101,6 +101,14 @@ export interface RelationshipExecutionPlanItem {
   rawType?: string;
   sourceRowNumbers: number[];
   needsPendingReview: boolean;
+  /**
+   * AE GROW "Brokerage-wide Signal Sweep" stage 2 -- the observed ownership
+   * start date to record on growRelationships.ownershipStartDate, when the
+   * source file carried one for an ownership-style relationship. Absent means
+   * AE genuinely does not know, and the tenure rule then abstains rather than
+   * inventing a tenure from the row's creation timestamp.
+   */
+  ownershipStart?: { dateIso: string; precision: string; raw: string };
 }
 
 export interface ExecuteImportBatchInput {
@@ -307,7 +315,7 @@ async function executeRelationshipLink(
   // is reused rather than duplicated. Protects against double-submission and
   // against the same real-world relationship appearing twice in the source file.
   const [existing] = await client
-    .select({ id: growRelationships.id })
+    .select({ id: growRelationships.id, ownershipStartDate: growRelationships.ownershipStartDate })
     .from(growRelationships)
     .where(
       and(
@@ -319,7 +327,27 @@ async function executeRelationshipLink(
       ),
     )
     .limit(1);
-  if (existing) return { relationshipId: existing.id, created: false };
+  if (existing) {
+    // AE GROW "Brokerage-wide Signal Sweep" stage 2 -- BACK-FILL ONLY.
+    // Re-importing a file that now carries a "date acquired" column fills the
+    // gap on relationships AE already had, which is the realistic way a
+    // brokerage switches the tenure rule on for its existing data. It is
+    // strictly a NULL -> value transition: an import can never silently
+    // rewrite an ownership start that is already recorded, so nothing an
+    // agent is currently looking at changes underneath them.
+    if (item.ownershipStart && existing.ownershipStartDate === null) {
+      await client
+        .update(growRelationships)
+        .set({
+          ownershipStartDate: new Date(item.ownershipStart.dateIso),
+          ownershipStartSource: "import",
+          ownershipStartPrecision: item.ownershipStart.precision,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(growRelationships.id, existing.id), eq(growRelationships.brokerageId, brokerageId), isNull(growRelationships.ownershipStartDate)));
+    }
+    return { relationshipId: existing.id, created: false };
+  }
 
   const [created] = await client
     .insert(growRelationships)
@@ -332,6 +360,13 @@ async function executeRelationshipLink(
       sourceType: "import",
       sourceId: `${importJobId}:${item.sourceRowNumbers.join(",")}`,
       sourceEvidence: item.rawType ?? null,
+      // NOTE: validFrom is deliberately left to its defaultNow(). It means
+      // "since when has AE known about this relationship" and that IS import
+      // time. The real-world acquisition date is a separate column, set only
+      // when the source actually supplied one.
+      ownershipStartDate: item.ownershipStart ? new Date(item.ownershipStart.dateIso) : null,
+      ownershipStartSource: item.ownershipStart ? "import" : null,
+      ownershipStartPrecision: item.ownershipStart ? item.ownershipStart.precision : null,
       createdBy: agentId,
     })
     .returning({ id: growRelationships.id });

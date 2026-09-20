@@ -308,6 +308,21 @@ export const growSignalSweepCursors = pgTable(
     brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
     // { growRelationships: ISO, growOpportunities: ISO, appraisals: ISO, propertyProviderObservations: ISO }
     sourceHighWaterMarks: jsonb("source_high_water_marks").notNull().default(sql`'{}'::jsonb`),
+    // AE GROW "Brokerage-wide Signal Sweep" stage 2 — PER-RULE CONTINUATION.
+    //
+    // `{ [ruleName]: lastOrderingKey }`. Each rule in
+    // lib/propertyIntelligence/evaluation.ts gets a fair share of the
+    // per-brokerage candidate cap and scans in ascending id order; a rule
+    // that fills its share records where it stopped here, and the next run
+    // resumes after that point rather than re-reading the same head of the
+    // table forever. A rule that finished resets to 0, so nothing is ever
+    // permanently skipped.
+    //
+    // Additive and defaulted, like sourceHighWaterMarks above, and jsonb for
+    // the same reason: a later stage can add or rename a rule without another
+    // migration. An unknown rule name is simply absent, which reads as
+    // "start from the beginning" — the correct behaviour for a new rule.
+    ruleCursors: jsonb("rule_cursors").notNull().default(sql`'{}'::jsonb`),
     lastEvaluatedAt: timestamp("last_evaluated_at"),
     // The last evaluation that was NOT short-circuited by the cursor — the
     // anchor for FULL_SWEEP_INTERVAL_MS's periodic "evaluate regardless".
