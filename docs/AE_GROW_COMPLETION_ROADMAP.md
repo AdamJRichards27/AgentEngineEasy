@@ -329,6 +329,26 @@ empty; a suppression written via the route is observed by `contactability.ts` on
 read; a quiet-hours-deferred message with withdrawn consent ends `BLOCKED_BY_CONSENT` and the
 provider is never called; `EXPLAIN` shows index scans for each cited query.
 
+**WAVE 1 OUTCOME — all four delivered as draft PRs.**
+
+| PR | Slice | Notes |
+|---|---|---|
+| **#51** | W1-A | A-2/A-3/A-4/A-5 closed. Also completed the `RETRY_SCHEDULED → BLOCKED_BY_CONSENT` transition edge, without which a withdrawn retry was fail-closed but never settled and the 60s sweep re-failed it every pass. |
+| **#52** | W1-B | A-1 closed. `grep consentControlsPersistence apps/api/src/routes` now resolves. The suppression → `contactability` → Grow Today path is asserted end-to-end over real HTTP, proving the DNC control is no longer inert. |
+| **#53** | W1-C | I-1/I-3/I-6/I-7/I-8 closed. Two audit corrections recorded: I-3 is **eight** reads, not five; and `grow_contact_roles` was never one of the scans — it already had a usable `(party_id, role)` index. |
+| **#50** | W1-D | H-1/H-2/H-3/H-6 and the index batch, as migration **0028**, 14 indexes. Caught a real defect in its own work: drizzle's `.desc()` emits `DESC NULLS LAST`, which does not satisfy Postgres's `ORDER BY … DESC` (`NULLS FIRST`), so the index was inert for the query it existed for. |
+| **#54** | Test-env | Canonical API test runner. CI sets `NODE_ENV=test`, `ALLOW_DEV_AUTH=true` and a placeholder `SESSION_SECRET` at job level; a fresh worktree has none, and each absence fails in a way indistinguishable from a real regression. Three Wave 1 slices independently lost time to this. |
+
+`appraisals(party_id)`, the one index dependency W1-C could not fix in code (`appraisals` has **no
+`brokerage_id` column at all** — it is tenant-scoped transitively via `propertyId → properties`), is
+already present in migration 0028. No index work is fragmented across slices.
+
+**Known, pre-existing, not introduced by Wave 1:** the full 166-file API suite is order- and
+state-dependent when runs share one database. The staging baseline and a clean branch fail *disjoint*
+sets — 22 failures in `growCalls.test.ts` on baseline versus 4 in `callTranscriptions.test.ts` on a
+branch, all green in isolation. This is a test-infrastructure property, not a product defect, and is
+the reason candidate judgement rests on targeted suites repeated for stability plus GitHub CI.
+
 ### WAVE 2 — unblocked, depends on Wave 1
 
 | PR | Scope | Depends on | Sev |
@@ -483,3 +503,4 @@ are aggregate-only; polling stops on terminal states.
 | Date | Change |
 |---|---|
 | 2026-09-21 | Created from the nine-workstream audit of staging `ba87901`. Wave 1 dispatched. |
+| 2026-09-21 | Wave 1 delivered as PRs #50–#53, plus #54 (test-env hardening). Wave 2 dispatched: **W2-A** Grow Today bounding, per-party signal consolidation (DECISION 3) and the activity-aggregation rewrite; **W2-B** UX coherence and integration honesty; **W2-C** AI governance and cost observability. Wave 2 branches from `ba87901` and does not contain Wave 1, by design — file ownership is disjoint. |
