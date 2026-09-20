@@ -165,11 +165,22 @@ async function createRelationship(cookie: string, partyId: number, propertyId: n
   return relationship.id;
 }
 
-/** Backdates a relationship's validFrom directly — no HTTP route exposes this column (see module header comment). */
+/**
+ * Records an OBSERVED ownership start `yearsAgo` directly — no HTTP route
+ * exposes this column (see module header comment).
+ *
+ * STAGE 2: long_ownership_tenure used to read validFrom, which is
+ * defaultNow() and therefore measures ROW AGE rather than how long anyone has
+ * owned anything. It now reads ownershipStartDate, populated only from a
+ * source that genuinely carries an acquisition date (the import pipeline or a
+ * provider ownership observation), and abstains when it is NULL. This helper
+ * sets both so the fixture reads the same either way.
+ */
 async function backdateRelationship(relationshipId: number, yearsAgo: number): Promise<void> {
+  const ownershipStartDate = new Date(Date.now() - yearsAgo * 365 * 24 * 60 * 60 * 1000);
   await db
     .update(growRelationships)
-    .set({ validFrom: new Date(Date.now() - yearsAgo * 365 * 24 * 60 * 60 * 1000) })
+    .set({ validFrom: ownershipStartDate, ownershipStartDate, ownershipStartSource: "import", ownershipStartPrecision: "day" })
     .where(eq(growRelationships.id, relationshipId));
 }
 
@@ -283,7 +294,18 @@ test("long ownership tenure — deterministic StrongIndicator band, idempotent r
   // knowledge of this specific contact's private intentions. See
   // docs/AE_GROW_PRIORITY_6_STAGE_B_GROW_ASK_AE_REPORT.md, "Priority 5 wording review", for the
   // full before/after text and rationale.
-  assert.match(signal.explanation, /approximately 11 years/, "must state the recorded tenure as a fact");
+  //
+  // STAGE 2 NOTE ON THIS ASSERTION. The requirement is unchanged — the
+  // explanation must state the RECORDED tenure as a fact and nothing more.
+  // What changed is only the hedging word: the rule now renders durations
+  // through describeDuration() ("about 11 years") instead of hand-writing
+  // "approximately 11 years", so that every rule hedges identically rather
+  // than each one inventing its own phrasing. The three substantive
+  // assertions below (no sale-likelihood language, no aggregate statistic
+  // applied to an individual, explicit disclaimer of private intentions) are
+  // untouched and still pass verbatim.
+  assert.match(signal.explanation, /about 11 years/, "must state the recorded tenure as a fact");
+  assert.match(signal.explanation, /since /, "must say WHEN the recorded ownership started, not just how long it has run");
   assert.doesNotMatch(signal.explanation, /likely to (consider selling|sell)/i, "must never use sale-likelihood language");
   assert.doesNotMatch(signal.explanation, /on average/i, "must never present an aggregate statistic as if it applied to this specific owner");
   assert.match(

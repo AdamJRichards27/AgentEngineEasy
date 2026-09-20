@@ -450,3 +450,207 @@ test("keeps warning-level rows importable -- an unrecognised relationship type a
     await cleanupBrokerage(brokerage.id);
   }
 });
+
+/* ---------------------------------------------------------------------
+ * AE GROW "Brokerage-wide Signal Sweep" stage 2 — ownership start capture.
+ *
+ * End to end, from a column in a spreadsheet to a signal an agent can read.
+ * This is the path that makes the long_ownership_tenure rule functional at
+ * all: before it existed the rule could only see growRelationships.validFrom,
+ * which is defaultNow() and therefore says "imported today" for every row in
+ * an imported database.
+ * -----------------------------------------------------------------*/
+
+const OWNERSHIP_MAPPING: ColumnMapping = {
+  "First Name": "person.firstName",
+  "Last Name": "person.lastName",
+  "Email": "person.email",
+  "Property Address": "property.address.full",
+  "Relationship Type": "relationship.type",
+  "Date Acquired": "property.ownershipStartDate",
+};
+
+function toOwnershipCsv(rows: Record<string, string>[]): string {
+  const headers = Object.keys(OWNERSHIP_MAPPING);
+  const escape = (v: string) => (v.includes(",") || v.includes('"') ? `"${v.replace(/"/g, '""')}"` : v);
+  return [headers.join(","), ...rows.map((row) => headers.map((h) => escape(row[h] ?? "")).join(","))].join("\n");
+}
+
+test("ownership start: a mapped 'Date Acquired' column reaches growRelationships and makes the tenure rule fire", async () => {
+  const brokerage = await makeBrokerage("Import Test - ownership start capture");
+  const user = await makeUser(brokerage.id, "ownership");
+  try {
+    const csv = toOwnershipCsv([
+      // Australian day-first, full precision.
+      {
+        "First Name": "Margaret",
+        "Last Name": "Okafor",
+        Email: "margaret.okafor@import-test.local",
+        "Property Address": "8 Jacaranda Cres, Ashgrove QLD 4060",
+        "Relationship Type": "Owner",
+        "Date Acquired": "14/03/2011",
+      },
+      // Year only — must be kept, at YEAR precision, never widened to a day.
+      {
+        "First Name": "Tomas",
+        "Last Name": "Nguyen",
+        Email: "tomas.nguyen@import-test.local",
+        "Property Address": "19 Rosella Street, Clayfield QLD 4011",
+        "Relationship Type": "Owner",
+        "Date Acquired": "2009",
+      },
+      // Unreadable — the row must still import, with a WARNING, and simply
+      // carry no ownership start. This is the honest failure mode: AE does
+      // not know, so the tenure rule will abstain for this contact.
+      {
+        "First Name": "Priya",
+        "Last Name": "Raman",
+        Email: "priya.raman@import-test.local",
+        "Property Address": "3 Kurrajong Pl, Newmarket QLD 4051",
+        "Relationship Type": "Owner",
+        "Date Acquired": "sometime in the nineties",
+      },
+      // A "Date Acquired" against a TENANT is not an ownership start and must
+      // not be recorded as one.
+      {
+        "First Name": "Daniel",
+        "Last Name": "Brooks",
+        Email: "daniel.brooks@import-test.local",
+        "Property Address": "77 Ironbark Rd, Wilston QLD 4051",
+        "Relationship Type": "Tenant",
+        "Date Acquired": "01/01/2015",
+      },
+    ]);
+
+    const { job } = await createImportJobFromFile(brokerage.id, user.id, csvFile(csv));
+    const validation = await runMappingAndValidation(job.id, brokerage.id, OWNERSHIP_MAPPING);
+    assert.equal(validation.rejectedRows, 0, "an unreadable date never rejects a row");
+    assert.equal(validation.warningRows, 1, "the unreadable date is surfaced as exactly one warning");
+
+    await buildImportPreview(job.id, brokerage.id);
+    const result = await runPlanAndExecute(job.id, brokerage.id, user.id);
+    assert.equal(result.relationshipsCreated, 4);
+
+    const relRows = await db.select().from(growRelationships).where(eq(growRelationships.brokerageId, brokerage.id));
+    const byParty = new Map<number, (typeof relRows)[number]>();
+    const partyRows = await db.select().from(parties).where(eq(parties.brokerageId, brokerage.id));
+    for (const rel of relRows) byParty.set(rel.partyId, rel);
+    const relFor = (lastName: string) => {
+      const party = partyRows.find((p) => p.lastName === lastName);
+      assert.ok(party, `fixture contact ${lastName} exists`);
+      const rel = byParty.get(party.id);
+      assert.ok(rel, `fixture relationship for ${lastName} exists`);
+      return rel;
+    };
+
+    const margaret = relFor("Okafor");
+    assert.equal(margaret.ownershipStartDate?.toISOString(), "2011-03-14T00:00:00.000Z");
+    assert.equal(margaret.ownershipStartSource, "import");
+    assert.equal(margaret.ownershipStartPrecision, "day");
+    // The distinction that matters: validFrom is import time (now), the
+    // ownership start is 2011. Before this change only the former existed.
+    assert.ok(margaret.validFrom.getTime() > margaret.ownershipStartDate!.getTime());
+
+    const tomas = relFor("Nguyen");
+    assert.equal(tomas.ownershipStartDate?.toISOString(), "2009-01-01T00:00:00.000Z");
+    assert.equal(tomas.ownershipStartPrecision, "year", "a year-only source keeps its true precision");
+
+    const priya = relFor("Raman");
+    assert.equal(priya.ownershipStartDate, null, "an unreadable date is recorded as UNKNOWN, never guessed");
+    assert.equal(priya.ownershipStartSource, null);
+
+    const daniel = relFor("Brooks");
+    assert.equal(daniel.relationshipType, "tenant");
+    assert.equal(daniel.ownershipStartDate, null, "a date against a non-ownership relationship is not an ownership start");
+
+    // END TO END: the imported dates are enough for the tenure rule to fire,
+    // and the contact AE has no date for is correctly absent.
+    const { evaluateCandidates } = await import("../../propertyIntelligence/evaluation.js");
+    const evaluation = await evaluateCandidates({ brokerageId: brokerage.id, now: new Date(), maxCandidates: 500 });
+    const tenure = evaluation.candidates.filter((c) => c.signalType === "long_ownership_tenure");
+    const tenurePartyIds = new Set(tenure.map((c) => c.partyId));
+    assert.equal(tenure.length, 2, "exactly the two contacts with a readable ownership start produce a tenure candidate");
+    assert.ok(tenurePartyIds.has(margaret.partyId));
+    assert.ok(tenurePartyIds.has(tomas.partyId));
+    assert.ok(!tenurePartyIds.has(priya.partyId), "the rule ABSTAINS for the contact whose date AE could not read");
+    assert.ok(!tenurePartyIds.has(daniel.partyId), "a tenant is never a tenure candidate");
+  } finally {
+    await cleanupBrokerage(brokerage.id);
+  }
+});
+
+test("ownership start: re-importing with a date column BACK-FILLS an existing relationship, and never overwrites one", async () => {
+  const brokerage = await makeBrokerage("Import Test - ownership start backfill");
+  const user = await makeUser(brokerage.id, "backfill");
+  try {
+    // First import: no date column value at all, so the relationship lands
+    // with an unknown ownership start — the state every pre-existing row in
+    // a live database is in after this migration.
+    const first = toOwnershipCsv([
+      {
+        "First Name": "Helen",
+        "Last Name": "Vasquez",
+        Email: "helen.vasquez@import-test.local",
+        "Property Address": "5 Melaleuca Way, Kenmore QLD 4069",
+        "Relationship Type": "Owner",
+        "Date Acquired": "",
+      },
+    ]);
+    const jobOne = await createImportJobFromFile(brokerage.id, user.id, csvFile(first));
+    await runMappingAndValidation(jobOne.job.id, brokerage.id, OWNERSHIP_MAPPING);
+    await buildImportPreview(jobOne.job.id, brokerage.id);
+    await runPlanAndExecute(jobOne.job.id, brokerage.id, user.id);
+
+    const [before] = await db.select().from(growRelationships).where(eq(growRelationships.brokerageId, brokerage.id));
+    assert.equal(before.ownershipStartDate, null);
+
+    // Second import: same contact, same property, now WITH a date. This is
+    // how a brokerage realistically switches the tenure rule on for data it
+    // already loaded.
+    const second = toOwnershipCsv([
+      {
+        "First Name": "Helen",
+        "Last Name": "Vasquez",
+        Email: "helen.vasquez@import-test.local",
+        "Property Address": "5 Melaleuca Way, Kenmore QLD 4069",
+        "Relationship Type": "Owner",
+        "Date Acquired": "2012-06-01",
+      },
+    ]);
+    const jobTwo = await createImportJobFromFile(brokerage.id, user.id, csvFile(second));
+    await runMappingAndValidation(jobTwo.job.id, brokerage.id, OWNERSHIP_MAPPING);
+    await buildImportPreview(jobTwo.job.id, brokerage.id);
+    await runPlanAndExecute(jobTwo.job.id, brokerage.id, user.id);
+
+    const afterRows = await db.select().from(growRelationships).where(eq(growRelationships.brokerageId, brokerage.id));
+    assert.equal(afterRows.length, 1, "the relationship is reused, not duplicated");
+    assert.equal(afterRows[0].ownershipStartDate?.toISOString(), "2012-06-01T00:00:00.000Z", "the gap is filled");
+    assert.equal(afterRows[0].ownershipStartSource, "import");
+
+    // Third import: a DIFFERENT date. It must be ignored — an import may fill
+    // an unknown, never silently rewrite a date already on the record.
+    const third = toOwnershipCsv([
+      {
+        "First Name": "Helen",
+        "Last Name": "Vasquez",
+        Email: "helen.vasquez@import-test.local",
+        "Property Address": "5 Melaleuca Way, Kenmore QLD 4069",
+        "Relationship Type": "Owner",
+        "Date Acquired": "1999-01-01",
+      },
+    ]);
+    const jobThree = await createImportJobFromFile(brokerage.id, user.id, csvFile(third));
+    await runMappingAndValidation(jobThree.job.id, brokerage.id, OWNERSHIP_MAPPING);
+    await buildImportPreview(jobThree.job.id, brokerage.id);
+    await runPlanAndExecute(jobThree.job.id, brokerage.id, user.id);
+
+    const finalRows = await db.select().from(growRelationships).where(eq(growRelationships.brokerageId, brokerage.id));
+    assert.equal(
+      finalRows[0].ownershipStartDate?.toISOString(),
+      "2012-06-01T00:00:00.000Z",
+      "a later import must not silently rewrite an ownership start that is already recorded",
+    );
+  } finally {
+    await cleanupBrokerage(brokerage.id);
+  }
+});

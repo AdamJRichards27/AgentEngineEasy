@@ -161,8 +161,8 @@ export const METRIC_DEFINITIONS = {
     labels: { trigger: ["SCHEDULED", "MANUAL"] },
   },
   property_signal_outcome_total: {
-    help: "Property Intelligence signals written by a sweep, by outcome. `re_raised` counts human-decided signals returned to Active under the bounded re-review policy; `suppressed` counts candidates withheld by the contactability filter (never raised, never surfaced, never contacted).",
-    labels: { outcome: ["created", "updated", "re_raised", "expired", "suppressed"] },
+    help: "Property Intelligence signals written by a sweep, by outcome. `re_raised` counts human-decided signals returned to Active under the bounded re-review policy; `suppressed` counts candidates withheld by the contactability filter (never raised, never surfaced, never contacted); `rule_truncated` counts rules that had more candidates than their share of the per-brokerage cap and paused, to be resumed from a stored cursor on the next run. Which rule paused, for which brokerage, and where, are in the structured property_signal_rule_truncated log line — deliberately not in a label, per this block's own rule.",
+    labels: { outcome: ["created", "updated", "re_raised", "expired", "suppressed", "rule_truncated"] },
   },
   financial_reconciliation_variance_total: {
     help: "A financial_reconciliations row was recorded with status VARIANCE — reported evidence (e.g. a mock payment-status webhook) disagrees with the payment request's expected amount/currency and needs human review (see FIN05_RECONCILIATION_VARIANCE_UNRESOLVED).",

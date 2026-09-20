@@ -110,7 +110,16 @@ export const parties = pgTable("parties", {
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // AE GROW "Brokerage-wide Signal Sweep" stage 2. `parties` had no index at
+  // all beyond its primary key, yet the re_engagement_opportunity rule is the
+  // first rule that is genuinely CONTACT-driven rather than property-driven:
+  // its driving set is "every contact in this brokerage", so without this the
+  // rule would sequential-scan a tenant-mixed table on every evaluated
+  // brokerage. Same argument, and same shape, as properties_brokerage_idx.
+  brokerageIdx: index("parties_brokerage_idx").on(table.brokerageId),
+}));
 
 // The join that makes "enter once, reuse everywhere" real. A seller entered
 // against a property is never re-entered for AML, agency agreement, or contract.

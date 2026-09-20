@@ -128,6 +128,22 @@ export function validateRecord(record: NormalisedImportRecord): RowValidationRes
     });
   }
 
+  // AE GROW "Brokerage-wide Signal Sweep" stage 2. An ownership start date
+  // AE could not read is a WARNING, never an ERROR: the row imports fine and
+  // is fully usable, it simply cannot support the long_ownership_tenure rule.
+  // Warning rather than silently dropping matters because the realistic
+  // failure is a WHOLE COLUMN in an unrecognised format — one visible warning
+  // per row lets the user reformat and re-import, where a silent drop would
+  // leave them wondering why tenure signals never appear.
+  if (property?.ownershipStartRejected) {
+    issues.push({
+      field: "property.ownershipStartDate",
+      code: "OWNERSHIP_START_DATE_UNRECOGNISED",
+      message: `"${property.ownershipStartRejected.raw}" was not imported as an ownership start date. ${property.ownershipStartRejected.reason} The rest of the row imports normally.`,
+      severity: "WARNING",
+    });
+  }
+
   if (contactAddress && !contactAddress.formatted) {
     issues.push({
       field: "contactAddress",

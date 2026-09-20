@@ -11,6 +11,7 @@ import { logAudit } from "../audit.js";
 import { PropertyIntelligenceAccessError } from "./observations.js";
 import { PropertyIntelligenceTransitionError } from "./matches.js";
 import { evaluateCandidates } from "./evaluation.js";
+import { loadContactabilityFilter } from "./contactability.js";
 import {
   HUMAN_DECIDED_STATUSES,
   expireSignalsPastExpiry,
@@ -204,10 +205,60 @@ export async function listSignalsForProperty(propertyId: number, brokerageId: nu
     .where(and(...conditions));
 }
 
-/** Active, non-expired, non-dismissed signals for a contact — used by Contact 360 and Grow Today Rule F. */
+/**
+ * Active, non-expired, non-dismissed signals for a contact — used by Contact
+ * 360 and Grow Today Rule F.
+ *
+ * =====================================================================
+ * CONTACTABILITY IS CHECKED ON READ, NOT ONLY ON WRITE
+ * =====================================================================
+ *
+ * THE HOLE THIS CLOSES. The sweep consults the contactability filter when it
+ * RAISES a signal, which only protects a contact who was already DNC-listed
+ * or fully suppressed at that moment. For a contact listed AFTERWARDS the
+ * existing row was stranded in exactly the wrong state:
+ *
+ *   - the sweep drops their candidate, so the row is never refreshed;
+ *   - but the candidate still counts as SUPPORTED, so the "no longer
+ *     supported -> Expired" pass deliberately leaves it alone (and correctly
+ *     so — the filter must hide a contact, never silently retire their
+ *     history);
+ *   - and these rows carry expires_at IS NULL, so the expiry pass never
+ *     touches them either.
+ *
+ * The row therefore stayed Active forever and kept being surfaced. A
+ * write-time-only check cannot fix that, because the event that must change
+ * the answer (a DNC listing) happens after the write.
+ *
+ * WHAT THIS DOES. Hides, never retires. A suppressed contact's signals are
+ * withheld from this read; the rows themselves are not touched, not expired,
+ * not dismissed, and reappear the moment the suppression lapses. That is the
+ * same rule stage 1 applied to the sweep, now applied on the way out as well.
+ *
+ * WHAT COUNTS AS SUPPRESSED is owned entirely by
+ * ./contactability.ts — DNC LISTED on any channel, or an in-force
+ * suppression on EVERY channel. A partial (single-channel) suppression
+ * deliberately does NOT hide: the agent can still reach that contact another
+ * way, and hiding it would lose information they are entitled to see. This
+ * function makes no consent decision of its own and writes nothing.
+ *
+ * NOT APPLIED TO listSignalsForProperty() ABOVE, deliberately and for the
+ * same reason recalculateSignalsForProperty() does not apply it: that is an
+ * explicit, entitled, per-property human action on a record the agent has
+ * already navigated to, not a system-initiated suggestion about a person. See
+ * this stage's report — it is flagged there for a product decision rather
+ * than changed unilaterally.
+ */
 export async function listActiveSignalsForParty(partyId: number, brokerageId: number): Promise<GrowOpportunitySignal[]> {
   const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party) throw new PropertyIntelligenceAccessError("Contact not found");
+
+  // Checked BEFORE the signal read: a suppressed contact's rows are never
+  // loaded at all, so there is no window in which they exist in memory on a
+  // surfacing path.
+  const contactability = await loadContactabilityFilter(brokerageId, [partyId]);
+  if (contactability.isSuppressed(partyId)) return [];
+
   return db
     .select()
     .from(growOpportunitySignals)

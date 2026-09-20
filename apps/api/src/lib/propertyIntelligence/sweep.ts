@@ -751,7 +751,18 @@ async function sweepBrokerageInner(brokerageId: number, sweepRunId: string, summ
   summary.signalsExpired += expired;
 
   // 2. Set-based evaluation of every rule.
-  const { candidates, truncated } = await evaluateCandidates({ brokerageId, now, maxCandidates: options.maxCandidatesPerBrokerage });
+  //
+  //    STAGE 2: `ruleCursors` in / `nextRuleCursors` out is the per-rule
+  //    continuation. Each rule gets a fair share of maxCandidates and, if it
+  //    fills it, records where it stopped so the NEXT run resumes after that
+  //    point instead of re-reading the same head of the table forever. See
+  //    evaluation.ts's "PER-RULE BUDGETING" block for why this exists.
+  const { candidates, truncated, nextRuleCursors } = await evaluateCandidates({
+    brokerageId,
+    now,
+    maxCandidates: options.maxCandidatesPerBrokerage,
+    ruleCursors: (cursor?.ruleCursors as Record<string, number> | null) ?? {},
+  });
   summary.candidatesEvaluated += candidates.length;
   if (truncated) summary.truncated = true;
 
@@ -808,16 +819,27 @@ async function sweepBrokerageInner(brokerageId: number, sweepRunId: string, summ
     truncated,
   });
 
-  await writeCursor(brokerageId, sweepRunId, probe.marks, now, !truncated);
+  await writeCursor(brokerageId, sweepRunId, probe.marks, now, !truncated, nextRuleCursors);
 }
 
 /** One idempotent upsert per brokerage per pass. */
-async function writeCursor(brokerageId: number, sweepRunId: string, marks: Record<string, string | null>, now: Date, fullEvaluation: boolean): Promise<void> {
+async function writeCursor(
+  brokerageId: number,
+  sweepRunId: string,
+  marks: Record<string, string | null>,
+  now: Date,
+  fullEvaluation: boolean,
+  // Stage 2: omitted by the SKIPPED path below, which evaluated no rule and
+  // therefore has nothing to say about where any rule should resume — a
+  // skipped pass must never reset a continuation another pass set.
+  ruleCursors?: Record<string, number>,
+): Promise<void> {
   await db
     .insert(growSignalSweepCursors)
     .values({
       brokerageId,
       sourceHighWaterMarks: marks,
+      ruleCursors: ruleCursors ?? {},
       lastEvaluatedAt: now,
       lastFullEvaluationAt: fullEvaluation ? now : null,
       lastSweepRunId: sweepRunId,
@@ -827,6 +849,7 @@ async function writeCursor(brokerageId: number, sweepRunId: string, marks: Recor
       target: growSignalSweepCursors.brokerageId,
       set: {
         sourceHighWaterMarks: sql`excluded.source_high_water_marks`,
+        ruleCursors: ruleCursors === undefined ? sql`${growSignalSweepCursors.ruleCursors}` : sql`excluded.rule_cursors`,
         lastEvaluatedAt: sql`excluded.last_evaluated_at`,
         // A skipped pass must not advance the full-evaluation anchor, or the
         // FULL_SWEEP_INTERVAL_MS safety net would never fire.

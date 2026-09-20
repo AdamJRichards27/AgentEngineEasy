@@ -92,12 +92,32 @@ async function createProperty(tenant: { brokerageId: number; admin: DevLoginResu
   return row.id;
 }
 
-/** An Active owner relationship whose validFrom is `years` ago — the long_ownership_tenure rule's input. */
+/**
+ * An Active owner relationship with an OBSERVED ownership start `years` ago —
+ * the long_ownership_tenure rule's input.
+ *
+ * STAGE 2 CHANGED WHAT THIS FIXTURE HAS TO SET. It used to back-date
+ * validFrom, which is what the rule read. validFrom is defaultNow() and means
+ * "when AE learned of this row", so the rule was measuring row age; it now
+ * reads ownershipStartDate, an explicitly observed acquisition date, and
+ * abstains entirely when that is NULL. validFrom is still back-dated here so
+ * the two remain distinguishable in tests that care.
+ */
 async function createTenureRelationship(brokerageId: number, partyId: number, propertyId: number | null, years: number, relationshipType = "owner"): Promise<number> {
-  const validFrom = new Date(Date.now() - years * 365 * MS_PER_DAY);
+  const ownershipStartDate = new Date(Date.now() - years * 365 * MS_PER_DAY);
   const [row] = await db
     .insert(growRelationships)
-    .values({ brokerageId, partyId, propertyId, relationshipType, status: "Active", validFrom })
+    .values({
+      brokerageId,
+      partyId,
+      propertyId,
+      relationshipType,
+      status: "Active",
+      validFrom: ownershipStartDate,
+      ownershipStartDate,
+      ownershipStartSource: "import",
+      ownershipStartPrecision: "day",
+    })
     .returning({ id: growRelationships.id });
   return row.id;
 }
@@ -208,7 +228,10 @@ test("a dismissed signal is not re-raised before next_review_at, and after it on
 
   // (c) Quiet period elapsed AND the evidence materially changed (the tenure
   //     crossed into StrongIndicator) — re-raised exactly once.
-  await db.update(growRelationships).set({ validFrom: new Date(Date.now() - 11 * 365 * MS_PER_DAY) }).where(eq(growRelationships.id, relationshipId));
+  await db
+    .update(growRelationships)
+    .set({ ownershipStartDate: new Date(Date.now() - 11 * 365 * MS_PER_DAY) })
+    .where(eq(growRelationships.id, relationshipId));
   await sweep([A.brokerageId]);
   const [reRaised] = await db.select().from(growOpportunitySignals).where(eq(growOpportunitySignals.id, raised.id));
   assert.equal(reRaised.status, "Active", "a materially changed signal returns after its quiet period");

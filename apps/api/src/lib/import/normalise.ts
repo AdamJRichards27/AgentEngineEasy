@@ -30,6 +30,7 @@
 //    normaliser doesn't have.
 
 import { GROW_RELATIONSHIP_TYPES, type GrowRelationshipType } from "@aee/db";
+import { parseOwnershipStartDate } from "../ownershipStart.js";
 import type { CanonicalField } from "./mapping";
 import type {
   ImportRowMeta,
@@ -232,13 +233,34 @@ function buildPerson(mapped: MappedRow): NormalisedPerson {
   };
 }
 
+/**
+ * AE GROW "Brokerage-wide Signal Sweep" stage 2. Turns a mapped "date
+ * acquired" cell into either a recognised ownership start or an explicit
+ * rejection — never a guess. All the format handling, and the reasoning for
+ * rejecting rather than reinterpreting an ambiguous date, lives in
+ * lib/ownershipStart.ts, which the provider-observation capture path shares
+ * so the two can never disagree.
+ */
+function buildOwnershipStart(mapped: MappedRow): Pick<NormalisedProperty, "ownershipStart" | "ownershipStartRejected"> {
+  const raw = get(mapped, "property.ownershipStartDate");
+  if (!raw) return {};
+  const parsed = parseOwnershipStartDate(raw);
+  if (parsed.value && parsed.precision) {
+    return { ownershipStart: { dateIso: parsed.value.toISOString(), precision: parsed.precision, raw: parsed.original } };
+  }
+  return { ownershipStartRejected: { raw: parsed.original, reason: parsed.rejectedReason ?? "Unrecognised date." } };
+}
+
 function buildProperty(mapped: MappedRow): NormalisedProperty | undefined {
   const address = buildAddress(mapped, "property.address");
   const propertyType = get(mapped, "property.type");
   const ownershipInfo = get(mapped, "property.ownership");
   const notes = get(mapped, "property.notes");
-  if (!address && !propertyType && !ownershipInfo && !notes) return undefined;
-  return { address: address ?? {}, propertyType, ownershipInfo, notes };
+  const ownership = buildOwnershipStart(mapped);
+  if (!address && !propertyType && !ownershipInfo && !notes && !ownership.ownershipStart && !ownership.ownershipStartRejected) {
+    return undefined;
+  }
+  return { address: address ?? {}, propertyType, ownershipInfo, notes, ...ownership };
 }
 
 function buildRelationship(mapped: MappedRow): NormalisedRelationship | undefined {

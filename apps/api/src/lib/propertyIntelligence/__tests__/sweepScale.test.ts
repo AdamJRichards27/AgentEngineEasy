@@ -63,7 +63,10 @@ after(async () => {
 });
 
 test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes within budget and issues a bounded number of statements`, async () => {
-  const validFrom = new Date(Date.now() - 11 * 365 * MS_PER_DAY);
+  // Stage 2: the tenure rule reads ownershipStartDate (an observed
+  // acquisition date), not validFrom (row age) — so the fixture has to supply
+  // one or the rule correctly abstains and this file would measure nothing.
+  const ownershipStartDate = new Date(Date.now() - 11 * 365 * MS_PER_DAY);
 
   const seedStarted = Date.now();
   for (let offset = 0; offset < SCALE_PARTIES; offset += SEED_BATCH) {
@@ -92,7 +95,10 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
         propertyId: propertyRows[i].id,
         relationshipType: "owner",
         status: "Active",
-        validFrom,
+        validFrom: ownershipStartDate,
+        ownershipStartDate,
+        ownershipStartSource: "import",
+        ownershipStartPrecision: "day",
       })),
     );
   }
@@ -106,7 +112,22 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
   const startedAt = Date.now();
   let result;
   try {
-    result = await runSignalSweep("MANUAL", { brokerageIds: [T.brokerageId], force: true });
+    // STAGE 2: maxCandidatesPerBrokerage is now divided FAIRLY BETWEEN RULES
+    // rather than being a single shared pool the first rule can drain (see
+    // evaluation.ts's "PER-RULE BUDGETING"). This file's whole purpose is to
+    // measure ONE sweep that actually processes SCALE_PARTIES candidates, so
+    // it states a cap generous enough for that to happen — otherwise the
+    // tenure rule would correctly stop at its ~1/7 share and this test would
+    // be measuring a seventh of the work it claims to.
+    //
+    // The fair-share and continuation behaviour itself is covered in
+    // __tests__/rules.test.ts, where a deliberately tiny cap makes it
+    // observable.
+    result = await runSignalSweep("MANUAL", {
+      brokerageIds: [T.brokerageId],
+      force: true,
+      maxCandidatesPerBrokerage: SCALE_PARTIES * 10,
+    });
   } finally {
     uninstall();
   }
@@ -118,16 +139,22 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
   assert.equal(summary.brokeragesEvaluated, 1);
   assert.equal(summary.candidatesEvaluated, SCALE_PARTIES, "every seeded contact produces exactly one candidate");
   assert.equal(summary.signalsCreated, SCALE_PARTIES);
-  assert.equal(summary.truncated, false, "2,000 candidates is well inside the default per-brokerage bound");
+  assert.equal(summary.truncated, false, "2,000 candidates is well inside the stated per-brokerage bound");
 
   const persisted = await db.select({ id: growOpportunitySignals.id }).from(growOpportunitySignals).where(eq(growOpportunitySignals.brokerageId, T.brokerageId));
   assert.equal(persisted.length, SCALE_PARTIES);
 
   // The bound. Per brokerage the sweep issues a small fixed set of
-  // statements (cursor read, change-detection probe, expiry, four rule
-  // queries, two contactability queries, unsupported-expiry, cursor write)
-  // plus ONE upsert per UPSERT_CHUNK_SIZE candidates, plus a handful for the
-  // run's own bookkeeping. Anything per-candidate would be ~2 x 2,000.
+  // statements (cursor read, change-detection probe, expiry, ONE QUERY PER
+  // RULE — EVALUATION_STATEMENTS_PER_SCOPE of them — two contactability
+  // queries, unsupported-expiry, cursor write) plus ONE upsert per
+  // UPSERT_CHUNK_SIZE candidates, plus a handful for the run's own
+  // bookkeeping. Anything per-candidate would be ~2 x 2,000.
+  //
+  // Note the rules run SEQUENTIALLY as of stage 2 (a shared decrementing
+  // budget, to stop one rule starving the others and to bound peak memory).
+  // That changes latency, not the statement count: it is still exactly one
+  // statement per rule.
   const upsertStatements = Math.ceil(SCALE_PARTIES / UPSERT_CHUNK_SIZE);
   const statementCeiling = upsertStatements + 30;
   assert.ok(
