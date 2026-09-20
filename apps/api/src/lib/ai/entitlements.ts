@@ -44,6 +44,20 @@ export async function resolveBrokerageTier(brokerageId: number): Promise<Subscri
 
 interface TierCapabilities {
   roles: Record<AiRole, boolean>;
+  /**
+   * PROVISIONAL TECHNICAL SAFETY LIMIT — NOT a commercial allowance.
+   *
+   * These three numbers were written when nothing read them, and they are per BROKERAGE, not
+   * per user (see docs/AE_GROW_PILOT_READINESS_REPORT.md §6.1). They survive only as the
+   * FALLBACK DEFAULT for the brokerage-level daily safety ceiling in lib/ai/usageLimits.ts,
+   * used when no operator configuration exists and no live AI provider is approved.
+   *
+   * Nothing else may read this field: the effective per-user and per-brokerage limits are
+   * resolved exclusively by lib/ai/usageLimits.ts, and once LIVE_AI_PROVIDER_APPROVED=true
+   * these numbers are deliberately NOT used — that case fails closed until an operator has
+   * configured both limits explicitly. Do not treat them as a published entitlement, and do
+   * not add a third caller.
+   */
   maxAiRequestsPerDay: number;
 }
 

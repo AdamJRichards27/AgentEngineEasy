@@ -30,6 +30,7 @@ import {
 import type { ComparableSaleInput, MarketCompetitionInput } from "../lib/growAppraisalIntegrations.js";
 import { AiFeatureDisabledError, AiEntitlementError } from "../lib/ai/types.js";
 import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
+import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
 
 export const growAppraisalsRouter = Router();
 
@@ -84,9 +85,17 @@ function handleGrowAppraisalError(err: unknown, res: import("express").Response)
     res.status(403).json({ error: err.message });
     return;
   }
-  // market-position/generate goes through askCopilot(), so it shares the daily AI cap.
+  // market-position/generate goes through askCopilot(), so it shares the daily AI limits.
   if (err instanceof AiDailyCapExceededError) {
     res.status(429).json({ error: err.message });
+    return;
+  }
+  // ... and the same fail-closed operator fault when a live AI provider is approved with no
+  // configured allowance (lib/ai/usageLimits.ts). 503, not 500: the service is unavailable
+  // until an operator configures it, and nothing about this request is wrong.
+  if (err instanceof AiUsageLimitsNotConfiguredError) {
+    logger.error("grow_appraisal_ai_usage_limits_unconfigured", { missing: err.missing, detail: err.message });
+    res.status(503).json({ error: "AI is not available right now. An administrator has been notified.", code: "AI_USAGE_LIMITS_NOT_CONFIGURED" });
     return;
   }
   // Anything reaching here is NOT one of this feature's expected, typed,

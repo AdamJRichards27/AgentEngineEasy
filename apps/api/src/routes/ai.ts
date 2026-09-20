@@ -1,13 +1,14 @@
 import { Router } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { askCopilot } from "../lib/ai/orchestrator.js";
 import { isRoleEnabled } from "../lib/ai/featureFlags.js";
 import { resolveBrokerageTier, isRoleEntitled } from "../lib/ai/entitlements.js";
 import { AiEntitlementError, AiFeatureDisabledError } from "../lib/ai/types.js";
 import { GrowRateLimitError } from "../lib/ai/growRateLimiter.js";
-import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
+import { AiDailyCapExceededError, getAiUsageSnapshot } from "../lib/ai/dailyUsage.js";
+import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 
 export const aiRouter = Router();
@@ -119,10 +120,23 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
       res.status(429).json({ error: err.message });
       return;
     }
-    // AE GROW Pilot Readiness WP1 (P1-3) — durable per-brokerage daily cap
+    // AE GROW Pilot Readiness WP1 (P1-3) — durable daily AI limits
     // (lib/ai/dailyUsage.ts), enforced inside askCopilot() before any provider call.
+    // `scope` says which of the two independent limits was reached ("user" or "brokerage").
     if (err instanceof AiDailyCapExceededError) {
-      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier });
+      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier, scope: err.scope });
+      return;
+    }
+    // Live activation without configuration — an operator fault, not a client error and not a
+    // quota refusal (lib/ai/usageLimits.ts). The operator-facing detail goes to the log; the
+    // caller gets an honest "unavailable" rather than an answer served under a limit nobody
+    // decided on.
+    if (err instanceof AiUsageLimitsNotConfiguredError) {
+      logger.error("ai_usage_limits_unconfigured", { missing: err.missing, tier: err.tier, detail: err.message });
+      res.status(503).json({
+        error: "AI is not available right now. An administrator has been notified.",
+        code: "AI_USAGE_LIMITS_NOT_CONFIGURED",
+      });
       return;
     }
     logger.error("ai_ask_route_failed", { error: err });
@@ -158,4 +172,49 @@ aiRouter.get("/capabilities", requireAuth, async (req, res) => {
     // copilotEnabled are completely unaffected by this addition.
     businessCoachEnabled: isRoleEnabled("business_coach") && isRoleEntitled(tier, "business_coach"),
   });
+});
+
+// AE GROW post-merge hardening — read-only AI usage inspection.
+//
+// Answers "how much AI have I used today, and how much has my brokerage used?" from the same
+// durable ai_interactions rows the limits themselves count (lib/ai/dailyUsage.ts), so it is
+// correct whether or not any limit is configured or enforced — metering happens in the pilot's
+// mock-provider default too.
+//
+// Tenant scoping is total and not client-controllable: brokerageId and userId both come from
+// req.authedUser, never from the query string or body, so there is no shape of this request
+// that can read another brokerage's or another user's usage. A Brokerage Administrator
+// additionally gets a per-user breakdown FOR THEIR OWN BROKERAGE ONLY, which is user ids and
+// counts and nothing else — no question text, no response, no email address, no name. Gated by
+// the existing role model (BROKERAGE_ADMIN_ROLES, middlewares/auth.ts — "brokerage
+// users/settings/oversight"), the same role that already sees brokerage-wide oversight
+// surfaces elsewhere in this API; no new entitlement key was invented for it.
+aiRouter.get("/usage", requireAuth, async (req, res) => {
+  const authedUser = req.authedUser;
+  if (authedUser === undefined) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  const isBrokerageAdmin = BROKERAGE_ADMIN_ROLES.includes(authedUser.role);
+  try {
+    const snapshot = await getAiUsageSnapshot({
+      brokerageId: authedUser.brokerageId,
+      userId: authedUser.id,
+      includeUserBreakdown: isBrokerageAdmin,
+    });
+    res.json(snapshot);
+  } catch (err) {
+    if (err instanceof AiUsageLimitsNotConfiguredError) {
+      // Reported rather than papered over: displaying a limit that is not actually in force
+      // would be worse than saying the limits are not configured.
+      logger.error("ai_usage_limits_unconfigured", { missing: err.missing, tier: err.tier, detail: err.message });
+      res.status(503).json({
+        error: "AI usage limits are not configured. An administrator has been notified.",
+        code: "AI_USAGE_LIMITS_NOT_CONFIGURED",
+      });
+      return;
+    }
+    logger.error("ai_usage_route_failed", { error: err });
+    res.status(500).json({ error: "AI usage could not be read right now. Try again in a moment." });
+  }
 });
