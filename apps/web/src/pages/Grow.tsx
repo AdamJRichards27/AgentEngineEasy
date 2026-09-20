@@ -32,10 +32,17 @@ import {
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
+  canOfferChannel,
+  contactabilityNotice,
   formatGeneratedAt,
   formatWhen,
+  hasLinkedContact,
   priorityLabel,
   priorityPillClass,
+  rankExplanationLines,
+  rankSummaryLine,
+  signalWithholdingNotice,
+  unlinkedContactNotice,
 } from "../lib/growToday";
 
 interface GrowAccess {
@@ -612,6 +619,14 @@ function GrowToday({
         <StatTile label="Contacts Needing Attention" value={data.counts.contactsNeedingAttention} />
       </div>
 
+      {/* AE GROW Signal Sweep stage 3: Today must be honest about what it is
+          NOT showing. An Emerging signal held back by the daily cap, or a
+          signal withheld because its contact must not be contacted, is
+          reported as a count here rather than silently vanishing. */}
+      {signalWithholdingNotice(data.signalSummary) && (
+        <p className="muted grow-signal-withholding-notice">{signalWithholdingNotice(data.signalSummary)}</p>
+      )}
+
       {!data.hasAnyGrowData ? (
         <section className="card">
           <h2>Let's find your next opportunity</h2>
@@ -792,19 +807,36 @@ function GrowActionCard({
     },
   });
 
-  const showAddNote = canAddNote && item.availableActions.some((b) => b.action === "add_note");
+  // AE GROW Signal Sweep stage 3: every contact-anchored affordance is now
+  // additionally gated on the card actually HAVING a contact. A Property
+  // Intelligence signal derived from a provider observation is anchored to a
+  // property and has no party at all — it used to be dropped from Today
+  // entirely, which is the defect stage 3 fixes, so the UI has to cope with
+  // it rather than assume item.partyId is always a number.
+  const linkedContact = hasLinkedContact(item);
+  const showAddNote = canAddNote && linkedContact && item.availableActions.some((b) => b.action === "add_note");
   const showUpdateNextAction =
     canManageOpportunities && item.opportunityId !== null && item.availableActions.some((b) => b.action === "update_next_action");
   const showViewProperty = item.propertyId !== null && item.availableActions.some((b) => b.action === "view_property");
-  const showViewContact = canViewContacts;
+  const showViewContact = canViewContacts && linkedContact;
   // AE GROW Priority 3 §4: gated on both the grow.contacts.manage entitlement (see
-  // canManageContactComms above) and the contact actually having that channel on file
-  // (contactEmail/contactMobile) — the same "guarded by contactEmail/contactMobile being
-  // non-null" rule apps/api/src/lib/growToday.ts's own header comment documents for the
-  // email/sms availableActions entries this checks alongside.
-  const showEmail = canManageContactComms && item.contactEmail !== null && item.availableActions.some((b) => b.action === "email");
-  const showSms = canManageContactComms && item.contactMobile !== null && item.availableActions.some((b) => b.action === "sms");
+  // canManageContactComms above) and the contact actually having that channel on file.
+  //
+  // AE GROW Signal Sweep stage 3: that check now lives in ONE place —
+  // lib/growToday.ts's canOfferChannel — which additionally refuses any card
+  // marked do_not_contact and fails closed on an unrecognised contactability
+  // value. The server already withholds prospecting items for a suppressed
+  // contact and nulls their contact fields, so this is a third independent
+  // guard, not the only one.
+  const showEmail = canManageContactComms && canOfferChannel(item, "email");
+  const showSms = canManageContactComms && canOfferChannel(item, "sms");
   const showAskAE = item.availableActions.some((b) => b.action === "ask_ae");
+
+  const consentNotice = contactabilityNotice(item);
+  const unlinkedNotice = unlinkedContactNotice(item);
+  const why = item.whyItMatters;
+  const rankSummary = rankSummaryLine(item);
+  const rankLines = rankExplanationLines(item);
 
   const busy = addNote.isPending || updateNextAction.isPending;
   const errorMessage: string | null = addNote.isError
@@ -824,8 +856,48 @@ function GrowActionCard({
         <strong>{item.contactName}</strong>
         {item.propertyLabel ? <span className="muted"> — {item.propertyLabel}</span> : null}
       </div>
+      {/* AE GROW Signal Sweep stage 3: a do-not-contact notice leads the card,
+          above the reason and the recommendation, so it can never be missed by
+          somebody skimming. It only ever appears on an agent's own dated
+          commitment — prospecting items for a suppressed contact are withheld
+          by the server and never reach this component. */}
+      {consentNotice && (
+        <p className="error-text grow-action-consent-notice" role="note">
+          <strong>Do not contact.</strong> {consentNotice}
+        </p>
+      )}
+
       <p className="muted grow-action-reason">{item.reason}</p>
+
+      {/* AE GROW Signal Sweep stage 3 — EXPLAINABILITY. A ranked signal must
+          say why it matters in language the agent can act on and repeat to a
+          homeowner, and the rank itself is only ever shown alongside the
+          itemised factors that produced it. A bare score is not an
+          explanation. */}
+      {why && (
+        <div className="grow-action-why">
+          <p className="grow-action-why-headline">{why.headline}</p>
+          {why.talkingPoint && (
+            <p className="grow-action-why-talking-point">
+              <strong>You could ask:</strong> {why.talkingPoint}
+            </p>
+          )}
+          <p className="muted grow-action-why-caution">{why.caution}</p>
+          {rankLines.length > 0 && (
+            <details className="grow-action-why-factors">
+              <summary>{rankSummary ?? "Why AE ranked this here"}</summary>
+              <ul>
+                {rankLines.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+
       <p>Recommended: {item.recommendedAction}</p>
+      {unlinkedNotice && <p className="muted grow-action-unlinked-notice">{unlinkedNotice}</p>}
       <p className="muted">
         {item.dueAt
           ? `Due ${formatWhen(item.dueAt)}`
@@ -861,18 +933,22 @@ function GrowActionCard({
             View property
           </Link>
         )}
-        {showViewContact && (
-          <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(item.partyId)}>
+        {/* The `item.partyId !== null` repeated below is what proves to the
+            compiler what showViewContact/showEmail/showSms already guarantee:
+            a contact-anchored button is never rendered for a card that has no
+            contact. */}
+        {showViewContact && item.partyId !== null && (
+          <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(item.partyId as number)}>
             View contact
           </button>
         )}
-        {showEmail && (
-          <button type="button" className="btn btn-link btn-small" onClick={() => onEmailContact(item.partyId)}>
+        {showEmail && item.partyId !== null && (
+          <button type="button" className="btn btn-link btn-small" onClick={() => onEmailContact(item.partyId as number)}>
             Email
           </button>
         )}
-        {showSms && (
-          <button type="button" className="btn btn-link btn-small" onClick={() => onSmsContact(item.partyId)}>
+        {showSms && item.partyId !== null && (
+          <button type="button" className="btn btn-link btn-small" onClick={() => onSmsContact(item.partyId as number)}>
             SMS
           </button>
         )}

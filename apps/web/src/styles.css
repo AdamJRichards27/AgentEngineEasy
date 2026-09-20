@@ -1339,6 +1339,60 @@ ul.pc-item-list li {
   font-style: italic;
 }
 
+/* AE GROW "Brokerage-wide Signal Sweep" stage 3 — explainability and consent
+   on a Grow Today card. Every rule here is layout/emphasis only: nothing
+   conveys meaning by colour alone, because each of these blocks is introduced
+   by its own literal text ("Do not contact.", "You could ask:", the
+   ranking summary line), which is what actually carries the meaning. */
+
+.grow-action-consent-notice {
+  margin: 0 0 0.4rem;
+  padding: 0.5rem 0.65rem;
+  border-left: 3px solid currentColor;
+  border-radius: var(--radius-sm);
+}
+
+.grow-action-why {
+  margin: 0.4rem 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--color-bg);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+
+.grow-action-why-headline {
+  margin: 0 0 0.35rem;
+}
+
+.grow-action-why-talking-point {
+  margin: 0 0 0.35rem;
+}
+
+.grow-action-why-caution {
+  margin: 0 0 0.35rem;
+  font-size: 0.9em;
+}
+
+.grow-action-why-factors summary {
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.grow-action-why-factors ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.9em;
+}
+
+.grow-action-unlinked-notice,
+.grow-signal-withholding-notice {
+  font-size: 0.9em;
+}
+
+.grow-signal-withholding-notice {
+  margin: 0.4rem 0 0.8rem;
+}
+
 .grow-action-card-actions {
   display: flex;
   flex-wrap: wrap;
