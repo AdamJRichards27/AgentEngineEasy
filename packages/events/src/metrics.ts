@@ -164,6 +164,16 @@ export const METRIC_DEFINITIONS = {
     help: "Property Intelligence signals written by a sweep, by outcome. `re_raised` counts human-decided signals returned to Active under the bounded re-review policy; `suppressed` counts candidates withheld by the contactability filter (never raised, never surfaced, never contacted); `rule_truncated` counts rules that had more candidates than their share of the per-brokerage cap and paused, to be resumed from a stored cursor on the next run. Which rule paused, for which brokerage, and where, are in the structured property_signal_rule_truncated log line — deliberately not in a label, per this block's own rule.",
     labels: { outcome: ["created", "updated", "re_raised", "expired", "suppressed", "rule_truncated"] },
   },
+  property_signal_sweep_lock_orphaned_total: {
+    help:
+      "A sweep was refused the single-flight advisory lock while NO grow_signal_sweep_runs row was RUNNING. `race` is the ordinary case — the holder takes the lock a moment before it inserts its run row, so a refusal in that window is expected and harmless. `suspected_leak` means the refusal has repeated to LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS, i.e. something holds (0x41455351, 1) and is not sweeping — sweeping is silently dead. Deliberately NOT folded into property_signal_sweep_total: `skipped_locked` there must keep counting only expected refusals, and `failed` would corrupt the completed/failed ratio with refusals that are usually a race. Which process held the lock is in the structured log line, never a label.",
+    labels: { trigger: ["SCHEDULED", "MANUAL"], kind: ["race", "suspected_leak"] },
+  },
+  property_signal_sweep_brokerage_failure_total: {
+    help:
+      "One brokerage's pass inside a sweep failed while the run itself continued (see sweep.ts's considerBrokerage: one bad tenant is never a dead sweep). `evaluation` is the brokerage's own sweep throwing; `cursor_touch` is the follow-up failure to stamp that brokerage's last_evaluated_at, which is worse — the tenant can then starve every tenant behind it in the durable ordering. This is the only counter that distinguishes 'one tenant is broken' from 'the sweep is broken'. WHICH brokerage failed stays in the structured property_signal_sweep_brokerage_failed log line, never a label, per this block's own rule.",
+    labels: { kind: ["evaluation", "cursor_touch"] },
+  },
   financial_reconciliation_variance_total: {
     help: "A financial_reconciliations row was recorded with status VARIANCE — reported evidence (e.g. a mock payment-status webhook) disagrees with the payment request's expected amount/currency and needs human review (see FIN05_RECONCILIATION_VARIANCE_UNRESOLVED).",
     labels: { source: ["mock_integration_payment_status", "other"] },
