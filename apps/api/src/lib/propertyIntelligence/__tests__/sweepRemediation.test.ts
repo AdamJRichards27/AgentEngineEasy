@@ -92,11 +92,31 @@ async function createProperty(tenant: { brokerageId: number; admin: DevLoginResu
   return row.id;
 }
 
-/** An Active owner relationship whose validFrom is `years` ago — the long_ownership_tenure rule's input. */
+/**
+ * An Active owner relationship acquired `years` ago — the long_ownership_tenure
+ * rule's input.
+ *
+ * `ownershipStartDate` is what the rule actually reads, and it ABSTAINS when
+ * that is NULL. `validFrom` is row-creation time (defaultNow()) and says
+ * nothing about when the owner acquired the property, so setting it alone
+ * produces no signal at all and every assertion below would pass vacuously.
+ * Both are set here so the fixture states one coherent fact.
+ */
 async function createTenureRelationship(brokerageId: number, partyId: number, propertyId: number, years: number): Promise<number> {
+  const acquiredAt = new Date(Date.now() - years * 365 * MS_PER_DAY);
   const [row] = await db
     .insert(growRelationships)
-    .values({ brokerageId, partyId, propertyId, relationshipType: "owner", status: "Active", validFrom: new Date(Date.now() - years * 365 * MS_PER_DAY) })
+    .values({
+      brokerageId,
+      partyId,
+      propertyId,
+      relationshipType: "owner",
+      status: "Active",
+      validFrom: acquiredAt,
+      ownershipStartDate: acquiredAt,
+      ownershipStartSource: "manual",
+      ownershipStartPrecision: "day",
+    })
     .returning({ id: growRelationships.id });
   return row.id;
 }
@@ -603,17 +623,28 @@ test("P2-6 — a human-decided signal with no recorded fingerprint stays termina
   // Even a GENUINE change cannot rescue a row with no stored fingerprint.
   // That is the accepted tradeoff: a legacy NULL-fingerprint dismissal is
   // terminal until something else rewrites the row.
-  await db.update(growRelationships).set({ validFrom: new Date(Date.now() - 11 * 365 * MS_PER_DAY) }).where(eq(growRelationships.id, relationshipId));
+  // A genuine correction to the acquisition date itself — 11 years becomes 6,
+  // which moves the tenure band and therefore the evidence fingerprint. It has
+  // to be ownershipStartDate: the rule does not read validFrom, so changing
+  // that would not be a change in evidence at all.
+  await db
+    .update(growRelationships)
+    .set({ ownershipStartDate: new Date(Date.now() - 6 * 365 * MS_PER_DAY) })
+    .where(eq(growRelationships.id, relationshipId));
   await sweepScoped([C.brokerageId]);
   const [afterRealChange] = await db.select().from(growOpportunitySignals).where(eq(growOpportunitySignals.id, raised.id));
   assert.equal(afterRealChange.status, "Dismissed");
 
   // The normal flow is untouched: give the row the fingerprint a sweep would
   // have written, and the same material change re-raises it exactly once.
-  await db.update(growOpportunitySignals).set({ evidenceFingerprint: "band|Emerging" }).where(eq(growOpportunitySignals.id, raised.id));
+  // The fingerprint the sweep would have written when this row was raised at
+  // an 11-year tenure, i.e. what the human actually decided against. The
+  // acquisition date has since been corrected to 6 years, so the evidence now
+  // genuinely differs from that record.
+  await db.update(growOpportunitySignals).set({ evidenceFingerprint: "band|StrongIndicator" }).where(eq(growOpportunitySignals.id, raised.id));
   await sweepScoped([C.brokerageId]);
   const [reRaised] = await db.select().from(growOpportunitySignals).where(eq(growOpportunitySignals.id, raised.id));
   assert.equal(reRaised.status, "Active", "a row that DOES record what it was decided against still re-raises on a real change");
-  assert.equal(reRaised.confidenceBand, "StrongIndicator");
+  assert.equal(reRaised.confidenceBand, "Emerging", "re-raised against the corrected 6-year tenure, not the stale 11-year band");
   assert.equal(reRaised.reRaiseCount, 1);
 });
