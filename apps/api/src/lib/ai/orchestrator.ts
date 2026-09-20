@@ -186,8 +186,17 @@ export function buildGrowSupportingRecords(context: AiContextPackage): AiStructu
       records.push({ recordType: "opportunity", recordId: item.opportunityId, label: item.contactName, deepLink: null });
     } else if (item.appraisalId !== null) {
       records.push({ recordType: "appraisal", recordId: item.appraisalId, label: item.contactName, deepLink: null });
-    } else {
+    } else if (item.partyId !== null) {
       records.push({ recordType: "party", recordId: item.partyId, label: item.contactName, deepLink: null });
+    } else {
+      // AE GROW "Brokerage-wide Signal Sweep" stage 3: a Grow Today item with
+      // no property, opportunity, appraisal OR contact has no record to point
+      // at, so it contributes no supporting record rather than a dangling
+      // "party #null" link. GrowTodayItemView.partyId became nullable when
+      // Grow Today stopped dropping contact-less Property Intelligence
+      // signals; those are property-anchored and are caught by the first
+      // branch above, so this is a total-function guard, not a live path.
+      continue;
     }
     if (records.length >= MAX_GROW_SUPPORTING_RECORDS) {
       break;
@@ -270,16 +279,26 @@ export function isReasonableCommitmentDueDate(dueAt: Date, now: Date): boolean {
 // proposal) whenever there is nothing concrete and dated to ground one
 // in, which is the ordinary case for most questions ("insufficient
 // evidence... remains ordinary text").
-export function selectGrowCommitmentCandidate(context: AiContextPackage): GrowTodayItemView | null {
+//
+// AE GROW "Brokerage-wide Signal Sweep" stage 3: also returns null when the
+// candidate has no linked contact. GrowTodayItemView.partyId became nullable
+// when Grow Today stopped dropping contact-less Property Intelligence
+// signals, and a commitment is a promise to a PERSON — there is nothing to
+// propose without one. Unreachable in practice today (only DATED items reach
+// here, and every dated item comes from an opportunity or appraisal that has
+// a party), so this is a type-level guarantee rather than a behaviour change.
+export function selectGrowCommitmentCandidate(
+  context: AiContextPackage,
+): (GrowTodayItemView & { partyId: number }) | null {
   const grow = context.grow;
   if (grow === null) {
     return null;
   }
   const candidate = grow.focusedItem ?? grow.dueFollowUps[0] ?? grow.appraisalFollowUps[0] ?? null;
-  if (candidate === null || candidate.dueAt === null) {
+  if (candidate === null || candidate.dueAt === null || candidate.partyId === null) {
     return null;
   }
-  return candidate;
+  return candidate as GrowTodayItemView & { partyId: number };
 }
 
 /**
@@ -318,7 +337,7 @@ async function hasCompletedActionRequestForResource(
 
 function summarizeGrowCommitmentProposal(
   request: AiActionRequest,
-  candidate: GrowTodayItemView,
+  candidate: GrowTodayItemView & { partyId: number },
   timeZone: string,
 ): GrowCommitmentProposalSummary {
   const payload = request.inputPayload as {

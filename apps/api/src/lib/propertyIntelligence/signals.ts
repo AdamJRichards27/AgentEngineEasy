@@ -1,89 +1,119 @@
-import { and, eq, lt, isNotNull, notInArray } from "drizzle-orm";
+import { and, eq, isNotNull, lt } from "drizzle-orm";
 import {
   db,
   growOpportunitySignals,
-  propertyProviderObservations,
-  growRelationships,
   growOpportunities,
-  appraisals,
   properties,
   parties,
   type GrowOpportunitySignal,
-  type PropertySignalType,
-  type PropertySignalConfidenceBand,
 } from "@aee/db";
 import { logAudit } from "../audit.js";
 import { PropertyIntelligenceAccessError } from "./observations.js";
 import { PropertyIntelligenceTransitionError } from "./matches.js";
+import { evaluateCandidates } from "./evaluation.js";
+import { loadContactabilityFilter } from "./contactability.js";
+import {
+  HUMAN_DECIDED_STATUSES,
+  expireSignalsPastExpiry,
+  expireUnsupportedSignals,
+  loadSignalsByDedupeKeys,
+  upsertSignalCandidates,
+} from "./persistence.js";
 
 /**
- * AE GROW Priority 5 Remediation — the deterministic rule engine the
- * merged schema (packages/db/src/schema/propertyIntelligence.ts) already
- * documents at lib/propertyIntelligence/signals.ts, but which never
- * actually shipped (see the remediation tracking report's lead finding).
+ * AE GROW Priority 5 Remediation — the deterministic Property Intelligence
+ * rule engine's human-facing lifecycle (review / dismiss / promote), plus the
+ * single-property recalculation entry point.
  *
- * Every rule below reads ONLY data genuinely available in AE today:
+ * The rules themselves now live in ./evaluation.ts (set-based, shared with
+ * the brokerage-wide sweep in ./sweep.ts) and the single write path lives in
+ * ./persistence.ts. This file owns everything a HUMAN does to a signal.
+ *
+ * Every rule reads ONLY data genuinely available in AE today:
  * growRelationships, appraisals, and propertyProviderObservations rows a
- * caller (a test fixture, or a future provider-ingestion job — see
- * observations.ts) actually wrote. Nothing here invents or estimates a
- * fact a provider never supplied. The four PROPERTY_SIGNAL_TYPES this
- * codebase declares but that have no real evidence source wired
- * (land_use_zoning_change, lease_tenancy_milestone, agent_recorded_motivation,
- * re_engagement_opportunity) are deliberately NOT implemented here — see
- * the remediation tracking report's "Genuine gaps" section for why
- * fabricating a rule for them would violate the remediation's own
- * "do not manufacture provider data to make a rule appear functional"
- * instruction.
+ * caller actually wrote. Nothing here invents or estimates a fact a provider
+ * never supplied. The four PROPERTY_SIGNAL_TYPES this codebase declares but
+ * that have no real evidence source wired (land_use_zoning_change,
+ * lease_tenancy_milestone, agent_recorded_motivation,
+ * re_engagement_opportunity) are deliberately NOT implemented.
  *
- * Idempotency and dismissal-resistance are both derived from one
- * mechanism: dedupeKey encodes not just "this kind of signal, on this
- * property" but the SPECIFIC underlying row that justifies it (a
- * relationship id, an appraisal id, or a specific observation id). A
- * recalculation that finds the exact same underlying row produces the
- * exact same dedupeKey; a genuinely new/changed piece of evidence (a new
- * observation row, e.g.) produces a NEW dedupeKey. Combined with
- * upsertSignal's rule below ("never resurrect a human-decided signal"),
- * this gives exactly the "resistant to immediate regeneration after
- * dismissal unless material evidence changes" behaviour the remediation
- * objective asks for, without needing a separate evidence-diffing pass.
+ * =====================================================================
+ * RE-REVIEW POLICY (AE GROW "Brokerage-wide Signal Sweep", stage 1)
+ * =====================================================================
+ *
+ * THE PROBLEM THIS REPLACES. Until this change, Dismissed / Reviewed /
+ * Superseded were terminal for a dedupeKey FOREVER: the engine skipped any
+ * human-decided row unconditionally. Because a dedupeKey encodes the
+ * underlying row (a relationship id, an appraisal id, an observation id), a
+ * contact whose long-tenure signal was reviewed once could never be
+ * surfaced again from that same relationship — not in a year, not in a
+ * decade, even though a five-year tenure becoming an eleven-year tenure is
+ * genuinely new information. "Never again" was an accident of the dedupe
+ * mechanism, not a decision anyone made.
+ *
+ * THE POLICY. A human decision now sets a QUIET PERIOD rather than a
+ * permanent tombstone:
+ *
+ *   dismissSignal()  -> next_review_at = now + DISMISS_QUIET_PERIOD_DAYS (180)
+ *       A dismissal is a considered "not this, not now". Six months is long
+ *       enough that the agent is not re-shown their own decision within any
+ *       normal working cycle, and short enough that a genuinely changed
+ *       situation is not buried for years.
+ *
+ *   reviewSignal()   -> next_review_at = now + REVIEW_QUIET_PERIOD_DAYS (30)
+ *       "Reviewed" is an acknowledgement, not a rejection — the agent looked
+ *       and took it on board. A shorter period matches that weaker claim.
+ *
+ *   promoteSignal()  -> next_review_at stays NULL (PERMANENTLY TERMINAL)
+ *       Promotion created a real growOpportunities row. Re-raising the same
+ *       evidence would duplicate work the agent is already doing, so a
+ *       promoted signal is never re-raised. NULL next_review_at means
+ *       "never", and that is also what every pre-existing row in the
+ *       database carries — so nothing already decided before this change is
+ *       ever resurrected by it.
+ *
+ * TWO CONDITIONS, BOTH REQUIRED. The sweep may raise a human-decided
+ * dedupeKey again only when BOTH hold:
+ *   1. next_review_at is set AND has elapsed. A dismissal is NEVER silently
+ *      overridden before its quiet period — this is enforced in the upsert's
+ *      ON CONFLICT predicate (persistence.ts), evaluated atomically by
+ *      Postgres, not by a read-then-write check that could race a concurrent
+ *      dismissal.
+ *   2. The evidence has MATERIALLY CHANGED — the rule-specific definition
+ *      documented on buildEvidenceFingerprint() in ./evaluation.ts. Time
+ *      passing is not, by itself, a material change.
+ *
+ * WHAT A RE-RAISE LOOKS LIKE. The row goes back to Active, re_raise_count is
+ * incremented, and the superseded decision is snapshotted into
+ * prior_decision so an Active signal never displays a stale dismissal reason
+ * while the reviewer can still see what was decided last time. The
+ * authoritative trail remains the audit log, which is untouched by this
+ * change. dismissedReason remains MANDATORY on every dismissal.
+ *
+ * UNCHANGED: a genuinely new piece of evidence (a new observation row, a
+ * second owner relationship) still produces a NEW dedupeKey, never collides
+ * with a decided one, and raises its own Active signal immediately — no
+ * quiet period applies, because that is a different signal about a different
+ * fact.
  */
 
-const LONG_OWNERSHIP_TENURE_YEARS_EMERGING = 5;
-const LONG_OWNERSHIP_TENURE_YEARS_WORTH_REVIEWING = 7;
-const LONG_OWNERSHIP_TENURE_YEARS_STRONG = 10;
+/** See the re-review policy above. Deliberately constants, not env-tunable: a quiet period is a product decision an operator should not be able to quietly shorten to zero. */
+export const DISMISS_QUIET_PERIOD_DAYS = 180;
+export const REVIEW_QUIET_PERIOD_DAYS = 30;
 
-const STALE_APPRAISAL_OVERDUE_DAYS_EMERGING = 14;
-const STALE_APPRAISAL_OVERDUE_DAYS_WORTH_REVIEWING = 30;
-const STALE_APPRAISAL_OVERDUE_DAYS_STRONG = 60;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-/** Observation-driven signals go stale (Expired) this many days after the observation's own sourceTimestamp. */
-const OBSERVATION_SIGNAL_STALE_AFTER_DAYS = 180;
-const OBSERVATION_FRESH_WITHIN_DAYS_STRONG = 30;
-const OBSERVATION_FRESH_WITHIN_DAYS_WORTH_REVIEWING = 90;
+/**
+ * Ceiling on candidates evaluated for ONE property by the recalculate route.
+ * A single property cannot plausibly produce this many; the bound exists so
+ * the route can never be turned into an unbounded query by pathological data.
+ */
+const MAX_CANDIDATES_PER_PROPERTY = 500;
 
-const HUMAN_DECIDED_STATUSES = new Set(["Dismissed", "Reviewed", "Superseded"]);
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.floor((a.getTime() - b.getTime()) / (24 * 60 * 60 * 1000));
-}
+const HUMAN_DECIDED = new Set<string>(HUMAN_DECIDED_STATUSES);
 
 function addDays(date: Date, days: number): Date {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
-}
-
-interface SignalCandidate {
-  brokerageId: number;
-  partyId: number | null;
-  propertyId: number | null;
-  signalType: PropertySignalType;
-  title: string;
-  explanation: string;
-  evidence: Record<string, unknown>;
-  source: string;
-  sourceTimestamp: Date | null;
-  confidenceBand: PropertySignalConfidenceBand;
-  expiresAt: Date | null;
-  dedupeKey: string;
+  return new Date(date.getTime() + days * MS_PER_DAY);
 }
 
 async function assertPropertyInBrokerage(propertyId: number, brokerageId: number): Promise<void> {
@@ -94,300 +124,55 @@ async function assertPropertyInBrokerage(propertyId: number, brokerageId: number
   if (!property) throw new PropertyIntelligenceAccessError("Property not found");
 }
 
-/** Rule 1 — long ownership tenure, from growRelationships (owner/co_owner, Active). */
-async function longOwnershipTenureCandidates(propertyId: number, brokerageId: number, now: Date): Promise<SignalCandidate[]> {
-  const rows = await db
-    .select()
-    .from(growRelationships)
-    .where(and(eq(growRelationships.propertyId, propertyId), eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")));
-
-  const candidates: SignalCandidate[] = [];
-  for (const r of rows) {
-    if (r.relationshipType !== "owner" && r.relationshipType !== "co_owner") continue;
-    const years = daysBetween(now, r.validFrom) / 365;
-    if (years < LONG_OWNERSHIP_TENURE_YEARS_EMERGING) continue;
-    const confidenceBand: PropertySignalConfidenceBand =
-      years >= LONG_OWNERSHIP_TENURE_YEARS_STRONG ? "StrongIndicator" : years >= LONG_OWNERSHIP_TENURE_YEARS_WORTH_REVIEWING ? "WorthReviewing" : "Emerging";
-    candidates.push({
-      brokerageId,
-      partyId: r.partyId,
-      propertyId,
-      signalType: "long_ownership_tenure",
-      title: "Long ownership tenure",
-      explanation: `This contact has been recorded as ${r.relationshipType === "co_owner" ? "a co-owner" : "the owner"} of this property for approximately ${Math.floor(years)} years. AE surfaces long ownership tenure as a pattern worth reviewing, since an owner's circumstances can change over a long tenure — this is not a prediction about this contact's plans, and AE has no information about their private intentions.`,
-      evidence: { relationshipId: r.id, relationshipType: r.relationshipType, validFrom: r.validFrom.toISOString(), approximateTenureYears: Math.floor(years) },
-      source: "internal",
-      sourceTimestamp: r.validFrom,
-      confidenceBand,
-      expiresAt: null,
-      dedupeKey: `${brokerageId}:long_ownership_tenure:${propertyId}:${r.id}`,
-    });
-  }
-  return candidates;
-}
-
-/** Rule 2 — stale appraisal follow-up, from the appraisals table (FOLLOW_UP overdue, or DEFERRED long ago). */
-async function staleAppraisalCandidates(propertyId: number, brokerageId: number, now: Date): Promise<SignalCandidate[]> {
-  const rows = await db.select().from(appraisals).where(eq(appraisals.propertyId, propertyId));
-  const candidates: SignalCandidate[] = [];
-  for (const a of rows) {
-    let referenceDate: Date | null = null;
-    let reasonPrefix = "";
-    if (a.status === "FOLLOW_UP" && a.followUpAt) {
-      referenceDate = a.followUpAt;
-      reasonPrefix = "An appraisal follow-up on this property is overdue";
-    } else if (a.outcome === "DEFERRED" && a.outcomeAt) {
-      referenceDate = a.outcomeAt;
-      reasonPrefix = "A deferred appraisal on this property has had no further activity";
-    } else {
-      continue;
-    }
-    const overdueDays = daysBetween(now, referenceDate);
-    if (overdueDays < STALE_APPRAISAL_OVERDUE_DAYS_EMERGING) continue;
-    const confidenceBand: PropertySignalConfidenceBand =
-      overdueDays >= STALE_APPRAISAL_OVERDUE_DAYS_STRONG ? "StrongIndicator" : overdueDays >= STALE_APPRAISAL_OVERDUE_DAYS_WORTH_REVIEWING ? "WorthReviewing" : "Emerging";
-    candidates.push({
-      brokerageId,
-      partyId: a.partyId ?? null,
-      propertyId,
-      signalType: "stale_previous_appraisal",
-      title: "Stale previous appraisal",
-      explanation: `${reasonPrefix} (${overdueDays} days) — worth a check-in to see whether their plans have changed.`,
-      evidence: { appraisalId: a.id, status: a.status, outcome: a.outcome, overdueDays },
-      source: "internal",
-      sourceTimestamp: referenceDate,
-      confidenceBand,
-      expiresAt: null,
-      dedupeKey: `${brokerageId}:stale_previous_appraisal:${propertyId}:${a.id}`,
-    });
-  }
-  return candidates;
-}
-
-/** Rule 3 — past buyer interest with no opportunity yet created (re-engagement candidate). */
-async function pastBuyerInterestCandidates(propertyId: number, brokerageId: number): Promise<SignalCandidate[]> {
-  const rows = await db
-    .select()
-    .from(growRelationships)
-    .where(and(eq(growRelationships.propertyId, propertyId), eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")));
-
-  const candidates: SignalCandidate[] = [];
-  for (const r of rows) {
-    if (r.relationshipType !== "prospective_buyer" && r.relationshipType !== "buyer") continue;
-    const [existingOpportunity] = await db
-      .select({ id: growOpportunities.id })
-      .from(growOpportunities)
-      .where(and(eq(growOpportunities.partyId, r.partyId), eq(growOpportunities.propertyId, propertyId)));
-    if (existingOpportunity) continue;
-    candidates.push({
-      brokerageId,
-      partyId: r.partyId,
-      propertyId,
-      signalType: "past_buyer_interest",
-      title: "Past buyer interest, not yet followed up",
-      explanation: "This contact was recorded as an interested buyer for this property, but no opportunity has been created for them yet.",
-      evidence: { relationshipId: r.id, relationshipType: r.relationshipType },
-      source: "internal",
-      sourceTimestamp: r.validFrom,
-      confidenceBand: "Emerging",
-      expiresAt: null,
-      dedupeKey: `${brokerageId}:past_buyer_interest:${propertyId}:${r.id}`,
-    });
-  }
-  return candidates;
-}
-
-const OBSERVATION_SIGNAL_MAP: Record<string, { signalType: PropertySignalType; title: string; describe: (payload: Record<string, unknown>) => string }> = {
-  sales_history: {
-    signalType: "recent_nearby_sales_activity",
-    title: "Recent nearby sales activity",
-    describe: () => "A provider observation recorded recent sales activity relevant to this property.",
-  },
-  // PROPERTY_OBSERVATION_TYPES' "market_activity" (packages/db/src/schema/propertyIntelligence.ts)
-  // has no dedicated slot of its own among the schema's 12 PROPERTY_SIGNAL_TYPES — it shares
-  // recent_nearby_sales_activity with sales_history above (the remediation objective's own
-  // suggested "market-activity observation" signal type maps onto this closest existing type)
-  // rather than inventing a 13th signal type outside the merged schema's fixed enum.
-  market_activity: {
-    signalType: "recent_nearby_sales_activity",
-    title: "Recent nearby sales activity",
-    describe: () => "A provider observation recorded broader market activity (e.g. listing/demand trends) relevant to this property.",
-  },
-  planning_development: {
-    signalType: "development_planning_activity",
-    title: "Development or planning activity",
-    describe: () => "A provider observation recorded planning or development activity near this property.",
-  },
-  valuation_equity: {
-    signalType: "estimated_equity_band",
-    title: "Estimated equity position",
-    describe: () => "A provider observation recorded valuation/equity information for this property.",
-  },
-  mortgage_refinancing: {
-    signalType: "mortgage_refinancing_indicator",
-    title: "Mortgage or refinancing activity",
-    describe: () => "A provider observation recorded mortgage or refinancing activity for this property.",
-  },
-  ownership: {
-    signalType: "property_ownership_change",
-    title: "Possible ownership change",
-    describe: () => "A provider observation of ownership data differs from AE's own recorded owner(s) — worth reviewing, not a confirmed change.",
-  },
-};
-
-/** Rules 4-8 — one candidate per CURRENT (isCurrent = true) observation whose type maps to a signal above. */
-async function observationCandidates(propertyId: number, brokerageId: number, now: Date): Promise<SignalCandidate[]> {
-  const rows = await db
-    .select()
-    .from(propertyProviderObservations)
-    .where(
-      and(
-        eq(propertyProviderObservations.propertyId, propertyId),
-        eq(propertyProviderObservations.brokerageId, brokerageId),
-        eq(propertyProviderObservations.isCurrent, true),
-      ),
-    );
-
-  const candidates: SignalCandidate[] = [];
-  for (const o of rows) {
-    const mapping = OBSERVATION_SIGNAL_MAP[o.observationType];
-    if (!mapping) continue; // address_candidate has no corresponding signal type — it feeds match review, not signals.
-    const sourceTimestamp = o.sourceTimestamp ?? o.retrievedAt;
-    const ageDays = daysBetween(now, sourceTimestamp);
-    if (ageDays > OBSERVATION_SIGNAL_STALE_AFTER_DAYS) continue; // too old to raise a new signal from at all
-    const confidenceBand: PropertySignalConfidenceBand =
-      ageDays <= OBSERVATION_FRESH_WITHIN_DAYS_STRONG ? "StrongIndicator" : ageDays <= OBSERVATION_FRESH_WITHIN_DAYS_WORTH_REVIEWING ? "WorthReviewing" : "Emerging";
-    candidates.push({
-      brokerageId,
-      partyId: null,
-      propertyId,
-      signalType: mapping.signalType,
-      title: mapping.title,
-      explanation: mapping.describe((o.payload as Record<string, unknown>) ?? {}),
-      evidence: { observationId: o.id, provider: o.provider, observationType: o.observationType, payload: o.payload },
-      source: o.provider,
-      sourceTimestamp,
-      confidenceBand,
-      expiresAt: addDays(sourceTimestamp, OBSERVATION_SIGNAL_STALE_AFTER_DAYS),
-      dedupeKey: `${brokerageId}:${mapping.signalType}:${propertyId}:${o.id}`,
-    });
-  }
-  return candidates;
-}
-
-async function computeCandidatesForProperty(propertyId: number, brokerageId: number): Promise<SignalCandidate[]> {
-  const now = new Date();
-  const [tenure, staleAppraisal, pastBuyer, observations] = await Promise.all([
-    longOwnershipTenureCandidates(propertyId, brokerageId, now),
-    staleAppraisalCandidates(propertyId, brokerageId, now),
-    pastBuyerInterestCandidates(propertyId, brokerageId),
-    observationCandidates(propertyId, brokerageId, now),
-  ]);
-  return [...tenure, ...staleAppraisal, ...pastBuyer, ...observations];
-}
-
 /**
- * Upserts one candidate by dedupeKey. Never resurrects a human-decided
- * signal (Dismissed/Reviewed/Superseded) — those are left completely
- * untouched, which is exactly the "resistant to immediate regeneration
- * after dismissal unless material evidence changes" behaviour: a
- * genuinely new piece of evidence produces a NEW dedupeKey (a new
- * observation row, a changed relationship), never collides with the old
- * one, and so is free to raise a brand new Active signal alongside the
- * dismissed one.
- */
-async function upsertSignal(candidate: SignalCandidate): Promise<GrowOpportunitySignal | null> {
-  const [existing] = await db.select().from(growOpportunitySignals).where(eq(growOpportunitySignals.dedupeKey, candidate.dedupeKey));
-
-  if (!existing) {
-    const [inserted] = await db
-      .insert(growOpportunitySignals)
-      .values({
-        brokerageId: candidate.brokerageId,
-        partyId: candidate.partyId,
-        propertyId: candidate.propertyId,
-        signalType: candidate.signalType,
-        title: candidate.title,
-        explanation: candidate.explanation,
-        evidence: candidate.evidence,
-        source: candidate.source,
-        sourceTimestamp: candidate.sourceTimestamp,
-        confidenceBand: candidate.confidenceBand,
-        status: "Active",
-        dedupeKey: candidate.dedupeKey,
-        expiresAt: candidate.expiresAt,
-      })
-      .returning();
-    return inserted;
-  }
-
-  if (HUMAN_DECIDED_STATUSES.has(existing.status)) {
-    return existing; // left untouched — see this function's own doc comment.
-  }
-
-  // Active or Expired (auto-managed states): refresh the editorial fields and,
-  // if it had expired but the underlying evidence is still being produced by
-  // this recalculation, bring it back to Active.
-  const [updated] = await db
-    .update(growOpportunitySignals)
-    .set({
-      title: candidate.title,
-      explanation: candidate.explanation,
-      evidence: candidate.evidence,
-      confidenceBand: candidate.confidenceBand,
-      computedAt: new Date(),
-      status: "Active",
-      expiresAt: candidate.expiresAt,
-      updatedAt: new Date(),
-    })
-    .where(eq(growOpportunitySignals.id, existing.id))
-    .returning();
-  return updated;
-}
-
-/**
- * Recomputes every rule for one property and upserts the result,
- * idempotently. Also expires any Active/Expired signal for this property
- * that this run's candidates no longer support (e.g. the relationship that
- * justified a long_ownership_tenure signal became Historical) — preserving
- * the row (never deleted) with status Expired rather than leaving a stale
- * Active signal with no current supporting evidence.
+ * Recomputes every rule for ONE property and upserts the result,
+ * idempotently — the POST /property/:id/recalculate route's entry point.
+ *
+ * Now a thin scoping wrapper over the shared evaluation/persistence code the
+ * brokerage-wide sweep uses, so the two can never drift. Behaviour for a
+ * property-scoped caller is unchanged: the same rules, the same dedupe keys,
+ * the same "signals this property currently has" response (including rows
+ * left untouched because a human decided them), and the same preservation of
+ * unsupported signals as Expired rather than deleted.
+ *
+ * NOTE: this path deliberately does NOT apply the contactability filter. It
+ * is an explicit, entitled, per-property human action on a record the agent
+ * is already looking at — not a system-initiated suggestion — and filtering
+ * it would silently hide rows from the surface that exists to review them.
+ * The sweep, which IS system-initiated, does apply the filter.
  */
 export async function recalculateSignalsForProperty(propertyId: number, brokerageId: number): Promise<GrowOpportunitySignal[]> {
   await assertPropertyInBrokerage(propertyId, brokerageId);
-  await expireStaleSignals(propertyId, brokerageId);
+  const now = new Date();
+  const propertyIds = [propertyId];
 
-  const candidates = await computeCandidatesForProperty(propertyId, brokerageId);
-  const results: GrowOpportunitySignal[] = [];
-  for (const candidate of candidates) {
-    const row = await upsertSignal(candidate);
-    if (row) results.push(row);
+  await expireSignalsPastExpiry(brokerageId, now, propertyIds);
+
+  const { candidates, truncated } = await evaluateCandidates({ brokerageId, propertyIds, now, maxCandidates: MAX_CANDIDATES_PER_PROPERTY });
+  await upsertSignalCandidates(brokerageId, candidates, now);
+
+  const dedupeKeys = candidates.map((c) => c.dedupeKey);
+  // An incomplete pass proves nothing about what is currently true, so the
+  // "no longer supported" expiry is skipped when the candidate set was
+  // truncated (see expireUnsupportedSignals' own contract).
+  if (!truncated) {
+    await expireUnsupportedSignals(brokerageId, dedupeKeys, now, propertyIds);
   }
 
-  const currentDedupeKeys = candidates.map((c) => c.dedupeKey);
-  const autoManagedConditions = [
-    eq(growOpportunitySignals.propertyId, propertyId),
-    eq(growOpportunitySignals.brokerageId, brokerageId),
-    eq(growOpportunitySignals.status, "Active"),
-  ];
-  const staleRows =
-    currentDedupeKeys.length > 0
-      ? await db
-          .select({ id: growOpportunitySignals.id })
-          .from(growOpportunitySignals)
-          .where(and(...autoManagedConditions, notInArray(growOpportunitySignals.dedupeKey, currentDedupeKeys)))
-      : await db
-          .select({ id: growOpportunitySignals.id })
-          .from(growOpportunitySignals)
-          .where(and(...autoManagedConditions));
-  for (const row of staleRows) {
-    await db.update(growOpportunitySignals).set({ status: "Expired", updatedAt: new Date() }).where(eq(growOpportunitySignals.id, row.id));
-  }
-
-  return results;
+  return loadSignalsByDedupeKeys(brokerageId, dedupeKeys);
 }
 
-/** Lazily flips any Active signal past its own expiresAt to Expired — no cron/scheduler needed. */
+/**
+ * Lazily flips any Active signal for this property past its own expiresAt to
+ * Expired.
+ *
+ * Retained, and still called on the read paths, but it is no longer the
+ * mechanism the system relies on: ./sweep.ts performs this expiry
+ * brokerage-wide on a schedule. Keeping the read-time call is harmless (it
+ * is a single indexed UPDATE that usually matches nothing) and means a read
+ * immediately after an expiry boundary is still correct on a deployment
+ * where the sweep is disabled.
+ */
 export async function expireStaleSignals(propertyId: number, brokerageId: number): Promise<void> {
   await db
     .update(growOpportunitySignals)
@@ -420,10 +205,60 @@ export async function listSignalsForProperty(propertyId: number, brokerageId: nu
     .where(and(...conditions));
 }
 
-/** Active, non-expired, non-dismissed signals for a contact — used by Contact 360 and Grow Today Rule F. */
+/**
+ * Active, non-expired, non-dismissed signals for a contact — used by Contact
+ * 360 and Grow Today Rule F.
+ *
+ * =====================================================================
+ * CONTACTABILITY IS CHECKED ON READ, NOT ONLY ON WRITE
+ * =====================================================================
+ *
+ * THE HOLE THIS CLOSES. The sweep consults the contactability filter when it
+ * RAISES a signal, which only protects a contact who was already DNC-listed
+ * or fully suppressed at that moment. For a contact listed AFTERWARDS the
+ * existing row was stranded in exactly the wrong state:
+ *
+ *   - the sweep drops their candidate, so the row is never refreshed;
+ *   - but the candidate still counts as SUPPORTED, so the "no longer
+ *     supported -> Expired" pass deliberately leaves it alone (and correctly
+ *     so — the filter must hide a contact, never silently retire their
+ *     history);
+ *   - and these rows carry expires_at IS NULL, so the expiry pass never
+ *     touches them either.
+ *
+ * The row therefore stayed Active forever and kept being surfaced. A
+ * write-time-only check cannot fix that, because the event that must change
+ * the answer (a DNC listing) happens after the write.
+ *
+ * WHAT THIS DOES. Hides, never retires. A suppressed contact's signals are
+ * withheld from this read; the rows themselves are not touched, not expired,
+ * not dismissed, and reappear the moment the suppression lapses. That is the
+ * same rule stage 1 applied to the sweep, now applied on the way out as well.
+ *
+ * WHAT COUNTS AS SUPPRESSED is owned entirely by
+ * ./contactability.ts — DNC LISTED on any channel, or an in-force
+ * suppression on EVERY channel. A partial (single-channel) suppression
+ * deliberately does NOT hide: the agent can still reach that contact another
+ * way, and hiding it would lose information they are entitled to see. This
+ * function makes no consent decision of its own and writes nothing.
+ *
+ * NOT APPLIED TO listSignalsForProperty() ABOVE, deliberately and for the
+ * same reason recalculateSignalsForProperty() does not apply it: that is an
+ * explicit, entitled, per-property human action on a record the agent has
+ * already navigated to, not a system-initiated suggestion about a person. See
+ * this stage's report — it is flagged there for a product decision rather
+ * than changed unilaterally.
+ */
 export async function listActiveSignalsForParty(partyId: number, brokerageId: number): Promise<GrowOpportunitySignal[]> {
   const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party) throw new PropertyIntelligenceAccessError("Contact not found");
+
+  // Checked BEFORE the signal read: a suppressed contact's rows are never
+  // loaded at all, so there is no window in which they exist in memory on a
+  // surfacing path.
+  const contactability = await loadContactabilityFilter(brokerageId, [partyId]);
+  if (contactability.isSuppressed(partyId)) return [];
+
   return db
     .select()
     .from(growOpportunitySignals)
@@ -432,12 +267,20 @@ export async function listActiveSignalsForParty(partyId: number, brokerageId: nu
 
 export async function reviewSignal(input: { signalId: number; brokerageId: number; userId: number }): Promise<GrowOpportunitySignal> {
   const existing = await assertSignalInBrokerage(input.signalId, input.brokerageId);
-  if (HUMAN_DECIDED_STATUSES.has(existing.status)) {
+  if (HUMAN_DECIDED.has(existing.status)) {
     throw new PropertyIntelligenceTransitionError(`Signal is already ${existing.status}`);
   }
+  const now = new Date();
   const [updated] = await db
     .update(growOpportunitySignals)
-    .set({ status: "Reviewed", reviewedByUserId: input.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .set({
+      status: "Reviewed",
+      reviewedByUserId: input.userId,
+      reviewedAt: now,
+      // Re-review policy: an acknowledgement, so a short quiet period.
+      nextReviewAt: addDays(now, REVIEW_QUIET_PERIOD_DAYS),
+      updatedAt: now,
+    })
     .where(eq(growOpportunitySignals.id, existing.id))
     .returning();
   await logAudit({
@@ -458,21 +301,27 @@ export async function dismissSignal(input: {
   userId: number;
   dismissedReason: string;
 }): Promise<GrowOpportunitySignal> {
+  // Still mandatory — the re-review policy makes a dismissal temporary, not
+  // unexplained.
   if (!input.dismissedReason || input.dismissedReason.trim().length === 0) {
     throw new PropertyIntelligenceTransitionError("dismissedReason is required to dismiss a signal");
   }
   const existing = await assertSignalInBrokerage(input.signalId, input.brokerageId);
-  if (HUMAN_DECIDED_STATUSES.has(existing.status)) {
+  if (HUMAN_DECIDED.has(existing.status)) {
     throw new PropertyIntelligenceTransitionError(`Signal is already ${existing.status}`);
   }
+  const now = new Date();
   const [updated] = await db
     .update(growOpportunitySignals)
     .set({
       status: "Dismissed",
       dismissedReason: input.dismissedReason,
       reviewedByUserId: input.userId,
-      reviewedAt: new Date(),
-      updatedAt: new Date(),
+      reviewedAt: now,
+      // Re-review policy: a considered rejection, so a long quiet period.
+      // Nothing may re-raise this dedupeKey before it elapses.
+      nextReviewAt: addDays(now, DISMISS_QUIET_PERIOD_DAYS),
+      updatedAt: now,
     })
     .where(eq(growOpportunitySignals.id, existing.id))
     .returning();
@@ -492,10 +341,11 @@ export async function dismissSignal(input: {
  * Promotes a signal into a real growOpportunities row. Requires an
  * authenticated, entitled human action (checked by the caller/route);
  * re-checks tenant ownership itself regardless. Prevents duplicate
- * promotion (a signal with a promotedOpportunityId already set cannot be
- * promoted again). Never creates an appraisal, campaign, transaction, or
- * communication — only a growOpportunities row, exactly like every other
- * manual "Create opportunity" action in this codebase (routes/grow.ts).
+ * promotion. Never creates an appraisal, campaign, transaction, or
+ * communication — only a growOpportunities row.
+ *
+ * Leaves next_review_at NULL: a promoted signal is permanently terminal (see
+ * the re-review policy in this file's header).
  */
 export async function promoteSignal(input: { signalId: number; brokerageId: number; userId: number }): Promise<{
   signal: GrowOpportunitySignal;
@@ -532,7 +382,14 @@ export async function promoteSignal(input: { signalId: number; brokerageId: numb
 
   const [updatedSignal] = await db
     .update(growOpportunitySignals)
-    .set({ status: "Superseded", promotedOpportunityId: opportunity.id, reviewedByUserId: input.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .set({
+      status: "Superseded",
+      promotedOpportunityId: opportunity.id,
+      reviewedByUserId: input.userId,
+      reviewedAt: new Date(),
+      nextReviewAt: null,
+      updatedAt: new Date(),
+    })
     .where(eq(growOpportunitySignals.id, existing.id))
     .returning();
 

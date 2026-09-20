@@ -82,6 +82,7 @@ import {
   propertyExternalIdentifiers,
   propertyProviderObservations,
   growOpportunitySignals,
+  growSignalSweepCursors,
   growCallSessions,
   growCallRecordingConsents,
   growCallWebhookEvents,
@@ -653,6 +654,13 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   // AE GROW Priority 5 Remediation — see this function's own doc comment above: must run
   // before growOpportunities immediately below (promotedOpportunityId FK).
   await db.delete(growOpportunitySignals).where(inArray(growOpportunitySignals.brokerageId, ids));
+  // AE GROW "Brokerage-wide Signal Sweep" stage 1 — grow_signal_sweep_cursors
+  // carries brokerageId directly with a non-cascading FK onto brokerages.id,
+  // so it only has to run before the brokerages delete at the end of this
+  // function. (grow_signal_sweep_runs is global bookkeeping with no
+  // brokerage/tenant column at all — nothing to clean up per tenant, exactly
+  // like risk_exception_scan_runs.)
+  await db.delete(growSignalSweepCursors).where(inArray(growSignalSweepCursors.brokerageId, ids));
   await db.delete(propertyExternalIdentifiers).where(inArray(propertyExternalIdentifiers.brokerageId, ids));
   await db.delete(propertyProviderObservations).where(inArray(propertyProviderObservations.brokerageId, ids));
   await db.delete(growOpportunities).where(inArray(growOpportunities.brokerageId, ids));

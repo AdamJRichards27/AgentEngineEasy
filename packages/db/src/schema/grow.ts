@@ -1,4 +1,5 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -14,6 +15,40 @@ import { transactions } from "./transaction";
 // PowerOfAttorney/Other, no history, no confidence, no source) and is left untouched.
 // Grow's relationship taxonomy below is deliberately much richer and historical, so it gets
 // its own table rather than stretching propertyParties past what it means in RUN.
+
+// AE GROW "Brokerage-wide Signal Sweep" stage 2 (SIGNAL GENERATION).
+//
+// The relationship types that describe HOLDING a property rather than merely
+// being interested in one. Only these carry a meaningful "when did this
+// holding actually begin" date, so only these may have ownershipStartDate
+// populated (see that column's own comment); only `owner`/`co_owner` feed the
+// long_ownership_tenure rule.
+export const GROW_OWNERSHIP_RELATIONSHIP_TYPES = ["owner", "co_owner", "landlord"] as const;
+export type GrowOwnershipRelationshipType = (typeof GROW_OWNERSHIP_RELATIONSHIP_TYPES)[number];
+
+/**
+ * Where an ownership start date came from. Recorded alongside the date
+ * itself because "the agent's own spreadsheet said 2011" and "a provider's
+ * ownership record says 2011" are different strengths of evidence, and a
+ * signal that cites one must be able to say which.
+ *
+ * Precedence, enforced in application code and never by overwrite: a value
+ * already present is NEVER replaced. `import` and `manual` are agent-owned
+ * and therefore authoritative; `provider_observation` only ever FILLS A GAP
+ * (a NULL), so a provider can never quietly restate what an agent recorded.
+ */
+export const GROW_OWNERSHIP_START_SOURCES = ["import", "manual", "provider_observation"] as const;
+export type GrowOwnershipStartSource = (typeof GROW_OWNERSHIP_START_SOURCES)[number];
+
+/**
+ * How precise the recorded ownership start actually is. Real sources give
+ * "2011", "03/2011" and "14/03/2011" interchangeably; storing a timestamp
+ * without this would silently turn "sometime in 2011" into "1 January 2011"
+ * and let a signal assert a precision nobody supplied. Rules quote the
+ * precision back to the agent instead of hiding it.
+ */
+export const GROW_OWNERSHIP_START_PRECISIONS = ["day", "month", "year"] as const;
+export type GrowOwnershipStartPrecision = (typeof GROW_OWNERSHIP_START_PRECISIONS)[number];
 
 export const GROW_RELATIONSHIP_TYPES = [
   "owner",
@@ -60,15 +95,96 @@ export const growRelationships = pgTable("grow_relationships", {
   status: text("status").notNull().default("Active"), // Active | Historical | PendingReview
   isPrimary: boolean("is_primary").notNull().default(false),
   confidenceScore: numeric("confidence_score"), // 0..1; null = not scored (manual entry)
+  // WHAT validFrom ACTUALLY MEANS (read this before writing a rule against it).
+  // It is `defaultNow()`, i.e. for every row written by the import pipeline,
+  // by POST /relationships, or by any other caller that does not pass it
+  // explicitly, it records WHEN THE ROW WAS CREATED — not when the described
+  // relationship began in the real world. On imported data every contact
+  // therefore looks like they acquired their property on import day. It is
+  // still the right column for "since when has AE known about this
+  // relationship", and that is all it may be read as.
   validFrom: timestamp("valid_from").notNull().defaultNow(),
   validTo: timestamp("valid_to"),
+
+  // ---------------------------------------------------------------
+  // AE GROW "Brokerage-wide Signal Sweep" stage 2 — OBSERVED OWNERSHIP
+  // START. Additive and nullable, so every existing row keeps working
+  // unmodified and reads as "unknown".
+  // ---------------------------------------------------------------
+  //
+  // When the described HOLDING of the property actually began, as observed
+  // in a source that genuinely carries that fact — deliberately a separate
+  // column from validFrom above, which cannot express it. NULL means AE does
+  // not know, and "does not know" is a first-class answer: the
+  // long_ownership_tenure rule ABSTAINS on a NULL rather than falling back to
+  // validFrom and asserting a tenure it invented (see
+  // lib/propertyIntelligence/evaluation.ts).
+  //
+  // Populated only where the data legitimately exists:
+  //   - the Grow import pipeline, from a mapped "date acquired" /
+  //     "purchase date" / "owned since" column (lib/import/normalise.ts's
+  //     normaliseOwnershipStartDate, lib/import/execute.ts);
+  //   - a provider `ownership` observation that carries an acquisition /
+  //     settlement date (lib/propertyIntelligence/observations.ts), which
+  //     only ever fills a NULL and never overwrites an agent-sourced value.
+  // Never inferred, never defaulted, never back-filled from a row timestamp.
+  //
+  // Only meaningful for GROW_OWNERSHIP_RELATIONSHIP_TYPES; the writers above
+  // refuse to set it for any other relationship type.
+  ownershipStartDate: timestamp("ownership_start_date"),
+  // One of GROW_OWNERSHIP_START_SOURCES — the provenance a signal cites.
+  ownershipStartSource: text("ownership_start_source"),
+  // One of GROW_OWNERSHIP_START_PRECISIONS — "day" | "month" | "year". A
+  // source that said only "2011" is stored as 2011-01-01 with precision
+  // "year", and every explanation built from it says "2011", never "1
+  // January 2011".
+  ownershipStartPrecision: text("ownership_start_precision"),
+
   sourceType: text("source_type").notNull().default("manual"), // manual | import | inferred | migration
   sourceId: text("source_id"),
   sourceEvidence: text("source_evidence"),
   createdBy: integer("created_by").references(() => users.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // AE GROW "Brokerage-wide Signal Sweep" stage 1. This table had NO indexes
+  // at all before; every index below serves a query that already exists.
+  //
+  // Both internal signal rules (long_ownership_tenure, past_buyer_interest)
+  // and Grow Today Rule D read exactly (brokerage_id, status='Active') and
+  // then discriminate on relationship_type — so the sweep's brokerage-wide
+  // set query and Rule D's per-brokerage read share one index instead of
+  // sequential-scanning the whole tenant-mixed table.
+  brokerageStatusTypeIdx: index("grow_relationships_brokerage_status_type_idx").on(table.brokerageId, table.status, table.relationshipType),
+  // The sweep's per-brokerage change-detection probe is
+  // `select max(updated_at) where brokerage_id = $1` — an index-only
+  // backwards scan of one brokerage's slice rather than a full table scan
+  // on every tick. This is what makes a steady-state sweep cheap.
+  brokerageUpdatedAtIdx: index("grow_relationships_brokerage_updated_at_idx").on(table.brokerageId, table.updatedAt),
+  // Contact-anchored evaluation (a property-less relationship belongs to a
+  // party, not a property) and the Contact 360 / Relationship Timeline reads.
+  brokeragePartyIdx: index("grow_relationships_brokerage_party_idx").on(table.brokerageId, table.partyId),
+
+  // AE GROW "Brokerage-wide Signal Sweep" stage 2.
+  //
+  // long_ownership_tenure now drives off ownership_start_date, and it
+  // ABSTAINS wherever that column is NULL — which, on a tenant that has
+  // never imported an acquisition-date column, is every row. A PARTIAL index
+  // is therefore the right shape twice over: it is the exact slice the rule
+  // scans (`ownership_start_date is not null and ownership_start_date <=
+  // cutoff`), and it stays empty (near-zero cost) on a tenant whose data
+  // cannot support the rule at all.
+  brokerageOwnershipStartIdx: index("grow_relationships_brokerage_ownership_start_idx")
+    .on(table.brokerageId, table.ownershipStartDate)
+    .where(sql`${table.ownershipStartDate} IS NOT NULL`),
+  // lease_tenancy_milestone reads (brokerage_id, valid_to) over a narrow
+  // window around now. valid_to is NULL for an open-ended relationship —
+  // the overwhelming majority — so this is partial for the same reason.
+  brokerageValidToIdx: index("grow_relationships_brokerage_valid_to_idx")
+    .on(table.brokerageId, table.validTo)
+    .where(sql`${table.validTo} IS NOT NULL`),
+}));
 
 export const GROW_ACTIVITY_TYPES = [
   "call",
@@ -101,7 +217,17 @@ export const growActivities = pgTable("grow_activities", {
   source: text("source").notNull().default("manual"),
   sourceId: text("source_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // Grow Today reads every activity for a brokerage and folds it down to a
+  // last-activity-per-party map (lib/growToday.ts). Leading with
+  // (brokerage_id, party_id, occurred_at) turns that from a full scan of a
+  // tenant-mixed table into one brokerage's slice in party/recency order.
+  brokeragePartyOccurredIdx: index("grow_activities_brokerage_party_occurred_idx").on(table.brokerageId, table.partyId, table.occurredAt),
+  // grow_activities is append-only (no updated_at), so recorded_at is its
+  // mutation high-water mark for the sweep's change-detection probe.
+  brokerageRecordedAtIdx: index("grow_activities_brokerage_recorded_at_idx").on(table.brokerageId, table.recordedAt),
+}));
 
 // A structured, explainable potential business outcome - never just an unexplained score.
 export const growOpportunities = pgTable("grow_opportunities", {
@@ -132,7 +258,21 @@ export const growOpportunities = pgTable("grow_opportunities", {
   closedAt: timestamp("closed_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // The past_buyer_interest rule asks "does this (party, property) already
+  // have an opportunity?" — previously one SELECT per candidate relationship
+  // against an unindexed table. The set-based rewrite does it as a single
+  // anti-join per brokerage, which needs exactly this composite.
+  brokeragePartyPropertyIdx: index("grow_opportunities_brokerage_party_property_idx").on(table.brokerageId, table.partyId, table.propertyId),
+  // Grow Today Rules A/B/C read (brokerage_id, status='Open') on every
+  // request; promoteSignal and the Opportunities surface read the same slice.
+  brokerageStatusIdx: index("grow_opportunities_brokerage_status_idx").on(table.brokerageId, table.status),
+  // The sweep's change-detection probe: a new or edited opportunity can
+  // retire a past_buyer_interest signal, so opportunities are one of the
+  // sources whose high-water mark decides whether a brokerage is re-evaluated.
+  brokerageUpdatedAtIdx: index("grow_opportunities_brokerage_updated_at_idx").on(table.brokerageId, table.updatedAt),
+}));
 
 export const insertGrowRelationshipSchema = createInsertSchema(growRelationships).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertGrowActivitySchema = createInsertSchema(growActivities).omit({ id: true, createdAt: true });

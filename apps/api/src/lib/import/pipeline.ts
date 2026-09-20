@@ -560,6 +560,9 @@ export async function buildExecutionPlan(
     rawType: l.rawType,
     sourceRowNumbers: l.rowIndexes.map((i) => plan.rowNumbers[i]),
     needsPendingReview: l.needsPendingReview,
+    // AE GROW "Brokerage-wide Signal Sweep" stage 2 — the observed ownership
+    // start, already resolved per link by relationships.ts.
+    ownershipStart: l.ownershipStart,
   }));
 
   return { contacts, contactProperties, relationships };

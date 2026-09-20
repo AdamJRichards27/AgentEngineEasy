@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -72,7 +72,17 @@ export const properties = pgTable("properties", {
   longitude: numeric("longitude", { precision: 10, scale: 7 }),
   dataQualityStatus: text("data_quality_status"), // null | "NotEnriched" | "Partial" | "Enriched" | "Stale"
   lastEnrichedAt: timestamp("last_enriched_at"),
-});
+},
+(table) => ({
+  // AE GROW "Brokerage-wide Signal Sweep" stage 1. `properties` had no index
+  // on brokerage_id, yet it is the ONLY tenant boundary several sweep and
+  // Grow Today queries have: `appraisals` carries no brokerage_id of its own
+  // (see schema/appraisal.ts), so every brokerage-scoped appraisal read is
+  // driven from `properties where brokerage_id = $1`. Without this index the
+  // appraisal-side composite indexes added alongside it cannot be reached
+  // cheaply, because the driving side would still be a full scan.
+  brokerageIdx: index("properties_brokerage_idx").on(table.brokerageId),
+}));
 
 export const PROPERTY_DATA_QUALITY_STATUSES = ["NotEnriched", "Partial", "Enriched", "Stale"] as const;
 export type PropertyDataQualityStatus = (typeof PROPERTY_DATA_QUALITY_STATUSES)[number];
@@ -100,7 +110,16 @@ export const parties = pgTable("parties", {
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // AE GROW "Brokerage-wide Signal Sweep" stage 2. `parties` had no index at
+  // all beyond its primary key, yet the re_engagement_opportunity rule is the
+  // first rule that is genuinely CONTACT-driven rather than property-driven:
+  // its driving set is "every contact in this brokerage", so without this the
+  // rule would sequential-scan a tenant-mixed table on every evaluated
+  // brokerage. Same argument, and same shape, as properties_brokerage_idx.
+  brokerageIdx: index("parties_brokerage_idx").on(table.brokerageId),
+}));
 
 // The join that makes "enter once, reuse everywhere" real. A seller entered
 // against a property is never re-entered for AML, agency agreement, or contract.

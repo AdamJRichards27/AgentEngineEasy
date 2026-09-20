@@ -134,7 +134,14 @@ export interface GrowTodayItemView {
   id: string;
   type: string;
   priority: string;
-  partyId: number;
+  // AE GROW "Brokerage-wide Signal Sweep" stage 3: widened to match
+  // GrowTodayAction.partyId, which became nullable when Grow Today stopped
+  // dropping the signals that have no linked contact (an observation-derived
+  // signal is about a property, not a person). Nothing downstream of this
+  // view dereferences partyId — it travels into model context as an opaque
+  // identifier for a safe deep link only — so widening the type is the whole
+  // change, and a contact-less item simply carries null.
+  partyId: number | null;
   contactName: string;
   propertyId: number | null;
   propertyLabel: string | null;

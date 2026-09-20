@@ -1,0 +1,74 @@
+-- AE GROW "Brokerage-wide Signal Sweep" — stage 2 (SIGNAL GENERATION).
+--
+-- STRICTLY ADDITIVE, exactly as 0026 was. Every statement in this file is
+-- either an ADD COLUMN (nullable, or NOT NULL with a constant DEFAULT) or a
+-- CREATE INDEX. There is no DROP, no RENAME, no type change, no NOT NULL
+-- added to an existing column, and no data rewrite — an existing database
+-- applies this with rows in place and every pre-existing row keeps working
+-- unmodified, reading the three new grow_relationships columns as NULL and
+-- rule_cursors as '{}'.
+--
+-- WHY EACH COLUMN
+--
+--   grow_relationships.ownership_start_date / _source / _precision
+--     THE DEFECT THIS FIXES. grow_relationships.valid_from is defaultNow(),
+--     so it records when the ROW was created, not when the owner acquired the
+--     property. Any "long tenure" rule built on it measures how long AE has
+--     known about the row — on imported data, every contact looks like they
+--     bought on import day. These three columns record an OBSERVED ownership
+--     start instead, with its provenance and the precision the source
+--     actually supplied ("2011" is stored as 2011-01-01 with precision
+--     'year' and is never presented as 1 January).
+--
+--     NULL is a first-class answer meaning "AE does not know", and the
+--     long_ownership_tenure rule ABSTAINS on NULL rather than falling back to
+--     valid_from. On an existing database every row therefore starts as
+--     "unknown" and the rule is silent until real dates arrive — from the
+--     import pipeline's mapped "date acquired" column, or from a provider
+--     `ownership` observation that explicitly carries an acquisition date.
+--     That silence is deliberate and correct: the alternative is asserting
+--     tenures nobody recorded.
+--
+--   grow_signal_sweep_cursors.rule_cursors
+--     Per-rule continuation. Each rule gets a fair share of the
+--     per-brokerage candidate cap and scans in ascending id order; a rule
+--     that fills its share records where it stopped here so the next run
+--     resumes after that point. Without it, a brokerage over the cap would
+--     re-read the same head of each table forever. jsonb (not a column per
+--     rule) so a later stage can add a rule without another migration; an
+--     absent rule name reads as "start from the beginning", which is the
+--     correct default for a newly added rule.
+--
+-- WHY EACH INDEX
+--
+--   parties_brokerage_idx
+--     `parties` had no index at all beyond its primary key.
+--     re_engagement_opportunity is the first genuinely CONTACT-driven rule —
+--     its driving set is "every contact in this brokerage" — so without this
+--     it would sequential-scan a tenant-mixed table for every evaluated
+--     brokerage. Same argument and same shape as 0026's
+--     properties_brokerage_idx.
+--
+--   grow_relationships_brokerage_ownership_start_idx (partial, NOT NULL)
+--     Exactly the slice long_ownership_tenure scans. PARTIAL because the rule
+--     abstains wherever the column is NULL, which on a tenant that has never
+--     imported an acquisition date is every row — so on those tenants the
+--     index stays empty and costs essentially nothing.
+--
+--   grow_relationships_brokerage_valid_to_idx (partial, NOT NULL)
+--     Serves lease_tenancy_milestone, which reads a narrow window around
+--     valid_to. Partial for the same reason: valid_to is NULL for every
+--     open-ended relationship, which is the overwhelming majority.
+--
+-- OPERATIONAL NOTE: as in 0026, these CREATE INDEX statements take a brief
+-- ACCESS EXCLUSIVE lock (drizzle's migrator runs them in a transaction, so
+-- CONCURRENTLY is unavailable). On pilot data volumes that is milliseconds;
+-- on a large persistent database, build them out-of-band with CREATE INDEX
+-- CONCURRENTLY first and those statements then become no-ops here.
+ALTER TABLE "grow_relationships" ADD COLUMN "ownership_start_date" timestamp;--> statement-breakpoint
+ALTER TABLE "grow_relationships" ADD COLUMN "ownership_start_source" text;--> statement-breakpoint
+ALTER TABLE "grow_relationships" ADD COLUMN "ownership_start_precision" text;--> statement-breakpoint
+ALTER TABLE "grow_signal_sweep_cursors" ADD COLUMN "rule_cursors" jsonb DEFAULT '{}'::jsonb NOT NULL;--> statement-breakpoint
+CREATE INDEX "parties_brokerage_idx" ON "parties" USING btree ("brokerage_id");--> statement-breakpoint
+CREATE INDEX "grow_relationships_brokerage_ownership_start_idx" ON "grow_relationships" USING btree ("brokerage_id","ownership_start_date") WHERE "grow_relationships"."ownership_start_date" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "grow_relationships_brokerage_valid_to_idx" ON "grow_relationships" USING btree ("brokerage_id","valid_to") WHERE "grow_relationships"."valid_to" IS NOT NULL;

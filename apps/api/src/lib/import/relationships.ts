@@ -22,9 +22,11 @@
 // NormalisedRelationship.resolvedType, already resolved in normalise.ts).
 // No second taxonomy is invented here.
 
-import type { GrowRelationshipType, ImportMatchType } from "@aee/db";
-import type { NormalisedImportRecord } from "./neutralFormat";
+import { GROW_OWNERSHIP_RELATIONSHIP_TYPES, type GrowRelationshipType, type ImportMatchType } from "@aee/db";
+import type { NormalisedImportRecord, NormalisedOwnershipStart } from "./neutralFormat";
 import { normaliseAddressForMatching } from "./normalise";
+
+const OWNERSHIP_TYPES = new Set<string>(GROW_OWNERSHIP_RELATIONSHIP_TYPES);
 
 /* ------------------------------------------------------------------ */
 /* Union-find helper                                                  */
@@ -214,6 +216,20 @@ export interface ResolvedRelationshipLink {
   rawType?: string;
   needsPendingReview: boolean;
   rowIndexes: number[]; // every source row that contributed this link -- usually one; >1 means duplicate rows in the source
+  /**
+   * AE GROW "Brokerage-wide Signal Sweep" stage 2 -- the observed ownership
+   * start, when the source supplied one AND this link is an ownership-style
+   * relationship (GROW_OWNERSHIP_RELATIONSHIP_TYPES). A "date acquired"
+   * against a prospective_buyer row describes nothing AE can use, so it is
+   * deliberately not carried.
+   *
+   * When duplicate source rows contribute different dates to the SAME link,
+   * the EARLIEST is kept: two rows disagreeing about when an ownership began
+   * is a data-quality problem, and the earliest is the only choice that
+   * cannot overstate a tenure. (Overstating is the failure that reaches a
+   * homeowner as a wrong claim; understating merely delays a signal.)
+   */
+  ownershipStart?: NormalisedOwnershipStart;
 }
 
 /**
@@ -240,10 +256,17 @@ export function resolveRelationshipLinks(
 
     const resolvedType: GrowRelationshipType = record.relationship?.resolvedType ?? "unknown_pending_review";
     const key = `${contactGroupKey}::${propertyGroupKey}::${resolvedType}`;
+    // Only an ownership-style relationship can carry an ownership start.
+    const ownershipStart = OWNERSHIP_TYPES.has(resolvedType) ? record.property?.ownershipStart : undefined;
 
     const existing = byKey.get(key);
     if (existing) {
       existing.rowIndexes.push(rowIndex);
+      // Duplicate rows for the same link: keep the earliest date (see the
+      // field's comment on why earliest rather than first-seen or latest).
+      if (ownershipStart && (!existing.ownershipStart || ownershipStart.dateIso < existing.ownershipStart.dateIso)) {
+        existing.ownershipStart = ownershipStart;
+      }
       return;
     }
     byKey.set(key, {
@@ -253,6 +276,7 @@ export function resolveRelationshipLinks(
       rawType: record.relationship?.rawType,
       needsPendingReview: resolvedType === "unknown_pending_review",
       rowIndexes: [rowIndex],
+      ownershipStart,
     });
   });
 
