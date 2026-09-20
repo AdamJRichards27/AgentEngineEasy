@@ -413,6 +413,7 @@ Work continues in parallel on everything not listed here. These block only the s
 | 16 | Does the pilot run **one instance or two**? | W2-F severity | At one instance H-5 is latent; at two, the reconcilers are P1 immediately. |
 | 17 | **Consent open decisions A and B** (contact-wide withdrawal; save after withdrawal), plus: **is re-consent after withdrawal permitted at all?** | A-10, W3-J | Code has silently implemented the narrow answer to A and the *permissive* answer to B. A withdrawn F2 stream is currently permanently dead — a contact who withdraws can never opt back in. That is a significant product decision made in a step-1 guard clause. |
 | 18 | Should per-property signal reads honour contactability? | — | Flagged in-repo as a deliberate product decision. |
+| 19 | **On Contact 360, should a suppressed contact's signals be hidden entirely (today) or shown as intelligence with outreach actions stripped?** | W2-D scope | The 2026-09-21 decision implies the latter ("a signal may exist and remain useful as intelligence while outreach actions are suppressed"), but also says respect existing contactability behaviour. `listActiveSignalsForParty` currently hides the intelligence, not just the outreach. Proceeding with the existing fail-closed behaviour until ruled on; loosening a consent control is not a routine engineering call. |
 
 ---
 
@@ -504,3 +505,48 @@ are aggregate-only; polling stops on terminal states.
 |---|---|
 | 2026-09-21 | Created from the nine-workstream audit of staging `ba87901`. Wave 1 dispatched. |
 | 2026-09-21 | Wave 1 delivered as PRs #50–#53, plus #54 (test-env hardening). Wave 2 dispatched: **W2-A** Grow Today bounding, per-party signal consolidation (DECISION 3) and the activity-aggregation rewrite; **W2-B** UX coherence and integration honesty; **W2-C** AI governance and cost observability. Wave 2 branches from `ba87901` and does not contain Wave 1, by design — file ownership is disjoint. |
+| 2026-09-21 | Wave 2 delivered: **#55** (W2-C), **#56** (W2-B); **#57** (W2-A) in CI. Project Owner ruled on contact-anchored signals (below); **W2-D** dispatched as PR-to-follow, branched from #56 because it extends that PR's `service.ts` work. Bundle verification found and fixed a flaky assertion in #50's own test suite — see below. |
+
+---
+
+## 10. Contact-anchored signals — Project Owner decision, 2026-09-21
+
+**Decision.** A signal with `partyId` present and `propertyId` null must **not** be discarded for lack
+of a property anchor. Three-way hierarchy: **property-anchored** (verified relevant property exists) →
+**contact-anchored** (intelligence legitimately relates to the person, no verified property
+association) → **invalid/unusable** (neither valid anchor, or tenant/evidence integrity cannot be
+established). **Never fabricate or infer a property association to make a UI work.**
+
+**What discovery established before any code was written:**
+
+| Rule | Anchor behaviour | Evidence |
+|---|---|---|
+| `re_engagement_opportunity` | **Always** contact-anchored | `evaluation.ts:1290` sets `propertyId: null` with the comment *"Always null: the subject of this signal is the PERSON."* Only `propertyScopable: false` rule (`:1448`). |
+| `agent_recorded_motivation` | Optionally contact-anchored | `:929` passes `r.propertyId` through; explanation already branches — *"no property is linked to it yet"* (`:925`). |
+| `past_buyer_interest` | Optionally contact-anchored | `:645`; explanation branches at `:640`. |
+| `long_ownership_tenure`, `stale_previous_appraisal`, `lease_tenancy_milestone`, all provider observations | **Property-dependent — anchor still required** | Provider observations are the mirror case: `:853` sets `partyId: null`. |
+
+**The gap was one line, and only in Contact 360.** `service.ts:135` did `if (s.propertyId === null) continue`.
+Because `re_engagement_opportunity` is *always* contact-anchored, **every re-engagement signal was
+invisible on the contact's own record** — the flagship future-seller signal, unreachable on the
+surface built to show it.
+
+**Three requirements were already satisfied and must not be "fixed":**
+
+- **Grow Today already handles it correctly.** `growToday.ts:462` left-joins properties so null-property
+  signals survive; `:838` pushes `view_property` only `if (s.propertyId)`; `:860` passes the null
+  through honestly. No DCC change is needed — which is also why W2-D must not touch that file while
+  W2-A owns it.
+- **Ranking is already property-agnostic.** `signalRanking.ts` contains **zero** `propertyId`
+  references, so contact-anchored signals are not ranked below property signals by construction. Pin
+  it with a test rather than changing it. Signals still cannot reach `DoNow` merely for being signals.
+- **The party read is already tenant-scoped and contactability-gated.** `listActiveSignalsForParty`
+  (`signals.ts:252-265`) validates the party against the brokerage and returns `[]` for a suppressed
+  contact *before* loading any signal row.
+
+**Open tension, escalated rather than resolved (see §5 gate 19).** The decision says a signal may
+exist as *intelligence* while *outreach* is suppressed — "SIGNAL EXISTS ≠ CONTACT MAY BE CONTACTED" —
+but also says to respect existing contactability behaviour and not bypass consent controls. For
+`listActiveSignalsForParty` those readings conflict: it currently hides the intelligence entirely, not
+just the outreach. W2-D implements **within** the existing fail-closed behaviour and does not weaken
+it.
