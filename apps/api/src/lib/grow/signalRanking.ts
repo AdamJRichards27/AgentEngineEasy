@@ -246,8 +246,22 @@ const COLD_CONTACT_POINTS = 4;
 /** Recorded contact this recently means do not put them at the top of today again. */
 const RECENTLY_CONTACTED_DAYS = 7;
 const RECENTLY_CONTACTED_POINTS = -12;
-/** Matches growToday.ts's own COLD_CONTACT_THRESHOLD_DAYS so the two surfaces agree on "cold". */
-const COLD_CONTACT_THRESHOLD_DAYS = 21;
+
+/**
+ * How long without a recorded contact of any kind counts as "cold".
+ *
+ * AE GROW COMPLETION PROGRAM W2-A (F-7) — SINGLE-SOURCED. This constant used
+ * to exist TWICE, here and at lib/growToday.ts, kept equal by a comment on
+ * each saying it matched the other. Two surfaces that must agree on the
+ * meaning of "cold" cannot be kept in agreement by a comment: the first person
+ * to tune one of them silently gives Grow Today and the signal ranker two
+ * different definitions of the same word, and nothing fails.
+ *
+ * It is declared HERE (the pure, dependency-free leaf module) and imported by
+ * growToday.ts, which already imports from this file, rather than the other
+ * way round — growToday.ts reaches the database and this module must not.
+ */
+export const COLD_CONTACT_THRESHOLD_DAYS = 21;
 
 /**
  * At or above this, a signal earns a Do Today card; below it, Keep Warm.
@@ -460,6 +474,39 @@ function buildNarrative(signal: RankableSignal, state: SignalContactState): Sign
         caution: `${GENERIC_CAUTION} Finance activity has many explanations that have nothing to do with selling, and must never be raised with the contact directly.`,
       };
     }
+    case "re_engagement_opportunity": {
+      // AE GROW COMPLETION PROGRAM W2-A (B-4). This is the sweep's
+      // HIGHEST-VOLUME signal type and it had NO case here at all, so it fell
+      // to the default branch below and every card got talkingPoint: null —
+      // the flagship "nurture a future seller" signal was the one signal that
+      // gave the agent nothing to say.
+      //
+      // WORDING. `dormantDays` is written at the top level of the evidence
+      // blob by evaluation.ts's re-engagement rule (its `legacy` block), and
+      // is read defensively here: a missing or wrong-typed value degrades to
+      // a vaguer phrase rather than throwing or inventing a number.
+      //
+      // Everything below asserts only what AE's OWN records show — that a
+      // relationship exists and that nobody has recorded a contact for a long
+      // time. It says nothing about why, nothing about the owner's plans, and
+      // the talking point is an offer phrased as a question, exactly like the
+      // long-tenure and past-buyer cases above.
+      const dormantDays = evidenceNumber(signal.evidence, "dormantDays");
+      const dormantPhrase =
+        dormantDays === null
+          ? "a long time"
+          : `${Math.floor(dormantDays)} ${plural(Math.floor(dormantDays), "day", "days")}`;
+      const neverContacted = /never been contacted/i.test(signal.title);
+      return {
+        headline: neverContacted
+          ? `This person is in your database with a real recorded connection to the brokerage, and AE can find no contact of any kind ever recorded with them. Nobody has an open opportunity or commitment for them either, so this is a relationship that exists on paper and nowhere else.`
+          : `AE has no contact of any kind recorded with this person for ${dormantPhrase}, and nobody currently has an open opportunity or commitment for them. The relationship has gone quiet — that is the part you can do something about today.`,
+        talkingPoint: neverContacted
+          ? `"We've had you on our books for a while and I don't think we've ever properly introduced ourselves — would a quick catch-up about ${where} be useful, or would you rather we just keep you on the mailing list?"`
+          : `"It's been a while since we last spoke — is there anything happening with ${where} that would be worth a catch-up about, or shall I check back in later in the year?"`,
+        caution: `${GENERIC_CAUTION} A gap in AE's records means nobody RECORDED a contact — it does not prove none happened, and it says nothing at all about whether this person wants to hear from you.`,
+      };
+    }
     case "property_ownership_change": {
       return {
         headline: `A ${signal.source} observation of ownership for ${where} does not match AE's own recorded owner. Either your record is stale or the property changed hands — both are worth ten minutes before anyone calls.`,
@@ -631,6 +678,70 @@ export function rankSignal(signal: RankableSignal, state: SignalContactState, no
     factors: reportedFactors,
     narrative,
   };
+}
+
+/* ---------------------------------------------------------------------
+ * AE GROW COMPLETION PROGRAM W2-A (F-3 / the Project Owner's DECISION 3) —
+ * WHICH OF TWO SIGNALS ABOUT THE SAME PERSON IS "THE STRONGER SIGNAL".
+ *
+ * DECISION 3 asks that when several things would apply to one contact, AE
+ * surfaces ONE best item with the evidence preserved. Doing that requires an
+ * answer to a question this codebase had never actually written down: given a
+ * long-tenure signal and a re-engagement signal for the same person, which one
+ * IS the card?
+ *
+ * TWO CANDIDATE AUTHORITIES EXISTED, AND THEY DISAGREE.
+ *
+ *   - Total rankScore. This is already the ordering authority for EVERY OTHER
+ *     comparison on this surface: growToday.ts's final comparator orders the
+ *     whole day by it, across all six rules.
+ *   - SIGNAL_TYPE_POINTS above. It expresses a real product judgement (how
+ *     close a KIND of signal sits to a conversation with an owner) but it has
+ *     never been declared a tie-break authority and it is only ONE of six
+ *     components of the score.
+ *
+ * They genuinely conflict. A StrongIndicator re_engagement_opportunity scores
+ * 68 and beats a WorthReviewing long_ownership_tenure on total score, while
+ * losing to it on type weight (10 vs 18).
+ *
+ * WHAT IS IMPLEMENTED, AND WHY. Total rankScore — because it is the existing,
+ * already-shipped ordering authority for this surface, and because picking the
+ * winner by a criterion DIFFERENT from the one that then orders the list would
+ * mean the chosen card could sort below a card it had just beaten. Choosing by
+ * score keeps "the card AE kept" and "the card AE ranks highest" the same
+ * sentence.
+ *
+ * THIS IS A PENDING PROJECT OWNER DECISION, NOT A SETTLED ONE. It is therefore
+ * single-sourced into the one comparator below and named in
+ * PER_PARTY_SIGNAL_SELECTOR, so flipping it to signal-type authority is an
+ * edit to this function and nothing else. Whatever is chosen, the losing
+ * signals are NEVER discarded: they ride on the winning card as
+ * relatedSignals, so the evidence survives and AE can show its working.
+ * -----------------------------------------------------------------*/
+
+/** The criterion currently used to choose one card per party. See the block above. */
+export const PER_PARTY_SIGNAL_SELECTOR = "rankScore" as const;
+export type PerPartySignalSelector = typeof PER_PARTY_SIGNAL_SELECTOR;
+
+/** The minimum a ranked signal must expose to be compared against a sibling. */
+export interface ComparableRankedSignal {
+  /** The total rankScore from rankSignal(). */
+  score: number;
+  /** The grow_opportunity_signals row id — the deterministic tiebreak. */
+  rowId: number;
+}
+
+/**
+ * Strongest first. THE ROW ID TIEBREAK IS LOAD-BEARING, not cosmetic: without
+ * it two equally-scored signals order by whatever the database happened to
+ * return, so the chosen card — and therefore the whole day's card list — could
+ * differ between two identical requests a second apart. Every ordering of
+ * signals on this surface goes through this one function so that the global
+ * sort and the per-party winner can never disagree.
+ */
+export function compareSignalStrength(a: ComparableRankedSignal, b: ComparableRankedSignal): number {
+  if (a.score !== b.score) return b.score - a.score;
+  return a.rowId - b.rowId;
 }
 
 /** The bands are stored as identifiers; agents read prose. */
