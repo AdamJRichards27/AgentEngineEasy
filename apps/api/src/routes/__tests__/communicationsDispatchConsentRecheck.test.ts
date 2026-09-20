@@ -266,22 +266,19 @@ test("A-3: a message deferred past quiet hours is BLOCKED_BY_CONSENT when the sw
 // NOTE on the terminal status for this path. The consent re-check in
 // dispatchMessage() is status-agnostic: it runs before the SENDING
 // transition for QUEUED and RETRY_SCHEDULED alike and asks for
-// BLOCKED_BY_CONSENT in both cases. For a QUEUED message that lands (the
-// test above asserts it). For a RETRY_SCHEDULED message the transition
-// table currently has no RETRY_SCHEDULED -> BLOCKED_BY_CONSENT edge
-// (lib/communications/types.ts: RETRY_SCHEDULED: ["SENDING", "FAILED",
-// "CANCELLED"]), so applyMessageTransition refuses it and
-// dispatchDueMessages' own try/catch logs communications_dispatch_due_failed
-// and moves on — the message stays RETRY_SCHEDULED.
+// BLOCKED_BY_CONSENT in both cases.
 //
-// That is fail-closed, which is the security property that matters here and
-// is what this test pins: the provider is never called and the message never
-// becomes SENT, on every sweep, for as long as consent stays withdrawn.
-// Adding the missing edge is a one-line additive change to types.ts, which
-// is outside this slice's file ownership (AE GROW W1-A) and is reported as
-// the single outstanding item. The assertions below are deliberately
-// written to hold both before and after that edge lands, so this test does
-// not pin the current defective status and does not need revisiting.
+// The transition table gained the RETRY_SCHEDULED -> BLOCKED_BY_CONSENT edge
+// so this path settles the same way the QUEUED path does. Without it the
+// message was still fail-closed — the provider was never called — but it
+// never settled: applyMessageTransition refused the move, and the 60s sweep
+// logged communications_dispatch_due_failed on every pass, forever.
+//
+// Settling as BLOCKED_BY_CONSENT (rather than auto-resuming when consent
+// returns) is deliberate and matches the rest of the model: BLOCKED_BY_CONSENT
+// is documented as re-attemptable via an explicit requeue into QUEUED, not as
+// a state the dispatch sweep silently escapes. The QUEUED path already behaves
+// exactly this way, so the two paths are now consistent.
 test("A-3: a RETRY_SCHEDULED message whose consent was withdrawn during its backoff is never handed to the provider and never becomes SENT", async () => {
   await patchSettings({ timeZone: "UTC", quietHoursStart: null, quietHoursEnd: null, transactionalOptOutAllowed: true });
 
@@ -314,22 +311,38 @@ test("A-3: a RETRY_SCHEDULED message whose consent was withdrawn during its back
 
   const final = await readMessage(draft.id);
   assert.notEqual(final.status, "SENT", "a message whose consent was withdrawn must never reach SENT on the retry path");
+  assert.equal(final.status, "BLOCKED_BY_CONSENT", "the retry must settle as blocked rather than re-failing on every sweep forever");
   assert.equal(final.sentAt, null);
   assert.equal(final.provider, null, "no provider ever accepted this message");
   assert.equal(final.retryCount, 1, "the retry was abandoned on consent grounds, not consumed as another failed attempt");
 
   // Belt and braces: prove the block is the consent gate and not, say, an
-  // exhausted retry budget — restoring consent lets the very next sweep
-  // deliver the message, so nothing else is holding it back.
+  // exhausted retry budget. A blocked message is deliberately NOT auto-resumed
+  // by the sweep — it takes an explicit requeue, exactly as the QUEUED path
+  // does — so restore consent, requeue, and confirm it then goes out.
   const restore = await fetch(`${baseUrl}/api/communications/consent`, {
     method: "POST",
     headers: headers(agent.cookie),
     body: JSON.stringify({ channel: "EMAIL", destination, transactionalOptOut: false }),
   });
   assert.equal(restore.status, 201, await restore.clone().text());
+
   await withProviderSpy(async (sentTo) => {
     await dispatchDueMessages(new Date(sweepAt.getTime() + 2 * MINUTE_MS));
-    assert.equal(sentTo.includes(destination), true, "with consent restored the retry is attempted again — the gate was the only thing blocking it");
+    assert.equal(sentTo.includes(destination), false, "a blocked message is not silently resumed by the sweep just because consent came back");
+  });
+
+  const blocked = await readMessage(draft.id);
+  const requeued = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
+    method: "POST",
+    headers: headers(agent.cookie),
+    body: JSON.stringify({ expectedVersion: blocked.version }),
+  });
+  assert.equal(requeued.status, 200, await requeued.clone().text());
+
+  await withProviderSpy(async (sentTo) => {
+    await dispatchDueMessages(new Date(sweepAt.getTime() + 3 * MINUTE_MS));
+    assert.equal(sentTo.includes(destination), true, "once consent is restored and the message is requeued it dispatches — the gate was the only thing blocking it");
   });
 });
 
