@@ -4,7 +4,7 @@ Canonical record for the readiness phase that follows AE GROW Priority 6 (Stages
 
 ## Status
 
-**Technical readiness work complete; pending independent review, GitHub CI on the final head, and the Project Owner's merge decision.** Nothing here authorises a pilot, a deployment, or any live provider.
+**Technical readiness work complete; independent review and GitHub CI green on the final head; pending the Project Owner's merge decision.** Nothing here authorises a pilot, a deployment, or any live provider.
 
 - Base: `staging` at `82906353cf...` (F4 merged; post-merge CI #358 green).
 - Branch: `feat/ae-grow-pilot-readiness-hardening`; draft PR #45.
@@ -50,14 +50,17 @@ Test reliability: advisory-locked and tenant-scopeable sweeps, per-run webhook e
 
 | Check | Result |
 |---|---|
-| API suite (CI command, fresh database) | 1407 passed, 0 failed, 1 skipped |
-| Web suite | 135 passed, 0 failed |
+| API suite (CI command, fresh database) | 1451 passed, 1 skipped; see the note below on local parallel flakiness |
+| Web suite | 160 passed, 0 failed |
 | Workspace typecheck | Clean |
 | API and web production builds | Clean |
 | Clean-database migration + schema drift | Clean; `db:preflight` passes |
 | Synthetic production startup | Passed |
 | `pnpm audit --prod` | No known vulnerabilities |
 | Live browser smoke journey | See §7 |
+| GitHub CI | Green on the branch head |
+
+**On local parallel-run flakiness.** Running the API suite with several test files in parallel against one shared database intermittently fails a handful of tests with `401 Not authenticated`, in whichever files happen to be running. It is not caused by this branch: the **same suite at the merge base (`82906353`), unmodified, fails the same way** under the same conditions (10 failures, in files this branch never touched), while every file passes when run on its own and GitHub CI — which uses a fresh database and fewer cores — is green. Two previously silent paths now log a reason (`load_session_token_rejected`, `load_session_user_unusable`) so the next occurrence leaves evidence instead of a bare 401. `PG_POOL_MAX` also caps per-process pools, since a refused connection surfaced as the same confusing 401.
 
 ## 6.1 Project Owner decisions this phase surfaced
 
