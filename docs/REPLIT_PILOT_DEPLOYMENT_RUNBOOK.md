@@ -482,10 +482,17 @@ Run the read-only audit against the target database before deploying:
 DATABASE_URL=... pnpm --filter @aee/db run db:audit-grow-grants
 ```
 
-It lists every brokerage holding `grow.access`, reports the keys each one is missing, and flags
-brokerages carrying manual grants. Grant anything missing through a Grow or bundle subscription, or
-by an explicit recorded manual grant. Calling keys are reported separately and never counted as
-"missing", because a pilot may deliberately withhold them (see below).
+It separates two readiness questions per brokerage:
+
+- **Core Grow pilot entitlements** — the keys the completed non-calling Grow experience needs.
+  A brokerage is reported `READY` when it holds them all, or `INCOMPLETE` with the exact keys
+  missing. Grant those through a Grow or bundle subscription, or by an explicit recorded manual
+  grant.
+- **Live calling entitlements** (`grow.calling.*`) — never required for pilot readiness, and
+  reported separately. "None" is the expected pilot state; holding them is flagged as something to
+  revoke, because AE has no product path yet for establishing and recording call consent, recording
+  authority or Do Not Call status, and live activation additionally needs a provider decision and
+  the AU/NZ legal review (see below).
 
 Three keys govern the calling/transcription/follow-up surface:
 
