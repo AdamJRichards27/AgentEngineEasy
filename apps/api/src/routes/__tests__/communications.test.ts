@@ -138,6 +138,19 @@ async function grant(targetBrokerageId: number, entitlementKey: string) {
   invalidateEntitlementCache(targetBrokerageId);
 }
 
+// AE GROW W1-A (A-2): the inverse of grant(), so a test that needs a
+// Grow-gated route for one step can hand the entitlement back afterwards.
+// The contact-first test further down deliberately asserts a 403 BEFORE it
+// grants anything, so nothing in this file may leave a standing grant behind
+// earlier than that test expects one.
+async function revoke(targetBrokerageId: number, entitlementKey: string) {
+  await db
+    .update(entitlementGrants)
+    .set({ status: "Revoked" })
+    .where(and(eq(entitlementGrants.brokerageId, targetBrokerageId), eq(entitlementGrants.entitlementKey, entitlementKey)));
+  invalidateEntitlementCache(targetBrokerageId);
+}
+
 async function createHttpProperty(cookie: string, address: string): Promise<number> {
   const res = await fetch(`${baseUrl}/api/properties`, {
     method: "POST",
@@ -483,12 +496,17 @@ test("6. a marketing send is blocked without opt-in, then succeeds once consent 
   assert.equal(blockedSend.body.blocked, true);
   assert.equal(blockedSend.body.message.status, "BLOCKED_BY_CONSENT");
 
+  // AE GROW W1-A (A-2): recording consent now requires grow.contacts.manage.
+  // Granted just for this step and handed straight back, because the
+  // contact-first test further down asserts a 403 before it grants anything.
+  await grant(brokerageId, "grow.contacts.manage");
   const consentRes = await fetch(`${baseUrl}/api/communications/consent`, {
     method: "POST",
     headers: authHeaders(agent.cookie),
     body: JSON.stringify({ channel: "EMAIL", destination, marketingOptIn: true }),
   });
   assert.equal(consentRes.status, 201);
+  await revoke(brokerageId, "grow.contacts.manage");
 
   const requeueRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
     method: "POST",
