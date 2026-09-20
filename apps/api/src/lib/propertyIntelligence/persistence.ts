@@ -72,7 +72,20 @@ export async function upsertSignalCandidates(brokerageId: number, candidates: Si
   // row, and a per-call nonce is exact where comparing timestamps would not be.
   const reRaiseMarker = randomUUID();
 
-  for (const batch of chunk(candidates, UPSERT_CHUNK_SIZE)) {
+  // ONE ROW PER dedupe_key PER STATEMENT, BY CONSTRUCTION.
+  //
+  // `insert ... on conflict (dedupe_key) do update` raises "ON CONFLICT DO
+  // UPDATE command cannot affect row a second time" if a single statement
+  // carries the same key twice — a whole-statement failure, and before the
+  // per-brokerage error handling in sweep.ts it aborted the entire sweep. No
+  // rule pair produces a colliding key today, so this is not reachable; a Map
+  // keyed by dedupeKey makes it UNREACHABLE rather than merely unlikely, at
+  // the cost of one pass over the batch. The last candidate for a key wins,
+  // which is the same row the database would have been left holding.
+  const deduped = new Map<string, SignalCandidate>();
+  for (const candidate of candidates) deduped.set(candidate.dedupeKey, candidate);
+
+  for (const batch of chunk([...deduped.values()], UPSERT_CHUNK_SIZE)) {
     const values = batch.map((c) => ({
       brokerageId: c.brokerageId,
       partyId: c.partyId,
@@ -149,15 +162,33 @@ export async function upsertSignalCandidates(brokerageId: number, candidates: Si
         //           so a dismissal is never overridden before its own quiet
         //           period — and a NULL next_review_at, which is what
         //           promotion leaves behind, is permanently terminal; and
-        //       (b) the evidence fingerprint has materially changed
-        //           (IS DISTINCT FROM, so a legacy NULL fingerprint counts as
-        //           changed the first time the sweep sees the row — the sweep
-        //           has no record of what that row was decided against).
+        //       (b) the stored evidence fingerprint EXISTS and has materially
+        //           changed.
+        //
+        //           `is distinct from` alone was not enough (independent
+        //           review P2-6). A row written before fingerprints existed
+        //           has evidence_fingerprint NULL, and NULL IS DISTINCT FROM
+        //           anything is true — so a legacy signal that a human
+        //           dismissed BEFORE the first sweep ever reached its
+        //           brokerage would come back the moment its quiet period
+        //           elapsed, with the evidence completely unchanged. That is
+        //           precisely the outcome condition (b) exists to prevent, so
+        //           the stored fingerprint must also be NOT NULL: with no
+        //           record of what the human decided against, the sweep
+        //           cannot claim anything changed, and a dismissal that
+        //           cannot be justified is not overridden.
+        //
+        //           This costs nothing in the normal flow: the sweep writes a
+        //           fingerprint on every row it creates or refreshes (an
+        //           Active/Expired row always passes the first branch), so a
+        //           signal the sweep has seen even once carries a fingerprint
+        //           before any human can decide on it.
         // ---------------------------------------------------------------
         setWhere: sql`${growOpportunitySignals.status} in ('Active', 'Expired')
           or (
             ${growOpportunitySignals.nextReviewAt} is not null
             and ${growOpportunitySignals.nextReviewAt} <= excluded.computed_at
+            and ${growOpportunitySignals.evidenceFingerprint} is not null
             and ${growOpportunitySignals.evidenceFingerprint} is distinct from excluded.evidence_fingerprint
           )`,
       })

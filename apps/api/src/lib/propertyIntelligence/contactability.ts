@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { db, GROW_CONSENT_CHANNELS } from "@aee/db";
+import { db, GROW_CONSENT_CHANNELS, GROW_CONSENT_SUPPRESSION_STATES } from "@aee/db";
+import { logger } from "@aee/events";
 
 /**
  * AE GROW "Brokerage-wide Signal Sweep" stage 1 — contactability filter
@@ -18,28 +19,55 @@ import { db, GROW_CONSENT_CHANNELS } from "@aee/db";
  * consent phase extends THIS function; nothing else in the sweep knows the
  * consent tables exist.
  *
+ * "LATEST ROW" MEANS WHAT THE CONSENT MODEL SAYS IT MEANS.
+ * lib/consentControlsPersistence.ts is the canonical resolver for these two
+ * tables, and its definition of the current row is SERIAL id DESC — because
+ * checked_at / effective_at / captured_at are CALLER-SUPPLIED evidence
+ * metadata, while the serial id is the append order and therefore the only
+ * ordering the database itself guarantees. It additionally requires a
+ * suppression to be in force (effective_at <= now) before it counts at all.
+ * This module follows that definition exactly rather than inventing a second
+ * one. It previously ordered by the caller-supplied timestamps, which
+ * diverged in the UNSAFE direction: a contact suppressed on every channel and
+ * then given a RELEASED row dated in the FUTURE stayed blocked for the
+ * consent engine while this filter read them as released and raised their
+ * signal.
+ *
  * THE TWO CONDITIONS (deliberately the minimum that is unambiguous):
  *
- *   1. DNC listed. The latest grow_contact_dncr_statuses row for this
- *      contact on ANY channel has status LISTED. DNCR is recorded per
- *      channel; "listed on at least one channel" is the conservative read,
- *      and conservative is the correct direction for a suggestion surface.
- *      CLEARED / UNKNOWN / NOT_CHECKED never suppress anything.
+ *   1. DNC listed or unknown. The latest grow_contact_dncr_statuses row for
+ *      this contact on ANY channel has status LISTED or UNKNOWN. DNCR is
+ *      recorded per channel; "blocked on at least one channel" is the
+ *      conservative read, and conservative is the correct direction for a
+ *      suggestion surface.
  *
- *   2. Fully suppressed. The latest grow_contact_channel_suppressions row
- *      for this contact is an in-force SUPPRESSED (state SUPPRESSED and
- *      either no expiry or an expiry still in the future) on EVERY channel
- *      in GROW_CONSENT_CHANNELS. A partial suppression — say SMS only —
- *      deliberately does NOT hide the signal: the agent can still reach that
- *      contact another way, and hiding it would silently lose information
- *      they are entitled to see. Only a contact suppressed everywhere is
- *      withheld.
+ *      UNKNOWN FAILS CLOSED, and that is not the same thing as missing data.
+ *      An UNKNOWN row means somebody CHECKED the register and could not
+ *      determine the answer — the consent engine treats exactly that as
+ *      DNCR_STATUS_UNKNOWN and refuses to proceed. NOT_CHECKED (nobody has
+ *      looked yet) and CLEARED do not suppress.
  *
- * THE COMMON PILOT CASE IS "NO DATA". Neither table has any rows for most
- * tenants today (their only writers are on the telephony path). Absence of
- * consent data therefore changes nothing at all: no DNC row means not
- * LISTED, no suppression row means not suppressed-everywhere, and the
- * contact's signals behave exactly as they did before this filter existed.
+ *   2. Fully suppressed. The latest in-force grow_contact_channel_suppressions
+ *      row for this contact suppresses EVERY channel in
+ *      GROW_CONSENT_CHANNELS. "In force" is effective_at <= now and either no
+ *      expiry or an expiry still in the future. "Suppresses" is any state
+ *      other than the one recognised release state: a state this build does
+ *      not recognise (a corrupted value, or an enum value added by a newer
+ *      build writing into the same database) must never silently UN-suppress
+ *      a channel. A partial suppression — say SMS only — deliberately does
+ *      NOT hide the signal: the agent can still reach that contact another
+ *      way, and hiding it would silently lose information they are entitled
+ *      to see. Only a contact suppressed everywhere is withheld.
+ *
+ * THE COMMON PILOT CASE IS "NO DATA", AND IT IS NOT A FAILURE. Neither table
+ * has any rows for most tenants today (their only writers are on the
+ * telephony path). Absence of consent data therefore changes nothing at all:
+ * no DNC row means not LISTED and not UNKNOWN, no suppression row means not
+ * suppressed-everywhere, and the contact's signals behave exactly as they did
+ * before this filter existed. The fail-closed rules above apply only to a row
+ * that EXISTS and says something this build cannot interpret as permissive —
+ * failing closed on genuinely absent data would suppress every contact in
+ * every pilot tenant, which is the opposite of conservative.
  *
  * COST. Two statements per batch of parties, regardless of how many parties
  * are in the batch — DISTINCT ON does the "latest per (party, channel)"
@@ -47,8 +75,31 @@ import { db, GROW_CONSENT_CHANNELS } from "@aee/db";
  * parameter array sane.
  */
 
-/** Parties per statement. Two statements per chunk; 2,000 parties is one chunk. */
+/** Parties per statement. Two statements per chunk; 5,000 parties is one chunk. */
 export const CONTACTABILITY_CHUNK_SIZE = 5000;
+
+/**
+ * DNCR statuses that suppress. LISTED is on the register; UNKNOWN means the
+ * register WAS consulted and could not answer, which
+ * lib/consentControlsPersistence.ts also refuses to proceed on
+ * (DNCR_STATUS_UNKNOWN). NOT_CHECKED and CLEARED do not suppress.
+ */
+export const CONTACTABILITY_BLOCKING_DNCR_STATUSES: ReadonlySet<string> = new Set(["LISTED", "UNKNOWN"]);
+
+/** The one suppression state that releases a channel. Everything else — including a value this build does not recognise — suppresses it. */
+const RELEASE_STATE = "RELEASED";
+const KNOWN_SUPPRESSION_STATES: ReadonlySet<string> = new Set(GROW_CONSENT_SUPPRESSION_STATES);
+
+/** Distinct unrecognised suppression states already reported, so a corrupted column cannot flood the log. Process-local and purely diagnostic. */
+const reportedUnrecognisedStates = new Set<string>();
+
+function reportUnrecognisedSuppressionState(state: string): void {
+  if (reportedUnrecognisedStates.has(state)) return;
+  reportedUnrecognisedStates.add(state);
+  // The state value is a schema constant, never tenant content; no ids are
+  // logged here at all.
+  logger.warn("property_signal_contactability_unrecognised_suppression_state", { state, treatedAs: "SUPPRESSED" });
+}
 
 export interface ContactabilityFilter {
   /** Party ids that must not have a signal raised or refreshed for them this run. */
@@ -74,10 +125,6 @@ function chunk<T>(items: T[], size: number): T[][] {
  * matches nothing, and no other tenant's consent rows are ever read.
  */
 export async function loadContactabilityFilter(brokerageId: number, partyIds: Array<number | null>): Promise<ContactabilityFilter> {
-  // Number.isInteger is not defensive theatre: these ids are interpolated
-  // into an array literal below (a bind parameter cannot carry an int[] here
-  // without a driver-specific array codec), so only genuine integers may
-  // ever reach that string.
   const ids = [...new Set(partyIds.filter((id): id is number => typeof id === "number" && Number.isInteger(id)))];
   if (ids.length === 0) return EMPTY_FILTER;
 
@@ -85,33 +132,53 @@ export async function loadContactabilityFilter(brokerageId: number, partyIds: Ar
   const suppressed = new Set<number>();
 
   for (const batch of chunk(ids, CONTACTABILITY_CHUNK_SIZE)) {
-    const idArray = sql`${sql.raw(`array[${batch.join(",")}]::int[]`)}`;
+    // ONE bind parameter (a JSON array expanded server-side), not N
+    // parameters and not string concatenation. The statement text is then
+    // identical whatever the batch contains, and no party id ever reaches the
+    // SQL text — the same technique persistence.ts uses for its dedupe-key
+    // set. (This used to build `array[1,2,3]::int[]` by joining the ids into
+    // the statement, which was safe only because of the Number.isInteger
+    // filter above and stayed safe only for as long as nobody removed it.)
+    const idArray = sql`array(select jsonb_array_elements_text(${JSON.stringify(batch)}::jsonb)::int)`;
 
-    // Condition 1 — latest DNC status per (party, channel); LISTED on any
-    // channel suppresses.
-    const dncr = await db.execute<{ party_id: number }>(sql`
+    // Condition 1 — current DNC status per (party, channel) by SERIAL id,
+    // matching consentControlsPersistence.latestDncr(). LISTED (on the
+    // register) or UNKNOWN (checked, undeterminable) on any channel
+    // suppresses; NOT_CHECKED and CLEARED do not.
+    const dncr = await db.execute<{ party_id: number; status: string }>(sql`
       select distinct on (party_id, channel) party_id, status
       from grow_contact_dncr_statuses
       where brokerage_id = ${brokerageId} and party_id = any(${idArray})
-      order by party_id, channel, checked_at desc, id desc
+      order by party_id, channel, id desc
     `);
     for (const row of dncr.rows as Array<{ party_id: number; status: string }>) {
-      if (row.status === "LISTED") suppressed.add(Number(row.party_id));
+      if (CONTACTABILITY_BLOCKING_DNCR_STATUSES.has(row.status)) suppressed.add(Number(row.party_id));
     }
 
-    // Condition 2 — latest suppression per (party, channel); suppressed on
-    // EVERY channel suppresses. The channel count is compared in JS against
+    // Condition 2 — current suppression per (party, channel) by SERIAL id,
+    // considering only rows already IN FORCE, matching
+    // consentControlsPersistence.latestSuppression(). Without the
+    // effective_at filter a RELEASED row dated in the future would read as
+    // the current state here while the consent engine still treated the
+    // party as suppressed. The channel count is compared in JS against
     // GROW_CONSENT_CHANNELS so the rule stays readable and so adding a
     // channel to that list cannot silently change SQL semantics.
     const suppressions = await db.execute<{ party_id: number; channel: string; state: string; expires_at: string | null }>(sql`
       select distinct on (party_id, channel) party_id, channel, state, expires_at
       from grow_contact_channel_suppressions
-      where brokerage_id = ${brokerageId} and party_id = any(${idArray})
-      order by party_id, channel, effective_at desc, id desc
+      where brokerage_id = ${brokerageId}
+        and party_id = any(${idArray})
+        and effective_at <= now()
+      order by party_id, channel, id desc
     `);
     const activeChannelsByParty = new Map<number, Set<string>>();
     for (const row of suppressions.rows as Array<{ party_id: number; channel: string; state: string; expires_at: string | Date | null }>) {
-      if (row.state !== "SUPPRESSED") continue;
+      // FAIL CLOSED ON AN UNRECOGNISED STATE. Only the explicit release
+      // state lets a channel through; anything this build does not recognise
+      // counts as suppressing, so a corrupted value or a state added by a
+      // newer build cannot silently un-suppress a contact.
+      if (row.state === RELEASE_STATE) continue;
+      if (!KNOWN_SUPPRESSION_STATES.has(row.state)) reportUnrecognisedSuppressionState(row.state);
       if (row.expires_at !== null && new Date(row.expires_at).getTime() <= now.getTime()) continue; // lapsed suppression is not in force
       const partyId = Number(row.party_id);
       const set = activeChannelsByParty.get(partyId) ?? new Set<string>();

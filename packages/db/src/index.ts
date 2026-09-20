@@ -144,23 +144,49 @@ export const pool = createSafePool(process.env.DATABASE_URL);
  * issued directly on `db.$client` (the sweep's dedicated advisory-lock
  * connection) are NOT seen here — those are a fixed two per run by
  * construction, which is exactly why they need no instrumentation.
+ *
+ * TEST-ONLY, AND GATED (independent-review remediation P2-5). An observer
+ * installed here sees EVERY statement this process issues and its BIND
+ * PARAMETERS — session and auth lookups, party PII, consent writes — for
+ * every tenant, with no brokerage scope and no redaction. That is an
+ * assertion seam, not an observability feature, so like
+ * lib/propertyIntelligence/sweep.ts's tryHoldSignalSweepLockForTests() and
+ * resetSweepResumePointForTests() it refuses to install outside
+ * NODE_ENV === "test". Anything that wants production statement telemetry
+ * must add something purpose-built that redacts parameters.
  */
 export type DbQueryObserver = (query: string, params: unknown[]) => void;
 
 let dbQueryObserver: DbQueryObserver | null = null;
 
-/** Installs an observer and returns its uninstall function (restoring whatever was installed before). */
+/**
+ * Installs the process-wide statement observer and returns its uninstall
+ * function. Test-only; see above.
+ *
+ * Uninstall CLEARS the observer rather than restoring whatever was installed
+ * before it. Restoring a captured `previous` looks tidier but is wrong under
+ * out-of-order teardown: uninstalling an older handle would reinstate a stale
+ * observer and leave the tap live for the rest of the process. There is no
+ * legitimate use for nesting these, so clearing is both simpler and the only
+ * behaviour with no way to leak.
+ */
 export function setDbQueryObserver(observer: DbQueryObserver | null): () => void {
-  const previous = dbQueryObserver;
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setDbQueryObserver is a test-only seam and is unavailable outside tests.");
+  }
   dbQueryObserver = observer;
   return () => {
-    dbQueryObserver = previous;
+    dbQueryObserver = null;
   };
 }
 
 export const db = drizzle(pool, {
   schema,
   logger: {
+    // Reachable only when a test has installed an observer; setDbQueryObserver
+    // refuses to install one outside NODE_ENV === "test", so in production
+    // this is a null check per statement and nothing else can ever be handed
+    // a query or its parameters.
     logQuery(query: string, params: unknown[]): void {
       dbQueryObserver?.(query, params);
     },

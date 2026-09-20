@@ -47,6 +47,20 @@ import { expireSignalsPastExpiry, expireUnsupportedSignals, upsertSignalCandidat
  *   value AND, against the consent locks, a different lock function family,
  *   so no collision is possible in either direction.
  *
+ *   NO PER-PROCESS ITERATION STATE. Which tenants a scheduled run picks up
+ *   is derived from grow_signal_sweep_cursors.last_evaluated_at — least
+ *   recently evaluated first, a brokerage with no cursor row first of all —
+ *   so the resume point is in the DATABASE, exactly like the single-flight
+ *   lock and the stale-run recovery. Two API instances sharing a database
+ *   therefore take turns through the whole tenant list instead of each
+ *   keeping a private cursor and re-sweeping the head of it, and a restart
+ *   loses nothing. See listBrokeragesDueForSweep().
+ *
+ *   ONE BAD TENANT IS NOT A DEAD SWEEP. A brokerage whose pass throws is
+ *   counted, logged by id, has its cursor stamped so it cannot starve the
+ *   tenants behind it, and the run CONTINUES — the run is recorded COMPLETED
+ *   with errors > 0. Only a failure of the run's own bookkeeping is fatal.
+ *
  * COST CONTROL — see shouldEvaluateBrokerage() below. Before evaluating a
  * brokerage the sweep probes the max mutation timestamp of each source table
  * and compares it with the high-water marks in grow_signal_sweep_cursors. A
@@ -143,8 +157,9 @@ export interface SweepSummary {
   signalsExpired: number;
   candidatesSuppressed: number;
   truncated: boolean;
+  /** Brokerages whose pass threw. The run still swept every other brokerage and is recorded COMPLETED; see considerBrokerage(). */
   errors: number;
-  /** The highest brokerage id this run reached. The next run resumes after it when the run was bounded out. */
+  /** The last brokerage id this run reached. On the explicit-cursor path a caller may pass it back as afterBrokerageId; the production path resumes from grow_signal_sweep_cursors instead and does not need it. */
   lastBrokerageId: number;
   /** True when the run stopped because it hit maxBrokerages rather than because it ran out of brokerages. */
   boundedOut: boolean;
@@ -159,7 +174,15 @@ export interface RunSignalSweepOptions {
    * only its own tenants — the single-flight lock is still global either way.
    */
   brokerageIds?: number[];
-  /** Resume after this brokerage id. Defaults to 0 for a scoped run, and for an unscoped run to the resume point the last bounded-out run recorded. */
+  /**
+   * Resume after this brokerage id, iterating in ascending id order.
+   *
+   * Supplying it (at any value, including 0) selects the explicit-cursor
+   * path. OMITTING it on an UNSCOPED run selects the production path, which
+   * takes its order from grow_signal_sweep_cursors.last_evaluated_at — least
+   * recently evaluated first — and therefore needs no caller-held cursor at
+   * all. See listBrokeragesDueForSweep().
+   */
   afterBrokerageId?: number;
   /** Overrides for this call only (tests, ops). */
   maxBrokerages?: number;
@@ -169,30 +192,97 @@ export interface RunSignalSweepOptions {
 }
 
 /**
- * Where an unscoped bounded-out run left off, so the next run continues
- * rather than restarting at brokerage 1 and starving the tail of the tenant
- * list. Held in memory deliberately: it is an optimisation, not state whose
- * loss can corrupt anything — a fresh process simply starts from the
- * beginning, and each brokerage's own cursor still prevents redundant work.
+ * DURABLE RESUME POINT (independent-review remediation P1-4).
+ *
+ * The resume point used to be a module-level integer, which is per PROCESS.
+ * With two API instances sharing one database and more tenants than
+ * maxBrokerages, each process kept its own idea of where it had got to, so
+ * both repeatedly swept the head of the id-ordered tenant list and the tail
+ * was only ever reached by accident — while every skipped brokerage still
+ * consumed a slot against maxBrokerages, so the cheap change-detection path
+ * could not let a run get further either.
+ *
+ * There is now no in-process resume state at all. An unscoped production run
+ * asks the DATABASE which tenants are most overdue, ordering by
+ * grow_signal_sweep_cursors.last_evaluated_at (a brokerage with no cursor row
+ * has never been evaluated and therefore sorts first). Every considered
+ * brokerage — evaluated, skipped-unchanged, or failed — writes
+ * last_evaluated_at before the run ends, so it moves to the BACK of the
+ * ordering and the next run, in this process or any other, continues with
+ * whatever is now most overdue. That is durable across processes and
+ * restarts, and it gives round-robin fairness for free.
+ *
+ * The explicit-cursor path is kept for scoped runs and for a caller that
+ * passes afterBrokerageId (tests and ops), where deterministic ascending-id
+ * iteration is what the caller is actually asking for.
  */
-let unscopedResumeAfterBrokerageId = 0;
 
-/** Test-only: resets the in-memory resume point so one test file cannot influence another. */
+/**
+ * Consecutive "already running" refusals seen with NO RUNNING run row before
+ * the sweep reports a suspected advisory-lock leak. A single occurrence is
+ * an ordinary race (the holder inserts its run row a moment after taking the
+ * lock); a run of them means somebody holds (0x41455351, 1) and is not
+ * sweeping, which silently disables sweeping entirely and must be alertable
+ * rather than reported as the expected `skipped_locked` outcome.
+ */
+export const LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS = 3;
+
+let consecutiveOrphanedLockSkips = 0;
+
+/**
+ * Test-only: resets the per-process sweep counters so one test file cannot
+ * influence another.
+ *
+ * The resume point itself is no longer per-process state (see the block
+ * comment above) — it lives in grow_signal_sweep_cursors.last_evaluated_at —
+ * so there is nothing to reset for it. What remains is the orphaned-lock
+ * alert counter, which is genuinely per-process. The export is kept, with
+ * the same test-only gate, so existing suites keep one obvious isolation
+ * call site.
+ */
 export function resetSweepResumePointForTests(): void {
   if (process.env.NODE_ENV !== "test") {
     throw new Error("resetSweepResumePointForTests is a test-only seam and is unavailable outside tests.");
   }
-  unscopedResumeAfterBrokerageId = 0;
+  consecutiveOrphanedLockSkips = 0;
 }
 
 export async function runSignalSweep(trigger: "SCHEDULED" | "MANUAL" = "SCHEDULED", options: RunSignalSweepOptions = {}): Promise<RunSignalSweepResult> {
   const startedAtMs = Date.now();
   const lockClient = await db.$client.connect();
   let lockHeld = false;
-  let releaseError: Error | undefined;
+
+  // LOCK ACQUISITION IS ITS OWN try (independent-review remediation P1-1).
+  //
+  // A session-level advisory lock is NOT transactional: it survives statement
+  // rollback and cancellation. So if pg_try_advisory_lock executed
+  // server-side and the statement then failed anyway (statement_timeout, a
+  // cancelled query, a read error after the function ran), the lock may be
+  // HELD by this connection even though we never saw the result. Returning
+  // that connection to the pool would leave (0x41455351, 1) held forever by a
+  // pooled client: every later run would be refused with skipped_locked, no
+  // RUNNING row would exist, and sweeping would be silently dead until the
+  // process restarted.
+  //
+  // Passing the error to release() DESTROYS the connection instead of
+  // returning it, and Postgres releases a session advisory lock the instant
+  // its connection closes. Same reasoning as the unlock-failure path below.
   try {
     const lockResult = await lockClient.query<{ locked: boolean }>("select pg_try_advisory_lock($1::int4, $2::int4) as locked", [SWEEP_LOCK_NAMESPACE, SWEEP_LOCK_KEY]);
     lockHeld = lockResult.rows[0]?.locked === true;
+  } catch (err) {
+    const acquireError = err instanceof Error ? err : new Error(String(err));
+    lockClient.release(acquireError);
+    logger.error("property_signal_sweep_lock_acquire_failed", { error: acquireError.message });
+    // The declared outcome label set is closed (packages/events/src/metrics.ts)
+    // and a failed acquisition genuinely is a failed sweep attempt.
+    incrementCounter("property_signal_sweep_total", { trigger, outcome: "failed" });
+    observeHistogram("property_signal_sweep_duration_ms", Date.now() - startedAtMs, { trigger });
+    throw acquireError;
+  }
+
+  let releaseError: Error | undefined;
+  try {
     if (!lockHeld) {
       const [running] = await db
         .select({ id: growSignalSweepRuns.id })
@@ -201,8 +291,39 @@ export async function runSignalSweep(trigger: "SCHEDULED" | "MANUAL" = "SCHEDULE
         .orderBy(desc(growSignalSweepRuns.startedAt))
         .limit(1);
       incrementCounter("property_signal_sweep_total", { trigger, outcome: "skipped_locked" });
-      return { ok: false, skippedReason: running ? `A signal sweep (${running.id}) is already running.` : "A signal sweep is already running." };
+      if (running) {
+        // Someone really is sweeping. This is the documented, expected case.
+        consecutiveOrphanedLockSkips = 0;
+        return { ok: false, skippedReason: `A signal sweep (${running.id}) is already running.` };
+      }
+      // The lock is held but nothing is running. Once is a race; repeatedly is
+      // a leaked lock, which is indistinguishable from "sweeping is dead"
+      // unless it is said out loud.
+      //
+      // NOTE ON METRICS. This deserves its own counter
+      // (property_signal_sweep_lock_orphaned_total). METRIC_DEFINITIONS in
+      // packages/events/src/metrics.ts is a closed registry that this change
+      // is not permitted to extend, and reusing `outcome: "failed"` here
+      // would corrupt the completed/failed ratio with refusals that are
+      // usually an ordinary race. So the alert is carried by logger.error,
+      // which is how every other lock problem in this repository is reported
+      // (see exceptions_scan_lock_unlock_failed), until the counter can be
+      // registered.
+      consecutiveOrphanedLockSkips += 1;
+      const detail = {
+        trigger,
+        consecutiveOrphanedSkips: consecutiveOrphanedLockSkips,
+        lockNamespace: SWEEP_LOCK_NAMESPACE,
+        lockKey: SWEEP_LOCK_KEY,
+      };
+      if (consecutiveOrphanedLockSkips >= LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS) {
+        logger.error("property_signal_sweep_lock_suspected_leak", detail);
+      } else {
+        logger.warn("property_signal_sweep_lock_held_with_no_running_row", detail);
+      }
+      return { ok: false, skippedReason: "A signal sweep is already running." };
     }
+    consecutiveOrphanedLockSkips = 0;
     const result = await runSweepWhileLocked(trigger, options);
     incrementCounter("property_signal_sweep_total", { trigger, outcome: "completed" });
     observeHistogram("property_signal_sweep_duration_ms", Date.now() - startedAtMs, { trigger });
@@ -287,7 +408,12 @@ async function runSweepWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: Run
 
   const [sweepRun] = await db.insert(growSignalSweepRuns).values({ status: "RUNNING", trigger }).returning();
 
-  const startAfter = options.afterBrokerageId ?? (scopedBrokerageIds ? 0 : unscopedResumeAfterBrokerageId);
+  // An unscoped run with no caller-supplied cursor is the PRODUCTION path and
+  // takes the durable least-recently-evaluated ordering. A scoped run, or one
+  // where the caller named a resume point, keeps deterministic ascending-id
+  // iteration, which is exactly what those callers ask for.
+  const useDurableOrder = !scopedBrokerageIds && options.afterBrokerageId === undefined;
+  const startAfter = options.afterBrokerageId ?? 0;
   const summary: SweepSummary = {
     sweepRunId: sweepRun.id,
     brokeragesConsidered: 0,
@@ -305,44 +431,97 @@ async function runSweepWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: Run
     boundedOut: false,
   };
 
-  try {
-    let lastId = startAfter;
-    let exhausted = false;
-    while (summary.brokeragesConsidered < maxBrokerages) {
-      if (scopedBrokerageIds && scopedBrokerageIds.length === 0) {
-        exhausted = true;
-        break;
-      }
-      const page = await db
-        .select({ id: brokerages.id })
-        .from(brokerages)
-        .where(scopedBrokerageIds ? and(gt(brokerages.id, lastId), inArray(brokerages.id, scopedBrokerageIds)) : gt(brokerages.id, lastId))
-        .orderBy(asc(brokerages.id))
-        .limit(Math.min(BROKERAGE_PAGE_SIZE, maxBrokerages - summary.brokeragesConsidered));
-      if (page.length === 0) {
-        exhausted = true;
-        break;
-      }
-      for (const { id: brokerageId } of page) {
-        await sweepBrokerage(brokerageId, sweepRun.id, summary, { maxCandidatesPerBrokerage, fullSweepIntervalMs: config.fullSweepIntervalMs, force: options.force === true });
-        summary.brokeragesConsidered += 1;
-        summary.lastBrokerageId = brokerageId;
-        lastId = brokerageId;
-      }
-    }
+  const brokerageOptions: BrokerageSweepOptions = {
+    maxCandidatesPerBrokerage,
+    fullSweepIntervalMs: config.fullSweepIntervalMs,
+    force: options.force === true,
+  };
 
-    summary.boundedOut = !exhausted;
-    if (!scopedBrokerageIds) {
-      // Resume after the last brokerage reached, or start again from the top
-      // once the tenant list is exhausted.
-      unscopedResumeAfterBrokerageId = summary.boundedOut ? summary.lastBrokerageId : 0;
+  /**
+   * ONE BROKERAGE, NEVER FATAL (independent-review remediation P1-2).
+   *
+   * A throw from one tenant used to fail the whole run and, because the
+   * resume point only advanced after the loop completed, every later run
+   * restarted at the same place, hit the same poisoned tenant, and died
+   * again — so every brokerage after it was never swept again. It is the
+   * same failure shape lib/exceptions/engine.ts already guards against: an
+   * error is counted, logged with ids only, and the scan CONTINUES, because
+   * absence of evidence from a failed evaluation is never proof of anything.
+   *
+   * The failing brokerage's cursor still gets its last_evaluated_at stamped
+   * (and only that — no high-water marks, no full-evaluation anchor), so it
+   * moves to the back of the durable ordering and cannot starve the tenants
+   * behind it, while the next pass still does a full evaluation of it.
+   */
+  const considerBrokerage = async (brokerageId: number): Promise<void> => {
+    try {
+      await sweepBrokerage(brokerageId, sweepRun.id, summary, brokerageOptions);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      summary.errors += 1;
+      // No metric: METRIC_DEFINITIONS has no counter for a per-brokerage
+      // failure and this change may not extend that registry. The count is
+      // persisted on the run row (grow_signal_sweep_runs.errors) and the ids
+      // are in the log line below.
+      // Ids only — never candidate, party or property content.
+      logger.error("property_signal_sweep_brokerage_failed", { brokerageId, sweepRunId: sweepRun.id, error: message });
+      await touchBrokerageCursor(brokerageId, sweepRun.id, new Date()).catch((cursorErr) =>
+        logger.error("property_signal_sweep_cursor_touch_failed", {
+          brokerageId,
+          sweepRunId: sweepRun.id,
+          error: cursorErr instanceof Error ? cursorErr.message : String(cursorErr),
+        }),
+      );
+    }
+    summary.brokeragesConsidered += 1;
+    summary.lastBrokerageId = brokerageId;
+  };
+
+  try {
+    if (useDurableOrder) {
+      const due = await listBrokeragesDueForSweep(maxBrokerages);
+      for (const brokerageId of due) await considerBrokerage(brokerageId);
+      // A run that filled its whole bound has, by construction, nothing to
+      // prove about what is left; the next run simply asks the database
+      // again. There is no id to carry forward.
+      summary.boundedOut = due.length >= maxBrokerages;
+    } else {
+      let lastId = startAfter;
+      let exhausted = false;
+      while (summary.brokeragesConsidered < maxBrokerages) {
+        if (scopedBrokerageIds && scopedBrokerageIds.length === 0) {
+          exhausted = true;
+          break;
+        }
+        const page = await db
+          .select({ id: brokerages.id })
+          .from(brokerages)
+          .where(scopedBrokerageIds ? and(gt(brokerages.id, lastId), inArray(brokerages.id, scopedBrokerageIds)) : gt(brokerages.id, lastId))
+          .orderBy(asc(brokerages.id))
+          .limit(Math.min(BROKERAGE_PAGE_SIZE, maxBrokerages - summary.brokeragesConsidered));
+        if (page.length === 0) {
+          exhausted = true;
+          break;
+        }
+        for (const { id: brokerageId } of page) {
+          await considerBrokerage(brokerageId);
+          lastId = brokerageId;
+        }
+      }
+      summary.boundedOut = !exhausted;
     }
 
     await db
       .update(growSignalSweepRuns)
       .set({
+        // COMPLETED-WITH-ERRORS. GROW_SIGNAL_SWEEP_RUN_STATUSES has no fourth
+        // value and this change may not alter the schema, so a partially
+        // failed run is COMPLETED with errors > 0 and a summary line in
+        // error_message — the run really did finish and really did sweep
+        // every other tenant; only FAILED means "this run did not run".
         status: "COMPLETED",
         completedAt: new Date(),
+        errorMessage: summary.errors > 0 ? `Completed with ${summary.errors} failed brokerage(s); see property_signal_sweep_brokerage_failed for the ids.` : null,
         brokeragesConsidered: summary.brokeragesConsidered,
         brokeragesEvaluated: summary.brokeragesEvaluated,
         brokeragesSkippedUnchanged: summary.brokeragesSkippedUnchanged,
@@ -380,7 +559,10 @@ async function runSweepWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: Run
     throw err;
   }
 
-  logger.info("property_signal_sweep_completed", {
+  // A run that swept everything it could but lost a tenant on the way is not
+  // an ordinary completion, and must not read like one in the log stream.
+  const completionLog = summary.errors > 0 ? logger.warn : logger.info;
+  completionLog("property_signal_sweep_completed", {
     sweepRunId: summary.sweepRunId,
     trigger,
     brokeragesConsidered: summary.brokeragesConsidered,
@@ -404,6 +586,60 @@ interface BrokerageSweepOptions {
   maxCandidatesPerBrokerage: number;
   fullSweepIntervalMs: number;
   force: boolean;
+}
+
+/**
+ * THE DURABLE RESUME POINT (independent-review remediation P1-4).
+ *
+ * The brokerages most overdue for a sweep, most overdue first, bounded by
+ * `limit`. "Overdue" is grow_signal_sweep_cursors.last_evaluated_at, which is
+ * written for EVERY brokerage a run considers — evaluated, skipped-unchanged,
+ * or failed — so a considered brokerage moves to the back of this ordering
+ * and the next run continues with whatever is now most overdue, in this
+ * process or any other. That is what makes the resume point survive a
+ * restart and work across API instances sharing a database, which a
+ * module-level integer could never do.
+ *
+ * A brokerage with no cursor row has never been evaluated, so it is treated
+ * as last evaluated at the epoch and sweeps first. coalesce() rather than
+ * NULLS FIRST deliberately: it makes "no cursor" an ordinary comparable
+ * value, so the ordering is total and testable rather than a special case.
+ *
+ * Exported because it is also the honest answer to "what is this sweep going
+ * to do next?" for ops — ids only, never tenant data.
+ */
+export async function listBrokeragesDueForSweep(limit: number): Promise<number[]> {
+  const rows = await db
+    .select({ id: brokerages.id })
+    .from(brokerages)
+    .leftJoin(growSignalSweepCursors, eq(growSignalSweepCursors.brokerageId, brokerages.id))
+    .orderBy(sql`coalesce(${growSignalSweepCursors.lastEvaluatedAt}, timestamp 'epoch') asc`, asc(brokerages.id))
+    .limit(limit);
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Stamps ONLY last_evaluated_at (plus the run id) for a brokerage whose pass
+ * threw, so the failing tenant advances past itself in the durable ordering
+ * and cannot starve every brokerage behind it.
+ *
+ * Deliberately does not touch source_high_water_marks or
+ * last_full_evaluation_at: a failed pass proves nothing about what this
+ * brokerage's sources contain, so the next pass must still do a full
+ * evaluation rather than skip it as unchanged.
+ */
+async function touchBrokerageCursor(brokerageId: number, sweepRunId: string, now: Date): Promise<void> {
+  await db
+    .insert(growSignalSweepCursors)
+    .values({ brokerageId, lastEvaluatedAt: now, lastFullEvaluationAt: null, lastSweepRunId: sweepRunId, updatedAt: now })
+    .onConflictDoUpdate({
+      target: growSignalSweepCursors.brokerageId,
+      set: {
+        lastEvaluatedAt: sql`excluded.last_evaluated_at`,
+        lastSweepRunId: sql`excluded.last_sweep_run_id`,
+        updatedAt: sql`excluded.updated_at`,
+      },
+    });
 }
 
 /** One brokerage, under its own fresh ambient correlation context so every log line this pass emits carries one consistent id (matching lib/exceptions/engine.ts's scanBrokerageForExceptions). */
