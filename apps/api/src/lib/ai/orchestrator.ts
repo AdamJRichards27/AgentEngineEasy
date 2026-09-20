@@ -10,7 +10,8 @@ import { isRoleEnabled } from "./featureFlags.js";
 import { isRoleEntitled } from "./entitlements.js";
 import { logAiInteraction, logAiUsage } from "./audit.js";
 import { assertGrowRateLimit, GrowRateLimitError } from "./growRateLimiter.js";
-import { assertDailyAiCapNotReached, AiDailyCapExceededError } from "./dailyUsage.js";
+import { assertDailyAiLimitsNotReached, AiDailyCapExceededError } from "./dailyUsage.js";
+import { AiUsageLimitsNotConfiguredError } from "./usageLimits.js";
 import {
   buildCoachFocusAreas,
   buildCoachHeadline,
@@ -592,17 +593,20 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
     throw new AiEntitlementError("Grow-scoped Ask AE requires a Grow or Pro plan.");
   }
 
-  // AE GROW Pilot Readiness WP1 (P1-3) — durable per-brokerage daily AI request
-  // cap (TIER_CAPABILITIES.maxAiRequestsPerDay), counted from ai_interactions
-  // (see dailyUsage.ts). Applies to every askCopilot() caller (RUN Copilot,
-  // Grow Ask AE, Business Coach, appraisal market-position drafts), after the
-  // entitlement checks and before any tool run or provider call. context.tier
-  // is resolveBrokerageTier()'s answer (contextEngine.ts). A refused request is
-  // audited as blocked (never counted), mirroring the rate-limit branch above.
+  // AE GROW Pilot Readiness WP1 (P1-3), extended by the post-merge configurable-limits pass —
+  // durable daily AI request limits, counted from ai_interactions (see dailyUsage.ts) with the
+  // numbers resolved by lib/ai/usageLimits.ts. BOTH a per-user daily limit and a
+  // brokerage-level daily safety ceiling apply here, independently: a request is refused if it
+  // would exceed either. Applies to every askCopilot() caller (RUN Copilot, Grow Ask AE,
+  // Business Coach, appraisal market-position drafts), after the entitlement checks and before
+  // any tool run or provider call. context.tier is resolveBrokerageTier()'s answer
+  // (contextEngine.ts). A refused request is audited as blocked (never counted), mirroring the
+  // rate-limit branch above — as is a fail-closed configuration fault, which is an operator
+  // problem rather than a quota refusal and must be just as visible in the audit trail.
   try {
-    await assertDailyAiCapNotReached(input.brokerageId, context.tier);
+    await assertDailyAiLimitsNotReached({ brokerageId: input.brokerageId, userId: input.userId, tier: context.tier });
   } catch (err) {
-    if (err instanceof AiDailyCapExceededError) {
+    if (err instanceof AiDailyCapExceededError || err instanceof AiUsageLimitsNotConfiguredError) {
       await logAiInteraction({
         requestId,
         brokerageId: input.brokerageId,

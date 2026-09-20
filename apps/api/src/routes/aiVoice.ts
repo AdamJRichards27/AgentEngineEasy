@@ -7,7 +7,8 @@ import { requireAuth } from "../middlewares/auth.js";
 import { isRoleEnabled } from "../lib/ai/featureFlags.js";
 import { resolveBrokerageTier, isRoleEntitled } from "../lib/ai/entitlements.js";
 import type { AiRole, SubscriptionTier } from "../lib/ai/types.js";
-import { assertDailyAiCapNotReached, AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
+import { assertDailyAiLimitsNotReached, AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
+import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import {
   assertVoiceRateLimit,
@@ -212,17 +213,35 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
     return;
   }
 
-  // AE GROW Pilot Readiness WP1 (P1-3) — durable per-brokerage daily AI cap
-  // (lib/ai/dailyUsage.ts). Voice writes no durable per-request row of its own,
-  // so it is not itself counted; it is refused (before upload validation or any
-  // provider call) once the brokerage's durable Ask/Coach count for today has
-  // reached the tier cap, since the transcript's only use is as input to an
-  // Ask/Coach request that would itself be refused.
+  // AE GROW Pilot Readiness WP1 (P1-3) — durable daily AI limits
+  // (lib/ai/dailyUsage.ts). Voice still writes no durable per-request row of
+  // its own (unchanged by the post-merge configurable-limits pass — adding one
+  // would be a schema/product change, and the transcript is not itself an AI
+  // request against a model provider), so it is not itself counted; it is
+  // refused (before upload validation or any provider call) once the caller's
+  // OWN or their brokerage's durable Ask/Coach count for today has reached its
+  // limit, since the transcript's only use is as input to an Ask/Coach request
+  // that would itself be refused. The per-user scope is the one behavioural
+  // addition here: it falls straight out of passing the authenticated user id
+  // that this route already has, and without it a user at their personal limit
+  // would still be able to spend transcription budget on a question the very
+  // next call would refuse.
   try {
-    await assertDailyAiCapNotReached(authedUser.brokerageId, tier);
+    await assertDailyAiLimitsNotReached({ brokerageId: authedUser.brokerageId, userId: authedUser.id, tier });
   } catch (err) {
     if (err instanceof AiDailyCapExceededError) {
-      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier });
+      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier, scope: err.scope });
+      return;
+    }
+    // An operator configuration fault (a live provider approved with no configured allowance),
+    // not a client error and not a quota refusal — see lib/ai/usageLimits.ts.
+    if (err instanceof AiUsageLimitsNotConfiguredError) {
+      logger.error("voice_transcription_ai_usage_limits_unconfigured", {
+        brokerageId: authedUser.brokerageId,
+        missing: err.missing,
+        detail: err.message,
+      });
+      res.status(503).json({ error: "AI is not available right now. An administrator has been notified.", code: "AI_USAGE_LIMITS_NOT_CONFIGURED" });
       return;
     }
     logger.error("voice_transcription_daily_cap_check_failed", { error: err, brokerageId: authedUser.brokerageId });

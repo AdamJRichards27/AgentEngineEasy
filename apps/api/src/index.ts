@@ -15,6 +15,7 @@ import { assertCorsConfigured } from "./lib/cors.js";
 import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
 import { assertAuthEmailProviderConfigured } from "./lib/auth/email.js";
 import { assertApprovedLegalVersionsConfigured } from "./lib/auth/legalVersions.js";
+import { assertAiUsageLimitsConfigured } from "./lib/ai/usageLimits.js";
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
@@ -62,6 +63,17 @@ assertOperationalAlertsConfigured();
 assertApprovedLegalVersionsConfigured();
 assertDocumentStorageConfigured();
 assertESignProviderConfigured();
+
+// AE GROW post-merge hardening — same fail-closed shape as the checks above. A process
+// approved to send real brokerage/contact context to a real model provider
+// (LIVE_AI_PROVIDER_APPROVED=true) must not start until an operator has explicitly decided
+// BOTH the per-user daily allowance and the brokerage-level daily safety ceiling: the
+// provisional per-tier numbers in TIER_CAPABILITIES are technical safety defaults, not a
+// commercial allowance, and must never be reached for silently. A no-op in the pilot's
+// mock-provider default, which needs no new environment variables at all. See
+// lib/ai/usageLimits.ts for the variables, their accepted values, and the one explicit
+// escape hatch (AI_DAILY_CAP_ENFORCED=false), which is warned about rather than hidden.
+assertAiUsageLimitsConfigured(process.env, (event, detail) => logger.warn(event, detail));
 
 async function start(): Promise<void> {
 // AE GROW Pilot Readiness WP2a (P0-3): every timestamp column is
