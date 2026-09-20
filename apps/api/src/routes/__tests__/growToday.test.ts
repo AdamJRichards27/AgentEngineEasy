@@ -598,7 +598,18 @@ test("Rule F — invisible without grow.propertyIntelligence.read; once entitled
   assert.equal(cardsForSelena.length, 1, "the contact must still appear exactly once on Today, never twice");
 });
 
-test("Rule F — an Emerging-band signal never surfaces on Today (Rule D still fires normally for that contact), and Rules A-E ranking/ordering is unaffected by Rule F cards being mixed in", async () => {
+test("Rule F — an Emerging-band signal DOES surface on Today (as the weakest Keep Warm item), and Rules A-E ranking/ordering is unaffected by Rule F cards being mixed in", async () => {
+  // AE GROW "Brokerage-wide Signal Sweep" stage 3 — THIS TEST'S EXPECTATION
+  // WAS DELIBERATELY INVERTED.
+  //
+  // It previously asserted that an Emerging-band signal "must never be
+  // promoted onto Today, regardless of entitlement". That was the Priority 5
+  // Remediation behaviour, and it is the wrong product: the strategy is
+  // identifying and nurturing FUTURE SELLERS, including contacts with no
+  // obvious current signal — which is precisely what the Emerging band is.
+  // Filtering it left only a present-tense alert engine. Stage 3 surfaces the
+  // band, ranked low, instead of discarding it. See lib/growToday.ts's
+  // MAX_EMERGING_SIGNAL_ACTIONS comment.
   await grant(A.brokerageId, "grow.propertyIntelligence.read");
 
   const emergingPropertyId = await createProperty(A.agent.cookie, "21 Emerging Signal St");
@@ -608,18 +619,21 @@ test("Rule F — an Emerging-band signal never surfaces on Today (Rule D still f
     propertyId: emergingPropertyId,
     relationshipType: "owner",
   });
-  await db.insert(growOpportunitySignals).values({
-    brokerageId: A.brokerageId,
-    partyId: emergingPartyId,
-    propertyId: emergingPropertyId,
-    signalType: "long_ownership_tenure",
-    title: "Long ownership tenure",
-    explanation: "Emerging-band fixture; must never reach Today.",
-    evidence: { fixture: "ruleF-emerging" },
-    source: "internal",
-    confidenceBand: "Emerging",
-    dedupeKey: `rule-f-test-${suffix}-emerging`,
-  });
+  const [emergingSignal] = await db
+    .insert(growOpportunitySignals)
+    .values({
+      brokerageId: A.brokerageId,
+      partyId: emergingPartyId,
+      propertyId: emergingPropertyId,
+      signalType: "long_ownership_tenure",
+      title: "Long ownership tenure",
+      explanation: "Emerging-band fixture; stage 3 surfaces this as a quiet Keep Warm card.",
+      evidence: { fixture: "ruleF-emerging", approximateTenureYears: 5 },
+      source: "internal",
+      confidenceBand: "Emerging",
+      dedupeKey: `rule-f-test-${suffix}-emerging`,
+    })
+    .returning();
 
   // A fresh Do Now overdue-opportunity fixture, exactly like the very first
   // Rule A/B/C test in this file, run again here to prove the priority
@@ -641,16 +655,23 @@ test("Rule F — an Emerging-band signal never surfaces on Today (Rule D still f
 
   const { body } = await fetchToday(A.agent.cookie);
 
+  const emergingCard = body.priorityActions.find((a: any) => a.id === `signal:${emergingSignal.id}`);
+  assert.ok(emergingCard, "stage 3: an Emerging-band signal must surface — it is the future-seller population the strategy targets");
+  assert.equal(emergingCard.type, "property_intelligence_signal");
+  assert.equal(emergingCard.confidenceBand, "Emerging");
+  assert.equal(emergingCard.priority, "KeepWarm", "an Emerging signal is surfaced quietly, never as urgent work");
+  assert.ok(emergingCard.whyItMatters, "every surfaced signal must carry its explanation");
+  assert.ok(body.signalSummary.emergingSurfaced >= 1);
+
+  // Rule F still suppresses Rule D's generic nudge for the same contact — an
+  // Emerging signal is a more specific reason than "no contact recorded".
   assert.ok(
-    !body.priorityActions.some((a: any) => a.type === "property_intelligence_signal" && a.partyId === emergingPartyId),
-    "an Emerging-band signal must never be promoted onto Today, regardless of entitlement",
+    !body.priorityActions.some((a: any) => a.id === `relationship:${emergingRelationshipId}`),
+    "a surfaced Rule F card still supersedes the same contact's generic Rule D card",
   );
-  const emergingColdCard = body.priorityActions.find((a: any) => a.id === `relationship:${emergingRelationshipId}`);
-  assert.ok(emergingColdCard, "Rule D must still fire normally for a contact whose only signal is below Rule F's confidence bar");
-  assert.equal(emergingColdCard.priority, "KeepWarm");
 
   const doNowIndex = body.priorityActions.findIndex((a: any) => a.id === `opportunity:${doNowOppId}`);
-  const keepWarmIndex = body.priorityActions.findIndex((a: any) => a.id === `relationship:${emergingRelationshipId}`);
+  const keepWarmIndex = body.priorityActions.findIndex((a: any) => a.id === `signal:${emergingSignal.id}`);
   assert.ok(doNowIndex !== -1 && keepWarmIndex !== -1);
   assert.ok(doNowIndex < keepWarmIndex, "DoNow items must still sort ahead of KeepWarm items with Rule F in play");
   for (let i = 1; i < body.priorityActions.length; i++) {
