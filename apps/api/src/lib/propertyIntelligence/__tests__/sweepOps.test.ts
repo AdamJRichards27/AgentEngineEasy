@@ -150,6 +150,53 @@ async function clearRunningRows(): Promise<void> {
     .where(eq(growSignalSweepRuns.status, "RUNNING"));
 }
 
+/*
+ * The sweep's single-flight advisory lock (0x41455351, 1) is DATABASE-wide, not
+ * process-wide. The test runner gives each test FILE its own process, but those
+ * processes share one database, and several other suites trigger sweeps -- the
+ * ops route suite does it over HTTP. So a sibling suite can legitimately hold
+ * the lock at the instant one of these tests wants it.
+ *
+ * That is the single-flight guarantee working correctly, not a defect, but it
+ * made two assumptions in this file flaky: "the lock must be free right now"
+ * and "my sweep must have run". Both now retry briefly instead of asserting
+ * exclusivity on first try. The retries are bounded and fail loudly, so a
+ * genuine leak -- the P0 this file exists to catch -- still fails the suite
+ * rather than hanging.
+ */
+const LOCK_CONTENTION_ATTEMPTS = 40;
+const LOCK_CONTENTION_WAIT_MS = 50;
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Takes the sweep lock for a test, waiting out a sibling suite that holds it. */
+async function acquireSweepLockForTest(): Promise<() => Promise<void>> {
+  for (let attempt = 0; attempt < LOCK_CONTENTION_ATTEMPTS; attempt += 1) {
+    const release = await tryHoldSignalSweepLockForTests();
+    if (release) return release;
+    await pause(LOCK_CONTENTION_WAIT_MS);
+  }
+  throw new Error(
+    `The sweep advisory lock was still held after ${LOCK_CONTENTION_ATTEMPTS} attempts. ` +
+      "Either a sibling suite is sweeping for an unusually long time, or the lock has genuinely leaked.",
+  );
+}
+
+/** Runs a sweep that must actually happen, waiting out transient lock refusals. */
+async function sweepExclusively(options: Parameters<typeof runSignalSweep>[1]): Promise<Extract<Awaited<ReturnType<typeof runSignalSweep>>, { ok: true }>> {
+  let last: Awaited<ReturnType<typeof runSignalSweep>> | undefined;
+  for (let attempt = 0; attempt < LOCK_CONTENTION_ATTEMPTS; attempt += 1) {
+    last = await runSignalSweep("MANUAL", options);
+    if (last.ok) return last;
+    await pause(LOCK_CONTENTION_WAIT_MS);
+  }
+  throw new Error(
+    `The sweep never acquired its lock after ${LOCK_CONTENTION_ATTEMPTS} attempts` +
+      (last && !last.ok && "skippedReason" in last ? ` (last skippedReason: ${String(last.skippedReason)})` : "") +
+      ".",
+  );
+}
+
 /* ---------------------------------------------------------------------
  * H-1 (P0) — the suspected lock leak must be ALERTABLE, not just logged.
  *
@@ -162,8 +209,7 @@ async function clearRunningRows(): Promise<void> {
 
 test("H-1 — a held lock with no RUNNING row, repeated to the threshold, dispatches exactly one GROW_SIGNAL_SWEEP_UNHEALTHY alert", async () => {
   await clearRunningRows();
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release, "the lock must be free at the start of this test");
+  const release = await acquireSweepLockForTest();
   try {
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS; attempt += 1) {
       const refused = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
@@ -186,8 +232,7 @@ test("H-1 — a held lock with no RUNNING row, repeated to the threshold, dispat
 
 test("H-1 — the ordinary race (a single orphaned refusal below the threshold) alerts nobody", async () => {
   await clearRunningRows();
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release, "the lock must be free at the start of this test");
+  const release = await acquireSweepLockForTest();
   try {
     // One below the threshold: this is the documented, expected case — the
     // holder inserts its run row a moment after taking the lock.
@@ -205,8 +250,7 @@ test("H-1 — a refusal while a sweep really IS running is the expected outcome 
   // A genuine RUNNING row present: this is not a leak at all.
   await clearRunningRows();
   const [runningRow] = await db.insert(growSignalSweepRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release);
+  const release = await acquireSweepLockForTest();
   try {
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS + 2; attempt += 1) {
       const refused = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
@@ -231,8 +275,7 @@ test("H-1 — a refusal while a sweep really IS running is the expected outcome 
 
 test("H-6 — orphaned-lock refusals are counted by kind, separately from property_signal_sweep_total's skipped_locked", async () => {
   await clearRunningRows();
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release);
+  const release = await acquireSweepLockForTest();
   try {
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS; attempt += 1) {
       await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
@@ -259,8 +302,7 @@ test("H-6 — orphaned-lock refusals are counted by kind, separately from proper
 
 test("H-6 — no new sweep metric series carries a tenant identifier", async () => {
   await clearRunningRows();
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release);
+  const release = await acquireSweepLockForTest();
   try {
     await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
   } finally {
@@ -283,8 +325,7 @@ test("H-6 — no new sweep metric series carries a tenant identifier", async () 
 test("H-6 — property_signal_outcome_total{outcome=\"expired\"} is no longer a dead label", async () => {
   // The number was computed (summary.signalsExpired) and discarded before
   // this slice, so this series never existed at all.
-  const result = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId], force: true });
-  assert.equal(result.ok, true);
+  const result = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
 
   const rendered = renderMetricsText();
   assert.ok(
@@ -415,6 +456,5 @@ test("fixture sanity — the test brokerage is sweepable", async () => {
     .values({ brokerageId: A.brokerageId, agentId: A.admin.user.id, formattedAddress: `1 Ops Health St ${suffix}`, state: "NSW", suburb: "Testville", postcode: "2000" })
     .returning({ id: properties.id });
   assert.ok(party.id > 0 && property.id > 0);
-  const result = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId], force: true });
-  assert.equal(result.ok, true);
+  const result = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
 });
