@@ -147,6 +147,23 @@ export const METRIC_DEFINITIONS = {
     help: "An integration connection's health check or dispatch path reported degraded/unavailable provider behaviour (distinct from a single failed webhook/outbox item — this tracks sustained provider-side degradation).",
     labels: { provider: ["mock_portal_v1", "mock_sms_v1", "mock_payment_status_v1", "other"] },
   },
+  // AE GROW "Brokerage-wide Signal Sweep" stage 1. Three metrics, all with
+  // tiny closed label sets — never a brokerageId, partyId, propertyId,
+  // dedupeKey or rule name, so a tenant with a million contacts adds exactly
+  // zero series. Per-brokerage detail belongs in the structured run log and
+  // the grow_signal_sweep_runs row, not in a metric label.
+  property_signal_sweep_total: {
+    help: "Brokerage-wide Property Intelligence signal sweeps attempted, by trigger and terminal outcome. `skipped_locked` means another sweep already held the single-flight advisory lock (expected, not an error).",
+    labels: { trigger: ["SCHEDULED", "MANUAL"], outcome: ["completed", "failed", "skipped_locked"] },
+  },
+  property_signal_sweep_duration_ms: {
+    help: "Duration in milliseconds of a completed or failed brokerage-wide Property Intelligence signal sweep, by trigger.",
+    labels: { trigger: ["SCHEDULED", "MANUAL"] },
+  },
+  property_signal_outcome_total: {
+    help: "Property Intelligence signals written by a sweep, by outcome. `re_raised` counts human-decided signals returned to Active under the bounded re-review policy; `suppressed` counts candidates withheld by the contactability filter (never raised, never surfaced, never contacted).",
+    labels: { outcome: ["created", "updated", "re_raised", "expired", "suppressed"] },
+  },
   financial_reconciliation_variance_total: {
     help: "A financial_reconciliations row was recorded with status VARIANCE — reported evidence (e.g. a mock payment-status webhook) disagrees with the payment request's expected amount/currency and needs human review (see FIN05_RECONCILIATION_VARIANCE_UNRESOLVED).",
     labels: { source: ["mock_integration_payment_status", "other"] },

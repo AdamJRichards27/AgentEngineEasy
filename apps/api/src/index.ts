@@ -18,6 +18,7 @@ import { assertApprovedLegalVersionsConfigured } from "./lib/auth/legalVersions.
 import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
+import { registerSignalSweep } from "./lib/propertyIntelligence/sweepBootstrap.js";
 import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
@@ -94,6 +95,15 @@ registerAutomationEngine();
 // requirement as registerAutomationEngine() above, for the same reason (no
 // canonical event fired between boot and registration should be missed).
 registerExceptionEngine();
+
+// AE GROW "Brokerage-wide Signal Sweep" (stage 1). Starts the periodic,
+// single-flighted Property Intelligence signal sweep — no event handlers,
+// so it has no ordering requirement relative to configureEvents(), but it
+// is registered here alongside the other schedulers so every background
+// engine is wired in one place. Never starts under NODE_ENV=test, and can
+// be disabled entirely with GROW_SIGNAL_SWEEP_ENABLED=false (see
+// lib/propertyIntelligence/sweep.ts's sweepConfig() for every variable).
+registerSignalSweep();
 
 // Agent Engine 2.0 — Property Launch & Campaign Coordination. Registers
 // the AGENCY_AGREEMENT_SIGNED auto-propose handler — same ordering

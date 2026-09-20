@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -68,7 +68,26 @@ export const growRelationships = pgTable("grow_relationships", {
   createdBy: integer("created_by").references(() => users.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // AE GROW "Brokerage-wide Signal Sweep" stage 1. This table had NO indexes
+  // at all before; every index below serves a query that already exists.
+  //
+  // Both internal signal rules (long_ownership_tenure, past_buyer_interest)
+  // and Grow Today Rule D read exactly (brokerage_id, status='Active') and
+  // then discriminate on relationship_type — so the sweep's brokerage-wide
+  // set query and Rule D's per-brokerage read share one index instead of
+  // sequential-scanning the whole tenant-mixed table.
+  brokerageStatusTypeIdx: index("grow_relationships_brokerage_status_type_idx").on(table.brokerageId, table.status, table.relationshipType),
+  // The sweep's per-brokerage change-detection probe is
+  // `select max(updated_at) where brokerage_id = $1` — an index-only
+  // backwards scan of one brokerage's slice rather than a full table scan
+  // on every tick. This is what makes a steady-state sweep cheap.
+  brokerageUpdatedAtIdx: index("grow_relationships_brokerage_updated_at_idx").on(table.brokerageId, table.updatedAt),
+  // Contact-anchored evaluation (a property-less relationship belongs to a
+  // party, not a property) and the Contact 360 / Relationship Timeline reads.
+  brokeragePartyIdx: index("grow_relationships_brokerage_party_idx").on(table.brokerageId, table.partyId),
+}));
 
 export const GROW_ACTIVITY_TYPES = [
   "call",
@@ -101,7 +120,17 @@ export const growActivities = pgTable("grow_activities", {
   source: text("source").notNull().default("manual"),
   sourceId: text("source_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // Grow Today reads every activity for a brokerage and folds it down to a
+  // last-activity-per-party map (lib/growToday.ts). Leading with
+  // (brokerage_id, party_id, occurred_at) turns that from a full scan of a
+  // tenant-mixed table into one brokerage's slice in party/recency order.
+  brokeragePartyOccurredIdx: index("grow_activities_brokerage_party_occurred_idx").on(table.brokerageId, table.partyId, table.occurredAt),
+  // grow_activities is append-only (no updated_at), so recorded_at is its
+  // mutation high-water mark for the sweep's change-detection probe.
+  brokerageRecordedAtIdx: index("grow_activities_brokerage_recorded_at_idx").on(table.brokerageId, table.recordedAt),
+}));
 
 // A structured, explainable potential business outcome - never just an unexplained score.
 export const growOpportunities = pgTable("grow_opportunities", {
@@ -132,7 +161,21 @@ export const growOpportunities = pgTable("grow_opportunities", {
   closedAt: timestamp("closed_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // The past_buyer_interest rule asks "does this (party, property) already
+  // have an opportunity?" — previously one SELECT per candidate relationship
+  // against an unindexed table. The set-based rewrite does it as a single
+  // anti-join per brokerage, which needs exactly this composite.
+  brokeragePartyPropertyIdx: index("grow_opportunities_brokerage_party_property_idx").on(table.brokerageId, table.partyId, table.propertyId),
+  // Grow Today Rules A/B/C read (brokerage_id, status='Open') on every
+  // request; promoteSignal and the Opportunities surface read the same slice.
+  brokerageStatusIdx: index("grow_opportunities_brokerage_status_idx").on(table.brokerageId, table.status),
+  // The sweep's change-detection probe: a new or edited opportunity can
+  // retire a past_buyer_interest signal, so opportunities are one of the
+  // sources whose high-water mark decides whether a brokerage is re-evaluated.
+  brokerageUpdatedAtIdx: index("grow_opportunities_brokerage_updated_at_idx").on(table.brokerageId, table.updatedAt),
+}));
 
 export const insertGrowRelationshipSchema = createInsertSchema(growRelationships).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertGrowActivitySchema = createInsertSchema(growActivities).omit({ id: true, createdAt: true });

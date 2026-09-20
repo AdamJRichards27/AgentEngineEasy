@@ -129,7 +129,43 @@ export function createSafePool(
 
 export const pool = createSafePool(process.env.DATABASE_URL);
 
-export const db = drizzle(pool, { schema });
+/**
+ * AE GROW "Brokerage-wide Signal Sweep" stage 1 — optional statement
+ * observer.
+ *
+ * The sweep's central design claim is that it issues a BOUNDED number of
+ * statements per brokerage regardless of how many candidates that brokerage
+ * has (set queries + batched upserts, never a SELECT+UPDATE per candidate).
+ * That claim is only worth making if it is asserted, so this package exposes
+ * one pluggable observer that drizzle calls once per statement it issues.
+ *
+ * No observer is installed by default and the hook is a single optional call
+ * through a module-local binding, so the production cost is nil. Statements
+ * issued directly on `db.$client` (the sweep's dedicated advisory-lock
+ * connection) are NOT seen here — those are a fixed two per run by
+ * construction, which is exactly why they need no instrumentation.
+ */
+export type DbQueryObserver = (query: string, params: unknown[]) => void;
+
+let dbQueryObserver: DbQueryObserver | null = null;
+
+/** Installs an observer and returns its uninstall function (restoring whatever was installed before). */
+export function setDbQueryObserver(observer: DbQueryObserver | null): () => void {
+  const previous = dbQueryObserver;
+  dbQueryObserver = observer;
+  return () => {
+    dbQueryObserver = previous;
+  };
+}
+
+export const db = drizzle(pool, {
+  schema,
+  logger: {
+    logQuery(query: string, params: unknown[]): void {
+      dbQueryObserver?.(query, params);
+    },
+  },
+});
 
 /**
  * AE GROW Pilot Readiness WP2a — the migration journal shipped with this

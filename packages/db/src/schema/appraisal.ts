@@ -1,4 +1,5 @@
-import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { properties, parties } from "./property";
@@ -105,7 +106,35 @@ export const appraisals = pgTable("appraisals", {
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+},
+(table) => ({
+  // AE GROW "Brokerage-wide Signal Sweep" stage 1. This table had NO indexes
+  // besides its primary key and share_token.
+  //
+  // NOTE ON SCOPING: `appraisals` deliberately carries no brokerage_id — it
+  // is tenant-scoped only through properties.property_id -> properties
+  // .brokerage_id (see this file's own header). So the brokerage-scoped
+  // sweep/Grow Today queries are joins driven from properties, and the
+  // useful appraisal-side index is therefore property-leading, not
+  // brokerage-leading. properties.brokerage_id is indexed by this same
+  // migration so the driving side of that join is cheap too.
+  //
+  // stale_previous_appraisal, FOLLOW_UP branch, and Grow Today Rule E
+  // (appraisal follow-ups due) both read exactly status='FOLLOW_UP' with a
+  // follow_up_at comparison, per property.
+  propertyFollowUpIdx: index("appraisals_property_follow_up_idx")
+    .on(table.propertyId, table.followUpAt)
+    .where(sql`${table.status} = 'FOLLOW_UP'`),
+  // stale_previous_appraisal, DEFERRED branch.
+  propertyDeferredOutcomeIdx: index("appraisals_property_deferred_outcome_idx")
+    .on(table.propertyId, table.outcomeAt)
+    .where(sql`${table.outcome} = 'DEFERRED'`),
+  // The sweep's change-detection probe for this source. Probed as
+  // `max(appraisals.updated_at)` over one brokerage's properties, so the
+  // property-leading composite lets Postgres take the max per property from
+  // the index rather than reading appraisal rows.
+  propertyUpdatedAtIdx: index("appraisals_property_updated_at_idx").on(table.propertyId, table.updatedAt),
+}));
 
 /**
  * Sec.10 - Comparable property (manual first, Priority 5 provider-injection
