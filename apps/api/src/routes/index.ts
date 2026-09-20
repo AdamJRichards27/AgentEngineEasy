@@ -18,6 +18,7 @@ import { aiVoiceRouter } from "./aiVoice.js";
 import { billingRouter } from "./billing.js";
 import { growRouter } from "./grow.js";
 import { contactsRouter } from "./contacts.js";
+import { growConsentRouter } from "./growConsent.js";
 import { growAiActionsRouter } from "./growAiActions.js";
 import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
@@ -93,6 +94,16 @@ apiRouter.use("/grow", growRouter);
 // so the two read as one Grow surface in this file, even though they're separate router objects
 // for file-size/organisation reasons only.
 apiRouter.use("/grow/contacts", contactsRouter);
+// AE GROW Priority 6 Stage F2 step 2 — the consent/DNCR/suppression write
+// routes F2 step 1 deliberately deferred ("No route is required for this
+// step"), leaving every state writer in lib/consentControlsPersistence.ts
+// without a non-test caller and the Do Not Contact control inert. Mounted on
+// "/grow" rather than "/grow/contacts" because this router's paths span both
+// /grow/contacts/:partyId/... and /grow/consent/policies, and neither
+// growRouter nor contactsRouter declares a route those can collide with; both
+// of those routers gate per route rather than with a blanket router.use, so
+// nothing here is intercepted before it is reached. See routes/growConsent.ts.
+apiRouter.use("/grow", growConsentRouter);
 // AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
 // Actions. Same "separate router object for file-size/organisation
 // reasons only" pattern as contactsRouter immediately above — this is a
