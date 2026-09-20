@@ -1,7 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch } from "../lib/api";
 import { AskAgentEngine } from "../components/AskAgentEngine";
+// AE GROW Completion W2-B (G-4) — the shared loading/failed/empty region
+// presentation (components/GrowDataRegion.tsx). Named for Grow because that is
+// where it was first needed; the failure it prevents is not Grow-specific.
+import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 
 // AE GROW Priority 0.5 — Workstream 5 (Grow "Today" preparation: architecture only, no UX built,
 // no behaviour changed on this page). This is RUN's existing Home/Dashboard page, reading RUN's
@@ -63,10 +67,11 @@ function formatDate(iso: string): string {
 // summary of the same counts the sections below spell out in full;
 // everything comes from one GET /home/summary call (lib/homeSummary.ts).
 export default function Home() {
-  const { data, isLoading, isError, error } = useQuery({
+  const summary = useQuery({
     queryKey: ["home-summary"],
     queryFn: () => apiFetch<HomeSummaryResponse>("/home/summary"),
   });
+  const { data, isLoading, isError } = summary;
 
   const hasNothingUrgent =
     !isLoading && !isError && (data?.exceptions.length ?? 0) === 0 && (data?.nextActions.length ?? 0) === 0;
@@ -83,8 +88,19 @@ export default function Home() {
 
       <AskAgentEngine contextType="business" contextId={null} />
 
-      {isLoading && <p className="muted">Loading…</p>}
-      {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+      {/* AE GROW Completion W2-B (G-4/G-5): the error branch used to be
+          `(error as ApiError).friendly` — the literal string "undefined" for
+          any failure that is not an ApiError — with no retry. */}
+      {(isLoading || isError) && (
+        <GrowDataRegionStatus
+          query={summary}
+          itemCount={undefined}
+          loadingMessage="Loading…"
+          errorFallback="Couldn't load your dashboard."
+          emptyMessage="Nothing to show yet."
+          onRetry={() => void summary.refetch()}
+        />
+      )}
 
       {!isLoading && !isError && (
         <>
