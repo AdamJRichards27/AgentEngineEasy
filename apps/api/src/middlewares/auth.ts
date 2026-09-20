@@ -63,7 +63,13 @@ export async function loadSession(req: Request, res: Response, next: NextFunctio
     // session-forgery attempts) — a request with no cookie at all is
     // ordinary unauthenticated traffic (most webhook/public routes) and
     // must not inflate this counter. See docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
-    if (token) incrementCounter("auth_security_event_total", { event: "invalid_session_token" });
+    if (token) {
+      incrementCounter("auth_security_event_total", { event: "invalid_session_token" });
+      // AE GROW Pilot Readiness: the counter alone cannot be correlated with a
+      // user's report ("I was signed out"), so record the shape of the failure
+      // — never the token itself, and no PII.
+      logger.warn("load_session_token_rejected", { correlationId: req.correlationId });
+    }
     next();
     return;
   }
@@ -95,6 +101,16 @@ export async function loadSession(req: Request, res: Response, next: NextFunctio
   // as the isActive/brokerageId checks already do below.
   if (row && row.isActive && row.brokerageId && row.sessionEpoch === verified.epoch) {
     req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
+  } else if (!row || !row.isActive || !row.brokerageId) {
+    // AE GROW Pilot Readiness: this branch was completely silent, so a
+    // cryptographically valid session that stopped resolving produced a bare
+    // 401 with nothing in the logs to explain it — the hardest possible thing
+    // to support during a pilot, and the reason a long-standing intermittent
+    // 401 in the test suite resisted diagnosis. Ids only, never PII.
+    logger.warn("load_session_user_unusable", {
+      userId: verified.uid,
+      reason: !row ? "user_row_missing" : !row.isActive ? "user_inactive" : "user_without_brokerage",
+    });
   } else if (row && row.sessionEpoch !== verified.epoch) {
     // A cryptographically valid, non-expired token whose embedded epoch
     // is stale — exactly the "captured via XSS, replayed after the
