@@ -22,6 +22,13 @@
 //      scheduledAt pushed to the window's end; dispatchDueMessages() (the
 //      boot-time scheduler) picks it up later.
 //   8. Otherwise dispatch immediately: QUEUED/RETRY_SCHEDULED -> SENDING.
+//   8a. AE GROW W1-A (A-3): dispatchMessage() re-runs the step 5 consent
+//      check itself, immediately before SENDING, for every dispatched
+//      channel. Steps 1-7 only run on the enqueue path; the boot-time sweep
+//      dispatchDueMessages() calls dispatchMessage() directly, so a message
+//      deferred past quiet hours or waiting out a retry backoff would
+//      otherwise be delivered on a consent decision made minutes or hours
+//      earlier. Blocks to BLOCKED_BY_CONSENT, same as step 5.
 //   9. Call the provider-neutral adapter (Sections 17-18).
 //  10. Record a communicationDeliveryAttempts row — append-only, one per
 //      attempt, never edited.
@@ -37,7 +44,8 @@
 // AE GROW PRIORITY 3: this send path (queueMessage -> evaluateAndDispatch-
 // QueuedMessage -> dispatchMessage) is the SOLE place sandboxEmailProvider/
 // sandboxSmsProvider are ever called — steps 5/6/7 above (consent, cost
-// control, quiet hours) run unconditionally before either provider is
+// control, quiet hours) plus step 8a's dispatch-time consent re-check run
+// unconditionally before either provider is
 // reached, for every EMAIL/SMS message regardless of whether it is
 // property-first or contact-first (these gates key on channel/destination/
 // classification, never on propertyId/partyId), so no separate contact-
@@ -329,6 +337,14 @@ export async function evaluateAndDispatchQueuedMessage(
   }
 
   const dispatched = await dispatchMessage(messageId, brokerageId);
+  // AE GROW W1-A (A-3): dispatchMessage now runs its own consent re-check,
+  // so it can hand back a BLOCKED_BY_CONSENT message even on this path (a
+  // withdrawal that lands between the check above and the dispatch below).
+  // Report that honestly rather than claiming `dispatched: true` for a
+  // message that never reached a provider.
+  if (dispatched.status === "BLOCKED_BY_CONSENT") {
+    return { message: dispatched, blocked: true, blockedReason: dispatched.failureDetail, dispatched: false };
+  }
   return { message: dispatched, blocked: false, blockedReason: null, dispatched: true };
 }
 
@@ -341,6 +357,48 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
   }
 
   const channel = existing.channel as CommunicationChannel;
+
+  // AE GROW W1-A (A-3): the consent gate used to run ONLY at step 5, inside
+  // evaluateAndDispatchQueuedMessage. Two paths reach a provider without
+  // passing through it again, and on both of them arbitrary time elapses
+  // between that check and the send:
+  //
+  //   * a message deferred past quiet hours (step 7) stays QUEUED with a
+  //     future scheduledAt, and dispatchDueMessages() below then calls this
+  //     function directly when the window closes;
+  //   * a RETRY_SCHEDULED message waits out its backoff (up to 30 minutes
+  //     per attempt) and is likewise picked up by that same sweep.
+  //
+  // If consent is withdrawn in that interval — a STOP reply landing on
+  // webhooks.ts's applyOptOut, or a staff member revoking marketing opt-in —
+  // the old code delivered anyway. Re-checking here makes this function, the
+  // sole caller of both sandbox providers, fail closed on its own rather
+  // than trusting a decision some earlier caller may have made long ago.
+  // Reuses the existing BLOCKED_BY_CONSENT status and CONSENT_BLOCKED
+  // failure category, so a message blocked at dispatch is indistinguishable
+  // from one blocked at enqueue and requeues through the same path.
+  if (isDispatchedChannel(channel)) {
+    const consentResult = await checkConsent(
+      brokerageId,
+      channel,
+      existing.recipientDestination!,
+      existing.classification as CommunicationClassification,
+    );
+    if (!consentResult.allowed) {
+      const blocked = await applyMessageTransition({
+        messageId,
+        brokerageId,
+        toStatus: "BLOCKED_BY_CONSENT",
+        expectedVersion: existing.version,
+        actorUserId: null,
+        patch: { failureCategory: "CONSENT_BLOCKED", failureDetail: consentResult.reason },
+        auditAction: "communication_message_blocked_by_consent",
+      });
+      await publishCommunicationEvent("COMMUNICATION_MESSAGE_BLOCKED", blocked, null);
+      return blocked;
+    }
+  }
+
   const sending = await applyMessageTransition({
     messageId,
     brokerageId,
@@ -462,7 +520,7 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
  * every brokerage — this is a system-wide background sweep, not a
  * per-tenant read.
  */
-export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dispatchedCount: number; errorCount: number }> {
+export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dispatchedCount: number; blockedCount: number; errorCount: number }> {
   const due = await db
     .select()
     .from(communicationMessages)
@@ -475,15 +533,22 @@ export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dis
     );
 
   let dispatchedCount = 0;
+  // AE GROW W1-A (A-3): a message this sweep picks up can now come back
+  // BLOCKED_BY_CONSENT (consent withdrawn while it sat deferred past quiet
+  // hours or waiting out a retry backoff). That is a successful, deliberate
+  // non-send, not a dispatch and not an error — counting it as either would
+  // misreport the sweep.
+  let blockedCount = 0;
   let errorCount = 0;
   for (const message of due) {
     try {
-      await dispatchMessage(message.id, message.brokerageId);
-      dispatchedCount++;
+      const result = await dispatchMessage(message.id, message.brokerageId);
+      if (result.status === "BLOCKED_BY_CONSENT") blockedCount++;
+      else dispatchedCount++;
     } catch (err) {
       errorCount++;
       logger.error("communications_dispatch_due_failed", { messageId: message.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return { dispatchedCount, errorCount };
+  return { dispatchedCount, blockedCount, errorCount };
 }
