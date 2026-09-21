@@ -1,23 +1,35 @@
 import { Router } from "express";
-import { and, desc, eq, ilike, inArray, or } from "drizzle-orm";
+import { and, desc, eq, gt, ilike, inArray, isNull, lte, or } from "drizzle-orm";
 import {
   db,
   growActivities,
   growCommitments,
+  growConsentDecisions,
+  growConsentPolicyVersions,
+  growContactChannelConsents,
+  growContactChannelSuppressions,
+  growContactDncrStatuses,
   growContactRelationships,
   growContactRoles,
   growOpportunities,
   growRelationships,
   parties,
   properties,
+  GROW_CONSENT_CHANNELS,
   GROW_CONTACT_ROLES,
   GROW_CONTACT_RELATIONSHIP_TYPES,
+  type GrowConsentChannel,
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
 import { logAudit } from "../lib/audit.js";
+// AE GROW Completion W3-A (A-6) — Contact 360's contactability read model. See
+// buildContactability() below for why these three imports and no others.
+import { isWithinConsentHours } from "../lib/consentControls.js";
+import { evaluateConsentDecisionReadOnly } from "../lib/consentControlsPersistence.js";
+import { PHONE_CALL_CONSENT_PURPOSE, PHONE_CALL_CONSENT_SCOPE } from "../lib/telephony/eligibility.js";
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
 //
@@ -149,6 +161,389 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
   });
 });
 
+/* =====================================================================
+ * AE GROW Completion W3-A (A-6) — Contact 360's contactability read model.
+ *
+ * WHY THIS EXISTS. The F2 consent/DNC engine has been complete for some time
+ * — five append-only tables (schema/consentControls.ts), a strict fail-closed
+ * evaluator with 28 reason codes (lib/consentControls.ts), a persistence
+ * boundary (lib/consentControlsPersistence.ts) and, since PR #52, HTTP writers
+ * (routes/growConsent.ts). What it never had was a place a human could SEE it.
+ * Contact 360's response carried zero consent, DNC, suppression or
+ * contactability fields, so the only way to learn why a contact could not be
+ * emailed was to read the database. This block is that read model.
+ *
+ * THIS READ WRITES NOTHING, AND THAT IS A DELIBERATE DEPARTURE FROM AN
+ * EXISTING DEFECT. GET /grow/calls/contacts/:partyId/eligibility calls the
+ * MUTATING evaluator, so every UI poll takes a brokerage advisory lock and
+ * appends a grow_consent_decisions row — a read that manufactures enforcement
+ * evidence. This block calls evaluateConsentDecisionReadOnly() instead, which
+ * is the library's own presentation path: identical current-state lookups
+ * (latestConsent / policyFor / latestDncr / latestSuppression) and the identical
+ * pure evaluator, with no decision row, no audit row and no advisory lock.
+ * routes/__tests__/contactability.test.ts asserts that N reads of this endpoint
+ * add zero grow_consent_decisions rows and hold no consent advisory lock.
+ *
+ * WHY THE EVALUATOR AND NOT A SECOND RESOLVER. Every row this block renders is
+ * already in memory from the three history queries below, so the decisions
+ * could have been computed without another round trip. They deliberately are
+ * not: "current row" in this model means serial-id append order plus, for a
+ * suppression, effective_at <= now, and inventing a third implementation of
+ * that rule is exactly the drift lib/propertyIntelligence/contactability.ts
+ * documents itself having already suffered. The evaluator stays the single
+ * definition; this file only presents what it returns. The cost is one
+ * evaluator call per channel — a fixed five, issued in parallel and
+ * independent of how much consent history a contact has — which is the price
+ * of having one implementation of "current" rather than two.
+ *
+ * THE PILOT STATE IS RENDERED HONESTLY, NOT WORKED AROUND. No consent policy
+ * row is approved: timeZone and the allowed/quiet hours are deliberately null
+ * pending AU/NZ legal sign-off, and with them unset the evaluator correctly
+ * returns POLICY_INVALID_WINDOW -> REVIEW_REQUIRED. Nothing here seeds,
+ * defaults or infers a policy, and nothing here fabricates an ELIGIBLE state.
+ * The block instead reports the inputs that produce that answer — which policy
+ * versions are in force, whether any of them actually defines a calling window
+ * (awaitingPolicyApproval), and the per-channel reason code — so the screen can
+ * explain WHY a channel is unavailable rather than showing a bare failure.
+ * ===================================================================*/
+
+/** Consent/DNC/suppression events returned for the audit history, newest first. */
+const CONTACTABILITY_HISTORY_LIMIT = 200;
+
+/** Recorded enforcement decisions scanned to find the latest one per channel. */
+const CONTACTABILITY_DECISION_SCAN_LIMIT = 100;
+
+/**
+ * The (purpose, scope) pair a channel is evaluated with when the contact has
+ * NO recorded consent stream on that channel at all.
+ *
+ * This is a label, not a policy choice, and it cannot change any answer: with
+ * zero consent rows for the channel the evaluator exits at its `!consent`
+ * guard with UNKNOWN_CONSENT whatever pair it is handed. It exists so the
+ * response can name the stream an evaluation refers to instead of reporting a
+ * decision with no subject. When the contact DOES have recorded streams the
+ * pair is taken from the recorded row and this map is not consulted.
+ *
+ * PHONE_CALL reuses lib/telephony/eligibility.ts's canonical pair rather than
+ * restating it, so the reason this screen shows for "why can't I call" is the
+ * same stream the outbound call boundary itself evaluates.
+ */
+const CHANNEL_PROBE_STREAM: Record<GrowConsentChannel, { purpose: string; scope: string }> = {
+  PHONE_CALL: { purpose: PHONE_CALL_CONSENT_PURPOSE, scope: PHONE_CALL_CONSENT_SCOPE },
+  EMAIL: { purpose: "EMAIL", scope: "OUTBOUND" },
+  SMS: { purpose: "SMS", scope: "OUTBOUND" },
+  VOICE_CALL: { purpose: "VOICE_CALL", scope: "OUTBOUND" },
+  EXTERNAL_MESSAGE: { purpose: "EXTERNAL_MESSAGE", scope: "OUTBOUND" },
+};
+
+type ConsentRow = typeof growContactChannelConsents.$inferSelect;
+type DncrRow = typeof growContactDncrStatuses.$inferSelect;
+type SuppressionRow = typeof growContactChannelSuppressions.$inferSelect;
+
+const iso = (value: Date | null): string | null => (value === null ? null : value.toISOString());
+
+/**
+ * One (channel, purpose, scope) stream's head. `evidence` and
+ * `relationshipEvidence` are deliberately NOT returned: they are free-form
+ * jsonb an importer may have filled with arbitrary third-party payload, and
+ * Contact 360 needs the evidence REFERENCE, not the evidence blob. Whether a
+ * payload exists is reported so the screen can say so.
+ */
+function consentStreamView(row: ConsentRow) {
+  return {
+    consentId: row.id,
+    channel: row.channel,
+    purpose: row.purpose,
+    scope: row.scope,
+    state: row.state,
+    source: row.source,
+    captureMethod: row.captureMethod,
+    jurisdiction: row.jurisdiction,
+    capturedAt: row.capturedAt.toISOString(),
+    expiresAt: iso(row.expiresAt),
+    reviewAt: iso(row.reviewAt),
+    evidenceReference: row.evidenceReference,
+    hasEvidencePayload: row.evidence !== null,
+    inferredReasoning: row.inferredReasoning,
+    notRequiredJustification: row.notRequiredJustification,
+    withdrawnAt: iso(row.withdrawnAt),
+    withdrawnByUserId: row.withdrawnByUserId,
+    withdrawalReason: row.withdrawalReason,
+    supersedesConsentId: row.supersedesConsentId,
+    recordedByUserId: row.recordedByUserId,
+    recordedAt: row.createdAt.toISOString(),
+  };
+}
+
+function dncrView(row: DncrRow) {
+  return {
+    dncrStatusId: row.id,
+    channel: row.channel,
+    status: row.status,
+    jurisdiction: row.jurisdiction,
+    checkedAt: row.checkedAt.toISOString(),
+    validUntil: iso(row.validUntil),
+    reviewAt: iso(row.reviewAt),
+    source: row.source,
+    reference: row.reference,
+    recordedByUserId: row.recordedByUserId,
+    recordedAt: row.createdAt.toISOString(),
+  };
+}
+
+function suppressionView(row: SuppressionRow, now: Date) {
+  return {
+    suppressionId: row.id,
+    channel: row.channel,
+    state: row.state,
+    reason: row.reason,
+    effectiveAt: row.effectiveAt.toISOString(),
+    expiresAt: iso(row.expiresAt),
+    reference: row.reference,
+    // Mirrors activeSuppression() in lib/consentControls.ts: in force now, and
+    // any state other than RELEASED counts as suppressing. A state this build
+    // does not recognise must never read as "released".
+    active: row.state !== "RELEASED" && row.effectiveAt.getTime() <= now.getTime() && (row.expiresAt === null || row.expiresAt.getTime() > now.getTime()),
+    recordedByUserId: row.recordedByUserId,
+    recordedAt: row.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Builds the `contactability` block. Reads only; see the section header above.
+ *
+ * Failure is NOT swallowed. A compliance surface that silently degrades to
+ * "no data" would render exactly the dishonest state this slice exists to
+ * remove, so a fault here fails the Contact 360 request (forwarded to the
+ * global error handler by lib/asyncRouteErrors.ts) rather than quietly
+ * reporting a contact as un-evaluated.
+ */
+async function buildContactability(brokerageId: number, partyId: number) {
+  const now = new Date();
+
+  const [consentRows, dncrRows, suppressionRows, policyRows, decisionRows] = await Promise.all([
+    // Ascending id: the append order, so the LAST row for a key is that
+    // stream's head — the same definition latestConsent() uses.
+    db
+      .select()
+      .from(growContactChannelConsents)
+      .where(and(eq(growContactChannelConsents.brokerageId, brokerageId), eq(growContactChannelConsents.partyId, partyId)))
+      .orderBy(growContactChannelConsents.id),
+    db
+      .select()
+      .from(growContactDncrStatuses)
+      .where(and(eq(growContactDncrStatuses.brokerageId, brokerageId), eq(growContactDncrStatuses.partyId, partyId)))
+      .orderBy(growContactDncrStatuses.id),
+    db
+      .select()
+      .from(growContactChannelSuppressions)
+      .where(and(eq(growContactChannelSuppressions.brokerageId, brokerageId), eq(growContactChannelSuppressions.partyId, partyId)))
+      .orderBy(growContactChannelSuppressions.id),
+    // Policy versions in force for this brokerage right now, both
+    // jurisdictions — the same effective/retired window policyFor() applies,
+    // minus its jurisdiction filter, because the screen needs to say what IS
+    // approved, not only what applies to one recorded jurisdiction.
+    db
+      .select()
+      .from(growConsentPolicyVersions)
+      .where(
+        and(
+          eq(growConsentPolicyVersions.brokerageId, brokerageId),
+          lte(growConsentPolicyVersions.effectiveAt, now),
+          or(isNull(growConsentPolicyVersions.retiredAt), gt(growConsentPolicyVersions.retiredAt, now)),
+        ),
+      )
+      .orderBy(desc(growConsentPolicyVersions.effectiveAt), desc(growConsentPolicyVersions.id)),
+    // Previously RECORDED enforcement decisions. Read-only: this endpoint
+    // never appends one.
+    db
+      .select()
+      .from(growConsentDecisions)
+      .where(and(eq(growConsentDecisions.brokerageId, brokerageId), eq(growConsentDecisions.partyId, partyId)))
+      .orderBy(desc(growConsentDecisions.id))
+      .limit(CONTACTABILITY_DECISION_SCAN_LIMIT),
+  ]);
+
+  // Head per (channel, purpose, scope), then the most recently appended head
+  // per channel — the stream this block evaluates for that channel's headline
+  // decision. Every head is still returned under `streams`, so a channel
+  // carrying several purposes is shown in full rather than reduced to one.
+  const consentHeads = new Map<string, ConsentRow>();
+  for (const row of consentRows) consentHeads.set(JSON.stringify([row.channel, row.purpose, row.scope]), row);
+  const headsByChannel = new Map<string, ConsentRow[]>();
+  for (const head of consentHeads.values()) {
+    if (!headsByChannel.has(head.channel)) headsByChannel.set(head.channel, []);
+    headsByChannel.get(head.channel)!.push(head);
+  }
+
+  const dncrHeads = new Map<string, DncrRow>();
+  for (const row of dncrRows) dncrHeads.set(row.channel, row);
+
+  // Only rows already in force count as the current suppression, matching
+  // latestSuppression(): a RELEASED row dated in the future must not read as
+  // the current state here while the consent engine still treats the contact
+  // as suppressed.
+  const suppressionHeads = new Map<string, SuppressionRow>();
+  for (const row of suppressionRows) {
+    if (row.effectiveAt.getTime() > now.getTime()) continue;
+    suppressionHeads.set(row.channel, row);
+  }
+
+  const lastDecisionByChannel = new Map<string, (typeof decisionRows)[number]>();
+  for (const row of decisionRows) if (!lastDecisionByChannel.has(row.channel)) lastDecisionByChannel.set(row.channel, row);
+
+  const channels = await Promise.all(
+    GROW_CONSENT_CHANNELS.map(async (channel) => {
+      const heads = (headsByChannel.get(channel) ?? []).sort((a, b) => a.id - b.id);
+      const primary = heads.length > 0 ? heads[heads.length - 1] : null;
+      const stream = primary
+        ? { purpose: primary.purpose, scope: primary.scope }
+        : CHANNEL_PROBE_STREAM[channel];
+
+      const evaluated = await evaluateConsentDecisionReadOnly({
+        brokerageId,
+        partyId,
+        channel,
+        purpose: stream.purpose,
+        scope: stream.scope,
+        // Never asserted from the caller: the recorded consent row's own
+        // jurisdiction is canonical, exactly as the audited boundary treats it.
+        jurisdiction: null,
+      });
+
+      const suppressionRow = suppressionHeads.get(channel) ?? null;
+      const suppression = suppressionRow ? suppressionView(suppressionRow, now) : null;
+      const suppressed = suppression?.active === true;
+
+      // An active suppression is an explicit recorded instruction not to use
+      // this channel. The fail-closed evaluator can exit EARLIER for a
+      // different reason (with no consent on file it returns UNKNOWN_CONSENT
+      // long before it reaches its suppression gate), so reporting only the
+      // evaluator's reason would hide a recorded do-not-contact from the
+      // person reading this screen. Folding suppression in can only ever
+      // downgrade a channel to BLOCKED — it can never make one look more
+      // permissive — so this cannot manufacture an eligible state. This is the
+      // same reason lib/propertyIntelligence/contactability.ts reads the
+      // suppression rows directly instead of going through the evaluator.
+      const status = suppressed || evaluated.evaluation.decision === "BLOCKED" ? "BLOCKED" : evaluated.evaluation.decision;
+      const reasonCode = suppressed && evaluated.evaluation.decision !== "BLOCKED" ? "SUPPRESSED" : evaluated.evaluation.reasonCode;
+
+      const lastRecorded = lastDecisionByChannel.get(channel) ?? null;
+      const dncrRow = dncrHeads.get(channel) ?? null;
+
+      return {
+        channel,
+        status,
+        reasonCode,
+        // The freshly computed, unrecorded evaluation. `recorded: false` is
+        // load-bearing documentation: this decision has no id because reading
+        // a screen is not an enforcement decision.
+        decision: {
+          recorded: false,
+          decision: evaluated.evaluation.decision,
+          reasonCode: evaluated.evaluation.reasonCode,
+          reasonCodes: evaluated.evaluation.reasonCodes,
+          jurisdiction: evaluated.evaluation.jurisdiction,
+          policyVersion: evaluated.evaluation.policyVersion,
+          purpose: stream.purpose,
+          scope: stream.scope,
+          // False when no stream exists for this channel and the pair above is
+          // only a label — see CHANNEL_PROBE_STREAM.
+          streamRecorded: primary !== null,
+          evaluatedAt: now.toISOString(),
+        },
+        // The latest decision that WAS recorded, by an actual outbound
+        // attempt. Null for every contact nothing has tried to reach.
+        lastRecordedDecision: lastRecorded
+          ? {
+              id: lastRecorded.id,
+              decision: lastRecorded.decision,
+              reasonCode: lastRecorded.reasonCode,
+              jurisdiction: lastRecorded.jurisdiction,
+              policyVersion: lastRecorded.policyVersion,
+              evaluatedAt: lastRecorded.evaluatedAt.toISOString(),
+              decidedByUserId: lastRecorded.decidedByUserId,
+            }
+          : null,
+        consentState: primary ? primary.state : "UNKNOWN",
+        consent: primary ? consentStreamView(primary) : null,
+        streams: heads.map(consentStreamView),
+        dncrStatus: dncrRow ? dncrRow.status : "NOT_CHECKED",
+        dncr: dncrRow ? dncrView(dncrRow) : null,
+        suppressed,
+        suppression,
+      };
+    }),
+  );
+
+  const policies = policyRows.map((row) => ({
+    policyVersionId: row.id,
+    jurisdiction: row.jurisdiction,
+    version: row.version,
+    effectiveAt: row.effectiveAt.toISOString(),
+    retiredAt: iso(row.retiredAt),
+    allowInferredConsent: row.allowInferredConsent,
+    allowNotRequiredConsent: row.allowNotRequiredConsent,
+    dncrRequired: row.dncrRequired,
+    suppressionEnabled: row.suppressionEnabled,
+    timeZone: row.timeZone,
+    allowedHoursStart: row.allowedHoursStart,
+    allowedHoursEnd: row.allowedHoursEnd,
+    quietHoursStart: row.quietHoursStart,
+    quietHoursEnd: row.quietHoursEnd,
+    // Reuses the evaluator's OWN window rule rather than restating it: a null
+    // result there is precisely "this policy supplies no usable window", which
+    // is what turns every channel into POLICY_INVALID_WINDOW -> REVIEW_REQUIRED.
+    callingWindowConfigured: isWithinConsentHours(now, row) !== null,
+  }));
+
+  // Vacuously true when no policy version is in force at all, which is the
+  // current pilot state for every tenant. Both readings are the same fact: no
+  // approved policy defines a calling window, so nothing can be ELIGIBLE yet.
+  const awaitingPolicyApproval = policies.every((p) => !p.callingWindowConfigured);
+
+  const status = channels.every((c) => c.status === "BLOCKED")
+    ? "BLOCKED"
+    : channels.some((c) => c.status === "ELIGIBLE")
+      ? "ELIGIBLE"
+      : "REVIEW_REQUIRED";
+  // Deterministic: the first channel, in GROW_CONSENT_CHANNELS order, that
+  // actually carries the rolled-up status.
+  const statusReasonCode = channels.find((c) => c.status === status)!.reasonCode;
+
+  const history = [
+    ...consentRows.map((row) => ({ kind: "CONSENT" as const, occurredAt: row.createdAt, id: row.id, ...consentStreamView(row) })),
+    ...dncrRows.map((row) => ({ kind: "DNCR" as const, occurredAt: row.createdAt, id: row.id, ...dncrView(row) })),
+    ...suppressionRows.map((row) => ({ kind: "SUPPRESSION" as const, occurredAt: row.createdAt, id: row.id, ...suppressionView(row, now) })),
+  ]
+    // Newest first. createdAt is database-assigned (defaultNow()), unlike the
+    // caller-supplied capturedAt/checkedAt/effectiveAt evidence timestamps, so
+    // it is the only honest ordering for "what happened when". Ties break on
+    // the serial id, which is the append order.
+    .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime() || b.id - a.id)
+    .slice(0, CONTACTABILITY_HISTORY_LIMIT)
+    .map(({ occurredAt, ...entry }) => ({ ...entry, occurredAt: occurredAt.toISOString() }));
+
+  return {
+    evaluatedAt: now.toISOString(),
+    status,
+    statusReasonCode,
+    // Nothing has ever been recorded for this contact. Distinct from "recorded
+    // and unknown": the screen should offer to capture consent, not report a
+    // review backlog.
+    hasConsentRecords: consentRows.length > 0 || dncrRows.length > 0 || suppressionRows.length > 0,
+    awaitingPolicyApproval,
+    policies,
+    channels,
+    activeSuppressions: channels.filter((c) => c.suppressed).map((c) => c.suppression!),
+    history,
+    // The whole event stream is append-only with supersession — no row above
+    // is ever updated or deleted — and the screen says so rather than leaving
+    // the reader to assume an editable record.
+    historyTruncated: consentRows.length + dncrRows.length + suppressionRows.length > CONTACTABILITY_HISTORY_LIMIT,
+  };
+}
+
 // GET /grow/contacts/:partyId — Contact 360. One response covers the whole view: canonical
 // identity, Grow's multi-valued roles, household relationships, property relationships,
 // opportunities, recent activities/commitments, the Relationship Timeline, and the
@@ -168,8 +563,17 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     return;
   }
 
-  const [householdRows, propertyRelRows, opportunityRows, roleRows, activityRows, commitmentRows, timeline, intelligence] =
-    await Promise.all([
+  const [
+    householdRows,
+    propertyRelRows,
+    opportunityRows,
+    roleRows,
+    activityRows,
+    commitmentRows,
+    timeline,
+    intelligence,
+    contactability,
+  ] = await Promise.all([
       // §5 — household relationships are recorded as a single directed row per pair+type (see
       // the dedup check in POST /:partyId/relationships below), but the relationship itself is
       // symmetric: "A is B's spouse" and "B is A's spouse" are the same fact. Querying by
@@ -222,6 +626,9 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
         .orderBy(desc(growCommitments.dueAt)),
       getRelationshipTimeline(brokerageId, partyId, 100),
       getContactIntelligenceSummary(brokerageId, partyId),
+      // AE GROW Completion W3-A (A-6). Read-only; see buildContactability().
+      // The party has already been proven to belong to this brokerage above.
+      buildContactability(brokerageId, partyId),
     ]);
 
   // Batch-resolve display info for whichever party is on "the other side" of each household
@@ -316,6 +723,9 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     })),
     timeline,
     intelligence,
+    // AE GROW Completion W3-A (A-6) — consent, DNC, suppression and the
+    // per-channel contactability decision, none of it recorded by this read.
+    contactability,
   });
 });
 

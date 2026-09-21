@@ -543,7 +543,28 @@ test("approved Timeline snapshot remains independently deletable from recording,
   assert.deepEqual(afterDeletion, beforeActivity);
   const afterContact = await fetch(contactUrl(`/${fixture.partyId}`), { headers: { cookie: A.agent.cookie } });
   assert.equal(afterContact.status, 200);
-  assert.deepEqual(await afterContact.json(), beforeContactBody);
+  const afterContactBody = await afterContact.json();
+
+  // AE GROW Completion W3-A (A-6): Contact 360 now also returns a
+  // `contactability` block, and its consent evaluation is computed at READ
+  // time (the consent rules depend on the instant — expiry, review dates, the
+  // policy's contact window). Two reads therefore carry different
+  // evaluatedAt stamps and the body is legitimately no longer byte-identical.
+  // The subject of this test is unaffected, so it still compares everything
+  // else exactly, and compares the consent block with only those read-time
+  // stamps normalised — deleting a recording, a transcript or an AI draft must
+  // not change one recorded fact about whether this contact may be contacted.
+  const withoutReadTime = (body: unknown) =>
+    JSON.parse(
+      JSON.stringify((body as { contactability: unknown }).contactability).replace(
+        /"evaluatedAt":"[^"]*"/g,
+        '"evaluatedAt":"<read time>"',
+      ),
+    );
+  const { contactability: _beforeContactability, ...beforeRest } = beforeContactBody as { contactability: unknown };
+  const { contactability: _afterContactability, ...afterRest } = afterContactBody as { contactability: unknown };
+  assert.deepEqual(afterRest, beforeRest);
+  assert.deepEqual(withoutReadTime(afterContactBody), withoutReadTime(beforeContactBody));
 });
 
 test("manual activity creation rejects call_summary and creates zero rows", async () => {
