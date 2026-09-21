@@ -1424,13 +1424,43 @@ interface RuleDefinition {
    * recalculating one property.
    */
   propertyScopable: boolean;
+  /**
+   * AE GROW Completion W2-D — whether this rule may legitimately emit a
+   * candidate with `propertyId: null`.
+   *
+   * Distinct from `propertyScopable`, and the two are NOT the same question:
+   *
+   *   propertyScopable  — "may this rule RUN when the caller scoped the pass
+   *                        to specific properties?"
+   *   contactAnchorable — "is a result from this rule still MEANINGFUL when it
+   *                        has no property anchor at all?"
+   *
+   * re_engagement_opportunity is false/true: it must not run property-scoped
+   * AND its subject is always the person. past_buyer_interest and
+   * agent_recorded_motivation are true/true: they run property-scoped, and
+   * they pass their source relationship's own propertyId straight through —
+   * which grow_relationships declares nullable, so a genuine
+   * "we know the person, we do not know the property" result is expected and
+   * is already phrased for in each rule's explanation.
+   *
+   * Every other rule's subject IS a property. A row of one of those types
+   * carrying a null propertyId is a data-integrity problem — it cannot be
+   * explained, because the thing the explanation is about is missing — and
+   * classifySignalAnchor() below reports it as "unusable" rather than
+   * laundering it into a contact-anchored signal. Nothing widens this set to
+   * make a surface look fuller; see the W2-D objective's "do not weaken their
+   * evidence requirements to increase signal volume".
+   */
+  contactAnchorable: boolean;
   run(scope: EvaluationScope, limit: number, after: number): Promise<SignalCandidate[]>;
 }
 
 const RULES: RuleDefinition[] = [
-  { name: "long_ownership_tenure", signalTypes: ["long_ownership_tenure"], propertyScopable: true, run: longOwnershipTenureCandidates },
-  { name: "stale_previous_appraisal", signalTypes: ["stale_previous_appraisal"], propertyScopable: true, run: staleAppraisalCandidates },
-  { name: "past_buyer_interest", signalTypes: ["past_buyer_interest"], propertyScopable: true, run: pastBuyerInterestCandidates },
+  { name: "long_ownership_tenure", signalTypes: ["long_ownership_tenure"], propertyScopable: true, contactAnchorable: false, run: longOwnershipTenureCandidates },
+  { name: "stale_previous_appraisal", signalTypes: ["stale_previous_appraisal"], propertyScopable: true, contactAnchorable: false, run: staleAppraisalCandidates },
+  // Passes grow_relationships.propertyId (nullable) through verbatim — see :640,
+  // which already authors the no-property wording.
+  { name: "past_buyer_interest", signalTypes: ["past_buyer_interest"], propertyScopable: true, contactAnchorable: true, run: pastBuyerInterestCandidates },
   {
     name: "provider_observations",
     signalTypes: [
@@ -1441,11 +1471,17 @@ const RULES: RuleDefinition[] = [
       "property_ownership_change",
     ],
     propertyScopable: true,
+    // The mirror case: these set partyId null and are anchored to a property
+    // only. A provider observation with no property is not intelligence about
+    // a person, it is a broken row.
+    contactAnchorable: false,
     run: observationCandidates,
   },
-  { name: "agent_recorded_motivation", signalTypes: ["agent_recorded_motivation"], propertyScopable: true, run: agentRecordedMotivationCandidates },
-  { name: "lease_tenancy_milestone", signalTypes: ["lease_tenancy_milestone"], propertyScopable: true, run: leaseTenancyMilestoneCandidates },
-  { name: "re_engagement_opportunity", signalTypes: ["re_engagement_opportunity"], propertyScopable: false, run: reEngagementCandidates },
+  // Also passes a nullable relationship propertyId through — see :925.
+  { name: "agent_recorded_motivation", signalTypes: ["agent_recorded_motivation"], propertyScopable: true, contactAnchorable: true, run: agentRecordedMotivationCandidates },
+  { name: "lease_tenancy_milestone", signalTypes: ["lease_tenancy_milestone"], propertyScopable: true, contactAnchorable: false, run: leaseTenancyMilestoneCandidates },
+  // ALWAYS contact-anchored — the only rule that is. See :1290.
+  { name: "re_engagement_opportunity", signalTypes: ["re_engagement_opportunity"], propertyScopable: false, contactAnchorable: true, run: reEngagementCandidates },
 ];
 
 /**
@@ -1463,6 +1499,64 @@ export const EVALUATION_STATEMENTS_PER_PROPERTY_SCOPE = RULES.filter((r) => r.pr
 
 /** Exposed so a caller (and the tests) can reason about budgets without duplicating the list. */
 export const EVALUATION_RULE_NAMES = RULES.map((r) => r.name);
+
+/* =====================================================================
+ * AE GROW Completion W2-D — THE ANCHOR TAXONOMY.
+ *
+ * Before this, "which rules may produce a signal with no property?" was
+ * implicit in seven rule bodies, and the one surfacing path that cared
+ * (getContactPropertyIntelligenceSummary) expressed its answer as a bare
+ * `if (s.propertyId === null) continue`. That discarded the flagship
+ * re_engagement_opportunity signal — which is ALWAYS contact-anchored — from
+ * the contact record built to show it, and did so without saying anything.
+ *
+ * The taxonomy is now declared once, on the rule registry above, and read
+ * through the three exports below. The three categories:
+ *
+ *   PROPERTY-ANCHORED  a verified property this signal is about.
+ *   CONTACT-ANCHORED   the intelligence genuinely relates to the PERSON and
+ *                      AE has no verified property association. A real
+ *                      signal, to be surfaced honestly — with its evidence,
+ *                      with its unknowns, and with NO property link and NO
+ *                      property-specific action.
+ *   UNUSABLE           neither anchor can be established, or a
+ *                      property-dependent rule's row arrived without the
+ *                      property its whole explanation is about. Counted and
+ *                      reported, never surfaced as if it were the middle
+ *                      category.
+ *
+ * The absence of a property is represented as an absence. Nothing here ever
+ * infers, substitutes or fabricates a property association to make a row
+ * renderable.
+ * =====================================================================*/
+
+export type SignalAnchor = "property" | "contact" | "unusable";
+
+/**
+ * Derived from RULES, never hand-listed, so adding a rule without deciding
+ * this question cannot silently default it to "contact-anchorable".
+ */
+export const CONTACT_ANCHORABLE_SIGNAL_TYPES: ReadonlySet<string> = new Set<string>(
+  RULES.filter((r) => r.contactAnchorable).flatMap((r) => r.signalTypes),
+);
+
+/** The rule names behind the set above, for tests and for operational reporting. */
+export const CONTACT_ANCHORABLE_RULE_NAMES = RULES.filter((r) => r.contactAnchorable).map((r) => r.name);
+
+/**
+ * Which of the three categories a stored signal row falls into.
+ *
+ * Total and side-effect-free: it reads only the row's own type and its two
+ * anchor columns, so a caller on a read path can classify without a lookup.
+ * A signal type this codebase has no rule for is deliberately NOT
+ * contact-anchorable — an unrecognised type with no property is exactly the
+ * case where AE cannot say what it is looking at.
+ */
+export function classifySignalAnchor(signal: { signalType: string; partyId: number | null; propertyId: number | null }): SignalAnchor {
+  if (signal.propertyId !== null) return "property";
+  if (signal.partyId === null) return "unusable";
+  return CONTACT_ANCHORABLE_SIGNAL_TYPES.has(signal.signalType) ? "contact" : "unusable";
+}
 
 /**
  * Runs every rule applicable to this scope, sequentially, against a shared

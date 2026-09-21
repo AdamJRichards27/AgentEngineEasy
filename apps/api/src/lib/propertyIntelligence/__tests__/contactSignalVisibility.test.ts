@@ -12,12 +12,13 @@
 //      contact has no recorded relationship against rendered nowhere.
 //
 // (2) is fixed here: the property is emitted as its own entry, flagged
-// SIGNAL_ONLY so nothing claims a relationship the agent never recorded. (1)
-// still cannot be represented in this response — every entry is keyed by a real
-// propertyId and the web panel links each one to /properties/:id — so
-// countContactAnchoredSignals makes it a measured number instead of an
-// invisible `continue`, and the panel change needed to render it is reported
-// rather than made here (that file belongs to another slice).
+// SIGNAL_ONLY so nothing claims a relationship the agent never recorded.
+//
+// (1) was W2-B's KNOWN GAP and is closed by W2-D, which replaced the
+// `continue` with a three-way classification off the rule registry. This suite
+// keeps proving the W2-B behaviour against the new response shape
+// (`summary.properties`); the contact-anchored and unusable categories are
+// covered by ./contactAnchoredSignals.test.ts.
 //
 // Real Postgres, real fixtures, no mocks of the module under test — the
 // convention every suite in this directory follows.
@@ -129,7 +130,7 @@ test("E-4: a signal about a property the contact has no Active relationship agai
   // because no Active grow_relationships row produced an entry to attach it to.
   const orphanedSignalId = await createSignal(partyId, signalOnlyPropertyId, "Signal on an unlinked property");
 
-  const entries = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  const { properties: entries } = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
   const byProperty = new Map(entries.map((e) => [e.propertyId, e]));
 
   const recorded = byProperty.get(recordedPropertyId);
@@ -157,23 +158,29 @@ test("E-4: a signal about a property the contact has no Active relationship agai
   assert.equal(entries.length, 2, "one entry per property, never a duplicate");
 });
 
-test("E-4: a party-anchored signal with no property at all is counted rather than silently dropped", async () => {
+test("E-4/W2-D: a party-anchored signal with no property never becomes a property entry", async () => {
   const partyId = await createParty("ContactAnchored");
   const propertyId = await createProperty("3 Recorded Ave");
   await createActiveRelationship(partyId, propertyId);
   await createSignal(partyId, propertyId, "Signal on the recorded property");
 
-  assert.equal(await countContactAnchoredSignals(partyId, A.brokerageId), 0, "nothing is withheld yet");
+  assert.equal(await countContactAnchoredSignals(partyId, A.brokerageId), 0, "nothing contact-anchored yet");
 
-  // Legal per the schema: both anchors are nullable, with no CHECK requiring one.
+  // Legal per the schema: both anchors are nullable, with no CHECK requiring
+  // one. This fixture's type is long_ownership_tenure, which is
+  // property-DEPENDENT — so W2-D classifies it as unusable, not as a
+  // contact-anchored signal. See ./contactAnchoredSignals.test.ts for the
+  // rule types that genuinely are contact-anchored.
   await createSignal(partyId, null, "Signal about the contact themselves");
 
-  const entries = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
-  assert.equal(entries.length, 1, "it has no property, so it cannot become a property entry");
+  const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  assert.equal(summary.properties.length, 1, "it has no property, so it cannot become a property entry");
+  assert.equal(summary.unusableSignalCount, 1, "a property-dependent row with no property is counted, not surfaced");
+  assert.deepEqual(summary.contactAnchoredSignals, [], "and it is never laundered into the contact-anchored list");
   assert.equal(
     await countContactAnchoredSignals(partyId, A.brokerageId),
-    1,
-    "…but it is a measurable withheld count, not an invisible `continue`",
+    0,
+    "the count reports intelligence about a person, never a data-integrity problem",
   );
 });
 
@@ -182,7 +189,7 @@ test("E-4: a contact with no relationships at all still sees their signals", asy
   const propertyId = await createProperty("4 Nowhere Cl");
   const signalId = await createSignal(partyId, propertyId, "The only thing AE knows about this contact");
 
-  const entries = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  const { properties: entries } = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
   assert.equal(entries.length, 1, "before this fix the response was empty and said nothing");
   assert.equal(entries[0].propertyId, propertyId);
   assert.equal(entries[0].relationshipType, SIGNAL_ONLY_RELATIONSHIP_TYPE);
@@ -204,7 +211,7 @@ test("E-4: a non-Active relationship's property is surfaced by its signal, not b
   });
   await createSignal(partyId, propertyId, "Signal on a historically-owned property");
 
-  const entries = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  const { properties: entries } = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
   assert.equal(entries.length, 1);
   assert.equal(
     entries[0].relationshipType,
@@ -233,7 +240,7 @@ test("E-4: a signal-only entry is still brokerage-scoped", async () => {
     // cause that property's address to be handed to this contact.
     const signalId = await createSignal(partyId, foreignProperty.id, "Signal pointing across a tenancy boundary");
     try {
-      const entries = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+      const { properties: entries } = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
       assert.deepEqual(entries, [], "the address lookup is re-scoped, not trusted from the signal row");
     } finally {
       // This signal belongs to brokerage A but references one of B's
