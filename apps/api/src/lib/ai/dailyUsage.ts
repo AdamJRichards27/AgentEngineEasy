@@ -154,9 +154,25 @@ export async function countUserAiRequestsToday(brokerageId: number, userId: numb
 //
 // Cost of reading: one extra aggregate and, for administrators, two extra
 // grouped aggregates, all over the SAME same-day ai_interactions rows the
-// request counts already scan, joined to ai_usage by primary key. The
-// (brokerage_id, created_at) index these rely on is the one added by PR #50's
-// batched migration — no migration is added here.
+// request counts already scan. Selecting those rows uses the
+// (brokerage_id, created_at) index on ai_interactions added by PR #50's
+// batched migration (0028).
+//
+// Each of those three reads then JOINS TO ai_usage ON ai_usage.interaction_id
+// — a foreign key, not a primary key, and Postgres creates no index for a
+// foreign key. Before this slice the only index on ai_usage was its primary
+// key on `id`, which nothing here joins to, so every one of these reads
+// sequentially scanned the whole tenant-mixed table to reach the few hundred
+// rows belonging to today. That matters more on this table than most:
+// ai_usage gains a row per successful AI request forever with no retention
+// policy, so the cost grew with lifetime platform usage rather than with
+// today's traffic, and an administrator's snapshot paid it three times.
+//
+// So this slice DOES add a migration: 0029 creates
+// ai_usage_interaction_idx on ai_usage (interaction_id), declared on the
+// table in packages/db/src/schema/ai.ts. The plan is asserted at a fixture
+// size where a sequential scan would otherwise be chosen, in
+// routes/__tests__/aiUsageQueryPlan.test.ts.
 // ---------------------------------------------------------------------------
 
 /** Token and cost totals for a set of same-day interactions. */

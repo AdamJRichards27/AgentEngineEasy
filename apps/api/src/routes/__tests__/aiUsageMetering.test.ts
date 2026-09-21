@@ -14,8 +14,12 @@
 // of the slice — exposing tokens and cost must not change what is enforced,
 // which remains a request count while the commercial allowance is undecided.
 //
-// No migration is added by this work: the (brokerage_id, created_at) index the
-// same-day scans want is already in PR #50's batched migration.
+// This work DOES add a migration. Selecting the same-day interactions uses the
+// (brokerage_id, created_at) index already in PR #50's batched migration, but
+// the read-back then joins to ai_usage on interaction_id — a foreign key, and
+// Postgres indexes no foreign key — so migration 0029 adds
+// ai_usage_interaction_idx. The plan that depends on it is asserted in
+// aiUsageQueryPlan.test.ts; this file asserts the numbers.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
