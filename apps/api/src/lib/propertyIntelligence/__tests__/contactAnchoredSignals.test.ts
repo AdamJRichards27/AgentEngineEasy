@@ -38,9 +38,9 @@ import {
   type GrowOpportunitySignal,
 } from "@aee/db";
 import {
-  countContactAnchoredSignals,
   getContactPropertyIntelligenceSummary,
   CONTACT_ANCHORED_MISSING_PROPERTY,
+  SIGNAL_ONLY_RELATIONSHIP_TYPE,
   PropertyIntelligenceAccessError,
 } from "../service.js";
 import { classifySignalAnchor, CONTACT_ANCHORABLE_SIGNAL_TYPES, CONTACT_ANCHORABLE_RULE_NAMES } from "../evaluation.js";
@@ -328,7 +328,6 @@ test("W2-D: a re_engagement_opportunity signal is visible on Contact 360, with e
     "the re-engagement signal is NOT attached to the contact's property — its subject is the person",
   );
 
-  assert.equal(await countContactAnchoredSignals(partyId, A.brokerageId), summary.contactAnchoredSignals.length, "the count and the surface agree");
   assert.equal(summary.unusableSignalCount, 0, "nothing the real rules produced is unusable");
 });
 
@@ -382,7 +381,7 @@ test("W2-D: a property-dependent signal type with no property is unusable, never
     "a data-integrity problem must not be laundered into intelligence about a person",
   );
   assert.deepEqual(summary.properties, [], "and it certainly does not conjure a property entry");
-  assert.equal(await countContactAnchoredSignals(partyId, A.brokerageId), 0, "the count reports contact-anchored signals only");
+  assert.equal(summary.contactAnchoredSignals.length, 0, "the contact-anchored list reports contact-anchored signals only");
 });
 
 test("W2-D: every category is accounted for — no signal is dropped on the floor", async () => {
@@ -499,9 +498,6 @@ test("W2-D: a suppressed contact keeps their intelligence and loses every genera
   const propertyEntry = after.properties.find((e) => e.propertyId === propertyId);
   assert.ok(propertyEntry && propertyEntry.activeSignals.length > 0, "their property-anchored signals are readable too");
 
-  // The count agrees with the surface, as it always has.
-  assert.equal(await countContactAnchoredSignals(partyId, A.brokerageId), after.contactAnchoredSignals.length, "the count and the surface still agree");
-
   // Restricted, not retired — the stage 1 rule, still true.
   const rows = await signalsFor(A.brokerageId, partyId);
   for (const row of rows) {
@@ -524,11 +520,6 @@ test("W2-D: a foreign-tenant partyId is rejected on every read this slice touche
     () => getContactPropertyIntelligenceSummary(foreignPartyId, A.brokerageId),
     (err: unknown) => err instanceof PropertyIntelligenceAccessError && /Contact not found/.test((err as Error).message),
     "getContactPropertyIntelligenceSummary rejects a foreign-tenant partyId",
-  );
-  await assert.rejects(
-    () => countContactAnchoredSignals(foreignPartyId, A.brokerageId),
-    (err: unknown) => err instanceof PropertyIntelligenceAccessError && /Contact not found/.test((err as Error).message),
-    "countContactAnchoredSignals rejects a foreign-tenant partyId",
   );
 
   // The same id read by its OWN tenant works — proving the rejection above is
@@ -571,4 +562,222 @@ test("W2-D: the HTTP contact endpoint is entitlement-controlled and brokerage-sc
   assert.equal(theirs.status, 404, "a foreign-tenant partyId is not found, not forbidden-but-confirmed");
   const theirBody = (await theirs.text()).toLowerCase();
   assert.equal(theirBody.includes("w2d"), false, "no fixture contact detail leaks across the tenancy boundary");
+});
+
+/* =====================================================================
+ * 6. DETERMINISM.
+ *
+ * Contact 360 read its entries out of queries with no ORDER BY. Postgres
+ * guarantees nothing about the order of such a result, so the same contact
+ * could render the same properties in a different sequence on consecutive
+ * loads. Nothing was lost — which is what made it easy to miss and corrosive
+ * to trust: an agent watching a list reshuffle between refreshes cannot tell
+ * "the data changed" from "the data moved".
+ *
+ * Same spirit as the determinism test in PR #55 for the coaching metrics.
+ * ===================================================================*/
+
+/**
+ * A contact built specifically to be REORDERABLE, so a passing assertion means
+ * something. Several properties whose addresses do not sort in insertion
+ * order, several signals each, a property reached only by a signal, and two
+ * Active relationships against one property so the dedupe has a real choice to
+ * make.
+ */
+async function createReorderableContact(label: string): Promise<{ partyId: number; propertyIds: number[]; sharedPropertyId: number }> {
+  const partyId = await createParty(A.brokerageId, label);
+
+  // Deliberately NOT inserted in address order.
+  const addresses = ["40 Mid St", "10 Alpha Ave", "70 Zulu Way", "25 Beta Blvd"];
+  const propertyIds: number[] = [];
+  for (const address of addresses) {
+    const id = await createProperty(A.brokerageId, A.admin.user.id, address);
+    propertyIds.push(id);
+    await createRelationship({ brokerageId: A.brokerageId, partyId, propertyId: id, relationshipType: "owner" });
+    for (let i = 0; i < 3; i++) {
+      await insertRawSignal({ brokerageId: A.brokerageId, partyId, propertyId: id, signalType: "long_ownership_tenure" });
+    }
+  }
+
+  // A SECOND Active relationship on one property. The dedupe keeps one row per
+  // property, so without an ordered read Postgres picked which
+  // relationshipType the panel displayed — and could pick differently next
+  // time, relabelling the same contact "owner" then "landlord".
+  const sharedPropertyId = propertyIds[0];
+  await createRelationship({ brokerageId: A.brokerageId, partyId, propertyId: sharedPropertyId, relationshipType: "landlord" });
+
+  // A property reached ONLY by a signal — the other source of entries, which
+  // is concatenated onto the first and so cannot share its ORDER BY.
+  const signalOnly = await createProperty(A.brokerageId, A.admin.user.id, "05 Signal Only Ct");
+  await insertRawSignal({ brokerageId: A.brokerageId, partyId, propertyId: signalOnly, signalType: "long_ownership_tenure" });
+
+  // And contact-anchored signals, which have their own ordering to keep.
+  for (let i = 0; i < 3; i++) {
+    await insertRawSignal({ brokerageId: A.brokerageId, partyId, propertyId: null, signalType: "re_engagement_opportunity" });
+  }
+
+  return { partyId, propertyIds, sharedPropertyId };
+}
+
+test("W2-D: repeated reads of the same contact return byte-identical output", async () => {
+  const { partyId } = await createReorderableContact("Deterministic");
+
+  // Ten reads. One repeat could coincide; a planner free to reorder will
+  // usually do so within ten, and any single divergence fails the assertion.
+  const first = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const again = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+    assert.deepEqual(again, first, `read ${attempt + 2} differs from the first — the response is not deterministic`);
+  }
+
+  // Byte-for-byte over the wire too, which is what a client actually receives.
+  const bodies: string[] = [];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await fetch(`${baseUrl}/api/grow/property-intelligence/contact/${partyId}`, { headers: { cookie: A.admin.cookie } });
+    assert.equal(res.status, 200);
+    bodies.push(await res.text());
+  }
+  assert.equal(new Set(bodies).size, 1, "every HTTP response body is identical");
+});
+
+test("W2-D: the entry order is TOTAL — recorded relationships first, then address, with a unique tiebreak", async () => {
+  const { partyId } = await createReorderableContact("TotalOrder");
+  const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+
+  // 1. Recorded relationships precede signal-only entries.
+  const ranks = summary.properties.map((e) => (e.relationshipType === SIGNAL_ONLY_RELATIONSHIP_TYPE ? 1 : 0));
+  assert.deepEqual(ranks, [...ranks].sort(), "signal-only entries never interleave with recorded relationships");
+  assert.ok(ranks.includes(1), "the fixture really does include a signal-only entry");
+  assert.ok(ranks.includes(0), "and a recorded one");
+
+  // 2. Within a group, address order — and the fixture was NOT inserted in
+  //    address order, so this is the sort doing the work.
+  const recorded = summary.properties.filter((e) => e.relationshipType !== SIGNAL_ONLY_RELATIONSHIP_TYPE);
+  assert.deepEqual(
+    recorded.map((e) => e.propertyAddress),
+    [...recorded.map((e) => e.propertyAddress)].sort((a, b) => a.localeCompare(b)),
+    "recorded entries are in address order",
+  );
+  assert.notDeepEqual(recorded.map((e) => e.propertyAddress), ["40 Mid St", "10 Alpha Ave", "70 Zulu Way", "25 Beta Blvd"].map((a) => `${a} ${suffix}`), "and that is not merely insertion order");
+
+  // 3. THE UNIQUE TIEBREAK. Two properties sharing an address would otherwise
+  //    be free to swap — address and group rank are both non-unique, so
+  //    without propertyId the order is not total.
+  const duplicate = await createProperty(A.brokerageId, A.admin.user.id, "10 Alpha Ave");
+  await createRelationship({ brokerageId: A.brokerageId, partyId, propertyId: duplicate, relationshipType: "owner" });
+
+  const withDuplicate = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  const sameAddress = withDuplicate.properties.filter((e) => e.propertyAddress === `10 Alpha Ave ${suffix}`);
+  assert.equal(sameAddress.length, 2, "the fixture really does have two properties at one address");
+  assert.deepEqual(
+    sameAddress.map((e) => e.propertyId),
+    [...sameAddress.map((e) => e.propertyId)].sort((a, b) => a - b),
+    "entries sharing an address are ordered by propertyId",
+  );
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assert.deepEqual(await getContactPropertyIntelligenceSummary(partyId, A.brokerageId), withDuplicate, "and that tie does not reorder between reads");
+  }
+});
+
+test("W2-D: nested arrays are ordered too — a signal list is as reorderable as an entry list", async () => {
+  const { partyId, propertyIds } = await createReorderableContact("NestedOrder");
+  const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+
+  for (const entry of summary.properties) {
+    assert.deepEqual(
+      entry.activeSignals.map((s) => s.id),
+      [...entry.activeSignals.map((s) => s.id)].sort((a, b) => a - b),
+      `property ${entry.propertyId}'s signals are in a stable id order`,
+    );
+  }
+  assert.ok(
+    summary.properties.some((e) => e.propertyId === propertyIds[1] && e.activeSignals.length > 1),
+    "the fixture gives at least one property several signals, so the ordering is exercised",
+  );
+
+  assert.deepEqual(
+    summary.contactAnchoredSignals.map((e) => e.signal.id),
+    [...summary.contactAnchoredSignals.map((e) => e.signal.id)].sort((a, b) => a - b),
+    "contact-anchored entries are ordered too",
+  );
+  assert.ok(summary.contactAnchoredSignals.length > 1, "and there is more than one of them to order");
+});
+
+test("W2-D: which of two Active relationships on one property is displayed is deterministic", async () => {
+  const { partyId, sharedPropertyId } = await createReorderableContact("DedupeWinner");
+
+  // The dedupe keeps ONE row per property. Ordering by relationship id makes
+  // that the earliest recorded relationship — "owner" here, inserted before
+  // "landlord" — rather than whichever row the planner happened to return.
+  const first = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  const shared = first.properties.find((e) => e.propertyId === sharedPropertyId);
+  assert.ok(shared, "the doubly-related property is present");
+  assert.equal(shared.relationshipType, "owner", "the earliest recorded relationship wins, not an arbitrary one");
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const again = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+    assert.equal(
+      again.properties.find((e) => e.propertyId === sharedPropertyId)?.relationshipType,
+      "owner",
+      "and the same contact is never relabelled between reads",
+    );
+  }
+
+  assert.equal(first.properties.filter((e) => e.propertyId === sharedPropertyId).length, 1, "still exactly one entry per property");
+});
+
+/* =====================================================================
+ * 7. THE EMPTY STATE — the W2-D acceptance criterion.
+ *
+ * Before this slice, a contact whose only Active signal was contact-anchored
+ * got `[]` from the summary, and Contact 360 rendered "No property
+ * intelligence connected to this contact yet." That was affirmatively false:
+ * AE held a signal about that person and said it held nothing. The count that
+ * would have contradicted it was unreachable — no route field carried it.
+ * ===================================================================*/
+
+test("W2-D: a contact whose ONLY signal is contact-anchored is never reported as having nothing", async () => {
+  const partyId = await createParty(A.brokerageId, "OnlyContactAnchored");
+  // No relationships, no properties, no property-anchored signals. Exactly the
+  // shape that produced the false empty state.
+  const signalId = await insertRawSignal({ brokerageId: A.brokerageId, partyId, propertyId: null, signalType: "re_engagement_opportunity" });
+
+  const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+
+  // The panel's own empty-state condition, mirrored here so this test fails if
+  // the API ever stops satisfying it (PropertyIntelligencePanel.tsx renders the
+  // empty state only when BOTH collections are empty).
+  //
+  // Evaluated BEFORE the assertions below, deliberately: asserting the length
+  // first narrows it to a literal type, and the compiler then rejects the
+  // `=== 0` comparison as provably false. That is a useful thing to know and a
+  // useless thing to ship — it would delete the runtime check that catches a
+  // future regression.
+  const panelWouldShowEmptyState = summary.properties.length === 0 && summary.contactAnchoredSignals.length === 0;
+  assert.equal(panelWouldShowEmptyState, false, "Contact 360 must not say 'no property intelligence' about a contact AE has a signal for");
+
+  assert.deepEqual(summary.properties, [], "there genuinely is no property to report");
+  assert.equal(summary.contactAnchoredSignals.length, 1, "but there IS intelligence, and it is on the wire");
+  assert.equal(summary.contactAnchoredSignals[0].signal.id, signalId);
+
+  // Over HTTP, which is what the panel actually reads.
+  const res = await fetch(`${baseUrl}/api/grow/property-intelligence/contact/${partyId}`, { headers: { cookie: A.admin.cookie } });
+  const body = (await res.json()) as { properties: unknown[]; contactAnchoredSignals: unknown[] };
+  assert.equal(body.contactAnchoredSignals.length, 1, "the route carries it — there is now a field for it to travel in");
+  assert.deepEqual(body.properties, []);
+});
+
+test("W2-D: a contact with genuinely nothing still reports nothing", async () => {
+  // The other half: the empty state must still be reachable when it is TRUE.
+  // A fix that simply never shows it would be its own kind of dishonest.
+  const partyId = await createParty(A.brokerageId, "GenuinelyEmpty");
+  const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+
+  const panelWouldShowEmptyState = summary.properties.length === 0 && summary.contactAnchoredSignals.length === 0;
+  assert.equal(panelWouldShowEmptyState, true, "the empty state is still reachable when it is the truth");
+
+  assert.deepEqual(summary.properties, []);
+  assert.deepEqual(summary.contactAnchoredSignals, []);
+  assert.equal(summary.unusableSignalCount, 0);
+  assert.equal(summary.outreachRestriction, null);
 });

@@ -379,3 +379,46 @@ test("W2-D: the contact-anchored blurb promises no property and no property acti
   assert.match(CONTACT_ANCHORED_SECTION_BLURB, /relate to this person rather than to a property/);
   assert.match(CONTACT_ANCHORED_SECTION_BLURB, /no property to open and no property action to take/);
 });
+
+/* =====================================================================
+ * THE EMPTY STATE.
+ *
+ * Before W2-D the summary returned [] for a contact whose only Active signal
+ * was contact-anchored, and this panel rendered "No property intelligence
+ * connected to this contact yet." — affirmatively false about a contact AE
+ * held a signal for. The API half is asserted in
+ * apps/api/.../contactAnchoredSignals.test.ts; this is the render half, since
+ * the false sentence was produced HERE.
+ * ===================================================================*/
+
+const EMPTY_STATE = "No property intelligence connected to this contact yet.";
+
+test("W2-D: a contact whose only signal is contact-anchored is never told there is nothing to see", async () => {
+  installGlobals({
+    properties: [],
+    contactAnchoredSignals: [contactAnchoredEntry()],
+    unusableSignalCount: 0,
+    outreachRestriction: null,
+  });
+  try {
+    const text = textContent(await renderPanel());
+    assert.equal(text.includes(EMPTY_STATE), false, "the empty state must not appear when AE holds a signal about this person");
+    assert.match(text, /Worth reconnecting/, "the signal is what is rendered instead");
+    assert.match(text, /About this contact/, "under its own heading");
+    assert.match(text, /No property linked/, "which says plainly that there is no property, rather than implying there is nothing");
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("W2-D: a contact with genuinely nothing still sees the empty state", async () => {
+  // The fix must not be "never show the empty state" — that would trade one
+  // false statement for another.
+  installGlobals({ properties: [], contactAnchoredSignals: [], unusableSignalCount: 0, outreachRestriction: null });
+  try {
+    const text = textContent(await renderPanel());
+    assert.ok(text.includes(EMPTY_STATE), "the empty state is still shown when it is true");
+  } finally {
+    clearGlobals();
+  }
+});

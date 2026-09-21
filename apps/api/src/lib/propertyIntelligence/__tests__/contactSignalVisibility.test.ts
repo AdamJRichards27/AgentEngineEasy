@@ -28,7 +28,6 @@ import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
 import { db, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
 import {
-  countContactAnchoredSignals,
   getContactPropertyIntelligenceSummary,
   SIGNAL_ONLY_RELATIONSHIP_TYPE,
 } from "../service.js";
@@ -164,7 +163,8 @@ test("E-4/W2-D: a party-anchored signal with no property never becomes a propert
   await createActiveRelationship(partyId, propertyId);
   await createSignal(partyId, propertyId, "Signal on the recorded property");
 
-  assert.equal(await countContactAnchoredSignals(partyId, A.brokerageId), 0, "nothing contact-anchored yet");
+  const initial = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+  assert.deepEqual(initial.contactAnchoredSignals, [], "nothing contact-anchored yet");
 
   // Legal per the schema: both anchors are nullable, with no CHECK requiring
   // one. This fixture's type is long_ownership_tenure, which is
@@ -177,10 +177,12 @@ test("E-4/W2-D: a party-anchored signal with no property never becomes a propert
   assert.equal(summary.properties.length, 1, "it has no property, so it cannot become a property entry");
   assert.equal(summary.unusableSignalCount, 1, "a property-dependent row with no property is counted, not surfaced");
   assert.deepEqual(summary.contactAnchoredSignals, [], "and it is never laundered into the contact-anchored list");
+  // W2-D removed countContactAnchoredSignals(): the list IS the count now, so
+  // the two can no longer disagree. See service.ts's removal note.
   assert.equal(
-    await countContactAnchoredSignals(partyId, A.brokerageId),
+    summary.contactAnchoredSignals.length,
     0,
-    "the count reports intelligence about a person, never a data-integrity problem",
+    "the contact-anchored list holds intelligence about a person, never a data-integrity problem",
   );
 });
 

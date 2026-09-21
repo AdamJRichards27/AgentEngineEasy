@@ -377,10 +377,25 @@ export async function readActiveSignalsForParty(partyId: number, brokerageId: nu
       }
     : null;
 
+  // ORDERED, because this feeds a display surface. Postgres gives no order
+  // guarantee without ORDER BY, so the same contact could render their signals
+  // in a different sequence on consecutive loads — nothing lost, but an agent
+  // cannot tell "the list changed" from "the list moved".
+  //
+  // `id` is the whole ordering, and it is a UNIQUE column, so the order is
+  // TOTAL: there are no ties left for the planner to break differently next
+  // time. Ordering on confidenceBand or computedAt would have looked more
+  // meaningful and still permitted two signals sharing a value to swap.
+  //
+  // Deliberately insertion order and NOT a ranking. Ranking Property
+  // Intelligence signals is lib/grow/signalRanking.ts's job, and inventing a
+  // second, implicit ranking here — by quietly ordering on confidence — would
+  // be a product decision smuggled in as a bug fix.
   const signals = await db
     .select()
     .from(growOpportunitySignals)
-    .where(and(eq(growOpportunitySignals.partyId, partyId), eq(growOpportunitySignals.brokerageId, brokerageId), eq(growOpportunitySignals.status, "Active")));
+    .where(and(eq(growOpportunitySignals.partyId, partyId), eq(growOpportunitySignals.brokerageId, brokerageId), eq(growOpportunitySignals.status, "Active")))
+    .orderBy(growOpportunitySignals.id);
 
   return { signals, outreachRestriction };
 }

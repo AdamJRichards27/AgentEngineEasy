@@ -325,10 +325,57 @@ function applyOutreachRestrictionToProperties(
  * check at this call site, which is what made the old behaviour both wrong
  * and invisible.
  */
+/**
+ * THE TOTAL ORDER for Contact 360's property entries.
+ *
+ * Contact 360 read its entries out of an unordered query, so the same contact
+ * could render the same properties in a different sequence on consecutive
+ * loads. No row was lost — which is exactly what made it hard to notice, and
+ * what makes it corrosive: an agent watching a list reshuffle between refreshes
+ * cannot tell "the data changed" from "the data moved", so they stop trusting
+ * either reading.
+ *
+ * THREE KEYS, AND THE LAST ONE IS WHY THIS IS A FUNCTION AND NOT AN `ORDER BY`:
+ *
+ *   1. RECORDED RELATIONSHIPS FIRST, signal-only entries last. Preserves the
+ *      grouping this response already had — a property the agent actually
+ *      recorded against the contact outranks one reached only via a signal —
+ *      rather than quietly reordering the panel while fixing its stability.
+ *   2. ADDRESS, so the order a human sees is the one they would expect, and so
+ *      it does not silently change when an unrelated row is inserted
+ *      elsewhere. Compared with localeCompare for a sane A-Z.
+ *   3. propertyId, THE UNIQUE TIEBREAK. Keys 1 and 2 are both non-unique: two
+ *      properties can share an address (a duplicate record, or unit entries
+ *      normalising to the same string), and every entry in a group shares its
+ *      group rank. Without a unique final key those ties stay free to reorder
+ *      and the whole exercise achieves nothing. This is the key that makes the
+ *      order TOTAL rather than merely better.
+ *
+ * Entries come from two sources (the relationship query and the signal-only
+ * lookup) and are concatenated, so no single ORDER BY could express this; the
+ * comparator is applied once to the assembled array instead.
+ */
+function compareContactPropertyEntries(a: ContactPropertyIntelligenceEntry, b: ContactPropertyIntelligenceEntry): number {
+  const rank = (e: ContactPropertyIntelligenceEntry) => (e.relationshipType === SIGNAL_ONLY_RELATIONSHIP_TYPE ? 1 : 0);
+  return rank(a) - rank(b) || a.propertyAddress.localeCompare(b.propertyAddress) || a.propertyId - b.propertyId;
+}
+
 export async function getContactPropertyIntelligenceSummary(partyId: number, brokerageId: number): Promise<ContactIntelligenceSummary> {
   const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party) throw new PropertyIntelligenceAccessError("Contact not found");
 
+  // ORDERED BY growRelationships.id, and that is load-bearing TWICE.
+  //
+  // 1. It fixes WHICH ROW WINS. The dedupe below keeps the FIRST row it sees
+  //    per propertyId, so when a contact has two Active relationships against
+  //    the same property — owner and landlord, say — the unordered query let
+  //    Postgres decide which relationshipType the panel displayed, and it was
+  //    free to decide differently on the next read. The same contact could be
+  //    labelled "owner" on one load and "landlord" on the next. Ordering by
+  //    id makes it the EARLIEST RECORDED relationship, always.
+  // 2. It fixes the ENTRY ORDER for the subsequent sort's stability.
+  //
+  // `id` is unique, so this is a total order with no ties left to break.
   const relationshipRows = await db
     .select({
       propertyId: growRelationships.propertyId,
@@ -337,7 +384,8 @@ export async function getContactPropertyIntelligenceSummary(partyId: number, bro
     })
     .from(growRelationships)
     .innerJoin(properties, eq(growRelationships.propertyId, properties.id))
-    .where(and(eq(growRelationships.partyId, partyId), eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")));
+    .where(and(eq(growRelationships.partyId, partyId), eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")))
+    .orderBy(growRelationships.id);
 
   // One read, three destinations. Every Active signal for this contact lands
   // in exactly one of them and none is dropped on the floor — which is the
@@ -405,7 +453,8 @@ export async function getContactPropertyIntelligenceSummary(partyId: number, bro
     const signalOnlyProperties = await db
       .select({ id: properties.id, formattedAddress: properties.formattedAddress })
       .from(properties)
-      .where(and(inArray(properties.id, signalOnlyPropertyIds), eq(properties.brokerageId, brokerageId)));
+      .where(and(inArray(properties.id, signalOnlyPropertyIds), eq(properties.brokerageId, brokerageId)))
+      .orderBy(properties.id);
     for (const p of signalOnlyProperties) {
       seen.add(p.id);
       baseEntries.push({
@@ -422,12 +471,25 @@ export async function getContactPropertyIntelligenceSummary(partyId: number, bro
   // re-asserts the property belongs to this brokerage itself, the same
   // defence-in-depth every other Property Intelligence read in this module
   // already relies on rather than trusting the join above alone.
+  //
+  // Its rows are sorted HERE rather than in matches.ts: that function is
+  // shared with the property workspace and is not this slice's to change, but
+  // an unordered nested array makes THIS response unstable just as surely as
+  // an unordered outer one. Sorted by unique id, so the order is total.
   const propertyEntries = await Promise.all(
     baseEntries.map(async (entry) => ({
       ...entry,
-      pendingMatches: await listMatchesForProperty(entry.propertyId, brokerageId, "PendingReview"),
+      pendingMatches: (await listMatchesForProperty(entry.propertyId, brokerageId, "PendingReview")).slice().sort((a, b) => a.id - b.id),
     })),
   );
+
+  propertyEntries.sort(compareContactPropertyEntries);
+
+  // Already in signal-id order, because they were appended while walking an
+  // id-ordered read. Sorted again explicitly so the guarantee belongs to THIS
+  // function rather than to an ordering decision made in another file that a
+  // future edit there could remove without anything here noticing.
+  contactAnchoredSignals.sort((a, b) => a.signal.id - b.signal.id);
 
   // The restriction is applied at the LAST possible moment, on the way out,
   // so there is exactly one place to look to answer "what does a suppressed
@@ -442,34 +504,34 @@ export async function getContactPropertyIntelligenceSummary(partyId: number, bro
   };
 }
 
-/**
- * How many of this contact's own active signals are genuinely
- * contact-anchored.
+/* =====================================================================
+ * REMOVED IN W2-D: countContactAnchoredSignals()
  *
- * W2-B introduced this as a count of `propertyId === null`, because at that
- * point there was nowhere to put such a row and the number existed to make the
- * gap measurable. W2-D closes the gap, and in doing so splits that number in
- * two: a null property is only contact-anchored when the RULE that produced it
- * can legitimately be about a person (classifySignalAnchor()). A
- * long_ownership_tenure row with no property is not a contact-anchored signal
- * — it is a broken row — and counting it here would have meant reporting a
- * data-integrity problem as intelligence.
+ * W2-B added it as a count of `propertyId === null` for one reason: the
+ * summary could not REPRESENT such a signal, so the number existed to make
+ * the gap measurable instead of invisible. It was a placeholder for a missing
+ * feature, and it was honest about being one.
  *
- * Still a thin wrapper over the same read the summary uses, so the count and
- * the surface can never disagree. Use
- * getContactPropertyIntelligenceSummary().unusableSignalCount for the other
- * half.
+ * It never became reachable. It had no non-test caller, and the route that
+ * serves this data returned `{ properties: entries }` — there was no field
+ * for the count to travel in, so no client could ever read it. The measure of
+ * the gap was itself inside the gap. For a contact whose only Active signal
+ * was contact-anchored, Contact 360 therefore rendered "No property
+ * intelligence connected to this contact yet." — affirmatively false, with
+ * the number that would have contradicted it sitting unreachable one layer
+ * below.
  *
- * W2-D: counts a suppressed contact's signals too, for the same reason the
- * summary now returns them — the count exists to agree with what is on the
- * surface, and under-reporting it would reintroduce the silent withholding on
- * the one number that was added to make withholding visible. This is a count
- * of intelligence, not a permission to contact anyone; the restriction is
- * carried by the summary.
- */
-export async function countContactAnchoredSignals(partyId: number, brokerageId: number): Promise<number> {
-  const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
-  if (!party) throw new PropertyIntelligenceAccessError("Contact not found");
-  const { signals } = await readActiveSignalsForParty(partyId, brokerageId);
-  return signals.filter((s) => classifySignalAnchor(s) === "contact").length;
-}
+ * W2-D closes the gap the function was measuring, which retires the function.
+ * `contactAnchoredSignals` now carries the signals themselves, and its
+ * `.length` IS the count — reachable, on the wire, and incapable of
+ * disagreeing with the list it is derived from. A separate function
+ * recomputing the same number from a second read could only ever agree by
+ * luck or disagree by accident.
+ *
+ * Deleted rather than wired into the route, because the alternative was a
+ * response field duplicating an array length already beside it. The empty
+ * state is fixed too: the panel's `isEmpty` now requires BOTH collections to
+ * be empty, so a contact with only contact-anchored signals no longer gets
+ * told there is nothing to see. Both are asserted in
+ * __tests__/contactAnchoredSignals.test.ts.
+ * =====================================================================*/
