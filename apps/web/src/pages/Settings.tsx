@@ -26,6 +26,10 @@ interface SubscriptionResponse {
   entitlements: string[];
 }
 
+function billingErrorMessage(error: unknown): string {
+  return error instanceof ApiError ? error.friendly : "Something went wrong. Try again.";
+}
+
 function formatPrice(amountCents: number | null, currency: string | null, interval: string | null): string {
   if (amountCents === null || currency === null) return "Contact us";
   const amount = (amountCents / 100).toLocaleString(undefined, { style: "currency", currency });
@@ -105,8 +109,12 @@ export default function Settings() {
         ) : (
           <p className="muted">No active subscription. Brokerage-wide activation is the only allocation unit in this build - office/team seat allocation is not yet available.</p>
         )}
+        {/* AE GROW Completion W2-B (G-5): was `((checkout.error ?? cancel.error) as ApiError)
+            .friendly`, which renders the literal string "undefined" whenever the failure isn't an
+            ApiError — a dropped connection during checkout being the obvious one, on the one
+            screen where the agent is trying to pay. */}
         {(checkout.isError || cancel.isError) && (
-          <p className="error-text">{((checkout.error ?? cancel.error) as ApiError).friendly}</p>
+          <p className="error-text">{billingErrorMessage(checkout.error ?? cancel.error)}</p>
         )}
 
         {isAdmin && catalogue.data && catalogue.data.products.length > 0 && (

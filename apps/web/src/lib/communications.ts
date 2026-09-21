@@ -155,10 +155,30 @@ export interface QueueMessageResult {
   dispatched: boolean;
 }
 
+// AE GROW Completion W2-B (E-6) — mirror drift, corrected. The API has returned
+// `propertyAddress: string | null` plus `partyDisplayName: string | null` since
+// Priority 3 made a message's propertyId nullable (see
+// apps/api/src/lib/communications/messages.ts:145-152, whose own in-code note
+// points at partyDisplayName as "what the Hub shows instead"). This hand-mirror
+// still declared a non-null address and omitted partyDisplayName entirely, so
+// the Hub typed `message.propertyId` as safe to interpolate and rendered
+// /properties/null — Number("null") is NaN, which the API answers 400 — while
+// the summary line showed an empty address for exactly the contact-first rows
+// Priority 3 added. Nothing about the server changed to fix this; only this
+// declaration was wrong.
+//
+// The second drift instance in this codebase (the first is self-documented at
+// apps/web/src/lib/growToday.ts:18-20). __tests__/communicationsHub.behavior
+// .test.ts's "E-6 guard" now compares this declaration's field names and
+// nullability against the API's directly, so a third one cannot land silently
+// on this pair at least.
 export interface RecentCommunicationRow {
   message: CommunicationMessage;
-  propertyAddress: string;
+  /** Null for a contact-first message (no propertyId) — partyDisplayName is what the Hub shows instead. */
+  propertyAddress: string | null;
   threadSubject: string;
+  /** The message's party's display name, when the message carries a partyId. */
+  partyDisplayName: string | null;
 }
 
 export interface HubResponse {

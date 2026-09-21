@@ -12,13 +12,25 @@
 // Crew/Brokerage Administrator, Financial only for Brokerage Administrator — unchanged from
 // before this phase). ENTITLEMENT answers "which AE products has this brokerage purchased."
 //
-// Grow is NOT role- or entitlement-hidden by this file: every role could already reach /grow
-// before this phase, and the backend does not yet enforce grow.access on Grow's existing routes
-// (true before this phase, unchanged by it — Workstream 3 only introduced run.access
-// enforcement on the RUN surface). Hiding the Grow link here based on entitlement, with no
-// matching backend gate, would be exactly the "product gating relies solely on frontend hiding"
-// outcome Priority 0.5's Stop Condition 3 forbids. This file therefore only controls ORDERING
-// and the post-login LANDING route — both UX-only, with no security implication either way.
+// Grow is NOT role- or entitlement-hidden by this file, but NOT because the backend is
+// ungated.
+//
+// AE GROW Completion W2-B (G-8) — correcting a claim that had become false and dangerous.
+// This comment used to assert that "the backend does not yet enforce grow.access on Grow's
+// existing routes". It does. Every route on the Grow router except GET /grow/access is
+// entitlement-gated, and routes/grow.ts:42-45 says so in its own header comment ("/access is
+// intentionally the ONLY route that does not also requireEntitlement('grow.access')"); the
+// same gating extends across the other Grow routers (contacts, communications, calls,
+// appraisals, import, property intelligence, AI actions). An engineer reading this file to
+// decide whether hiding a Grow nav link is safe was being told the exact opposite of the
+// truth — which is how frontend-only gating gets shipped.
+//
+// What is still true is the reason this file does not hide the link: every role could already
+// reach /grow before this phase, and ORDERING plus the post-login LANDING route are all this
+// file decides. Both are UX-only. Access itself is decided server-side, per request, by
+// requireEntitlement — never by whether a link is rendered here. Priority 0.5's Stop
+// Condition 3 forbids gating that "relies solely on frontend hiding"; nothing here is relied
+// on for access at all.
 export interface NavLink {
   path: string;
   label: string;
