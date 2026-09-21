@@ -85,24 +85,42 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
     );
   }
 
-  let partyRows = await db.select().from(parties).where(and(...conditions)).orderBy(desc(parties.createdAt)).limit(200);
-
+  // The role filter is a SQL predicate, applied BEFORE the limit. It used to run in JS over the
+  // already-limited 200 rows, which made `?role=` search only the 200 most recently created
+  // contacts in the brokerage: once a brokerage held more than 200 parties, a contact holding
+  // that role simply stopped appearing in the picker, with no error and no indication that
+  // anything had been cut. `limit(200)` now caps the contacts that actually match, which is what
+  // it was always meant to mean. The subquery is covered by grow_contact_roles' own
+  // (brokerage_id, party_id) and (party_id, role) indexes.
   if (role) {
-    const roleRows = await db
-      .select({ partyId: growContactRoles.partyId })
-      .from(growContactRoles)
-      .where(and(eq(growContactRoles.brokerageId, brokerageId), eq(growContactRoles.role, role)));
-    const partyIdsWithRole = new Set(roleRows.map((r) => r.partyId));
-    partyRows = partyRows.filter((p) => partyIdsWithRole.has(p.id));
+    conditions.push(
+      inArray(
+        parties.id,
+        db
+          .select({ partyId: growContactRoles.partyId })
+          .from(growContactRoles)
+          .where(and(eq(growContactRoles.brokerageId, brokerageId), eq(growContactRoles.role, role))),
+      ),
+    );
   }
 
+  const partyRows = await db.select().from(parties).where(and(...conditions)).orderBy(desc(parties.createdAt)).limit(200);
+
+  // Enrichment is restricted to the parties actually being rendered. Both of these queries used
+  // to read every role row and every relationship row in the brokerage (~25k relationship rows at
+  // realistic size) to decorate at most 200 displayed contacts — `partyIds` was computed here and
+  // then never used. Both tables are indexed (brokerage_id, party_id), so adding the party
+  // predicate keeps the same index and just bounds how much of it is walked.
   const partyIds = partyRows.map((p) => p.id);
   const [roleRows, relationshipCountRows] = partyIds.length > 0
     ? await Promise.all([
-        db.select().from(growContactRoles).where(eq(growContactRoles.brokerageId, brokerageId)),
+        db
+          .select()
+          .from(growContactRoles)
+          .where(and(eq(growContactRoles.brokerageId, brokerageId), inArray(growContactRoles.partyId, partyIds))),
         db.select({ partyId: growRelationships.partyId, propertyId: growRelationships.propertyId })
           .from(growRelationships)
-          .where(eq(growRelationships.brokerageId, brokerageId)),
+          .where(and(eq(growRelationships.brokerageId, brokerageId), inArray(growRelationships.partyId, partyIds))),
       ])
     : [[], []];
 

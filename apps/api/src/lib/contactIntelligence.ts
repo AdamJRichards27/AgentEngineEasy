@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, growActivities, growCommitments, growContactRoles, growOpportunities, growRelationships } from "@aee/db";
 
 // AE GROW Priority 2 — Contact Intelligence Summary (§9).
@@ -37,18 +37,46 @@ export async function getContactIntelligenceSummary(
   brokerageId: number,
   partyId: number,
 ): Promise<ContactIntelligenceSummary> {
+  // brokerageId is part of the SQL predicate, not applied in JS afterwards. Every index on
+  // growRelationships/growActivities/growOpportunities/growCommitments LEADS with brokerage_id,
+  // so filtering on `party_id` alone left the leading column unconstrained and Postgres had to
+  // examine every row in the table (or every entry in one of those indexes) on every Contact
+  // 360 open — work that grew with the INSTANCE's row count, not the tenant's. Naming the
+  // leading column makes each of these a bounded seek into one tenant's slice.
+  //
+  // growContactRoles is the exception and was never one of those scans: it also carries a
+  // (party_id, role) unique index, so its party_id-only lookup could already seek. Its
+  // brokerage predicate is for consistency with its four siblings, not a plan fix.
+  //
+  // The JS filters below are unchanged and are now redundant by construction — they are kept as
+  // the defence in depth this function already documented, not as the thing doing the scoping.
   const [roleRows, relationshipRows, activityRows, opportunityRows, commitmentRows] = await Promise.all([
-    db.select().from(growContactRoles).where(eq(growContactRoles.partyId, partyId)),
-    db.select().from(growRelationships).where(eq(growRelationships.partyId, partyId)),
-    db.select().from(growActivities).where(eq(growActivities.partyId, partyId)),
-    db.select().from(growOpportunities).where(eq(growOpportunities.partyId, partyId)),
-    db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId)),
+    db
+      .select()
+      .from(growContactRoles)
+      .where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growRelationships)
+      .where(and(eq(growRelationships.partyId, partyId), eq(growRelationships.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growActivities)
+      .where(and(eq(growActivities.partyId, partyId), eq(growActivities.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growOpportunities)
+      .where(and(eq(growOpportunities.partyId, partyId), eq(growOpportunities.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growCommitments)
+      .where(and(eq(growCommitments.partyId, partyId), eq(growCommitments.brokerageId, brokerageId))),
   ]);
 
-  // Tenant isolation: every query above filtered by partyId alone. A row belonging to another
-  // brokerage cannot exist for this partyId in practice (partyId itself is tenant-scoped and
-  // validated by the caller before this function runs), but as a second line of defence every
-  // row is still filtered by brokerageId here before being counted.
+  // Tenant isolation, second line of defence: a row belonging to another brokerage cannot exist
+  // for this partyId in practice (partyId itself is tenant-scoped and validated by the caller
+  // before this function runs) and can no longer be returned by the queries above either, but
+  // every row is still filtered by brokerageId here before being counted.
   const roles = roleRows.filter((r) => r.brokerageId === brokerageId);
   const relationships = relationshipRows.filter((r) => r.brokerageId === brokerageId);
   const activities = activityRows.filter((a) => a.brokerageId === brokerageId);
