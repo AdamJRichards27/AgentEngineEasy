@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "wouter";
+import { Link, useSearch } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
@@ -75,12 +75,27 @@ function growActivityTypeLabel(activityType: string): string {
   return activityType.replace(/_/g, " ");
 }
 
+// Hand-mirrors the row GET /grow/opportunities returns — that route selects the
+// whole grow_opportunities row (apps/api/src/routes/grow.ts:383-391), so every
+// field below already came down the wire; the previous four-field declaration
+// was simply reading less of it than it received.
+//
+// AE GROW Completion W2-B (E-3): partyId / propertyId / recommendedNextAction /
+// nextActionDueAt are read now because the Opportunities tab needs them to be
+// something other than a dead end. partyId is NOT NULL and propertyId IS
+// nullable in packages/db/src/schema/grow.ts:236-237; `reason` is nullable there
+// too, which this mirror previously declared as `string` and rendered as an
+// empty cell.
 interface GrowOpportunity {
   id: number;
   opportunityType: string;
   status: string;
   stage: string;
-  reason: string;
+  reason: string | null;
+  partyId: number;
+  propertyId: number | null;
+  recommendedNextAction: string | null;
+  nextActionDueAt: string | null;
 }
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline, frontend types.
@@ -338,7 +353,13 @@ function sandboxCallStatusLabel(status: string): string {
   }
 }
 
-function callErrorMessage(error: unknown, fallback: string): string {
+// AE GROW Completion W2-B (G-5) — the one way this page turns a failure into a
+// sentence. It was already here (as callErrorMessage, used by the call panel);
+// every remaining `(error as ApiError).friendly` cast on this page now goes
+// through it instead, because that cast renders the literal string "undefined"
+// whenever the failure isn't an ApiError — a dropped connection, an aborted
+// request, or anything thrown before the response was parsed.
+function growErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.friendly : fallback;
 }
 
@@ -375,8 +396,11 @@ function RecordingGateReasons({ result }: { result: GrowCallFiveGateResult }) {
 // default landing tab), Opportunities, Contacts, Nurture, Performance, Ask AE — mirroring
 // PitCrewCommandCentre.tsx's own internal `.pc-tabs` sub-navigation pattern rather than adding
 // new top-level wouter routes (RUN already owns the top-level /today route — see App.tsx).
-// Nurture and Performance are clearly-labelled "coming soon" placeholders: no backend exists for
-// either yet, and Priority 1 does not build one.
+//
+// AE GROW Completion W2-B (G-8): this comment used to say "Nurture AND Performance are
+// clearly-labelled coming soon placeholders". Performance stopped being one in Priority 6 Stage C
+// — it renders the real AI Business Coach (GrowBusinessCoachTab below). Nurture is still a
+// genuine placeholder and stays one until a backend for it exists.
 export default function Grow() {
   const { user } = useSession();
   const queryClient = useQueryClient();
@@ -420,7 +444,12 @@ export default function Grow() {
               <button className="btn btn-primary" onClick={() => checkout.mutate()} disabled={checkout.isPending}>
                 {checkout.isPending ? "Starting checkout…" : "Add Grow"}
               </button>
-              {checkout.isError && <p className="error-text">{(checkout.error as ApiError).friendly}</p>}
+              {/* AE GROW Completion W2-B (G-5): was `(checkout.error as ApiError).friendly`, which
+                  renders the string "undefined" for any failure that isn't an ApiError — a network
+                  drop mid-checkout being the obvious one. See growErrorMessage above. */}
+              {checkout.isError && (
+                <p className="error-text">{growErrorMessage(checkout.error, "Couldn't start checkout. Try again.")}</p>
+              )}
             </>
           ) : (
             <p className="muted">Ask a Brokerage Administrator to add Grow from Settings → Billing.</p>
@@ -433,15 +462,38 @@ export default function Grow() {
   return <GrowWorkspace />;
 }
 
+// AE GROW Completion W2-B (E-6/E-7) — deep links into this workspace.
+//
+// Contact 360 is not a wouter route: it is a view inside the Contacts tab (see
+// App.tsx's route table, which mounts /grow and /grow/import only). So the two
+// surfaces that legitimately need to send an agent *to a specific contact* —
+// the Communications Hub's contact-first rows, and the import results screen —
+// pass it in the query string instead of inventing a route. Only the search
+// string is read; the path still matches /grow exactly as before, and an absent
+// or unparseable parameter leaves the workspace on its normal Today landing.
+export function growWorkspaceEntryState(search: string): { tab: GrowTab; contactPartyId: number | null } {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const rawContact = params.get("contact");
+  const contactId = rawContact !== null && /^[1-9][0-9]*$/.test(rawContact) ? Number(rawContact) : null;
+  const rawTab = params.get("tab");
+  const tab = GROW_TABS.find((t) => t.key === rawTab)?.key ?? (contactId !== null ? "contacts" : "today");
+  // A contact can only be opened on the tab that renders it.
+  return contactId !== null ? { tab: "contacts", contactPartyId: contactId } : { tab, contactPartyId: null };
+}
+
 function GrowWorkspace() {
-  const [tab, setTab] = useState<GrowTab>("today");
+  const search = useSearch();
+  // Read once, on mount: this is an entry point, not a controlled route. Every
+  // in-workspace navigation below owns the state from then on.
+  const [entry] = useState(() => growWorkspaceEntryState(search));
+  const [tab, setTab] = useState<GrowTab>(entry.tab);
   // AE GROW Priority 2 §12 — Priority 1 integration. The only state this priority adds at the
   // workspace level: which contact (if any) the Contacts tab should open straight into a
   // Contact 360 detail view for, rather than its default list. Lifted up here (rather than kept
   // local to GrowContactsTab) purely so GrowToday's "View Contact" button can jump both the tab
   // AND the selected contact in one click — Priority 1's own tab/state model is otherwise
   // untouched.
-  const [contactPartyId, setContactPartyId] = useState<number | null>(null);
+  const [contactPartyId, setContactPartyId] = useState<number | null>(entry.contactPartyId);
   // AE GROW Priority 3 §2/§4 — the channel (if any) a Grow Today Email/SMS action button asked
   // Contact 360 to jump straight into composing. Lifted up here for the same reason
   // contactPartyId is: GrowToday's own buttons live several components away from
@@ -525,7 +577,10 @@ function GrowWorkspace() {
             onSmsContact={smsContact}
           />
         )}
-        {tab === "opportunities" && <GrowOpportunitiesTab />}
+        {/* AE GROW Completion W2-B (E-3): the tab now needs the same "open this
+            contact" jump Grow Today already had, so an opportunity row can lead
+            somewhere. Exactly the viewContact above, not a second mechanism. */}
+        {tab === "opportunities" && <GrowOpportunitiesTab onViewContact={viewContact} />}
         {tab === "contacts" && (
           <GrowContactsTab
             selectedPartyId={contactPartyId}
@@ -582,12 +637,22 @@ function GrowToday({
     queryFn: () => apiFetch("/grow/today"),
   });
 
-  if (today.isLoading) {
-    return <p className="muted">Loading today's priorities…</p>;
-  }
-
-  if (today.isError || !today.data) {
-    return <p className="error-text">{today.error instanceof ApiError ? today.error.friendly : "Couldn't load Today."}</p>;
+  // AE GROW Completion W2-B (G-4) — Today had an error branch already, but it
+  // was a bare sentence with no way out: an agent whose session had just expired
+  // saw one line of red and had to reload the whole app. It now uses the same
+  // region presentation (message + support reference + Try again) the four
+  // regions on the Contacts and Opportunities tabs have had since WP6b.
+  if (today.isLoading || today.isError || !today.data) {
+    return (
+      <GrowDataRegionStatus
+        query={today}
+        itemCount={undefined}
+        loadingMessage="Loading today's priorities…"
+        errorFallback="Couldn't load Today."
+        emptyMessage="Nothing to show yet."
+        onRetry={() => void today.refetch()}
+      />
+    );
   }
 
   const data = today.data;
@@ -726,6 +791,148 @@ function StatTile({ label, value }: { label: string; value: number }) {
   );
 }
 
+// ── Follow-ups on an opportunity (AE GROW Completion W2-B, E-3) ───────────
+//
+// PATCH /grow/opportunities/:id is the one write behind "Create follow-up".
+// Grow Today's action card has offered it since Priority 1; the Opportunities
+// tab and Contact 360's opportunities table offered nothing at all, so the SAME
+// opportunity record was actionable on one screen and inert on the other two.
+//
+// The fix is deliberately not a second mutation. This hook and
+// GrowNextActionForm below are the Today card's own mutation and form, lifted
+// out unchanged in behaviour (same route, same method, same body shape, same
+// "at least one field or don't submit" rule), and all three surfaces now call
+// them. There is exactly one definition of what creating a follow-up means.
+
+interface GrowNextActionInput {
+  nextActionDueAt?: string;
+  recommendedNextAction?: string;
+}
+
+function useUpdateOpportunityNextAction(opportunityId: number | null, onSaved: () => void) {
+  return useMutation<unknown, unknown, GrowNextActionInput>({
+    mutationFn: (vars) =>
+      apiFetch(`/grow/opportunities/${opportunityId}`, {
+        method: "PATCH",
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: onSaved,
+  });
+}
+
+// Owns its own field state, so closing the form is what clears it — the caller
+// no longer has to remember to reset two strings on success. `idPrefix` keeps
+// the label/input association unique when several of these are on screen at
+// once (one per row of a table).
+function GrowNextActionForm({
+  idPrefix,
+  submitting,
+  onSubmit,
+}: {
+  idPrefix: string;
+  submitting: boolean;
+  onSubmit: (vars: GrowNextActionInput) => void;
+}) {
+  const [nextActionDate, setNextActionDate] = useState("");
+  const [nextActionText, setNextActionText] = useState("");
+
+  return (
+    <form
+      className="stack grow-inline-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const vars: GrowNextActionInput = {};
+        if (nextActionDate) vars.nextActionDueAt = new Date(nextActionDate).toISOString();
+        if (nextActionText.trim()) vars.recommendedNextAction = nextActionText.trim();
+        if (!vars.nextActionDueAt && !vars.recommendedNextAction) return;
+        onSubmit(vars);
+      }}
+    >
+      <label htmlFor={`${idPrefix}-date`}>Next action due</label>
+      <input id={`${idPrefix}-date`} type="date" value={nextActionDate} onChange={(e) => setNextActionDate(e.target.value)} />
+      <label htmlFor={`${idPrefix}-text`}>Recommended next action</label>
+      <input
+        id={`${idPrefix}-text`}
+        type="text"
+        placeholder="e.g. Call to confirm appraisal time"
+        value={nextActionText}
+        onChange={(e) => setNextActionText(e.target.value)}
+      />
+      <button className="btn btn-primary btn-small" type="submit" disabled={submitting}>
+        Save follow-up
+      </button>
+    </form>
+  );
+}
+
+// The actions an opportunity ROW offers, shared by the Opportunities tab and
+// Contact 360's opportunities table. Before this, both rendered four plain
+// <td>s and nothing else: you could see that an opportunity needed work and do
+// nothing about it, on either screen.
+//
+// onViewContact is null on Contact 360 — that table is already inside the
+// contact this opportunity belongs to, so a "View contact" there would just
+// reload the screen you are on. Everywhere else it is the same jump Grow Today
+// makes.
+function GrowOpportunityRowActions({
+  opportunityId,
+  partyId,
+  propertyId,
+  canManageOpportunities,
+  canViewContacts,
+  onViewContact,
+  onSaved,
+}: {
+  opportunityId: number;
+  partyId: number | null;
+  propertyId: number | null;
+  canManageOpportunities: boolean;
+  canViewContacts: boolean;
+  onViewContact: ((partyId: number) => void) | null;
+  onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const updateNextAction = useUpdateOpportunityNextAction(opportunityId, () => {
+    setOpen(false);
+    onSaved();
+  });
+
+  return (
+    <div className="grow-action-card-actions">
+      {onViewContact !== null && canViewContacts && partyId !== null && (
+        <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(partyId)}>
+          View contact
+        </button>
+      )}
+      {propertyId !== null && (
+        <Link href={`/properties/${propertyId}`} className="btn btn-link btn-small">
+          View property
+        </Link>
+      )}
+      {canManageOpportunities && (
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          disabled={updateNextAction.isPending}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Cancel" : "Create follow-up"}
+        </button>
+      )}
+      {updateNextAction.isError && (
+        <p className="error-text">{growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")}</p>
+      )}
+      {open && (
+        <GrowNextActionForm
+          idPrefix={`grow-opportunity-${opportunityId}`}
+          submitting={updateNextAction.isPending}
+          onSubmit={(vars) => updateNextAction.mutate(vars)}
+        />
+      )}
+    </div>
+  );
+}
+
 interface GrowActionCardProps {
   item: GrowTodayAction;
   canAddNote: boolean;
@@ -767,8 +974,6 @@ function GrowActionCard({
   const queryClient = useQueryClient();
   const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
   const [noteText, setNoteText] = useState("");
-  const [nextActionDate, setNextActionDate] = useState("");
-  const [nextActionText, setNextActionText] = useState("");
 
   function invalidateToday() {
     queryClient.invalidateQueries({ queryKey: ["grow-today"] });
@@ -793,18 +998,14 @@ function GrowActionCard({
     },
   });
 
-  const updateNextAction = useMutation({
-    mutationFn: (vars: { nextActionDueAt?: string; recommendedNextAction?: string }) =>
-      apiFetch(`/grow/opportunities/${item.opportunityId}`, {
-        method: "PATCH",
-        body: JSON.stringify(vars),
-      }),
-    onSuccess: () => {
-      setOpenForm(null);
-      setNextActionDate("");
-      setNextActionText("");
-      invalidateToday();
-    },
+  // AE GROW Completion W2-B (E-3): this card's follow-up mutation now lives in
+  // useUpdateOpportunityNextAction above, so the two opportunity tables offer
+  // the identical write rather than each growing their own copy. Nothing about
+  // what this card does changed — the form's own field state simply moved into
+  // GrowNextActionForm, which unmounts (and therefore clears) when it closes.
+  const updateNextAction = useUpdateOpportunityNextAction(item.opportunityId, () => {
+    setOpenForm(null);
+    invalidateToday();
   });
 
   // AE GROW Signal Sweep stage 3: every contact-anchored affordance is now
@@ -840,13 +1041,9 @@ function GrowActionCard({
 
   const busy = addNote.isPending || updateNextAction.isPending;
   const errorMessage: string | null = addNote.isError
-    ? addNote.error instanceof ApiError
-      ? addNote.error.friendly
-      : "Something went wrong. Try again."
+    ? growErrorMessage(addNote.error, "Something went wrong. Try again.")
     : updateNextAction.isError
-    ? updateNextAction.error instanceof ApiError
-      ? updateNextAction.error.friendly
-      : "Something went wrong. Try again."
+    ? growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")
     : null;
 
   return (
@@ -984,36 +1181,7 @@ function GrowActionCard({
       )}
 
       {openForm === "nextAction" && (
-        <form
-          className="stack grow-inline-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const vars: { nextActionDueAt?: string; recommendedNextAction?: string } = {};
-            if (nextActionDate) vars.nextActionDueAt = new Date(nextActionDate).toISOString();
-            if (nextActionText.trim()) vars.recommendedNextAction = nextActionText.trim();
-            if (!vars.nextActionDueAt && !vars.recommendedNextAction) return;
-            updateNextAction.mutate(vars);
-          }}
-        >
-          <label htmlFor={`grow-next-action-date-${item.id}`}>Next action due</label>
-          <input
-            id={`grow-next-action-date-${item.id}`}
-            type="date"
-            value={nextActionDate}
-            onChange={(e) => setNextActionDate(e.target.value)}
-          />
-          <label htmlFor={`grow-next-action-text-${item.id}`}>Recommended next action</label>
-          <input
-            id={`grow-next-action-text-${item.id}`}
-            type="text"
-            placeholder="e.g. Call to confirm appraisal time"
-            value={nextActionText}
-            onChange={(e) => setNextActionText(e.target.value)}
-          />
-          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
-            Save follow-up
-          </button>
-        </form>
+        <GrowNextActionForm idPrefix={`grow-next-action-${item.id}`} submitting={busy} onSubmit={(vars) => updateNextAction.mutate(vars)} />
       )}
     </li>
   );
@@ -1410,7 +1578,7 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
       {eligibility.isLoading && <p className="muted">Checking call eligibility…</p>}
       {eligibility.isError && (
         <p className="error-text">
-          {callErrorMessage(eligibility.error, "Call eligibility could not be loaded. Refresh and try again.")}
+          {growErrorMessage(eligibility.error, "Call eligibility could not be loaded. Refresh and try again.")}
         </p>
       )}
       {eligibility.data && !activeSession && (
@@ -1487,7 +1655,7 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
           {session.isLoading && <p className="muted">Refreshing call status…</p>}
           {session.isError && (
             <p className="error-text">
-              {callErrorMessage(session.error, "Call status could not be refreshed. Try again.")}
+              {growErrorMessage(session.error, "Call status could not be refreshed. Try again.")}
             </p>
           )}
           {activeSession.status === "READY" && (
@@ -1566,7 +1734,7 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
           </div>
 
           {mutationError ? (
-            <p className="error-text">{callErrorMessage(mutationError, "The server did not apply that call action. Refresh and try again.")}</p>
+            <p className="error-text">{growErrorMessage(mutationError, "The server did not apply that call action. Refresh and try again.")}</p>
           ) : null}
           {TERMINAL_CALL_STATUSES.has(activeSession.status) && (
             <button type="button" className="btn btn-link btn-small" onClick={startAnotherSandboxCall}>
@@ -1694,16 +1862,24 @@ function GrowContactDetail({
     onSuccess: invalidate,
   });
 
-  if (detail.isLoading) {
-    return <p className="muted">Loading contact…</p>;
-  }
-  if (detail.isError || !detail.data) {
+  // AE GROW Completion W2-B (G-4) — same region presentation as every other
+  // Grow region, so a Contact 360 that failed to load offers Try again rather
+  // than only "Back to contacts". The back button stays: it is this view's own
+  // navigation, not part of the failure.
+  if (detail.isLoading || detail.isError || !detail.data) {
     return (
       <div>
         <button type="button" className="btn btn-link btn-small" onClick={onBack}>
           &larr; Back to contacts
         </button>
-        <p className="error-text">{detail.error instanceof ApiError ? detail.error.friendly : "Couldn't load this contact."}</p>
+        <GrowDataRegionStatus
+          query={detail}
+          itemCount={undefined}
+          loadingMessage="Loading contact…"
+          errorFallback="Couldn't load this contact."
+          emptyMessage="Nothing to show for this contact."
+          onRetry={() => void detail.refetch()}
+        />
       </div>
     );
   }
@@ -2095,51 +2271,112 @@ function GrowContactDetail({
         )}
       </section>
 
-      <section className="card">
-        <h2>Opportunities</h2>
-        <p className="muted">Explainable by design - every opportunity carries a reason, never just a score.</p>
-        {data.opportunities.length === 0 && <p className="empty-state">No opportunities yet.</p>}
-        {data.opportunities.length > 0 && (
-          <table className="grow-table">
-            <thead>
-              <tr>
-                <th>Type</th>
-                <th>Stage</th>
-                <th>Status</th>
-                <th>Reason</th>
-                <th>Next action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.opportunities.map((o) => (
-                <tr key={o.id}>
-                  <td>{o.opportunityType}</td>
-                  <td>{o.stage}</td>
-                  <td>
-                    <span className={`pill ${o.status === "Open" ? "pill-success" : o.status === "Lost" ? "pill-danger" : ""}`}>
-                      {o.status}
-                    </span>
-                  </td>
-                  <td>{o.reason ?? "–"}</td>
-                  <td>
-                    {o.recommendedNextAction ?? "–"}
-                    {o.nextActionDueAt ? ` (due ${formatWhen(o.nextActionDueAt)})` : ""}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      <GrowContactOpportunitiesSection partyId={partyId} opportunities={data.opportunities} onChanged={invalidate} />
     </div>
   );
 }
 
-function GrowOpportunitiesTab() {
+// AE GROW Completion W2-B (E-3) — Contact 360's opportunities table. Extracted
+// from GrowContactDetail above only so the row actions it now carries can be
+// exercised on their own; the markup is otherwise the table that was inline
+// here, plus an Actions column.
+export function GrowContactOpportunitiesSection({
+  partyId,
+  opportunities,
+  onChanged,
+}: {
+  partyId: number;
+  opportunities: GrowContact360Opportunity[];
+  onChanged: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const { hasEntitlement } = useEntitlements();
+  const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
+
+  function onSaved() {
+    // The follow-up is due-dated work, so Grow Today's feed is stale too — the
+    // same pair Grow Today's own card invalidates, from the other direction.
+    onChanged();
+    queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+    queryClient.invalidateQueries({ queryKey: ["grow-opportunities"] });
+  }
+
+  return (
+    <section className="card">
+      <h2>Opportunities</h2>
+      <p className="muted">Explainable by design - every opportunity carries a reason, never just a score.</p>
+      {opportunities.length === 0 && <p className="empty-state">No opportunities yet.</p>}
+      {opportunities.length > 0 && (
+        <table className="grow-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Stage</th>
+              <th>Status</th>
+              <th>Reason</th>
+              <th>Next action</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {opportunities.map((o) => (
+              <tr key={o.id}>
+                <td>{o.opportunityType}</td>
+                <td>{o.stage}</td>
+                <td>
+                  <span className={`pill ${o.status === "Open" ? "pill-success" : o.status === "Lost" ? "pill-danger" : ""}`}>
+                    {o.status}
+                  </span>
+                </td>
+                <td>{o.reason ?? "–"}</td>
+                <td>
+                  {o.recommendedNextAction ?? "–"}
+                  {o.nextActionDueAt ? ` (due ${formatWhen(o.nextActionDueAt)})` : ""}
+                </td>
+                <td>
+                  {/* onViewContact is null here on purpose — see
+                      GrowOpportunityRowActions: this table is already inside
+                      the contact these opportunities belong to. */}
+                  <GrowOpportunityRowActions
+                    opportunityId={o.id}
+                    partyId={partyId}
+                    propertyId={o.propertyId}
+                    canManageOpportunities={canManageOpportunities}
+                    canViewContacts={false}
+                    onViewContact={null}
+                    onSaved={onSaved}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+// AE GROW Completion W2-B (E-3) — this tab was the clearest dead end in Grow:
+// four read-only cells per row, no row click, no contact link, no property
+// link, no action. The very same opportunity was fully actionable on Grow
+// Today. It now offers the same three next steps Today's card does, backed by
+// the same mutation (GrowOpportunityRowActions above), and shows the existing
+// next action so that creating one visibly changes something.
+export function GrowOpportunitiesTab({ onViewContact }: { onViewContact: (partyId: number) => void }) {
+  const queryClient = useQueryClient();
+  const { hasEntitlement } = useEntitlements();
+  const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
+  const canViewContacts = hasEntitlement("grow.contacts.read");
+
   const opportunities = useQuery<{ opportunities: GrowOpportunity[] }>({
     queryKey: ["grow-opportunities"],
     queryFn: () => apiFetch("/grow/opportunities"),
   });
+
+  function onSaved() {
+    void opportunities.refetch();
+    queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+  }
 
   return (
     <section className="card">
@@ -2161,6 +2398,8 @@ function GrowOpportunitiesTab() {
               <th>Stage</th>
               <th>Status</th>
               <th>Reason</th>
+              <th>Next action</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -2173,7 +2412,22 @@ function GrowOpportunitiesTab() {
                     {o.status}
                   </span>
                 </td>
-                <td>{o.reason}</td>
+                <td>{o.reason ?? "–"}</td>
+                <td>
+                  {o.recommendedNextAction ?? "–"}
+                  {o.nextActionDueAt ? ` (due ${formatWhen(o.nextActionDueAt)})` : ""}
+                </td>
+                <td>
+                  <GrowOpportunityRowActions
+                    opportunityId={o.id}
+                    partyId={o.partyId}
+                    propertyId={o.propertyId}
+                    canManageOpportunities={canManageOpportunities}
+                    canViewContacts={canViewContacts}
+                    onViewContact={onViewContact}
+                    onSaved={onSaved}
+                  />
+                </td>
               </tr>
             ))}
           </tbody>

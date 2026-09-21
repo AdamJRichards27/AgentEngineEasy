@@ -1,6 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch } from "../lib/api";
+// AE GROW Completion W2-B (G-4) — the shared loading/failed/empty region
+// presentation (components/GrowDataRegion.tsx). Named for Grow because that is
+// where it was first needed; the failure it prevents is not Grow-specific.
+import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 import {
   type ActionItem,
   type ActivePropertySummary,
@@ -33,10 +37,11 @@ import {
 // <details className="section"> below the fold, same convention as
 // PropertyWorkspace.tsx's own secondary sections.
 export default function CommandCentre() {
-  const { data, isLoading, isError, error } = useQuery({
+  const commandCentre = useQuery({
     queryKey: ["command-centre"],
     queryFn: () => apiFetch<CommandCentreResponse>("/command-centre"),
   });
+  const { data, isLoading, isError } = commandCentre;
 
   return (
     <div>
@@ -55,8 +60,21 @@ export default function CommandCentre() {
         </p>
       </div>
 
-      {isLoading && <p className="muted">Loading...</p>}
-      {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+      {/* AE GROW Completion W2-B (G-4/G-5): the error branch used to be
+          `(error as ApiError).friendly`, which renders the literal "undefined"
+          for any failure that is not an ApiError, and it offered no way to
+          retry — on this screen, of all of them, the agent was told nothing
+          needed their attention and given no way to find out otherwise. */}
+      {(isLoading || isError) && (
+        <GrowDataRegionStatus
+          query={commandCentre}
+          itemCount={undefined}
+          loadingMessage="Loading..."
+          errorFallback="Couldn't load Today."
+          emptyMessage="Nothing to show yet."
+          onRetry={() => void commandCentre.refetch()}
+        />
+      )}
 
       {!isLoading && !isError && data && (
         <>
@@ -91,7 +109,14 @@ export default function CommandCentre() {
           <CollapsibleActionSection
             title="Pit Crew Activity"
             items={data.pitCrew}
-            emptyText="No Pit Crew activity to show yet -- Pit Crew service assignment isn't tracked in the schema yet, so this section will stay empty until that exists."
+            // AE GROW Completion W2-B (G-8): this used to say Pit Crew service
+            // assignment "isn't tracked in the schema yet, so this section will
+            // stay empty until that exists". It is tracked
+            // (packages/db/src/schema/pitCrew.ts's pitCrewAssignments) and this
+            // section is populated from it (lib/commandCentre/queries.ts's
+            // pitCrew filter), so the copy was telling the agent that a working
+            // feature did not exist — and that an empty list meant nothing.
+            emptyText="No Pit Crew activity right now."
           />
 
           <CollapsibleActionSection

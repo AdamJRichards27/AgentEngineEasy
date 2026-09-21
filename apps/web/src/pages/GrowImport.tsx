@@ -2,6 +2,19 @@ import { useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
+// AE GROW Completion W2-B (G-4) — the shared loading/failed/empty region
+// presentation every other Grow region already uses.
+import { GrowDataRegionStatus } from "../components/GrowDataRegion";
+
+// AE GROW Completion W2-B (G-5) — the one way this page turns a failure into a
+// sentence. Every `(mutation.error as ApiError).friendly` on this page used to
+// render the literal string "undefined" when the failure wasn't an ApiError,
+// which for the upload mutation in particular is the common case: it throws
+// from a bare fetch(), so a dropped connection never produces an ApiError at
+// all.
+function importErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.friendly : fallback;
+}
 
 // Mirrors apps/api/src/lib/import/mapping.ts's CANONICAL_FIELDS exactly --
 // this list is presentation-only (labels + ordering for the mapping step),
@@ -325,14 +338,24 @@ function ImportHistory({
           >
             {upload.isPending ? "Uploading…" : "Upload & continue"}
           </button>
-          {upload.isError && <p className="error-text">{(upload.error as ApiError).friendly}</p>}
+          {upload.isError && <p className="error-text">{importErrorMessage(upload.error, "That file couldn't be uploaded. Check your connection and try again.")}</p>}
         </div>
       </section>
 
       <section className="card">
         <h2>Import history</h2>
-        {jobs.isLoading && <p className="muted">Loading…</p>}
-        {jobs.data?.jobs.length === 0 && <p className="empty-state">No imports yet.</p>}
+        {/* AE GROW Completion W2-B (G-4): this card branched only on isLoading
+            and `jobs.data?.jobs.length === 0`. On a failed fetch `data` is
+            undefined, so BOTH branches were false and the card rendered nothing
+            at all under its heading — verbatim the defect growDataRegionState
+            was written to eliminate (lib/growWorkspace.ts:7-15). */}
+        <GrowDataRegionStatus
+          query={jobs}
+          itemCount={jobs.data?.jobs.length}
+          errorFallback="Couldn't load your import history."
+          emptyMessage="No imports yet."
+          onRetry={() => void jobs.refetch()}
+        />
         {jobs.data && jobs.data.jobs.length > 0 && (
           <table className="grow-table">
             <thead>
@@ -509,7 +532,7 @@ function MappingStep({
         <button className="btn btn-primary" disabled={submit.isPending} onClick={() => submit.mutate()}>
           {submit.isPending ? "Validating…" : "Validate & continue"}
         </button>
-        {submit.isError && <p className="error-text">{(submit.error as ApiError).friendly}</p>}
+        {submit.isError && <p className="error-text">{importErrorMessage(submit.error, "Couldn't validate that mapping. Try again.")}</p>}
         {result && (
           <p className="muted">
             {result.validRows} row{result.validRows === 1 ? "" : "s"} ready
@@ -631,7 +654,7 @@ function PreviewStep({ job, onExecuted }: { job: ImportJob; onExecuted: (result:
         <button className="btn btn-primary" disabled={execute.isPending} onClick={() => execute.mutate()}>
           {execute.isPending ? "Importing…" : "Run import"}
         </button>
-        {execute.isError && <p className="error-text">{(execute.error as ApiError).friendly}</p>}
+        {execute.isError && <p className="error-text">{importErrorMessage(execute.error, "Couldn't run the import. Try again.")}</p>}
       </section>
     </div>
   );
@@ -745,6 +768,21 @@ function ResultsStep({ job, onRolledBack }: { job: ImportJob; onRolledBack: () =
             .
           </p>
         )}
+        {/* AE GROW Completion W2-B (E-7): after importing a whole contact
+            database the only thing this screen offered was "Undo this import".
+            The only forward link anywhere in this file was on the NOT-entitled
+            screen. These two are the actual next steps — see what came in, or
+            work it — and they are plain links to routes that already exist
+            (App.tsx mounts /grow; the contact deep-link parameters are read by
+            Grow.tsx's growWorkspaceEntryState). */}
+        <div className="grow-empty-actions">
+          <Link href="/grow?tab=contacts" className="btn btn-primary btn-small">
+            See these contacts in Grow
+          </Link>
+          <Link href="/grow" className="btn btn-secondary btn-small">
+            Go to Grow Today
+          </Link>
+        </div>
       </section>
 
       <section className="card">
@@ -773,7 +811,7 @@ function ResultsStep({ job, onRolledBack }: { job: ImportJob; onRolledBack: () =
             </button>
           </div>
         )}
-        {rollbackMutation.isError && <p className="error-text">{(rollbackMutation.error as ApiError).friendly}</p>}
+        {rollbackMutation.isError && <p className="error-text">{importErrorMessage(rollbackMutation.error, "Couldn't undo this import. Try again.")}</p>}
         {rollback && (
           <div>
             <p className="muted">
