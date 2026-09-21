@@ -72,7 +72,9 @@ import { logger } from "@aee/events";
  * COST. Two statements per batch of parties, regardless of how many parties
  * are in the batch — DISTINCT ON does the "latest per (party, channel)"
  * reduction in the database. Batches are chunked only to keep a single bind
- * parameter array sane.
+ * parameter array sane. W2-A (I-16): the two statements in a batch are
+ * independent and now issue in parallel, so a batch costs one round trip
+ * rather than two.
  */
 
 /** Parties per statement. Two statements per chunk; 5,000 parties is one chunk. */
@@ -141,36 +143,46 @@ export async function loadContactabilityFilter(brokerageId: number, partyIds: Ar
     // filter above and stayed safe only for as long as nobody removed it.)
     const idArray = sql`array(select jsonb_array_elements_text(${JSON.stringify(batch)}::jsonb)::int)`;
 
-    // Condition 1 — current DNC status per (party, channel) by SERIAL id,
-    // matching consentControlsPersistence.latestDncr(). LISTED (on the
-    // register) or UNKNOWN (checked, undeterminable) on any channel
-    // suppresses; NOT_CHECKED and CLEARED do not.
-    const dncr = await db.execute<{ party_id: number; status: string }>(sql`
-      select distinct on (party_id, channel) party_id, status
-      from grow_contact_dncr_statuses
-      where brokerage_id = ${brokerageId} and party_id = any(${idArray})
-      order by party_id, channel, id desc
-    `);
+    // AE GROW COMPLETION PROGRAM W2-A (I-16) — THE TWO CONDITIONS NOW RUN
+    // TOGETHER. They read different tables, share no state, and neither one's
+    // result influences the other's query: running them one after the other
+    // simply paid two network round trips where one would do, on the hot path
+    // of the endpoint every agent loads every morning. The set-building below
+    // is unchanged, and `suppressed` is still only written after both have
+    // resolved, so the ordering of the two has no bearing on the result.
+    const [dncr, suppressions] = await Promise.all([
+      // Condition 1 — current DNC status per (party, channel) by SERIAL id,
+      // matching consentControlsPersistence.latestDncr(). LISTED (on the
+      // register) or UNKNOWN (checked, undeterminable) on any channel
+      // suppresses; NOT_CHECKED and CLEARED do not.
+      db.execute<{ party_id: number; status: string }>(sql`
+        select distinct on (party_id, channel) party_id, status
+        from grow_contact_dncr_statuses
+        where brokerage_id = ${brokerageId} and party_id = any(${idArray})
+        order by party_id, channel, id desc
+      `),
+      // Condition 2 — current suppression per (party, channel) by SERIAL id,
+      // considering only rows already IN FORCE, matching
+      // consentControlsPersistence.latestSuppression(). Without the
+      // effective_at filter a RELEASED row dated in the future would read as
+      // the current state here while the consent engine still treated the
+      // party as suppressed. The channel count is compared in JS against
+      // GROW_CONSENT_CHANNELS so the rule stays readable and so adding a
+      // channel to that list cannot silently change SQL semantics.
+      db.execute<{ party_id: number; channel: string; state: string; expires_at: string | null }>(sql`
+        select distinct on (party_id, channel) party_id, channel, state, expires_at
+        from grow_contact_channel_suppressions
+        where brokerage_id = ${brokerageId}
+          and party_id = any(${idArray})
+          and effective_at <= now()
+        order by party_id, channel, id desc
+      `),
+    ]);
+
     for (const row of dncr.rows as Array<{ party_id: number; status: string }>) {
       if (CONTACTABILITY_BLOCKING_DNCR_STATUSES.has(row.status)) suppressed.add(Number(row.party_id));
     }
 
-    // Condition 2 — current suppression per (party, channel) by SERIAL id,
-    // considering only rows already IN FORCE, matching
-    // consentControlsPersistence.latestSuppression(). Without the
-    // effective_at filter a RELEASED row dated in the future would read as
-    // the current state here while the consent engine still treated the
-    // party as suppressed. The channel count is compared in JS against
-    // GROW_CONSENT_CHANNELS so the rule stays readable and so adding a
-    // channel to that list cannot silently change SQL semantics.
-    const suppressions = await db.execute<{ party_id: number; channel: string; state: string; expires_at: string | null }>(sql`
-      select distinct on (party_id, channel) party_id, channel, state, expires_at
-      from grow_contact_channel_suppressions
-      where brokerage_id = ${brokerageId}
-        and party_id = any(${idArray})
-        and effective_at <= now()
-      order by party_id, channel, id desc
-    `);
     const activeChannelsByParty = new Map<number, Set<string>>();
     for (const row of suppressions.rows as Array<{ party_id: number; channel: string; state: string; expires_at: string | Date | null }>) {
       // FAIL CLOSED ON AN UNRECOGNISED STATE. Only the explicit release
