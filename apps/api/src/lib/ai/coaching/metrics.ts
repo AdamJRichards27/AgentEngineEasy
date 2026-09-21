@@ -30,7 +30,7 @@
 // on" bucketing below, which must bucket by the period's resolved local
 // calendar day (period.timeZone), not a bare UTC date slice — see that
 // function's own comment for why.
-import { and, asc, eq, gte, isNotNull, lt, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, lt, notInArray } from "drizzle-orm";
 import {
   db,
   appraisals,
@@ -551,7 +551,10 @@ export async function fetchActiveRelationships(brokerageId: number): Promise<Rel
     .select({ id: growRelationships.id, partyId: growRelationships.partyId, relationshipType: growRelationships.relationshipType, isPrimary: growRelationships.isPrimary })
     .from(growRelationships)
     .where(and(eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")))
-    .orderBy(asc(growRelationships.validFrom))
+    // id tiebreak for the same reason fetchRecentActivityByParty below needs
+    // one: validFrom is routinely identical across rows created by one import,
+    // and a partial order is not a deterministic one once the cap bites.
+    .orderBy(asc(growRelationships.validFrom), asc(growRelationships.id))
     .limit(RELATIONSHIP_ROW_CAP);
 }
 
@@ -560,11 +563,22 @@ export async function fetchActiveRelationships(brokerageId: number): Promise<Rel
 // coaching answer about a 7-day activity period can still correctly say
 // whether a contact has been engaged with recently even if that contact's
 // last activity fell just outside the requested period.
+//
+// Ordered before the cap, like every other fetch in this file. Without an
+// orderBy, Postgres may return ANY ACTIVITY_ROW_CAP of the matching rows and
+// a different set on the next run, which made "which contacts count as
+// recently engaged" non-deterministic above the cap and
+// noRecentActivityContacts over-report. Most recent first is the meaningful
+// order for a recency question: if the set must be truncated, the rows kept
+// are the ones that most strongly establish recent engagement. id is the
+// tiebreak so activities sharing an occurredAt (bulk imports do this) still
+// produce a total order, not just a stable-looking one.
 export async function fetchRecentActivityByParty(brokerageId: number, since: Date): Promise<Array<{ partyId: number | null; occurredAt: Date }>> {
   return db
     .select({ partyId: growActivities.partyId, occurredAt: growActivities.occurredAt })
     .from(growActivities)
     .where(and(eq(growActivities.brokerageId, brokerageId), gte(growActivities.occurredAt, since)))
+    .orderBy(desc(growActivities.occurredAt), asc(growActivities.id))
     .limit(ACTIVITY_ROW_CAP);
 }
 
@@ -578,6 +592,15 @@ export interface RelationshipEngagementMetric {
   noRecentActivityContacts: number;
   noRecentActivityList: Array<{ partyId: number; relationshipType: string }>;
   noRecentActivityTruncated: boolean;
+  /**
+   * True when the ACTIVITY rows this split was computed from hit
+   * ACTIVITY_ROW_CAP. Distinct from `truncated`, which is about the
+   * RELATIONSHIP rows: activity truncation biases the split one specific way
+   * (some genuinely-engaged contacts fall outside the kept rows, so
+   * recentlyEngagedContacts under-reports and noRecentActivityContacts
+   * over-reports), and a reader needs to be told which of the two happened.
+   */
+  activityTruncated: boolean;
   limitations: string[];
 }
 
@@ -619,6 +642,15 @@ export function computeRelationshipEngagement(
   if (relationshipRows.length >= RELATIONSHIP_ROW_CAP) {
     limitations.push(`At least ${RELATIONSHIP_ROW_CAP} active relationships exist; engagement figures are based on the first ${RELATIONSHIP_ROW_CAP} recorded.`);
   }
+  // Activity-row truncation is disclosed the same way relationship-row
+  // truncation above is, and separately from it: it is a different cap on a
+  // different input with a different, directional effect on the numbers.
+  const activityTruncated = recentActivityRows.length >= ACTIVITY_ROW_CAP;
+  if (activityTruncated) {
+    limitations.push(
+      `At least ${ACTIVITY_ROW_CAP} activity records fall in the recent-engagement window; the engaged/not-engaged split is based on the ${ACTIVITY_ROW_CAP} most recent activity rows, so the number of contacts with no recent activity may be overstated.`,
+    );
+  }
 
   return {
     sampleSize: relationshipRows.length,
@@ -630,6 +662,7 @@ export function computeRelationshipEngagement(
     noRecentActivityContacts: noRecentActivityList.length,
     noRecentActivityList: noRecentActivityList.slice(0, NO_RECENT_ACTIVITY_LIST_CAP),
     noRecentActivityTruncated: noRecentActivityList.length > NO_RECENT_ACTIVITY_LIST_CAP,
+    activityTruncated,
     limitations,
   };
 }

@@ -413,7 +413,7 @@ Work continues in parallel on everything not listed here. These block only the s
 | 16 | Does the pilot run **one instance or two**? | W2-F severity | At one instance H-5 is latent; at two, the reconcilers are P1 immediately. |
 | 17 | **Consent open decisions A and B** (contact-wide withdrawal; save after withdrawal), plus: **is re-consent after withdrawal permitted at all?** | A-10, W3-J | Code has silently implemented the narrow answer to A and the *permissive* answer to B. A withdrawn F2 stream is currently permanently dead — a contact who withdraws can never opt back in. That is a significant product decision made in a step-1 guard clause. |
 | 18 | Should per-property signal reads honour contactability? | — | Flagged in-repo as a deliberate product decision. |
-| 19 | **On Contact 360, should a suppressed contact's signals be hidden entirely (today) or shown as intelligence with outreach actions stripped?** | W2-D scope | The 2026-09-21 decision implies the latter ("a signal may exist and remain useful as intelligence while outreach actions are suppressed"), but also says respect existing contactability behaviour. `listActiveSignalsForParty` currently hides the intelligence, not just the outreach. Proceeding with the existing fail-closed behaviour until ruled on; loosening a consent control is not a routine engineering call. |
+| 19 | ~~On Contact 360, should a suppressed contact's signals be hidden entirely, or shown as intelligence with outreach stripped?~~ | — | **RESOLVED 2026-09-21 — see §11.** A contactability restriction must not erase legitimate intelligence from authorised internal users. Signals may remain visible; outreach must be suppressed. |
 
 ---
 
@@ -544,9 +544,50 @@ surface built to show it.
   (`signals.ts:252-265`) validates the party against the brokerage and returns `[]` for a suppressed
   contact *before* loading any signal row.
 
-**Open tension, escalated rather than resolved (see §5 gate 19).** The decision says a signal may
-exist as *intelligence* while *outreach* is suppressed — "SIGNAL EXISTS ≠ CONTACT MAY BE CONTACTED" —
-but also says to respect existing contactability behaviour and not bypass consent controls. For
-`listActiveSignalsForParty` those readings conflict: it currently hides the intelligence entirely, not
-just the outreach. W2-D implements **within** the existing fail-closed behaviour and does not weaken
-it.
+**The contactability question this raised was escalated, and has been resolved — see §11.**
+
+
+---
+
+## 11. Decision gate 19 — RESOLVED, 2026-09-21
+
+**Project Owner decision.** A contactability restriction must **not** erase legitimate intelligence
+from authorised internal Grow users.
+
+> SIGNAL EXISTS ≠ CONTACT MAY BE CONTACTED.
+
+For a DNC or otherwise suppressed contact, legitimate signals **may remain visible** to appropriately
+authorised users, provided every one of the following holds:
+
+- the contact/outreach restriction is displayed **unmistakably**;
+- calling, SMS and email are suppressed or disabled;
+- automated outreach and generated outreach actions are suppressed;
+- no communication activity is created automatically;
+- signal evidence and history are preserved;
+- tenant and entitlement controls are preserved.
+
+DNC is **not** permission to delete or hide legitimate relationship intelligence merely because
+outreach is prohibited.
+
+**Scope of the ruling.** This is a product and technical architecture decision, **not** an AU/NZ legal
+conclusion. Live activation remains subject to legal and compliance review, and every gate in §6
+still stands.
+
+**Consequence for implementation.** `listActiveSignalsForParty` (`signals.ts:252-265`) currently
+returns `[]` for a suppressed contact — hiding the intelligence rather than only the outreach — and is
+therefore now **in scope** for change under W2-D, conditional on: explicit tests, security review,
+entitlement checks, the restriction being unmistakable, and **a proven absence of any pathway to
+actual outreach**. The existing fail-closed rationale in that file is to be replaced with the new
+invariant, not silently deleted: *rows may be read for display; no outreach affordance may be derived
+from them.*
+
+---
+
+## 12. Change log (continued)
+
+| Date | Change |
+|---|---|
+| 2026-09-21 | **Seven-slice merge wave.** PRs #49, #54, #50, #51, #52, #53, #57 merged sequentially to staging, each pinned to its approved SHA with a normal merge commit. Base `ba87901` → final **`e774494f6c4e8e9bd99793d108c741c97925f444`**. All seven approved heads verified contained; merge parents verified; 25 commits added. #50 carries migration 0028 (14 indexes) — merge grants **no** production migration authority, the `CONCURRENTLY` deployment requirement and the migration-0025 duplicate pre-check both still apply. |
+| 2026-09-21 | PRs **#55** and **#56** held from merge pending independent review, assigned to Grok Bot as its first AE assignment, with an OpenClaw-side cross-check in parallel. Both verified still to merge cleanly onto the new staging. |
+| 2026-09-21 | Grok Bot introduced as independent reviewer and parallel development agent under OpenClaw orchestration. Ownership now tracked in [`AE_WORKSTREAM_OWNERSHIP_REGISTER.md`](./AE_WORKSTREAM_OWNERSHIP_REGISTER.md). |
+| 2026-09-21 | Decision gate 19 resolved (§11). W2-D scope expanded accordingly. |

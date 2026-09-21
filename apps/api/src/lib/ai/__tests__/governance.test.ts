@@ -44,7 +44,7 @@ import {
   STUCK_EXECUTING_RECOVERED_MESSAGE,
 } from "../actionRequests.js";
 import { executeAIAction, executeAIActionAsSystem, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "../executionGateway.js";
-import { getActionDefinition } from "../actions/registry.js";
+import { ACTION_REGISTRY, getActionDefinition } from "../actions/registry.js";
 import { classifyActionFailure } from "../../automation/operations.js";
 import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js";
 import { riskTierForLevel } from "../authority.js";
@@ -223,6 +223,109 @@ test("restricted-action blocking: an actionKey matching a protected-operation fr
 
 test("restricted-action blocking: riskTierForLevel(4) resolves to RESTRICTED", () => {
   assert.equal(riskTierForLevel(4), "RESTRICTED");
+});
+
+// ---------------------------------------------------------------------------
+// 4b. Outbound messaging is denied by RULE, not by absence of the feature
+// (AE GROW W2-C, B-1).
+//
+// Before W2-C the denylist covered AML/ledger/entitlement/SQL and friends but
+// no messaging fragment at all, so an action registered as e.g.
+// "SEND_SMS_TO_CONTACT" with riskLevel 0 passed this self-check and would have
+// become automation-invokable the moment a provider was wired up. Each name
+// below is the shape a plausible future action would actually take -- the
+// point is that the author does not have to remember to set a high riskLevel,
+// because the NAME alone is refused.
+// ---------------------------------------------------------------------------
+const MESSAGING_ACTION_KEYS_THAT_MUST_BE_REFUSED = [
+  "SEND_SMS_TO_CONTACT",
+  "SMS_VENDOR_DISPATCH",
+  "EMAIL_VENDOR_UPDATE",
+  "MESSAGE_BUYER_AGENT",
+  "NOTIFY_SELLER_OF_OFFER",
+  "DIAL_CONTACT_NUMBER",
+];
+
+for (const actionKey of MESSAGING_ACTION_KEYS_THAT_MUST_BE_REFUSED) {
+  test(`outbound messaging denylist: "${actionKey}" at riskLevel 0 crashes the registry startup self-check`, () => {
+    assert.throws(
+      () => assertNoProtectedOperationsRegistered([{ actionKey, riskLevel: 0 }]),
+      /forbidden fragment/,
+      "a send-shaped actionKey must be refused on its NAME, whatever riskLevel its author set",
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 4c. The denylist's KNOWN FALSE POSITIVE, pinned as a contract rather than
+// left as a surprise (W2-C remediation).
+//
+// The fragments match as substrings of the whole key, so a draft-for-review
+// action named DRAFT_EMAIL_FOR_REVIEW is refused even though drafting for a
+// human is exactly the alternative this module recommends. That behaviour is
+// DELIBERATE and was re-confirmed under review: see the long comment in
+// protectedOperations.ts for why classification by an author-supplied field
+// would be weaker than a name tripwire the author cannot influence. These
+// tests exist so the trade is visible and cannot be "fixed" by accident.
+// ---------------------------------------------------------------------------
+test("the denylist refuses DRAFT_EMAIL_FOR_REVIEW — a known, deliberate false positive", () => {
+  assert.throws(
+    () => assertNoProtectedOperationsRegistered([{ actionKey: "DRAFT_EMAIL_FOR_REVIEW", riskLevel: 0 }]),
+    /forbidden fragment "EMAIL"/,
+    "matching is by substring and deliberately does not special-case DRAFT_ — loosening it is a security change, not a cleanup",
+  );
+});
+
+/** The refusal message for one action key. Fails the test if it is not refused at all. */
+function refusalMessageFor(actionKey: string): string {
+  try {
+    assertNoProtectedOperationsRegistered([{ actionKey, riskLevel: 0 }]);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  assert.fail(`"${actionKey}" was expected to be refused by the startup self-check, but was allowed`);
+}
+
+test("a messaging refusal names the sanctioned Communications path and a usable alternative name", () => {
+  // The P3 this closes: the old message told an engineer the action must
+  // never be registered and stopped there, naming no way forward.
+  const message = refusalMessageFor("SEND_SMS_TO_CONTACT");
+
+  assert.match(message, /Communications/, "the human-decision path must be named");
+  assert.match(message, /DRAFT/, "and drafting for a human must be named as the alternative shape");
+  assert.match(
+    message,
+    /DRAFT_CONTACT_OUTREACH_FOR_REVIEW/,
+    "including a concrete key that actually passes this check, since the obvious DRAFT_EMAIL_FOR_REVIEW does not",
+  );
+});
+
+test("the alternative the error message recommends genuinely passes the check", () => {
+  // An error message that suggests a name which is itself refused would be
+  // worse than saying nothing. This asserts the recommendation is real.
+  assert.doesNotThrow(() =>
+    assertNoProtectedOperationsRegistered([{ actionKey: "DRAFT_CONTACT_OUTREACH_FOR_REVIEW", riskLevel: 0 }]),
+  );
+});
+
+test("a NON-messaging refusal does not offer the Communications path", () => {
+  // Pointing an entitlement-escalation attempt at the Communications surface
+  // would be nonsense, and a message that says something irrelevant trains
+  // people to stop reading it.
+  const message = refusalMessageFor("CHANGE_USER_ROLE");
+
+  assert.match(message, /forbidden fragment/);
+  assert.ok(!/Communications/.test(message), "guidance must be specific to the category that matched");
+});
+
+test("outbound messaging denylist: every currently registered action still passes the startup self-check", () => {
+  const registered = Object.values(ACTION_REGISTRY);
+  assert.equal(registered.length, 9, "update this test deliberately when the registered action set changes");
+  // The real call actions/registry.ts makes at module load. If the messaging
+  // fragments false-positived on a legitimate action key, importing the
+  // registry at the top of this file would already have crashed the suite --
+  // this asserts it explicitly so the reason is obvious rather than implicit.
+  assert.doesNotThrow(() => assertNoProtectedOperationsRegistered(registered));
 });
 
 // ---------------------------------------------------------------------------

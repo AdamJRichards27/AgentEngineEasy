@@ -149,15 +149,29 @@ const getContactRelationshipSummary: AiToolDefinition = {
   },
 };
 
-const getDueCommitments: AiToolDefinition = {
-  name: "get_due_commitments",
-  description: "Read-only list of the caller's Grow Today items that carry a due date (opportunity next-action or appraisal follow-up due dates), soonest first.",
+// Named for what it actually returns. This tool reads ctx.grow.dueFollowUps,
+// which growContext.ts builds by filtering the SAME Grow Today priorityActions
+// list get_grow_today_items returns down to the items carrying a dueAt
+// (growContext.ts:148-151) - it contains ZERO grow_commitments rows. It was
+// called "get_due_commitments" until W2-C, which misled the model into
+// answering "what did I promise?" with opportunity next-action dates, and
+// misled the next engineer into thinking commitments were already wired into
+// Grow Today. They are not: Grow Today has no commitment-derived items at all
+// yet (a sibling slice owns lib/growToday.ts, and the rule that would surface
+// commitments there is not built). When commitments do land on Grow Today,
+// revisit whether a genuine get_due_commitments belongs here alongside this
+// tool - do not simply rename this one back.
+const getGrowTodayDueItems: AiToolDefinition = {
+  name: "get_grow_today_due_items",
+  description:
+    "Read-only list of the caller's Grow Today items that carry a due date (opportunity next-action and appraisal follow-up due dates), soonest first. " +
+    "This is a date-filtered view of the same Grow Today list as get_grow_today_items - it does NOT read recorded Grow commitments, so never describe these as commitments the caller made.",
   riskLevel: 0,
   async run(ctx) {
     if (ctx.grow === null) {
-      return { tool: "get_due_commitments", ok: false, error: NO_GROW_CONTEXT_ERROR };
+      return { tool: "get_grow_today_due_items", ok: false, error: NO_GROW_CONTEXT_ERROR };
     }
-    return { tool: "get_due_commitments", ok: true, data: ctx.grow.dueFollowUps };
+    return { tool: "get_grow_today_due_items", ok: true, data: ctx.grow.dueFollowUps };
   },
 };
 
@@ -235,7 +249,7 @@ const explainGrowTodayItem: AiToolDefinition = {
 export const GROW_TOOL_REGISTRY: AiToolDefinition[] = [
   getGrowTodayItems,
   getContactRelationshipSummary,
-  getDueCommitments,
+  getGrowTodayDueItems,
   getGrowOpportunityPipeline,
   getAppraisalFollowups,
   getPropertyIntelligenceSignals,

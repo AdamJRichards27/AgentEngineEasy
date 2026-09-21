@@ -45,7 +45,7 @@ framing from the long-ownership-tenure signal). Stage B's own work starts at
   `contextType === "grow"` branch that runs only for Grow-scoped requests.
 - **Tools** (`apps/api/src/lib/ai/tools/registry.ts`): 8 new, read-only,
   riskLevel-0 tools in `GROW_TOOL_REGISTRY` (`get_grow_today_items`,
-  `get_contact_relationship_summary`, `get_due_commitments`,
+  `get_contact_relationship_summary`, `get_grow_today_due_items`,
   `get_grow_opportunity_pipeline`, `get_appraisal_followups`,
   `get_property_intelligence_signals`, `get_recent_relationship_activity`,
   `explain_grow_today_item`), each reading one already-bounded field off `ctx.grow`

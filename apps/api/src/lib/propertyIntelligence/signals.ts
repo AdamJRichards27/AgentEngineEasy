@@ -5,6 +5,7 @@ import {
   growOpportunities,
   properties,
   parties,
+  GROW_CONSENT_CHANNELS,
   type GrowOpportunitySignal,
 } from "@aee/db";
 import { logAudit } from "../audit.js";
@@ -205,18 +206,14 @@ export async function listSignalsForProperty(propertyId: number, brokerageId: nu
     .where(and(...conditions));
 }
 
-/**
- * Active, non-expired, non-dismissed signals for a contact — used by Contact
- * 360 and Grow Today Rule F.
- *
- * =====================================================================
- * CONTACTABILITY IS CHECKED ON READ, NOT ONLY ON WRITE
+/* =====================================================================
+ * CONTACTABILITY ON THE CONTACT 360 READ — WHAT CHANGED, AND WHY
  * =====================================================================
  *
- * THE HOLE THIS CLOSES. The sweep consults the contactability filter when it
- * RAISES a signal, which only protects a contact who was already DNC-listed
- * or fully suppressed at that moment. For a contact listed AFTERWARDS the
- * existing row was stranded in exactly the wrong state:
+ * THE ORIGINAL RATIONALE, PRESERVED. The sweep consults the contactability
+ * filter when it RAISES a signal, which only protects a contact who was
+ * already DNC-listed or fully suppressed at that moment. For a contact listed
+ * AFTERWARDS the existing row was stranded in exactly the wrong state:
  *
  *   - the sweep drops their candidate, so the row is never refreshed;
  *   - but the candidate still counts as SUPPORTED, so the "no longer
@@ -226,43 +223,202 @@ export async function listSignalsForProperty(propertyId: number, brokerageId: nu
  *   - and these rows carry expires_at IS NULL, so the expiry pass never
  *     touches them either.
  *
- * The row therefore stayed Active forever and kept being surfaced. A
- * write-time-only check cannot fix that, because the event that must change
- * the answer (a DNC listing) happens after the write.
+ * The row therefore stayed Active forever and kept being surfaced as a
+ * prospecting suggestion. That hole is REAL and this function still closes
+ * it. A write-time-only check cannot, because the event that must change the
+ * answer (a DNC listing) happens after the write.
  *
- * WHAT THIS DOES. Hides, never retires. A suppressed contact's signals are
- * withheld from this read; the rows themselves are not touched, not expired,
- * not dismissed, and reappear the moment the suppression lapses. That is the
- * same rule stage 1 applied to the sweep, now applied on the way out as well.
+ * WHAT THAT RATIONALE GOT WRONG, AND WHAT REPLACES IT. The remedy chosen was
+ * `return []` — withhold the rows entirely. That conflated two different
+ * questions, and answering the second with the first's answer destroyed
+ * information the brokerage is entitled to:
  *
- * WHAT COUNTS AS SUPPRESSED is owned entirely by
- * ./contactability.ts — DNC LISTED on any channel, or an in-force
- * suppression on EVERY channel. A partial (single-channel) suppression
- * deliberately does NOT hide: the agent can still reach that contact another
- * way, and hiding it would lose information they are entitled to see. This
- * function makes no consent decision of its own and writes nothing.
+ *     MAY THIS CONTACT BE CONTACTED?   No. That is what the DNC record says,
+ *                                      and it is absolute.
+ *     DOES THIS SIGNAL EXIST?          Yes. A DNC listing is a restriction on
+ *                                      OUTREACH. It is not a statement that
+ *                                      the tenure, the past enquiry or the
+ *                                      recorded motivation never happened,
+ *                                      and it is not an instruction to blind
+ *                                      an authorised internal user to their
+ *                                      own brokerage's records.
  *
- * NOT APPLIED TO listSignalsForProperty() ABOVE, deliberately and for the
- * same reason recalculateSignalsForProperty() does not apply it: that is an
- * explicit, entitled, per-property human action on a record the agent has
- * already navigated to, not a system-initiated suggestion about a person. See
- * this stage's report — it is flagged there for a product decision rather
- * than changed unilaterally.
+ * SIGNAL EXISTS != CONTACT MAY BE CONTACTED. `return []` answered the second
+ * question with the first's answer and, in doing so, erased legitimate
+ * relationship intelligence from an entitled internal user rather than
+ * merely removing the outreach they must not perform. Worse, it erased it
+ * SILENTLY: the agent could not tell a contact with no signals from a
+ * contact whose signals were withheld, so the suppression itself became
+ * invisible on the one record that should state it most plainly.
+ *
+ * THE INVARIANT THAT REPLACES IT, and which this module's tests enforce:
+ *
+ *     ROWS MAY BE READ FOR DISPLAY.
+ *     NO OUTREACH AFFORDANCE MAY BE DERIVED FROM THEM.
+ *
+ * Both halves are load-bearing. The read returns the rows AND, inseparably,
+ * the restriction — which is why the return type is a struct and not an
+ * array. A caller cannot obtain a suppressed contact's signals without also
+ * obtaining the fact that they must not be contacted; there is deliberately
+ * no overload, no flag and no sibling function that yields the bare rows.
+ * "Forgot to check the restriction" is not reachable, because there is
+ * nothing to forget: the restriction arrives in the same value as the data.
+ *
+ * WHAT THE SECOND HALF COSTS THE CALLER is documented on
+ * ContactOutreachRestriction below and enforced in service.ts (the generated
+ * agentAction is dropped), routes/propertyIntelligence.ts (promotion to an
+ * opportunity is refused) and PropertyIntelligencePanel.tsx (the restriction
+ * is rendered before any signal, and the promote control is not rendered at
+ * all). See __tests__/contactabilityOutreachPathway.test.ts, which walks
+ * every affordance on those surfaces and asserts that none of them yields an
+ * email, SMS or call for a suppressed contact.
+ *
+ * STILL TRUE, AND UNCHANGED BY ANY OF THE ABOVE:
+ *
+ *   - HIDES OUTREACH, NEVER RETIRES DATA. The rows are not touched, not
+ *     expired, not dismissed, and the restriction lifts the moment the
+ *     suppression lapses. Evidence and history are preserved exactly.
+ *   - WHAT COUNTS AS SUPPRESSED is owned entirely by ./contactability.ts —
+ *     DNC LISTED (or UNKNOWN) on any channel, or an in-force suppression on
+ *     EVERY channel. A partial (single-channel) suppression deliberately does
+ *     not restrict here: the agent can still reach that contact another way.
+ *     This function makes no consent decision of its own and writes nothing.
+ *   - THE SWEEP IS UNCHANGED. It still refuses to RAISE or REFRESH a
+ *     suppressed contact's signal (sweep.ts:772-776), and Grow Today still
+ *     withholds them from the prospecting surface entirely
+ *     (growToday.ts:908). Nothing here widens a system-INITIATED suggestion;
+ *     this is a human-initiated read of a record the agent has already
+ *     navigated to.
+ *   - NOT APPLIED TO listSignalsForProperty() ABOVE, for the same reason
+ *     recalculateSignalsForProperty() does not apply it: that is an explicit,
+ *     entitled, per-property human action, not a suggestion about a person.
+ *
+ * SCOPE. This is a product/technical architecture decision about what an
+ * authorised internal user may SEE. It is not a legal conclusion about AU/NZ
+ * do-not-call obligations, and it does not relax one: no outreach becomes
+ * permissible anywhere as a result of it.
+ * =====================================================================*/
+
+/**
+ * An in-force restriction on contacting a party, travelling WITH that party's
+ * signals so the two can never be separated.
+ *
+ * Deliberately has no "allowed" representation — the type is `… | null`, and
+ * null is the only way to express "no restriction". A boolean field would
+ * invite `if (r.outreachProhibited)` against an object that a serialisation
+ * bug, a partial mock or an older API build had left without the key, which
+ * reads as permitted. An absent OBJECT cannot be misread that way.
  */
-export async function listActiveSignalsForParty(partyId: number, brokerageId: number): Promise<GrowOpportunitySignal[]> {
+export interface ContactOutreachRestriction {
+  /**
+   * Always literally true when the object exists. Present so a JSON consumer
+   * that reaches for a field finds one that cannot be falsy, rather than
+   * inferring permission from a missing key.
+   */
+  readonly outreachProhibited: true;
+  /** Why, in a form code can branch on without parsing prose. */
+  readonly reason: "contactability_suppressed";
+  /**
+   * Every channel AE knows about. This restriction is never partial — a
+   * partial suppression does not reach this code at all — so the list is
+   * total by construction rather than assembled from the suppressing rows.
+   */
+  readonly blockedChannels: readonly string[];
+  /** The sentence a human reads. Identical wording to Grow Today's own DNC note, so one contact does not get two different explanations on two screens. */
+  readonly notice: string;
+  /** What the agent is told to do instead, replacing any generated outreach action. */
+  readonly recommendedAction: string;
+}
+
+/**
+ * The wording is Grow Today's, verbatim (growToday.ts:341-344), not a second
+ * paraphrase of it. A contact who is suppressed is suppressed on every
+ * surface, and an agent who reads two different explanations of the same
+ * restriction on two screens is entitled to conclude that one of them is
+ * wrong.
+ */
+export const CONTACT_OUTREACH_RESTRICTION_NOTICE =
+  "A do-not-contact listing or a full-channel suppression is on file for this contact. AE will not present them as someone to reach out to, and no outreach action is offered here.";
+export const CONTACT_OUTREACH_RESTRICTION_ACTION =
+  "Do not contact. This contact is on a do-not-contact record or is suppressed on every channel — review the contact record before taking any action at all.";
+
+/** The signals, and — inseparably — whether the person they are about may be contacted. */
+export interface PartySignalRead {
+  signals: GrowOpportunitySignal[];
+  /** Null means no restriction is on file. Non-null means outreach is prohibited; see ContactOutreachRestriction. */
+  outreachRestriction: ContactOutreachRestriction | null;
+}
+
+/**
+ * Active, non-expired, non-dismissed signals for a contact, together with any
+ * in-force outreach restriction on that contact.
+ *
+ * Replaces listActiveSignalsForParty(), which returned a bare array and
+ * therefore had to express "suppressed" as an empty one. The rename is the
+ * point: every call site had to be revisited, and no caller can still be
+ * holding the old bare-array contract. See the block comment above for the
+ * invariant this signature exists to make unforgeable.
+ */
+export async function readActiveSignalsForParty(partyId: number, brokerageId: number): Promise<PartySignalRead> {
   const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party) throw new PropertyIntelligenceAccessError("Contact not found");
 
-  // Checked BEFORE the signal read: a suppressed contact's rows are never
-  // loaded at all, so there is no window in which they exist in memory on a
-  // surfacing path.
+  // Resolved BEFORE the rows are read, so the restriction is already known by
+  // the time any signal exists in memory on this path. Nothing downstream can
+  // observe the signals in a state where the restriction has not been decided.
   const contactability = await loadContactabilityFilter(brokerageId, [partyId]);
-  if (contactability.isSuppressed(partyId)) return [];
+  const outreachRestriction: ContactOutreachRestriction | null = contactability.isSuppressed(partyId)
+    ? {
+        outreachProhibited: true,
+        reason: "contactability_suppressed",
+        blockedChannels: GROW_CONSENT_CHANNELS,
+        notice: CONTACT_OUTREACH_RESTRICTION_NOTICE,
+        recommendedAction: CONTACT_OUTREACH_RESTRICTION_ACTION,
+      }
+    : null;
 
-  return db
+  // ORDERED, because this feeds a display surface. Postgres gives no order
+  // guarantee without ORDER BY, so the same contact could render their signals
+  // in a different sequence on consecutive loads — nothing lost, but an agent
+  // cannot tell "the list changed" from "the list moved".
+  //
+  // `id` is the whole ordering, and it is a UNIQUE column, so the order is
+  // TOTAL: there are no ties left for the planner to break differently next
+  // time. Ordering on confidenceBand or computedAt would have looked more
+  // meaningful and still permitted two signals sharing a value to swap.
+  //
+  // Deliberately insertion order and NOT a ranking. Ranking Property
+  // Intelligence signals is lib/grow/signalRanking.ts's job, and inventing a
+  // second, implicit ranking here — by quietly ordering on confidence — would
+  // be a product decision smuggled in as a bug fix.
+  const signals = await db
     .select()
     .from(growOpportunitySignals)
-    .where(and(eq(growOpportunitySignals.partyId, partyId), eq(growOpportunitySignals.brokerageId, brokerageId), eq(growOpportunitySignals.status, "Active")));
+    .where(and(eq(growOpportunitySignals.partyId, partyId), eq(growOpportunitySignals.brokerageId, brokerageId), eq(growOpportunitySignals.status, "Active")))
+    .orderBy(growOpportunitySignals.id);
+
+  return { signals, outreachRestriction };
+}
+
+/**
+ * Whether outreach to this contact is prohibited, on its own — for a caller
+ * that must make an outreach DECISION rather than render intelligence, and
+ * so has no business loading the signals at all.
+ *
+ * Used by the promote-to-opportunity path, which is a write that would place
+ * the contact into the opportunity funnel. Kept here, beside the read it
+ * shares a definition of "suppressed" with, so the two can never diverge.
+ */
+export async function isOutreachRestrictedForParty(partyId: number, brokerageId: number): Promise<ContactOutreachRestriction | null> {
+  const contactability = await loadContactabilityFilter(brokerageId, [partyId]);
+  if (!contactability.isSuppressed(partyId)) return null;
+  return {
+    outreachProhibited: true,
+    reason: "contactability_suppressed",
+    blockedChannels: GROW_CONSENT_CHANNELS,
+    notice: CONTACT_OUTREACH_RESTRICTION_NOTICE,
+    recommendedAction: CONTACT_OUTREACH_RESTRICTION_ACTION,
+  };
 }
 
 export async function reviewSignal(input: { signalId: number; brokerageId: number; userId: number }): Promise<GrowOpportunitySignal> {
@@ -346,6 +502,48 @@ export async function dismissSignal(input: {
  *
  * Leaves next_review_at NULL: a promoted signal is permanently terminal (see
  * the re-review policy in this file's header).
+ *
+ * =====================================================================
+ * W2-D — THIS IS THE OUTREACH PATHWAY, AND IT IS NOW CLOSED
+ * =====================================================================
+ *
+ * Making a suppressed contact's signals VISIBLE (see readActiveSignalsForParty
+ * above) is only safe if visibility cannot be converted into outreach. This
+ * function is the one place on the Property Intelligence surface where it
+ * could have been, and it is not obvious at a glance, because this function
+ * genuinely does not send anything. What it does is create a
+ * growOpportunities row — and an opportunity is the INPUT to the outreach
+ * funnel:
+ *
+ *     promoteSignal()  ->  growOpportunities row (partyId set)
+ *                      ->  Grow Today Rules A/B/C read it as an
+ *                          "opportunity_follow_up" card (growToday.ts:625)
+ *                      ->  that card is where `{ action: "email" }` and
+ *                          `{ action: "sms" }` buttons are rendered.
+ *
+ * Grow Today already refuses to attach those buttons for a suppressed
+ * contact, and forces contactEmail/contactMobile to null in the response
+ * itself (growToday.ts:631-667). So the funnel is defended at its far end and
+ * a promoted row would NOT in fact produce a sendable affordance today.
+ *
+ * That is not sufficient, and relying on it would be exactly the "assert,
+ * don't prove" this change is required to avoid. It would make the safety of
+ * Contact 360 depend on a check in a file this work item may not modify, via
+ * a table neither file mentions, with no test tying the two together — a
+ * defence that survives only until someone adds a second opportunity consumer
+ * that does not repeat Grow Today's check.
+ *
+ * So the pathway is cut at the source as well: a suppressed contact's signal
+ * cannot be promoted at all. Defence in depth, with the near end of the
+ * funnel closed by the same definition of "suppressed" the read uses. The
+ * agent keeps the intelligence; the funnel keeps the contact out.
+ *
+ * REFUSED, NOT HIDDEN. A 409 that names the reason, not a silent no-op and
+ * not a 404 — the agent is entitled to know the signal exists, that it was
+ * their own brokerage's DNC record that stopped them, and that nothing is
+ * broken. Consistent with the panel, which does not render the control at
+ * all; this check is what makes that a defence rather than a decoration,
+ * since the route is reachable without the panel.
  */
 export async function promoteSignal(input: { signalId: number; brokerageId: number; userId: number }): Promise<{
   signal: GrowOpportunitySignal;
@@ -364,6 +562,16 @@ export async function promoteSignal(input: { signalId: number; brokerageId: numb
 
   const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, existing.partyId), eq(parties.brokerageId, input.brokerageId)));
   if (!party) throw new PropertyIntelligenceAccessError("Contact not found");
+
+  // Checked AFTER tenancy (so a foreign signal is still a 404, never a 409
+  // that would confirm the row exists) and BEFORE the insert, so no
+  // opportunity row is ever created and rolled back.
+  const restriction = await isOutreachRestrictedForParty(existing.partyId, input.brokerageId);
+  if (restriction) {
+    throw new PropertyIntelligenceTransitionError(
+      "This contact is on a do-not-contact record or is suppressed on every channel. The signal stays visible on their record, but it cannot be promoted to an opportunity — an opportunity is how a contact enters the follow-up and outreach funnel.",
+    );
+  }
 
   const [opportunity] = await db
     .insert(growOpportunities)
