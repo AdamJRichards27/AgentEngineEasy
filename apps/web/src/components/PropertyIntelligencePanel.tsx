@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
 import { useEntitlements } from "../lib/session";
+import { CONTACT_ANCHORED_SECTION_BLURB, unusableSignalNotice } from "../lib/contactAnchoredSignals";
 
 // AE GROW Priority 5 Remediation — Property Intelligence. The reusable panel Contact 360
 // (Grow.tsx) and the Property Workspace (PropertyWorkspace.tsx) both embed, rather than either
@@ -76,6 +77,50 @@ interface ContactPropertyIntelligenceEntry {
   pendingMatches: PropertyExternalIdentifier[];
 }
 
+// AE GROW Completion W2-D. Hand-mirrors service.ts's ContactAnchoredSignalEntry
+// / ContactIntelligenceSummary exactly, per this file's header convention.
+//
+// Note what is NOT here: no propertyId, no propertyAddress, no
+// relationshipType, no pendingMatches. A contact-anchored signal has no
+// property, so this shape has nowhere to put one — which is deliberate. If it
+// carried `propertyId: number | null` the very next thing written would be a
+// `/properties/${propertyId}` link that renders `/properties/null` the day
+// somebody forgets the guard.
+interface SignalObservation {
+  what: string;
+  recordType: string;
+  recordId: number | string | null;
+  observedAt: string | null;
+  source: string;
+}
+
+interface ContactAnchoredSignalEntry {
+  anchor: "contact";
+  signal: GrowOpportunitySignal;
+  observations: SignalObservation[];
+  unknowns: string[];
+  missingPropertyAnchor: string;
+  agentAction: string | null;
+}
+
+// Hand-mirrors signals.ts's ContactOutreachRestriction. Note there is no
+// "allowed" shape: the field is the object or it is absent. A boolean would
+// invite reading a missing key as permission.
+interface ContactOutreachRestriction {
+  outreachProhibited: true;
+  reason: "contactability_suppressed";
+  blockedChannels: string[];
+  notice: string;
+  recommendedAction: string;
+}
+
+interface ContactIntelligenceSummary {
+  properties: ContactPropertyIntelligenceEntry[];
+  contactAnchoredSignals: ContactAnchoredSignalEntry[];
+  unusableSignalCount: number;
+  outreachRestriction: ContactOutreachRestriction | null;
+}
+
 const CONFIDENCE_PILL_CLASS: Record<PropertySignalConfidenceBand, string> = {
   Emerging: "pill",
   WorthReviewing: "pill pill-warning",
@@ -121,7 +166,7 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
 
   const queryKey = props.anchor === "property" ? ["property-intelligence", "property", props.propertyId] : ["property-intelligence", "contact", props.partyId];
 
-  const query = useQuery<PropertyIntelligenceSummary | { properties: ContactPropertyIntelligenceEntry[] }, ApiError>({
+  const query = useQuery<PropertyIntelligenceSummary | ContactIntelligenceSummary, ApiError>({
     queryKey,
     queryFn: () =>
       props.anchor === "property"
@@ -227,7 +272,14 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
     );
   }
 
-  function renderSignal(signal: GrowOpportunitySignal) {
+  // `detail` is the W2-D extension point: a contact-anchored signal renders its
+  // evidence and its unknowns here, between the explanation and the actions.
+  // Every signal keeps the same title, band, explanation and action row, so a
+  // signal without a property does not read as a lesser kind of signal.
+  //
+  // `outreachRestricted` removes the one action on this panel that leads
+  // anywhere near outreach — see below.
+  function renderSignal(signal: GrowOpportunitySignal, detail?: ReactNode, outreachRestricted = false) {
     const freshness = formatDateShort(signal.sourceTimestamp) ?? formatDateShort(signal.computedAt);
     return (
       <li key={signal.id} className="plain-item">
@@ -242,20 +294,38 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
           Source: {signal.source === "internal" ? "AE record" : humanize(signal.source)}
           {freshness ? ` · ${freshness}` : ""}
         </p>
+        {detail}
         {canManage && (
           <div className="action-row">
             <button type="button" className="btn btn-secondary btn-small" onClick={() => reviewSignal.mutate(signal.id)} disabled={reviewSignal.isPending}>
               Mark reviewed
             </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-small"
-              onClick={() => promoteSignal.mutate(signal.id)}
-              disabled={promoteSignal.isPending || signal.partyId === null}
-              title={signal.partyId === null ? "No linked contact — cannot promote to an opportunity" : undefined}
-            >
-              Promote to opportunity
-            </button>
+            {/* AE GROW Completion W2-D — NOT RENDERED WHEN OUTREACH IS RESTRICTED.
+                "Mark reviewed" and "Dismiss" stay: they are internal record-keeping
+                about a signal, they reach no one, and taking them away would leave an
+                agent unable to clear a signal they are not allowed to act on.
+                "Promote to opportunity" is different in kind — an opportunity is the
+                INPUT to the follow-up funnel (Grow Today renders opportunity cards, and
+                an opportunity can be converted to an appraisal, which sends). It is the
+                only control on this panel that moves a contact toward being contacted,
+                so it is the only one removed.
+                REMOVED, NOT DISABLED-AND-STYLED: there is no element to re-enable in a
+                devtools console. And this is presentation only — the server refuses the
+                same promotion independently (signals.ts promoteSignal), which is what
+                makes it a defence. That server check also covers the Property Workspace
+                embedding of this panel, where the restriction is not in scope to fetch
+                and the button is therefore still rendered. */}
+            {!outreachRestricted && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-small"
+                onClick={() => promoteSignal.mutate(signal.id)}
+                disabled={promoteSignal.isPending || signal.partyId === null}
+                title={signal.partyId === null ? "No linked contact — cannot promote to an opportunity" : undefined}
+              >
+                Promote to opportunity
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-small btn-danger"
@@ -413,13 +483,127 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
   }
 
   // anchor === "contact"
-  const entries = (query.data as { properties: ContactPropertyIntelligenceEntry[] }).properties;
+  const contactData = query.data as ContactIntelligenceSummary;
+  const entries = contactData.properties;
+  // Tolerated as absent so the panel still renders against an API that has not
+  // been deployed with W2-D yet — the same hand-mirror caution this file's
+  // header describes. Absent is treated as "none", never as "unknown".
+  const contactAnchored = contactData.contactAnchoredSignals ?? [];
+  const withholdingNotice = unusableSignalNotice(contactData.unusableSignalCount ?? 0);
+  const isEmpty = entries.length === 0 && contactAnchored.length === 0;
+  // AE GROW Completion W2-D — non-null means this contact must not be
+  // contacted. `?? null` because an API build predating W2-D omits the key;
+  // absent means "no restriction is on file", which is the same thing that
+  // build's own behaviour asserted (it withheld the signals entirely rather
+  // than returning them with a restriction), so there is nothing to fail
+  // closed about here.
+  const outreachRestriction = contactData.outreachRestriction ?? null;
+
+  /**
+   * AE GROW Completion W2-D — what AE saw, and what AE does not know, for a
+   * signal that has no property.
+   *
+   * Both halves are rendered, always and in that order. A contact-anchored
+   * signal's whole claim on an agent's attention is that AE can say precisely
+   * what it is working from; showing the evidence while hiding the gaps would
+   * make it a worse signal than the property-anchored ones, not an equal one.
+   */
+  function renderContactAnchoredDetail(entry: ContactAnchoredSignalEntry): ReactNode {
+    return (
+      <div className="contact-anchored-detail">
+        {entry.observations.length > 0 && (
+          <>
+            <p className="muted">
+              <strong>What AE can see</strong>
+            </p>
+            <ul className="plain">
+              {entry.observations.map((o, i) => (
+                <li key={i}>
+                  {o.what}
+                  {formatDateShort(o.observedAt) ? <span className="muted"> · {formatDateShort(o.observedAt)}</span> : null}
+                  <span className="muted"> · {o.source === "internal" ? "AE record" : humanize(o.source)}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        <p className="muted">
+          <strong>What AE does not know</strong>
+        </p>
+        <ul className="plain">
+          {/* The defining unknown of this category, first and always. */}
+          <li>{entry.missingPropertyAnchor}</li>
+          {entry.unknowns.map((u, i) => (
+            <li key={i}>{u}</li>
+          ))}
+        </ul>
+        {/* The API nulls agentAction outright whenever outreach is restricted
+            (service.ts applyOutreachRestriction), so there is normally nothing
+            to render. The explicit guard is belt-and-braces against an API
+            build that has not caught up: the restriction's own
+            recommendedAction is shown in the banner above instead, and a
+            "Consider a check-in" line must never appear on a DNC contact. */}
+        {entry.agentAction && !outreachRestriction && (
+          <p className="muted">
+            <strong>You might consider:</strong> {entry.agentAction}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <section className="card">
       <h2>Property Intelligence</h2>
-      <p className="muted">Facts and opportunity signals for properties connected to this contact — never a second contact record.</p>
-      {entries.length === 0 && <p className="empty-state">No property intelligence connected to this contact yet.</p>}
+      <p className="muted">Facts and opportunity signals connected to this contact — never a second contact record.</p>
+
+      {/* =================================================================
+          AE GROW Completion W2-D — THE OUTREACH RESTRICTION.
+          FIRST, ABOVE EVERYTHING, AND UNMISSABLE.
+
+          Rendered before the empty state, before the contact-anchored
+          section and before any property, so it is not possible to read a
+          single signal on this panel without having already read that this
+          person must not be contacted. This is the condition on which
+          showing a suppressed contact's intelligence at all was granted:
+          the intelligence is visible, the restriction is louder.
+
+          It is a statement of a record AE holds, not a judgement about the
+          person, and it says what the agent should do instead.
+          ============================================================= */}
+      {outreachRestriction && (
+        <div className="callout callout-warning grow-outreach-restriction" role="alert">
+          <div>
+            <strong>Do not contact</strong>
+          </div>
+          <p>{outreachRestriction.notice}</p>
+          <p>{outreachRestriction.recommendedAction}</p>
+          <p className="muted">
+            Calling, SMS and email are not available for this contact anywhere in AE, and this signal cannot be promoted to an opportunity. The intelligence below is
+            shown because it is a record of what has already happened — it is not a suggestion to get in touch.
+          </p>
+        </div>
+      )}
+
+      {isEmpty && <p className="empty-state">No property intelligence connected to this contact yet.</p>}
+
+      {/* Contact-anchored first: this is intelligence about the person whose
+          record the agent is already looking at, and it used to be dropped
+          here entirely. No Link, no address, no "Refresh signals" — there is
+          no property for any of those to point at. */}
+      {contactAnchored.length > 0 && (
+        <div className="plain-item">
+          <div>
+            <strong>About this contact</strong> <span className="pill">No property linked</span>
+          </div>
+          <p className="muted">{CONTACT_ANCHORED_SECTION_BLURB}</p>
+          <ul className="plain">{contactAnchored.map((entry) => renderSignal(entry.signal, renderContactAnchoredDetail(entry), outreachRestriction !== null))}</ul>
+        </div>
+      )}
+
+      {/* Honest about what is not shown, in Grow Today's own idiom. */}
+      {withholdingNotice && <p className="muted grow-signal-withholding-notice">{withholdingNotice}</p>}
+
       {entries.map((entry) => (
         <div key={entry.propertyId} className="plain-item">
           <div>
@@ -439,7 +623,10 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
           )}
           {entry.pendingMatches.length === 0 && entry.activeSignals.length === 0 && <p className="muted">No active signals for this property.</p>}
           {entry.pendingMatches.length > 0 && <ul className="plain">{entry.pendingMatches.map(renderMatch)}</ul>}
-          {entry.activeSignals.length > 0 && <ul className="plain">{entry.activeSignals.map((s) => renderSignal(s))}</ul>}
+          {/* The contact's restriction applies to their property-anchored
+              signals too — it is a property of the PERSON, not of which
+              section of this panel their signal happens to be filed under. */}
+          {entry.activeSignals.length > 0 && <ul className="plain">{entry.activeSignals.map((s) => renderSignal(s, undefined, outreachRestriction !== null))}</ul>}
         </div>
       ))}
     </section>

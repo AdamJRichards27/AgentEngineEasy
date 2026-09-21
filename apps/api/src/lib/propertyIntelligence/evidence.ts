@@ -96,6 +96,42 @@ export function buildEvidence(input: BuildEvidenceInput): StructuredSignalEviden
   };
 }
 
+/**
+ * AE GROW Completion W2-D — the READ side of the contract above.
+ *
+ * `grow_opportunity_signals.evidence` is jsonb. Most rows carry the
+ * structured envelope buildEvidence() writes, but rows written before
+ * schemaVersion 1 (and any row a future rule writes differently) do not, so a
+ * surfacing path must be able to ask "what was observed, and what does AE not
+ * know?" without trusting the shape.
+ *
+ * Total by construction: every field degrades to empty rather than throwing,
+ * and nothing is invented to fill a gap. An empty `unknowns` from a legacy row
+ * means "this row does not record its unknowns", which the caller renders as
+ * silence — never as "AE knows everything".
+ */
+export interface ReadableSignalEvidence {
+  observations: SignalObservation[];
+  unknowns: string[];
+  agentAction: string | null;
+}
+
+function isObservation(value: unknown): value is SignalObservation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const o = value as Record<string, unknown>;
+  return typeof o.what === "string" && o.what.trim() !== "";
+}
+
+export function readEvidence(raw: unknown): ReadableSignalEvidence {
+  const evidence = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+
+  const observations = Array.isArray(evidence.observations) ? evidence.observations.filter(isObservation) : [];
+  const unknowns = Array.isArray(evidence.unknowns) ? evidence.unknowns.filter((u): u is string => typeof u === "string" && u.trim() !== "") : [];
+  const agentAction = typeof evidence.agentAction === "string" && evidence.agentAction.trim() !== "" ? evidence.agentAction : null;
+
+  return { observations, unknowns, agentAction };
+}
+
 /* ---------------------------------------------------------------------
  * Bounding an untrusted provider payload before it enters evidence.
  *
