@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { countActiveSignals, getSweepOpsHealth, runSignalSweep } from "../lib/propertyIntelligence/sweep.js";
 import {
   PropertyIntelligenceAccessError,
   PropertyIntelligenceTransitionError,
@@ -267,4 +268,71 @@ propertyIntelligenceRouter.post("/property/:propertyId/recalculate", requireAuth
   } catch (err) {
     handlePropertyIntelligenceError(err, res);
   }
+});
+
+/* ---------------------------------------------------------------------
+ * Ops — Brokerage-wide Signal Sweep operability (AE GROW Completion W1-D,
+ * H-2/H-3). Mirrors routes/exceptions.ts's `/exceptions/ops/*` pair and
+ * automationOps.ts, verbatim in shape.
+ *
+ * WHY requireRole AND NOT requireEntitlement, when every other route in this
+ * file uses entitlements. Entitlements gate a per-brokerage PRODUCT
+ * capability ("does this tenant's plan include Property Intelligence?"). This
+ * is ENGINE OPERATIONS: whether a background job on this deployment is alive.
+ * Two consequences follow, and both are the point:
+ *   - The health payload is engine-wide, not tenant-scoped. Run rows carry
+ *     counters and ids only, never tenant data, but an Agent still has no
+ *     business reading another brokerage's run bookkeeping — so this is
+ *     Brokerage Administrator only and an Agent gets 403.
+ *   - Pit Crew is deliberately excluded. Pit Crew is DELEGATED TRANSACTION
+ *     operations, not platform operations; BROKERAGE_ADMIN_ROLES does not
+ *     include it, so Pit Crew gets 403 too.
+ * This is proceeding BA-only with the Project Owner informed, and may be
+ * reversed to an entitlement later without changing anything below except
+ * these two middlewares.
+ *
+ * No admin UI ships with this — an authenticated API surface is sufficient,
+ * exactly as the Project Owner directed.
+ * -----------------------------------------------------------------*/
+
+const requireOps = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES)] as const;
+
+/**
+ * Last run, success/failure, `truncated`, `errors`, staleness, how many
+ * brokerages are due, and whether the scheduler is switched on at all. Before
+ * this endpoint every one of those existed as a durable row that nothing could
+ * read over HTTP, and GROW_SIGNAL_SWEEP_ENABLED=false was indistinguishable
+ * from a healthy-but-idle system after the single boot log line.
+ */
+propertyIntelligenceRouter.get("/ops/health", ...requireOps, async (_req, res) => {
+  const health = await getSweepOpsHealth();
+  res.json(health);
+});
+
+/**
+ * Manual trigger. This is what lets an operator recover from a stale or
+ * wedged sweep without a deploy — the gap that made the ops surface a P1.
+ *
+ * 409 + skippedReason when the single-flight advisory lock is held, matching
+ * POST /exceptions/ops/scan exactly. That refusal is the production contract
+ * for an overlapping trigger, not an error: the sweep is already running.
+ */
+propertyIntelligenceRouter.post("/ops/sweep", ...requireOps, async (_req, res) => {
+  const result = await runSignalSweep("MANUAL");
+  if (!result.ok) {
+    res.status(409).json({ error: result.skippedReason, skippedReason: result.skippedReason });
+    return;
+  }
+  res.json({ summary: result.summary });
+});
+
+/**
+ * Active signal count for the CALLER'S OWN brokerage. The brokerage id is
+ * taken from the session and is never a route or query parameter, so this
+ * route cannot be pointed at another tenant however it is called.
+ */
+propertyIntelligenceRouter.get("/ops/signals/count", ...requireOps, async (req, res) => {
+  const user = req.authedUser!;
+  const activeSignals = await countActiveSignals(user.brokerageId);
+  res.json({ brokerageId: user.brokerageId, activeSignals });
 });

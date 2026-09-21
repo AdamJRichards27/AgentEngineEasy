@@ -366,6 +366,25 @@ test(`computeRelationshipEngagement: reaching RELATIONSHIP_ROW_CAP (${RELATIONSH
   const relationships: RelationshipRow[] = Array.from({ length: RELATIONSHIP_ROW_CAP }, (_, i) => makeRelationshipRow({ id: i, partyId: i }));
   const metric = computeRelationshipEngagement(relationships, []);
   assert.equal(metric.truncated, true);
+  assert.equal(metric.activityTruncated, false, "relationship-row and activity-row truncation are reported independently");
+});
+
+// AE GROW W2-C (C-9). computeRelationshipEngagement disclosed only
+// RELATIONSHIP-row truncation, while silently accepting an activity-row list
+// its caller had already capped at ACTIVITY_ROW_CAP — so above that cap it
+// reported an under-count of engaged contacts as if it were complete.
+test(`computeRelationshipEngagement: reaching ACTIVITY_ROW_CAP (${ACTIVITY_ROW_CAP}) activity rows is disclosed as its own limitation`, () => {
+  const relationships: RelationshipRow[] = [makeRelationshipRow({ id: 1, partyId: 1, isPrimary: true })];
+  const recentActivity = Array.from({ length: ACTIVITY_ROW_CAP }, (_, i) => ({
+    partyId: 1,
+    occurredAt: new Date(new Date("2026-03-14T00:00:00.000Z").getTime() + i * 1000),
+  }));
+  const metric = computeRelationshipEngagement(relationships, recentActivity);
+  assert.equal(metric.activityTruncated, true);
+  assert.equal(metric.truncated, false, "a single relationship row is nowhere near RELATIONSHIP_ROW_CAP");
+  const disclosure = metric.limitations.find((l) => l.includes("activity record"));
+  assert.ok(disclosure !== undefined, `activity-row truncation must appear in limitations; got ${JSON.stringify(metric.limitations)}`);
+  assert.ok(disclosure.includes(String(ACTIVITY_ROW_CAP)));
 });
 
 // ---------------------------------------------------------------------------

@@ -135,6 +135,7 @@ function makeRelationships(overrides: Partial<RelationshipEngagementMetric> = {}
     noRecentActivityContacts: 0,
     noRecentActivityList: [],
     noRecentActivityTruncated: false,
+    activityTruncated: false,
     limitations: [],
     ...overrides,
   };

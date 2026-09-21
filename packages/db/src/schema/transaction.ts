@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, numeric, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, numeric, timestamp, jsonb, index } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -16,7 +16,12 @@ export const offers = pgTable("offers", {
   status: text("status").notNull().default("Received"), // Received | Accepted | Declined | Withdrawn
   shareToken: text("share_token").unique(), // public buyer-facing link, no sign-in required
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. Offers are only ever read per
+  // property, and this table had no index beyond its primary key and the
+  // share-token unique.
+  propertyIdx: index("offers_property_idx").on(table.propertyId),
+}));
 
 // Real structured fields from day one — not a single flat `commission` number
 // (the clearest schema gap the prior Agent Engine audit found).
@@ -77,7 +82,13 @@ export const transactions = pgTable("transactions", {
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. "The transaction for this
+  // property" is the single most common read of this table (the property
+  // detail view, the timeline, the exception engine's own rules) and it had
+  // no index beyond the primary key.
+  propertyIdx: index("transactions_property_idx").on(table.propertyId),
+}));
 
 export const CONTRACT_CONDITION_STATUSES = ["Pending", "Satisfied", "Waived", "Failed", "NotApplicable"] as const;
 export type ContractConditionStatus = (typeof CONTRACT_CONDITION_STATUSES)[number];
@@ -103,7 +114,12 @@ export const transactionConditions = pgTable("transaction_conditions", {
   notes: text("notes"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. Conditions are always read as
+  // "every condition on this transaction"; no index beyond the primary key
+  // existed for it.
+  transactionIdx: index("transaction_conditions_transaction_idx").on(table.transactionId),
+}));
 
 export const insertOfferSchema = createInsertSchema(offers).omit({ id: true, createdAt: true });
 export const insertTransactionSchema = createInsertSchema(transactions).omit({ id: true, createdAt: true, updatedAt: true });

@@ -13,6 +13,17 @@ export type OperationalAlertType =
   | "INTEGRATION_WEBHOOK_FAILURE"
   | "FINANCIAL_RECONCILIATION_VARIANCE"
   | "TENANT_SECURITY_SIGNAL"
+  // AE GROW Signal Sweep operability (H-1). logger.error is never bridged to
+  // this module — lib/logger.ts only writes JSON to stderr — so a leaked
+  // sweep advisory lock, or a scheduled run that throws every tick, is
+  // entirely silent while property_signal_sweep_total keeps reporting the
+  // healthy-looking `skipped_locked`. Exactly two call sites raise this: the
+  // suspected-leak branch in lib/propertyIntelligence/sweep.ts and the
+  // scheduled-run catch in lib/propertyIntelligence/sweepBootstrap.ts. A
+  // single brokerage's pass failing is deliberately NOT one of them — that is
+  // metric-only (property_signal_sweep_brokerage_failure_total), because one
+  // bad tenant genuinely is not page-worthy while the sweep keeps running.
+  | "GROW_SIGNAL_SWEEP_UNHEALTHY"
   | "TEST";
 
 export interface AlertPolicy {
@@ -33,6 +44,7 @@ export const OPERATIONAL_ALERT_POLICIES: Readonly<Record<OperationalAlertType, A
   INTEGRATION_WEBHOOK_FAILURE: { severity: "high", owner: "integrations", runbook: "integration-webhook-failure" },
   FINANCIAL_RECONCILIATION_VARIANCE: { severity: "high", owner: "finance-operations", runbook: "financial-reconciliation" },
   TENANT_SECURITY_SIGNAL: { severity: "critical", owner: "security", runbook: "tenant-isolation" },
+  GROW_SIGNAL_SWEEP_UNHEALTHY: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
   TEST: { severity: "low", owner: "operations", runbook: "alert-delivery-test" },
 };
 

@@ -97,8 +97,8 @@ test("GROW_TOOL_REGISTRY contains exactly the 8 named Grow tools, each riskLevel
     "explain_grow_today_item",
     "get_appraisal_followups",
     "get_contact_relationship_summary",
-    "get_due_commitments",
     "get_grow_opportunity_pipeline",
+    "get_grow_today_due_items",
     "get_grow_today_items",
     "get_property_intelligence_signals",
     "get_recent_relationship_activity",
@@ -171,10 +171,10 @@ test("get_contact_relationship_summary returns exactly ctx.grow.relationshipBrea
   assert.deepEqual(result.data, breakdown);
 });
 
-test("get_due_commitments returns exactly ctx.grow.dueFollowUps", async () => {
+test("get_grow_today_due_items returns exactly ctx.grow.dueFollowUps", async () => {
   const due = [makeGrowTodayItem({ id: "opportunity:5", dueAt: "2026-01-02T00:00:00.000Z" })];
   const ctx = makeContext({ grow: makeGrowContext({ dueFollowUps: due }) });
-  const tool = GROW_TOOL_REGISTRY.find((t) => t.name === "get_due_commitments")!;
+  const tool = GROW_TOOL_REGISTRY.find((t) => t.name === "get_grow_today_due_items")!;
   const result = await tool.run(ctx, {});
   assert.equal(result.ok, true);
   assert.deepEqual(result.data, due);

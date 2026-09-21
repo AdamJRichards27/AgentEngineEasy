@@ -55,7 +55,13 @@ export const COMMUNICATION_MESSAGE_STATUS_TRANSITIONS: Record<CommunicationMessa
   DELIVERED: ["BOUNCED"],
   RECEIVED: [],
   FAILED: ["RETRY_SCHEDULED"],
-  RETRY_SCHEDULED: ["SENDING", "FAILED", "CANCELLED"],
+  // BLOCKED_BY_CONSENT is reachable from RETRY_SCHEDULED because dispatchMessage
+  // re-checks consent at dispatch time, not only at enqueue time. A message that
+  // was queued under valid consent, failed transiently, and is now retrying must
+  // be able to settle as blocked if consent was withdrawn in the interval —
+  // otherwise it is fail-closed but never settles, and the 60s sweep re-fails it
+  // on every pass.
+  RETRY_SCHEDULED: ["SENDING", "FAILED", "CANCELLED", "BLOCKED_BY_CONSENT"],
   BOUNCED: [],
   UNDELIVERABLE: [],
   CANCELLED: [],

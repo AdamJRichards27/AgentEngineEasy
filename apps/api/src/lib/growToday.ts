@@ -1,9 +1,12 @@
-import { and, eq, gt, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, max, or, sql } from "drizzle-orm";
 import { db, appraisals, growActivities, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
 import { loadContactabilityFilter } from "./propertyIntelligence/contactability.js";
 import {
+  COLD_CONTACT_THRESHOLD_DAYS,
+  PER_PARTY_SIGNAL_SELECTOR,
   RANK_APPRAISAL_NO_ACTION_SET,
   RANK_OPPORTUNITY_NO_ACTION_SET,
+  compareSignalStrength,
   confidenceBandLabel,
   rankColdRelationship,
   rankDueToday,
@@ -11,6 +14,7 @@ import {
   rankSignal,
   type SignalContactability,
   type SignalNarrative,
+  type SignalRanking,
   type SignalRankingFactor,
 } from "./grow/signalRanking.js";
 
@@ -174,6 +178,118 @@ import {
 // lib/propertyIntelligence/signals.ts's listActiveSignalsForParty() — the
 // Contact 360 read — has the identical hole and is owned by the sweep agent.
 // See this change's report.
+//
+// =====================================================================
+// AE GROW COMPLETION PROGRAM — SLICE W2-A. BOUNDING, PER-PARTY
+// CONSOLIDATION, AND THE QUERY REWRITE.
+// =====================================================================
+//
+// Everything above made this surface CORRECT. None of it made it SURVIVE a
+// real brokerage. Three families of defect are fixed below; each has a named
+// constant, a comment explaining the number, and a test.
+//
+// -------------------------------------------------------------------
+// 1. NOTHING STRONG WAS EVER CAPPED (F-2).
+// -------------------------------------------------------------------
+//
+// MAX_EMERGING_SIGNAL_ACTIONS was the ONLY cap in the whole pipeline, and it
+// protected the WEAKEST band. Rules A/B/C emit one card per open opportunity,
+// Rule E one per FOLLOW_UP appraisal, Rule D one per cold party, and Rule F
+// one per Active non-Emerging signal — all uncapped — and priorityActions was
+// then returned in full, with no LIMIT in the query, no pagination in the
+// route and no windowing in the UI.
+//
+// The arithmetic that makes that a day-one defect rather than a theoretical
+// one: the sweep writes up to 5,000 candidates per brokerage per run, and a
+// 5,000-contact brokerage importing a database that is mostly two years
+// dormant produces re_engagement_opportunity at StrongIndicator, scoring
+// 40 (band) + 10 (type) + 6 (internal source) + 6 (no open opportunity)
+// + 6 (never contacted) = 68, against SIGNAL_DO_TODAY_MIN_SCORE of 55. That
+// is THOUSANDS of Do Today cards on the first morning.
+//
+// Two bounds are added, at two different layers, because they solve two
+// different problems:
+//   - the *_ROW_CAP constants bound what each rule READS, so the process
+//     never materialises a whole tenant's joined contact strings in heap;
+//   - MAX_PRIORITY_ACTIONS bounds what the response RETURNS, after the
+//     deterministic sort, so the strongest cards always survive the cut.
+// Both are stated, never silent: see GrowTodaySignalSummary.
+//
+// -------------------------------------------------------------------
+// 2. THERE WAS NO DE-DUPLICATION AMONG SIGNALS (F-3 — DECISION 3).
+// -------------------------------------------------------------------
+//
+// Read this carefully, because MOST of DECISION 3 was already built and is
+// deliberately left alone here. Write-time exclusion already enforces "no open
+// opportunity, no open commitment" (evaluation.ts). Read-time signal-vs-cold
+// de-dup already works: a surfaced signal adds its partyId to
+// partyIdsWithOpportunityAction and Rule D skips it.
+//
+// The genuine gap was narrower: nothing de-duplicated signals AGAINST EACH
+// OTHER. partyIdsWithOpportunityAction suppressed only Rule D, never a sibling
+// signal, so a long-tenure owner dormant 200 days with no open opportunity got
+// BOTH long_ownership_tenure AND re_engagement_opportunity — two cards, one
+// person. That is DECISION 3's "or stronger signal" clause, and it was
+// unimplemented and untested.
+//
+// The fix is READ-PATH consolidation, consistent with this file's existing
+// precedent that hiding is a READ-path decision (see the contactability block
+// above). Every row is preserved, nothing is written, and it is reversible by
+// deleting one loop. The deliberately REJECTED alternative was tightening the
+// write path with a "no stronger signal" subquery in reEngagementCandidates:
+// that would put a second statement inside a rule whose one-statement-per-rule
+// shape EVALUATION_STATEMENTS_PER_SCOPE asserts, and would hide rows the
+// Contact 360 review surface may legitimately want to show.
+//
+// THREE THINGS THE CONSOLIDATION MUST NOT GET WRONG:
+//   - PARTY-LESS SIGNALS MUST NOT COLLAPSE. A signal with partyId null is
+//     anchored to a PROPERTY. Grouping them by partyId would fold every
+//     property in the brokerage into one phantom "null" bucket and delete all
+//     but one. The identical trap is already documented for the
+//     contactsNeedingAttention count at the bottom of this file. They bypass
+//     grouping entirely.
+//   - THE LOSERS MUST SURVIVE. DECISION 3 requires the evidence to be
+//     preserved, so every suppressed sibling rides on the winning card as a
+//     relatedSignals entry. AE can then show its working: "this is the card,
+//     and here is the other thing I know about this person".
+//   - THE EMERGING CAP MUST COUNT CARDS, NOT ROWS. It is applied AFTER
+//     grouping now. Before, one party with four Emerging signals could eat
+//     four of the ten slots on their own.
+//
+// Which sibling wins is a REAL, PENDING PRODUCT DECISION. See
+// PER_PARTY_SIGNAL_SELECTOR in lib/grow/signalRanking.ts, which is the single
+// place it is decided and the single place it would be flipped.
+//
+// -------------------------------------------------------------------
+// 3. THE QUERY REWRITE (I-2, I-4, I-5, I-16).
+// -------------------------------------------------------------------
+//
+// I-2, the worst of them: this function used to SELECT EVERY ROW of
+// grow_activities for the brokerage and compute a max-per-party in a JavaScript
+// loop. grow_activities is the only Grow table that grows with USAGE rather
+// than with inventory, and Grow Today is the landing surface every agent hits
+// every morning — so at a realistic 250,000 activity rows, every single
+// /grow/today request shipped 250,000 rows over the wire to compute at most a
+// few thousand dates. It is now a `max(occurred_at) ... group by party_id`
+// aggregate, restricted to the party ids the other rules actually asked about.
+//
+// I-4: the other four tenant reads were unbounded too, and each joins
+// parties/properties, so every row carried a name, an email, a mobile and an
+// address. They are now capped and ordered so that truncation removes the
+// LEAST relevant rows, and the truncation is stated rather than hidden.
+//
+// lib/ai/coaching/metrics.ts is the model followed here — tenant-scoped,
+// bounded by named *_ROW_CAP constants, and honest about truncation as a
+// stated limitation rather than presenting a partial list as complete. Its
+// constants are deliberately NOT imported: growContext.ts already depends on
+// this file, and importing back out of lib/ai/ would invert that layering.
+//
+// THE STATEMENT COUNT IS UNCHANGED. It was five parallel reads plus two
+// serial contactability statements (seven). It is now four parallel reads,
+// then the activity aggregate and the two contactability statements in
+// parallel (seven). The second wave has to follow the first because it is
+// scoped BY the first wave's party ids — which is exactly what makes it
+// bounded.
 
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
@@ -202,17 +318,60 @@ export type GrowTodayActionButton =
   | { action: "view_appraisal"; appraisalId: number };
 
 /**
+ * W2-A (F-3 / DECISION 3) — a signal AE knows about for this contact that did
+ * NOT become the card, carried on the card that did so the evidence is never
+ * lost. Two ways that happens, distinguished by `relationship`:
+ *
+ *   - "consolidated_into_this_card": a sibling signal for the same party lost
+ *     the per-party selection (see PER_PARTY_SIGNAL_SELECTOR). Its card was
+ *     folded into this one so the contact appears exactly once.
+ *   - "withheld_by_daily_cap": every signal for this party was held back by
+ *     MAX_EMERGING_SIGNAL_ACTIONS, so a Rule D cold-contact card surfaced
+ *     instead and carries them as its explanation (F-5).
+ *
+ * The row itself is untouched in either case and remains fully visible on the
+ * contact and property records.
+ */
+export interface GrowTodayRelatedSignal {
+  signalId: number;
+  signalType: string;
+  title: string;
+  /** The signal's own stored, already-hedged explanation. Never re-worded here. */
+  explanation: string;
+  confidenceBand: string;
+  confidenceBandLabel: string;
+  /** What it scored. Shown only alongside the winning card's own explanation, never alone. */
+  rankScore: number;
+  relationship: "consolidated_into_this_card" | "withheld_by_daily_cap";
+}
+
+/**
  * Stage 3 — the agent-readable explanation that rides with a surfaced
  * signal. `factors` is the itemised breakdown of the rankScore, so the
  * ranking is auditable rather than an opaque number; `headline` /
  * `talkingPoint` / `caution` are what the agent reads and (for the talking
- * point) may choose to say. Null on Rules A-E, whose `reason` and
+ * point) may choose to say.
+ *
+ * W2-A (F-5) — NO LONGER SIGNAL-ONLY. Rule D's cold-contact card used to emit
+ * whyItMatters: null unconditionally, so when a cap withheld a contact's
+ * signal the surviving cold card carried nothing but "No contact recorded for
+ * N days." and could not explain why AE had chosen it. A Rule D card now
+ * carries this too.
+ *
+ * confidenceBand / confidenceBandLabel are therefore NULLABLE: a cold-contact
+ * card has no stored confidence band, because it is not a signal. That
+ * nullability is load-bearing on the web side — apps/web/src/lib/growToday.ts's
+ * rankSummaryLine() renders "priority N/100" for any non-null whyItMatters,
+ * and a cold card must not suddenly start displaying a score, so the mirror
+ * guards on a null band. Still null on Rules A/B/C and E, whose `reason` and
  * `recommendedAction` are already the whole explanation.
  */
 export interface GrowTodayWhyItMatters extends SignalNarrative {
-  confidenceBand: string;
-  confidenceBandLabel: string;
+  confidenceBand: string | null;
+  confidenceBandLabel: string | null;
   factors: SignalRankingFactor[];
+  /** W2-A — see GrowTodayRelatedSignal. Empty when nothing was folded in. */
+  relatedSignals: GrowTodayRelatedSignal[];
 }
 
 export interface GrowTodayAction {
@@ -284,6 +443,28 @@ export interface GrowTodaySignalSummary {
    * on the contact/property record.
    */
   withheldDoNotContact: number;
+  /**
+   * W2-A (F-3 / DECISION 3) — signals that lost the per-party selection to a
+   * stronger sibling. NOT hidden: each one rides on the winning card as a
+   * whyItMatters.relatedSignals entry, so this is a count of cards merged, not
+   * of evidence discarded.
+   */
+  consolidatedIntoStrongerSignal: number;
+  /**
+   * W2-A (F-2) — cards of ANY rule (not only signals) dropped by
+   * MAX_PRIORITY_ACTIONS after the full list was sorted. Because the cut
+   * happens after the sort, what is dropped is always the lowest-ranked tail
+   * of the day.
+   */
+  withheldByActionCap: number;
+  /**
+   * W2-A (I-4) — plain-language statements of what this response is BOUNDED
+   * by, in the shape lib/ai/coaching/metrics.ts established: a surface that
+   * truncates its input says so, rather than presenting a partial list as if
+   * it were complete. Empty when nothing was truncated, which is the normal
+   * case for every brokerage below the caps.
+   */
+  limitations: string[];
 }
 
 export interface GrowTodaySummary {
@@ -307,9 +488,74 @@ export interface GrowTodaySummary {
 }
 
 // A relationship/opportunity with no recorded contact in this many days (or
-// ever) is surfaced as "Keep Warm" — a documented, adjustable constant, not
-// a magic number buried in the rule logic below.
-const COLD_CONTACT_THRESHOLD_DAYS = 21;
+// ever) is surfaced as "Keep Warm".
+//
+// W2-A (F-7): this used to be declared here AND in lib/grow/signalRanking.ts,
+// with a comment on each saying it matched the other. It is now declared once,
+// in signalRanking.ts (the pure leaf module this file already imports from),
+// and imported — see that constant's own comment. Re-exported so nothing that
+// reads "Grow Today's cold threshold" from this module breaks.
+export { COLD_CONTACT_THRESHOLD_DAYS };
+
+/* ---------------------------------------------------------------------
+ * W2-A (I-4, I-5) — WHAT EACH RULE IS ALLOWED TO READ.
+ *
+ * Every one of these bounds a query that was previously "every matching row
+ * in the tenant", joined to parties/properties so that each row also carried a
+ * name, an email, a mobile and a formatted address. On a large brokerage that
+ * was several megabytes of heap per request, on the one endpoint every agent
+ * loads every morning.
+ *
+ * THE VALUES DELIBERATELY MATCH lib/ai/coaching/metrics.ts's own *_ROW_CAP
+ * constants for the same tables, so the two bounded Grow read surfaces agree
+ * on how much of a tenant they will look at. They are not imported from there:
+ * lib/ai/context/growContext.ts already depends on THIS file, and importing
+ * back out of lib/ai/ would invert that dependency.
+ *
+ * ORDERING IS PART OF THE CAP. A LIMIT without an ORDER BY truncates
+ * arbitrarily and non-deterministically; each query below orders so that the
+ * rows most likely to matter are the rows that survive, and so that repeating
+ * the same request returns the same rows.
+ * -----------------------------------------------------------------*/
+
+/** Active relationships read for Rule D. Ordered so truncation cannot change which relationship wins a party — see the query. */
+export const GROW_TODAY_RELATIONSHIP_ROW_CAP = 2000;
+/** Open opportunities read for Rules A/B/C. Ordered by due date, so dated commitments outlive undated ones. */
+export const GROW_TODAY_OPPORTUNITY_ROW_CAP = 1000;
+/** FOLLOW_UP appraisals read for Rule E. Ordered by follow-up date, so the most overdue survive. */
+export const GROW_TODAY_APPRAISAL_ROW_CAP = 500;
+/** Active Property Intelligence signals read for Rule F. Ordered by confidence band, so the strongest evidence survives. */
+export const GROW_TODAY_SIGNAL_ROW_CAP = 500;
+
+/**
+ * W2-A (F-2) — THE TOTAL NUMBER OF CARDS ONE /grow/today RESPONSE MAY CARRY.
+ *
+ * THIS IS A TECHNICAL SAFETY BOUND, NOT A PRODUCT DECISION. It is not a claim
+ * about how many actions an agent should work in a day, and it must not be
+ * read as one. The Project Owner has not set a number, and inventing a
+ * commercial one here would be worse than inventing none: the number that
+ * belongs on this screen is a coaching judgement, and it is theirs to make.
+ * What this constant does is stop the response from being unbounded, which is
+ * a property of the code and squarely an engineering concern.
+ *
+ * WHY 200.
+ *   - It is roughly an ORDER OF MAGNITUDE above the largest plausible genuine
+ *     working day, so it cannot silently become the product rule by accident.
+ *     For comparison, lib/ai/context/growContext.ts — the only other consumer
+ *     of this list — already slices it to 20 before showing anything to the
+ *     model.
+ *   - It bounds the serialised response at a few hundred kilobytes rather
+ *     than the several megabytes an uncapped list produces, and the frontend
+ *     renders this list flat, with no pagination and no windowing.
+ *   - It is applied AFTER the deterministic sort, so the cards that survive
+ *     are always the highest-ranked ones; a cap that truncated before sorting
+ *     would be arbitrary and is not what this does.
+ *
+ * WHAT IS CUT IS REPORTED, NEVER SILENT: GrowTodaySignalSummary.
+ * withheldByActionCap counts it and the web mirror states it, following the
+ * same honesty rule as emergingWithheld and withheldDoNotContact.
+ */
+export const MAX_PRIORITY_ACTIONS = 200;
 
 // AE GROW "Brokerage-wide Signal Sweep" stage 3 — THE EMERGING BAND IS NO
 // LONGER FILTERED OUT.
@@ -469,7 +715,140 @@ async function fetchPropertyIntelligenceSignalRows(
         // ranked down rather than discarded.
         or(isNull(growOpportunitySignals.expiresAt), gt(growOpportunitySignals.expiresAt, now)),
       ),
-    );
+    )
+    // W2-A (I-4) — BOUNDED, AND BOUNDED IN THE RIGHT DIRECTION.
+    //
+    // This read was previously every Active signal in the brokerage. The sweep
+    // writes up to 5,000 candidates per run, and each row here drags a name,
+    // an email, a mobile and a formatted address along with it.
+    //
+    // The true rank is computed in Node (lib/grow/signalRanking.ts is pure and
+    // has no database access by design), so the ORDER BY cannot use it. The
+    // confidence band is the closest honest proxy available in SQL: it is the
+    // single largest lever in the score by a wide margin — 40 / 26 / 12 points
+    // against a type weight that never exceeds 22 — so ordering by band keeps
+    // the strongest evidence and discards the weakest. The row id breaks ties,
+    // which is what makes the truncation, and therefore the whole card list,
+    // identical across two identical requests.
+    .orderBy(
+      sql`case ${growOpportunitySignals.confidenceBand}
+            when 'StrongIndicator' then 0
+            when 'WorthReviewing' then 1
+            when 'Emerging' then 2
+            else 3
+          end`,
+      asc(growOpportunitySignals.id),
+    )
+    .limit(GROW_TODAY_SIGNAL_ROW_CAP);
+}
+
+/**
+ * W2-A (I-2) — THE SINGLE WORST SCALE PROBLEM IN GROW, AND THE ONE THAT
+ * ARRIVES FIRST.
+ *
+ * WHAT THIS REPLACES. Grow Today used to run
+ *
+ *     select party_id, occurred_at from grow_activities where brokerage_id = ?
+ *
+ * — every activity row the brokerage has ever recorded — and then reduce it to
+ * a max-per-party with a JavaScript loop. grow_activities is the ONLY Grow
+ * table that grows with USAGE rather than with inventory: it accumulates a row
+ * every time anybody does anything, forever, and it is never pruned. At a
+ * realistic 250,000 rows that is 250,000 rows across the wire, parsed into
+ * 250,000 Date objects, to produce a Map of at most a few thousand entries —
+ * on the landing surface every agent in the tenant loads every morning, and
+ * (via growContext.ts) underneath every single Grow "Ask AE" question before
+ * one token is sent.
+ *
+ * WHAT IT DOES INSTEAD. The aggregate runs in the database, which is what
+ * databases are for, and returns ONE row per party.
+ *
+ * WHY THERE IS NO ROW CAP HERE, DELIBERATELY. Two reasons, and the second is a
+ * correctness argument rather than a performance one.
+ *
+ *   - It does not need one. The result is already bounded by the caller: it
+ *     asks only about the party ids the four capped rule reads actually
+ *     returned, so it can never exceed their combined caps.
+ *   - A cap here would FABRICATE FACTS. Absence from this map means "no
+ *     contact has ever been recorded for this person", which Rule D renders as
+ *     "No contact recorded yet." and which the signal ranker scores with
+ *     NEVER_CONTACTED_POINTS. Truncating the map would therefore invent
+ *     coldness for real contacts — telling an agent nobody has ever spoken to
+ *     somebody they called last week. A bound that produces a confident false
+ *     statement is worse than the unbounded read it replaced, and no ordering
+ *     avoids it: keeping the freshest parties mislabels the coldest, keeping
+ *     the coldest mislabels the freshest.
+ *
+ * THE INDEX THIS WANTS (not added here — index work is batched into its own
+ * migration PR): grow_activities (brokerage_id, party_id, occurred_at desc),
+ * which turns this into an index-only scan. It is correct without it.
+ */
+async function fetchLastActivityByParty(brokerageId: number, partyIds: number[]): Promise<Map<number, Date>> {
+  const lastActivityByParty = new Map<number, Date>();
+  if (partyIds.length === 0) return lastActivityByParty;
+
+  // ONE bind parameter (a JSON array expanded server-side) rather than N, so
+  // the statement text is identical whatever the batch contains and no party
+  // id is ever concatenated into SQL — the same technique
+  // lib/propertyIntelligence/contactability.ts uses for the same reason. The
+  // ids are already integer-filtered by the caller.
+  const idArray = sql`array(select jsonb_array_elements_text(${JSON.stringify(partyIds)}::jsonb)::int)`;
+
+  const rows = await db
+    .select({ partyId: growActivities.partyId, lastOccurredAt: max(growActivities.occurredAt) })
+    .from(growActivities)
+    .where(
+      and(
+        eq(growActivities.brokerageId, brokerageId),
+        isNotNull(growActivities.partyId),
+        sql`${growActivities.partyId} = any(${idArray})`,
+      ),
+    )
+    .groupBy(growActivities.partyId);
+
+  for (const row of rows) {
+    // drizzle's max() reuses the column's own driver mapper, so occurredAt
+    // decodes here exactly as it did when this loop read raw rows.
+    if (row.partyId === null || row.lastOccurredAt === null) continue;
+    lastActivityByParty.set(row.partyId, row.lastOccurredAt);
+  }
+  return lastActivityByParty;
+}
+
+/**
+ * W2-A — one signal row, scored, plus the siblings for the same party that
+ * lost to it. `consolidated` is populated only on a per-party winner and is
+ * empty everywhere else, including on every party-less (property-anchored)
+ * signal, which never participates in grouping at all.
+ */
+interface RankedSignalCandidate {
+  row: PropertyIntelligenceSignalRow;
+  ranking: SignalRanking;
+  contactability: SignalContactability;
+  consolidated: RankedSignalCandidate[];
+}
+
+/**
+ * W2-A — projects a signal that did NOT become a card into the evidence that
+ * rides on the card that did. Copies the signal's own stored explanation
+ * verbatim: a consolidated sibling is never re-worded or re-summarised here,
+ * because the whole point of keeping it is that the original evidence
+ * survives.
+ */
+function toRelatedSignal(
+  candidate: { row: PropertyIntelligenceSignalRow; ranking: SignalRanking },
+  relationship: GrowTodayRelatedSignal["relationship"],
+): GrowTodayRelatedSignal {
+  return {
+    signalId: candidate.row.id,
+    signalType: candidate.row.signalType,
+    title: candidate.row.title,
+    explanation: candidate.row.explanation,
+    confidenceBand: candidate.row.confidenceBand,
+    confidenceBandLabel: confidenceBandLabel(candidate.row.confidenceBand),
+    rankScore: candidate.ranking.score,
+    relationship,
+  };
 }
 
 export async function getGrowTodaySummary(
@@ -484,7 +863,10 @@ export async function getGrowTodaySummary(
   // entitlement or auth concept, and still doesn't.
   const includePropertyIntelligenceSignals = options?.includePropertyIntelligenceSignals ?? false;
   const propertyIntelligenceNow = new Date();
-  const [relationshipRows, opportunityRows, activityRows, appraisalFollowUpRows, propertyIntelligenceSignalRows] = await Promise.all([
+  // W2-A (I-4) — WAVE 1: the four rule reads, all capped, all ordered. The
+  // activity aggregate has moved OUT of this wave because it is now scoped by
+  // the party ids these four return, which is what makes it bounded.
+  const [relationshipRows, opportunityRows, appraisalFollowUpRows, propertyIntelligenceSignalRows] = await Promise.all([
     db
       .select({
         id: growRelationships.id,
@@ -503,7 +885,23 @@ export async function getGrowTodaySummary(
       .from(growRelationships)
       .innerJoin(parties, eq(growRelationships.partyId, parties.id))
       .leftJoin(properties, eq(growRelationships.propertyId, properties.id))
-      .where(and(eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active"))),
+      .where(and(eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")))
+      // W2-A (I-4) — THE ORDER IS CHOSEN TO MAKE THE CAP HARMLESS TO
+      // CORRECTNESS, not merely deterministic. Rule D below reduces these rows
+      // to one per party, preferring the primary relationship and then the most
+      // recently established one. Sorting by exactly that preference, WITHIN
+      // party, means a truncation that cuts through the middle of a party's
+      // relationships still leaves that party's WINNING row on the near side of
+      // the cut. A truncated party therefore gets the same card it would have
+      // got uncapped; only whole parties past the cap are lost, and that is
+      // stated in limitations below.
+      .orderBy(
+        asc(growRelationships.partyId),
+        desc(growRelationships.isPrimary),
+        desc(growRelationships.validFrom),
+        asc(growRelationships.id),
+      )
+      .limit(GROW_TODAY_RELATIONSHIP_ROW_CAP),
     db
       .select({
         id: growOpportunities.id,
@@ -519,15 +917,25 @@ export async function getGrowTodaySummary(
         partyEmail: parties.email,
         partyMobile: parties.mobile,
         propertyAddress: properties.formattedAddress,
+        // W2-A — the TRUE number of open opportunities, computed over the full
+        // result set BEFORE the LIMIT applies (Postgres evaluates window
+        // functions ahead of LIMIT). counts.openOpportunities is a headline
+        // figure on the screen, and a capped read must not quietly turn it into
+        // "1,000" for a brokerage that has 5,000. This costs no extra
+        // statement and no extra round trip; it is the only read here that
+        // needs an exact total, so it is the only one that pays for one.
+        totalOpenOpportunities: sql<number>`count(*) over ()`.mapWith(Number),
       })
       .from(growOpportunities)
       .innerJoin(parties, eq(growOpportunities.partyId, parties.id))
       .leftJoin(properties, eq(growOpportunities.propertyId, properties.id))
-      .where(and(eq(growOpportunities.brokerageId, brokerageId), eq(growOpportunities.status, "Open"))),
-    db
-      .select({ partyId: growActivities.partyId, occurredAt: growActivities.occurredAt })
-      .from(growActivities)
-      .where(eq(growActivities.brokerageId, brokerageId)),
+      .where(and(eq(growOpportunities.brokerageId, brokerageId), eq(growOpportunities.status, "Open")))
+      // Dated commitments first, oldest due date leading — Postgres sorts
+      // NULLS LAST on ASC, so the "no next action set" rows (which are the
+      // least urgent of the three Rule A/B/C outcomes) are the ones a
+      // truncation drops first.
+      .orderBy(asc(growOpportunities.nextActionDueAt), asc(growOpportunities.id))
+      .limit(GROW_TODAY_OPPORTUNITY_ROW_CAP),
     db
       .select({
         id: appraisals.id,
@@ -546,27 +954,55 @@ export async function getGrowTodaySummary(
       .from(appraisals)
       .innerJoin(properties, eq(appraisals.propertyId, properties.id))
       .innerJoin(parties, eq(appraisals.partyId, parties.id))
-      .where(and(eq(properties.brokerageId, brokerageId), eq(appraisals.status, "FOLLOW_UP"))),
+      .where(and(eq(properties.brokerageId, brokerageId), eq(appraisals.status, "FOLLOW_UP")))
+      // Most overdue first. Rule E only surfaces an overdue or due-today
+      // follow-up, so a future-dated one — which it skips anyway — is exactly
+      // what a truncation should drop.
+      .orderBy(asc(appraisals.followUpAt), asc(appraisals.id))
+      .limit(GROW_TODAY_APPRAISAL_ROW_CAP),
     fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, propertyIntelligenceNow),
   ]);
 
-  const lastActivityByParty = new Map<number, Date>();
-  for (const a of activityRows) {
-    if (a.partyId === null) continue;
-    const existing = lastActivityByParty.get(a.partyId);
-    if (!existing || a.occurredAt > existing) lastActivityByParty.set(a.partyId, a.occurredAt);
-  }
+  // W2-A — the exact open-opportunity total, carried on every row by the
+  // `count(*) over ()` above and therefore identical on all of them. Zero rows
+  // means zero open opportunities, which is the only case where the window
+  // function has nowhere to ride.
+  const totalOpenOpportunities = opportunityRows[0]?.totalOpenOpportunities ?? 0;
 
+  // W2-A — the one party-id set both wave-2 reads need.
+  //
+  // I-16: this used to be built as four concatenated arrays INCLUDING
+  // duplicates and nulls, and handed straight to loadContactabilityFilter. A
+  // brokerage where the same contact holds a relationship, an opportunity, an
+  // appraisal and a signal contributed that id four times. De-duplicating here
+  // rather than inside the callee means the allocation, the JSON payload and
+  // the chunk boundaries are all computed from the real cardinality — and it
+  // is now the single set that scopes the activity aggregate too, instead of
+  // that aggregate reading the whole tenant.
+  const partyIdsInScope = [
+    ...new Set<number>(
+      [
+        ...relationshipRows.map((r) => r.partyId),
+        ...opportunityRows.map((o) => o.partyId),
+        ...appraisalFollowUpRows.map((a) => a.partyId),
+        ...propertyIntelligenceSignalRows.map((s) => s.partyId),
+      ].filter((id): id is number => typeof id === "number" && Number.isInteger(id)),
+    ),
+  ];
+
+  // W2-A — WAVE 2. Both reads are scoped by the same bounded id set and are
+  // independent of one another, so they run together: the statement count is
+  // the same as before this change (four + one aggregate + contactability's
+  // two), with one extra round-trip wave bought in exchange for the activity
+  // read no longer being tenant-wide.
+  //
   // Stage 3 — CONSENT / CONTACTABILITY, APPLIED AT READ TIME TO EVERY RULE.
   // See this file's "READ-TIME CONTACTABILITY (security finding P1-3)" header
   // block for the defect this closes and for the hide/show split below.
-  const allPartyIds: Array<number | null> = [
-    ...relationshipRows.map((r) => r.partyId),
-    ...opportunityRows.map((o) => o.partyId),
-    ...appraisalFollowUpRows.map((a) => a.partyId),
-    ...propertyIntelligenceSignalRows.map((s) => s.partyId),
-  ];
-  const contactabilityFilter = await loadContactabilityFilter(brokerageId, allPartyIds);
+  const [lastActivityByParty, contactabilityFilter] = await Promise.all([
+    fetchLastActivityByParty(brokerageId, partyIdsInScope),
+    loadContactabilityFilter(brokerageId, partyIdsInScope),
+  ]);
   const contactabilityOf = (partyId: number | null): SignalContactability =>
     contactabilityFilter.isSuppressed(partyId) ? "do_not_contact" : "contactable";
 
@@ -783,7 +1219,7 @@ export async function getGrowTodaySummary(
     (s) => contactabilityOf(s.partyId) === "do_not_contact",
   ).length;
 
-  const rankedSignals = propertyIntelligenceSignalRows
+  const rankedSignals: RankedSignalCandidate[] = propertyIntelligenceSignalRows
     .filter((s) => contactabilityOf(s.partyId) === "contactable")
     .map((s) => {
       const contactability = contactabilityOf(s.partyId);
@@ -808,19 +1244,81 @@ export async function getGrowTodaySummary(
         },
         propertyIntelligenceNow,
       );
-      return { row: s, ranking, contactability };
+      return { row: s, ranking, contactability, consolidated: [] };
     })
     // Strongest first, so the Emerging cap below keeps the BEST of the long
     // tail rather than an arbitrary slice of it.
-    .sort((a, b) => b.ranking.score - a.ranking.score || a.row.id - b.row.id);
+    //
+    // W2-A — this comparator (and the row-id tiebreak that makes repeated
+    // identical requests return identical card orders) now lives in
+    // lib/grow/signalRanking.ts, so the GLOBAL ordering of signals and the
+    // PER-PARTY choice of which sibling becomes the card are literally the
+    // same function and cannot drift apart.
+    .sort((a, b) => compareSignalStrength({ score: a.ranking.score, rowId: a.row.id }, { score: b.ranking.score, rowId: b.row.id }));
 
+  // =====================================================================
+  // W2-A (F-3) — PER-PARTY CONSOLIDATION. THE PROJECT OWNER'S DECISION 3.
+  // =====================================================================
+  //
+  // One person, one card. `rankedSignals` is already sorted strongest-first by
+  // compareSignalStrength, so the FIRST signal seen for a party is by
+  // definition that party's winner and every later one is folded into it —
+  // no second sort, no second criterion, nothing that could disagree with the
+  // ordering the list is about to be rendered in.
+  //
+  // PARTY-LESS SIGNALS BYPASS THIS ENTIRELY. partyId null means the signal is
+  // anchored to a PROPERTY, and property-anchored signals are not "the same
+  // person" as each other — grouping them on a null key would collapse every
+  // property in the brokerage into a single phantom bucket and silently drop
+  // all but one of them. (The same trap is documented for the
+  // contactsNeedingAttention count near the bottom of this file, which is where
+  // it was first caught.)
+  //
+  // NOTHING IS DISCARDED. A folded sibling becomes a relatedSignals entry on
+  // the winning card, so the agent sees the one best item AND the evidence
+  // behind the choice — which is precisely what DECISION 3 asks for. The row
+  // is untouched and still fully visible on the contact record.
+  const consolidatedSignals: RankedSignalCandidate[] = [];
+  const winnerIndexByParty = new Map<number, number>();
+  let consolidatedIntoStrongerSignal = 0;
+  for (const candidate of rankedSignals) {
+    if (candidate.row.partyId === null) {
+      consolidatedSignals.push(candidate);
+      continue;
+    }
+    const winnerIndex = winnerIndexByParty.get(candidate.row.partyId);
+    if (winnerIndex === undefined) {
+      winnerIndexByParty.set(candidate.row.partyId, consolidatedSignals.length);
+      consolidatedSignals.push(candidate);
+      continue;
+    }
+    consolidatedSignals[winnerIndex].consolidated.push(candidate);
+    consolidatedIntoStrongerSignal++;
+  }
+
+  // W2-A (F-3) — THE EMERGING CAP NOW COUNTS CARDS, NOT ROWS, because it runs
+  // AFTER consolidation. Before, a single contact holding four Emerging
+  // signals consumed four of the ten daily slots by themselves, which is the
+  // opposite of what a cap meant to keep the day readable should do.
   let emergingSurfaced = 0;
   let emergingWithheld = 0;
-  const signalsToSurface: typeof rankedSignals = [];
-  for (const candidate of rankedSignals) {
+  const signalsToSurface: RankedSignalCandidate[] = [];
+  // W2-A (F-5) — parties whose only signal card the cap held back. Rule D's
+  // cold-contact card for such a party is the one that survives, and it uses
+  // this to explain itself instead of saying only "No contact recorded for N
+  // days."
+  const signalsWithheldByParty = new Map<number, RankedSignalCandidate[]>();
+  for (const candidate of consolidatedSignals) {
     if (candidate.row.confidenceBand === "Emerging") {
       if (emergingSurfaced >= MAX_EMERGING_SIGNAL_ACTIONS) {
         emergingWithheld++;
+        if (candidate.row.partyId !== null) {
+          const held = signalsWithheldByParty.get(candidate.row.partyId) ?? [];
+          // The folded siblings are held back with their winner — none of them
+          // produced a card either, so all of them travel to Rule D.
+          held.push(candidate, ...candidate.consolidated);
+          signalsWithheldByParty.set(candidate.row.partyId, held);
+        }
         continue;
       }
       emergingSurfaced++;
@@ -828,7 +1326,7 @@ export async function getGrowTodaySummary(
     signalsToSurface.push(candidate);
   }
 
-  for (const { row: s, ranking } of signalsToSurface) {
+  for (const { row: s, ranking, consolidated } of signalsToSurface) {
     if (s.partyId !== null) partyIdsWithOpportunityAction.add(s.partyId);
 
     const availableActions: GrowTodayActionButton[] = [];
@@ -877,6 +1375,10 @@ export async function getGrowTodaySummary(
         confidenceBand: s.confidenceBand,
         confidenceBandLabel: confidenceBandLabel(s.confidenceBand),
         factors: ranking.factors,
+        // W2-A (F-3) — the siblings this card won against. Present so the
+        // agent sees everything AE knows about this contact on the one card,
+        // and so AE can show WHY this is the card rather than the other one.
+        relatedSignals: consolidated.map((c) => toRelatedSignal(c, "consolidated_into_this_card")),
       },
     });
   }
@@ -926,6 +1428,49 @@ export async function getGrowTodaySummary(
     availableActions.push({ action: "view_contact", partyId: r.partyId });
     availableActions.push({ action: "ask_ae" });
 
+    // =====================================================================
+    // W2-A (F-5) — RULE D NOW EXPLAINS ITSELF.
+    // =====================================================================
+    //
+    // This card used to emit whyItMatters: null unconditionally. That was
+    // defensible while Rule D was only ever a fallback nobody had a better
+    // answer for — but it stopped being true the moment a cap could WITHHOLD a
+    // contact's signal and leave this card standing in its place. The agent
+    // then saw "No contact recorded for 240 days." with no way to know AE had
+    // something more specific about that exact person and had held it back.
+    //
+    // NO CONFIDENCE BAND, DELIBERATELY. A cold-contact card is a date
+    // comparison, not a signal, and it has no stored evidence band. Both band
+    // fields are therefore null, which is exactly what the web mirror's
+    // rankSummaryLine() keys off to keep a bare "priority N/100" OFF this card
+    // — a threshold rule must never be dressed up as a scored inference.
+    //
+    // NO FACTORS, for the same reason: there is no itemised score to itemise.
+    // What this card can honestly carry is the rule it fired on, the limit of
+    // what that proves, and any signals held back for this contact.
+    const withheldForParty = signalsWithheldByParty.get(r.partyId) ?? [];
+    const coldWhyItMatters: GrowTodayWhyItMatters = {
+      headline:
+        withheldForParty.length > 0
+          ? `AE surfaced this contact because your own records show no recorded contact with them${
+              lastActivity ? ` for ${daysSince(lastActivity)} days` : " at all"
+            }. AE also holds ${withheldForParty.length === 1 ? "another early-stage signal" : `${withheldForParty.length} other early-stage signals`} about this person that today's limit held back — ${
+              withheldForParty.length === 1 ? "it is" : "they are"
+            } listed below and remain fully visible on the contact record.`
+          : `AE surfaced this contact because your own records show no recorded contact with them${
+              lastActivity ? ` for ${daysSince(lastActivity)} days` : " at all"
+            }, and AE's threshold for "gone quiet" is ${COLD_CONTACT_THRESHOLD_DAYS} days. There is nothing more specific than that on file — this is a gap in the relationship, not evidence about this person.`,
+      // Nothing to put in the agent's mouth. A gap in a record is not a
+      // conversation starter, and inventing one here would be the exact
+      // over-reach every narrative in signalRanking.ts is written to avoid.
+      talkingPoint: null,
+      caution: `AE knows only that no contact was RECORDED in this period — it does not know that none happened, and it has no information at all about this contact's plans or intentions.`,
+      confidenceBand: null,
+      confidenceBandLabel: null,
+      factors: [],
+      relatedSignals: withheldForParty.map((c) => toRelatedSignal(c, "withheld_by_daily_cap")),
+    };
+
     actions.push({
       id: `relationship:${r.id}`,
       type: "relationship_cold",
@@ -949,7 +1494,7 @@ export async function getGrowTodaySummary(
       // Always "contactable" here: a suppressed contact was withheld above.
       contactability: "contactable",
       contactabilityNote: null,
-      whyItMatters: null,
+      whyItMatters: coldWhyItMatters,
     });
   }
 
@@ -974,18 +1519,77 @@ export async function getGrowTodaySummary(
     return (a.lastActivityAt ?? "").localeCompare(b.lastActivityAt ?? "");
   });
 
+  // =====================================================================
+  // W2-A (F-2) — THE ONE BOUND ON THE WHOLE RESPONSE.
+  // =====================================================================
+  //
+  // AFTER the sort, never before: the cut therefore always removes the
+  // lowest-ranked tail of the day, and never an arbitrary slice. On every
+  // brokerage below the cap this line does nothing at all.
+  //
+  // Note what this does NOT do: it does not re-balance across priority bands.
+  // If a tenant genuinely has 200+ Do Today items, the Keep Warm tail is what
+  // goes, and that is the correct answer — the sort has already said those are
+  // the least important things on the screen. The notice says so out loud.
+  const priorityActions = actions.slice(0, MAX_PRIORITY_ACTIONS);
+  const withheldByActionCap = actions.length - priorityActions.length;
+
   // A party-less signal card has no contact to count, so it is excluded here
   // rather than collapsing every such card into a single phantom "null"
   // contact (which is what a naive Set over a nullable field would do).
+  //
+  // Counted over the RETURNED cards, so the number beside the list always
+  // describes the list the agent can actually see.
   const contactsNeedingAttention = new Set(
-    actions.map((a) => a.partyId).filter((id): id is number => id !== null),
+    priorityActions.map((a) => a.partyId).filter((id): id is number => id !== null),
   ).size;
 
+  // W2-A (I-4) — STATED TRUNCATION, in lib/ai/coaching/metrics.ts's shape: a
+  // bounded read says so in words the surface can render, rather than handing
+  // back a partial list that looks complete. Each line names the rule, the
+  // cap, and what survived the cut, so an agent reading it knows what to go
+  // and look at instead.
+  const limitations: string[] = [];
+  if (opportunityRows.length >= GROW_TODAY_OPPORTUNITY_ROW_CAP) {
+    limitations.push(
+      `This brokerage has ${totalOpenOpportunities} open opportunities; Today reads the ${GROW_TODAY_OPPORTUNITY_ROW_CAP} with the earliest next-action dates. The rest are all on the Opportunities list.`,
+    );
+  }
+  if (relationshipRows.length >= GROW_TODAY_RELATIONSHIP_ROW_CAP) {
+    limitations.push(
+      `This brokerage has at least ${GROW_TODAY_RELATIONSHIP_ROW_CAP} active relationships; Today's cold-contact check covers the first ${GROW_TODAY_RELATIONSHIP_ROW_CAP} by contact. Contacts beyond that are unaffected and still on the Contacts list.`,
+    );
+  }
+  if (appraisalFollowUpRows.length >= GROW_TODAY_APPRAISAL_ROW_CAP) {
+    limitations.push(
+      `At least ${GROW_TODAY_APPRAISAL_ROW_CAP} appraisals are awaiting follow-up; Today shows the ${GROW_TODAY_APPRAISAL_ROW_CAP} most overdue. The Appraisal Workspace has the full list.`,
+    );
+  }
+  if (propertyIntelligenceSignalRows.length >= GROW_TODAY_SIGNAL_ROW_CAP) {
+    limitations.push(
+      `At least ${GROW_TODAY_SIGNAL_ROW_CAP} active signals exist; Today reads the ${GROW_TODAY_SIGNAL_ROW_CAP} with the strongest evidence bands. Every signal stays visible on its contact and property record.`,
+    );
+  }
+
+  // W2-A — BOTH "SURFACED" COUNTS ARE DERIVED FROM THE RETURNED LIST, not
+  // from the loop that built it. `signalsToSurface` is what survived the
+  // Emerging cap, which is not the same thing as what survived the whole
+  // pipeline: the total priority-action cap runs later and can cut signal
+  // cards too. A field documented as "signal cards actually on today's list"
+  // has to be counted off today's list, or the screen states a number the
+  // agent can disprove by counting the cards in front of them.
+  const surfacedSignalCards = priorityActions.filter((a) => a.type === "property_intelligence_signal");
   const signalSummary: GrowTodaySignalSummary = {
-    surfaced: signalsToSurface.length,
-    emergingSurfaced,
+    surfaced: surfacedSignalCards.length,
+    emergingSurfaced: surfacedSignalCards.filter((a) => a.confidenceBand === "Emerging").length,
+    // Counts CARDS held back, not rows: after consolidation a card is a
+    // contact. Rows folded into a card are counted by
+    // consolidatedIntoStrongerSignal instead, and are never lost from either.
     emergingWithheld,
     withheldDoNotContact: withheldDoNotContactSignals,
+    consolidatedIntoStrongerSignal,
+    withheldByActionCap,
+    limitations,
   };
 
   return {
@@ -1000,12 +1604,19 @@ export async function getGrowTodaySummary(
     // A-E's own inputs to this boolean are unchanged.
     hasAnyGrowData: relationshipRows.length > 0 || opportunityRows.length > 0 || propertyIntelligenceSignalRows.length > 0,
     counts: {
-      priorityActions: actions.length,
+      // The count beside the list describes the list. What the cap removed is
+      // reported separately and explicitly as signalSummary.withheldByActionCap
+      // rather than being folded into a headline number the agent cannot
+      // reconcile against what is on their screen.
+      priorityActions: priorityActions.length,
       followUpsDue: followUpsDueCount,
-      openOpportunities: opportunityRows.length,
+      // W2-A — the TRUE total, from the windowed count in the opportunities
+      // query above, not the capped row count. A headline figure must not
+      // quietly become "however many rows we happened to read".
+      openOpportunities: totalOpenOpportunities,
       contactsNeedingAttention,
     },
-    priorityActions: actions,
+    priorityActions,
     signalSummary,
   };
 }

@@ -59,7 +59,7 @@ import {
   listTemplatesForBrokerage,
   CommunicationTemplateError,
 } from "../lib/communications/templates.js";
-import { checkConsent, recordConsent } from "../lib/communications/consent.js";
+import { checkConsent, recordConsent, CommunicationConsentPartyError } from "../lib/communications/consent.js";
 import { getCostSummary } from "../lib/communications/costControl.js";
 import { getOrCreateCommunicationSettings, updateCommunicationSettings } from "../lib/communications/settings.js";
 import {
@@ -682,9 +682,23 @@ communicationsRouter.post("/communications/templates/:templateId/archive", requi
 
 // ---------------------------------------------------------------------
 // Consent (Section 16).
+//
+// AE GROW W1-A (A-2): these two routes were requireAuth-only. routes/
+// index.ts mounts every router with no requireEntitlement, and this router
+// has no router-level .use() guard, so any authenticated user in the
+// brokerage could POST marketingOptIn: true for any destination with
+// source "MANUAL" and no evidence — i.e. manufacture marketing consent for
+// a recipient who never gave it, and then watch the MARKETING gate in
+// lib/communications/consent.ts wave the resulting send through.
+//
+// Consent and DNC are contact-management controls, so they are gated on the
+// canonical Grow contact-management keys (packages/db/src/schema/billing.ts)
+// — grow.contacts.manage to change a consent record, grow.contacts.read to
+// interrogate one — matching the /grow/contacts/:partyId/communications/...
+// routes above, which already carry exactly this pair.
 // ---------------------------------------------------------------------
 
-communicationsRouter.get("/communications/consent", requireAuth, async (req, res) => {
+communicationsRouter.get("/communications/consent", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
   const user = req.authedUser!;
   const channel = req.query.channel;
   const destination = req.query.destination;
@@ -707,12 +721,20 @@ const recordConsentSchema = z.object({
   notes: z.string().optional(),
 });
 
-communicationsRouter.post("/communications/consent", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/consent", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
   const body = recordConsentSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
-  const consent = await recordConsent({ ...body.data, brokerageId: user.brokerageId, source: "MANUAL", recordedByUserId: user.id });
-  res.status(201).json(consent);
+  try {
+    const consent = await recordConsent({ ...body.data, brokerageId: user.brokerageId, source: "MANUAL", recordedByUserId: user.id });
+    res.status(201).json(consent);
+  } catch (err) {
+    // AE GROW W1-A (A-5): a partyId the caller's brokerage does not own is a
+    // bad request body, not a missing resource — 400, and recordConsent has
+    // already guaranteed nothing was written and nothing published.
+    if (err instanceof CommunicationConsentPartyError) return void res.status(400).json({ error: err.message });
+    if (!handleCommunicationsError(err, res)) throw err;
+  }
 });
 
 // ---------------------------------------------------------------------

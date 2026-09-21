@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, boolean, timestamp, jsonb, numeric, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, timestamp, jsonb, numeric, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -62,7 +62,21 @@ export const aiInteractions = pgTable("ai_interactions", {
   status: text("status").notNull(),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. lib/ai/dailyUsage.ts's
+  // countAiRequestsToday runs `where brokerage_id = $1 and status in (...)
+  // and created_at >= <UTC midnight>` on EVERY AI request, as the guard that
+  // decides whether the request is allowed at all. With only the primary key
+  // and request_id unique here, that guard sequential-scanned the whole
+  // tenant-mixed table — making the limiter the slowest part of the request
+  // it protects. brokerage_id leads (equality) and created_at follows (the
+  // range), which is the order this query can actually use.
+  //
+  // `status` is deliberately NOT in the index: it is a small IN-list over a
+  // low-cardinality column, so filtering it on the heap after a tight
+  // (brokerage, day) range scan is cheaper than a wider index.
+  brokerageCreatedAtIdx: index("ai_interactions_brokerage_created_at_idx").on(table.brokerageId, table.createdAt),
+}));
 
 // Provider + token + cost + latency telemetry for one interaction. Split from
 // aiInteractions so a provider error (no usage row) is distinguishable from a
@@ -78,7 +92,27 @@ export const aiUsage = pgTable("ai_usage", {
   estimatedCostUsd: numeric("estimated_cost_usd"),
   latencyMs: integer("latency_ms"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion W2-C. Postgres creates NO index for a foreign key, so
+  // until this existed the only index on this table was the primary key on
+  // `id` — and nothing joins to `id`. lib/ai/dailyUsage.ts reads usage back by
+  // joining ON interaction_id (sumAiTokenUsageToday, and the per-user and
+  // per-role breakdowns behind GET /api/ai/usage), which meant every one of
+  // those reads sequentially scanned the whole tenant-mixed table to find the
+  // few hundred rows belonging to today.
+  //
+  // That is the wrong shape for this table specifically: ai_usage gains a row
+  // per successful AI request forever and has no retention policy, so without
+  // this index the cost of a user-facing endpoint grows with lifetime platform
+  // usage rather than with today's traffic. An administrator's snapshot pays
+  // it three times.
+  //
+  // interaction_id alone, not a composite: it is the entire join predicate,
+  // and the day/tenant/status narrowing all live on ai_interactions, where
+  // 0028's (brokerage_id, created_at) index already serves them. The planner
+  // drives today's interactions into this index rather than reading the heap.
+  interactionIdx: index("ai_usage_interaction_idx").on(table.interactionId),
+}));
 
 // Scaffolding for the action-risk-level framework (Build Instructions §"Action
 // Risk Levels", Level 0-4). Nothing in this build writes an "executed" row: nothing

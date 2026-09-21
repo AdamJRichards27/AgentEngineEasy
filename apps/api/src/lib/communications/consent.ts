@@ -17,12 +17,31 @@
 // Exception & Risk Engine, the Workflow Automation Engine) can react.
 
 import { and, eq } from "drizzle-orm";
-import { db, communicationConsent, type CommunicationConsent } from "@aee/db";
+import { db, communicationConsent, parties, type CommunicationConsent } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "../audit.js";
 import { getOrCreateCommunicationSettings } from "./settings.js";
 import type { CommunicationChannel, CommunicationClassification } from "./types.js";
-import { consentChannelFor } from "./types.js";
+import { consentChannelFor, isDispatchedChannel } from "./types.js";
+
+/**
+ * AE GROW W1-A (A-5): a consent write named a party the caller's brokerage
+ * does not own. Raised BEFORE any row is written or any event published, so
+ * a rejected write leaves no trace of the foreign party id anywhere — not on
+ * the consent row, and not in the (brokerageId, partyId) pair
+ * COMMUNICATION_CONSENT_UPDATED carries onto the event bus.
+ *
+ * A distinct error type (rather than reusing CommunicationTenancyError,
+ * which routes/communications.ts maps to 404 "not found") because this is a
+ * malformed request body, not an unreachable resource: the caller supplied a
+ * partyId that is not theirs to name, which is a 400.
+ */
+export class CommunicationConsentPartyError extends Error {
+  constructor(message = "That contact does not belong to your brokerage.") {
+    super(message);
+    this.name = "CommunicationConsentPartyError";
+  }
+}
 
 export function normalizeDestination(channel: "EMAIL" | "SMS", raw: string): string {
   const trimmed = raw.trim();
@@ -54,7 +73,19 @@ export async function checkConsent(
   classification: CommunicationClassification,
 ): Promise<ConsentCheckResult> {
   const consentChannel = consentChannelFor(channel);
-  if (!consentChannel) return { allowed: true, reason: null, consent: null };
+  if (!consentChannel) {
+    // AE GROW W1-A (A-3 hardening): outbox.ts's dispatchMessage() now leans
+    // on this function as the last gate before a provider call, so "no
+    // consent channel" must never silently become "allowed" for a channel
+    // this app actually dispatches. Today no dispatched channel maps to
+    // null; if one is ever added without a consent mapping, fail loudly here
+    // instead of reopening the bypass A-3 closed. (The permissive return for
+    // the genuinely record-only channels is tracked separately as A-P2-3.)
+    if (isDispatchedChannel(channel)) {
+      throw new Error(`Channel ${channel} is dispatched through a provider but has no consent channel mapping.`);
+    }
+    return { allowed: true, reason: null, consent: null };
+  }
 
   const destination = normalizeDestination(consentChannel, destinationRaw);
   const [consent] = await db
@@ -91,7 +122,28 @@ export interface RecordConsentInput {
   notes?: string | null;
 }
 
+/** The audit/event shape of a consent record's two decision-bearing fields. */
+function describeConsentState(state: { marketingOptIn: boolean; transactionalOptOut: boolean } | null | undefined): string {
+  if (!state) return "none";
+  return `marketingOptIn=${state.marketingOptIn},transactionalOptOut=${state.transactionalOptOut}`;
+}
+
 export async function recordConsent(input: RecordConsentInput): Promise<CommunicationConsent> {
+  // AE GROW W1-A (A-5): partyId arrives straight off the request body at
+  // routes/communications.ts's POST /communications/consent and used to be
+  // written through unchecked, stamping a foreign tenant's party id onto
+  // this brokerage's consent row and then emitting that mismatched
+  // (brokerageId, partyId) pair on the event bus below. Validate it against
+  // the caller's own brokerage first, before the SELECT and well before any
+  // write or publish, so a rejected request changes nothing at all.
+  if (input.partyId != null) {
+    const [party] = await db
+      .select({ id: parties.id })
+      .from(parties)
+      .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)));
+    if (!party) throw new CommunicationConsentPartyError();
+  }
+
   const destination = normalizeDestination(input.channel, input.destination);
   const [existing] = await db
     .select()
@@ -117,12 +169,22 @@ export async function recordConsent(input: RecordConsentInput): Promise<Communic
           .returning()
       )[0];
 
+  // AE GROW W1-A (A-4): consent is still mutated in place (the schema
+  // redesign that would keep a full consent history belongs to the later
+  // model-reconciliation slice), so the audit entry is the only record of
+  // what the value was before this change. It previously carried
+  // updatedValue alone, which made a withdrawal indistinguishable from a
+  // grant after the fact. Recording the prior state alongside the new one
+  // leaves every consent change as a before/after pair. "none" means there
+  // was no consent row at all until this write created one.
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.recordedByUserId ?? undefined,
     action: "communication_consent_updated",
     recordType: "communication_consent",
     recordId: String(row.id),
-    updatedValue: `marketingOptIn=${row.marketingOptIn},transactionalOptOut=${row.transactionalOptOut}`,
+    previousValue: describeConsentState(existing),
+    updatedValue: describeConsentState(row),
   });
 
   await publishDomainEvent({
