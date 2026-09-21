@@ -191,14 +191,28 @@ aiRouter.get("/capabilities", requireAuth, async (req, res) => {
 // surfaces elsewhere in this API; no new entitlement key was invented for it.
 //
 // AE GROW W2-C (C-10) — the same response now also carries TOKENS and ESTIMATED COST, read back
-// from ai_usage (which until now was written on every successful request and read by nothing),
-// for the caller and for their brokerage. A brokerage administrator additionally gets the
-// per-capability (aiRole) split and the median/p90/max distribution across active users — the
-// numbers a pilot needs to decide what a commercial allowance should be. Nothing here changes
-// what is ENFORCED: the ceilings still count requests only (lib/ai/dailyUsage.ts), because
-// denominating them in tokens or dollars is a commercial decision reserved for pilot evidence,
-// and this endpoint exists to produce that evidence rather than pre-empt it. Cost is always
-// accompanied by costEstimateBasis so a provider-side estimate is never read as a bill.
+// from ai_usage (which until now was written on every successful request and read by nothing).
+// Nothing here changes what is ENFORCED: the ceilings still count requests only
+// (lib/ai/dailyUsage.ts), because denominating them in tokens or dollars is a commercial
+// decision reserved for pilot evidence, and this endpoint exists to produce that evidence
+// rather than pre-empt it. Cost is always accompanied by costEstimateBasis so a provider-side
+// estimate is never read as a bill.
+//
+// WHO SEES WHAT (Project Owner ruling — brokerage-wide AI spend is administrator-only):
+//
+//   Every authenticated user        their own request count, their own tokens and their own
+//                                   estimated cost; the brokerage's REQUEST COUNT and ceiling
+//                                   (which predate this and explain a brokerage-wide refusal).
+//
+//   Brokerage Administrator ONLY    tokens.brokerage — brokerage-wide tokens and estimated
+//   (+ everything above)            provider cost — plus users[], byRole[] and distribution.
+//
+// An agent must not learn the brokerage's token total or provider spend, other agents' usage,
+// or any other commercially sensitive brokerage-wide AI consumption figure, THROUGH ANY FIELD
+// of this response. That is enforced in lib/ai/dailyUsage.ts, which never puts the withheld
+// figures into the object it returns — not by the frontend declining to render them — and the
+// gate is the caller's role, resolved below from the session and never from client input.
+// routes/__tests__/aiUsageAdminOnly.test.ts asserts the negative case field by field.
 //
 // Not covered here, and deliberately not papered over: voice transcription (routes/aiVoice.ts)
 // writes no ai_interactions or ai_usage row at all, so STT spend is absent from these totals.
@@ -213,7 +227,11 @@ aiRouter.get("/usage", requireAuth, async (req, res) => {
     const snapshot = await getAiUsageSnapshot({
       brokerageId: authedUser.brokerageId,
       userId: authedUser.id,
-      includeUserBreakdown: isBrokerageAdmin,
+      // Resolved HERE, from the session's role, and never from anything the
+      // client sends: there is no query parameter, header or body field that
+      // can turn this on. dailyUsage.ts does the withholding; this line is
+      // the only place that decides who qualifies.
+      includeBrokerageOversight: isBrokerageAdmin,
     });
     res.json(snapshot);
   } catch (err) {

@@ -268,7 +268,7 @@ test("the administrator breakdown joins ai_usage through the index on BOTH of it
   // pays this join three times, so a fix that only helped the totals query
   // would leave two thirds of it in place.
   const statements = await captureAiUsageStatements(() =>
-    getAiUsageSnapshot({ brokerageId, userId, includeUserBreakdown: true }),
+    getAiUsageSnapshot({ brokerageId, userId, includeBrokerageOversight: true }),
   );
   assert.equal(
     statements.length,

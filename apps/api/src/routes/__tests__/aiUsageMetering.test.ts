@@ -50,7 +50,8 @@ interface UsageBody {
   brokerageId: number;
   brokerage: { used: number; limit: number | null; remaining: number | null };
   user: { userId: number; used: number } | null;
-  tokens: { brokerage: TokenTotals; user: TokenTotals | null };
+  /** `brokerage` is OPTIONAL here because the API withholds it from non-admins — see aiUsageAdminOnly.test.ts. */
+  tokens: { brokerage?: TokenTotals; user: TokenTotals | null };
   costEstimateBasis: string;
   users?: { userId: number; used: number; tokens: TokenTotals }[];
   byRole?: { aiRole: string; requests: number; tokens: TokenTotals }[];
@@ -145,18 +146,26 @@ test("GET /api/ai/usage reports tokens and estimated cost per user and per broke
   await seed({ brokerageId: b.brokerageId, userId: b.admin.user.id, usage: { promptTokens: 50, completionTokens: 10, estimatedCostUsd: 0.0005 } });
   await seed({ brokerageId: b.brokerageId, userId: b.admin.user.id, status: "error" });
 
-  const agentView = await usage(b.agent.cookie);
+  // BROKERAGE-WIDE token and cost totals are administrator-only, so the
+  // numbers themselves are asserted through the admin view. That they are
+  // WITHHELD from the agent is asserted in aiUsageAdminOnly.test.ts, which
+  // covers the whole response rather than this one field.
+  const adminView = await usage(b.admin.cookie);
 
   // Request counts are untouched by this change.
-  assert.equal(agentView.brokerage.used, 5, "both success and error rows still count as requests");
+  assert.equal(adminView.brokerage.used, 5, "both success and error rows still count as requests");
+
+  assert.equal(adminView.tokens.brokerage?.meteredRequests, 4, "the errored request has no usage row and must not be counted as metered");
+  assert.equal(adminView.tokens.brokerage?.promptTokens, 9350);
+  assert.equal(adminView.tokens.brokerage?.completionTokens, 610);
+  assert.equal(adminView.tokens.brokerage?.totalTokens, 9960);
+  assert.ok(Math.abs((adminView.tokens.brokerage?.estimatedCostUsd ?? 0) - 0.0375) < 1e-9, `got ${adminView.tokens.brokerage?.estimatedCostUsd}`);
+
+  // An agent still gets their OWN request count, tokens and cost — the ruling
+  // withholds brokerage-wide spend, not a user's own consumption.
+  const agentView = await usage(b.agent.cookie);
+  assert.equal(agentView.brokerage.used, 5, "the brokerage REQUEST COUNT is not spend data and stays visible");
   assert.equal(agentView.user?.used, 3);
-
-  assert.equal(agentView.tokens.brokerage.meteredRequests, 4, "the errored request has no usage row and must not be counted as metered");
-  assert.equal(agentView.tokens.brokerage.promptTokens, 9350);
-  assert.equal(agentView.tokens.brokerage.completionTokens, 610);
-  assert.equal(agentView.tokens.brokerage.totalTokens, 9960);
-  assert.ok(Math.abs(agentView.tokens.brokerage.estimatedCostUsd - 0.0375) < 1e-9, `got ${agentView.tokens.brokerage.estimatedCostUsd}`);
-
   assert.equal(agentView.tokens.user?.meteredRequests, 3);
   assert.equal(agentView.tokens.user?.totalTokens, 9900);
   assert.ok(Math.abs((agentView.tokens.user?.estimatedCostUsd ?? 0) - 0.037) < 1e-9);
@@ -176,10 +185,18 @@ test("GET /api/ai/usage token totals are tenant-scoped — another brokerage's t
   await seed({ brokerageId: mine.brokerageId, userId: mine.agent.user.id, usage: { promptTokens: 10, completionTokens: 5, estimatedCostUsd: 0.1 } });
   await seed({ brokerageId: theirs.brokerageId, userId: theirs.agent.user.id, usage: { promptTokens: 99999, completionTokens: 99999, estimatedCostUsd: 99 } });
 
-  const view = await usage(mine.agent.cookie);
+  // Read as the ADMIN: brokerage-wide totals are now administrator-only, and
+  // tenant scoping of those totals is exactly what this test exists to pin.
+  const view = await usage(mine.admin.cookie);
   assert.equal(view.brokerageId, mine.brokerageId);
-  assert.equal(view.tokens.brokerage.totalTokens, 15);
-  assert.ok(Math.abs(view.tokens.brokerage.estimatedCostUsd - 0.1) < 1e-9);
+  assert.equal(view.tokens.brokerage?.totalTokens, 15);
+  assert.ok(Math.abs((view.tokens.brokerage?.estimatedCostUsd ?? 0) - 0.1) < 1e-9);
+
+  // ...and the agent's OWN totals are tenant-scoped by the same predicate, so
+  // the other brokerage's 199,998 tokens cannot reach them either.
+  const agentView = await usage(mine.agent.cookie);
+  assert.equal(agentView.brokerageId, mine.brokerageId);
+  assert.equal(agentView.tokens.user?.totalTokens, 15);
 });
 
 test("a brokerage administrator additionally sees per-capability usage and the distribution across active users", async () => {
@@ -225,10 +242,13 @@ test("a brokerage administrator additionally sees per-capability usage and the d
   assert.equal(d.medianTotalTokensPerActiveUser, 2650);
   assert.equal(d.maxTotalTokensPerActiveUser, 5000);
 
-  // A non-administrator still gets their own and their brokerage's totals, and
-  // nothing person-identifying about anyone else.
+  // A non-administrator gets their own totals and NONE of the oversight
+  // block — not the per-user rows, not the per-capability split, not the
+  // distribution, and (Project Owner ruling) not the brokerage-wide token and
+  // cost totals either. Asserted exhaustively in aiUsageAdminOnly.test.ts.
   const agentView = await usage(b.agent.cookie);
-  assert.equal(agentView.tokens.brokerage.totalTokens, 5300);
+  assert.equal(agentView.tokens.user?.totalTokens, 300, "their own tokens, which they may see");
+  assert.equal(agentView.tokens.brokerage, undefined, "brokerage-wide tokens and cost are administrator-only");
   assert.equal(agentView.users, undefined);
   assert.equal(agentView.byRole, undefined);
   assert.equal(agentView.distribution, undefined);
@@ -249,5 +269,5 @@ test("a user whose every request errored still appears with requests but zero to
   // requests - meteredRequests is the "cost unknown" figure an operator needs:
   // it is how many of today's requests reached the provider without leaving a
   // usage row (see audit.ts's swallowed insert failure, reported in the PR).
-  assert.equal(adminView.brokerage.used - adminView.tokens.brokerage.meteredRequests, 2);
+  assert.equal(adminView.brokerage.used - (adminView.tokens.brokerage?.meteredRequests ?? 0), 2);
 });

@@ -17,6 +17,46 @@
 // actionKeys -- it exists so a reviewer adding a new action to the
 // registry has an explicit checklist of "this must never be here" to
 // check the new actionKey's name against.
+//
+// ---------------------------------------------------------------------------
+// WHY THIS IS STILL CRUDE SUBSTRING MATCHING (W2-C remediation, reviewed).
+//
+// The obvious objection is real and is not disputed: matching fragments as
+// substrings of the whole key refuses safe operations too. DRAFT_EMAIL_FOR_-
+// REVIEW contains "EMAIL" and is refused, even though drafting for human
+// review is precisely the alternative this module tells people to build.
+// Replacing the matching with an explicit or canonical operation
+// classification was evaluated as part of that review and DELIBERATELY NOT
+// DONE, because every version of it is weaker than what is here:
+//
+//   Any classification scheme -- an `operationClass` field, a declared
+//   capability, a canonical operation enum -- is a value the ACTION'S OWN
+//   AUTHOR supplies. This module exists precisely because an author-supplied
+//   categorisation cannot be trusted: policyEngine.ts already refuses
+//   RESTRICTED actions by `riskLevel`, and that only helps if riskLevel is
+//   set correctly, which is exactly the mistake this file is the backstop
+//   for. Swapping a name-based tripwire the author cannot influence for a
+//   declaration the author fills in reintroduces the single point of failure
+//   it was built to cover. A miscategorised `operationClass: "INTERNAL"` on
+//   a real send action would pass silently, where "SEND" in the name does
+//   not.
+//
+// The cost of keeping it is a NAMING CONSTRAINT, not a lost capability: the
+// draft-for-review feature is fully buildable as
+// DRAFT_CONTACT_OUTREACH_FOR_REVIEW. Trading a naming constraint for a check
+// that trusts nobody is the right side of that trade, so the matching stays
+// and the ERROR MESSAGE carries the way forward instead (see
+// assertNoProtectedOperationsRegistered below). The false positive is pinned
+// as a tested, documented contract in __tests__/governance.test.ts so the
+// next engineer meets it as a stated rule with a named alternative rather
+// than as a surprise at startup.
+//
+// What this check does NOT do, stated so it is not mistaken for more than it
+// is: it cannot catch an action whose name is innocuous but whose
+// implementation sends (CREATE_CONTACT_OUTREACH that calls a provider). That
+// is the Policy Engine's and code review's job. This is a tripwire on names,
+// and its whole value is that it is dumb and untrusting.
+// ---------------------------------------------------------------------------
 
 export const PROTECTED_OPERATION_CATEGORIES = [
   "AML/compliance determinations (verdicts, overrides, status changes)",

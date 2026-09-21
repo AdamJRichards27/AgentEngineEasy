@@ -228,9 +228,41 @@ function totalsFrom(row: { metered: unknown; promptTokens: unknown; completionTo
   };
 }
 
+/**
+ * The raw result of the token aggregate — BOTH scopes, always. This is an
+ * internal computation type, not a response shape: see AiUsageTokensView for
+ * what actually reaches a caller, which depends on who is asking.
+ */
 export interface AiTokenUsageToday {
   brokerage: AiTokenUsageTotals;
   /** null when no user was asked about. */
+  user: AiTokenUsageTotals | null;
+}
+
+/**
+ * The token/cost portion of AiUsageSnapshot, as RETURNED.
+ *
+ * `brokerage` is optional and absent — not zeroed, not nulled — for a caller
+ * without brokerage-wide oversight. Optional rather than `| null` on purpose:
+ * a nullable field invites `?? 0`, which would silently render a real
+ * brokerage total as "0" in some future UI and teach people the number is
+ * zero rather than withheld. Absent forces a caller to decide what to show.
+ */
+export interface AiUsageTokensView {
+  /**
+   * Brokerage-wide tokens AND estimated provider cost.
+   *
+   * BROKERAGE-WIDE OVERSIGHT ONLY. This is commercially sensitive: it is the
+   * platform's provider spend for this tenant, and an ordinary agent has no
+   * need for it. Populated only when the caller was granted oversight — see
+   * AiUsageSnapshotInput.includeBrokerageOversight.
+   */
+  brokerage?: AiTokenUsageTotals;
+  /**
+   * The CALLER'S OWN tokens and estimated cost. Not oversight data — this is
+   * the asker's own consumption, which every authenticated user may see.
+   * null when no user was asked about.
+   */
   user: AiTokenUsageTotals | null;
 }
 
@@ -369,21 +401,38 @@ export interface AiUsageSnapshot {
   enforced: boolean;
   /** True while the brokerage ceiling is the provisional TIER_CAPABILITIES number. */
   usesProvisionalBrokerageCeiling: boolean;
+  /**
+   * Brokerage-wide REQUEST COUNTS and the ceiling they are measured against.
+   * Visible to every authenticated user in the brokerage, and deliberately
+   * still so: an agent refused by the brokerage ceiling has to be able to see
+   * that the brokerage — not they — is what ran out. Counts are not spend.
+   */
   brokerage: AiUsageScopeView;
   user: (AiUsageScopeView & { userId: number }) | null;
   /**
    * Tokens and estimated cost for exactly the same interactions `brokerage`/`user`
    * count as requests. Additive: the request-counting fields above are unchanged,
    * and NOTHING here is enforced against — see the ai_usage section comment.
+   *
+   * `tokens.brokerage` is OVERSIGHT-ONLY; `tokens.user` is not. See
+   * AiUsageTokensView.
    */
-  tokens: AiTokenUsageToday;
+  tokens: AiUsageTokensView;
   /** Always present next to a cost figure so it is never mistaken for a bill. */
   costEstimateBasis: string;
-  /** Per-user counts inside this brokerage; only populated when the caller asks for it. */
+  // ---------------------------------------------------------------------
+  // BROKERAGE-WIDE OVERSIGHT FIELDS. Every field below describes people
+  // other than the caller, or the tenant as a whole. All three are populated
+  // only when includeBrokerageOversight was granted, by the single branch in
+  // getAiUsageSnapshot that also populates tokens.brokerage — so a new
+  // oversight field cannot end up gated on a different condition from its
+  // siblings.
+  // ---------------------------------------------------------------------
+  /** Per-user counts inside this brokerage (ids and numbers only — no PII). */
   users?: { userId: number; used: number; tokens: AiTokenUsageTotals }[];
-  /** Per-capability split; populated with `users`. */
+  /** Per-capability split, brokerage-wide. */
   byRole?: AiUsageByRole[];
-  /** Median/p90/max across active users; populated with `users`. */
+  /** Median/p90/max across active users, including their TOKEN totals. */
   distribution?: AiUsageDistribution;
 }
 
@@ -428,8 +477,25 @@ export interface AiUsageSnapshotInput {
   /** Include this user's own usage. Always counted within brokerageId — never across tenants. */
   userId?: number;
   tier?: SubscriptionTier;
-  /** Per-user breakdown for the whole brokerage (ids and counts only — no PII). */
-  includeUserBreakdown?: boolean;
+  /**
+   * THE AUTHORISATION GATE for every brokerage-wide oversight field in the
+   * response: tokens.brokerage (brokerage-wide tokens and estimated provider
+   * cost), users[], byRole[] and distribution.
+   *
+   * ONE flag for all of them, deliberately. These were previously two
+   * separate conditions — the per-user breakdown was gated on the caller's
+   * role while brokerage-wide tokens and cost were returned to everyone,
+   * which is exactly how commercially sensitive spend data ended up in front
+   * of the Agent role. A single named gate means a field added to the
+   * oversight block cannot be gated on the weaker of two conditions by
+   * accident.
+   *
+   * Default false: the caller must ASK for oversight data, so a caller that
+   * forgets leaks nothing. This module does not decide who qualifies —
+   * routes/ai.ts resolves it from the authenticated user's role
+   * (BROKERAGE_ADMIN_ROLES) and never from anything client-supplied.
+   */
+  includeBrokerageOversight?: boolean;
   /** Pre-resolved limits, when the caller already has them. */
   limits?: ResolvedAiUsageLimits;
 }
@@ -443,6 +509,14 @@ export interface AiUsageSnapshotInput {
  *
  * Correct regardless of enforcement: the counts come from the durable audit rows, which are
  * written whether or not any limit is configured (see the module comment on metering).
+ *
+ * TWO SEPARATE SCOPES, and the difference is the point of the oversight gate:
+ * what the caller did (always returned) versus what the TENANT did (returned
+ * only under includeBrokerageOversight). Brokerage-wide REQUEST COUNTS sit on
+ * the always-returned side — they predate this gate and an agent needs them to
+ * understand a brokerage-ceiling refusal — but brokerage-wide TOKENS and
+ * ESTIMATED PROVIDER COST do not: that is the platform's spend for this
+ * tenant, and the Project Owner has ruled it administrator-only.
  */
 export async function getAiUsageSnapshot(input: AiUsageSnapshotInput): Promise<AiUsageSnapshot> {
   const tier = input.tier ?? (await resolveBrokerageTier(input.brokerageId));
@@ -455,6 +529,14 @@ export async function getAiUsageSnapshot(input: AiUsageSnapshotInput): Promise<A
     sumAiTokenUsageToday(input.brokerageId, input.userId),
   ]);
 
+  // `tokens` holds BOTH scopes — the aggregate computes them in one pass and
+  // there is no cheaper shape that still answers for the user. What follows
+  // is therefore a deliberate DROP, not a filtered query: tokens.brokerage is
+  // copied into the response only under the oversight gate below, so for
+  // everyone else the brokerage-wide figure is never part of the object that
+  // gets serialised. Building the response by OMISSION rather than deleting
+  // from a fully-populated object is the safer direction — a field nobody
+  // adds cannot be a field somebody forgets to remove.
   const snapshot: AiUsageSnapshot = {
     brokerageId: input.brokerageId,
     tier,
@@ -465,11 +547,15 @@ export async function getAiUsageSnapshot(input: AiUsageSnapshotInput): Promise<A
       input.userId === undefined
         ? null
         : { userId: input.userId, ...scopeView(counts.user ?? 0, limits.perUser.limit) },
-    tokens,
+    tokens: { user: tokens.user },
     costEstimateBasis: AI_COST_ESTIMATE_BASIS,
   };
 
-  if (input.includeUserBreakdown === true) {
+  // THE ONE OVERSIGHT BRANCH. Every brokerage-wide field the response can
+  // carry is populated here and nowhere else, so they cannot drift apart.
+  if (input.includeBrokerageOversight === true) {
+    snapshot.tokens.brokerage = tokens.brokerage;
+
     // LEFT join, not inner: a user whose requests all errored has interactions
     // but no ai_usage rows, and must still appear with used > 0 and zero
     // tokens rather than vanish from the breakdown. countDistinct on the
