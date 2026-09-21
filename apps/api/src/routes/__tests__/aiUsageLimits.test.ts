@@ -162,7 +162,7 @@ interface UsageSnapshotBody {
   usesProvisionalBrokerageCeiling: boolean;
   brokerage: { used: number; limit: number | null; remaining: number | null };
   user: { userId: number; used: number; limit: number | null; remaining: number | null } | null;
-  users?: { userId: number; used: number }[];
+  users?: { userId: number; used: number; tokens: { totalTokens: number; estimatedCostUsd: number } }[];
 }
 
 async function usage(cookie: string): Promise<UsageSnapshotBody> {
@@ -360,10 +360,21 @@ test("GET /api/ai/usage is tenant-scoped, reports both scopes, and only shows a 
   const adminView = await usage(b.admin.cookie);
   assert.equal(adminView.user?.userId, b.admin.user.id);
   assert.equal(adminView.user?.used, 3);
-  assert.deepEqual(adminView.users, [
-    { userId: b.agent.user.id, used: 4 },
-    { userId: b.admin.user.id, used: 3 },
-  ]);
+  // W2-C (C-10) added an additive `tokens` object to each breakdown row, so
+  // this asserts the ids and counts — the thing this test is about — rather
+  // than the whole row shape. These fixtures seed ai_interactions only, with
+  // no ai_usage rows, so the tokens are legitimately zero and are asserted as
+  // such here; the token read-back itself is covered by aiUsageMetering.test.ts.
+  assert.deepEqual(
+    (adminView.users ?? []).map((row) => ({ userId: row.userId, used: row.used })),
+    [
+      { userId: b.agent.user.id, used: 4 },
+      { userId: b.admin.user.id, used: 3 },
+    ],
+  );
+  for (const row of adminView.users ?? []) {
+    assert.equal(row.tokens.totalTokens, 0, "interactions seeded without an ai_usage row contribute no tokens");
+  }
   for (const row of adminView.users ?? []) {
     assert.notEqual(row.userId, other.agent.user.id, "the breakdown never crosses a tenant boundary");
   }

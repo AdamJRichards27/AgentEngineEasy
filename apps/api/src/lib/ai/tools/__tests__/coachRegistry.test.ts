@@ -110,6 +110,7 @@ function makeCoachContext(overrides: Partial<BusinessCoachContext> = {}): Busine
       noRecentActivityContacts: 0,
       noRecentActivityList: [],
       noRecentActivityTruncated: false,
+      activityTruncated: false,
       limitations: [],
     },
     growToday: {
