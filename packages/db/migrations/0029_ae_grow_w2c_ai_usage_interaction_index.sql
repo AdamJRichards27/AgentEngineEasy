@@ -1,0 +1,31 @@
+-- AE GROW Completion W2-C — the index ai_usage never had.
+--
+-- STRICTLY ADDITIVE, and the smallest possible form of it: one CREATE INDEX.
+-- There is no DROP, no RENAME, no type change, no NOT NULL added to an
+-- existing column, and no data rewrite. An existing database applies this
+-- with rows in place, every pre-existing ai_usage row keeps working
+-- unmodified, and nothing that reads or writes the table needs to change.
+--
+-- WHY. Postgres creates no index for a foreign key. ai_usage.interaction_id
+-- has been a plain FK column since the AI Audit Layer landed, so the only
+-- index on this table was the primary key on `id` — and nothing joins to
+-- `id`. lib/ai/dailyUsage.ts reads usage back by joining ON interaction_id,
+-- which meant GET /api/ai/usage sequentially scanned the whole tenant-mixed
+-- table to find the few hundred rows belonging to today: once for an agent,
+-- three times for a brokerage administrator. Measured at 200k interactions /
+-- 100k usage rows, that join read all 100,000 rows to return 250.
+--
+-- 0028's (brokerage_id, created_at) index does not help here — it is on
+-- ai_interactions, the other side of the join.
+--
+-- ai_usage gains one row per successful AI request forever and has no
+-- retention policy, so the missing index made the cost of a user-facing
+-- endpoint grow with lifetime platform usage rather than with today's
+-- traffic. This is the index that makes it grow with today's traffic instead.
+--
+-- Built non-concurrently, consistent with every other index in this migration
+-- set: it takes a SHARE lock that blocks writes to ai_usage for the duration,
+-- which at current table sizes is well under the deploy window. If this is
+-- ever applied to a table large enough for that to matter, replace it with a
+-- CREATE INDEX CONCURRENTLY run outside the transaction.
+CREATE INDEX "ai_usage_interaction_idx" ON "ai_usage" USING btree ("interaction_id");

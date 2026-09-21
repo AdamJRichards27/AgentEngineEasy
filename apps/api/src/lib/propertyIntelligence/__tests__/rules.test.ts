@@ -33,7 +33,7 @@ import {
 } from "@aee/db";
 import { runSignalSweep, resetSweepResumePointForTests, type SweepSummary } from "../sweep.js";
 import { evaluateCandidates, EVALUATION_RULE_NAMES } from "../evaluation.js";
-import { listActiveSignalsForParty } from "../signals.js";
+import { readActiveSignalsForParty } from "../signals.js";
 import { recordObservation, ownershipStartCoverage } from "../observations.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
@@ -867,18 +867,31 @@ test("tenant isolation — the contact-driven rules never read or raise across b
  * drops their candidate so it is never refreshed, still counts it as
  * supported so it is never expired, and it carries no expires_at so the
  * expiry pass never sees it either. Without a read-side check that row is
- * surfaced forever.
+ * surfaced as a prospecting suggestion forever.
+ *
+ * W2-D CHANGED WHAT "THE READ-SIDE CHECK" DOES, and these tests changed with
+ * it. It used to answer by returning an empty array — erasing the
+ * intelligence from an authorised internal user, not merely the outreach.
+ * It now returns the rows AND the restriction, inseparably:
+ *
+ *     ROWS MAY BE READ FOR DISPLAY.
+ *     NO OUTREACH AFFORDANCE MAY BE DERIVED FROM THEM.
+ *
+ * These two tests cover the first half and the definition of "suppressed".
+ * The second half — that no affordance anywhere yields an email, SMS or call
+ * — is proved exhaustively in ./contactabilityOutreachPathway.test.ts.
  * ===================================================================*/
 
-test("contactability on read — a contact DNC-listed AFTER their signal was raised is hidden, and the row is left Active", async () => {
+test("contactability on read — a contact DNC-listed AFTER their signal was raised keeps the signal, and gains an outreach restriction", async () => {
   const partyId = await createParty(A.brokerageId, "ListedAfterRaise", 900);
   await createRelationship({ brokerageId: A.brokerageId, partyId, propertyId: null, relationshipType: "prospective_seller", createdDaysAgo: 900 });
 
   // 1. The signal is raised while the contact is perfectly contactable.
   await sweep([A.brokerageId]);
-  const raised = await listActiveSignalsForParty(partyId, A.brokerageId);
-  assert.ok(raised.length > 0, "the contact is reachable, so their signals are visible");
-  const raisedIds = raised.map((s) => s.id);
+  const raised = await readActiveSignalsForParty(partyId, A.brokerageId);
+  assert.ok(raised.signals.length > 0, "the contact is reachable, so their signals are visible");
+  assert.equal(raised.outreachRestriction, null, "and nothing restricts contacting them");
+  const raisedIds = raised.signals.map((s) => s.id);
 
   // 2. They are listed afterwards — the exact sequence the write-time filter
   //    cannot cover, because the listing happens after the write.
@@ -892,35 +905,58 @@ test("contactability on read — a contact DNC-listed AFTER their signal was rai
     recordedByUserId: A.admin.user.id,
   });
 
-  // 3. The read path now withholds them.
-  assert.deepEqual(await listActiveSignalsForParty(partyId, A.brokerageId), [], "a DNC-listed contact's signals are not surfaced");
+  // 3. THE READ NOW RESTRICTS OUTREACH — and does NOT erase the intelligence.
+  //    SIGNAL EXISTS != CONTACT MAY BE CONTACTED. A DNC listing says the
+  //    second thing; answering the first with it is what W2-D corrected.
+  const restricted = await readActiveSignalsForParty(partyId, A.brokerageId);
+  assert.deepEqual(
+    restricted.signals.map((s) => s.id).sort(),
+    [...raisedIds].sort(),
+    "every signal the contact had is still readable — a contactability restriction does not delete legitimate intelligence",
+  );
+  assert.ok(restricted.outreachRestriction, "and the restriction is returned with them, in the same value");
+  assert.equal(restricted.outreachRestriction?.outreachProhibited, true);
+  assert.equal(restricted.outreachRestriction?.reason, "contactability_suppressed");
+  // The restriction must be unmistakable, not a bare boolean a surface could
+  // render as nothing.
+  assert.match(restricted.outreachRestriction!.notice, /do-not-contact/i);
+  assert.match(restricted.outreachRestriction!.recommendedAction, /^Do not contact\./);
+  // Total by construction — this restriction is never partial.
+  assert.deepEqual([...restricted.outreachRestriction!.blockedChannels].sort(), [...GROW_CONSENT_CHANNELS].sort());
 
-  // 4. HIDDEN, NOT RETIRED. The rows themselves are untouched — the stage 1
-  //    rule is that contactability hides a contact, never silently destroys
-  //    their history.
+  // 4. HIDDEN OUTREACH, NOT RETIRED DATA. The rows themselves are untouched —
+  //    contactability restricts contact, it never silently destroys history.
   for (const id of raisedIds) {
     const [row] = await db.select().from(growOpportunitySignals).where(eq(growOpportunitySignals.id, id));
-    assert.equal(row.status, "Active", "the signal row is left Active; hiding is not expiring");
-    assert.equal(row.dismissedReason, null, "hiding is not dismissing either");
+    assert.equal(row.status, "Active", "the signal row is left Active; restricting is not expiring");
+    assert.equal(row.dismissedReason, null, "restricting is not dismissing either");
   }
 
-  // 5. And a sweep while they are listed must still not retire the rows.
+  // 5. And a sweep while they are listed must still not retire the rows, nor
+  //    start refreshing them — the sweep's own write-time filter is unchanged.
   await sweep([A.brokerageId]);
   for (const id of raisedIds) {
     const [row] = await db.select().from(growOpportunitySignals).where(eq(growOpportunitySignals.id, id));
     assert.equal(row.status, "Active", "a suppressed contact's history survives a sweep intact");
   }
+
+  // 6. THE RESTRICTION LIFTS WITH THE LISTING. Nothing was destroyed while it
+  //    was in force, so there is nothing to restore.
+  await db.delete(growContactDncrStatuses).where(and(eq(growContactDncrStatuses.brokerageId, A.brokerageId), eq(growContactDncrStatuses.partyId, partyId)));
+  const released = await readActiveSignalsForParty(partyId, A.brokerageId);
+  assert.equal(released.outreachRestriction, null, "clearing the listing clears the restriction");
+  assert.deepEqual(released.signals.map((s) => s.id).sort(), [...raisedIds].sort(), "with the same rows, untouched throughout");
 });
 
-test("contactability on read — suppression across EVERY channel hides; a single-channel suppression does not", async () => {
+test("contactability on read — suppression across EVERY channel restricts outreach; a single-channel suppression does not", async () => {
   const fullyParty = await createParty(A.brokerageId, "SuppressedEverywhere", 900);
   await createRelationship({ brokerageId: A.brokerageId, partyId: fullyParty, propertyId: null, relationshipType: "prospective_seller", createdDaysAgo: 900 });
   const partialParty = await createParty(A.brokerageId, "SuppressedOneChannel", 900);
   await createRelationship({ brokerageId: A.brokerageId, partyId: partialParty, propertyId: null, relationshipType: "prospective_seller", createdDaysAgo: 900 });
 
   await sweep([A.brokerageId]);
-  assert.ok((await listActiveSignalsForParty(fullyParty, A.brokerageId)).length > 0);
-  assert.ok((await listActiveSignalsForParty(partialParty, A.brokerageId)).length > 0);
+  assert.ok((await readActiveSignalsForParty(fullyParty, A.brokerageId)).signals.length > 0);
+  assert.ok((await readActiveSignalsForParty(partialParty, A.brokerageId)).signals.length > 0);
 
   await db.insert(growContactChannelSuppressions).values(
     GROW_CONSENT_CHANNELS.map((channel) => ({
@@ -941,11 +977,17 @@ test("contactability on read — suppression across EVERY channel hides; a singl
     recordedByUserId: A.admin.user.id,
   });
 
-  assert.deepEqual(await listActiveSignalsForParty(fullyParty, A.brokerageId), [], "suppressed on every channel — withheld");
-  assert.ok(
-    (await listActiveSignalsForParty(partialParty, A.brokerageId)).length > 0,
-    "a partially suppressed contact is still reachable another way, so hiding their signals would lose information the agent is entitled to",
+  const fully = await readActiveSignalsForParty(fullyParty, A.brokerageId);
+  assert.ok(fully.outreachRestriction, "suppressed on every channel — outreach is restricted");
+  assert.ok(fully.signals.length > 0, "and the intelligence itself is still readable by an entitled internal user");
+
+  const partial = await readActiveSignalsForParty(partialParty, A.brokerageId);
+  assert.equal(
+    partial.outreachRestriction,
+    null,
+    "a partially suppressed contact is still reachable another way, so no blanket restriction applies — the surviving channel's own consent rules govern it",
   );
+  assert.ok(partial.signals.length > 0);
 });
 
 /* =====================================================================

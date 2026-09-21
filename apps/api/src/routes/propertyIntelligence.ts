@@ -111,8 +111,22 @@ propertyIntelligenceRouter.get("/contact/:partyId", requireAuth, requireRead, as
   const partyId = readIdParam(res, req.params.partyId, "contact");
   if (partyId === null) return;
   try {
-    const entries = await getContactPropertyIntelligenceSummary(partyId, user.brokerageId);
-    res.json({ properties: entries });
+    // W2-D: the response gained `contactAnchoredSignals`,
+    // `unusableSignalCount` and `outreachRestriction` alongside the existing
+    // `properties` key, which is unchanged — so an older client keeps reading
+    // exactly what it read before and simply does not render the new sections.
+    //
+    // AN OLDER CLIENT IGNORING `outreachRestriction` IS SAFE, and that is a
+    // property of the payload rather than a hope about clients: this response
+    // contains no email address, no phone number, no destination and no
+    // channel action for ANY contact, restricted or not. There is nothing in
+    // it a client could turn into outreach whether it honours the field or
+    // not. The restriction is for HONEST DISPLAY; the actual enforcement is
+    // that no affordance exists here to enforce against, plus promoteSignal()
+    // refusing below. See __tests__/contactabilityOutreachPathway.test.ts,
+    // which asserts the payload shape field by field.
+    const summary = await getContactPropertyIntelligenceSummary(partyId, user.brokerageId);
+    res.json(summary);
   } catch (err) {
     handlePropertyIntelligenceError(err, res);
   }
