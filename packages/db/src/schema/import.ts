@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -122,7 +122,13 @@ export const importRecords = pgTable("import_records", {
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. This table had NOTHING beyond its
+  // primary key, while every read of it is "the records belonging to this
+  // import job" — so resuming an import batch sequential-scanned every record
+  // every other import had ever written.
+  importJobIdx: index("import_records_import_job_idx").on(table.importJobId),
+}));
 
 export const insertImportJobSchema = createInsertSchema(importJobs).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertImportRecordSchema = createInsertSchema(importRecords).omit({ id: true, createdAt: true, updatedAt: true });

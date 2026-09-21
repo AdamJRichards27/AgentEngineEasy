@@ -168,6 +168,13 @@ export const communicationParticipants = pgTable(
   },
   (table) => ({
     threadIdx: index("communication_participants_thread_idx").on(table.threadId),
+    // AE GROW Completion Wave 1 index batch. The thread index above serves
+    // "who is on this thread". The inverse question — "which threads is this
+    // contact on", which is what every contact-centric communications read
+    // asks — had no index and scanned the table. party_id is nullable
+    // (manual-entry participants resolve to no party), so those rows are
+    // simply not in the index.
+    partyIdx: index("communication_participants_party_idx").on(table.partyId),
   }),
 );
 

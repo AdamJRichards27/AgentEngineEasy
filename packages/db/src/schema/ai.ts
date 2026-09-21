@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, boolean, timestamp, jsonb, numeric, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, timestamp, jsonb, numeric, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -62,7 +62,21 @@ export const aiInteractions = pgTable("ai_interactions", {
   status: text("status").notNull(),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. lib/ai/dailyUsage.ts's
+  // countAiRequestsToday runs `where brokerage_id = $1 and status in (...)
+  // and created_at >= <UTC midnight>` on EVERY AI request, as the guard that
+  // decides whether the request is allowed at all. With only the primary key
+  // and request_id unique here, that guard sequential-scanned the whole
+  // tenant-mixed table — making the limiter the slowest part of the request
+  // it protects. brokerage_id leads (equality) and created_at follows (the
+  // range), which is the order this query can actually use.
+  //
+  // `status` is deliberately NOT in the index: it is a small IN-list over a
+  // low-cardinality column, so filtering it on the heap after a tight
+  // (brokerage, day) range scan is cheaper than a wider index.
+  brokerageCreatedAtIdx: index("ai_interactions_brokerage_created_at_idx").on(table.brokerageId, table.createdAt),
+}));
 
 // Provider + token + cost + latency telemetry for one interaction. Split from
 // aiInteractions so a provider error (no usage row) is distinguishable from a

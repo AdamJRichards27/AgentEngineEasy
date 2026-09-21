@@ -134,6 +134,13 @@ export const appraisals = pgTable("appraisals", {
   // property-leading composite lets Postgres take the max per property from
   // the index rather than reading appraisal rows.
   propertyUpdatedAtIdx: index("appraisals_property_updated_at_idx").on(table.propertyId, table.updatedAt),
+  // AE GROW Completion Wave 1 index batch. Every index above is
+  // property-leading, which is right for the sweep's property-driven rules —
+  // but the contact-centric reads (a party's appraisal history) filter on
+  // party_id alone and had nothing to use. Distinct from the scoping note
+  // above: party_id is nullable here (Stage A appraisals were property-keyed
+  // only), so this index simply skips those rows.
+  partyIdx: index("appraisals_party_idx").on(table.partyId),
 }));
 
 /**

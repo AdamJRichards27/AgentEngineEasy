@@ -288,7 +288,31 @@ export const growSignalSweepRuns = pgTable("grow_signal_sweep_runs", {
   truncated: boolean("truncated").notNull().default(false),
   errors: integer("errors").notNull().default(0),
   errorMessage: text("error_message"),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch (W1-D). This table had ONLY its
+  // primary key, and both of the sweep's own hot-path queries sort or filter
+  // on columns that were therefore unindexed:
+  //
+  //   started_at DESC — read on EVERY lock-refused tick (sweep.ts's
+  //   `where status='RUNNING' order by started_at desc limit 1`, the check
+  //   that decides race-vs-suspected-leak) and by GET /ops/health. A seq scan
+  //   plus a sort, per tick.
+  //
+  //   status='RUNNING' (PARTIAL) — the stale-run recovery update at the top of
+  //   every successful run. Partial because RUNNING is at most one row out of
+  //   a table that is otherwise entirely COMPLETED/FAILED history, so the
+  //   index stays tiny forever and never needs the other statuses.
+  //
+  // NULLS FIRST IS LOAD-BEARING, not decoration. Postgres's default for
+  // `order by started_at desc` is DESC NULLS FIRST, and an index declared
+  // DESC NULLS LAST does NOT satisfy that ordering — the planner falls back
+  // to a full seq scan plus a top-N sort even with `limit 5`, which is
+  // exactly the cost this index exists to remove. Verified with EXPLAIN:
+  // NULLS LAST → Seq Scan + Sort; NULLS FIRST → Index Scan. (started_at is
+  // NOT NULL, so this changes nothing about which rows come back.)
+  startedAtIdx: index("grow_signal_sweep_runs_started_at_idx").on(table.startedAt.desc().nullsFirst()),
+  runningIdx: index("grow_signal_sweep_runs_running_idx").on(table.status).where(sql`${table.status} = 'RUNNING'`),
+}));
 
 /* ---------------------------------------------------------------------
  * Per-brokerage change-detection cursor (cost control).
