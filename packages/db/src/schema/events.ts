@@ -1,4 +1,4 @@
-import { pgTable, uuid, integer, text, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, integer, text, timestamp, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 // Persistence for the 19 canonical domain events — see packages/events for
@@ -52,6 +52,14 @@ export const domainEvents = pgTable(
   },
   (table) => ({
     idempotencyKeyIdx: uniqueIndex("domain_events_idempotency_key_idx").on(table.idempotencyKey),
+    // AE GROW Completion Wave 1 index batch. The Property Timeline
+    // (apps/api/src/lib/timeline.ts's getPropertyTimeline) reads this table
+    // with exactly this three-column predicate on every timeline open, and
+    // neither of its predicates was indexed — the only indexes here were the
+    // primary key and the idempotency key. Column order follows the query's
+    // own selectivity: one property, then its tenant, then the event-type
+    // IN-list.
+    propertyBrokerageEventTypeIdx: index("domain_events_property_brokerage_event_type_idx").on(table.propertyId, table.brokerageId, table.eventType),
   }),
 );
 

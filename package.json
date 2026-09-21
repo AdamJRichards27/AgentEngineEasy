@@ -9,6 +9,7 @@
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck": "pnpm -r run typecheck",
     "db:push": "pnpm --filter @aee/db run db:push",
+    "test:api": "bash scripts/run-api-tests.sh",
     "verify:vendor": "node scripts/verify-vendored-dependencies.mjs"
   },
   "devDependencies": {

@@ -7,6 +7,7 @@ import {
   growOpportunitySignals,
 } from "@aee/db";
 import { logger, incrementCounter, observeHistogram, runWithCorrelationId, currentCorrelationId } from "@aee/events";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 import { evaluateCandidates, type SignalCandidate } from "./evaluation.js";
 import { loadContactabilityFilter } from "./contactability.js";
 import { expireSignalsPastExpiry, expireUnsupportedSignals, upsertSignalCandidates } from "./persistence.js";
@@ -300,15 +301,21 @@ export async function runSignalSweep(trigger: "SCHEDULED" | "MANUAL" = "SCHEDULE
       // a leaked lock, which is indistinguishable from "sweeping is dead"
       // unless it is said out loud.
       //
-      // NOTE ON METRICS. This deserves its own counter
-      // (property_signal_sweep_lock_orphaned_total). METRIC_DEFINITIONS in
-      // packages/events/src/metrics.ts is a closed registry that this change
-      // is not permitted to extend, and reusing `outcome: "failed"` here
-      // would corrupt the completed/failed ratio with refusals that are
-      // usually an ordinary race. So the alert is carried by logger.error,
-      // which is how every other lock problem in this repository is reported
-      // (see exceptions_scan_lock_unlock_failed), until the counter can be
-      // registered.
+      // METRIC (AE GROW Completion W1-D, H-6).
+      // property_signal_sweep_lock_orphaned_total is now registered and is
+      // incremented here ALONGSIDE the log lines below, never instead of
+      // them. It is deliberately separate from property_signal_sweep_total:
+      // `skipped_locked` there must keep counting only EXPECTED refusals, and
+      // reusing `failed` would corrupt the completed/failed ratio with
+      // refusals that are usually an ordinary race.
+      //
+      // ALERT (AE GROW Completion W1-D, H-1 — the P0).
+      // logger.error is never bridged to dispatchOperationalAlert (logger.ts
+      // only writes JSON to stderr), so before this the suspected-leak branch
+      // was entirely silent: sweeping was dead while the metric read
+      // skipped_locked, which looks healthy. The threshold branch now raises
+      // GROW_SIGNAL_SWEEP_UNHEALTHY. The ordinary race (below the threshold)
+      // deliberately raises nothing.
       consecutiveOrphanedLockSkips += 1;
       const detail = {
         trigger,
@@ -316,8 +323,20 @@ export async function runSignalSweep(trigger: "SCHEDULED" | "MANUAL" = "SCHEDULE
         lockNamespace: SWEEP_LOCK_NAMESPACE,
         lockKey: SWEEP_LOCK_KEY,
       };
-      if (consecutiveOrphanedLockSkips >= LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS) {
+      const suspectedLeak = consecutiveOrphanedLockSkips >= LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS;
+      incrementCounter("property_signal_sweep_lock_orphaned_total", { trigger, kind: suspectedLeak ? "suspected_leak" : "race" });
+      if (suspectedLeak) {
         logger.error("property_signal_sweep_lock_suspected_leak", detail);
+        // Fire-and-forget on purpose. Alert delivery is best-effort with its
+        // own in-process retry and dedup cooldown (see operationalAlerts.ts);
+        // it must never turn a refused sweep into a thrown one, and the
+        // caller is already returning a refusal either way.
+        void dispatchOperationalAlert({
+          type: "GROW_SIGNAL_SWEEP_UNHEALTHY",
+          summary: `The Property Intelligence signal sweep has been refused the single-flight lock ${consecutiveOrphanedLockSkips} consecutive times with no run in progress — the advisory lock is suspected leaked and sweeping is not happening.`,
+          dedupKey: "grow-signal-sweep:lock-leak",
+          details: detail,
+        }).catch((err) => logger.error("property_signal_sweep_alert_dispatch_failed", { error: err instanceof Error ? err.message : String(err) }));
       } else {
         logger.warn("property_signal_sweep_lock_held_with_no_running_row", detail);
       }
@@ -459,19 +478,29 @@ async function runSweepWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: Run
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       summary.errors += 1;
-      // No metric: METRIC_DEFINITIONS has no counter for a per-brokerage
-      // failure and this change may not extend that registry. The count is
-      // persisted on the run row (grow_signal_sweep_runs.errors) and the ids
-      // are in the log line below.
+      // AE GROW Completion W1-D (H-6): property_signal_sweep_brokerage_failure_total
+      // is now registered, so "one tenant is broken" is finally distinguishable
+      // from "the sweep is broken" without reading logs. WHICH brokerage failed
+      // stays in the structured log line below and on the run row's `errors`
+      // count — never a label, per the metrics catalogue's own rule.
+      //
+      // Deliberately metric-only, with no operational alert: a single tenant's
+      // pass throwing while the run sweeps every other tenant and completes is
+      // genuinely not page-worthy. Only the sweep as a whole failing is.
+      incrementCounter("property_signal_sweep_brokerage_failure_total", { kind: "evaluation" });
       // Ids only — never candidate, party or property content.
       logger.error("property_signal_sweep_brokerage_failed", { brokerageId, sweepRunId: sweepRun.id, error: message });
-      await touchBrokerageCursor(brokerageId, sweepRun.id, new Date()).catch((cursorErr) =>
+      await touchBrokerageCursor(brokerageId, sweepRun.id, new Date()).catch((cursorErr) => {
+        // Strictly worse than the evaluation failure above: without its
+        // last_evaluated_at stamp this brokerage keeps sorting first in the
+        // durable ordering and can starve every tenant behind it.
+        incrementCounter("property_signal_sweep_brokerage_failure_total", { kind: "cursor_touch" });
         logger.error("property_signal_sweep_cursor_touch_failed", {
           brokerageId,
           sweepRunId: sweepRun.id,
           error: cursorErr instanceof Error ? cursorErr.message : String(cursorErr),
-        }),
-      );
+        });
+      });
     }
     summary.brokeragesConsidered += 1;
     summary.lastBrokerageId = brokerageId;
@@ -749,6 +778,11 @@ async function sweepBrokerageInner(brokerageId: number, sweepRunId: string, summ
   //    per-property version as the mechanism the system relies on.
   const expired = await expireSignalsPastExpiry(brokerageId, now);
   summary.signalsExpired += expired;
+  // Both expiry passes below feed ONE counter increment at the end of this
+  // function, so property_signal_outcome_total{outcome="expired"} matches what
+  // this pass actually retired. Before W1-D that label was declared and never
+  // incremented — the number was computed here and discarded.
+  let expiredThisPass = expired;
 
   // 2. Set-based evaluation of every rule.
   //
@@ -797,7 +831,9 @@ async function sweepBrokerageInner(brokerageId: number, sweepRunId: string, summ
   //    retire their history.
   if (!truncated) {
     const supported = candidates.map((c) => c.dedupeKey);
-    summary.signalsExpired += await expireUnsupportedSignals(brokerageId, supported, now);
+    const unsupported = await expireUnsupportedSignals(brokerageId, supported, now);
+    summary.signalsExpired += unsupported;
+    expiredThisPass += unsupported;
   }
 
   summary.brokeragesEvaluated += 1;
@@ -805,6 +841,7 @@ async function sweepBrokerageInner(brokerageId: number, sweepRunId: string, summ
   incrementCounter("property_signal_outcome_total", { outcome: "created" }, upsert.created);
   incrementCounter("property_signal_outcome_total", { outcome: "updated" }, upsert.updated);
   incrementCounter("property_signal_outcome_total", { outcome: "re_raised" }, upsert.reRaised);
+  incrementCounter("property_signal_outcome_total", { outcome: "expired" }, expiredThisPass);
   incrementCounter("property_signal_outcome_total", { outcome: "suppressed" }, suppressedCount);
 
   logger.debug("property_signal_sweep_brokerage_evaluated", {
@@ -872,4 +909,87 @@ export async function countActiveSignals(brokerageId: number): Promise<number> {
     .from(growOpportunitySignals)
     .where(and(eq(growOpportunitySignals.brokerageId, brokerageId), eq(growOpportunitySignals.status, "Active")));
   return Number(row?.count ?? 0);
+}
+
+/* ---------------------------------------------------------------------
+ * OPS HEALTH (AE GROW Completion W1-D, H-2/H-3).
+ *
+ * Everything below already existed as durable rows and was unreachable over
+ * HTTP by any means: last-run time, success/failure, `truncated`, `errors`,
+ * per-brokerage staleness, and whether the scheduler is running at all.
+ * GROW_SIGNAL_SWEEP_ENABLED=false logged once at boot and thereafter looked
+ * exactly like a healthy-but-idle system.
+ *
+ * This is the whole answer in one call, so the route stays a thin handler and
+ * the SQL stays in the module that owns these tables. It is engine-wide, NOT
+ * tenant-scoped, which is precisely why the route above it is gated on
+ * requireRole(BROKERAGE_ADMIN_ROLES) rather than an entitlement — see the
+ * route. Run rows contain counters and ids only; no tenant data ever appears
+ * in this payload.
+ * -----------------------------------------------------------------*/
+
+export interface SweepOpsHealth {
+  scheduler: { enabled: boolean; intervalMs: number; maxBrokerages: number; maxCandidatesPerBrokerage: number };
+  recentRuns: Awaited<ReturnType<typeof listRecentSweepRuns>>;
+  /** When a run last reached COMPLETED. null means no sweep has EVER completed — not "recently". */
+  lastCompletedAt: Date | null;
+  staleBy: {
+    /** Milliseconds since lastCompletedAt, or null when nothing has ever completed. */
+    ageMs: number | null;
+    /** 3 × the scheduler interval: two ticks may be missed before this is called stale. */
+    thresholdMs: number;
+    stale: boolean;
+  };
+  /** How many brokerages the NEXT run would consider, bounded by maxBrokerages — the same ordering the sweep itself uses. */
+  brokeragesDue: number;
+  /** The id of a run currently marked RUNNING, or null. A non-null value here with a very old startedAt is the shape of a crashed sweep. */
+  runningRunId: string | null;
+}
+
+export async function getSweepOpsHealth(now: Date = new Date()): Promise<SweepOpsHealth> {
+  const config = sweepConfig();
+  const [recentRuns, lastCompleted, running, due] = await Promise.all([
+    listRecentSweepRuns(5),
+    db
+      .select({ completedAt: growSignalSweepRuns.completedAt })
+      .from(growSignalSweepRuns)
+      .where(eq(growSignalSweepRuns.status, "COMPLETED"))
+      .orderBy(desc(growSignalSweepRuns.completedAt))
+      .limit(1),
+    db
+      .select({ id: growSignalSweepRuns.id })
+      .from(growSignalSweepRuns)
+      .where(eq(growSignalSweepRuns.status, "RUNNING"))
+      .orderBy(desc(growSignalSweepRuns.startedAt))
+      .limit(1),
+    listBrokeragesDueForSweep(config.maxBrokerages),
+  ]);
+
+  // Deliberately NOT derived from `recentRuns`: the five most recent runs can
+  // all be RUNNING or FAILED, and reporting "never completed" in that case
+  // would be a lie of exactly the kind this endpoint exists to prevent.
+  const lastCompletedAt = lastCompleted[0]?.completedAt ?? null;
+  const thresholdMs = config.intervalMs * 3;
+  const ageMs = lastCompletedAt === null ? null : now.getTime() - lastCompletedAt.getTime();
+  return {
+    scheduler: {
+      enabled: config.enabled,
+      intervalMs: config.intervalMs,
+      maxBrokerages: config.maxBrokerages,
+      maxCandidatesPerBrokerage: config.maxCandidatesPerBrokerage,
+    },
+    recentRuns,
+    lastCompletedAt,
+    staleBy: {
+      ageMs,
+      thresholdMs,
+      // A system that has never completed a sweep IS stale — nothing has ever
+      // been swept. Paired with scheduler.enabled an operator can tell
+      // "deliberately switched off" from "switched on and broken", which is
+      // the distinction that did not exist before this endpoint.
+      stale: ageMs === null || ageMs > thresholdMs,
+    },
+    brokeragesDue: due.length,
+    runningRunId: running[0]?.id ?? null,
+  };
 }

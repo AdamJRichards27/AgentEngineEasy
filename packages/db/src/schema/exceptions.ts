@@ -271,7 +271,21 @@ export const riskExceptionScanRuns = pgTable("risk_exception_scan_runs", {
   exceptionsUpdated: integer("exceptions_updated").notNull().default(0),
   exceptionsAutoResolved: integer("exceptions_auto_resolved").notNull().default(0),
   errorMessage: text("error_message"),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch (W1-D). Identical gap, identical
+  // queries, identical fix as grow_signal_sweep_runs — this table also had
+  // only its primary key, while lib/exceptions/engine.ts runs the same
+  // `order by started_at desc limit 1` on a refused lock and the same
+  // update-by-status stale-run recovery on every successful scan, and
+  // GET /exceptions/ops/health reads the same ordering. See
+  // schema/propertyIntelligence.ts's growSignalSweepRuns for the full
+  // reasoning, including why the status index is partial.
+  // NULLS FIRST matches Postgres's default ordering for `order by started_at
+  // desc` — see growSignalSweepRuns for why DESC NULLS LAST silently fails to
+  // serve it.
+  startedAtIdx: index("risk_exception_scan_runs_started_at_idx").on(table.startedAt.desc().nullsFirst()),
+  runningIdx: index("risk_exception_scan_runs_running_idx").on(table.status).where(sql`${table.status} = 'RUNNING'`),
+}));
 
 export const insertRiskExceptionSchema = createInsertSchema(riskExceptions).omit({
   id: true,

@@ -68,14 +68,44 @@ export interface GrowTodayRankingFactor {
   points: number;
 }
 
-/** Mirrors GrowTodayWhyItMatters. Present only on a Property Intelligence signal card. */
+/**
+ * AE GROW COMPLETION PROGRAM W2-A — mirrors GrowTodayRelatedSignal. A signal
+ * AE holds for this contact that did NOT become the card, carried on the card
+ * that did so the evidence is visible rather than silently dropped.
+ *
+ * OPTIONAL ON THIS SIDE, DELIBERATELY. The API always sends it, but this
+ * mirror is hand-maintained and this file already commits to not crashing on
+ * an older API response (see signalWithholdingNotice's own test).
+ */
+export interface GrowTodayRelatedSignal {
+  signalId: number;
+  signalType: string;
+  title: string;
+  explanation: string;
+  confidenceBand: string;
+  confidenceBandLabel: string;
+  rankScore: number;
+  relationship: "consolidated_into_this_card" | "withheld_by_daily_cap";
+}
+
+/**
+ * Mirrors GrowTodayWhyItMatters.
+ *
+ * W2-A — NO LONGER SIGNAL-ONLY, and the two band fields are NULLABLE because
+ * of it. A Rule D cold-contact card now carries an explanation too (it has to:
+ * when a cap withholds a contact's signal, this card is what the agent is left
+ * with), and a cold-contact card is a date comparison rather than a scored
+ * inference, so it has no confidence band. rankSummaryLine() below keys off
+ * exactly that null to keep a bare "priority N/100" off such a card.
+ */
 export interface GrowTodayWhyItMatters {
   headline: string;
   talkingPoint: string | null;
   caution: string;
-  confidenceBand: string;
-  confidenceBandLabel: string;
+  confidenceBand: string | null;
+  confidenceBandLabel: string | null;
   factors: GrowTodayRankingFactor[];
+  relatedSignals?: GrowTodayRelatedSignal[];
 }
 
 export interface GrowTodayAction {
@@ -113,6 +143,19 @@ export interface GrowTodaySignalSummary {
   emergingSurfaced: number;
   emergingWithheld: number;
   withheldDoNotContact: number;
+  /**
+   * W2-A — the three fields below are OPTIONAL on this side on purpose. The
+   * API always sends them, but this mirror has drifted behind the API twice
+   * before (see this file's header), and the failure mode for a display
+   * helper reading a field an older server did not send must be "say nothing
+   * about it", never "throw while rendering the day".
+   */
+  /** Signals folded into a stronger sibling's card for the same contact. */
+  consolidatedIntoStrongerSignal?: number;
+  /** Cards of any rule dropped by the server's total priority-action cap. */
+  withheldByActionCap?: number;
+  /** Plain-language statements of what the server's reads were bounded by. */
+  limitations?: string[];
 }
 
 export interface GrowTodaySummary {
@@ -216,18 +259,47 @@ export function contactabilityNotice(action: GrowTodayAction): string | null {
  */
 export function rankExplanationLines(action: GrowTodayAction): string[] {
   if (action.whyItMatters === null) return [];
-  return action.whyItMatters.factors
+  const lines = action.whyItMatters.factors
     .filter((f) => f.points !== 0)
     .map((f) => `${f.points > 0 ? "+" : "−"}${Math.abs(f.points)} · ${f.label} — ${f.detail}`);
+
+  // W2-A — THE EVIDENCE AE DID NOT MAKE THE CARD OUT OF, on the card it did
+  // make. Rendered HERE, in the existing explanation block, rather than behind
+  // a new component nobody has wired up yet: a consolidated or withheld signal
+  // that exists in the API response but appears nowhere on the screen is
+  // indistinguishable, to the agent, from one that was thrown away.
+  //
+  // No points on these lines. A related signal contributed nothing to THIS
+  // card's score — it is a separate piece of evidence about the same person,
+  // and showing it with a "+N" would imply it had been added in.
+  for (const related of action.whyItMatters.relatedSignals ?? []) {
+    const why =
+      related.relationship === "consolidated_into_this_card"
+        ? "also on file for this contact; AE showed the stronger of the two"
+        : "also on file for this contact; held back by today's limit";
+    lines.push(`${related.title} (${related.confidenceBandLabel}) — ${why}. ${related.explanation}`);
+  }
+  return lines;
 }
 
 /**
  * The one-line "how strongly does AE hold this" summary shown next to the
  * band. Never a percentage and never a probability: the score orders a list,
  * it does not predict a sale.
+ *
+ * W2-A — RETURNS NULL FOR A CARD WITH NO CONFIDENCE BAND, which is the guard
+ * that stops a Rule D cold-contact card from displaying a priority score.
+ * Rule D cards started carrying a whyItMatters so they could explain
+ * themselves when a cap withholds a contact's signal; this function used to
+ * render "priority N/100" for ANY non-null whyItMatters, so without this check
+ * a plain "no contact recorded for 240 days" threshold rule would have begun
+ * presenting itself to agents as a scored inference. It is not one, and a
+ * rank that orders a list is not a number an agent should be reading off a
+ * card that has no evidence behind it.
  */
 export function rankSummaryLine(action: GrowTodayAction): string | null {
   if (action.whyItMatters === null) return null;
+  if (action.whyItMatters.confidenceBandLabel === null || action.whyItMatters.confidenceBand === null) return null;
   return `${action.whyItMatters.confidenceBandLabel} · priority ${action.rankScore}/100 (ranking only — not a prediction that this contact is selling)`;
 }
 
@@ -249,8 +321,36 @@ export function signalWithholdingNotice(summary: GrowTodaySignalSummary | undefi
       `${summary.withheldDoNotContact} ${summary.withheldDoNotContact === 1 ? "signal is" : "signals are"} withheld because the contact must not be contacted`,
     );
   }
-  if (parts.length === 0) return null;
-  return `${parts.join("; ")}. ${parts.length === 1 ? "It is" : "They are"} still visible on the contact and property records.`;
+  // W2-A — consolidation is reported alongside the withholding reasons
+  // because from the agent's side it has the same shape: something AE knows
+  // is not on the screen as its own card. It is phrased differently because it
+  // is a different thing — the evidence IS on the screen, folded into the card
+  // for that same contact, and the "why it matters" block lists it.
+  const consolidated = summary.consolidatedIntoStrongerSignal ?? 0;
+  if (consolidated > 0) {
+    parts.push(
+      `${consolidated} ${consolidated === 1 ? "signal was" : "signals were"} merged into a stronger signal for the same contact, so nobody appears twice`,
+    );
+  }
+  const cappedActions = summary.withheldByActionCap ?? 0;
+  if (cappedActions > 0) {
+    parts.push(
+      `${cappedActions} lower-priority ${cappedActions === 1 ? "item is" : "items are"} not shown because today's list is capped`,
+    );
+  }
+  const limitations = summary.limitations ?? [];
+  if (parts.length === 0 && limitations.length === 0) return null;
+
+  const sentences: string[] = [];
+  if (parts.length > 0) {
+    sentences.push(`${parts.join("; ")}. ${parts.length === 1 ? "It is" : "They are"} still visible on the contact and property records.`);
+  }
+  // Stated verbatim, never summarised into a count: the server wrote each of
+  // these to name a specific bound and where the full list lives, and
+  // compressing that back into "some things are hidden" would throw away the
+  // only part an agent can act on.
+  sentences.push(...limitations);
+  return sentences.join(" ");
 }
 
 /**

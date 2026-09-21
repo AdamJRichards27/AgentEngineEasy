@@ -1,4 +1,5 @@
 import { logger } from "@aee/events";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 import { runSignalSweep, sweepConfig } from "./sweep.js";
 
 /**
@@ -46,7 +47,24 @@ export function registerSignalSweep(options: RegisterSignalSweepOptions = {}): v
   }
 
   intervalHandle = setInterval(() => {
-    runSignalSweep("SCHEDULED").catch((err) => logger.error("property_signal_sweep_scheduled_run_failed", { error: err instanceof Error ? err.message : String(err) }));
+    runSignalSweep("SCHEDULED").catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("property_signal_sweep_scheduled_run_failed", { error: message });
+      // AE GROW Completion W1-D (H-1). This catch is the ONLY thing standing
+      // between a permanently throwing scheduled sweep and total silence:
+      // logger.error is not bridged to dispatchOperationalAlert (logger.ts
+      // only writes JSON to stderr), and nothing else observes this timer. The
+      // dedup cooldown in operationalAlerts.ts is what keeps a tick that fails
+      // every interval to one alert per cooldown rather than one per tick.
+      void dispatchOperationalAlert({
+        type: "GROW_SIGNAL_SWEEP_UNHEALTHY",
+        summary: `The scheduled Property Intelligence signal sweep threw and did not run: ${message}`,
+        dedupKey: "grow-signal-sweep:scheduled-run-failed",
+        details: { intervalMs: config.intervalMs, error: message },
+      }).catch((alertErr) =>
+        logger.error("property_signal_sweep_alert_dispatch_failed", { error: alertErr instanceof Error ? alertErr.message : String(alertErr) }),
+      );
+    });
   }, config.intervalMs);
   intervalHandle.unref?.();
 

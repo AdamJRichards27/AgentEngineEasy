@@ -138,7 +138,12 @@ export const propertyParties = pgTable("property_parties", {
   role: text("role").notNull(),
   isPrimary: boolean("is_primary").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (table) => ({
+  // AE GROW Completion Wave 1 index batch. This join table existed only to be
+  // read as "who is linked to this property", and had no index beyond its
+  // primary key — so every property detail view sequential-scanned it.
+  propertyIdx: index("property_parties_property_idx").on(table.propertyId),
+}));
 
 export const insertPropertySchema = createInsertSchema(properties).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertPartySchema = createInsertSchema(parties).omit({ id: true, createdAt: true, updatedAt: true });

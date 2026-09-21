@@ -751,7 +751,20 @@ test("stage 3 — signalSummary is always present and all-zero when the caller h
     });
 
     const { body } = await fetchToday(fresh.agent.cookie);
-    assert.deepEqual(body.signalSummary, { surfaced: 0, emergingSurfaced: 0, emergingWithheld: 0, withheldDoNotContact: 0 });
+    // W2-A extends this summary with consolidatedIntoStrongerSignal,
+    // withheldByActionCap and limitations. The assertion is still EXHAUSTIVE
+    // on purpose — that is what makes it catch a field quietly appearing with
+    // a non-zero value for an unentitled caller — so the new fields are listed
+    // here with the same all-zero expectation the original four carry.
+    assert.deepEqual(body.signalSummary, {
+      surfaced: 0,
+      emergingSurfaced: 0,
+      emergingWithheld: 0,
+      withheldDoNotContact: 0,
+      consolidatedIntoStrongerSignal: 0,
+      withheldByActionCap: 0,
+      limitations: [],
+    });
     assert.ok(!body.priorityActions.some((a: any) => a.type === "property_intelligence_signal"));
   } finally {
     await cleanupBrokerages([fresh.brokerageId]);

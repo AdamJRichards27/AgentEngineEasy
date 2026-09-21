@@ -93,15 +93,17 @@ cross-check against the instruction's named list.
 | 12 | Background queue health | current backlog depth and oldest-item age per queue, distinct from the per-attempt dispatch counters in #4/#6 | **new:** `queue_backlog_size{queue}` / `queue_oldest_item_age_ms{queue}` — `lib/observability/queueGauges.ts`, covering `integration_outbox`, `financial_payment_outbox`, `communications_outbox`, sampled fresh (never accumulated) immediately before every `GET /api/internal/metrics` render |
 | 13 | AI action governance | allow/deny split of every AI action policy decision | **new:** `ai_action_decision_total{outcome}` — `lib/ai/policyEngine.ts`'s `evaluateAIAction` wrapper around the pre-existing `evaluateAIActionCore` |
 | 14 | Workflow/automation execution health | automation-rule (and, by label, other workflow-family) execution failures | **new:** `workflow_execution_failure_total{workflow}` — wired at `lib/automation/engine.ts`'s rule-evaluation catch site; `ready_to_list`/`launch_plan`/`other` labels are declared but not yet wired at a throw site (see §4) |
+| 15 | Signal-sweep liveness and lock health | sweeps completing on schedule; refusals that are a leaked lock rather than an ordinary race; per-tenant failures isolated from whole-sweep failures | `property_signal_sweep_total{trigger,outcome}` / `property_signal_sweep_duration_ms{trigger}` — `lib/propertyIntelligence/sweep.ts`; **new in W1-D:** `property_signal_sweep_lock_orphaned_total{trigger,kind}` and `property_signal_sweep_brokerage_failure_total{kind}`. The same judgement is available on demand, without a scrape target, at `GET /api/grow/property-intelligence/ops/health` (Brokerage Administrator only). See §2a |
 
-## 2. Alert-ready conditions (26)
+## 2. Alert-ready conditions (31)
 
 Every condition below names the real metric or log signal it evaluates. **None of these
 page anyone today** — there is no alerting/paging pipeline in this repository — but each is
 phrased as a concrete threshold a real system (Prometheus Alertmanager, Datadog Monitors, or
 equivalent) could implement directly against `GET /api/internal/metrics` without
 re-deriving what to watch. Conditions 1–21 carry over from the prior revision (renumbered
-where a metric referenced there is now more precisely named); 22–26 are new this pass.
+where a metric referenced there is now more precisely named); 22–27 were new in that pass;
+28–31 are new in AE GROW Completion Wave 1 (slice W1-D) and are grouped in §2a below.
 
 1. `health_check_duration_ms{status="unavailable"}` recorded (i.e. `GET /api/health/ready`
    returns 503) for ≥ 2 consecutive scrape intervals → database connectivity incident
@@ -205,6 +207,73 @@ where a metric referenced there is now more precisely named); 22–26 are new th
     financial-integrity incident, same family as the pre-existing payment failure-rate
     alert #20 in the original numbering this document inherited before this pass renumbered
     condition #6/#9/#10).
+
+### 2a. Brokerage-wide Signal Sweep (conditions 28–31)
+
+Added by the AE GROW Completion Program, Wave 1 slice W1-D. The sweep
+(`lib/propertyIntelligence/sweep.ts`) is the first background job in this codebase whose
+**silent** failure mode is worse than its loud one: when its single-flight advisory lock
+leaks, `property_signal_sweep_total{outcome="skipped_locked"}` keeps incrementing, which is
+the same series a perfectly healthy overlapping tick produces. Sweeping is dead and every
+existing metric reads normal. Conditions 28 and 29 exist to close exactly that gap.
+
+Unlike every condition above, **28 and 29 do page today, via a real code path**:
+`GROW_SIGNAL_SWEEP_UNHEALTHY` (`lib/operationalAlerts.ts`; severity `high`, owner
+`operations`, runbook `grow-signal-sweep`) is dispatched to the configured
+`OPERATIONAL_ALERTS_WEBHOOK_URL` from two call sites. That does not make the rest of this
+document live — it makes these two conditions the exception, because `logger.error` is
+**not** bridged to `dispatchOperationalAlert()` (`logger.ts` only writes JSON to stderr), so
+a log-only treatment of a leaked lock would have been no alert at all.
+
+28. `property_signal_sweep_lock_orphaned_total{kind="suspected_leak"}` incremented at all →
+    something holds the sweep advisory lock `(0x41455351, 1)` and is not sweeping.
+    **Already dispatches `GROW_SIGNAL_SWEEP_UNHEALTHY`** (dedup key
+    `grow-signal-sweep:lock-leak`) from `sweep.ts`'s orphaned-lock branch, once per
+    `OPERATIONAL_ALERTS_COOLDOWN_SECONDS`. Note the deliberate split: `kind="race"` on the
+    same counter is the ORDINARY case — the lock holder inserts its run row a moment after
+    taking the lock — and must never alert. Only the repeat, at
+    `LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS` consecutive refusals, is real.
+    (Runbook: `grow-signal-sweep` — confirm via `GET /api/grow/property-intelligence/ops/health`
+    that `runningRunId` is null while `staleBy.stale` is true, then restart the API instance:
+    Postgres releases a session advisory lock the instant its connection closes.)
+29. The scheduled sweep threw → **already dispatches `GROW_SIGNAL_SWEEP_UNHEALTHY`** (dedup
+    key `grow-signal-sweep:scheduled-run-failed`) from `sweepBootstrap.ts`'s interval catch.
+    Distinct from 28: the job ran and failed, rather than never starting. A sweep failing
+    every tick produces one alert per cooldown, not one per tick.
+30. `property_signal_sweep_brokerage_failure_total{kind}` rising while
+    `property_signal_sweep_total{outcome="completed"}` keeps incrementing normally → ONE
+    tenant is broken, not the sweep. Deliberately **metric-only and not page-worthy**: the
+    run continues, sweeps every other brokerage, and is recorded COMPLETED with `errors > 0`.
+    Which brokerage failed is in the `property_signal_sweep_brokerage_failed` structured log
+    line, never a label. `kind="cursor_touch"` is the more serious of the two — that
+    brokerage's `last_evaluated_at` was not stamped, so it keeps sorting first in the durable
+    ordering and can starve the tenants behind it; a sustained non-zero rate there warrants
+    investigation even though a single occurrence does not.
+31. No `property_signal_sweep_total{outcome="completed"}` increment for longer than
+    3 × `GROW_SIGNAL_SWEEP_INTERVAL_MS` → sweeping has stopped without either alerting
+    branch firing (e.g. the process is alive but the timer was never registered). This one is
+    **not** wired to a dispatch and is the honest gap in this set: it is a
+    *rate-of-absence* condition, which needs an external rule engine (§3) rather than an
+    in-process call site. Until one exists, the same judgement is available on demand from
+    `GET /api/grow/property-intelligence/ops/health` (`staleBy.stale` with
+    `staleBy.thresholdMs` being that same 3 × interval). Check `scheduler.enabled` before
+    escalating: `GROW_SIGNAL_SWEEP_ENABLED=false` is a deliberate off switch and reports
+    `stale: true` correctly, since nothing is sweeping.
+
+**Cardinality note.** All three sweep counters
+(`property_signal_sweep_total`, `property_signal_sweep_lock_orphaned_total`,
+`property_signal_sweep_brokerage_failure_total`) carry only closed label sets and **no
+tenant identifier of any kind** — 2 triggers × 2 kinds = 4 series for the orphaned-lock
+counter, and 2 series for the per-brokerage failure counter. A brokerage with a million
+contacts adds exactly zero series. Per-brokerage detail lives on the
+`grow_signal_sweep_runs` row and in the structured log, per the metrics catalogue's own rule
+at `packages/events/src/metrics.ts:150-154`.
+
+**Not added, deliberately.** A stale-sweep check in `GET /api/health/ready` is a pending
+Project Owner decision and is out of scope here. The recommendation on the table is
+`degraded`, never `unavailable`: failing readiness would pull the single always-on pilot
+instance out of rotation over a background job that raises reviewable indicators and
+contacts nobody.
 
 ## 3. What it would take to make alerting real
 

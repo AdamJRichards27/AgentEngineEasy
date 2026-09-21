@@ -229,10 +229,42 @@ export async function getRelationshipTimeline(
     participantThreadLinks,
   ] = await Promise.all([
     db.select().from(parties).where(eq(parties.id, partyId)).limit(1).then((rows) => rows[0] ?? null),
-    db.select().from(growRelationships).where(eq(growRelationships.partyId, partyId)),
-    db.select().from(growActivities).where(eq(growActivities.partyId, partyId)),
-    db.select().from(growOpportunities).where(eq(growOpportunities.partyId, partyId)),
-    db.select().from(growCommitments).where(eq(growCommitments.partyId, partyId)),
+    // brokerageId is part of the SQL predicate, not only of the party guard below. Every index
+    // on these tables LEADS with brokerage_id (grow_relationships_brokerage_party_idx,
+    // grow_activities_brokerage_party_occurred_idx, grow_opportunities_brokerage_party_property_idx,
+    // grow_commitments_brokerage_party_idx), so a bare `party_id =` predicate cannot seek: it
+    // leaves the leading column unconstrained, and Postgres has to examine every row in the
+    // table (a seq scan) or every entry in one of those indexes (a full index scan with party_id
+    // as a non-leading Index Cond) — on every Contact 360 open. Either way the work grew with
+    // the INSTANCE's row count rather than the tenant's. Naming the leading column makes it a
+    // bounded seek into one tenant's slice: measured on this schema at 250,000 grow_activities
+    // rows across 40 brokerages, planner cost 3568.85 -> 11.86 and 379 -> 80 shared buffers for
+    // an identical result set.
+    //
+    // This is not a tenant-isolation change: the party's own brokerage is still checked below
+    // and is still what decides whether any event is produced at all.
+    db
+      .select()
+      .from(growRelationships)
+      .where(and(eq(growRelationships.partyId, partyId), eq(growRelationships.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growActivities)
+      .where(and(eq(growActivities.partyId, partyId), eq(growActivities.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growOpportunities)
+      .where(and(eq(growOpportunities.partyId, partyId), eq(growOpportunities.brokerageId, brokerageId))),
+    db
+      .select()
+      .from(growCommitments)
+      .where(and(eq(growCommitments.partyId, partyId), eq(growCommitments.brokerageId, brokerageId))),
+    // `appraisals` deliberately keeps its bare partyId predicate: unlike every other table above
+    // it carries NO brokerage_id column at all (packages/db/src/schema/appraisal.ts) — it is
+    // tenant-scoped transitively through propertyId -> properties.brokerageId — so there is no
+    // brokerage column here to push down to. Its indexes are all propertyId-leading, so this
+    // lookup remains the one unbounded scan on this path and still needs an appraisals(party_id)
+    // index; that index is reported for Wave 1's single batched migration, not added here.
     db.select().from(appraisals).where(eq(appraisals.partyId, partyId)),
     // AE GROW Priority 5 Remediation — Property Intelligence. brokerageId is filtered directly
     // here (the column is right there on this table), same reasoning as the
@@ -262,13 +294,14 @@ export async function getRelationshipTimeline(
 
   const events: GrowTimelineEvent[] = [];
 
-  // Tenant isolation: every source row above was already looked up by partyId alone (not yet
-  // brokerage-scoped) — communicationMessages/communicationParticipants included, since a
-  // partyId collision across brokerages is not actually possible but this function still does
-  // not trust that on its own — so nothing is trusted until the party itself is confirmed to
-  // belong to the caller's brokerage — callers MUST check this themselves before calling, but
-  // as a second line of defence this function refuses to produce any events for a cross-tenant
-  // party.
+  // Tenant isolation: the party itself is the gate. Most source queries above now also carry
+  // brokerageId in SQL, but `appraisals` (no brokerage_id column) and
+  // communicationParticipants (no brokerage_id column) are still looked up by partyId alone,
+  // and a partyId collision across brokerages, while not actually possible, is still not
+  // something this function trusts on its own — so nothing is trusted until the party itself is
+  // confirmed to belong to the caller's brokerage. Callers MUST check this themselves before
+  // calling, but as a second line of defence this function refuses to produce any events for a
+  // cross-tenant party.
   if (!party || party.brokerageId !== brokerageId) {
     return [];
   }
@@ -323,11 +356,23 @@ export async function getRelationshipTimeline(
   for (const m of communicationMessageRows) if (m.propertyId) propertyIds.add(m.propertyId);
   for (const s of signalRows) if (s.propertyId) propertyIds.add(s.propertyId);
 
+  // Label lookup for exactly the properties the events above actually reference. This used to
+  // be an unfiltered `SELECT id, formatted_address FROM properties` with the id match done in
+  // JS afterwards — i.e. an instance-wide read of every property row of every tenant, on every
+  // Contact 360 open, to label a handful of timeline entries. The ids are matched in SQL now.
+  // brokerageId is in the predicate too: propertyIds is derived entirely from rows already
+  // scoped to this tenant (and the party's own brokerage was confirmed above), so this filters
+  // nothing extra out in practice, but it keeps the read tenant-bounded by construction rather
+  // than by that derivation staying true, and matches the defence-in-depth convention the rest
+  // of this file follows.
   const propertyLabelById = new Map<number, string>();
   if (propertyIds.size > 0) {
-    const propertyRows = await db.select({ id: properties.id, formattedAddress: properties.formattedAddress }).from(properties);
+    const propertyRows = await db
+      .select({ id: properties.id, formattedAddress: properties.formattedAddress })
+      .from(properties)
+      .where(and(inArray(properties.id, [...propertyIds]), eq(properties.brokerageId, brokerageId)));
     for (const p of propertyRows) {
-      if (propertyIds.has(p.id)) propertyLabelById.set(p.id, p.formattedAddress);
+      propertyLabelById.set(p.id, p.formattedAddress);
     }
   }
 
