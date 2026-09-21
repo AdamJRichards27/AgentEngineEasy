@@ -50,6 +50,17 @@
 // property-first or contact-first (these gates key on channel/destination/
 // classification, never on propertyId/partyId), so no separate contact-
 // first enforcement was needed here.
+//
+// AE GROW W3-B: the two provider calls in dispatchMessage() below now go
+// through providers/registry.ts's resolveEmailProvider()/resolveSmsProvider()
+// rather than naming the sandbox adapters directly. With no environment set
+// those resolvers return the very same sandbox singletons this file used to
+// import, so the dispatch path is unchanged; what changed is that there is
+// now a single place where a future vendor adapter would be selected, and
+// that place is gated by LIVE_COMMUNICATIONS_APPROVED. Resolution happens
+// BEFORE the QUEUED -> SENDING transition on purpose — see the comment at
+// the resolution site for why a misconfiguration must not be laundered into
+// a delivery attempt.
 
 import { and, eq, isNotNull, lte, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -72,9 +83,10 @@ import { checkConsent } from "./consent.js";
 import { checkCostControl, recordCost, SMS_ESTIMATED_COST_CENTS_PER_MESSAGE } from "./costControl.js";
 import { isWithinQuietHours, nextAllowedSendTime } from "./quietHours.js";
 import { getOrCreateCommunicationSettings } from "./settings.js";
-import { SANDBOX_EMAIL_PROVIDER_NAME, sandboxEmailProvider } from "./providers/sandboxEmail.js";
-import { SANDBOX_SMS_PROVIDER_NAME, sandboxSmsProvider } from "./providers/sandboxSms.js";
-import type { ProviderSendResult } from "./providers/types.js";
+import { SANDBOX_EMAIL_PROVIDER_NAME } from "./providers/sandboxEmail.js";
+import { SANDBOX_SMS_PROVIDER_NAME } from "./providers/sandboxSms.js";
+import { resolveEmailProvider, resolveSmsProvider } from "./providers/registry.js";
+import type { EmailProvider, ProviderSendResult, SmsProvider } from "./providers/types.js";
 
 interface MessageTransitionPatch {
   subject?: string | null;
@@ -399,6 +411,28 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
     }
   }
 
+  // AE GROW W3-B: resolve the adapter BEFORE the SENDING transition, and
+  // deliberately outside the try/catch below.
+  //
+  // Both placements are load-bearing. The catch below converts any throw into
+  // a FAILED delivery attempt with PROVIDER_UNAVAILABLE — correct for a send
+  // that genuinely reached a provider and went wrong, but badly wrong for a
+  // resolution failure: a deployment that selected an unapproved live
+  // provider would be recorded as a transient delivery outage, retried on
+  // backoff, and eventually shown to staff as "the provider was unavailable"
+  // — an unapproved live provider is not an outage, and no amount of retrying
+  // will approve it. Resolving here instead lets a typed
+  // CommunicationProviderError propagate out of dispatchMessage() to the
+  // caller, loudly, the way ai/voice/gateway.ts's typed errors do.
+  //
+  // Resolving before the transition also leaves the message untouched at
+  // QUEUED/RETRY_SCHEDULED rather than stranded at SENDING, so once the
+  // configuration is corrected the existing sweep picks it up with no manual
+  // repair. With no environment set neither call can throw: each returns the
+  // sandbox singleton.
+  const emailProvider: EmailProvider | null = channel === "EMAIL" ? resolveEmailProvider() : null;
+  const smsProvider: SmsProvider | null = channel === "SMS" ? resolveSmsProvider() : null;
+
   const sending = await applyMessageTransition({
     messageId,
     brokerageId,
@@ -413,7 +447,7 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
   let result: ProviderSendResult;
   try {
     if (channel === "EMAIL") {
-      result = await sandboxEmailProvider.send({
+      result = await emailProvider!.send({
         to: sending.recipientDestination!,
         subject: sending.subject,
         bodyText: sending.bodyText,
@@ -421,7 +455,7 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
         idempotencyKey: sending.idempotencyKey!,
       });
     } else if (channel === "SMS") {
-      result = await sandboxSmsProvider.send({
+      result = await smsProvider!.send({
         to: sending.recipientDestination!,
         bodyText: sending.bodyText,
         idempotencyKey: sending.idempotencyKey!,
@@ -431,7 +465,13 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
     }
   } catch (err) {
     result = {
-      provider: channel === "EMAIL" ? SANDBOX_EMAIL_PROVIDER_NAME : SANDBOX_SMS_PROVIDER_NAME,
+      // Label the failure with the adapter that actually threw. Under the
+      // default configuration these resolve to the same two sandbox names
+      // this line used to hardcode; the fallbacks cover only the
+      // non-dispatched-channel throw in the try above, where no provider was
+      // resolved.
+      provider: (channel === "EMAIL" ? emailProvider?.name : smsProvider?.name) ??
+        (channel === "EMAIL" ? SANDBOX_EMAIL_PROVIDER_NAME : SANDBOX_SMS_PROVIDER_NAME),
       providerMessageId: `error-${randomUUID()}`,
       status: "FAILED",
       failureCategory: "PROVIDER_UNAVAILABLE",
