@@ -162,6 +162,10 @@ export async function evaluateRecordingGates(input: {
   const confirmedInCall = session.recordingStatus === "CONFIRMED" || session.recordingStatus === "PERMITTED_NOT_CAPTURED";
 
   let outboundDecision: OutboundDecision | null = null;
+  // AE GROW W3-B (D-4): the recorded decision, retained for EVIDENCE only and
+  // regardless of its outcome. Kept separate from `outboundDecision` above on
+  // purpose — see the comment at its assignment below.
+  let recordedDecisionForEvidence: OutboundDecision | null = null;
   try {
     // Re-evaluate the canonical call decision now, so withdrawal/expiry and
     // policy retirement between creation and recording enable are observed.
@@ -172,6 +176,27 @@ export async function evaluateRecordingGates(input: {
         decidedByUserId: input.actor.id,
         jurisdiction: session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null,
       });
+      // AE GROW W3-B (D-4). `recorded` is a decision this call just WROTE:
+      // evaluateOutboundCallEligibilityInTransaction persists a
+      // growConsentDecisions row whatever the outcome. Only the ELIGIBLE case
+      // used to be kept, so outboundDecisionId/outboundReasonCode at the
+      // bottom of this function were persisted as null precisely when the
+      // call was blocked — discarding the pointer to the row that records WHY
+      // it was blocked, at the one moment that evidence is worth having. The
+      // read-only branch immediately below never had that asymmetry (it
+      // passes throwIfIneligible: false and keeps whatever it gets), which is
+      // what marks this as an oversight rather than a deliberate policy.
+      recordedDecisionForEvidence = recorded;
+
+      // The eligibility-conditional assignment stays exactly as it was, and
+      // must. `outboundDecision` is not only evidence: it also supplies the
+      // policy snapshot, jurisdiction and policyVersion that feed the
+      // legalPolicy gate below, and it is this function's return value.
+      // Widening it to ineligible decisions would let a blocked call's policy
+      // snapshot satisfy the legalPolicy gate — a change to the five-gate
+      // conjunction itself, which is both out of scope here and the wrong
+      // direction. Retaining the decision for evidence while leaving gate
+      // inputs untouched fixes the lost reason code and nothing else.
       if (recorded.evaluation.decision === "ELIGIBLE") outboundDecision = recorded;
     } else if (input.readOnly) {
       outboundDecision = await evaluateOutboundCallEligibilityReadOnly({
@@ -181,6 +206,8 @@ export async function evaluateRecordingGates(input: {
         jurisdiction: session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null,
         throwIfIneligible: false,
       });
+      // Already outcome-independent: this branch keeps whatever it resolved.
+      recordedDecisionForEvidence = outboundDecision;
     } else {
       outboundDecision = await evaluateOutboundCallEligibility({
         brokerageId: session.brokerageId,
@@ -188,6 +215,11 @@ export async function evaluateRecordingGates(input: {
         decidedByUserId: input.actor.id,
         jurisdiction: session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null,
       });
+      // This evaluator THROWS on an ineligible decision, so an ineligible
+      // outcome lands in the catch below with no object to retain — a
+      // different shape of gap from the transaction branch's, and one that
+      // cannot be closed from inside this function. Left as-is deliberately.
+      recordedDecisionForEvidence = outboundDecision;
     }
   } catch {
     // The recording operation is fail-closed and must not make the base call
@@ -286,8 +318,11 @@ export async function evaluateRecordingGates(input: {
         ),
       },
     },
-    outboundDecisionId: outboundDecision?.decision?.id ?? null,
-    outboundReasonCode: outboundDecision?.evaluation.reasonCode ?? null,
+    // AE GROW W3-B (D-4): sourced from the retained decision, not from the
+    // gate-feeding `outboundDecision`, so a blocked in-transaction evaluation
+    // still carries the id and reason code of the decision it just recorded.
+    outboundDecisionId: recordedDecisionForEvidence?.decision?.id ?? null,
+    outboundReasonCode: recordedDecisionForEvidence?.evaluation.reasonCode ?? null,
   };
   // Exactly five recording gates are represented above.  `requested` is the
   // operation being attempted, not a sixth permission; the outbound decision

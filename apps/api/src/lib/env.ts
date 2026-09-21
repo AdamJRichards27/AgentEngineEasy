@@ -227,3 +227,44 @@ export function isLiveAiProviderApproved(): boolean {
 export function mustForceMockAiProvider(): boolean {
   return !isLiveAiProviderApproved();
 }
+
+/**
+ * AE GROW W3-B — communications dispatch activation gate.
+ *
+ * True only when an operator has explicitly set LIVE_COMMUNICATIONS_APPROVED
+ * to the literal string "true". This governs the EMAIL/SMS dispatch seam in
+ * apps/api/src/lib/communications/providers/registry.ts.
+ *
+ * Why this flag exists BEFORE any live adapter does. Every other outbound
+ * domain — calling, call transcription, voice, the AI model provider —
+ * already had a LIVE_*_APPROVED flag, because each had a real adapter that
+ * needed holding shut. EMAIL/SMS had none, for the opposite reason: the
+ * outbox hardcoded the sandbox adapter with no branch at all, so there was
+ * nothing to gate. That is a worse position to be in, not a better one —
+ * when a vendor adapter is eventually chosen, the gate would have to be
+ * retrofitted around live code that already works, which is exactly the
+ * order in which these controls get weakened or forgotten. Introducing the
+ * seam and its gate now, while the only reachable provider is provably the
+ * sandbox, means a future adapter inherits a fail-closed default on the day
+ * it is written rather than needing one argued for afterwards.
+ *
+ * A SEPARATE flag from every other LIVE_*_APPROVED flag, per the same
+ * convention those follow — approving telephony, call transcription, voice,
+ * external transactions or an external LLM must never be read as approving
+ * this app to send real email or SMS to a real recipient.
+ */
+export function isLiveCommunicationsApproved(): boolean {
+  return process.env.LIVE_COMMUNICATIONS_APPROVED === "true";
+}
+
+/**
+ * True whenever live communications dispatch has NOT been explicitly
+ * approved. Deliberately NOT production-scoped, matching
+ * mustForceMockCallTranscriptionProvider() and mustForceMockTelephonyProvider()
+ * rather than the older production-only gates: a real message sent to a real
+ * contact from a developer's laptop or from staging is exactly as delivered,
+ * and exactly as unrecallable, as one sent from production.
+ */
+export function mustForceSandboxCommunicationsProvider(): boolean {
+  return !isLiveCommunicationsApproved();
+}
