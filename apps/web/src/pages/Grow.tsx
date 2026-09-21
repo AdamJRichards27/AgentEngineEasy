@@ -14,6 +14,12 @@ import { ContactCommunicationsSection } from "../components/CommunicationsSectio
 // rather than a second bespoke screen.
 import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
 import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptPanel";
+// AE GROW Completion W3-A (A-7) — Contact 360's contactability/consent surface.
+// Extracted into its own component rather than added to this file, which is
+// already the Daily Command Centre, Contact 360 and the call panel at once;
+// that extraction is the explicit mitigation recorded in the roadmap.
+import { GrowContactConsentPanel } from "../components/GrowContactConsentPanel";
+import type { GrowContactability } from "../lib/contactability";
 import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 // AE GROW Pilot Readiness WP6b (D6) — the shared loading/failed/empty region
@@ -241,6 +247,10 @@ interface GrowContact360 {
   commitments: GrowContact360Commitment[];
   timeline: GrowTimelineEvent[];
   intelligence: ContactIntelligenceSummary;
+  // AE GROW Completion W3-A (A-6) — consent/DNC/suppression read model. Its
+  // own shape is hand-mirrored in lib/contactability.ts, alongside the display
+  // rules, rather than restated here.
+  contactability: GrowContactability;
 }
 
 type CallEligibilityStatus =
@@ -1924,6 +1934,13 @@ function GrowContactDetail({
           })}
         </div>
       </div>
+
+      {/* AE GROW Completion W3-A (A-7) — above the call and communications
+          panels on purpose: whether this contact may be reached, and why not,
+          has to be readable BEFORE the affordances that reach them. The block
+          comes from the Contact 360 request this view already makes, so the
+          panel adds no second round trip. */}
+      <GrowContactConsentPanel partyId={partyId} contactability={data.contactability} onChanged={invalidate} />
 
       <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />
       <GrowContactTranscriptPanel
