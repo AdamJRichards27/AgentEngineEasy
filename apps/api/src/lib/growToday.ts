@@ -1,5 +1,5 @@
-import { and, asc, desc, eq, gt, isNotNull, isNull, max, or, sql } from "drizzle-orm";
-import { db, appraisals, growActivities, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import { and, asc, desc, eq, gt, isNotNull, isNull, lte, max, or, sql } from "drizzle-orm";
+import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
 import { loadContactabilityFilter } from "./propertyIntelligence/contactability.js";
 import {
   COLD_CONTACT_THRESHOLD_DAYS,
@@ -166,6 +166,8 @@ import {
 //     availableActions removed, rank pinned to 0, and recommendedAction
 //     replaced by DO_NOT_CONTACT_RECOMMENDED_ACTION. "Reach out to
 //     reconnect" is exactly the sentence such a card must never carry.
+//     F-1 applies this same treatment to Open growCommitments rows that are
+//     due today or overdue. Completed and Cancelled rows are not read.
 //
 // This filter is a READ. It resolves no consent policy, picks no channel, and
 // writes nothing — lib/propertyIntelligence/contactability.ts's own header
@@ -284,12 +286,15 @@ import {
 // constants are deliberately NOT imported: growContext.ts already depends on
 // this file, and importing back out of lib/ai/ would invert that layering.
 //
-// THE STATEMENT COUNT IS UNCHANGED. It was five parallel reads plus two
-// serial contactability statements (seven). It is now four parallel reads,
-// then the activity aggregate and the two contactability statements in
-// parallel (seven). The second wave has to follow the first because it is
-// scoped BY the first wave's party ids — which is exactly what makes it
-// bounded.
+// THE STATEMENT COUNT. It was five parallel reads plus two serial
+// contactability statements (seven). W2-A made it the rule reads, then the
+// activity aggregate and the two contactability statements in parallel: six
+// statements without Property Intelligence and seven with it (the signal read
+// is the one that is entitlement-gated). F-1 adds one bounded
+// grow_commitments read to that first wave, so the count is seven without
+// Property Intelligence and eight with it. The second wave still has to
+// follow the first because it is scoped BY the first wave's party ids —
+// which is exactly what makes it bounded.
 
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
@@ -301,7 +306,10 @@ export type GrowTodayActionType =
   | "appraisal_follow_up"
   // AE Grow Priority 5 Remediation — additive: a Property Intelligence
   // signal surfaced by Rule F below.
-  | "property_intelligence_signal";
+  | "property_intelligence_signal"
+  // F-1 — an Open growCommitments row that is due today or overdue. Not an
+  // opportunity next-action and not an appraisal follow-up.
+  | "commitment";
 
 export type GrowTodayActionButton =
   | { action: "add_note" }
@@ -397,6 +405,11 @@ export interface GrowTodayAction {
   propertyLabel: string | null;
   opportunityId: number | null;
   appraisalId: number | null;
+  /**
+   * F-1 — the growCommitments row this card is about. Null on every other
+   * rule. The card is that existing record, not a second commitment model.
+   */
+  commitmentId: number | null;
   reason: string;
   recommendedAction: string;
   dueAt: string | null;
@@ -524,6 +537,12 @@ export const GROW_TODAY_RELATIONSHIP_ROW_CAP = 2000;
 export const GROW_TODAY_OPPORTUNITY_ROW_CAP = 1000;
 /** FOLLOW_UP appraisals read for Rule E. Ordered by follow-up date, so the most overdue survive. */
 export const GROW_TODAY_APPRAISAL_ROW_CAP = 500;
+/**
+ * F-1 — Open commitments whose due date is today or earlier. Ordered by due
+ * date, so the most overdue survive a truncation. Future-dated Open rows are
+ * not part of Today (same rule as a future opportunity next-action).
+ */
+export const GROW_TODAY_COMMITMENT_ROW_CAP = 500;
 /** Active Property Intelligence signals read for Rule F. Ordered by confidence band, so the strongest evidence survives. */
 export const GROW_TODAY_SIGNAL_ROW_CAP = 500;
 
@@ -863,10 +882,14 @@ export async function getGrowTodaySummary(
   // entitlement or auth concept, and still doesn't.
   const includePropertyIntelligenceSignals = options?.includePropertyIntelligenceSignals ?? false;
   const propertyIntelligenceNow = new Date();
-  // W2-A (I-4) — WAVE 1: the four rule reads, all capped, all ordered. The
-  // activity aggregate has moved OUT of this wave because it is now scoped by
-  // the party ids these four return, which is what makes it bounded.
-  const [relationshipRows, opportunityRows, appraisalFollowUpRows, propertyIntelligenceSignalRows] = await Promise.all([
+  // Same UTC day boundary every other dated rule on this surface already uses.
+  const today0 = startOfTodayUtc();
+  const today1 = endOfTodayUtc();
+  // W2-A (I-4) — WAVE 1: the rule reads, all capped, all ordered. F-1 adds the
+  // commitments read to this wave. The activity aggregate stays OUT of it
+  // because it is scoped by the party ids these reads return, which is what
+  // makes it bounded.
+  const [relationshipRows, opportunityRows, appraisalFollowUpRows, commitmentRows, propertyIntelligenceSignalRows] = await Promise.all([
     db
       .select({
         id: growRelationships.id,
@@ -960,6 +983,39 @@ export async function getGrowTodaySummary(
       // what a truncation should drop.
       .orderBy(asc(appraisals.followUpAt), asc(appraisals.id))
       .limit(GROW_TODAY_APPRAISAL_ROW_CAP),
+    // F-1 — Open commitments due today or overdue. Completed and Cancelled
+    // are excluded here, in the query, so they never become cards. The party
+    // and property joins carry the brokerage id so a bad foreign key cannot
+    // contribute another tenant's name, email or address.
+    db
+      .select({
+        id: growCommitments.id,
+        partyId: growCommitments.partyId,
+        propertyId: growCommitments.propertyId,
+        opportunityId: growCommitments.opportunityId,
+        description: growCommitments.description,
+        dueAt: growCommitments.dueAt,
+        partyFirstName: parties.firstName,
+        partyLastName: parties.lastName,
+        partyOrganisationName: parties.organisationName,
+        partyEmail: parties.email,
+        partyMobile: parties.mobile,
+        propertyAddress: properties.formattedAddress,
+      })
+      .from(growCommitments)
+      .innerJoin(parties, and(eq(growCommitments.partyId, parties.id), eq(parties.brokerageId, brokerageId)))
+      .leftJoin(properties, and(eq(growCommitments.propertyId, properties.id), eq(properties.brokerageId, brokerageId)))
+      .where(
+        and(
+          eq(growCommitments.brokerageId, brokerageId),
+          eq(growCommitments.status, "Open"),
+          lte(growCommitments.dueAt, today1),
+        ),
+      )
+      // Most overdue first. A future-dated Open commitment is already excluded
+      // by the due-date predicate, so a truncation drops the least overdue.
+      .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
+      .limit(GROW_TODAY_COMMITMENT_ROW_CAP),
     fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, propertyIntelligenceNow),
   ]);
 
@@ -985,6 +1041,7 @@ export async function getGrowTodaySummary(
         ...relationshipRows.map((r) => r.partyId),
         ...opportunityRows.map((o) => o.partyId),
         ...appraisalFollowUpRows.map((a) => a.partyId),
+        ...commitmentRows.map((c) => c.partyId),
         ...propertyIntelligenceSignalRows.map((s) => s.partyId),
       ].filter((id): id is number => typeof id === "number" && Number.isInteger(id)),
     ),
@@ -1006,8 +1063,6 @@ export async function getGrowTodaySummary(
   const contactabilityOf = (partyId: number | null): SignalContactability =>
     contactabilityFilter.isSuppressed(partyId) ? "do_not_contact" : "contactable";
 
-  const today0 = startOfTodayUtc();
-  const today1 = endOfTodayUtc();
   const actions: GrowTodayAction[] = [];
   const partyIdsWithOpportunityAction = new Set<number>();
   const partyIdsWithOpenOpportunity = new Set<number>(opportunityRows.map((o) => o.partyId));
@@ -1092,6 +1147,7 @@ export async function getGrowTodaySummary(
       propertyLabel: o.propertyAddress ?? null,
       opportunityId: o.id,
       appraisalId: null,
+      commitmentId: null,
       reason,
       recommendedAction: doNotContact ? DO_NOT_CONTACT_RECOMMENDED_ACTION : recommendedAction,
       dueAt: o.nextActionDueAt ? o.nextActionDueAt.toISOString() : null,
@@ -1159,10 +1215,87 @@ export async function getGrowTodaySummary(
       propertyLabel: ap.propertyAddress ?? null,
       opportunityId: ap.opportunityId,
       appraisalId: ap.id,
+      commitmentId: null,
       reason,
       recommendedAction: doNotContact ? DO_NOT_CONTACT_RECOMMENDED_ACTION : ap.followUpNotes ?? "Follow up on this appraisal.",
       dueAt: ap.followUpAt.toISOString(),
       lastActivityAt: lastActivityAtAppraisal ? lastActivityAtAppraisal.toISOString() : null,
+      availableActions,
+      rankScore: doNotContact ? 0 : rankScore,
+      confidenceBand: null,
+      contactability,
+      contactabilityNote: doNotContact ? DO_NOT_CONTACT_NOTE : null,
+      whyItMatters: null,
+    });
+  }
+
+  // F-1 — Open commitments the agent already made, due today or overdue.
+  //
+  // The query has already dropped Completed, Cancelled, and anything due
+  // after the end of today (UTC, the same boundary Rules A-E use). What is
+  // left is the answer to "what have I already committed to?" on this
+  // surface. A future-dated promise stays on the contact record; Today does
+  // not bring it forward.
+  //
+  // Contactability is the opportunity/appraisal treatment, not a new one: the
+  // card stays (it is an obligation a person recorded) and outreach is
+  // stripped. The description stays in `reason` so a do-not-contact card
+  // still says what was promised after recommendedAction is replaced.
+  //
+  // A surfaced party joins partyIdsWithOpportunityAction so Rule D does not
+  // also tell the agent to "reach out to reconnect" with someone they
+  // already have a due commitment for. That is the same dedup Rules A/B/C
+  // and E already apply; it is not a signal de-dup change.
+  for (const c of commitmentRows) {
+    let priority: GrowTodayPriority;
+    let reason: string;
+    let rankScore: number;
+    if (c.dueAt.getTime() < today0.getTime()) {
+      priority = "DoNow";
+      reason = `Open commitment was due ${formatDateUtc(c.dueAt)}. Promised: ${c.description}`;
+      rankScore = rankOverdueCommitment(daysSince(c.dueAt), "opportunity");
+      followUpsDueCount++;
+    } else {
+      // The query is lte(dueAt, today1), so every remaining row is due today.
+      priority = "DoToday";
+      reason = `Open commitment is due today. Promised: ${c.description}`;
+      rankScore = rankDueToday("opportunity");
+      followUpsDueCount++;
+    }
+
+    partyIdsWithOpportunityAction.add(c.partyId);
+
+    const contactability = contactabilityOf(c.partyId);
+    const doNotContact = contactability === "do_not_contact";
+    const availableActions: GrowTodayActionButton[] = [{ action: "add_note" }];
+    if (c.propertyId) availableActions.push({ action: "view_property", propertyId: c.propertyId });
+    if (!doNotContact) {
+      if (c.partyEmail) availableActions.push({ action: "email", partyId: c.partyId });
+      if (c.partyMobile) availableActions.push({ action: "sms", partyId: c.partyId });
+    }
+    availableActions.push({ action: "view_contact", partyId: c.partyId });
+    availableActions.push({ action: "ask_ae" });
+
+    const lastActivityAtCommitment = lastActivityByParty.get(c.partyId) ?? null;
+
+    actions.push({
+      id: `commitment:${c.id}`,
+      type: "commitment",
+      priority,
+      partyId: c.partyId,
+      contactName: contactDisplayName(c),
+      contactEmail: doNotContact ? null : c.partyEmail ?? null,
+      contactMobile: doNotContact ? null : c.partyMobile ?? null,
+      relationshipType: null,
+      propertyId: c.propertyId,
+      propertyLabel: c.propertyAddress ?? null,
+      opportunityId: c.opportunityId,
+      appraisalId: null,
+      commitmentId: c.id,
+      reason,
+      recommendedAction: doNotContact ? DO_NOT_CONTACT_RECOMMENDED_ACTION : c.description,
+      dueAt: c.dueAt.toISOString(),
+      lastActivityAt: lastActivityAtCommitment ? lastActivityAtCommitment.toISOString() : null,
       availableActions,
       rankScore: doNotContact ? 0 : rankScore,
       confidenceBand: null,
@@ -1359,6 +1492,7 @@ export async function getGrowTodaySummary(
       propertyLabel: s.propertyAddress ?? null,
       opportunityId: null,
       appraisalId: null,
+      commitmentId: null,
       reason: s.explanation,
       recommendedAction: "Review this signal on the property or contact record to decide whether it's worth acting on.",
       dueAt: null,
@@ -1484,6 +1618,7 @@ export async function getGrowTodaySummary(
       propertyLabel: r.propertyAddress ?? null,
       opportunityId: null,
       appraisalId: null,
+      commitmentId: null,
       reason,
       recommendedAction: "Reach out to reconnect.",
       dueAt: null,
@@ -1565,6 +1700,11 @@ export async function getGrowTodaySummary(
       `At least ${GROW_TODAY_APPRAISAL_ROW_CAP} appraisals are awaiting follow-up; Today shows the ${GROW_TODAY_APPRAISAL_ROW_CAP} most overdue. The Appraisal Workspace has the full list.`,
     );
   }
+  if (commitmentRows.length >= GROW_TODAY_COMMITMENT_ROW_CAP) {
+    limitations.push(
+      `At least ${GROW_TODAY_COMMITMENT_ROW_CAP} open commitments are due today or overdue; Today shows the ${GROW_TODAY_COMMITMENT_ROW_CAP} most overdue. Each contact record has the full list.`,
+    );
+  }
   if (propertyIntelligenceSignalRows.length >= GROW_TODAY_SIGNAL_ROW_CAP) {
     limitations.push(
       `At least ${GROW_TODAY_SIGNAL_ROW_CAP} active signals exist; Today reads the ${GROW_TODAY_SIGNAL_ROW_CAP} with the strongest evidence bands. Every signal stays visible on its contact and property record.`,
@@ -1600,9 +1740,16 @@ export async function getGrowTodaySummary(
     // (no relationships, no opportunities yet) would report
     // hasAnyGrowData: false, which Grow.tsx reads as "never used Grow" and
     // renders as the onboarding empty state — hiding a real, concrete
-    // action item behind an empty-state screen instead of showing it. Rules
-    // A-E's own inputs to this boolean are unchanged.
-    hasAnyGrowData: relationshipRows.length > 0 || opportunityRows.length > 0 || propertyIntelligenceSignalRows.length > 0,
+    // action item behind an empty-state screen instead of showing it.
+    // F-1 adds commitmentRows to this boolean for the same reason: a
+    // brokerage whose only Grow record is a due or overdue Open commitment
+    // must not be told it has never used Grow. Relationship rows, opportunity
+    // rows, signals, and those commitment rows are all inputs.
+    hasAnyGrowData:
+      relationshipRows.length > 0 ||
+      opportunityRows.length > 0 ||
+      propertyIntelligenceSignalRows.length > 0 ||
+      commitmentRows.length > 0,
     counts: {
       // The count beside the list describes the list. What the cap removed is
       // reported separately and explicitly as signalSummary.withheldByActionCap

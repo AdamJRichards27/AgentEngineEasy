@@ -38,6 +38,7 @@ import {
 import {
   type GrowTodayAction,
   type GrowTodaySummary,
+  actionTypeLabel,
   canOfferChannel,
   contactabilityNotice,
   formatGeneratedAt,
@@ -1044,6 +1045,7 @@ function GrowActionCard({
   const showAskAE = item.availableActions.some((b) => b.action === "ask_ae");
 
   const consentNotice = contactabilityNotice(item);
+  const kindLabel = actionTypeLabel(item.type);
   const unlinkedNotice = unlinkedContactNotice(item);
   const why = item.whyItMatters;
   const rankSummary = rankSummaryLine(item);
@@ -1060,6 +1062,7 @@ function GrowActionCard({
     <li className="grow-action-card">
       <div className="grow-action-card-header">
         <span className={priorityPillClass(item.priority)}>{priorityLabel(item.priority)}</span>
+        {kindLabel ? <span className="pill">{kindLabel}</span> : null}
         <strong>{item.contactName}</strong>
         {item.propertyLabel ? <span className="muted"> — {item.propertyLabel}</span> : null}
       </div>

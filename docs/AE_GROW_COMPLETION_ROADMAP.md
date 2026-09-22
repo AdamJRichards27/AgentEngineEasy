@@ -503,7 +503,7 @@ are aggregate-only; polling stops on terminal states.
 | Contactability controls are integrated | ⚠️ as of `234871a`: A-1 write routes (#52) and A-6/A-7 Contact 360 read + consent UI (#61) landed; model reconciliation still open | A-1 ✅#52, A-6 ✅#61, A-7 ✅#61, A-8 |
 | Nurture exists as a coherent relationship workflow | ❌ does not exist | B-2, W4-B |
 | Performance/Business Coach consolidated and usable | ⚠️ consolidated; **numbers are wrong per-agent**. Discovery unblocked after #55; implementation still gated on Owner decisions #4 and #5 | C-1, C-2 |
-| Daily Command Centre ties the experience together | ⚠️ **cannot answer "what have I committed to?"** — `growToday.ts` available to claim for F-1 | F-1, F-2 |
+| Daily Command Centre ties the experience together | ⚠️ **cannot answer "what have I committed to?"** — F-1 claimed and in progress (see ownership register) | F-1, F-2 |
 | Appraisal workflow is integrated | ❌ **workspace unreachable; Rule E can never fire** | E-1, E-2 |
 | Communication architecture is integrated | ⚠️ as of `234871a`: D-3 dispatch seam + activation gate landed (#60); inbound still incomplete | D-3 ✅#60, D-5, E-6 |
 | Voice/call/transcription/follow-up complete enough for later activation | ✅ | D-2 (capture) |
@@ -608,3 +608,4 @@ from them.*
 | 2026-09-21 | Grok Bot introduced as independent reviewer and parallel development agent under OpenClaw orchestration. Ownership now tracked in [`AE_WORKSTREAM_OWNERSHIP_REGISTER.md`](./AE_WORKSTREAM_OWNERSHIP_REGISTER.md). |
 | 2026-09-21 | Decision gate 19 resolved (§11). W2-D scope expanded accordingly. |
 | 2026-09-22 | **Consolidation gate.** PRs **#58 → #55 → #59 → #61 → #60** merged sequentially to staging. Tip **`234871ab1f9e415c0e9600f4d5290daa17aefc7b`**. #58 register/roadmap; #55 operational W2-C AI governance (≈ §4 W2-D + W3-K); #59 operational W2-D contact-anchored signals (post gate 19); #61 operational W3-A contactability completion (§4 W2-C + W3-B; A-6/A-7); #60 operational W3-B connect readiness (§4 W2-G; D-3). Domains released — see the ownership register. `growToday.ts` remains available to claim for F-1. Performance/Coach discovery is unblocked after #55; implementation stays gated on Owner decisions #4 and #5 plus a file claim. Naming rule from this entry forward: **operational name + PR#** is the primary identifier; historical §4 W-numbers are secondary (alias table under §4). |
+| 2026-09-22 | **F-1 claimed.** Commitments on Grow Today is Active in the ownership register (branch `cursor/f1-commitments-on-grow-today-33a9`, base `36f43ce`). Not merged. |

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  actionTypeLabel,
   priorityLabel,
   priorityPillClass,
   formatWhen,
@@ -61,6 +62,7 @@ function action(overrides: Partial<GrowTodayAction> = {}): GrowTodayAction {
     propertyLabel: "1 Test St",
     opportunityId: null,
     appraisalId: null,
+    commitmentId: null,
     reason: "Stored explanation.",
     recommendedAction: "Review this signal.",
     dueAt: null,
@@ -200,4 +202,55 @@ test("stage 3 — signalWithholdingNotice says nothing when nothing is held back
   const dncOnly = signalWithholdingNotice({ surfaced: 1, emergingSurfaced: 0, emergingWithheld: 0, withheldDoNotContact: 1 }) ?? "";
   assert.match(dncOnly, /1 signal is withheld because the contact must not be contacted/);
   assert.ok(!/early signal/.test(dncOnly), "the notice only mentions reasons that actually applied");
+});
+
+/* ---------------------------------------------------------------------
+ * F-1 — commitment cards use the existing contactability display rules.
+ * -----------------------------------------------------------------*/
+
+test("F-1 — only a commitment card carries a kind label", () => {
+  assert.equal(actionTypeLabel("commitment"), "Commitment");
+  assert.equal(actionTypeLabel("opportunity_follow_up"), null);
+  assert.equal(actionTypeLabel("appraisal_follow_up"), null);
+  assert.equal(actionTypeLabel("relationship_cold"), null);
+  assert.equal(actionTypeLabel("property_intelligence_signal"), null);
+  assert.equal(actionTypeLabel("opportunity_no_action_set"), null);
+});
+
+test("F-1 — a do-not-contact commitment card cannot offer outreach, and a contactable one can", () => {
+  const suppressed = action({
+    id: "commitment:9",
+    type: "commitment",
+    commitmentId: 9,
+    priority: "DoNow",
+    contactability: "do_not_contact",
+    contactabilityNote: "A do-not-contact listing is on file.",
+    contactEmail: "should-not-be-used@example.com",
+    contactMobile: "+61400000999",
+    availableActions: [
+      { action: "add_note" },
+      { action: "email", partyId: 42 },
+      { action: "sms", partyId: 42 },
+      { action: "view_contact", partyId: 42 },
+    ],
+    whyItMatters: null,
+    confidenceBand: null,
+    rankScore: 0,
+  });
+  assert.equal(canOfferChannel(suppressed, "email"), false);
+  assert.equal(canOfferChannel(suppressed, "sms"), false);
+  assert.match(contactabilityNotice(suppressed) ?? "", /do-not-contact listing/i);
+
+  const contactable = action({
+    id: "commitment:10",
+    type: "commitment",
+    commitmentId: 10,
+    priority: "DoToday",
+    whyItMatters: null,
+    confidenceBand: null,
+  });
+  assert.equal(canOfferChannel(contactable, "email"), true);
+  assert.equal(canOfferChannel(contactable, "sms"), true);
+  assert.equal(contactabilityNotice(contactable), null);
+  assert.equal(rankSummaryLine(contactable), null, "a commitment is a recorded promise, not a scored signal");
 });
