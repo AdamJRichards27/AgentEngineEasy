@@ -373,7 +373,7 @@ the reason candidate judgement rests on targeted suites repeated for stability p
 | **W3-E** Make Rule E reachable (`partyId` on the RUN appraisal path) | **Owner decision #3** | E-1 | **P0** |
 | **W3-F** Grow Appraisal Workspace UI (18 endpoints) | **Owner decision #2** | E-1 | **P0** |
 | **W3-G** Reason-aware 403s + honest calling surfaces for pilots | Owner decision #8 | G-1 G-2 | P1 |
-| **W3-H** Opportunities actionable; contact-signal withholding notice | — | E-3 (navigation/follow-up ✅#56; Add note / Ask AE in progress), E-4 ✅#59 | P1 |
+| **W3-H** Opportunities actionable; contact-signal withholding notice | — | E-3 ✅#65 (navigation/follow-up #56; Add note / Ask AE #65), E-4 ✅#59 | P1 |
 | **W3-I** Conversion + buyer/seller segmentation; consent awareness in coaching; comms as activity | C-6 needs Owner decision #7 | C-4 C-5 C-8 C-9 | P1 |
 | **W3-J** Consent model reconciliation | W2-C, W2-G | A-8 | P1 |
 | **W3-K** Cost observability: read back `ai_usage`, token/cost ceilings, AI metrics, voice metering | — | C-10 C-11 | P2 |
@@ -493,7 +493,7 @@ are aggregate-only; polling stops on terminal states.
 
 ## 8. FEATURE COMPLETE checklist (Owner §12)
 
-**As of staging tip `11cd01f` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
+**As of staging tip `23ff952` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
 
 | Criterion | Status | Blocking IDs |
 |---|---|---|
@@ -508,10 +508,10 @@ are aggregate-only; polling stops on terminal states.
 | Communication architecture is integrated | ⚠️ as of `234871a`: D-3 dispatch seam + activation gate landed (#60); inbound still incomplete | D-3 ✅#60, D-5, E-6 |
 | Voice/call/transcription/follow-up complete enough for later activation | ✅ | D-2 (capture) |
 | Entitlements are coherent | ⚠️ | A-2, G-1, G-2, G-7 |
-| Tenant isolation is verified | ⚠️ one unfiltered cross-tenant read; two tables without tenant columns | I-1, E-9 |
+| Tenant isolation is verified | ⚠️ as of `23ff952`: the unfiltered cross-tenant properties read is closed (I-1 ✅#53, re-verified — `relationshipTimeline.ts` labels with `id IN (…) AND brokerage_id =`). Two tables still have no tenant column | I-1 ✅#53, E-9 |
 | Audit coverage is appropriate | ⚠️ consent history unrecoverable in the live model | A-4 |
 | Major workflows operate end-to-end | ❌ appraisal chain severed | E-1 |
-| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability is in progress (see changelog); B-1 was closed by #55 | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2, H-1, I-1 I-2 I-3 |
+| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability landed in #65. B-1 was closed by #55. I-1 was closed by #53 and re-verified on tip `23ff952` (no remaining unscoped properties read on the Contact 360 timeline path) | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2, H-1, I-1 ✅#53, I-2 I-3 |
 
 ---
 
@@ -612,3 +612,5 @@ from them.*
 | 2026-09-22 | **F-1 landed.** #64 merged. Staging tip **`11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3`**. Open commitments due today or overdue appear on Grow Today. `growToday.ts` released back to the pool. |
 | 2026-09-22 | **B-1 closed by #55.** Messaging fragments are in the protected-operations denylist (`OUTBOUND_MESSAGING_FRAGMENTS` in `protectedOperations.ts`, asserted by `governance.test.ts`). Not re-opened. |
 | 2026-09-22 | **E-3 in progress.** PR **#65** (`cursor/e3-opportunities-actionable-0599`, base `11cd01f`). View contact, View property, and Create follow-up on the Opportunities tab already landed in #56. This slice adds Add note and Ask AE on those rows, reusing Grow Today's note write and tab switch. Email/SMS stay on Grow Today and Contact 360, where contactability is known. Not merged. |
+| 2026-09-22 | **E-3 landed.** #65 merged. Staging tip **`23ff95200fbca12ec155ec6868db60f3a31d8d73`**. Opportunities tab rows have Add note and Ask AE, reusing Grow Today's handlers. `Grow.tsx` opportunity actions and `growOpportunityActions.behavior.test.ts` are back in the pool. |
+| 2026-09-22 | **I-1 re-verified, not re-opened.** PR **#66** (`cursor/i1-contact-360-properties-scope-2304`). On tip `23ff952`, `getRelationshipTimeline` labels properties with `WHERE id IN (…) AND brokerage_id =` (`relationshipTimeline.ts`, the lookup that used to be the unscoped `SELECT id, formatted_address FROM properties`). `contactReadScoping.test.ts` already locks that predicate. No query change in this slice. The §2 finding row is left as the original audit. I-2 and I-4 were not touched. Not merged. |
