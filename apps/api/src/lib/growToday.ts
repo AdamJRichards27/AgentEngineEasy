@@ -1255,13 +1255,12 @@ export async function getGrowTodaySummary(
       reason = `Open commitment was due ${formatDateUtc(c.dueAt)}. Promised: ${c.description}`;
       rankScore = rankOverdueCommitment(daysSince(c.dueAt), "opportunity");
       followUpsDueCount++;
-    } else if (c.dueAt.getTime() <= today1.getTime()) {
+    } else {
+      // The query is lte(dueAt, today1), so every remaining row is due today.
       priority = "DoToday";
       reason = `Open commitment is due today. Promised: ${c.description}`;
       rankScore = rankDueToday("opportunity");
       followUpsDueCount++;
-    } else {
-      continue;
     }
 
     partyIdsWithOpportunityAction.add(c.partyId);
@@ -1741,10 +1740,11 @@ export async function getGrowTodaySummary(
     // (no relationships, no opportunities yet) would report
     // hasAnyGrowData: false, which Grow.tsx reads as "never used Grow" and
     // renders as the onboarding empty state — hiding a real, concrete
-    // action item behind an empty-state screen instead of showing it. Rules
-    // A-E's own inputs to this boolean are unchanged.
-    // F-1 — a brokerage whose only Grow record is a due commitment must not
-    // be told it has never used Grow. That empty state hides the card.
+    // action item behind an empty-state screen instead of showing it.
+    // F-1 adds commitmentRows to this boolean for the same reason: a
+    // brokerage whose only Grow record is a due or overdue Open commitment
+    // must not be told it has never used Grow. Relationship rows, opportunity
+    // rows, signals, and those commitment rows are all inputs.
     hasAnyGrowData:
       relationshipRows.length > 0 ||
       opportunityRows.length > 0 ||
