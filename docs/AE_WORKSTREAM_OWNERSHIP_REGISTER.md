@@ -13,7 +13,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 
-Current staging: `23ff95200fbca12ec155ec6868db60f3a31d8d73` (2026-09-22, E-3 / #65 merged onto F-1).
+Current staging: `6d3d87d6bb4fa3e65192f14ebe35099177c865cb` (2026-09-22, I-1 / #66 merged onto E-3).
 
 ---
 
@@ -36,7 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
-| **I-1 / Contact 360 properties scoping** | `cursor/i1-contact-360-properties-scope-2304` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). `apps/api/src/lib/relationshipTimeline.ts` was read and is **not** in this claim. | **Active** — re-verification only. The unscoped `SELECT id, formatted_address FROM properties` is already gone on staging. | Re-verified on staging `23ff95200fbca12ec155ec6868db60f3a31d8d73`. The label lookup is `WHERE id IN (…) AND brokerage_id =` (landed in #53, locked by `apps/api/src/routes/__tests__/contactReadScoping.test.ts`). Do not re-implement. I-2, I-4, and E-9 are out of scope. | #66 | — |
+| **I-2 / Grow Today activity aggregate** | `cursor/i2-grow-today-activity-aggregate-cb11` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). `apps/api/src/lib/growToday.ts` was read and is **not** in this claim. | **Active** — re-verification only. The whole-brokerage `grow_activities` scan reduced in Node is already gone on staging. | Re-verified on staging `6d3d87d6bb4fa3e65192f14ebe35099177c865cb`. `fetchLastActivityByParty` is `max(occurred_at) … group by party_id` with `brokerage_id =` and `party_id = any(…)` (landed in #57, locked by `apps/api/src/routes/__tests__/growTodayQueryShape.test.ts` and `growTodayConsolidation.test.ts`). Do not re-implement. F-2, F-3, I-4, and I-5 are out of scope. | #67 | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,9 +47,10 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`propertyIntelligence/service.ts`** (with `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts`) — released with **#59** (operational W2-D, contact-anchored signals).
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
-- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** for its status lines, and released again with **#65**. Docs edits still require a claim before a new slice starts. **I-1** currently claims the two register/roadmap files for this re-verification's status lines only.
-- **I-1** (`relationshipTimeline.ts` property-label lookup) is already in the pool via **#53**. This verification does not re-claim that file. The predicate is `id IN (…) AND brokerage_id =`, covered by `contactReadScoping.test.ts`. Do not open another I-1 implementation slice.
-- **`growToday.ts`** (API and web) was released with **F-1 / #64**. It is back in the pool.
+- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**. Docs edits still require a claim before a new slice starts. **I-2** currently claims the two register/roadmap files for this re-verification's status lines only.
+- **I-1** (`relationshipTimeline.ts` property-label lookup) is already in the pool via **#53**, and the #66 re-verification is merged. The predicate is `id IN (…) AND brokerage_id =`, covered by `contactReadScoping.test.ts`. Do not open another I-1 implementation slice.
+- **I-2** (`growToday.ts` `fetchLastActivityByParty`) is already in the pool via **#57**. This verification does not re-claim `growToday.ts`. The read is `max(occurred_at) group by party_id`, filtered by `brokerage_id` and the party ids already in play, covered by `growTodayQueryShape.test.ts`. Do not open another I-2 implementation slice. F-2, F-3, I-4, and I-5 remain later slices on that file.
+- **`growToday.ts`** (API and web) was released with **F-1 / #64**. It is back in the pool for those later slices. This I-2 re-verification does not hold it.
 - **B-1** (messaging fragments in the protected-operations denylist) was closed by **#55**. `OUTBOUND_MESSAGING_FRAGMENTS` is present in `apps/api/src/lib/ai/protectedOperations.ts` and covered by `governance.test.ts`. Do not open a B-1 implementation slice.
 
 ## Merged — no longer owned
@@ -90,6 +91,12 @@ Released back to the pool on 2026-09-22 (E-3, tip `23ff95200fbca12ec155ec6868db6
 | PR | Slice | Domain released |
 |---|---|---|
 | #65 | E-3 Opportunities actionable | `pages/Grow.tsx` (opportunity row actions and the shared Add note write), `web/lib/__tests__/growOpportunityActions.behavior.test.ts`, `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
+
+Released back to the pool on 2026-09-22 (I-1 re-verification, tip `6d3d87d6bb4fa3e65192f14ebe35099177c865cb`):
+
+| PR | Slice | Domain released |
+|---|---|---|
+| #66 | I-1 Contact 360 properties scoping (re-verification) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
 
 ---
 

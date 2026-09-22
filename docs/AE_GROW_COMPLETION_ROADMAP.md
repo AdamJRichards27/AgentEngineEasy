@@ -2,7 +2,7 @@
 
 **Status:** ACTIVE — canonical source of truth for remaining AE Grow work.
 **Baseline:** staging `ba8790123ea41c9b6be5b3525fc64c80a43939a5` (PR #48, Signal Sweep; post-merge CI #372 PASS).
-**Current staging tip (2026-09-22):** `11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3` — F-1 / #64 merged onto the consolidation gate (`234871ab1f9e415c0e9600f4d5290daa17aefc7b`, #58→#55→#59→#61→#60). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
+**Current staging tip (2026-09-22):** `6d3d87d6bb4fa3e65192f14ebe35099177c865cb` — I-1 / #66 merged onto E-3 (`23ff95200fbca12ec155ec6868db60f3a31d8d73`). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
 **Authority:** Project Owner decision *"MERGE SIGNAL SWEEP + BEGIN GROW COMPLETION PROGRAM"* (2026-09-20).
 **Maintenance rule:** this file is updated as each workstream lands. Do not create a second roadmap.
 
@@ -493,7 +493,7 @@ are aggregate-only; polling stops on terminal states.
 
 ## 8. FEATURE COMPLETE checklist (Owner §12)
 
-**As of staging tip `23ff952` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
+**As of staging tip `6d3d87d` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
 
 | Criterion | Status | Blocking IDs |
 |---|---|---|
@@ -511,7 +511,7 @@ are aggregate-only; polling stops on terminal states.
 | Tenant isolation is verified | ⚠️ as of `23ff952`: the unfiltered cross-tenant properties read is closed (I-1 ✅#53, re-verified — `relationshipTimeline.ts` labels with `id IN (…) AND brokerage_id =`). Two tables still have no tenant column | I-1 ✅#53, E-9 |
 | Audit coverage is appropriate | ⚠️ consent history unrecoverable in the live model | A-4 |
 | Major workflows operate end-to-end | ❌ appraisal chain severed | E-1 |
-| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability landed in #65. B-1 was closed by #55. I-1 was closed by #53 and re-verified on tip `23ff952` (no remaining unscoped properties read on the Contact 360 timeline path) | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2, H-1, I-1 ✅#53, I-2 I-3 |
+| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability landed in #65. B-1 was closed by #55. I-1 was closed by #53 and re-verified in #66 (no remaining unscoped properties read on the Contact 360 timeline path). I-2 was closed by #57 and re-verified on tip `6d3d87d`: Grow Today last-activity is `max(occurred_at) group by party_id` with a `brokerage_id` predicate in `fetchLastActivityByParty`, not a whole-brokerage activity scan reduced in Node | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2, H-1, I-1 ✅#53, I-2 ✅#57, I-3 |
 
 ---
 
@@ -613,4 +613,5 @@ from them.*
 | 2026-09-22 | **B-1 closed by #55.** Messaging fragments are in the protected-operations denylist (`OUTBOUND_MESSAGING_FRAGMENTS` in `protectedOperations.ts`, asserted by `governance.test.ts`). Not re-opened. |
 | 2026-09-22 | **E-3 in progress.** PR **#65** (`cursor/e3-opportunities-actionable-0599`, base `11cd01f`). View contact, View property, and Create follow-up on the Opportunities tab already landed in #56. This slice adds Add note and Ask AE on those rows, reusing Grow Today's note write and tab switch. Email/SMS stay on Grow Today and Contact 360, where contactability is known. Not merged. |
 | 2026-09-22 | **E-3 landed.** #65 merged. Staging tip **`23ff95200fbca12ec155ec6868db60f3a31d8d73`**. Opportunities tab rows have Add note and Ask AE, reusing Grow Today's handlers. `Grow.tsx` opportunity actions and `growOpportunityActions.behavior.test.ts` are back in the pool. |
-| 2026-09-22 | **I-1 re-verified, not re-opened.** PR **#66** (`cursor/i1-contact-360-properties-scope-2304`). On tip `23ff952`, `getRelationshipTimeline` labels properties with `WHERE id IN (…) AND brokerage_id =` (`relationshipTimeline.ts`, the lookup that used to be the unscoped `SELECT id, formatted_address FROM properties`). `contactReadScoping.test.ts` already locks that predicate. No query change in this slice. The §2 finding row is left as the original audit. I-2 and I-4 were not touched. Not merged. |
+| 2026-09-22 | **I-1 re-verified, not re-opened.** PR **#66** (`cursor/i1-contact-360-properties-scope-2304`). On tip `23ff952`, `getRelationshipTimeline` labels properties with `WHERE id IN (…) AND brokerage_id =` (`relationshipTimeline.ts`, the lookup that used to be the unscoped `SELECT id, formatted_address FROM properties`). `contactReadScoping.test.ts` already locks that predicate. No query change in this slice. The §2 finding row is left as the original audit. I-2 and I-4 were not touched. Merged. Staging tip **`6d3d87d6bb4fa3e65192f14ebe35099177c865cb`**. |
+| 2026-09-22 | **I-2 re-verified, not re-opened.** PR **#67** (`cursor/i2-grow-today-activity-aggregate-cb11`). On tip `6d3d87d`, `fetchLastActivityByParty` (`growToday.ts`) is `max(occurred_at) group by party_id` where `brokerage_id =` and `party_id = any(…)` — the party ids the other Grow Today rules already returned. That replaced the audit's whole-brokerage `select party_id, occurred_at` reduced in Node. The §2 anchor `growToday.ts:527-530` is the pre-rewrite line; on this tip those lines are the I-4 cap comment, and the aggregate is about lines 816–826. `growTodayQueryShape.test.ts` locks the SQL shape (`max`, `group by`, `brokerage_id`, `party_id = any`) and `growTodayConsolidation.test.ts` locks the most-recent day count. No query change in this slice. The §2 finding row is left as the original audit. F-2, F-3, I-4, and I-5 were not touched. Not merged. |
