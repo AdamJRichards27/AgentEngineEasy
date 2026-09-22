@@ -2,7 +2,7 @@
 
 **Status:** ACTIVE — canonical source of truth for remaining AE Grow work.
 **Baseline:** staging `ba8790123ea41c9b6be5b3525fc64c80a43939a5` (PR #48, Signal Sweep; post-merge CI #372 PASS).
-**Current staging tip (2026-09-22):** `234871ab1f9e415c0e9600f4d5290daa17aefc7b` — consolidation gate complete (#58→#55→#59→#61→#60). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
+**Current staging tip (2026-09-22):** `11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3` — F-1 / #64 merged onto the consolidation gate (`234871ab1f9e415c0e9600f4d5290daa17aefc7b`, #58→#55→#59→#61→#60). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
 **Authority:** Project Owner decision *"MERGE SIGNAL SWEEP + BEGIN GROW COMPLETION PROGRAM"* (2026-09-20).
 **Maintenance rule:** this file is updated as each workstream lands. Do not create a second roadmap.
 
@@ -373,7 +373,7 @@ the reason candidate judgement rests on targeted suites repeated for stability p
 | **W3-E** Make Rule E reachable (`partyId` on the RUN appraisal path) | **Owner decision #3** | E-1 | **P0** |
 | **W3-F** Grow Appraisal Workspace UI (18 endpoints) | **Owner decision #2** | E-1 | **P0** |
 | **W3-G** Reason-aware 403s + honest calling surfaces for pilots | Owner decision #8 | G-1 G-2 | P1 |
-| **W3-H** Opportunities actionable; contact-signal withholding notice | — | E-3 E-4 | P1 |
+| **W3-H** Opportunities actionable; contact-signal withholding notice | — | E-3 (navigation/follow-up ✅#56; Add note / Ask AE in progress), E-4 ✅#59 | P1 |
 | **W3-I** Conversion + buyer/seller segmentation; consent awareness in coaching; comms as activity | C-6 needs Owner decision #7 | C-4 C-5 C-8 C-9 | P1 |
 | **W3-J** Consent model reconciliation | W2-C, W2-G | A-8 | P1 |
 | **W3-K** Cost observability: read back `ai_usage`, token/cost ceilings, AI metrics, voice metering | — | C-10 C-11 | P2 |
@@ -493,7 +493,7 @@ are aggregate-only; polling stops on terminal states.
 
 ## 8. FEATURE COMPLETE checklist (Owner §12)
 
-**As of staging tip `234871a` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
+**As of staging tip `11cd01f` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
 
 | Criterion | Status | Blocking IDs |
 |---|---|---|
@@ -501,9 +501,9 @@ are aggregate-only; polling stops on terminal states.
 | Contact Intelligence operates coherently | ⚠️ as of `234871a`: I-3 (#53) and E-4 contact-anchored / DNC-visible signals (#59) landed; coherence still partial | I-3 ✅#53, E-4 ✅#59 |
 | Signal Sweep surfaces future-seller opportunities | ✅ *(merged #48)* — but unbounded at scale | F-2, F-3 |
 | Contactability controls are integrated | ⚠️ as of `234871a`: A-1 write routes (#52) and A-6/A-7 Contact 360 read + consent UI (#61) landed; model reconciliation still open | A-1 ✅#52, A-6 ✅#61, A-7 ✅#61, A-8 |
-| Nurture exists as a coherent relationship workflow | ❌ does not exist | B-2, W4-B |
+| Nurture exists as a coherent relationship workflow | ❌ the workflow does not exist. B-1 messaging denylist landed in #55 (`OUTBOUND_MESSAGING_FRAGMENTS`); do not re-open it | B-1 ✅#55, B-2, W4-B |
 | Performance/Business Coach consolidated and usable | ⚠️ consolidated; **numbers are wrong per-agent**. Discovery unblocked after #55; implementation still gated on Owner decisions #4 and #5 | C-1, C-2 |
-| Daily Command Centre ties the experience together | ⚠️ **cannot answer "what have I committed to?"** — F-1 claimed and in progress (see ownership register) | F-1, F-2 |
+| Daily Command Centre ties the experience together | ⚠️ as of `11cd01f`: F-1 commitments on Grow Today landed (#64). Non-`Emerging` signal cap still open | F-1 ✅#64, F-2 |
 | Appraisal workflow is integrated | ❌ **workspace unreachable; Rule E can never fire** | E-1, E-2 |
 | Communication architecture is integrated | ⚠️ as of `234871a`: D-3 dispatch seam + activation gate landed (#60); inbound still incomplete | D-3 ✅#60, D-5, E-6 |
 | Voice/call/transcription/follow-up complete enough for later activation | ✅ | D-2 (capture) |
@@ -511,7 +511,7 @@ are aggregate-only; polling stops on terminal states.
 | Tenant isolation is verified | ⚠️ one unfiltered cross-tenant read; two tables without tenant columns | I-1, E-9 |
 | Audit coverage is appropriate | ⚠️ consent history unrecoverable in the live model | A-4 |
 | Major workflows operate end-to-end | ❌ appraisal chain severed | E-1 |
-| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list | A-1 A-2 A-3, C-1, E-1, F-1 F-2, H-1, I-1 I-2 I-3 |
+| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability is in progress (see changelog); B-1 was closed by #55 | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2, H-1, I-1 I-2 I-3 |
 
 ---
 
@@ -609,3 +609,6 @@ from them.*
 | 2026-09-21 | Decision gate 19 resolved (§11). W2-D scope expanded accordingly. |
 | 2026-09-22 | **Consolidation gate.** PRs **#58 → #55 → #59 → #61 → #60** merged sequentially to staging. Tip **`234871ab1f9e415c0e9600f4d5290daa17aefc7b`**. #58 register/roadmap; #55 operational W2-C AI governance (≈ §4 W2-D + W3-K); #59 operational W2-D contact-anchored signals (post gate 19); #61 operational W3-A contactability completion (§4 W2-C + W3-B; A-6/A-7); #60 operational W3-B connect readiness (§4 W2-G; D-3). Domains released — see the ownership register. `growToday.ts` remains available to claim for F-1. Performance/Coach discovery is unblocked after #55; implementation stays gated on Owner decisions #4 and #5 plus a file claim. Naming rule from this entry forward: **operational name + PR#** is the primary identifier; historical §4 W-numbers are secondary (alias table under §4). |
 | 2026-09-22 | **F-1 claimed.** Commitments on Grow Today is Active in the ownership register (branch `cursor/f1-commitments-on-grow-today-33a9`, base `36f43ce`). Not merged. |
+| 2026-09-22 | **F-1 landed.** #64 merged. Staging tip **`11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3`**. Open commitments due today or overdue appear on Grow Today. `growToday.ts` released back to the pool. |
+| 2026-09-22 | **B-1 closed by #55.** Messaging fragments are in the protected-operations denylist (`OUTBOUND_MESSAGING_FRAGMENTS` in `protectedOperations.ts`, asserted by `governance.test.ts`). Not re-opened. |
+| 2026-09-22 | **E-3 in progress.** PR **#65** (`cursor/e3-opportunities-actionable-0599`, base `11cd01f`). View contact, View property, and Create follow-up on the Opportunities tab already landed in #56. This slice adds Add note and Ask AE on those rows, reusing Grow Today's note write and tab switch. Email/SMS stay on Grow Today and Contact 360, where contactability is known. Not merged. |

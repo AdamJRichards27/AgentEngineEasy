@@ -13,7 +13,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 
-Current staging: `234871ab1f9e415c0e9600f4d5290daa17aefc7b` (2026-09-22, consolidation gate complete: #58→#55→#59→#61→#60).
+Current staging: `11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3` (2026-09-22, F-1 / #64 merged onto the consolidation gate).
 
 ---
 
@@ -36,7 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
-| **F-1 / Commitments on Grow Today** | `cursor/f1-commitments-on-grow-today-33a9` | Grok (orchestrator) / Cursor cloud agent (implementer) | `apps/api/src/lib/growToday.ts`; `apps/api/src/routes/__tests__/growTodayQueryShape.test.ts`; `apps/api/src/routes/__tests__/growTodayCommitments.test.ts`; `apps/web/src/lib/growToday.ts`; `apps/web/src/lib/__tests__/growToday.test.ts`; `apps/web/src/lib/__tests__/growTodayConsolidation.test.ts`; `apps/web/src/pages/Grow.tsx` (Grow Today action card only); `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status line only). Read-only reuse of `growCommitments` and `loadContactabilityFilter` — commitment admin routes are not claimed. | **Active — in progress** | Branch from staging `36f43ce13f593f906d07ecc8eeb7337eb3fbc217`. F-4 / W3-A (DECISION A on the other commitment surfaces) is out of scope. | #64 | — |
+| **E-3 / Opportunities actionable** | `cursor/e3-opportunities-actionable-0599` | Grok (orchestrator) / Cursor cloud agent (implementer) | `apps/web/src/pages/Grow.tsx` (opportunity row actions, and the shared Add note write Grow Today already used); `apps/web/src/lib/__tests__/growOpportunityActions.behavior.test.ts`; `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). | **Active — in progress** | Branch from staging `11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3`. View contact / View property / Create follow-up already landed in #56. This slice adds Add note and Ask AE on those rows, reusing Today's handlers. Email/SMS stay off this list (no contactability payload). E-4, F-4, and B-1 are out of scope. | #65 | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,8 +47,9 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`propertyIntelligence/service.ts`** (with `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts`) — released with **#59** (operational W2-D, contact-anchored signals).
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
-- **`docs/`** — released with **#58** (register / roadmap). Docs edits still require a claim before a new slice starts.
-- **`growToday.ts`** (API and web) is **claimed for F-1** (commitments on Grow Today) — see the Active row. Do not edit it from another slice until that claim is released.
+- **`docs/`** — released with **#58** (register / roadmap). Docs edits still require a claim before a new slice starts. **E-3** currently claims the two register/roadmap files for its status lines.
+- **`growToday.ts`** (API and web) was released with **F-1 / #64**. It is back in the pool.
+- **B-1** (messaging fragments in the protected-operations denylist) was closed by **#55**. `OUTBOUND_MESSAGING_FRAGMENTS` is present in `apps/api/src/lib/ai/protectedOperations.ts` and covered by `governance.test.ts`. Do not open a B-1 implementation slice.
 
 ## Merged — no longer owned
 
@@ -76,6 +77,12 @@ Released back to the pool on 2026-09-22 (consolidation gate, merge order #58→#
 | #59 | Contact-anchored signals (operational W2-D) | `propertyIntelligence/service.ts`, `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts` |
 | #61 | Contactability completion (operational W3-A) | `routes/contacts.ts`, `pages/Grow.tsx`, `GrowContactConsentPanel`, `web/lib/contactability.ts` |
 | #60 | Connect readiness (operational W3-B) | `communications/outbox.ts`, `communications/providers/**`, `telephony/recordingGates.ts`, `lib/env.ts` (flag only) |
+
+Released back to the pool on 2026-09-22 (F-1, tip `11cd01f0e3a2bf10fde2def1817a6c29e6d6a2b3`):
+
+| PR | Slice | Domain released |
+|---|---|---|
+| #64 | F-1 Commitments on Grow Today | `growToday.ts` (API + web), Grow Today commitment card in `pages/Grow.tsx`, `growTodayCommitments.test.ts`, `growTodayQueryShape.test.ts`, `web/lib/__tests__/growToday.test.ts`, `growTodayConsolidation.test.ts` |
 
 ---
 
