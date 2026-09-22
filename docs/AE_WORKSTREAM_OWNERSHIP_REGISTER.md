@@ -13,7 +13,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 
-Current staging: `09f3bb5be2c1abbee7ded95005495f8605a49037` (2026-09-22, F-2 / #68 merged onto I-2).
+Current staging: `736118d5323657ee617e5f0086d2fe63eec37060` (2026-09-22, I-3 / #69 merged onto F-2).
 
 ---
 
@@ -36,7 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
-| **I-3 / Contact 360 brokerage predicates** | `cursor/i3-contact-360-brokerage-predicate-3727` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). `apps/api/src/lib/contactIntelligence.ts` and `apps/api/src/lib/relationshipTimeline.ts` were read and are **not** in this claim. | **Active** — re-verification only. The party-id selects on the brokerage-leading Grow tables already include `brokerage_id` in SQL. | Re-verified on staging `09f3bb5be2c1abbee7ded95005495f8605a49037`. Landed in #53 as eight reads (relationships, activities, opportunities, and commitments in each of the two files). `grow_contact_roles` was never one of the scans and carries the same predicate for consistency. Locked by `apps/api/src/routes/__tests__/contactReadScoping.test.ts`. Do not re-implement. | #69 | — |
+| **I-6 / I-8 contacts enrichment and QueryClient freshness** | `cursor/i6-i8-contacts-queryclient-reverify-0ca9` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). `apps/api/src/routes/contacts.ts` and `apps/web/src/main.tsx` were read and are **not** in this claim. | **Active** — re-verification only. Contacts-list enrichment is already bounded by the rendered party ids, and QueryClient defaults already set `staleTime: 30_000` and `refetchOnWindowFocus: false`. | Re-verified on staging `736118d5323657ee617e5f0086d2fe63eec37060`. Landed in #53. I-6 is locked by `apps/api/src/routes/__tests__/contactReadScoping.test.ts`. I-8 has no automated lock. Do not re-implement. I-7 is the same #53 contacts-list landing (role filter before the 200 cap) and is marked in this docs slice; no product change. | — | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,10 +47,13 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`propertyIntelligence/service.ts`** (with `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts`) — released with **#59** (operational W2-D, contact-anchored signals).
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
-- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**, claimed again by **F-2** and released with **#68**. Docs edits still require a claim before a new slice starts. **I-3** currently claims the two register/roadmap files for this re-verification's status lines only.
+- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**, claimed again by **F-2** and released with **#68**, claimed again by **I-3** and released with **#69**. Docs edits still require a claim before a new slice starts. **I-6 / I-8** currently claims the two register/roadmap files for this re-verification's status lines only.
 - **I-1** (`relationshipTimeline.ts` property-label lookup) is already in the pool via **#53**, and the #66 re-verification is merged. The predicate is `id IN (…) AND brokerage_id =`, covered by `contactReadScoping.test.ts`. Do not open another I-1 implementation slice.
 - **I-2** (`growToday.ts` `fetchLastActivityByParty`) is already in the pool via **#57**, and the #67 re-verification is merged. The read is `max(occurred_at) group by party_id`, filtered by `brokerage_id` and the party ids already in play, covered by `growTodayQueryShape.test.ts`. Do not open another I-2 implementation slice.
-- **I-3** (`contactIntelligence.ts` and `relationshipTimeline.ts` brokerage predicates) is already in the pool via **#53**. This verification does not re-claim those files. The SQL predicate is `brokerage_id =` and `party_id =` on `grow_relationships`, `grow_activities`, `grow_opportunities`, and `grow_commitments` (and `grow_contact_roles`), covered by `contactReadScoping.test.ts`. Do not open another I-3 implementation slice.
+- **I-3** (`contactIntelligence.ts` and `relationshipTimeline.ts` brokerage predicates) is already in the pool via **#53**, and the #69 re-verification is merged. The SQL predicate is `brokerage_id =` and `party_id =` on `grow_relationships`, `grow_activities`, `grow_opportunities`, and `grow_commitments` (and `grow_contact_roles`), covered by `contactReadScoping.test.ts`. Do not open another I-3 implementation slice.
+- **I-6** (`routes/contacts.ts` enrichment `party_id in (…)` on the rendered party ids, plus `brokerage_id`) is already in the pool via **#53**. This verification does not re-claim `routes/contacts.ts`. Locked by `contactReadScoping.test.ts`. Do not open another I-6 implementation slice.
+- **I-7** (role filter in SQL before `limit(200)`, same file) is already in the pool via **#53**. Locked by `contactReadScoping.test.ts`. Do not re-implement.
+- **I-8** (`QueryClient` `staleTime: 30_000`, `refetchOnWindowFocus: false` in `apps/web/src/main.tsx`) is already in the pool via **#53**. This verification does not re-claim `main.tsx`. Do not open another I-8 implementation slice.
 - **F-2** (`MAX_PRIORITY_ACTIONS` after the sort, `withheldByActionCap`) is already in the pool via **#57**, and the #68 re-verification is merged. Emerging stays on `MAX_EMERGING_SIGNAL_ACTIONS` (10). Do not open another F-2 implementation slice.
 - **F-3** (one signal card per party; losing signals ride as `relatedSignals`) is already in the pool via **#57**, locked by `growTodayConsolidation.test.ts`. Do not re-implement.
 - **I-4** (`GROW_TODAY_*_ROW_CAP` on each rule read, ordered, with stated `limitations`) is already in the pool via **#57**, locked by `growTodayQueryShape.test.ts`. Do not re-implement.
@@ -114,6 +117,12 @@ Released back to the pool on 2026-09-22 (F-2 re-verification, tip `09f3bb5be2c1a
 | PR | Slice | Domain released |
 |---|---|---|
 | #68 | F-2 Grow Today non-Emerging signal cap (re-verification) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
+
+Released back to the pool on 2026-09-22 (I-3 re-verification, tip `736118d5323657ee617e5f0086d2fe63eec37060`):
+
+| PR | Slice | Domain released |
+|---|---|---|
+| #69 | I-3 Contact 360 brokerage predicates (re-verification) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
 
 ---
 
