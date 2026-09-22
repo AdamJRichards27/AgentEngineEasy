@@ -398,7 +398,178 @@ test("E-3: without grow.opportunities.manage no follow-up button is offered on e
       hooks.beginRender();
       const tree = GrowOpportunitiesTab({ onViewContact: () => {} });
       assert.equal(button(tree, "Create follow-up"), undefined, "a button that would only 403 is never shown");
+      assert.equal(button(tree, "Add note"), undefined, "a note button that would only 403 is never shown");
+      assert.equal(button(tree, "Ask AE"), undefined, "Ask AE is only offered when the tab is given Today's switch");
       assert.ok(button(tree, "View contact"), "reading the contact is still offered");
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("E-3: an Opportunities row adds a note with Today's POST, and Ask AE uses Today's tab switch", async () => {
+  const asked: string[] = [];
+  const { hooks, calls, invalidated, pending } = installGlobals({
+    __w2bEntitlements: ["grow.access", "grow.contacts.read", "grow.opportunities.manage", "grow.activities.manage"],
+  });
+  try {
+    await withVite(async (vite) => {
+      const { GrowOpportunitiesTab } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        GrowOpportunitiesTab: (props: Record<string, unknown>) => unknown;
+      };
+      const render = () => {
+        hooks.beginRender();
+        return GrowOpportunitiesTab({
+          onViewContact: () => {},
+          onAskAE: () => asked.push("ask"),
+        });
+      };
+
+      let tree = render();
+      assert.ok(button(tree, "Add note"), "the row offers the note Grow Today already offers");
+      assert.ok(button(tree, "View contact"));
+      assert.ok(button(tree, "Create follow-up"));
+      assert.deepEqual(links(tree), ["/properties/77"]);
+
+      (button(tree, "Ask AE")!.props!.onClick as () => void)();
+      assert.deepEqual(asked, ["ask"], "Ask AE is the workspace tab switch, not a new destination");
+
+      (button(tree, "Add note")!.props!.onClick as () => void)();
+      tree = render();
+      const blank = byId(tree, "grow-opportunity-note-41-note");
+      assert.ok(blank, "the shared note form is rendered for this row");
+      (blank.props!.onChange as (e: unknown) => void)({ target: { value: "   " } });
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (e: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+      assert.deepEqual(calls, [], "a blank note writes nothing");
+
+      (byId(tree, "grow-opportunity-note-41-note")!.props!.onChange as (e: unknown) => void)({
+        target: { value: "Spoke with the owner" },
+      });
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (e: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+
+      assert.equal(calls.length, 1, "exactly one write");
+      assert.equal(calls[0].path, "/grow/activities", "the same route Grow Today's card POSTs");
+      assert.equal(calls[0].options?.method, "POST");
+      assert.deepEqual(JSON.parse(calls[0].options!.body!), {
+        activityType: "note",
+        summary: "Spoke with the owner",
+        partyId: 12,
+        propertyId: 77,
+        opportunityId: 41,
+      });
+      assert.ok(
+        invalidated.some((key) => Array.isArray(key) && key[0] === "grow-today"),
+        "Today's feed is invalidated once a note exists",
+      );
+      assert.ok(
+        invalidated.some((key) => Array.isArray(key) && key[0] === "grow-activities"),
+        "the activity list is invalidated too",
+      );
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("E-3: a note on an opportunity with no property omits propertyId", async () => {
+  const { hooks, calls, pending } = installGlobals({
+    __w2bEntitlements: ["grow.access", "grow.activities.manage"],
+    __w2bQuery: {
+      isLoading: false,
+      isError: false,
+      data: { opportunities: [opportunity({ id: 42, propertyId: null })] },
+      refetch: () => {},
+    },
+  });
+  try {
+    await withVite(async (vite) => {
+      const { GrowOpportunitiesTab } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        GrowOpportunitiesTab: (props: Record<string, unknown>) => unknown;
+      };
+      const render = () => {
+        hooks.beginRender();
+        return GrowOpportunitiesTab({ onViewContact: () => {} });
+      };
+
+      let tree = render();
+      assert.deepEqual(links(tree), [], "no property means no link");
+      assert.equal(button(tree, "Ask AE"), undefined, "Ask AE is absent unless the workspace passes the switch");
+      (button(tree, "Add note")!.props!.onClick as () => void)();
+      tree = render();
+      (byId(tree, "grow-opportunity-note-42-note")!.props!.onChange as (e: unknown) => void)({
+        target: { value: "No property yet" },
+      });
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (e: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+
+      assert.equal(calls.length, 1);
+      assert.deepEqual(JSON.parse(calls[0].options!.body!), {
+        activityType: "note",
+        summary: "No property yet",
+        partyId: 12,
+        opportunityId: 42,
+      });
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("E-3: Contact 360 can add a note on an opportunity, and does not offer Ask AE", async () => {
+  const { hooks, calls, pending } = installGlobals({
+    __w2bEntitlements: ["grow.access", "grow.activities.manage", "grow.opportunities.manage"],
+  });
+  try {
+    await withVite(async (vite) => {
+      const { GrowContactOpportunitiesSection } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        GrowContactOpportunitiesSection: (props: Record<string, unknown>) => unknown;
+      };
+      const render = () => {
+        hooks.beginRender();
+        return GrowContactOpportunitiesSection({
+          partyId: 12,
+          opportunities: [
+            {
+              id: 41,
+              opportunityType: "Appraisal",
+              status: "Open",
+              stage: "Qualified",
+              reason: "Enquired",
+              nextActionDueAt: null,
+              recommendedNextAction: null,
+              propertyId: 77,
+            },
+          ],
+          onChanged: () => {},
+        });
+      };
+
+      let tree = render();
+      assert.equal(button(tree, "View contact"), undefined);
+      assert.equal(button(tree, "Ask AE"), undefined, "Ask AE is a workspace jump this screen does not own");
+      (button(tree, "Add note")!.props!.onClick as () => void)();
+      tree = render();
+      (byId(tree, "grow-opportunity-note-41-note")!.props!.onChange as (e: unknown) => void)({
+        target: { value: "Booked a time" },
+      });
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (e: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].path, "/grow/activities");
+      assert.deepEqual(JSON.parse(calls[0].options!.body!), {
+        activityType: "note",
+        summary: "Booked a time",
+        partyId: 12,
+        propertyId: 77,
+        opportunityId: 41,
+      });
     });
   } finally {
     clearGlobals();

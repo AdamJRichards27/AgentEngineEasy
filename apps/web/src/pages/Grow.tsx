@@ -588,10 +588,11 @@ function GrowWorkspace() {
             onSmsContact={smsContact}
           />
         )}
-        {/* AE GROW Completion W2-B (E-3): the tab now needs the same "open this
-            contact" jump Grow Today already had, so an opportunity row can lead
-            somewhere. Exactly the viewContact above, not a second mechanism. */}
-        {tab === "opportunities" && <GrowOpportunitiesTab onViewContact={viewContact} />}
+        {/* E-3: the same contact jump and Ask AE tab switch Grow Today already
+            uses. Not a second navigation mechanism. */}
+        {tab === "opportunities" && (
+          <GrowOpportunitiesTab onViewContact={viewContact} onAskAE={() => setTab("askAE")} />
+        )}
         {tab === "contacts" && (
           <GrowContactsTab
             selectedPartyId={contactPartyId}
@@ -876,43 +877,144 @@ function GrowNextActionForm({
   );
 }
 
+interface GrowNoteInput {
+  summary: string;
+  partyId: number;
+  propertyId: number | null;
+  opportunityId: number | null;
+}
+
+// POST /grow/activities with activityType "note" is the one write behind
+// "Add note". Grow Today's card has used it since Priority 1. Opportunity rows
+// call this same helper so a note saved from the Opportunities tab cannot drift
+// from a note saved on Today.
+function useAddGrowNote(onSaved: () => void) {
+  return useMutation<unknown, unknown, GrowNoteInput>({
+    mutationFn: (input) =>
+      apiFetch("/grow/activities", {
+        method: "POST",
+        body: JSON.stringify({
+          activityType: "note",
+          summary: input.summary,
+          partyId: input.partyId,
+          ...(input.propertyId ? { propertyId: input.propertyId } : {}),
+          ...(input.opportunityId ? { opportunityId: input.opportunityId } : {}),
+        }),
+      }),
+    onSuccess: onSaved,
+  });
+}
+
+function GrowNoteForm({
+  idPrefix,
+  submitting,
+  onSubmit,
+}: {
+  idPrefix: string;
+  submitting: boolean;
+  onSubmit: (summary: string) => void;
+}) {
+  const [noteText, setNoteText] = useState("");
+
+  return (
+    <form
+      className="stack grow-inline-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const summary = noteText.trim();
+        if (!summary) return;
+        onSubmit(summary);
+      }}
+    >
+      <label htmlFor={`${idPrefix}-note`}>Note</label>
+      <textarea
+        id={`${idPrefix}-note`}
+        placeholder="Add a note about this contact"
+        value={noteText}
+        onChange={(e) => setNoteText(e.target.value)}
+        required
+        rows={2}
+      />
+      <button className="btn btn-primary btn-small" type="submit" disabled={submitting}>
+        Save note
+      </button>
+    </form>
+  );
+}
+
 // The actions an opportunity ROW offers, shared by the Opportunities tab and
-// Contact 360's opportunities table. Before this, both rendered four plain
-// <td>s and nothing else: you could see that an opportunity needed work and do
-// nothing about it, on either screen.
+// Contact 360's opportunities table. View contact, View property, and Create
+// follow-up landed with #56. Add note and Ask AE are the other non-outreach
+// actions Grow Today already offers on the same opportunity record; they reuse
+// Today's note write and Today's tab switch.
 //
-// onViewContact is null on Contact 360 — that table is already inside the
-// contact this opportunity belongs to, so a "View contact" there would just
-// reload the screen you are on. Everywhere else it is the same jump Grow Today
-// makes.
+// Email and SMS are intentionally not copied here. Grow Today only shows them
+// when the card carries a channel and the contact is not do-not-contact. This
+// list does not have that contactability payload, and offering outreach without
+// it would bypass the gate. View contact opens the record where those actions
+// already live.
+//
+// onViewContact and onAskAE are null on Contact 360 — that table is already
+// inside the contact, and Ask AE is a workspace-tab jump the contact screen
+// does not own. Everywhere else they are the same jumps Grow Today makes.
 function GrowOpportunityRowActions({
   opportunityId,
   partyId,
   propertyId,
   canManageOpportunities,
+  canAddNote,
   canViewContacts,
   onViewContact,
+  onAskAE,
   onSaved,
 }: {
   opportunityId: number;
   partyId: number | null;
   propertyId: number | null;
   canManageOpportunities: boolean;
+  canAddNote: boolean;
   canViewContacts: boolean;
   onViewContact: ((partyId: number) => void) | null;
+  onAskAE: (() => void) | null;
   onSaved: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
   const updateNextAction = useUpdateOpportunityNextAction(opportunityId, () => {
-    setOpen(false);
+    setOpenForm(null);
     onSaved();
   });
+  const addNote = useAddGrowNote(() => {
+    setOpenForm(null);
+    onSaved();
+  });
+  const busy = addNote.isPending || updateNextAction.isPending;
+  const showAddNote = canAddNote && partyId !== null;
+  const errorMessage = addNote.isError
+    ? growErrorMessage(addNote.error, "Something went wrong. Try again.")
+    : updateNextAction.isError
+      ? growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")
+      : null;
 
   return (
     <div className="grow-action-card-actions">
-      {onViewContact !== null && canViewContacts && partyId !== null && (
-        <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(partyId)}>
-          View contact
+      {showAddNote && (
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          disabled={busy}
+          onClick={() => setOpenForm(openForm === "note" ? null : "note")}
+        >
+          {openForm === "note" ? "Cancel" : "Add note"}
+        </button>
+      )}
+      {canManageOpportunities && (
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          disabled={busy}
+          onClick={() => setOpenForm(openForm === "nextAction" ? null : "nextAction")}
+        >
+          {openForm === "nextAction" ? "Cancel" : "Create follow-up"}
         </button>
       )}
       {propertyId !== null && (
@@ -920,23 +1022,35 @@ function GrowOpportunityRowActions({
           View property
         </Link>
       )}
-      {canManageOpportunities && (
-        <button
-          type="button"
-          className="btn btn-secondary btn-small"
-          disabled={updateNextAction.isPending}
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "Cancel" : "Create follow-up"}
+      {onViewContact !== null && canViewContacts && partyId !== null && (
+        <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(partyId)}>
+          View contact
         </button>
       )}
-      {updateNextAction.isError && (
-        <p className="error-text">{growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")}</p>
+      {onAskAE !== null && (
+        <button type="button" className="btn btn-link btn-small" onClick={onAskAE}>
+          Ask AE
+        </button>
       )}
-      {open && (
+      {errorMessage && <p className="error-text">{errorMessage}</p>}
+      {openForm === "note" && partyId !== null && (
+        <GrowNoteForm
+          idPrefix={`grow-opportunity-note-${opportunityId}`}
+          submitting={busy}
+          onSubmit={(summary) =>
+            addNote.mutate({
+              summary,
+              partyId,
+              propertyId,
+              opportunityId,
+            })
+          }
+        />
+      )}
+      {openForm === "nextAction" && (
         <GrowNextActionForm
           idPrefix={`grow-opportunity-${opportunityId}`}
-          submitting={updateNextAction.isPending}
+          submitting={busy}
           onSubmit={(vars) => updateNextAction.mutate(vars)}
         />
       )}
@@ -984,29 +1098,16 @@ function GrowActionCard({
 }: GrowActionCardProps) {
   const queryClient = useQueryClient();
   const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
-  const [noteText, setNoteText] = useState("");
 
   function invalidateToday() {
     queryClient.invalidateQueries({ queryKey: ["grow-today"] });
   }
 
-  const addNote = useMutation({
-    mutationFn: (summary: string) =>
-      apiFetch("/grow/activities", {
-        method: "POST",
-        body: JSON.stringify({
-          activityType: "note",
-          summary,
-          partyId: item.partyId,
-          ...(item.propertyId ? { propertyId: item.propertyId } : {}),
-          ...(item.opportunityId ? { opportunityId: item.opportunityId } : {}),
-        }),
-      }),
-    onSuccess: () => {
-      setOpenForm(null);
-      setNoteText("");
-      invalidateToday();
-    },
+  // Same note write the Opportunities tab uses. The form unmounts on success,
+  // which clears its field — there is no second copy of the POST body.
+  const addNote = useAddGrowNote(() => {
+    setOpenForm(null);
+    invalidateToday();
   });
 
   // AE GROW Completion W2-B (E-3): this card's follow-up mutation now lives in
@@ -1169,28 +1270,19 @@ function GrowActionCard({
         )}
       </div>
 
-      {openForm === "note" && (
-        <form
-          className="stack grow-inline-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!noteText.trim()) return;
-            addNote.mutate(noteText.trim());
-          }}
-        >
-          <label htmlFor={`grow-note-${item.id}`}>Note</label>
-          <textarea
-            id={`grow-note-${item.id}`}
-            placeholder="Add a note about this contact"
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-            required
-            rows={2}
-          />
-          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
-            Save note
-          </button>
-        </form>
+      {openForm === "note" && item.partyId !== null && (
+        <GrowNoteForm
+          idPrefix={`grow-note-${item.id}`}
+          submitting={busy}
+          onSubmit={(summary) =>
+            addNote.mutate({
+              summary,
+              partyId: item.partyId as number,
+              propertyId: item.propertyId,
+              opportunityId: item.opportunityId,
+            })
+          }
+        />
       )}
 
       {openForm === "nextAction" && (
@@ -2312,13 +2404,14 @@ export function GrowContactOpportunitiesSection({
   const queryClient = useQueryClient();
   const { hasEntitlement } = useEntitlements();
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
+  const canAddNote = hasEntitlement("grow.activities.manage");
 
   function onSaved() {
-    // The follow-up is due-dated work, so Grow Today's feed is stale too — the
-    // same pair Grow Today's own card invalidates, from the other direction.
+    // A follow-up or a note changes what Today and the activity list show.
     onChanged();
     queryClient.invalidateQueries({ queryKey: ["grow-today"] });
     queryClient.invalidateQueries({ queryKey: ["grow-opportunities"] });
+    queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
   }
 
   return (
@@ -2362,8 +2455,10 @@ export function GrowContactOpportunitiesSection({
                     partyId={partyId}
                     propertyId={o.propertyId}
                     canManageOpportunities={canManageOpportunities}
+                    canAddNote={canAddNote}
                     canViewContacts={false}
                     onViewContact={null}
+                    onAskAE={null}
                     onSaved={onSaved}
                   />
                 </td>
@@ -2376,16 +2471,22 @@ export function GrowContactOpportunitiesSection({
   );
 }
 
-// AE GROW Completion W2-B (E-3) — this tab was the clearest dead end in Grow:
-// four read-only cells per row, no row click, no contact link, no property
-// link, no action. The very same opportunity was fully actionable on Grow
-// Today. It now offers the same three next steps Today's card does, backed by
-// the same mutation (GrowOpportunityRowActions above), and shows the existing
-// next action so that creating one visibly changes something.
-export function GrowOpportunitiesTab({ onViewContact }: { onViewContact: (partyId: number) => void }) {
+// E-3 — this tab was four read-only cells per row. #56 added View contact,
+// View property, and Create follow-up, the same jumps and follow-up write Grow
+// Today already had. Add note and Ask AE are the remaining non-outreach actions
+// on Today's opportunity card, wired through the same handlers. The existing
+// next action stays visible so creating one changes the row.
+export function GrowOpportunitiesTab({
+  onViewContact,
+  onAskAE,
+}: {
+  onViewContact: (partyId: number) => void;
+  onAskAE?: () => void;
+}) {
   const queryClient = useQueryClient();
   const { hasEntitlement } = useEntitlements();
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
+  const canAddNote = hasEntitlement("grow.activities.manage");
   const canViewContacts = hasEntitlement("grow.contacts.read");
 
   const opportunities = useQuery<{ opportunities: GrowOpportunity[] }>({
@@ -2396,6 +2497,7 @@ export function GrowOpportunitiesTab({ onViewContact }: { onViewContact: (partyI
   function onSaved() {
     void opportunities.refetch();
     queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+    queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
   }
 
   return (
@@ -2443,8 +2545,10 @@ export function GrowOpportunitiesTab({ onViewContact }: { onViewContact: (partyI
                     partyId={o.partyId}
                     propertyId={o.propertyId}
                     canManageOpportunities={canManageOpportunities}
+                    canAddNote={canAddNote}
                     canViewContacts={canViewContacts}
                     onViewContact={onViewContact}
+                    onAskAE={onAskAE ?? null}
                     onSaved={onSaved}
                   />
                 </td>
