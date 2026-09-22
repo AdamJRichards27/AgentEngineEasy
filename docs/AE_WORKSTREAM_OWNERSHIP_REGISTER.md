@@ -36,6 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
+| **F-1 / Commitments on Grow Today** | `cursor/f1-commitments-on-grow-today-33a9` | Grok (orchestrator) / Cursor cloud agent (implementer) | `apps/api/src/lib/growToday.ts`; `apps/api/src/routes/__tests__/growTodayQueryShape.test.ts`; `apps/api/src/routes/__tests__/growTodayCommitments.test.ts`; `apps/web/src/lib/growToday.ts`; `apps/web/src/lib/__tests__/growToday.test.ts`; `apps/web/src/lib/__tests__/growTodayConsolidation.test.ts`; `apps/web/src/pages/Grow.tsx` (Grow Today action card only); `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status line only). Read-only reuse of `growCommitments` and `loadContactabilityFilter` — commitment admin routes are not claimed. | **Active — in progress** | Branch from staging `36f43ce13f593f906d07ecc8eeb7337eb3fbc217`. F-4 / W3-A (DECISION A on the other commitment surfaces) is out of scope. | — | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,7 +48,7 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
 - **`docs/`** — released with **#58** (register / roadmap). Docs edits still require a claim before a new slice starts.
-- **`growToday.ts`** (API and web) is **unowned and available to claim for F-1** (commitments on Grow Today). The next slice records that claim here before editing.
+- **`growToday.ts`** (API and web) is **claimed for F-1** (commitments on Grow Today) — see the Active row. Do not edit it from another slice until that claim is released.
 
 ## Merged — no longer owned
 

@@ -45,7 +45,9 @@ export type GrowTodayActionType =
   | "opportunity_no_action_set"
   | "relationship_cold"
   | "appraisal_follow_up"
-  | "property_intelligence_signal";
+  | "property_intelligence_signal"
+  // F-1 — mirrors the API. An Open growCommitments row due today or overdue.
+  | "commitment";
 
 export type GrowTodayContactability = "contactable" | "do_not_contact";
 
@@ -126,6 +128,8 @@ export interface GrowTodayAction {
   propertyLabel: string | null;
   opportunityId: number | null;
   appraisalId: number | null;
+  /** F-1 — the growCommitments row. Null on every other card kind. */
+  commitmentId: number | null;
   reason: string;
   recommendedAction: string;
   dueAt: string | null;
@@ -169,6 +173,17 @@ export interface GrowTodaySummary {
   };
   priorityActions: GrowTodayAction[];
   signalSummary: GrowTodaySignalSummary;
+}
+
+/**
+ * F-1 — the only card kind that needs its own label. Every other Today card
+ * is already named by its reason ("Follow-up is due today", "No contact
+ * recorded…"). A commitment has to be recognisable as a promise the agent
+ * already made, which those sentences do not say on their own.
+ */
+export function actionTypeLabel(type: GrowTodayActionType): string | null {
+  if (type === "commitment") return "Commitment";
+  return null;
 }
 
 export function priorityLabel(priority: GrowTodayPriority): string {

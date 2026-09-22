@@ -198,19 +198,21 @@ test("the statement count is FIXED — it does not grow with the size of the ten
   // unchanged" claim checkable. Before the rewrite: four parallel rule reads
   // (one of them the tenant-wide activity scan) plus contactability's two
   // serial statements. After: three parallel rule reads, then the bounded
-  // activity aggregate and contactability's two — the same six statements,
-  // with the activity read no longer tenant-wide and contactability's pair no
-  // longer serial.
+  // activity aggregate and contactability's two — six statements, with the
+  // activity read no longer tenant-wide and contactability's pair no longer
+  // serial.
+  //
+  // F-1 adds exactly one bounded grow_commitments read to that first wave.
   assert.equal(
     large.length,
-    6,
-    `expected 6 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
+    7,
+    `expected 7 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
   );
 
   const withSignals = await captureStatements(brokerageId, { includePropertyIntelligenceSignals: true });
   assert.equal(
     withSignals.length,
-    7,
+    8,
     `Rule F adds exactly one statement and no more; got ${withSignals.length}:\n${withSignals.join("\n---\n")}`,
   );
 });
@@ -218,7 +220,7 @@ test("the statement count is FIXED — it does not grow with the size of the ten
 test("every unbounded tenant read is gone: each rule read carries a limit, and the response carries the cap it was read under", async () => {
   const statements = await captureStatements(brokerageId, { includePropertyIntelligenceSignals: true });
 
-  for (const table of ["grow_relationships", "grow_opportunities", "appraisals", "grow_opportunity_signals"]) {
+  for (const table of ["grow_relationships", "grow_opportunities", "appraisals", "grow_commitments", "grow_opportunity_signals"]) {
     const matching = statements.filter((s) => new RegExp(`from\\s+"?${table}"?`, "i").test(s));
     assert.equal(matching.length, 1, `exactly one statement may read ${table}`);
     assert.match(matching[0], /limit/i, `the ${table} read must be bounded — this was an unbounded tenant read (I-4)`);

@@ -43,6 +43,7 @@ function signalCard(overrides: Partial<GrowTodayAction> = {}): GrowTodayAction {
     propertyLabel: "1 Test St",
     opportunityId: null,
     appraisalId: null,
+    commitmentId: null,
     reason: "Stored explanation.",
     recommendedAction: "Review this signal.",
     dueAt: null,
