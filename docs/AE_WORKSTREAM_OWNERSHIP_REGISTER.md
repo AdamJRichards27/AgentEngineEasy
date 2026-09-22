@@ -13,7 +13,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 
-Current staging: `6d3d87d6bb4fa3e65192f14ebe35099177c865cb` (2026-09-22, I-1 / #66 merged onto E-3).
+Current staging: `e703e7b422a6ef688c81f6901590b98d6fa439f1` (2026-09-22, I-2 / #67 merged onto I-1).
 
 ---
 
@@ -36,7 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
-| **I-2 / Grow Today activity aggregate** | `cursor/i2-grow-today-activity-aggregate-cb11` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). `apps/api/src/lib/growToday.ts` was read and is **not** in this claim. | **Active** — re-verification only. The whole-brokerage `grow_activities` scan reduced in Node is already gone on staging. | Re-verified on staging `6d3d87d6bb4fa3e65192f14ebe35099177c865cb`. `fetchLastActivityByParty` is `max(occurred_at) … group by party_id` with `brokerage_id =` and `party_id = any(…)` (landed in #57, locked by `apps/api/src/routes/__tests__/growTodayQueryShape.test.ts` and `growTodayConsolidation.test.ts`). Do not re-implement. F-2, F-3, I-4, and I-5 are out of scope. | #67 | — |
+| **F-2 / Grow Today non-Emerging signal cap** | `cursor/f2-grow-today-action-cap-a94d` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). `apps/api/src/lib/growToday.ts` was read and is **not** in this claim. | **Active** — re-verification only. Non-`Emerging` cards and the whole `priorityActions` list are already bounded on staging. | Re-verified on staging `e703e7b422a6ef688c81f6901590b98d6fa439f1`. `MAX_PRIORITY_ACTIONS` (200, a technical safety bound) is applied after the deterministic sort; `withheldByActionCap` reports the cut; `MAX_EMERGING_SIGNAL_ACTIONS` (10) still caps Emerging. Landed in #57. Locked by `apps/api/src/routes/__tests__/growTodayConsolidation.test.ts` and `growSignalSurface.test.ts`. Do not re-implement. F-3, I-4, and I-5 are the same #57 landing and are marked in this docs slice; no product change. | #68 | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,10 +47,14 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`propertyIntelligence/service.ts`** (with `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts`) — released with **#59** (operational W2-D, contact-anchored signals).
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
-- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**. Docs edits still require a claim before a new slice starts. **I-2** currently claims the two register/roadmap files for this re-verification's status lines only.
+- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**. Docs edits still require a claim before a new slice starts. **F-2** currently claims the two register/roadmap files for this re-verification's status lines only.
 - **I-1** (`relationshipTimeline.ts` property-label lookup) is already in the pool via **#53**, and the #66 re-verification is merged. The predicate is `id IN (…) AND brokerage_id =`, covered by `contactReadScoping.test.ts`. Do not open another I-1 implementation slice.
-- **I-2** (`growToday.ts` `fetchLastActivityByParty`) is already in the pool via **#57**. This verification does not re-claim `growToday.ts`. The read is `max(occurred_at) group by party_id`, filtered by `brokerage_id` and the party ids already in play, covered by `growTodayQueryShape.test.ts`. Do not open another I-2 implementation slice. F-2, F-3, I-4, and I-5 remain later slices on that file.
-- **`growToday.ts`** (API and web) was released with **F-1 / #64**. It is back in the pool for those later slices. This I-2 re-verification does not hold it.
+- **I-2** (`growToday.ts` `fetchLastActivityByParty`) is already in the pool via **#57**, and the #67 re-verification is merged. The read is `max(occurred_at) group by party_id`, filtered by `brokerage_id` and the party ids already in play, covered by `growTodayQueryShape.test.ts`. Do not open another I-2 implementation slice.
+- **F-2** (`MAX_PRIORITY_ACTIONS` after the sort, `withheldByActionCap`) is already in the pool via **#57**. Emerging stays on `MAX_EMERGING_SIGNAL_ACTIONS` (10). This verification does not re-claim `growToday.ts`. Do not open another F-2 implementation slice.
+- **F-3** (one signal card per party; losing signals ride as `relatedSignals`) is already in the pool via **#57**, locked by `growTodayConsolidation.test.ts`. Do not re-implement.
+- **I-4** (`GROW_TODAY_*_ROW_CAP` on each rule read, ordered, with stated `limitations`) is already in the pool via **#57**, locked by `growTodayQueryShape.test.ts`. Do not re-implement.
+- **I-5** (uncapped `priorityActions`) is the same response bound as F-2. Already in the pool via **#57**. Do not re-implement.
+- **`growToday.ts`** (API and web) was released with **F-1 / #64**. F-2, F-3, I-2, I-4, and I-5 are closed on it. This F-2 re-verification does not hold the file. A later slice that still needs it (E-2) must claim it.
 - **B-1** (messaging fragments in the protected-operations denylist) was closed by **#55**. `OUTBOUND_MESSAGING_FRAGMENTS` is present in `apps/api/src/lib/ai/protectedOperations.ts` and covered by `governance.test.ts`. Do not open a B-1 implementation slice.
 
 ## Merged — no longer owned
@@ -97,6 +101,12 @@ Released back to the pool on 2026-09-22 (I-1 re-verification, tip `6d3d87d6bb4fa
 | PR | Slice | Domain released |
 |---|---|---|
 | #66 | I-1 Contact 360 properties scoping (re-verification) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
+
+Released back to the pool on 2026-09-22 (I-2 re-verification, tip `e703e7b422a6ef688c81f6901590b98d6fa439f1`):
+
+| PR | Slice | Domain released |
+|---|---|---|
+| #67 | I-2 Grow Today activity aggregate (re-verification) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
 
 ---
 

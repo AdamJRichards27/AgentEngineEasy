@@ -2,7 +2,7 @@
 
 **Status:** ACTIVE — canonical source of truth for remaining AE Grow work.
 **Baseline:** staging `ba8790123ea41c9b6be5b3525fc64c80a43939a5` (PR #48, Signal Sweep; post-merge CI #372 PASS).
-**Current staging tip (2026-09-22):** `6d3d87d6bb4fa3e65192f14ebe35099177c865cb` — I-1 / #66 merged onto E-3 (`23ff95200fbca12ec155ec6868db60f3a31d8d73`). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
+**Current staging tip (2026-09-22):** `e703e7b422a6ef688c81f6901590b98d6fa439f1` — I-2 / #67 merged onto I-1 (`6d3d87d6bb4fa3e65192f14ebe35099177c865cb`). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
 **Authority:** Project Owner decision *"MERGE SIGNAL SWEEP + BEGIN GROW COMPLETION PROGRAM"* (2026-09-20).
 **Maintenance rule:** this file is updated as each workstream lands. Do not create a second roadmap.
 
@@ -300,7 +300,7 @@ TRACK 8  CONNECT    │ W2 dispatch seam + gate ─> W4 conformance   │  D-3, 
 **Hard couplings to respect**
 
 - `outbox.ts` is touched by A-3, D-3 and A-8 → **sequence them**, do not rebase it three times.
-- `growToday.ts` is touched by F-2, F-3, I-2, I-4, E-2 → **one canonical owner**, serialise.
+- `growToday.ts` is touched by F-2, F-3, I-2, I-4, E-2 → **one canonical owner**, serialise. F-2, F-3, I-2, I-4, and I-5 closed in #57 (re-verified on `e703e7b`); do not re-open them. E-2 is the remaining collision on this file.
 - `Grow.tsx` (~2,184 lines) is simultaneously DCC, Contact 360 and the call panel → extract panels
   into components *before* parallel UI work, or three agents will collide in one file.
 - `routes/contacts.ts` is touched by A-6 and I-6 → serialise.
@@ -354,7 +354,7 @@ the reason candidate judgement rests on targeted suites repeated for stability p
 
 | PR | Scope | Depends on | Sev |
 |---|---|---|---|
-| **W2-A** Grow Today: per-party signal consolidation + cap non-`Emerging` + query rewrite | W1-C | F-2 F-3 I-2 I-4 I-5 I-16 | **P0** |
+| **W2-A** Grow Today: per-party signal consolidation + cap non-`Emerging` + query rewrite | W1-C | F-2 ✅#57, F-3 ✅#57, I-2 ✅#57, I-4 ✅#57, I-5 ✅#57, I-16 | **P0** |
 | **W2-B** Commitments on Grow Today (Rule G) + DECISION A on those cards | W2-A | F-1 | **P0** |
 | **W2-C** Contact 360 contactability read model (read-only evaluator, no writes on a GET) | W1-B, W1-C | A-6 A-9 | P1 |
 | **W2-D** Messaging fragments in the protected-operations denylist | — | B-1 | P1 |
@@ -493,17 +493,17 @@ are aggregate-only; polling stops on terminal states.
 
 ## 8. FEATURE COMPLETE checklist (Owner §12)
 
-**As of staging tip `6d3d87d` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
+**As of staging tip `e703e7b` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
 
 | Criterion | Status | Blocking IDs |
 |---|---|---|
 | Core navigation has no unexplained "coming soon" placeholders | ⚠️ one stale placeholder + two stale comments; Nurture placeholder is honest | G-8, W4-B |
 | Contact Intelligence operates coherently | ⚠️ as of `234871a`: I-3 (#53) and E-4 contact-anchored / DNC-visible signals (#59) landed; coherence still partial | I-3 ✅#53, E-4 ✅#59 |
-| Signal Sweep surfaces future-seller opportunities | ✅ *(merged #48)* — but unbounded at scale | F-2, F-3 |
+| Signal Sweep surfaces future-seller opportunities | ✅ *(merged #48)*. Grow Today presentation of those signals is bounded and consolidated per party as of #57, re-verified on `e703e7b` | F-2 ✅#57, F-3 ✅#57 |
 | Contactability controls are integrated | ⚠️ as of `234871a`: A-1 write routes (#52) and A-6/A-7 Contact 360 read + consent UI (#61) landed; model reconciliation still open | A-1 ✅#52, A-6 ✅#61, A-7 ✅#61, A-8 |
 | Nurture exists as a coherent relationship workflow | ❌ the workflow does not exist. B-1 messaging denylist landed in #55 (`OUTBOUND_MESSAGING_FRAGMENTS`); do not re-open it | B-1 ✅#55, B-2, W4-B |
 | Performance/Business Coach consolidated and usable | ⚠️ consolidated; **numbers are wrong per-agent**. Discovery unblocked after #55; implementation still gated on Owner decisions #4 and #5 | C-1, C-2 |
-| Daily Command Centre ties the experience together | ⚠️ as of `11cd01f`: F-1 commitments on Grow Today landed (#64). Non-`Emerging` signal cap still open | F-1 ✅#64, F-2 |
+| Daily Command Centre ties the experience together | ✅ as of `e703e7b` for the listed blockers: F-1 commitments on Grow Today landed (#64). Non-`Emerging` cards and the whole `priorityActions` list are capped by `MAX_PRIORITY_ACTIONS` (200) after the sort (#57, re-verified); Emerging stays at 10 | F-1 ✅#64, F-2 ✅#57 |
 | Appraisal workflow is integrated | ❌ **workspace unreachable; Rule E can never fire** | E-1, E-2 |
 | Communication architecture is integrated | ⚠️ as of `234871a`: D-3 dispatch seam + activation gate landed (#60); inbound still incomplete | D-3 ✅#60, D-5, E-6 |
 | Voice/call/transcription/follow-up complete enough for later activation | ✅ | D-2 (capture) |
@@ -511,7 +511,7 @@ are aggregate-only; polling stops on terminal states.
 | Tenant isolation is verified | ⚠️ as of `23ff952`: the unfiltered cross-tenant properties read is closed (I-1 ✅#53, re-verified — `relationshipTimeline.ts` labels with `id IN (…) AND brokerage_id =`). Two tables still have no tenant column | I-1 ✅#53, E-9 |
 | Audit coverage is appropriate | ⚠️ consent history unrecoverable in the live model | A-4 |
 | Major workflows operate end-to-end | ❌ appraisal chain severed | E-1 |
-| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability landed in #65. B-1 was closed by #55. I-1 was closed by #53 and re-verified in #66 (no remaining unscoped properties read on the Contact 360 timeline path). I-2 was closed by #57 and re-verified on tip `6d3d87d`: Grow Today last-activity is `max(occurred_at) group by party_id` with a `brokerage_id` predicate in `fetchLastActivityByParty`, not a whole-brokerage activity scan reduced in Node | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2, H-1, I-1 ✅#53, I-2 ✅#57, I-3 |
+| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list. E-3 Opportunities actionability landed in #65. B-1 was closed by #55. I-1 was closed by #53 and re-verified in #66 (no remaining unscoped properties read on the Contact 360 timeline path). I-2 was closed by #57 and re-verified on tip `6d3d87d`: Grow Today last-activity is `max(occurred_at) group by party_id` with a `brokerage_id` predicate in `fetchLastActivityByParty`, not a whole-brokerage activity scan reduced in Node. F-2, F-3, I-4, and I-5 were closed by #57 and re-verified on tip `e703e7b`: `priorityActions` is sliced to `MAX_PRIORITY_ACTIONS` (200) after the sort and the cut is `withheldByActionCap`; Emerging stays on `MAX_EMERGING_SIGNAL_ACTIONS` (10); one signal card per party, with losers kept as `relatedSignals`; each Grow Today rule read is limited by a `GROW_TODAY_*_ROW_CAP` and ordered | A-1 A-2 A-3, C-1, E-1, F-1 ✅#64, F-2 ✅#57, F-3 ✅#57, H-1, I-1 ✅#53, I-2 ✅#57, I-3, I-4 ✅#57, I-5 ✅#57 |
 
 ---
 
@@ -614,4 +614,5 @@ from them.*
 | 2026-09-22 | **E-3 in progress.** PR **#65** (`cursor/e3-opportunities-actionable-0599`, base `11cd01f`). View contact, View property, and Create follow-up on the Opportunities tab already landed in #56. This slice adds Add note and Ask AE on those rows, reusing Grow Today's note write and tab switch. Email/SMS stay on Grow Today and Contact 360, where contactability is known. Not merged. |
 | 2026-09-22 | **E-3 landed.** #65 merged. Staging tip **`23ff95200fbca12ec155ec6868db60f3a31d8d73`**. Opportunities tab rows have Add note and Ask AE, reusing Grow Today's handlers. `Grow.tsx` opportunity actions and `growOpportunityActions.behavior.test.ts` are back in the pool. |
 | 2026-09-22 | **I-1 re-verified, not re-opened.** PR **#66** (`cursor/i1-contact-360-properties-scope-2304`). On tip `23ff952`, `getRelationshipTimeline` labels properties with `WHERE id IN (…) AND brokerage_id =` (`relationshipTimeline.ts`, the lookup that used to be the unscoped `SELECT id, formatted_address FROM properties`). `contactReadScoping.test.ts` already locks that predicate. No query change in this slice. The §2 finding row is left as the original audit. I-2 and I-4 were not touched. Merged. Staging tip **`6d3d87d6bb4fa3e65192f14ebe35099177c865cb`**. |
-| 2026-09-22 | **I-2 re-verified, not re-opened.** PR **#67** (`cursor/i2-grow-today-activity-aggregate-cb11`). On tip `6d3d87d`, `fetchLastActivityByParty` (`growToday.ts`) is `max(occurred_at) group by party_id` where `brokerage_id =` and `party_id = any(…)` — the party ids the other Grow Today rules already returned. That replaced the audit's whole-brokerage `select party_id, occurred_at` reduced in Node. The §2 anchor `growToday.ts:527-530` is the pre-rewrite line; on this tip those lines are the I-4 cap comment, and the aggregate is about lines 816–826. `growTodayQueryShape.test.ts` locks the SQL shape (`max`, `group by`, `brokerage_id`, `party_id = any`) and `growTodayConsolidation.test.ts` locks the most-recent day count. No query change in this slice. The §2 finding row is left as the original audit. F-2, F-3, I-4, and I-5 were not touched. Not merged. |
+| 2026-09-22 | **I-2 re-verified, not re-opened.** PR **#67** (`cursor/i2-grow-today-activity-aggregate-cb11`). On tip `6d3d87d`, `fetchLastActivityByParty` (`growToday.ts`) is `max(occurred_at) group by party_id` where `brokerage_id =` and `party_id = any(…)` — the party ids the other Grow Today rules already returned. That replaced the audit's whole-brokerage `select party_id, occurred_at` reduced in Node. The §2 anchor `growToday.ts:527-530` is the pre-rewrite line; on this tip those lines are the I-4 cap comment, and the aggregate is about lines 816–826. `growTodayQueryShape.test.ts` locks the SQL shape (`max`, `group by`, `brokerage_id`, `party_id = any`) and `growTodayConsolidation.test.ts` locks the most-recent day count. No query change in this slice. The §2 finding row is left as the original audit. F-2, F-3, I-4, and I-5 were not touched. Merged. Staging tip **`e703e7b422a6ef688c81f6901590b98d6fa439f1`**. |
+| 2026-09-22 | **F-2 re-verified, not re-opened.** PR **#68** (`cursor/f2-grow-today-action-cap-a94d`). On tip `e703e7b`, `priorityActions` is `actions.slice(0, MAX_PRIORITY_ACTIONS)` after the deterministic sort. `MAX_PRIORITY_ACTIONS` is 200 and is commented as a technical safety bound, not a commercial daily cap. The cut is `signalSummary.withheldByActionCap`, and the web mirror states it. Emerging still uses `MAX_EMERGING_SIGNAL_ACTIONS` (10), applied after per-party consolidation, and `emergingWithheld` still reports that cut. The §2 anchor `growToday.ts:334` is the pre-cap line; on this tip the constant is about line 577 and the slice is about lines 1669–1670. `growTodayConsolidation.test.ts` locks a StrongIndicator population over the cap, and `growSignalSurface.test.ts` locks Emerging at 10 surfaced / 4 withheld. No product change in this slice. The §2 finding rows are left as the original audit. **F-3**, **I-4**, and **I-5** are the same #57 landing and are marked here: one signal card per party with losers kept as `relatedSignals` (`growTodayConsolidation.test.ts`; party-less signals are not collapsed), each rule read limited and ordered by a `GROW_TODAY_*_ROW_CAP` with stated `limitations` (`growTodayQueryShape.test.ts`), and the uncapped `priorityActions` return, which is the same slice as F-2. I-16 was not re-audited and stays unmarked. Not merged. |
