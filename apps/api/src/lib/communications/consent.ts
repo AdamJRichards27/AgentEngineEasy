@@ -12,14 +12,18 @@
 //     where that policy is set, not baked into this function).
 //
 // Every check and every consent write is logged to the shared audit log
-// (Section 35: security/privacy — consent decisions must be traceable) and
-// publishes COMMUNICATION_CONSENT_UPDATED so downstream consumers (the
-// Exception & Risk Engine, the Workflow Automation Engine) can react.
+// (Section 35: security/privacy — consent decisions must be traceable).
+// The legacy consent mutation and its before/after audit row commit in one
+// transaction. COMMUNICATION_CONSENT_UPDATED is published only after that
+// transaction commits, so an audit failure rolls the consent change back
+// and never announces a change that did not commit. Downstream consumers
+// (the Exception & Risk Engine, the Workflow Automation Engine) still react
+// to that same event.
 
 import { and, eq } from "drizzle-orm";
-import { db, communicationConsent, parties, type CommunicationConsent } from "@aee/db";
+import { auditLogs, db, communicationConsent, parties, type CommunicationConsent } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
-import { logAudit } from "../audit.js";
+import { logAudit, type AuditLogInput } from "../audit.js";
 import { getOrCreateCommunicationSettings } from "./settings.js";
 import type { CommunicationChannel, CommunicationClassification } from "./types.js";
 import { consentChannelFor, isDispatchedChannel } from "./types.js";
@@ -128,63 +132,79 @@ function describeConsentState(state: { marketingOptIn: boolean; transactionalOpt
   return `marketingOptIn=${state.marketingOptIn},transactionalOptOut=${state.transactionalOptOut}`;
 }
 
+type ConsentDbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function writeConsentAudit(tx: ConsentDbTransaction, input: AuditLogInput): Promise<void> {
+  await tx.insert(auditLogs).values(input);
+}
+
 export async function recordConsent(input: RecordConsentInput): Promise<CommunicationConsent> {
   // AE GROW W1-A (A-5): partyId arrives straight off the request body at
   // routes/communications.ts's POST /communications/consent and used to be
   // written through unchecked, stamping a foreign tenant's party id onto
   // this brokerage's consent row and then emitting that mismatched
   // (brokerageId, partyId) pair on the event bus below. Validate it against
-  // the caller's own brokerage first, before the SELECT and well before any
-  // write or publish, so a rejected request changes nothing at all.
-  if (input.partyId != null) {
-    const [party] = await db
-      .select({ id: parties.id })
-      .from(parties)
-      .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)));
-    if (!party) throw new CommunicationConsentPartyError();
-  }
-
+  // the caller's own brokerage before any consent write or publish, so a
+  // rejected request changes nothing at all.
   const destination = normalizeDestination(input.channel, input.destination);
-  const [existing] = await db
-    .select()
-    .from(communicationConsent)
-    .where(and(eq(communicationConsent.brokerageId, input.brokerageId), eq(communicationConsent.destination, destination), eq(communicationConsent.channel, input.channel)));
-
-  const patch = {
-    partyId: input.partyId ?? existing?.partyId ?? null,
-    marketingOptIn: input.marketingOptIn ?? existing?.marketingOptIn ?? false,
-    transactionalOptOut: input.transactionalOptOut ?? existing?.transactionalOptOut ?? false,
-    source: input.source,
-    recordedByUserId: input.recordedByUserId ?? null,
-    notes: input.notes ?? null,
-    updatedAt: new Date(),
-  };
-
-  const row = existing
-    ? (await db.update(communicationConsent).set(patch).where(eq(communicationConsent.id, existing.id)).returning())[0]
-    : (
-        await db
-          .insert(communicationConsent)
-          .values({ brokerageId: input.brokerageId, destination, channel: input.channel, ...patch })
-          .returning()
-      )[0];
 
   // AE GROW W1-A (A-4): consent is still mutated in place (the schema
   // redesign that would keep a full consent history belongs to the later
   // model-reconciliation slice), so the audit entry is the only record of
-  // what the value was before this change. It previously carried
-  // updatedValue alone, which made a withdrawal indistinguishable from a
-  // grant after the fact. Recording the prior state alongside the new one
-  // leaves every consent change as a before/after pair. "none" means there
-  // was no consent row at all until this write created one.
-  await logAudit({
-    brokerageId: input.brokerageId,
-    userId: input.recordedByUserId ?? undefined,
-    action: "communication_consent_updated",
-    recordType: "communication_consent",
-    recordId: String(row.id),
-    previousValue: describeConsentState(existing),
-    updatedValue: describeConsentState(row),
+  // what the value was before this change. The prior state is read from the
+  // same transaction as the update/insert ("none" means there was no consent
+  // row at all until this write created one) and the audit insert uses the
+  // strict transaction-owned writer. An audit failure aborts the transaction,
+  // which rolls the consent mutation back with it. The domain event is
+  // published only after commit, from the committed row.
+  const row = await db.transaction(async (tx) => {
+    if (input.partyId != null) {
+      const [party] = await tx
+        .select({ id: parties.id })
+        .from(parties)
+        .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)));
+      if (!party) throw new CommunicationConsentPartyError();
+    }
+
+    const [existing] = await tx
+      .select()
+      .from(communicationConsent)
+      .where(and(eq(communicationConsent.brokerageId, input.brokerageId), eq(communicationConsent.destination, destination), eq(communicationConsent.channel, input.channel)))
+      .for("update");
+
+    const patch = {
+      partyId: input.partyId ?? existing?.partyId ?? null,
+      marketingOptIn: input.marketingOptIn ?? existing?.marketingOptIn ?? false,
+      transactionalOptOut: input.transactionalOptOut ?? existing?.transactionalOptOut ?? false,
+      source: input.source,
+      recordedByUserId: input.recordedByUserId ?? null,
+      notes: input.notes ?? null,
+      updatedAt: new Date(),
+    };
+
+    const written = existing
+      ? (await tx.update(communicationConsent).set(patch).where(eq(communicationConsent.id, existing.id)).returning())[0]
+      : (
+          await tx
+            .insert(communicationConsent)
+            .values({ brokerageId: input.brokerageId, destination, channel: input.channel, ...patch })
+            .returning()
+        )[0];
+
+    await logAudit(
+      {
+        brokerageId: input.brokerageId,
+        userId: input.recordedByUserId ?? undefined,
+        action: "communication_consent_updated",
+        recordType: "communication_consent",
+        recordId: String(written.id),
+        previousValue: describeConsentState(existing),
+        updatedValue: describeConsentState(written),
+      },
+      { strict: true, write: (auditInput) => writeConsentAudit(tx, auditInput) },
+    );
+
+    return written;
   });
 
   await publishDomainEvent({
