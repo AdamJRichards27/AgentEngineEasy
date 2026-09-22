@@ -2,6 +2,7 @@
 
 **Status:** ACTIVE — canonical source of truth for remaining AE Grow work.
 **Baseline:** staging `ba8790123ea41c9b6be5b3525fc64c80a43939a5` (PR #48, Signal Sweep; post-merge CI #372 PASS).
+**Current staging tip (2026-09-22):** `234871ab1f9e415c0e9600f4d5290daa17aefc7b` — consolidation gate complete (#58→#55→#59→#61→#60). The Signal Sweep baseline above is unchanged; it is the audit anchor for §2.
 **Authority:** Project Owner decision *"MERGE SIGNAL SWEEP + BEGIN GROW COMPLETION PROGRAM"* (2026-09-20).
 **Maintenance rule:** this file is updated as each workstream lands. Do not create a second roadmap.
 
@@ -387,6 +388,19 @@ the reason candidate judgement rests on targeted suites repeated for stability p
 | **W4-D** Command Centre / import / outbox bounding; code splitting; "Today" reconciliation | Owner decision #11 |
 | **W4-E** Ownership-start coverage surface (Owner §4) | — |
 
+### Operational labels ↔ original §4 labels
+
+Later queue language and the ownership register use an **operational name + PR#** as the primary identifier. Those operational labels are **not** always the same slice as the original §4 row with the same W-number. Historical W-numbers below are secondary.
+
+| Operational label | Original §4 label | PR |
+|---|---|---|
+| **W2-A** Grow Today bounding | §4 **W2-A** | #57 |
+| **W2-B** UX coherence | not §4 W2-B; ≈ **W2-E** / **W3-H** | #56 |
+| **W2-C** AI governance | not §4 W2-C; ≈ **W2-D** + **W3-K** | #55 |
+| **W2-D** contact-anchored | post gate 19; not §4 W2-D | #59 |
+| **W3-A** contactability completion | §4 **W2-C** + **W3-B** | #61 |
+| **W3-B** connect readiness | §4 **W2-G** | #60 |
+
 ---
 
 ## 5. Owner decision gates
@@ -479,23 +493,25 @@ are aggregate-only; polling stops on terminal states.
 
 ## 8. FEATURE COMPLETE checklist (Owner §12)
 
+**As of staging tip `234871a` (2026-09-22).** Status text is updated only where a later merge changed the audit reading. Blocking IDs are kept; ✅ marks an ID that has since landed. Unmarked IDs are still open. The §2 finding tables above are the original audit and are not rewritten here.
+
 | Criterion | Status | Blocking IDs |
 |---|---|---|
 | Core navigation has no unexplained "coming soon" placeholders | ⚠️ one stale placeholder + two stale comments; Nurture placeholder is honest | G-8, W4-B |
-| Contact Intelligence operates coherently | ⚠️ | I-3, E-4 |
+| Contact Intelligence operates coherently | ⚠️ as of `234871a`: I-3 (#53) and E-4 contact-anchored / DNC-visible signals (#59) landed; coherence still partial | I-3 ✅#53, E-4 ✅#59 |
 | Signal Sweep surfaces future-seller opportunities | ✅ *(merged #48)* — but unbounded at scale | F-2, F-3 |
-| Contactability controls are integrated | ❌ **no working DNC capability** | A-1, A-6, A-7 |
+| Contactability controls are integrated | ⚠️ as of `234871a`: A-1 write routes (#52) and A-6/A-7 Contact 360 read + consent UI (#61) landed; model reconciliation still open | A-1 ✅#52, A-6 ✅#61, A-7 ✅#61, A-8 |
 | Nurture exists as a coherent relationship workflow | ❌ does not exist | B-2, W4-B |
-| Performance/Business Coach consolidated and usable | ⚠️ consolidated; **numbers are wrong per-agent** | C-1, C-2 |
-| Daily Command Centre ties the experience together | ⚠️ **cannot answer "what have I committed to?"** | F-1, F-2 |
+| Performance/Business Coach consolidated and usable | ⚠️ consolidated; **numbers are wrong per-agent**. Discovery unblocked after #55; implementation still gated on Owner decisions #4 and #5 | C-1, C-2 |
+| Daily Command Centre ties the experience together | ⚠️ **cannot answer "what have I committed to?"** — `growToday.ts` available to claim for F-1 | F-1, F-2 |
 | Appraisal workflow is integrated | ❌ **workspace unreachable; Rule E can never fire** | E-1, E-2 |
-| Communication architecture is integrated | ⚠️ outbound complete, inbound incomplete | D-3, D-5, E-6 |
+| Communication architecture is integrated | ⚠️ as of `234871a`: D-3 dispatch seam + activation gate landed (#60); inbound still incomplete | D-3 ✅#60, D-5, E-6 |
 | Voice/call/transcription/follow-up complete enough for later activation | ✅ | D-2 (capture) |
 | Entitlements are coherent | ⚠️ | A-2, G-1, G-2, G-7 |
 | Tenant isolation is verified | ⚠️ one unfiltered cross-tenant read; two tables without tenant columns | I-1, E-9 |
 | Audit coverage is appropriate | ⚠️ consent history unrecoverable in the live model | A-4 |
 | Major workflows operate end-to-end | ❌ appraisal chain severed | E-1 |
-| No known P0/P1 product defect remains | ❌ **11 P0** | A-1 A-2 A-3, C-1, E-1, F-1 F-2, H-1, I-1 I-2 I-3 |
+| No known P0/P1 product defect remains | ❌ **11 P0** at the Signal Sweep audit; later landings are annotated on the rows above and are not deleted from this list | A-1 A-2 A-3, C-1, E-1, F-1 F-2, H-1, I-1 I-2 I-3 |
 
 ---
 
@@ -591,3 +607,4 @@ from them.*
 | 2026-09-21 | PRs **#55** and **#56** held from merge pending independent review, assigned to Grok Bot as its first AE assignment, with an OpenClaw-side cross-check in parallel. Both verified still to merge cleanly onto the new staging. |
 | 2026-09-21 | Grok Bot introduced as independent reviewer and parallel development agent under OpenClaw orchestration. Ownership now tracked in [`AE_WORKSTREAM_OWNERSHIP_REGISTER.md`](./AE_WORKSTREAM_OWNERSHIP_REGISTER.md). |
 | 2026-09-21 | Decision gate 19 resolved (§11). W2-D scope expanded accordingly. |
+| 2026-09-22 | **Consolidation gate.** PRs **#58 → #55 → #59 → #61 → #60** merged sequentially to staging. Tip **`234871ab1f9e415c0e9600f4d5290daa17aefc7b`**. #58 register/roadmap; #55 operational W2-C AI governance (≈ §4 W2-D + W3-K); #59 operational W2-D contact-anchored signals (post gate 19); #61 operational W3-A contactability completion (§4 W2-C + W3-B; A-6/A-7); #60 operational W3-B connect readiness (§4 W2-G; D-3). Domains released — see the ownership register. `growToday.ts` remains available to claim for F-1. Performance/Coach discovery is unblocked after #55; implementation stays gated on Owner decisions #4 and #5 plus a file claim. Naming rule from this entry forward: **operational name + PR#** is the primary identifier; historical §4 W-numbers are secondary (alias table under §4). |
