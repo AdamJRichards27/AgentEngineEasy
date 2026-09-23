@@ -13,7 +13,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 
-Current staging: `24336ed9ee36cee0b2bb5e4d08095e37b2c59655` (2026-09-22, A-4/A-5 status / #73 merged onto #72).
+Current staging: `4a3d48d462fa250fc1064bd2fa8b26f59e5a9cde` (2026-09-23, H-2/H-3/H-6 status / #74 merged).
 
 ---
 
@@ -36,7 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
-| **H-2 / H-3 / H-6 status reconciliation** | `cursor/h2-h3-h6-status-reconcile-7cf5` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). No implementation files are in this claim. Status is taken from merged GitHub evidence (#50), not a new product change. | **Active** — docs reconciliation only. H-2, H-3, and H-6 already landed in #50. Keep this claim while the PR is open; release to the Merged table on merge. | Reconciled on staging `24336ed9ee36cee0b2bb5e4d08095e37b2c59655` (merge of #73). H-2/H-3/H-6 closed by #50 (merge `0a478046b8809463adf4569f06c9b19e1020915a`). Do not re-implement. H-4 stays open (metric-only). C-1, E-1, G-1, and other Owner-gated items stay open. | #74 | — |
+| **E-2** (wire `view_appraisal` / `view_property` on Grow Today `appraisal_follow_up` cards) | `cursor/e2-view-appraisal-7064` (product #75). This docs PR is a separate status claim only (`cursor/e2-status-markers-57c7`); it does not edit the product branch. | Grok (orchestrator) / Cursor cloud agent (implementer) | This docs claim: `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). Product files `apps/api/src/lib/growToday.ts` and `apps/web/src/pages/Grow.tsx` stay owned by open draft **#75** until that PR merges. Do not claim them here. | **Active** — awaiting Owner merge of product #75. Docs markers describe evidence from #75 (draft). Do not re-implement the product change. | https://github.com/AdamJRichards27/AgentEngineEasy/pull/75. Head at this claim: `72c7ee99102da4567f29aadb6333eb116459ac7b` (parent is staging `4a3d48d462fa250fc1064bd2fa8b26f59e5a9cde`; rebased, so no longer behind). Superseded head `f1db9568789f1ad839a32d622b48fbaeb511541e` was cut from `24336ed` and was 3 commits behind; its CI was SUCCESS. CI on `72c7ee9` was in progress when this claim was written. Tests named in the #75 body, and present on the head: `apps/api/src/lib/__tests__/growTodayAppraisalActions.test.ts` (`view_appraisal` stays first and `view_property` is added when the appraisal has a property; no `view_property` when there is no property; do-not-contact still strips outreach and keeps both view actions) and `apps/web/src/lib/__tests__/growTodayAppraisalActions.behavior.test.ts` (View appraisal + View property → `/properties/{id}`; View property omitted unless the API lists it; no `/properties/null`). E-1 stays Owner-gated (decisions #2/#3, W3-E/W3-F). C-1, G-1, and H-4 stay open. | — | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,7 +47,7 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`propertyIntelligence/service.ts`** (with `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts`) — released with **#59** (operational W2-D, contact-anchored signals).
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
-- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**, claimed again by **F-2** and released with **#68**, claimed again by **I-3** and released with **#69**, claimed again by **I-6 / I-8** and released with **#70**, claimed again by **Wave-1 docs re-verification — A-1/A-2/A-3/H-1** and released with **#71**, claimed again by **A-4 / A-5 status reconciliation** and released with **#73**. Docs edits still require a claim before a new slice starts. **H-2 / H-3 / H-6 status reconciliation** currently claims the two register/roadmap files for this reconciliation's status lines only.
+- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**, claimed again by **F-2** and released with **#68**, claimed again by **I-3** and released with **#69**, claimed again by **I-6 / I-8** and released with **#70**, claimed again by **Wave-1 docs re-verification — A-1/A-2/A-3/H-1** and released with **#71**, claimed again by **A-4 / A-5 status reconciliation** and released with **#73**, claimed again by **H-2 / H-3 / H-6 status reconciliation** and released with **#74**. Docs edits still require a claim before a new slice starts. **E-2 status markers** currently claim the two register/roadmap files for status lines only. Product files for E-2 stay with #75 until that PR merges.
 - **I-1** (`relationshipTimeline.ts` property-label lookup) is already in the pool via **#53**, and the #66 re-verification is merged. The predicate is `id IN (…) AND brokerage_id =`, covered by `contactReadScoping.test.ts`. Do not open another I-1 implementation slice.
 - **I-2** (`growToday.ts` `fetchLastActivityByParty`) is already in the pool via **#57**, and the #67 re-verification is merged. The read is `max(occurred_at) group by party_id`, filtered by `brokerage_id` and the party ids already in play, covered by `growTodayQueryShape.test.ts`. Do not open another I-2 implementation slice.
 - **I-3** (`contactIntelligence.ts` and `relationshipTimeline.ts` brokerage predicates) is already in the pool via **#53**, and the #69 re-verification is merged. The SQL predicate is `brokerage_id =` and `party_id =` on `grow_relationships`, `grow_activities`, `grow_opportunities`, and `grow_commitments` (and `grow_contact_roles`), covered by `contactReadScoping.test.ts`. Do not open another I-3 implementation slice.
@@ -67,7 +67,7 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **F-3** (one signal card per party; losing signals ride as `relatedSignals`) is already in the pool via **#57**, locked by `growTodayConsolidation.test.ts`. Do not re-implement.
 - **I-4** (`GROW_TODAY_*_ROW_CAP` on each rule read, ordered, with stated `limitations`) is already in the pool via **#57**, locked by `growTodayQueryShape.test.ts`. Do not re-implement.
 - **I-5** (uncapped `priorityActions`) is the same response bound as F-2. Already in the pool via **#57**. Do not re-implement.
-- **`growToday.ts`** (API and web) was released with **F-1 / #64**. F-2, F-3, I-2, I-4, and I-5 are closed on it. The #68 re-verification is merged and did not hold the file. A later slice that still needs it (E-2) must claim it.
+- **`growToday.ts`** (API) and the Grow Today card in **`pages/Grow.tsx`** were released with **F-1 / #64** (and, for other `Grow.tsx` regions, #61 and #65). F-2, F-3, I-2, I-4, and I-5 are closed on `growToday.ts`. The #68 re-verification is merged and did not hold the file. **E-2 product #75** already claims `apps/api/src/lib/growToday.ts` and `apps/web/src/pages/Grow.tsx` until that PR merges. Do not open a second claim on those files. This docs slice does not claim them.
 - **B-1** (messaging fragments in the protected-operations denylist) was closed by **#55**. `OUTBOUND_MESSAGING_FRAGMENTS` is present in `apps/api/src/lib/ai/protectedOperations.ts` and covered by `governance.test.ts`. Do not open a B-1 implementation slice.
 
 ## Merged — no longer owned
@@ -150,6 +150,12 @@ Released back to the pool on 2026-09-22 (A-4 / A-5 status reconciliation, tip `2
 | PR | Slice | Domain released |
 |---|---|---|
 | #73 | A-4 / A-5 status reconciliation | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
+
+Released back to the pool on 2026-09-23 (H-2 / H-3 / H-6 status reconciliation, tip `4a3d48d462fa250fc1064bd2fa8b26f59e5a9cde`):
+
+| PR | Slice | Domain released |
+|---|---|---|
+| #74 | H-2 / H-3 / H-6 status reconciliation | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
 
 ---
 
