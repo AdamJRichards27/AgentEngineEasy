@@ -62,7 +62,7 @@
 // the resolution site for why a misconfiguration must not be laundered into
 // a delivery attempt.
 
-import { and, eq, isNotNull, lte, or } from "drizzle-orm";
+import { and, asc, eq, isNotNull, lte, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db, communicationDeliveryAttempts, communicationMessages, type CommunicationMessage } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger, incrementCounter } from "@aee/events";
@@ -554,13 +554,50 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
 }
 
 /**
+ * I-17. One scheduler tick dispatches at most this many due messages.
+ *
+ * Technical safety bound for the 60s sweep in bootstrap.ts, not a
+ * commercial send cap. The sweep used to select every due QUEUED /
+ * RETRY_SCHEDULED row and walk them serially, so a backlog was loaded in
+ * full and was still due when the next tick selected again. Each tick now
+ * takes the oldest due rows, up to this limit. Rows past the limit stay
+ * QUEUED or RETRY_SCHEDULED and wait for a later tick.
+ *
+ * Order is scheduledAt ascending, then id ascending. A quiet-hours window
+ * end shared by many messages does not reshuffle between ticks, and the
+ * next tick continues the same backlog instead of picking an arbitrary
+ * subset.
+ *
+ * A caller may request a smaller batch. The request cannot raise this cap.
+ */
+export const DISPATCH_DUE_MESSAGES_LIMIT = 25;
+
+export function resolveDispatchDueMessageLimit(requested?: number): number {
+  if (requested === undefined) return DISPATCH_DUE_MESSAGES_LIMIT;
+  if (!Number.isInteger(requested) || requested < 1) {
+    throw new Error(`dispatchDueMessages limit must be a positive integer (received ${String(requested)}).`);
+  }
+  return Math.min(requested, DISPATCH_DUE_MESSAGES_LIMIT);
+}
+
+/**
  * The boot-time scheduler's sweep (lib/communications/bootstrap.ts): every
  * QUEUED message deferred past quiet hours, and every RETRY_SCHEDULED
- * message whose backoff has elapsed, gets one dispatch attempt. Runs across
+ * message whose backoff has elapsed, gets one dispatch attempt — up to
+ * DISPATCH_DUE_MESSAGES_LIMIT rows, oldest scheduledAt first. Runs across
  * every brokerage — this is a system-wide background sweep, not a
  * per-tenant read.
+ *
+ * Each selected row still goes through dispatchMessage(), so the A-3
+ * consent re-check and the D-3 provider resolution (sandbox unless
+ * LIVE_COMMUNICATIONS_APPROVED) run for that row exactly as they do on
+ * the immediate enqueue path. This function does not choose a provider.
  */
-export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dispatchedCount: number; blockedCount: number; errorCount: number }> {
+export async function dispatchDueMessages(
+  now: Date = new Date(),
+  requestedLimit?: number,
+): Promise<{ dispatchedCount: number; blockedCount: number; errorCount: number; selectedCount: number }> {
+  const limit = resolveDispatchDueMessageLimit(requestedLimit);
   const due = await db
     .select()
     .from(communicationMessages)
@@ -570,7 +607,9 @@ export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dis
         isNotNull(communicationMessages.scheduledAt),
         lte(communicationMessages.scheduledAt, now),
       ),
-    );
+    )
+    .orderBy(asc(communicationMessages.scheduledAt), asc(communicationMessages.id))
+    .limit(limit);
 
   let dispatchedCount = 0;
   // AE GROW W1-A (A-3): a message this sweep picks up can now come back
@@ -590,5 +629,5 @@ export async function dispatchDueMessages(now: Date = new Date()): Promise<{ dis
       logger.error("communications_dispatch_due_failed", { messageId: message.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return { dispatchedCount, blockedCount, errorCount };
+  return { dispatchedCount, blockedCount, errorCount, selectedCount: due.length };
 }

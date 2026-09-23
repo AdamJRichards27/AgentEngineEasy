@@ -30,9 +30,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { and, eq } from "drizzle-orm";
-import { db, communicationMessages, entitlementGrants } from "@aee/db";
-import { dispatchDueMessages } from "../../lib/communications/outbox.js";
+import { randomUUID } from "node:crypto";
+import { and, asc, eq, inArray, isNotNull, lte, or } from "drizzle-orm";
+import { db, communicationMessages, communicationThreads, entitlementGrants } from "@aee/db";
+import { DISPATCH_DUE_MESSAGES_LIMIT, dispatchDueMessages, resolveDispatchDueMessageLimit } from "../../lib/communications/outbox.js";
 import { sandboxEmailProvider } from "../../lib/communications/providers/sandboxEmail.js";
 import type { ProviderSendResult, SendEmailInput } from "../../lib/communications/providers/types.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
@@ -382,3 +383,145 @@ test("A-3 regression: a deferred message whose consent is still intact dispatche
 
   await patchSettings({ quietHoursStart: null, quietHoursEnd: null });
 });
+
+// ---------------------------------------------------------------------
+// I-17 — the due sweep is bounded. Excess due rows wait for a later tick.
+//
+// This lives in the same file as the A-3 sweep tests because
+// dispatchDueMessages() selects across every brokerage. Node runs test
+// files in parallel processes; this file's tests run sequentially, and
+// it is the only suite that calls the sweep. A second file sweeping at
+// the same time could dispatch the rows this test expects to still be
+// waiting.
+// ---------------------------------------------------------------------
+
+test("I-17: the due-message cap is a positive bound and a caller cannot raise it", () => {
+  assert.equal(DISPATCH_DUE_MESSAGES_LIMIT, 25);
+  assert.ok(DISPATCH_DUE_MESSAGES_LIMIT >= 1);
+  assert.equal(resolveDispatchDueMessageLimit(undefined), DISPATCH_DUE_MESSAGES_LIMIT);
+  assert.equal(resolveDispatchDueMessageLimit(1), 1);
+  assert.equal(resolveDispatchDueMessageLimit(DISPATCH_DUE_MESSAGES_LIMIT), DISPATCH_DUE_MESSAGES_LIMIT);
+  assert.equal(resolveDispatchDueMessageLimit(DISPATCH_DUE_MESSAGES_LIMIT + 100), DISPATCH_DUE_MESSAGES_LIMIT);
+  assert.throws(() => resolveDispatchDueMessageLimit(0), /positive integer/);
+  assert.throws(() => resolveDispatchDueMessageLimit(-1), /positive integer/);
+  assert.throws(() => resolveDispatchDueMessageLimit(1.5), /positive integer/);
+});
+
+test("I-17: one sweep dispatches only the oldest due rows; excess due rows stay queued until a later tick", async () => {
+  assert.notEqual(process.env.LIVE_COMMUNICATIONS_APPROVED, "true", "this slice must not activate a live provider");
+
+  const now = new Date();
+  const [oldestDue] = await db
+    .select({ scheduledAt: communicationMessages.scheduledAt })
+    .from(communicationMessages)
+    .where(
+      and(
+        or(eq(communicationMessages.status, "QUEUED"), eq(communicationMessages.status, "RETRY_SCHEDULED")),
+        isNotNull(communicationMessages.scheduledAt),
+        lte(communicationMessages.scheduledAt, now),
+      ),
+    )
+    .orderBy(asc(communicationMessages.scheduledAt))
+    .limit(1);
+  // Sit strictly before any due row already in this database so the
+  // bounded select's oldest-first order picks this fixture first.
+  const baseMs = (oldestDue?.scheduledAt ? oldestDue.scheduledAt.getTime() : now.getTime()) - 60_000;
+  const tieAt = new Date(baseMs);
+
+  const [thread] = await db
+    .insert(communicationThreads)
+    .values({ brokerageId, propertyId, subject: `I-17 due bound ${suffix}`, createdByUserId: agent.user.id })
+    .returning();
+
+  const inserted = await db
+    .insert(communicationMessages)
+    .values([
+      dueRow(thread.id, "tie-low", tieAt, "QUEUED"),
+      dueRow(thread.id, "tie-high", tieAt, "QUEUED"),
+      dueRow(thread.id, "retry", new Date(baseMs + 1_000), "RETRY_SCHEDULED"),
+      dueRow(thread.id, "later", new Date(baseMs + 2_000), "QUEUED"),
+      dueRow(thread.id, "future", new Date(now.getTime() + 24 * 60 * 60_000), "QUEUED"),
+      dueRow(thread.id, "unscheduled", null, "QUEUED"),
+    ])
+    .returning();
+
+  const byLabel = new Map(inserted.map((row) => [row.recipientDestination!.split("@")[0].split("+").pop()!, row]));
+  const tieLow = byLabel.get("tie-low")!;
+  const tieHigh = byLabel.get("tie-high")!;
+  const retry = byLabel.get("retry")!;
+  const later = byLabel.get("later")!;
+  const future = byLabel.get("future")!;
+  const unscheduled = byLabel.get("unscheduled")!;
+  assert.ok(tieLow.id < tieHigh.id, "insert order must give the first tied row the lower id");
+
+  const first = await dispatchDueMessages(now, 1);
+  assert.equal(first.selectedCount, 1);
+  assert.ok(first.selectedCount <= DISPATCH_DUE_MESSAGES_LIMIT);
+  assert.equal(first.dispatchedCount + first.blockedCount + first.errorCount, first.selectedCount);
+  assert.equal(first.dispatchedCount, 1);
+  assert.equal(first.blockedCount, 0);
+  assert.equal(first.errorCount, 0);
+
+  const afterFirst = await readOurs([tieLow.id, tieHigh.id, retry.id, later.id, future.id, unscheduled.id]);
+  assert.equal(afterFirst.get(tieLow.id)!.status, "SENT", "the oldest due row (lowest id on a scheduledAt tie) is the one row this tick takes");
+  assert.equal(afterFirst.get(tieLow.id)!.provider, "sandbox_email", "D-3 still resolves the sandbox adapter; this sweep does not activate a live provider");
+  assert.equal(afterFirst.get(tieHigh.id)!.status, "QUEUED");
+  assert.equal(afterFirst.get(tieHigh.id)!.version, tieHigh.version, "a due row past the limit is not touched");
+  assert.equal(afterFirst.get(retry.id)!.status, "RETRY_SCHEDULED");
+  assert.equal(afterFirst.get(retry.id)!.version, retry.version);
+  assert.equal(afterFirst.get(later.id)!.status, "QUEUED");
+  assert.equal(afterFirst.get(later.id)!.version, later.version);
+  assert.equal(afterFirst.get(future.id)!.status, "QUEUED", "a QUEUED row whose scheduledAt is still in the future is not due");
+  assert.equal(afterFirst.get(unscheduled.id)!.status, "QUEUED", "a QUEUED row with no scheduledAt is not due");
+
+  const second = await dispatchDueMessages(new Date(), 2);
+  assert.equal(second.selectedCount, 2);
+  assert.equal(second.dispatchedCount, 2);
+  assert.equal(second.blockedCount, 0);
+  assert.equal(second.errorCount, 0);
+
+  const afterSecond = await readOurs([tieHigh.id, retry.id, later.id, future.id, unscheduled.id]);
+  assert.equal(afterSecond.get(tieHigh.id)!.status, "SENT", "the row that waited on the first tick is taken on the next tick, ahead of newer due rows");
+  assert.equal(afterSecond.get(tieHigh.id)!.provider, "sandbox_email");
+  assert.equal(afterSecond.get(retry.id)!.status, "SENT", "RETRY_SCHEDULED shares the same bounded select and still dispatches through dispatchMessage");
+  assert.equal(afterSecond.get(retry.id)!.provider, "sandbox_email");
+  assert.equal(afterSecond.get(later.id)!.status, "QUEUED");
+  assert.equal(afterSecond.get(later.id)!.version, later.version, "a due row past this tick's limit waits again");
+  assert.equal(afterSecond.get(future.id)!.status, "QUEUED");
+  assert.equal(afterSecond.get(unscheduled.id)!.status, "QUEUED");
+
+  const third = await dispatchDueMessages(new Date(), 1);
+  assert.equal(third.selectedCount, 1);
+  assert.equal(third.dispatchedCount, 1);
+
+  const afterThird = await readOurs([later.id, future.id, unscheduled.id]);
+  assert.equal(afterThird.get(later.id)!.status, "SENT", "the row held back by the earlier ticks is dispatched once it is the oldest due row");
+  assert.equal(afterThird.get(later.id)!.provider, "sandbox_email");
+  assert.equal(afterThird.get(future.id)!.status, "QUEUED");
+  assert.equal(afterThird.get(future.id)!.version, future.version);
+  assert.equal(afterThird.get(unscheduled.id)!.status, "QUEUED");
+  assert.equal(afterThird.get(unscheduled.id)!.version, unscheduled.version);
+});
+
+function dueRow(threadId: number, label: string, scheduledAt: Date | null, status: "QUEUED" | "RETRY_SCHEDULED") {
+  return {
+    threadId,
+    brokerageId,
+    propertyId,
+    direction: "OUTBOUND",
+    channel: "EMAIL",
+    classification: "TRANSACTIONAL",
+    status,
+    bodyText: `I-17 due-bound fixture ${label}.`,
+    senderUserId: agent.user.id,
+    createdByUserId: agent.user.id,
+    recipientDestination: `i17-${suffix}+${label}@example.com`,
+    idempotencyKey: `i17-${suffix}-${label}-${randomUUID()}`,
+    scheduledAt,
+  };
+}
+
+async function readOurs(ids: number[]) {
+  const rows = await db.select().from(communicationMessages).where(inArray(communicationMessages.id, ids));
+  return new Map(rows.map((row) => [row.id, row]));
+}
