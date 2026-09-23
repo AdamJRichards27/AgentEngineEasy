@@ -720,6 +720,23 @@ function DuplicateRow({
   );
 }
 
+// Completed-import exits. GET /grow/contacts accepts `search` and `role` only —
+// there is no import-job filter — so the contacts tab is the existing list.
+// `/grow` is Grow Today (`growWorkspaceEntryState` defaults an empty search
+// to the today tab). Undo stays on this screen and still posts the rollback route.
+export const IMPORT_COMPLETE_NEXT_ACTIONS = [
+  {
+    href: "/grow?tab=contacts",
+    label: "See these contacts in Grow",
+    className: "btn btn-primary btn-small",
+  },
+  {
+    href: "/grow",
+    label: "Go to Grow Today",
+    className: "btn btn-secondary btn-small",
+  },
+] as const;
+
 function ResultsStep({ job, onRolledBack }: { job: ImportJob; onRolledBack: () => void }) {
   const [rollback, setRollback] = useState<RollbackResult | null>(null);
   const [confirmingRollback, setConfirmingRollback] = useState(false);
@@ -768,20 +785,19 @@ function ResultsStep({ job, onRolledBack }: { job: ImportJob; onRolledBack: () =
             .
           </p>
         )}
-        {/* AE GROW Completion W2-B (E-7): after importing a whole contact
-            database the only thing this screen offered was "Undo this import".
-            The only forward link anywhere in this file was on the NOT-entitled
-            screen. These two are the actual next steps — see what came in, or
-            work it — and they are plain links to routes that already exist
-            (App.tsx mounts /grow; the contact deep-link parameters are read by
-            Grow.tsx's growWorkspaceEntryState). */}
+        {/* E-7: the success screen used to offer only "Undo this import".
+            These two links are the forward exits. They are the same routes
+            Grow already mounts (App.tsx: /grow; tab=contacts is read by
+            growWorkspaceEntryState). Undo remains in the card below. */}
+        <p className="muted">
+          Open the contact list to work what came in, or go to Today for what needs attention.
+        </p>
         <div className="grow-empty-actions">
-          <Link href="/grow?tab=contacts" className="btn btn-primary btn-small">
-            See these contacts in Grow
-          </Link>
-          <Link href="/grow" className="btn btn-secondary btn-small">
-            Go to Grow Today
-          </Link>
+          {IMPORT_COMPLETE_NEXT_ACTIONS.map((action) => (
+            <Link key={action.href} href={action.href} className={action.className}>
+              {action.label}
+            </Link>
+          ))}
         </div>
       </section>
 
