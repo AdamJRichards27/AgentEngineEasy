@@ -17,7 +17,7 @@ import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
-import { db, growSignalSweepRuns, parties, properties } from "@aee/db";
+import { db, growSignalSweepCursors, growSignalSweepRuns, parties, properties, setDbQueryObserver } from "@aee/db";
 import { renderMetricsText, resetMetricsForTesting } from "@aee/events";
 import {
   runSignalSweep,
@@ -53,6 +53,7 @@ interface CapturedAlert {
   owner: string;
   runbook: string;
   summary: string;
+  details?: Record<string, unknown>;
 }
 let captured: CapturedAlert[] = [];
 
@@ -445,6 +446,146 @@ test("H-3 — brokeragesDue reports what the next run would consider, bounded by
 test("the alert policy registry declares GROW_SIGNAL_SWEEP_UNHEALTHY exactly once, with the agreed policy", () => {
   const policy = OPERATIONAL_ALERT_POLICIES.GROW_SIGNAL_SWEEP_UNHEALTHY;
   assert.deepEqual(policy, { severity: "high", owner: "operations", runbook: "grow-signal-sweep" });
+});
+
+/* ---------------------------------------------------------------------
+ * H-4 (P1) — a per-brokerage failure and a cursor-touch failure must page.
+ *
+ * H-1 already raises GROW_SIGNAL_SWEEP_UNHEALTHY when the sweep as a whole
+ * is not running (leaked lock, or a scheduled tick that throws). These two
+ * paths used to stop at property_signal_sweep_brokerage_failure_total and
+ * logger.error, which is not bridged to dispatchOperationalAlert. A tenant
+ * that fails on every scheduled pass, and a cursor stamp that never lands,
+ * could therefore fail forever with no alert.
+ * -----------------------------------------------------------------*/
+
+/**
+ * Fails brokerageId's cursor read (the first statement of its pass) and,
+ * when failCursorTouch is set, the follow-up stamp of last_evaluated_at.
+ * Same statement-observer seam sweepRemediation.test.ts uses for P1-2.
+ */
+function failBrokeragePass(brokerageId: number, failCursorTouch: boolean): { uninstall: () => void; counts: { evaluation: number; cursorTouch: number } } {
+  const counts = { evaluation: 0, cursorTouch: 0 };
+  const uninstall = setDbQueryObserver((query, params) => {
+    const text = query.toLowerCase().replace(/\s+/g, " ").trim();
+    if (!text.includes("grow_signal_sweep_cursors")) return;
+    const targetsBrokerage = params.some((param) => param === brokerageId || param === String(brokerageId));
+    if (!targetsBrokerage) return;
+    if (text.startsWith("select")) {
+      counts.evaluation += 1;
+      throw new Error("injected: brokerage read failed");
+    }
+    if (failCursorTouch && (text.startsWith("insert") || text.startsWith("update"))) {
+      counts.cursorTouch += 1;
+      throw new Error("injected: cursor touch failed");
+    }
+  });
+  return { uninstall, counts };
+}
+
+test("H-4 — a per-brokerage evaluation failure dispatches GROW_SIGNAL_SWEEP_BROKERAGE_FAILED, stamps the cursor, and dedupes a repeat", async () => {
+  await db.delete(growSignalSweepCursors).where(eq(growSignalSweepCursors.brokerageId, A.brokerageId));
+  const injected = failBrokeragePass(A.brokerageId, false);
+  let firstRunId = "";
+  try {
+    const first = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
+    firstRunId = first.summary.sweepRunId;
+    assert.equal(first.summary.errors, 1, "the failing pass is counted and the run still completes");
+    await settleAlerts();
+    const second = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
+    assert.equal(second.summary.errors, 1);
+    await settleAlerts();
+  } finally {
+    injected.uninstall();
+  }
+
+  assert.ok(injected.counts.evaluation >= 2, "the brokerage read really failed on both passes");
+  assert.equal(injected.counts.cursorTouch, 0, "this case stamps the cursor; it must not inject a cursor-touch failure");
+
+  const alerts = captured.filter((a) => a.type === "GROW_SIGNAL_SWEEP_BROKERAGE_FAILED");
+  assert.equal(alerts.length, 1, "two failing passes inside the cooldown dispatch exactly one evaluation alert");
+  assert.equal(alerts[0].dedupKey, `grow-signal-sweep:brokerage-evaluation-failed:${A.brokerageId}`);
+  assert.equal(alerts[0].severity, "high");
+  assert.equal(alerts[0].owner, "operations");
+  assert.equal(alerts[0].runbook, "grow-signal-sweep");
+  assert.equal(alerts[0].details?.brokerageId, A.brokerageId);
+  assert.equal(alerts[0].details?.sweepRunId, firstRunId);
+  assert.equal(alerts[0].details?.kind, "evaluation");
+  assert.equal(captured.filter((a) => a.type === "GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED").length, 0);
+  assert.equal(captured.filter((a) => a.type === "GROW_SIGNAL_SWEEP_UNHEALTHY").length, 0, "one tenant failing is not the whole-sweep alert");
+
+  assert.equal(counter("property_signal_sweep_brokerage_failure_total", { kind: "evaluation" }), 2, "the metric still counts every failure; dedup is alert-only");
+  assert.equal(counter("property_signal_sweep_brokerage_failure_total", { kind: "cursor_touch" }), 0);
+
+  const [cursor] = await db.select().from(growSignalSweepCursors).where(eq(growSignalSweepCursors.brokerageId, A.brokerageId));
+  assert.ok(cursor?.lastEvaluatedAt, "a failing pass still stamps last_evaluated_at so the tenant cannot pin the front of the ordering");
+  const [run] = await db.select().from(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, firstRunId));
+  assert.equal(run.status, "COMPLETED", "a run that lost one tenant is completed-with-errors");
+  assert.equal(run.errors, 1);
+});
+
+test("H-4 — a cursor-touch failure dispatches GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED and does not advance the cursor", async () => {
+  await db.delete(growSignalSweepCursors).where(eq(growSignalSweepCursors.brokerageId, A.brokerageId));
+  const injected = failBrokeragePass(A.brokerageId, true);
+  let firstRunId = "";
+  try {
+    const first = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
+    firstRunId = first.summary.sweepRunId;
+    assert.equal(first.summary.errors, 1);
+    assert.equal(first.ok, true, "a cursor-touch failure must not fail the whole run");
+    await settleAlerts();
+    const second = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
+    assert.equal(second.summary.errors, 1);
+    await settleAlerts();
+  } finally {
+    injected.uninstall();
+  }
+
+  assert.ok(injected.counts.evaluation >= 2, "the evaluation failure is what leads to the cursor touch");
+  assert.ok(injected.counts.cursorTouch >= 2, "the cursor stamp really failed on both passes");
+
+  const cursorAlerts = captured.filter((a) => a.type === "GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED");
+  const evaluationAlerts = captured.filter((a) => a.type === "GROW_SIGNAL_SWEEP_BROKERAGE_FAILED");
+  assert.equal(cursorAlerts.length, 1, "two cursor-touch failures inside the cooldown dispatch exactly one cursor-touch alert");
+  assert.equal(evaluationAlerts.length, 1, "the evaluation failure on the same pass still pages, on its own dedup key");
+  assert.equal(cursorAlerts[0].dedupKey, `grow-signal-sweep:cursor-touch-failed:${A.brokerageId}`);
+  assert.equal(cursorAlerts[0].severity, "high");
+  assert.equal(cursorAlerts[0].owner, "operations");
+  assert.equal(cursorAlerts[0].runbook, "grow-signal-sweep");
+  assert.equal(cursorAlerts[0].details?.brokerageId, A.brokerageId);
+  assert.equal(cursorAlerts[0].details?.sweepRunId, firstRunId);
+  assert.equal(cursorAlerts[0].details?.kind, "cursor_touch");
+  assert.match(String(cursorAlerts[0].summary), /last_evaluated_at/);
+
+  assert.equal(counter("property_signal_sweep_brokerage_failure_total", { kind: "evaluation" }), 2);
+  assert.equal(counter("property_signal_sweep_brokerage_failure_total", { kind: "cursor_touch" }), 2);
+
+  const rendered = renderMetricsText();
+  for (const line of rendered.split("\n")) {
+    if (!line.startsWith("property_signal_sweep_brokerage_failure_total{")) continue;
+    assert.doesNotMatch(line, new RegExp(`"${A.brokerageId}"`), `failure series carries this brokerage id: ${line}`);
+  }
+
+  const [cursor] = await db.select().from(growSignalSweepCursors).where(eq(growSignalSweepCursors.brokerageId, A.brokerageId));
+  assert.equal(cursor, undefined, "a failed cursor touch leaves last_evaluated_at unstamped");
+  const [run] = await db.select().from(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, firstRunId));
+  assert.equal(run.status, "COMPLETED");
+});
+
+test("H-4 — a healthy brokerage pass raises neither per-brokerage alert", async () => {
+  const result = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
+  assert.equal(result.summary.errors, 0);
+  await settleAlerts();
+  assert.deepEqual(
+    captured.filter((a) => a.type === "GROW_SIGNAL_SWEEP_BROKERAGE_FAILED" || a.type === "GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED"),
+    [],
+  );
+});
+
+test("H-4 — the brokerage and cursor-touch alert policies match GROW_SIGNAL_SWEEP_UNHEALTHY", () => {
+  const h1 = OPERATIONAL_ALERT_POLICIES.GROW_SIGNAL_SWEEP_UNHEALTHY;
+  assert.deepEqual(OPERATIONAL_ALERT_POLICIES.GROW_SIGNAL_SWEEP_BROKERAGE_FAILED, h1);
+  assert.deepEqual(OPERATIONAL_ALERT_POLICIES.GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED, h1);
 });
 
 /* Keeps the unused-fixture linting honest: these exist so the brokerage has

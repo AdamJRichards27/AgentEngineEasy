@@ -217,13 +217,16 @@ leaks, `property_signal_sweep_total{outcome="skipped_locked"}` keeps incrementin
 the same series a perfectly healthy overlapping tick produces. Sweeping is dead and every
 existing metric reads normal. Conditions 28 and 29 exist to close exactly that gap.
 
-Unlike every condition above, **28 and 29 do page today, via a real code path**:
-`GROW_SIGNAL_SWEEP_UNHEALTHY` (`lib/operationalAlerts.ts`; severity `high`, owner
-`operations`, runbook `grow-signal-sweep`) is dispatched to the configured
-`OPERATIONAL_ALERTS_WEBHOOK_URL` from two call sites. That does not make the rest of this
-document live — it makes these two conditions the exception, because `logger.error` is
-**not** bridged to `dispatchOperationalAlert()` (`logger.ts` only writes JSON to stderr), so
-a log-only treatment of a leaked lock would have been no alert at all.
+Unlike every condition above, **28, 29, and 30 page today, via a real code path**.
+Conditions 28 and 29 dispatch `GROW_SIGNAL_SWEEP_UNHEALTHY` (`lib/operationalAlerts.ts`;
+severity `high`, owner `operations`, runbook `grow-signal-sweep`) to the configured
+`OPERATIONAL_ALERTS_WEBHOOK_URL` from two call sites. Condition 30 dispatches
+`GROW_SIGNAL_SWEEP_BROKERAGE_FAILED` and `GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED` with that
+same policy shape. That does not make the rest of this document live — it makes these
+conditions the exception, because `logger.error` is **not** bridged to
+`dispatchOperationalAlert()` (`logger.ts` only writes JSON to stderr), so a log-only
+treatment of a leaked lock or a brokerage that fails every tick would have been no alert
+at all.
 
 28. `property_signal_sweep_lock_orphaned_total{kind="suspected_leak"}` incremented at all →
     something holds the sweep advisory lock `(0x41455351, 1)` and is not sweeping.
@@ -242,16 +245,32 @@ a log-only treatment of a leaked lock would have been no alert at all.
     every tick produces one alert per cooldown, not one per tick.
 30. `property_signal_sweep_brokerage_failure_total{kind}` rising while
     `property_signal_sweep_total{outcome="completed"}` keeps incrementing normally → ONE
-    tenant is broken, not the sweep. Deliberately **metric-only and not page-worthy**: the
-    run continues, sweeps every other brokerage, and is recorded COMPLETED with `errors > 0`.
-    Which brokerage failed is in the `property_signal_sweep_brokerage_failed` structured log
-    line, never a label. `kind="cursor_touch"` is the more serious of the two — that
-    brokerage's `last_evaluated_at` was not stamped, so it keeps sorting first in the durable
-    ordering and can starve the tenants behind it; a sustained non-zero rate there warrants
-    investigation even though a single occurrence does not.
+    tenant is broken, and the sweep itself kept running. The run continues, sweeps every
+    other brokerage, and is recorded COMPLETED with `errors > 0`. Which brokerage failed is
+    in the alert details and in the `property_signal_sweep_brokerage_failed` structured log
+    line, never a metric label.
+    **Already dispatches an operational alert** from `sweep.ts`'s `considerBrokerage`, once
+    per brokerage per `OPERATIONAL_ALERTS_COOLDOWN_SECONDS`:
+    - `kind="evaluation"` → `GROW_SIGNAL_SWEEP_BROKERAGE_FAILED` (dedup key
+      `grow-signal-sweep:brokerage-evaluation-failed:<brokerageId>`). The pass threw; the
+      cursor stamp still runs so the tenant moves to the back of the durable ordering.
+    - `kind="cursor_touch"` → `GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED` (dedup key
+      `grow-signal-sweep:cursor-touch-failed:<brokerageId>`). The follow-up stamp of
+      `last_evaluated_at` also failed, so that brokerage keeps sorting first and can
+      starve every tenant behind it on later scheduled runs. This alert is in addition
+      to the evaluation alert for the same pass.
+    Both use the H-1 policy shape (severity `high`, owner `operations`, runbook
+    `grow-signal-sweep`) and are their own types, so they are not collapsed into
+    `GROW_SIGNAL_SWEEP_UNHEALTHY` (conditions 28 and 29), which means the sweep as a
+    whole is not running. A tenant that fails every tick produces one alert per cooldown
+    for that tenant, not one per tick. (Runbook: `grow-signal-sweep` — read
+    `errors` and `errorMessage` on `GET /api/grow/property-intelligence/ops/health`, then
+    the structured log for that `sweepRunId`.)
 31. No `property_signal_sweep_total{outcome="completed"}` increment for longer than
-    3 × `GROW_SIGNAL_SWEEP_INTERVAL_MS` → sweeping has stopped without either alerting
-    branch firing (e.g. the process is alive but the timer was never registered). This one is
+    3 × `GROW_SIGNAL_SWEEP_INTERVAL_MS` → sweeping has stopped without the lock-leak
+    or scheduled-run alert firing (e.g. the process is alive but the timer was never
+    registered). Per-brokerage alerts (condition 30) do not cover a sweep that never
+    starts. This one is
     **not** wired to a dispatch and is the honest gap in this set: it is a
     *rate-of-absence* condition, which needs an external rule engine (§3) rather than an
     in-process call site. Until one exists, the same judgement is available on demand from
@@ -266,7 +285,8 @@ a log-only treatment of a leaked lock would have been no alert at all.
 tenant identifier of any kind** — 2 triggers × 2 kinds = 4 series for the orphaned-lock
 counter, and 2 series for the per-brokerage failure counter. A brokerage with a million
 contacts adds exactly zero series. Per-brokerage detail lives on the
-`grow_signal_sweep_runs` row and in the structured log, per the metrics catalogue's own rule
+`grow_signal_sweep_runs` row, in the structured log, and in the H-4 alert `details`
+(`brokerageId` only — still never a metric label), per the metrics catalogue's own rule
 at `packages/events/src/metrics.ts:150-154`.
 
 **Not added, deliberately.** A stale-sweep check in `GET /api/health/ready` is a pending
