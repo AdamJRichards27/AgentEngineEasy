@@ -411,6 +411,42 @@ test("W2-D: a contact whose only signal is contact-anchored is never told there 
   }
 });
 
+test("E-4: withheld signals are disclosed, and the panel does not also say there is nothing", async () => {
+  installGlobals({
+    properties: [],
+    contactAnchoredSignals: [],
+    unusableSignalCount: 1,
+    outreachRestriction: null,
+  });
+  try {
+    const text = textContent(await renderPanel());
+    assert.equal(text.includes(EMPTY_STATE), false, "a withheld signal is not the same as no intelligence");
+    assert.match(text, /1 other signal is recorded/, "the honest notice is what the agent reads");
+    assert.match(text, /not shown/);
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("E-4: a restriction still shows intelligence that can be shown, and still discloses what cannot", async () => {
+  installGlobals({
+    properties: [],
+    contactAnchoredSignals: [contactAnchoredEntry({ agentAction: null })],
+    unusableSignalCount: 1,
+    outreachRestriction: RESTRICTION,
+  });
+  try {
+    const text = textContent(await renderPanel());
+    assert.match(text, /Do not contact/, "the restriction stays unmistakable");
+    assert.match(text, /Worth reconnecting/, "gate 19 keeps the contact-anchored signal visible");
+    assert.match(text, /1 other signal is recorded/, "the withheld count is not cleared by the restriction");
+    assert.doesNotMatch(text, /You might consider/, "generated outreach stays off a restricted contact");
+    assert.equal(text.includes(EMPTY_STATE), false);
+  } finally {
+    clearGlobals();
+  }
+});
+
 test("W2-D: a contact with genuinely nothing still sees the empty state", async () => {
   // The fix must not be "never show the empty state" — that would trade one
   // false statement for another.
