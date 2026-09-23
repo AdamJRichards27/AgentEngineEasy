@@ -479,27 +479,54 @@ async function runSweepWhileLocked(trigger: "SCHEDULED" | "MANUAL", options: Run
       const message = err instanceof Error ? err.message : String(err);
       summary.errors += 1;
       // AE GROW Completion W1-D (H-6): property_signal_sweep_brokerage_failure_total
-      // is now registered, so "one tenant is broken" is finally distinguishable
-      // from "the sweep is broken" without reading logs. WHICH brokerage failed
-      // stays in the structured log line below and on the run row's `errors`
-      // count — never a label, per the metrics catalogue's own rule.
+      // distinguishes "one tenant is broken" from "the sweep is broken" without
+      // reading logs. WHICH brokerage failed stays in the structured log line
+      // below, on the run row's `errors` count, and in the alert details —
+      // never a metric label, per the metrics catalogue's own rule.
       //
-      // Deliberately metric-only, with no operational alert: a single tenant's
-      // pass throwing while the run sweeps every other tenant and completes is
-      // genuinely not page-worthy. Only the sweep as a whole failing is.
+      // AE GROW Completion H-4. logger.error is not bridged to
+      // dispatchOperationalAlert (logger.ts only writes JSON to stderr), so
+      // before this a brokerage that failed on every scheduled pass never
+      // paged. H-1's GROW_SIGNAL_SWEEP_UNHEALTHY stays reserved for a leaked
+      // lock and a scheduled tick that throws: those mean the sweep as a whole
+      // is not running. One tenant's pass failing while the run continues is
+      // GROW_SIGNAL_SWEEP_BROKERAGE_FAILED. Dedup is per brokerage, so a
+      // permanently broken tenant pages once per cooldown rather than once per
+      // tick, and a second tenant is not hidden behind the first tenant's
+      // cooldown. Fire-and-forget, same as H-1: alert delivery must never turn
+      // this isolated failure into a thrown sweep.
       incrementCounter("property_signal_sweep_brokerage_failure_total", { kind: "evaluation" });
       // Ids only — never candidate, party or property content.
       logger.error("property_signal_sweep_brokerage_failed", { brokerageId, sweepRunId: sweepRun.id, error: message });
+      void dispatchOperationalAlert({
+        type: "GROW_SIGNAL_SWEEP_BROKERAGE_FAILED",
+        summary: `A Property Intelligence signal sweep pass failed for brokerage ${brokerageId} and the run continued (sweep run ${sweepRun.id}): ${message}`,
+        dedupKey: `grow-signal-sweep:brokerage-evaluation-failed:${brokerageId}`,
+        details: { brokerageId, sweepRunId: sweepRun.id, kind: "evaluation", error: message },
+      }).catch((alertErr) =>
+        logger.error("property_signal_sweep_alert_dispatch_failed", { error: alertErr instanceof Error ? alertErr.message : String(alertErr) }),
+      );
       await touchBrokerageCursor(brokerageId, sweepRun.id, new Date()).catch((cursorErr) => {
+        const cursorMessage = cursorErr instanceof Error ? cursorErr.message : String(cursorErr);
         // Strictly worse than the evaluation failure above: without its
         // last_evaluated_at stamp this brokerage keeps sorting first in the
-        // durable ordering and can starve every tenant behind it.
+        // durable ordering and can starve every tenant behind it on later
+        // scheduled runs. Own alert type, same policy shape as H-1. The dedup
+        // key differs from the evaluation alert, so both page for this pass.
         incrementCounter("property_signal_sweep_brokerage_failure_total", { kind: "cursor_touch" });
         logger.error("property_signal_sweep_cursor_touch_failed", {
           brokerageId,
           sweepRunId: sweepRun.id,
-          error: cursorErr instanceof Error ? cursorErr.message : String(cursorErr),
+          error: cursorMessage,
         });
+        void dispatchOperationalAlert({
+          type: "GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED",
+          summary: `A Property Intelligence signal sweep could not stamp last_evaluated_at for brokerage ${brokerageId} after a failed pass (sweep run ${sweepRun.id}). That brokerage keeps sorting first and can starve every tenant behind it: ${cursorMessage}`,
+          dedupKey: `grow-signal-sweep:cursor-touch-failed:${brokerageId}`,
+          details: { brokerageId, sweepRunId: sweepRun.id, kind: "cursor_touch", error: cursorMessage },
+        }).catch((alertErr) =>
+          logger.error("property_signal_sweep_alert_dispatch_failed", { error: alertErr instanceof Error ? alertErr.message : String(alertErr) }),
+        );
       });
     }
     summary.brokeragesConsidered += 1;

@@ -13,17 +13,26 @@ export type OperationalAlertType =
   | "INTEGRATION_WEBHOOK_FAILURE"
   | "FINANCIAL_RECONCILIATION_VARIANCE"
   | "TENANT_SECURITY_SIGNAL"
-  // AE GROW Signal Sweep operability (H-1). logger.error is never bridged to
-  // this module — lib/logger.ts only writes JSON to stderr — so a leaked
-  // sweep advisory lock, or a scheduled run that throws every tick, is
-  // entirely silent while property_signal_sweep_total keeps reporting the
-  // healthy-looking `skipped_locked`. Exactly two call sites raise this: the
-  // suspected-leak branch in lib/propertyIntelligence/sweep.ts and the
-  // scheduled-run catch in lib/propertyIntelligence/sweepBootstrap.ts. A
-  // single brokerage's pass failing is deliberately NOT one of them — that is
-  // metric-only (property_signal_sweep_brokerage_failure_total), because one
-  // bad tenant genuinely is not page-worthy while the sweep keeps running.
+  // AE GROW Signal Sweep operability. logger.error is never bridged to this
+  // module — lib/logger.ts only writes JSON to stderr — so these types are
+  // the only way a sweep failure pages.
+  //
+  // H-1: GROW_SIGNAL_SWEEP_UNHEALTHY. Exactly two call sites: the suspected
+  // lock leak in lib/propertyIntelligence/sweep.ts and the scheduled-run
+  // catch in lib/propertyIntelligence/sweepBootstrap.ts. Those mean the sweep
+  // as a whole is not running.
+  //
+  // H-4: GROW_SIGNAL_SWEEP_BROKERAGE_FAILED and
+  // GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED, both raised from considerBrokerage
+  // in sweep.ts. A single brokerage's pass used to stop at
+  // property_signal_sweep_brokerage_failure_total, so a tenant that fails on
+  // every scheduled pass — and a cursor-touch failure that pins that tenant
+  // at the front of the durable ordering — never paged. Same policy shape as
+  // H-1 (severity high, owner operations, runbook grow-signal-sweep), own
+  // types so an operator can tell "one tenant failed" from "the sweep is dead".
   | "GROW_SIGNAL_SWEEP_UNHEALTHY"
+  | "GROW_SIGNAL_SWEEP_BROKERAGE_FAILED"
+  | "GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED"
   | "TEST";
 
 export interface AlertPolicy {
@@ -45,6 +54,8 @@ export const OPERATIONAL_ALERT_POLICIES: Readonly<Record<OperationalAlertType, A
   FINANCIAL_RECONCILIATION_VARIANCE: { severity: "high", owner: "finance-operations", runbook: "financial-reconciliation" },
   TENANT_SECURITY_SIGNAL: { severity: "critical", owner: "security", runbook: "tenant-isolation" },
   GROW_SIGNAL_SWEEP_UNHEALTHY: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
+  GROW_SIGNAL_SWEEP_BROKERAGE_FAILED: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
+  GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
   TEST: { severity: "low", owner: "operations", runbook: "alert-delivery-test" },
 };
 
