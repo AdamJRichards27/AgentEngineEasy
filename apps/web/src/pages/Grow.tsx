@@ -630,7 +630,9 @@ function GrowWorkspace() {
 // change to the /grow/today contract or to this component's own ranking/filtering logic; the
 // only new read is the contactEmail/contactMobile/availableActions fields growToday.ts's types
 // already carry.
-function GrowToday({
+// Exported so the E-2 behavior test can render this feed directly. The page
+// still mounts it only from GrowWorkspace.
+export function GrowToday({
   onAskAE,
   onViewContact,
   onEmailContact,
@@ -1131,6 +1133,17 @@ function GrowActionCard({
   const showUpdateNextAction =
     canManageOpportunities && item.opportunityId !== null && item.availableActions.some((b) => b.action === "update_next_action");
   const showViewProperty = item.propertyId !== null && item.availableActions.some((b) => b.action === "view_property");
+  // E-2: Rule E's primary action is view_appraisal. The API has emitted it,
+  // and the web type has carried it, but this card used to ignore the button
+  // entirely. The destination is the existing Property Workspace
+  // (/properties/:id), which already hosts AppraisalSection — not a new Grow
+  // appraisal route. The link is shown only when that property id is actually
+  // present. A view_appraisal action with a null propertyId is not rendered
+  // as /properties/null; View contact below remains the fallback when the
+  // card has a person and the agent can read contacts. With neither a
+  // property nor that read, the action stays hidden.
+  const showViewAppraisal =
+    item.propertyId !== null && item.availableActions.some((b) => b.action === "view_appraisal");
   const showViewContact = canViewContacts && linkedContact;
   // AE GROW Priority 3 §4: gated on both the grow.contacts.manage entitlement (see
   // canManageContactComms above) and the contact actually having that channel on file.
@@ -1238,6 +1251,11 @@ function GrowActionCard({
           >
             Create follow-up
           </button>
+        )}
+        {showViewAppraisal && item.propertyId !== null && (
+          <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
+            View appraisal
+          </Link>
         )}
         {showViewProperty && item.propertyId !== null && (
           <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
