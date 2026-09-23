@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useCompleteSignIn, type SessionUser } from "../lib/session";
 
 // Critical Blocker Remediation, Phases 2/4/8 — the ONLY way an account is
@@ -113,7 +113,7 @@ export default function AcceptInvitation({ params }: { params: { token: string }
             <button className="btn btn-primary btn-block" onClick={submit} disabled={!canSubmit}>
               {accept.isPending ? "Creating your account…" : "Create account"}
             </button>
-            {accept.isError && <p className="error-text">{(accept.error as ApiError).friendly}</p>}
+            {accept.isError && <p className="error-text">{apiErrorMessage(accept.error, "Couldn't create your account. Try again.")}</p>}
           </div>
         )}
       </div>

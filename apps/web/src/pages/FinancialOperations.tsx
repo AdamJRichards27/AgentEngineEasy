@@ -24,7 +24,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 import {
   type CrossPropertyExceptionsResponse,
@@ -136,7 +136,7 @@ function FinancialExceptionsPanel() {
       </div>
 
       {isLoading && <p className="muted">Loading…</p>}
-      {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+      {isError && <p className="error-text">{apiErrorMessage(error, "Couldn't load financial exceptions. Try again.")}</p>}
       {!isLoading && !isError && (data?.exceptions.length ?? 0) === 0 && <p className="muted">No financial exceptions match these filters.</p>}
       {!isLoading && !isError && (data?.exceptions.length ?? 0) > 0 && (
         <>
@@ -206,7 +206,7 @@ function PaymentRequestsPanel() {
       </div>
 
       {isLoading && <p className="muted">Loading…</p>}
-      {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+      {isError && <p className="error-text">{apiErrorMessage(error, "Couldn't load payment requests. Try again.")}</p>}
       {!isLoading && !isError && requests.length === 0 && <p className="muted">No payment requests match this filter.</p>}
       {!isLoading && !isError && requests.length > 0 && (
         <ul className="item-list">
@@ -242,7 +242,7 @@ function AuditReturnRemindersPanel() {
     <section className="card">
       <h2>Audit Return Reminders{reminders.length > 0 ? ` (${reminders.length})` : ""}</h2>
       {isLoading && <p className="muted">Loading…</p>}
-      {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+      {isError && <p className="error-text">{apiErrorMessage(error, "Couldn't load audit return reminders. Try again.")}</p>}
       {!isLoading && !isError && reminders.length === 0 && <p className="muted">No audit return reminders scheduled.</p>}
       {!isLoading && !isError && reminders.length > 0 && (
         <ul className="item-list">

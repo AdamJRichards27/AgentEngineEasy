@@ -15,7 +15,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "../lib/session";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 
 const TABS = [
   { key: "team", label: "Team" },
@@ -172,13 +172,13 @@ function TeamTab({ currentUserId }: { currentUserId: number }) {
             {invite.isPending ? "Sending…" : "Send Invitation"}
           </button>
         </form>
-        {invite.isError && <p className="error-text">{(invite.error as ApiError).friendly}</p>}
+        {invite.isError && <p className="error-text">{apiErrorMessage(invite.error, "Couldn't send that invitation. Try again.")}</p>}
       </section>
 
       <section className="card">
         <h2>Invitations{invitations.data ? ` (${invitations.data.length})` : ""}</h2>
         {invitations.isLoading && <p className="muted">Loading…</p>}
-        {invitations.isError && <p className="error-text">{(invitations.error as ApiError).friendly}</p>}
+        {invitations.isError && <p className="error-text">{apiErrorMessage(invitations.error, "Couldn't load invitations. Try again.")}</p>}
         {invitations.data && invitations.data.length === 0 && <p className="empty-state">No invitations sent yet.</p>}
         {invitations.data && invitations.data.length > 0 && (
           <ul className="item-list">
@@ -204,13 +204,13 @@ function TeamTab({ currentUserId }: { currentUserId: number }) {
             })}
           </ul>
         )}
-        {revoke.isError && <p className="error-text">{(revoke.error as ApiError).friendly}</p>}
+        {revoke.isError && <p className="error-text">{apiErrorMessage(revoke.error, "Couldn't revoke that invitation. Try again.")}</p>}
       </section>
 
       <section className="card">
         <h2>Team members{members.data ? ` (${members.data.length})` : ""}</h2>
         {members.isLoading && <p className="muted">Loading…</p>}
-        {members.isError && <p className="error-text">{(members.error as ApiError).friendly}</p>}
+        {members.isError && <p className="error-text">{apiErrorMessage(members.error, "Couldn't load team members. Try again.")}</p>}
         {members.data && members.data.length > 0 && (
           <table className="grow-table">
             <thead>
@@ -251,7 +251,9 @@ function TeamTab({ currentUserId }: { currentUserId: number }) {
             </tbody>
           </table>
         )}
-        {(disable.isError || enable.isError) && <p className="error-text">{((disable.error ?? enable.error) as ApiError).friendly}</p>}
+        {(disable.isError || enable.isError) && (
+          <p className="error-text">{apiErrorMessage(disable.error ?? enable.error, "Couldn't update that team member. Try again.")}</p>
+        )}
       </section>
     </>
   );
@@ -300,7 +302,7 @@ function PrivacyRequestsTab() {
         itself exports or deletes data. See docs/legal/DATA_ACCESS_CORRECTION_DELETION_PROCESS.md.
       </p>
       {requests.isLoading && <p className="muted">Loading…</p>}
-      {requests.isError && <p className="error-text">{(requests.error as ApiError).friendly}</p>}
+      {requests.isError && <p className="error-text">{apiErrorMessage(requests.error, "Couldn't load privacy requests. Try again.")}</p>}
       {requests.data && requests.data.length === 0 && <p className="empty-state">No privacy requests.</p>}
       {requests.data && requests.data.length > 0 && (
         <ul className="item-list">
@@ -348,7 +350,7 @@ function PrivacyRequestsTab() {
           ))}
         </ul>
       )}
-      {resolve.isError && <p className="error-text">{(resolve.error as ApiError).friendly}</p>}
+      {resolve.isError && <p className="error-text">{apiErrorMessage(resolve.error, "Couldn't record that decision. Try again.")}</p>}
     </section>
   );
 }

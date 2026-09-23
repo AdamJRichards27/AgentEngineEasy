@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, ApiError, apiErrorMessage } from "../lib/api";
 // AE GROW Completion W2-B (G-4) — the shared loading/failed/empty region
 // presentation every other Grow region already uses.
 import { GrowDataRegionStatus } from "../components/GrowDataRegion";
@@ -13,7 +13,7 @@ import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 // from a bare fetch(), so a dropped connection never produces an ApiError at
 // all.
 function importErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.friendly : fallback;
+  return apiErrorMessage(error, fallback);
 }
 
 // Mirrors apps/api/src/lib/import/mapping.ts's CANONICAL_FIELDS exactly --

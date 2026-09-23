@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useSearch } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 // AE GROW Priority 3 — Contact 360's communications section, reused unmodified here (see that
@@ -371,7 +371,7 @@ function sandboxCallStatusLabel(status: string): string {
 // whenever the failure isn't an ApiError — a dropped connection, an aborted
 // request, or anything thrown before the response was parsed.
 function growErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.friendly : fallback;
+  return apiErrorMessage(error, fallback);
 }
 
 function recordingGateName(key: string): string {

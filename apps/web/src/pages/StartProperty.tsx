@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 
 interface AddressCandidate {
   placeId: string;
@@ -67,7 +67,7 @@ export default function StartProperty() {
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
       setCandidates([]);
-      setSearchError((err as ApiError).friendly ?? "Couldn't search that address. Try again.");
+      setSearchError(apiErrorMessage(err, "Couldn't search that address. Try again."));
     } finally {
       if (requestId === requestIdRef.current) setIsSearching(false);
     }
@@ -215,7 +215,7 @@ export default function StartProperty() {
           <button className="btn btn-primary btn-block" onClick={() => addSellers.mutate()} disabled={addSellers.isPending}>
             {addSellers.isPending ? "Saving…" : "Continue"}
           </button>
-          {addSellers.isError && <p className="error-text">{(addSellers.error as ApiError).friendly}</p>}
+          {addSellers.isError && <p className="error-text">{apiErrorMessage(addSellers.error, "Couldn't save those sellers. Try again.")}</p>}
         </div>
       </div>
     );
@@ -275,7 +275,7 @@ export default function StartProperty() {
           >
             Not this address? Create New Address
           </button>
-          {createProperty.isError && <p className="error-text">{(createProperty.error as ApiError).friendly}</p>}
+          {createProperty.isError && <p className="error-text">{apiErrorMessage(createProperty.error, "Couldn't create that property. Try again.")}</p>}
         </div>
       ) : (
         <div className="stack">
@@ -287,7 +287,7 @@ export default function StartProperty() {
           >
             Create Property
           </button>
-          {createProperty.isError && <p className="error-text">{(createProperty.error as ApiError).friendly}</p>}
+          {createProperty.isError && <p className="error-text">{apiErrorMessage(createProperty.error, "Couldn't create that property. Try again.")}</p>}
         </div>
       )}
     </div>

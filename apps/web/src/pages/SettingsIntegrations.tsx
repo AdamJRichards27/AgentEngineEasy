@@ -23,7 +23,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "../lib/session";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, ApiError, apiErrorMessage } from "../lib/api";
 import {
   approvalStatusLabel,
   approvalStatusPillClass,
@@ -187,7 +187,7 @@ function OverviewTab({ onViewConnection }: { onViewConnection: (focus: Focus) =>
             </button>
           )}
         </div>
-        {updateSettings.isError && <p className="error-text">{(updateSettings.error as ApiError).friendly}</p>}
+        {updateSettings.isError && <p className="error-text">{apiErrorMessage(updateSettings.error, "Couldn't save integration settings. Try again.")}</p>}
       </section>
 
       <section className="card">
@@ -394,7 +394,7 @@ function CreateConnectionForm({ prefillProviderId, onDone }: { prefillProviderId
           Cancel
         </button>
       </div>
-      {create.isError && <p className="error-text">{(create.error as ApiError).friendly}</p>}
+      {create.isError && <p className="error-text">{apiErrorMessage(create.error, "Couldn't create that connection. Try again.")}</p>}
     </form>
   );
 }
