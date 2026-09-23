@@ -17,9 +17,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import type { Server } from "node:http";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   db,
+  pool,
   entitlementGrants,
   auditLogs,
   growActivities,
@@ -28,6 +29,7 @@ import {
   parties,
   growContactChannelConsents,
   growConsentDecisions,
+  setDbQueryObserver,
 } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import {
@@ -385,6 +387,177 @@ test("Contact 360 eligibility check: no phone number, valid phone, and ambiguous
   assert.equal(ambiguousRes.status, 200);
   assert.equal(ambiguousBody.eligible, false, "an ambiguous national number is not eligible until its country is confirmed");
   assert.equal(ambiguousBody.requiresCountryConfirmation, true);
+});
+
+/**
+ * A-9. GET .../eligibility is the poll behind the Call button. It must report
+ * the same BLOCKED / REVIEW_REQUIRED / ELIGIBLE answers as the audited
+ * evaluator and must not append a decision or take the consent advisory lock.
+ * Create and confirm keep the mutating evaluator.
+ */
+test("GET eligibility polls append zero grow_consent_decisions rows and do not take the consent advisory lock", async () => {
+  const propertyId = await createProperty(A.agent.cookie, "2 Read Only Eligibility Ct");
+  const allowedPartyId = await createParty(A.agent.cookie, propertyId, {
+    email: uniqueEmail("readonly-allowed"),
+    mobile: "+61412000931",
+  });
+  const blockedPartyId = await createPartyWithoutCallEvidence(A.agent.cookie, propertyId, {
+    email: uniqueEmail("readonly-blocked"),
+    mobile: "+61412000932",
+  });
+  await captureConsentState({
+    brokerageId: A.brokerageId,
+    partyId: blockedPartyId,
+    channel: "PHONE_CALL",
+    state: "EXPRESS",
+    source: "a9-readonly-eligibility",
+    captureMethod: "test",
+    purpose: PHONE_CALL_CONSENT_PURPOSE,
+    scope: PHONE_CALL_CONSENT_SCOPE,
+    jurisdiction: "AU",
+    recordedByUserId: A.agent.user.id,
+  });
+  await recordDncrStatus({
+    brokerageId: A.brokerageId,
+    partyId: blockedPartyId,
+    channel: "PHONE_CALL",
+    jurisdiction: "AU",
+    status: "LISTED",
+    source: "a9-readonly-eligibility",
+    reference: `dncr-listed-readonly-${blockedPartyId}`,
+    recordedByUserId: A.agent.user.id,
+  });
+  const reviewPartyId = await createPartyWithoutCallEvidence(A.agent.cookie, propertyId, {
+    email: uniqueEmail("readonly-review"),
+    mobile: "+61412000933",
+  });
+  const ambiguousPartyId = await createParty(A.agent.cookie, propertyId, {
+    email: uniqueEmail("readonly-ambiguous"),
+    mobile: "0212345678",
+  });
+
+  async function decisionCount(partyId: number): Promise<number> {
+    const [row] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(growConsentDecisions)
+      .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, partyId)));
+    return row!.n;
+  }
+
+  const before = {
+    allowed: await decisionCount(allowedPartyId),
+    blocked: await decisionCount(blockedPartyId),
+    review: await decisionCount(reviewPartyId),
+    ambiguous: await decisionCount(ambiguousPartyId),
+  };
+  assert.deepEqual(before, { allowed: 0, blocked: 0, review: 0, ambiguous: 0 });
+
+  async function readEligibility(partyId: number) {
+    const res = await fetch(callsUrl(`/contacts/${partyId}/eligibility`), { headers: { cookie: A.agent.cookie } });
+    const body = (await res.json()) as {
+      eligible: boolean;
+      reason: string;
+      status: string;
+      consentDecisionId: number | null;
+      requiresCountryConfirmation: boolean;
+    };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.consentDecisionId, null, "a GET poll must not manufacture a consent decision id");
+    return body;
+  }
+
+  const allowed = await readEligibility(allowedPartyId);
+  assert.equal(allowed.eligible, true);
+  assert.equal(allowed.reason, "OK");
+  assert.equal(allowed.status, "Ready to call");
+  assert.equal(allowed.requiresCountryConfirmation, false);
+
+  const blocked = await readEligibility(blockedPartyId);
+  assert.equal(blocked.eligible, false);
+  assert.equal(blocked.reason, "DNCR_LISTED", "a listed register check stays BLOCKED and is not softened by a read");
+  assert.equal(blocked.status, "Do Not Call check required");
+
+  const review = await readEligibility(reviewPartyId);
+  assert.equal(review.eligible, false);
+  assert.equal(review.reason, "UNKNOWN_CONSENT", "missing consent stays REVIEW_REQUIRED");
+  assert.equal(review.status, "Consent needs review");
+
+  const ambiguous = await readEligibility(ambiguousPartyId);
+  assert.equal(ambiguous.eligible, false);
+  assert.equal(ambiguous.requiresCountryConfirmation, true);
+
+  const statements: string[] = [];
+  const uninstall = setDbQueryObserver((query) => statements.push(query));
+  try {
+    for (let i = 0; i < 5; i++) {
+      for (const partyId of [allowedPartyId, blockedPartyId, reviewPartyId, ambiguousPartyId]) {
+        const body = await readEligibility(partyId);
+        assert.equal(body.consentDecisionId, null);
+      }
+    }
+  } finally {
+    uninstall();
+  }
+
+  assert.deepEqual(
+    {
+      allowed: await decisionCount(allowedPartyId),
+      blocked: await decisionCount(blockedPartyId),
+      review: await decisionCount(reviewPartyId),
+      ambiguous: await decisionCount(ambiguousPartyId),
+    },
+    before,
+    "eligibility GET polls must not append grow_consent_decisions",
+  );
+
+  const lowered = statements.map((statement) => statement.toLowerCase());
+  assert.ok(statements.length > 0, "the observer must have seen the route's statements");
+  assert.equal(
+    lowered.filter((statement) => statement.includes("pg_advisory")).length,
+    0,
+    "a GET eligibility poll must not take the consent advisory lock",
+  );
+  const decisionInserts = lowered.filter(
+    (statement) => statement.includes("insert into") && statement.includes("grow_consent_decisions"),
+  );
+  assert.deepEqual(decisionInserts, [], "a GET eligibility poll must not INSERT into grow_consent_decisions");
+
+  // Independent of the statement log: an exclusive hold of the consent lock
+  // must not stall the poll. The namespace matches consentControlsPersistence.ts.
+  const CONSENT_ADVISORY_LOCK_NAMESPACE = 2076418031;
+  const holder = await pool.connect();
+  try {
+    await holder.query("begin");
+    await holder.query("select pg_advisory_xact_lock($1, $2)", [CONSENT_ADVISORY_LOCK_NAMESPACE, A.brokerageId]);
+    const outcome = await Promise.race([
+      Promise.all([
+        readEligibility(allowedPartyId),
+        readEligibility(blockedPartyId),
+        readEligibility(reviewPartyId),
+        readEligibility(ambiguousPartyId),
+      ]).then(() => "ok" as const),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 15_000)),
+    ]);
+    assert.equal(outcome, "ok", "GET eligibility must read through a held consent advisory lock");
+  } finally {
+    await holder.query("rollback").catch(() => {});
+    holder.release();
+  }
+
+  assert.equal(await decisionCount(allowedPartyId), 0);
+  const createRes = await fetch(callsUrl("/"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ partyId: allowedPartyId }),
+  });
+  assert.equal(createRes.status, 201, await createRes.text());
+  assert.equal(await decisionCount(allowedPartyId), 1, "create still records the authoritative decision the GET poll refused to write");
+  const [created] = await db
+    .select()
+    .from(growConsentDecisions)
+    .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, allowedPartyId)));
+  assert.equal(created!.decision, "ELIGIBLE");
+  assert.equal(created!.reasonCode, "EXPRESS_CONSENT_ELIGIBLE");
 });
 
 test("creation rejects an arbitrary destinationRaw that does not match the contact phone", async () => {
@@ -1193,7 +1366,7 @@ test("authoritative eligible decisions ignore forged authority fields and permit
   assert.equal(eligibilityRes.status, 200, JSON.stringify(eligibilityBody));
   assert.equal(eligibilityBody.eligible, true);
   assert.equal(eligibilityBody.reason, "OK");
-  assert.ok(eligibilityBody.consentDecisionId, "eligibility must expose the server-recorded decision id");
+  assert.equal(eligibilityBody.consentDecisionId, null, "GET eligibility must not manufacture a consent decision id");
   assert.equal(eligibilityBody.recording.permitted, false);
   assert.equal(eligibilityBody.recording.provider, "sandbox");
   assert.equal(eligibilityBody.recording.fiveGateResult.allPassed, false);
@@ -1239,7 +1412,7 @@ test("authoritative eligible decisions ignore forged authority fields and permit
     .from(growConsentDecisions)
     .where(and(eq(growConsentDecisions.brokerageId, A.brokerageId), eq(growConsentDecisions.partyId, partyId)))
     .orderBy(desc(growConsentDecisions.id));
-  assert.ok(createdDecisions.length >= 2, "eligibility and create must each record an authoritative decision");
+  assert.equal(createdDecisions.length, 1, "create records the authoritative decision; the preceding GET eligibility poll must not");
   assert.equal(createdDecisions[0]!.decision, "ELIGIBLE");
   assert.equal(createdDecisions[0]!.reasonCode, "INFERRED_CONSENT_ELIGIBLE");
   assert.equal(createdDecisions[0]!.consentId, consent.id);
@@ -1314,7 +1487,7 @@ test("missing, listed, unknown, and policy-disabled inferred consent produce aud
   assert.equal(missingEligibilityRes.status, 200);
   assert.equal(missingEligibilityBody.eligible, false);
   assert.equal(missingEligibilityBody.reason, "NO_VALID_DNCR_CLEARED_CONSENT");
-  assert.ok(missingEligibilityBody.consentDecisionId);
+  assert.equal(missingEligibilityBody.consentDecisionId, null, "a BLOCKED eligibility GET must not append a decision row");
   const missingCreateRes = await fetch(callsUrl("/"), {
     method: "POST",
     headers: { "content-type": "application/json", cookie: A.agent.cookie },
