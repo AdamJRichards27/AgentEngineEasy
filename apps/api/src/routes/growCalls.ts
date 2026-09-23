@@ -4,9 +4,10 @@
 // Authenticated call-session surface, entitlement-gated by
 // grow.calling.access (session lifecycle) and grow.calling.recording
 // (consent capture/withdrawal) — see packages/db/src/schema/billing.ts.
-// F2 routes all outbound creation/confirmation and eligibility checks through
-// the audited canonical PHONE_CALL decision; recording disclosure/confirmation
-// remains an orthogonal in-call state machine.
+// F2 routes outbound creation and confirmation through the audited canonical
+// PHONE_CALL decision. GET .../eligibility is a presentation poll: it uses
+// the same evaluator read-only (no decision row, no consent advisory lock).
+// Recording disclosure/confirmation remains an orthogonal in-call state machine.
 // Nothing here places a real call: every session this router creates is
 // provider = "sandbox" (lib/telephony/sandboxProvider.ts), and lifecycle
 // progression beyond DIAL_REQUESTED only ever happens via the separate,
@@ -57,7 +58,7 @@ import {
   GrowCallConsentNotFoundError,
 } from "../lib/telephony/consent.js";
 import { CallSessionTransitionError } from "../lib/telephony/stateMachine.js";
-import { CallConsentEligibilityError, evaluateOutboundCallEligibility } from "../lib/telephony/eligibility.js";
+import { CallConsentEligibilityError, evaluateOutboundCallEligibilityReadOnly } from "../lib/telephony/eligibility.js";
 import { evaluatePreCallRecordingGates, evaluateRecordingGates } from "../lib/telephony/recordingGates.js";
 import { SandboxTelephonyProvider } from "../lib/telephony/sandboxProvider.js";
 import {
@@ -247,7 +248,11 @@ growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.c
       jurisdiction: normalized.country,
     });
     try {
-      const decision = await evaluateOutboundCallEligibility({
+      // A-9: a UI poll must not append grow_consent_decisions or take the
+      // consent advisory lock. The read-only evaluator uses the same
+      // current-state lookups and pure decision as create/confirm, and it
+      // never manufactures a decision id.
+      await evaluateOutboundCallEligibilityReadOnly({
         brokerageId: authedUser.brokerageId,
         partyId,
         decidedByUserId: authedUser.id,
@@ -260,7 +265,7 @@ growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.c
         reason: "OK",
         displayNumber: party.mobile,
         requiresCountryConfirmation: false,
-        consentDecisionId: decision.decision.id,
+        consentDecisionId: null,
         recording,
       });
     } catch (err) {
@@ -283,9 +288,9 @@ growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.c
   } catch (err) {
     if (err instanceof PhoneNumberValidationError && err.code === "AMBIGUOUS") {
       // An ambiguous national number has no authoritative country/jurisdiction
-      // yet.  Record the conservative PHONE_CALL decision where possible, but
+      // yet.  Evaluate the conservative PHONE_CALL decision read-only, but
       // never advertise it as dial-eligible until creation receives an
-      // explicit assumedCountry.
+      // explicit assumedCountry. Creation still records the authoritative row.
       let consentDecisionId: number | null = null;
       let reason = "COUNTRY_CONFIRMATION_REQUIRED";
       const recording = await beforeCallRecordingStatus({
@@ -295,13 +300,13 @@ growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.c
         jurisdiction: null,
       });
       try {
-        const decision = await evaluateOutboundCallEligibility({
+        await evaluateOutboundCallEligibilityReadOnly({
           brokerageId: authedUser.brokerageId,
           partyId,
           decidedByUserId: authedUser.id,
           jurisdiction: null,
         });
-        consentDecisionId = decision.decision.id;
+        consentDecisionId = null;
         reason = "COUNTRY_CONFIRMATION_REQUIRED";
       } catch (decisionError) {
         if (decisionError instanceof CallConsentEligibilityError) {
