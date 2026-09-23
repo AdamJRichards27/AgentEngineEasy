@@ -1060,14 +1060,12 @@ export async function getGrowTodaySummary(
 
   // W2-A — the one party-id set both wave-2 reads need.
   //
-  // I-16: this used to be built as four concatenated arrays INCLUDING
-  // duplicates and nulls, and handed straight to loadContactabilityFilter. A
-  // brokerage where the same contact holds a relationship, an opportunity, an
-  // appraisal and a signal contributed that id four times. De-duplicating here
-  // rather than inside the callee means the allocation, the JSON payload and
-  // the chunk boundaries are all computed from the real cardinality — and it
-  // is now the single set that scopes the activity aggregate too, instead of
-  // that aggregate reading the whole tenant.
+  // I-16: this used to be four concatenated arrays, duplicates and nulls
+  // included. A contact on a relationship, an opportunity, an appraisal and a
+  // signal contributed that id four times. De-duplicating here sizes the
+  // activity aggregate and the JSON payload from the real cardinality.
+  // loadContactabilityFilter de-duplicates again before it chunks, so a caller
+  // that still concatenates cannot evaluate the same id twice in one pass.
   const partyIdsInScope = [
     ...new Set<number>(
       [

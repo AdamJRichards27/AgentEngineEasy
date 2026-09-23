@@ -72,9 +72,13 @@ import { logger } from "@aee/events";
  * COST. Two statements per batch of parties, regardless of how many parties
  * are in the batch — DISTINCT ON does the "latest per (party, channel)"
  * reduction in the database. Batches are chunked only to keep a single bind
- * parameter array sane. W2-A (I-16): the two statements in a batch are
- * independent and now issue in parallel, so a batch costs one round trip
- * rather than two.
+ * parameter array sane. I-16: the id list is de-duplicated before it is
+ * chunked, so a party handed in more than once (Grow Today concatenates
+ * overlapping rule reads; the sweep can repeat a party) is one bind slot
+ * and cannot land in a second chunk. The two statements in a chunk read
+ * different tables, share no state, and issue together. Chunks stay serial:
+ * a second chunk is 5,000 distinct parties, and parallel chunks are not
+ * worth the extra pool pressure.
  */
 
 /** Parties per statement. Two statements per chunk; 5,000 parties is one chunk. */
@@ -127,6 +131,9 @@ function chunk<T>(items: T[], size: number): T[][] {
  * matches nothing, and no other tenant's consent rows are ever read.
  */
 export async function loadContactabilityFilter(brokerageId: number, partyIds: Array<number | null>): Promise<ContactabilityFilter> {
+  // I-16 — one evaluation per id, before chunk(). Nulls and non-integers are
+  // not party ids. Set preserves first-seen order, which is what chunk
+  // boundaries are then computed from.
   const ids = [...new Set(partyIds.filter((id): id is number => typeof id === "number" && Number.isInteger(id)))];
   if (ids.length === 0) return EMPTY_FILTER;
 
