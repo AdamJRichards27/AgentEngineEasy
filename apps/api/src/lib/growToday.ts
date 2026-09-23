@@ -870,6 +870,39 @@ function toRelatedSignal(
   };
 }
 
+/**
+ * E-2 — the action list on a Rule E `appraisal_follow_up` card.
+ *
+ * `view_appraisal` is always first: it is the card's primary action. When the
+ * appraisal is anchored to a property, `view_property` is included in the same
+ * shape opportunity cards already emit, so Today can open the existing
+ * Property Workspace. A null `propertyId` contributes no `view_property`
+ * button — the client must not be asked to render `/properties/null`.
+ *
+ * Outreach (email/sms) is still withheld for a do-not-contact contact.
+ * Viewing the appraisal, the property, or the contact is not outreach and stays.
+ */
+export function appraisalFollowUpAvailableActions(
+  ap: {
+    id: number;
+    propertyId: number | null;
+    partyId: number;
+    partyEmail: string | null;
+    partyMobile: string | null;
+  },
+  doNotContact: boolean,
+): GrowTodayActionButton[] {
+  const availableActions: GrowTodayActionButton[] = [{ action: "view_appraisal", appraisalId: ap.id }];
+  if (ap.propertyId) availableActions.push({ action: "view_property", propertyId: ap.propertyId });
+  if (!doNotContact) {
+    if (ap.partyEmail) availableActions.push({ action: "email", partyId: ap.partyId });
+    if (ap.partyMobile) availableActions.push({ action: "sms", partyId: ap.partyId });
+  }
+  availableActions.push({ action: "view_contact", partyId: ap.partyId });
+  availableActions.push({ action: "ask_ae" });
+  return availableActions;
+}
+
 export async function getGrowTodaySummary(
   brokerageId: number,
   options?: { includePropertyIntelligenceSignals?: boolean },
@@ -1194,13 +1227,21 @@ export async function getGrowTodaySummary(
     // affordances rather than the item.
     const contactability = contactabilityOf(ap.partyId);
     const doNotContact = contactability === "do_not_contact";
-    const availableActions: GrowTodayActionButton[] = [{ action: "view_appraisal", appraisalId: ap.id }];
-    if (!doNotContact) {
-      if (ap.partyEmail) availableActions.push({ action: "email", partyId: ap.partyId });
-      if (ap.partyMobile) availableActions.push({ action: "sms", partyId: ap.partyId });
-    }
-    availableActions.push({ action: "view_contact", partyId: ap.partyId });
-    availableActions.push({ action: "ask_ae" });
+    // E-2: view_appraisal stays the primary action. When this follow-up is
+    // anchored to a property, also offer view_property — the same button
+    // opportunity cards already emit — so Today can open that property.
+    // A missing propertyId adds nothing: the client must not be handed a
+    // view_property button it would have to render as /properties/null.
+    const availableActions = appraisalFollowUpAvailableActions(
+      {
+        id: ap.id,
+        propertyId: ap.propertyId,
+        partyId: ap.partyId,
+        partyEmail: ap.partyEmail,
+        partyMobile: ap.partyMobile,
+      },
+      doNotContact,
+    );
 
     actions.push({
       id: `appraisal:${ap.id}:followup`,
