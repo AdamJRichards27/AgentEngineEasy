@@ -489,8 +489,13 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
   // been deployed with W2-D yet — the same hand-mirror caution this file's
   // header describes. Absent is treated as "none", never as "unknown".
   const contactAnchored = contactData.contactAnchoredSignals ?? [];
-  const withholdingNotice = unusableSignalNotice(contactData.unusableSignalCount ?? 0);
-  const isEmpty = entries.length === 0 && contactAnchored.length === 0;
+  const rawWithheld = contactData.unusableSignalCount ?? 0;
+  const withheldCount = Number.isFinite(rawWithheld) && rawWithheld > 0 ? rawWithheld : 0;
+  const withholdingNotice = unusableSignalNotice(withheldCount);
+  // Empty only when AE has nothing to say. A withheld count is something to
+  // say: "no property intelligence yet" stacked on "1 signal is recorded but
+  // not shown" is the false empty state this notice exists to replace.
+  const isEmpty = entries.length === 0 && contactAnchored.length === 0 && withheldCount === 0;
   // AE GROW Completion W2-D — non-null means this contact must not be
   // contacted. `?? null` because an API build predating W2-D omits the key;
   // absent means "no restriction is on file", which is the same thing that

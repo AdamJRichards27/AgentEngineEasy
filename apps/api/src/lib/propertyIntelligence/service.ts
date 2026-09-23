@@ -184,12 +184,22 @@ export interface ContactIntelligenceSummary {
   properties: ContactPropertyIntelligenceEntry[];
   contactAnchoredSignals: ContactAnchoredSignalEntry[];
   /**
-   * Active signals for this contact that are neither property- nor
-   * contact-anchored: a property-dependent rule's row that arrived without
-   * the property its entire explanation is about (a data-integrity problem,
-   * not intelligence about a person), or a row whose type this codebase has
-   * no rule for. Counted honestly and shown as a count, never dressed up as a
-   * contact-anchored signal to make the surface look fuller.
+   * Active signals for this contact that AE will not present as a property
+   * entry or as contact-anchored intelligence.
+   *
+   * Two origins, one count, because both are the same honesty problem:
+   *
+   *   - a property-dependent rule's row that arrived without the property its
+   *     entire explanation is about, or a row whose type this codebase has
+   *     no rule for;
+   *   - a property-classified row whose propertyId could not be verified
+   *     inside this brokerage. The address lookup is tenant-scoped on
+   *     purpose. A miss used to drop the signal out of every bucket. It is
+   *     counted here instead, and the address is not returned.
+   *
+   * Shown as a count, never dressed up as a contact-anchored signal to make
+   * the surface look fuller. A contactability restriction does not clear
+   * this count — gate 19 withholds outreach, not the fact that a record exists.
    */
   unusableSignalCount: number;
   /**
@@ -383,7 +393,11 @@ export async function getContactPropertyIntelligenceSummary(partyId: number, bro
       propertyAddress: properties.formattedAddress,
     })
     .from(growRelationships)
-    .innerJoin(properties, eq(growRelationships.propertyId, properties.id))
+    // The property side of the join is tenant-scoped too. A relationship row
+    // in this brokerage that points at another brokerage's property must not
+    // carry that address into Contact 360. The signal, if any, is accounted
+    // for below as unverified rather than attached to the foreign row.
+    .innerJoin(properties, and(eq(growRelationships.propertyId, properties.id), eq(properties.brokerageId, brokerageId)))
     .where(and(eq(growRelationships.partyId, partyId), eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")))
     .orderBy(growRelationships.id);
 
@@ -464,6 +478,23 @@ export async function getContactPropertyIntelligenceSummary(partyId: number, bro
         activeSignals: signalsByProperty.get(p.id) ?? [],
       });
     }
+  }
+
+  // Anything still in signalsByProperty and not in `seen` is a property-
+  // classified signal whose property could not be verified in this brokerage.
+  // Before this, those rows were in none of the three buckets: not a property
+  // entry (the address lookup correctly refused them), not contact-anchored
+  // (they name a property), and not unusableSignalCount. Contact 360 then
+  // rendered the empty state, which is the silent drop E-4 exists to remove.
+  //
+  // Counted, not surfaced. Returning the id or the address would either leak
+  // another tenant's property or invent a link. The withholding notice is the
+  // honest sentence. Gate 19 does not apply here as a reason to hide the
+  // count: a contactability restriction strips outreach, and this branch
+  // never had an outreach action to strip.
+  for (const [propertyId, list] of signalsByProperty) {
+    if (seen.has(propertyId)) continue;
+    unusableSignalCount += list.length;
   }
 
   // One extra tenant-scoped lookup per distinct property (never per

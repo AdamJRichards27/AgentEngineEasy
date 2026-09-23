@@ -26,7 +26,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
-import { db, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import { db, growContactDncrStatuses, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
 import {
   getContactPropertyIntelligenceSummary,
   SIGNAL_ONLY_RELATIONSHIP_TYPE,
@@ -236,18 +236,140 @@ test("E-4: a signal-only entry is still brokerage-scoped", async () => {
         suburb: "Testville",
         postcode: "4000",
       })
-      .returning({ id: properties.id });
+      .returning({ id: properties.id, formattedAddress: properties.formattedAddress });
 
     // A signal row that points at another brokerage's property should never
-    // cause that property's address to be handed to this contact.
+    // cause that property's address to be handed to this contact. It also
+    // must not vanish: the row is counted, and the panel's withholding
+    // notice is what says so.
     const signalId = await createSignal(partyId, foreignProperty.id, "Signal pointing across a tenancy boundary");
+    const secondId = await createSignal(partyId, foreignProperty.id, "A second signal on the same foreign property");
     try {
-      const { properties: entries } = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
-      assert.deepEqual(entries, [], "the address lookup is re-scoped, not trusted from the signal row");
+      const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+      assert.deepEqual(summary.properties, [], "the address lookup is re-scoped, not trusted from the signal row");
+      assert.deepEqual(summary.contactAnchoredSignals, [], "a property-classified row is not laundered into a contact-anchored signal");
+      assert.equal(summary.unusableSignalCount, 2, "both rows are disclosed as withheld, not dropped");
+      assert.equal(JSON.stringify(summary).includes(foreignProperty.formattedAddress), false, "the foreign address is not in the response");
     } finally {
       // This signal belongs to brokerage A but references one of B's
       // properties, which is the whole point of the fixture — so it has to go
       // before B can be torn down.
+      await db.delete(growOpportunitySignals).where(eq(growOpportunitySignals.id, signalId));
+      await db.delete(growOpportunitySignals).where(eq(growOpportunitySignals.id, secondId));
+    }
+  } finally {
+    await cleanupBrokerages([B.brokerageId]);
+  }
+});
+
+test("E-4: an in-tenant signal with no relationship stays visible beside a withheld foreign one", async () => {
+  const B = await createBrokerageWithUsers(baseUrl, `W2B Contact Signals Mixed ${suffix}`);
+  try {
+    const partyId = await createParty("Mixed");
+    const localPropertyId = await createProperty("7 Local Signal Only St");
+    const localSignalId = await createSignal(partyId, localPropertyId, "Signal on an in-tenant property with no relationship");
+    const [foreignProperty] = await db
+      .insert(properties)
+      .values({
+        brokerageId: B.brokerageId,
+        agentId: B.admin.user.id,
+        formattedAddress: `8 Foreign Mixed St ${suffix}`,
+        state: "QLD",
+        suburb: "Testville",
+        postcode: "4000",
+      })
+      .returning({ id: properties.id, formattedAddress: properties.formattedAddress });
+    const foreignSignalId = await createSignal(partyId, foreignProperty.id, "Signal that must be counted, not shown");
+    try {
+      const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+      assert.equal(summary.properties.length, 1, "the in-tenant property is still a signal-only entry");
+      assert.equal(summary.properties[0].propertyId, localPropertyId);
+      assert.equal(summary.properties[0].relationshipType, SIGNAL_ONLY_RELATIONSHIP_TYPE);
+      assert.deepEqual(
+        summary.properties[0].activeSignals.map((s) => s.id),
+        [localSignalId],
+      );
+      assert.equal(summary.unusableSignalCount, 1, "the foreign row is the one that is withheld");
+      assert.equal(JSON.stringify(summary).includes(foreignProperty.formattedAddress), false);
+    } finally {
+      await db.delete(growOpportunitySignals).where(eq(growOpportunitySignals.id, foreignSignalId));
+    }
+  } finally {
+    await cleanupBrokerages([B.brokerageId]);
+  }
+});
+
+test("E-4: an Active relationship to another brokerage's property does not leak the address", async () => {
+  const B = await createBrokerageWithUsers(baseUrl, `W2B Contact Signals Rel ${suffix}`);
+  try {
+    const partyId = await createParty("ForeignRelationship");
+    const [foreignProperty] = await db
+      .insert(properties)
+      .values({
+        brokerageId: B.brokerageId,
+        agentId: B.admin.user.id,
+        formattedAddress: `9 Foreign Relationship St ${suffix}`,
+        state: "QLD",
+        suburb: "Testville",
+        postcode: "4000",
+      })
+      .returning({ id: properties.id, formattedAddress: properties.formattedAddress });
+    await db.insert(growRelationships).values({
+      brokerageId: A.brokerageId,
+      partyId,
+      propertyId: foreignProperty.id,
+      relationshipType: "owner",
+      status: "Active",
+    });
+    const signalId = await createSignal(partyId, foreignProperty.id, "Signal riding a cross-tenant relationship");
+    try {
+      const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+      assert.deepEqual(summary.properties, [], "the relationship join does not carry a foreign address");
+      assert.equal(summary.unusableSignalCount, 1, "the signal is disclosed as withheld");
+      assert.equal(JSON.stringify(summary).includes(foreignProperty.formattedAddress), false);
+    } finally {
+      await db.delete(growOpportunitySignals).where(eq(growOpportunitySignals.id, signalId));
+      await db.delete(growRelationships).where(eq(growRelationships.partyId, partyId));
+    }
+  } finally {
+    await cleanupBrokerages([B.brokerageId]);
+  }
+});
+
+test("E-4: a contactability restriction does not erase a withheld unverifiable signal", async () => {
+  const B = await createBrokerageWithUsers(baseUrl, `W2B Contact Signals Dnc ${suffix}`);
+  try {
+    const partyId = await createParty("RestrictedUnverified");
+    const [foreignProperty] = await db
+      .insert(properties)
+      .values({
+        brokerageId: B.brokerageId,
+        agentId: B.admin.user.id,
+        formattedAddress: `10 Foreign Dnc St ${suffix}`,
+        state: "QLD",
+        suburb: "Testville",
+        postcode: "4000",
+      })
+      .returning({ id: properties.id, formattedAddress: properties.formattedAddress });
+    const signalId = await createSignal(partyId, foreignProperty.id, "Unverifiable signal on a suppressed contact");
+    await db.insert(growContactDncrStatuses).values({
+      brokerageId: A.brokerageId,
+      partyId,
+      channel: "PHONE_CALL",
+      status: "LISTED",
+      source: "test-fixture",
+      checkedAt: new Date(),
+      recordedByUserId: A.admin.user.id,
+    });
+    try {
+      const summary = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
+      assert.equal(summary.unusableSignalCount, 1, "gate 19 withholds outreach, not the fact that the signal exists");
+      assert.ok(summary.outreachRestriction, "the restriction is still returned with the count");
+      assert.equal(summary.outreachRestriction?.outreachProhibited, true);
+      assert.deepEqual(summary.properties, []);
+      assert.deepEqual(summary.contactAnchoredSignals, []);
+      assert.equal(JSON.stringify(summary).includes(foreignProperty.formattedAddress), false);
+    } finally {
       await db.delete(growOpportunitySignals).where(eq(growOpportunitySignals.id, signalId));
     }
   } finally {
