@@ -117,6 +117,10 @@ const virtualMocks: Plugin = {
       return `
         export class ApiError extends Error {}
         export const apiFetch = () => Promise.resolve({});
+        export function apiErrorMessage(error, fallback) {
+          if (error instanceof ApiError && typeof error.friendly === "string" && error.friendly.trim()) return error.friendly;
+          return fallback;
+        }
       `;
     }
     if (id === "\0e2-session") {

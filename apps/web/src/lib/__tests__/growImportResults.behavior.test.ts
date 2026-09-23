@@ -126,6 +126,10 @@ const virtualMocks: Plugin = {
           globalThis.__e7Fetch = { path, init };
           return Promise.resolve({ importJobId: 42, entries: [] });
         };
+        export function apiErrorMessage(error, fallback) {
+          if (error instanceof ApiError && typeof error.friendly === "string" && error.friendly.trim()) return error.friendly;
+          return fallback;
+        }
       `;
     }
     return null;

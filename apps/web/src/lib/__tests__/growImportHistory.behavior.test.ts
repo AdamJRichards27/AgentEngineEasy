@@ -111,6 +111,10 @@ const virtualMocks: Plugin = {
           }
         }
         export const apiFetch = () => Promise.resolve({});
+        export function apiErrorMessage(error, fallback) {
+          if (error instanceof ApiError && typeof error.friendly === "string" && error.friendly.trim()) return error.friendly;
+          return fallback;
+        }
       `;
     }
     return null;
