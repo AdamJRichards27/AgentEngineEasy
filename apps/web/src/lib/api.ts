@@ -30,6 +30,14 @@
 // agent a short "Reference: <first 8 chars>" to quote to support (see
 // formatSupportReference below). A network failure (status 0 — no response
 // ever arrived) has no server id, so correlationId is undefined there.
+//
+// G-2 — `entitlementKey` and `upgrade` are likewise additive, and only set
+// on a 403 whose JSON body carries them. requireEntitlement already emits
+// `{ reason, entitlementKey, upgrade:{action,productCode} }`. humanizeApiError
+// uses those fields (and requireRole's bare `{ error: "Forbidden" }`) so a
+// missing plan, a lapsed subscription, and a wrong role are different
+// sentences. Callers that only read `.friendly` pick the new sentence up;
+// this module does not render a checkout.
 export class ApiError extends Error {
   status: number;
   friendly: string;
@@ -46,13 +54,26 @@ export class ApiError extends Error {
   // balancer reporting that the API itself could not be reached. lib/
   // sessionProbe.ts is the only current reader.
   serverMessage?: string;
+  // G-2 — entitlement middleware already returns these on a 403
+  // (`apps/api/src/middlewares/entitlement.ts`). They are preserved so a
+  // caller can tell a missing plan from a lapsed subscription or a wrong
+  // role. This slice does not start a checkout; `upgrade` is data only.
+  entitlementKey?: string;
+  upgrade?: EntitlementUpgrade;
 
   constructor(
     status: number,
     friendly: string,
     technical?: string,
     reason?: string,
-    extras?: { code?: string; sideEffectApplied?: boolean; correlationId?: string; serverMessage?: string },
+    extras?: {
+      code?: string;
+      sideEffectApplied?: boolean;
+      correlationId?: string;
+      serverMessage?: string;
+      entitlementKey?: string;
+      upgrade?: EntitlementUpgrade;
+    },
   ) {
     super(technical ?? friendly);
     this.status = status;
@@ -62,7 +83,24 @@ export class ApiError extends Error {
     this.sideEffectApplied = extras?.sideEffectApplied;
     this.correlationId = extras?.correlationId;
     this.serverMessage = extras?.serverMessage;
+    this.entitlementKey = extras?.entitlementKey;
+    this.upgrade = extras?.upgrade;
   }
+}
+
+// Shape emitted by requireEntitlement on denial:
+// `{ action: "grow.checkout", productCode: "grow" }`.
+export interface EntitlementUpgrade {
+  action: string;
+  productCode: string;
+}
+
+// Fields a 403 may carry. Absent on a bare 403 and on requireRole's
+// `{ error: "Forbidden" }` body.
+export interface ForbiddenDetails {
+  reason?: string;
+  entitlementKey?: string;
+  upgrade?: EntitlementUpgrade;
 }
 
 // ── Support references (AE GROW Pilot Readiness WP5) ────────────────────
@@ -129,12 +167,90 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
 // plain sentence plus a clear next step. This is the one place that
 // mapping happens, so every mutation in the app gets it for free rather
 // than re-deriving copy per call site.
-export function humanizeApiError(path: string, status: number, serverMessage?: string, correlationId?: string): string {
+export function humanizeApiError(
+  path: string,
+  status: number,
+  serverMessage?: string,
+  correlationId?: string,
+  forbidden?: ForbiddenDetails,
+): string {
   if (status >= 500) return withSupportReference(humanizeServerError(path), correlationId);
-  return humanizeClientError(path, status, serverMessage);
+  return humanizeClientError(path, status, serverMessage, forbidden);
 }
 
-function humanizeClientError(path: string, status: number, serverMessage?: string): string {
+// G-2. The entitlement contract (reason + entitlementKey + upgrade) and
+// requireRole's exact `{ error: "Forbidden" }` body pick the sentence.
+// A 403 with none of those stays the generic permission line. No checkout
+// URL is built from `upgrade.action`.
+const GENERIC_FORBIDDEN_MESSAGE = "You don't have permission to do that — ask a Brokerage Administrator.";
+const WRONG_ROLE_MESSAGE = "You don't have the right role for that — ask a Brokerage Administrator.";
+const PLAN_MISSING_MESSAGE = "Your plan doesn't include this.";
+const PLAN_UPGRADE_MESSAGE = "Your plan doesn't include this. A Brokerage Administrator can add it.";
+const SUBSCRIPTION_INACTIVE_MESSAGE = "Your subscription isn't active — ask a Brokerage Administrator to restore it.";
+const ENTITLEMENT_EXPIRED_MESSAGE = "This access has expired — ask a Brokerage Administrator to renew it.";
+const SEAT_NOT_ALLOCATED_MESSAGE = "You don't have a seat for this — ask a Brokerage Administrator.";
+const LIMIT_REACHED_MESSAGE = "You've reached the limit on your plan — ask a Brokerage Administrator.";
+const TENANT_FORBIDDEN_MESSAGE = "That isn't available for this brokerage.";
+
+const ENTITLEMENT_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,80}$/;
+const UPGRADE_TOKEN_PATTERN = /^[A-Za-z0-9._:-]{1,80}$/;
+
+export function humanizeForbiddenMessage(details: ForbiddenDetails & { serverMessage?: string } = {}): string {
+  const { serverMessage, reason, entitlementKey, upgrade } = details;
+  if (isWrongRoleReason(reason)) return WRONG_ROLE_MESSAGE;
+  // requireRole (apps/api/src/middlewares/auth.ts) returns exactly
+  // { error: "Forbidden" }. A reason or entitlement field means some
+  // other 403 reused that word.
+  if (serverMessage === "Forbidden" && !reason && !entitlementKey && !upgrade) return WRONG_ROLE_MESSAGE;
+
+  switch (reason) {
+    case "SUBSCRIPTION_INACTIVE":
+      return SUBSCRIPTION_INACTIVE_MESSAGE;
+    case "ENTITLEMENT_EXPIRED":
+      return ENTITLEMENT_EXPIRED_MESSAGE;
+    case "SEAT_NOT_ALLOCATED":
+      return SEAT_NOT_ALLOCATED_MESSAGE;
+    case "LIMIT_REACHED":
+      return LIMIT_REACHED_MESSAGE;
+    case "TENANT_CONTEXT_REQUIRED":
+    case "TENANT_MISMATCH":
+      return TENANT_FORBIDDEN_MESSAGE;
+    case "NOT_AUTHENTICATED":
+      return "You're not signed in. Sign in to continue.";
+    case "ENTITLEMENT_MISSING":
+      return upgrade ? PLAN_UPGRADE_MESSAGE : PLAN_MISSING_MESSAGE;
+    default:
+      break;
+  }
+
+  // A key or upgrade object without a recognised reason is still a plan
+  // denial (fail-closed and some Grow AI routes omit `upgrade` or `reason`).
+  if (entitlementKey || upgrade) return upgrade ? PLAN_UPGRADE_MESSAGE : PLAN_MISSING_MESSAGE;
+  return GENERIC_FORBIDDEN_MESSAGE;
+}
+
+function isWrongRoleReason(reason: string | undefined): boolean {
+  return reason === "ROLE_FORBIDDEN" || (reason?.endsWith("_ROLE_FORBIDDEN") ?? false);
+}
+
+export function readEntitlementKey(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const key = value.trim();
+  return ENTITLEMENT_KEY_PATTERN.test(key) ? key : undefined;
+}
+
+export function readEntitlementUpgrade(value: unknown): EntitlementUpgrade | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const action = (value as { action?: unknown }).action;
+  const productCode = (value as { productCode?: unknown }).productCode;
+  if (typeof action !== "string" || typeof productCode !== "string") return undefined;
+  const actionTrim = action.trim();
+  const productTrim = productCode.trim();
+  if (!UPGRADE_TOKEN_PATTERN.test(actionTrim) || !UPGRADE_TOKEN_PATTERN.test(productTrim)) return undefined;
+  return { action: actionTrim, productCode: productTrim };
+}
+
+function humanizeClientError(path: string, status: number, serverMessage?: string, forbidden?: ForbiddenDetails): string {
   if (status === 401) {
     // A 401 from an authenticated call means the session ended (see
     // isSessionExpiryResponse). From a sign-in endpoint it is a credential
@@ -142,7 +258,9 @@ function humanizeClientError(path: string, status: number, serverMessage?: strin
     if (isSessionExpiryResponse(path, status)) return SESSION_ENDED_MESSAGE;
     return serverMessage ?? "You're not signed in. Sign in to continue.";
   }
-  if (status === 403) return "You don't have permission to do that — ask a Brokerage Administrator.";
+  if (status === 403) {
+    return humanizeForbiddenMessage({ serverMessage, ...forbidden });
+  }
   if (status === 404) return "That couldn't be found — it may have been removed.";
   // 400/409/etc — these already carry a specific, agent-relevant reason
   // from the server (e.g. "At least one seller must be captured before
@@ -194,20 +312,31 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     let serverReason: string | undefined;
     let serverCode: string | undefined;
     let sideEffectApplied: boolean | undefined;
+    let entitlementKey: string | undefined;
+    let upgrade: EntitlementUpgrade | undefined;
     try {
       const body = await res.json();
       serverMessage = typeof body?.error === "string" ? body.error : undefined;
       serverReason = typeof body?.reason === "string" ? body.reason : undefined;
       serverCode = typeof body?.code === "string" ? body.code : undefined;
       sideEffectApplied = typeof body?.sideEffectApplied === "boolean" ? body.sideEffectApplied : undefined;
+      // G-2: only a 403 carries the entitlement contract. Other statuses
+      // keep their existing reason/code parsing and ignore these fields.
+      if (res.status === 403) {
+        entitlementKey = readEntitlementKey(body?.entitlementKey);
+        upgrade = readEntitlementUpgrade(body?.upgrade);
+      }
     } catch {
       // Non-JSON error body — fall through with no server message.
     }
-    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage, correlationId), `API ${path} failed: ${res.status}`, serverReason, {
+    const forbidden = res.status === 403 ? { reason: serverReason, entitlementKey, upgrade } : undefined;
+    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage, correlationId, forbidden), `API ${path} failed: ${res.status}`, serverReason, {
       code: serverCode,
       sideEffectApplied,
       correlationId,
       serverMessage,
+      entitlementKey,
+      upgrade,
     });
   }
   if (res.status === 204) {
