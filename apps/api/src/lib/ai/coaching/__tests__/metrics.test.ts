@@ -419,6 +419,7 @@ function makeGrowContext(overrides: Partial<GrowContext> = {}): GrowContext {
     todayItems: [],
     focusedItem: null,
     dueFollowUps: [],
+    dueCommitments: [],
     appraisalFollowUps: [],
     activeSignals: [],
     opportunityPipeline: [],

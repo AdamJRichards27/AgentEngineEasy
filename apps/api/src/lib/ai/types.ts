@@ -172,6 +172,23 @@ export interface GrowRecentActivityView {
   summary: string;
 }
 
+// F-6 — one Open grow_commitments row that is due today or overdue.
+// Distinct from GrowTodayItemView: that shape is a Grow Today card
+// (opportunity next-action, appraisal follow-up, signal, or a commitment
+// card). This shape is the commitment record itself. status is the literal
+// "Open" because the read that fills it excludes Completed and Cancelled.
+export interface GrowDueCommitmentView {
+  id: number;
+  status: "Open";
+  partyId: number;
+  contactName: string;
+  propertyId: number | null;
+  propertyLabel: string | null;
+  opportunityId: number | null;
+  description: string;
+  dueAt: string;
+}
+
 // AE GROW Priority 6 Stage B — the Grow context builder's real output
 // (context/growContext.ts). Replaces the Priority-0.5-era placeholder shape
 // ({ leadCount: number }) that was never populated (buildGrowContext always
@@ -193,6 +210,9 @@ export interface GrowContext {
   todayItems: GrowTodayItemView[];
   focusedItem: GrowTodayItemView | null;
   dueFollowUps: GrowTodayItemView[];
+  // F-6 — Open grow_commitments due today or overdue. Not a slice of
+  // dueFollowUps. See growContext.ts computeDueCommitments.
+  dueCommitments: GrowDueCommitmentView[];
   appraisalFollowUps: GrowTodayItemView[];
   activeSignals: GrowTodayItemView[];
   opportunityPipeline: GrowOpportunityStageSummary[];

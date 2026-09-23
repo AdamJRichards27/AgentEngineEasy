@@ -150,28 +150,43 @@ const getContactRelationshipSummary: AiToolDefinition = {
 };
 
 // Named for what it actually returns. This tool reads ctx.grow.dueFollowUps,
-// which growContext.ts builds by filtering the SAME Grow Today priorityActions
-// list get_grow_today_items returns down to the items carrying a dueAt
-// (growContext.ts:148-151) - it contains ZERO grow_commitments rows. It was
-// called "get_due_commitments" until W2-C, which misled the model into
-// answering "what did I promise?" with opportunity next-action dates, and
-// misled the next engineer into thinking commitments were already wired into
-// Grow Today. They are not: Grow Today has no commitment-derived items at all
-// yet (a sibling slice owns lib/growToday.ts, and the rule that would surface
-// commitments there is not built). When commitments do land on Grow Today,
-// revisit whether a genuine get_due_commitments belongs here alongside this
-// tool - do not simply rename this one back.
+// which growContext.ts builds by filtering Grow Today priority actions down
+// to items that carry a dueAt and are not recorded commitments. It was
+// called "get_due_commitments" until W2-C, which made the model answer
+// "what did I promise?" with opportunity next-action dates. Do not point
+// this tool back at grow_commitments. Recorded promises are
+// get_due_commitments, below.
 const getGrowTodayDueItems: AiToolDefinition = {
   name: "get_grow_today_due_items",
   description:
     "Read-only list of the caller's Grow Today items that carry a due date (opportunity next-action and appraisal follow-up due dates), soonest first. " +
-    "This is a date-filtered view of the same Grow Today list as get_grow_today_items - it does NOT read recorded Grow commitments, so never describe these as commitments the caller made.",
+    "This is a date-filtered view of the same Grow Today list as get_grow_today_items - it does NOT read recorded Grow commitments, so never describe these as commitments the caller made. Use get_due_commitments for those.",
   riskLevel: 0,
   async run(ctx) {
     if (ctx.grow === null) {
       return { tool: "get_grow_today_due_items", ok: false, error: NO_GROW_CONTEXT_ERROR };
     }
     return { tool: "get_grow_today_due_items", ok: true, data: ctx.grow.dueFollowUps };
+  },
+};
+
+// F-6 — the genuine commitments read. ctx.grow.dueCommitments is filled by
+// growContext.ts's computeDueCommitments from grow_commitments (Open, due
+// today or overdue, brokerage-scoped, capped). It is not dueFollowUps and
+// not a Grow Today card. Renaming get_grow_today_due_items back to this
+// name would return follow-ups again.
+const getDueCommitments: AiToolDefinition = {
+  name: "get_due_commitments",
+  description:
+    "Read-only list of the caller's Open Grow commitments that are due today or overdue, most overdue first. " +
+    "Each row is a recorded grow_commitments promise (id, status, description, dueAt, contact, property, opportunity), already bounded and tenant-scoped. " +
+    "This is not get_grow_today_due_items: opportunity next-actions and appraisal follow-ups are follow-ups, not commitments.",
+  riskLevel: 0,
+  async run(ctx) {
+    if (ctx.grow === null) {
+      return { tool: "get_due_commitments", ok: false, error: NO_GROW_CONTEXT_ERROR };
+    }
+    return { tool: "get_due_commitments", ok: true, data: ctx.grow.dueCommitments };
   },
 };
 
@@ -250,6 +265,7 @@ export const GROW_TOOL_REGISTRY: AiToolDefinition[] = [
   getGrowTodayItems,
   getContactRelationshipSummary,
   getGrowTodayDueItems,
+  getDueCommitments,
   getGrowOpportunityPipeline,
   getAppraisalFollowups,
   getPropertyIntelligenceSignals,
