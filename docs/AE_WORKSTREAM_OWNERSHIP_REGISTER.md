@@ -13,7 +13,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 
-Current staging: `2c6208efec2e33c9eb1b601fc840341b7b9c2821` (2026-09-22, A-4 audit durability / #72 merged onto #71).
+Current staging: `24336ed9ee36cee0b2bb5e4d08095e37b2c59655` (2026-09-22, A-4/A-5 status / #73 merged onto #72).
 
 ---
 
@@ -36,7 +36,7 @@ for a read-only task even where the credential permits more.
 
 | Workstream | Branch | Primary agent | Files / domain | Status | Dependencies | PR | Reviewer |
 |---|---|---|---|---|---|---|---|
-| **A-4 / A-5 status reconciliation** | `cursor/a4-a5-status-reconcile-df04` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). No implementation files are in this claim. Status is taken from merged GitHub evidence (#72, #51), not a new product change. | **Active** — docs reconciliation only. A-4 audit durability already landed in #72; A-5 party validation already landed in #51. Keep this claim while the PR is open; release to the Merged table on merge. | Reconciled on staging `2c6208efec2e33c9eb1b601fc840341b7b9c2821` (merge of #72). A-4 closed by #51 prior-value audit plus #72 transactional strict `logAudit` (consent event after commit). A-5 closed by #51 only; #72 did not change party validation. Do not re-implement. A-8 stays open. | #73 | — |
+| **H-2 / H-3 / H-6 status reconciliation** | `cursor/h2-h3-h6-status-reconcile-7cf5` | Grok (orchestrator) / Cursor cloud agent (implementer) | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`; `docs/AE_GROW_COMPLETION_ROADMAP.md` (status lines only). No implementation files are in this claim. Status is taken from merged GitHub evidence (#50), not a new product change. | **Active** — docs reconciliation only. H-2, H-3, and H-6 already landed in #50. Keep this claim while the PR is open; release to the Merged table on merge. | Reconciled on staging `24336ed9ee36cee0b2bb5e4d08095e37b2c59655` (merge of #73). H-2/H-3/H-6 closed by #50 (merge `0a478046b8809463adf4569f06c9b19e1020915a`). Do not re-implement. H-4 stays open (metric-only). C-1, E-1, G-1, and other Owner-gated items stay open. | #74 | — |
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit | — | — |
 
 ### Known ownership — released and still open
@@ -47,7 +47,7 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **`propertyIntelligence/service.ts`** (with `evaluation.ts`, `evidence.ts`, `signals.ts`, `routes/propertyIntelligence.ts`, `PropertyIntelligencePanel.tsx`, `web/lib/contactAnchoredSignals.ts`) — released with **#59** (operational W2-D, contact-anchored signals).
 - **`routes/contacts.ts`** and the **`Grow.tsx` consent panel** (`GrowContactConsentPanel`) — released with **#61** (operational W3-A, contactability completion).
 - **`communications/outbox.ts`** and **`communications/providers/**`** (with `telephony/recordingGates.ts` and the `lib/env.ts` flag) — released with **#60** (operational W3-B, connect readiness). The #51 dispatch-time consent re-check stays in force.
-- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**, claimed again by **F-2** and released with **#68**, claimed again by **I-3** and released with **#69**, claimed again by **I-6 / I-8** and released with **#70**, claimed again by **Wave-1 docs re-verification — A-1/A-2/A-3/H-1** and released with **#71**. Docs edits still require a claim before a new slice starts. **A-4 / A-5 status reconciliation** currently claims the two register/roadmap files for this reconciliation's status lines only.
+- **`docs/`** — released with **#58** (register / roadmap), claimed again by **E-3** and released with **#65**, claimed again by **I-1** and released with **#66**, claimed again by **I-2** and released with **#67**, claimed again by **F-2** and released with **#68**, claimed again by **I-3** and released with **#69**, claimed again by **I-6 / I-8** and released with **#70**, claimed again by **Wave-1 docs re-verification — A-1/A-2/A-3/H-1** and released with **#71**, claimed again by **A-4 / A-5 status reconciliation** and released with **#73**. Docs edits still require a claim before a new slice starts. **H-2 / H-3 / H-6 status reconciliation** currently claims the two register/roadmap files for this reconciliation's status lines only.
 - **I-1** (`relationshipTimeline.ts` property-label lookup) is already in the pool via **#53**, and the #66 re-verification is merged. The predicate is `id IN (…) AND brokerage_id =`, covered by `contactReadScoping.test.ts`. Do not open another I-1 implementation slice.
 - **I-2** (`growToday.ts` `fetchLastActivityByParty`) is already in the pool via **#57**, and the #67 re-verification is merged. The read is `max(occurred_at) group by party_id`, filtered by `brokerage_id` and the party ids already in play, covered by `growTodayQueryShape.test.ts`. Do not open another I-2 implementation slice.
 - **I-3** (`contactIntelligence.ts` and `relationshipTimeline.ts` brokerage predicates) is already in the pool via **#53**, and the #69 re-verification is merged. The SQL predicate is `brokerage_id =` and `party_id =` on `grow_relationships`, `grow_activities`, `grow_opportunities`, and `grow_commitments` (and `grow_contact_roles`), covered by `contactReadScoping.test.ts`. Do not open another I-3 implementation slice.
@@ -58,6 +58,9 @@ Consolidation gate `234871a` released the domains below. The previous Active col
 - **A-2** (`POST /communications/consent` with `requireEntitlement("grow.contacts.manage")` in `routes/communications.ts`) is already in the pool via **#51**. Do not open another A-2 implementation slice.
 - **A-3** (`dispatchMessage` consent re-check → `BLOCKED_BY_CONSENT` in `communications/outbox.ts`) is already in the pool via **#51**. Do not open another A-3 implementation slice.
 - **H-1** (`GROW_SIGNAL_SWEEP_UNHEALTHY` in `operationalAlerts.ts`, raised from `sweep.ts` and `sweepBootstrap.ts`) is already in the pool via **#50**. Do not open another H-1 implementation slice.
+- **H-2** (`GET/POST /api/grow/property-intelligence/ops/{health,sweep,signals/count}`, BA-only `requireRole(...BROKERAGE_ADMIN_ROLES)`; `listRecentSweepRuns` and `countActiveSignals` have callers) is already in the pool via **#50**. Locked by `propertyIntelligenceOps.test.ts` and `sweepOps.test.ts`. Do not open another H-2 implementation slice.
+- **H-3** (`scheduler.enabled` on sweep ops health, so `GROW_SIGNAL_SWEEP_ENABLED=false` is visible after boot) is already in the pool via **#50**. Locked by `sweepOps.test.ts`. Do not open another H-3 implementation slice.
+- **H-6** (`property_signal_outcome_total{outcome="expired"}` incremented; sweep metrics in the metrics doc; `GROW_SIGNAL_SWEEP_*` in `.env.example`; sweep-run indexes in migration 0028) is already in the pool via **#50**. Locked by `sweepOps.test.ts`. Do not open another H-6 implementation slice. Run-table retention stays Owner decision #15.
 - **A-4** (legacy `communication_consent` prior-value audit, made durable) is already in the pool via **#51** (`previousValue` beside `updatedValue`) and **#72** (consent mutation and strict `logAudit` in one transaction; `COMMUNICATION_CONSENT_UPDATED` only after commit). Do not open another A-4 implementation slice.
 - **A-5** (`partyId` validated against the caller's brokerage before write or publish; a foreign-tenant id returns 400) is already in the pool via **#51**. #72 did not change that validation. Do not open another A-5 implementation slice.
 - **F-2** (`MAX_PRIORITY_ACTIONS` after the sort, `withheldByActionCap`) is already in the pool via **#57**, and the #68 re-verification is merged. Emerging stays on `MAX_EMERGING_SIGNAL_ACTIONS` (10). Do not open another F-2 implementation slice.
@@ -141,6 +144,12 @@ Released back to the pool on 2026-09-22 (Wave-1 docs re-verification — A-1/A-2
 | PR | Slice | Domain released |
 |---|---|---|
 | #71 | Wave-1 docs re-verification — A-1/A-2/A-3/H-1 | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
+
+Released back to the pool on 2026-09-22 (A-4 / A-5 status reconciliation, tip `24336ed9ee36cee0b2bb5e4d08095e37b2c59655`):
+
+| PR | Slice | Domain released |
+|---|---|---|
+| #73 | A-4 / A-5 status reconciliation | `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`, `docs/AE_GROW_COMPLETION_ROADMAP.md` |
 
 ---
 
