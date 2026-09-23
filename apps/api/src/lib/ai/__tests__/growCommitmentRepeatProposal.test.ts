@@ -134,6 +134,7 @@ function emptyGrowContext(overrides: Partial<NonNullable<AiContextPackage["grow"
     todayItems: [],
     focusedItem: null,
     dueFollowUps: [],
+    dueCommitments: [],
     appraisalFollowUps: [],
     activeSignals: [],
     opportunityPipeline: [],

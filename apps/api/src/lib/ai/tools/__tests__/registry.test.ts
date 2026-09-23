@@ -1,5 +1,6 @@
-// AE GROW Priority 6 Stage B — Tool Registry tests for the 8 new Grow
+// AE GROW Priority 6 Stage B — Tool Registry tests for the Grow
 // read-only tools plus selectToolsForContext's Grow branch.
+// F-6 added get_due_commitments (9 tools).
 //
 // Deliberately pure/unit rather than database-integration: every Grow tool
 // (tools/registry.ts) does nothing but read one already-bounded field off
@@ -7,7 +8,7 @@
 // no query, no I/O, and no branching on anything else in AiContextPackage.
 // That makes a hand-built AiContextPackage fixture both sufficient and far
 // more precise than a database-backed test would be here: every one of the
-// 8 tools' "reads exactly this field, nothing else" and "fails closed when
+// tools' "reads exactly this field, nothing else" and "fails closed when
 // ctx.grow is null" behaviors can be asserted in one deterministic call,
 // with no dependency on growContext.ts's own query shape (that has its own
 // dedicated coverage in routes/__tests__/growAskAeContext.test.ts).
@@ -27,7 +28,7 @@ import {
   selectToolsForContext,
   runAllTools,
 } from "../registry.js";
-import type { AiContextPackage, GrowContext, GrowTodayItemView } from "../../types.js";
+import type { AiContextPackage, GrowContext, GrowDueCommitmentView, GrowTodayItemView } from "../../types.js";
 
 function makeGrowTodayItem(overrides: Partial<GrowTodayItemView> = {}): GrowTodayItemView {
   return {
@@ -57,6 +58,7 @@ function makeGrowContext(overrides: Partial<GrowContext> = {}): GrowContext {
     todayItems: [],
     focusedItem: null,
     dueFollowUps: [],
+    dueCommitments: [],
     appraisalFollowUps: [],
     activeSignals: [],
     opportunityPipeline: [],
@@ -91,12 +93,13 @@ function makeContext(overrides: Partial<AiContextPackage> = {}): AiContextPackag
   };
 }
 
-test("GROW_TOOL_REGISTRY contains exactly the 8 named Grow tools, each riskLevel 0", () => {
+test("GROW_TOOL_REGISTRY contains exactly the 9 named Grow tools, each riskLevel 0", () => {
   const names = GROW_TOOL_REGISTRY.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "explain_grow_today_item",
     "get_appraisal_followups",
     "get_contact_relationship_summary",
+    "get_due_commitments",
     "get_grow_opportunity_pipeline",
     "get_grow_today_due_items",
     "get_grow_today_items",
@@ -180,6 +183,58 @@ test("get_grow_today_due_items returns exactly ctx.grow.dueFollowUps", async () 
   assert.deepEqual(result.data, due);
 });
 
+function makeDueCommitment(overrides: Partial<GrowDueCommitmentView> = {}): GrowDueCommitmentView {
+  return {
+    id: 42,
+    status: "Open",
+    partyId: 7,
+    contactName: "Casey Committed",
+    propertyId: 3,
+    propertyLabel: "1 Commitment St",
+    opportunityId: null,
+    description: "Call Casey about the appraisal they asked for.",
+    dueAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+// F-6 — the handler must return commitment rows. Wiring it back to
+// dueFollowUps (the pre-F-6 bug) fails this test: those items are Grow
+// Today follow-up cards, not grow_commitments rows.
+test("get_due_commitments returns due commitment rows and not Grow Today follow-ups", async () => {
+  const followUp = makeGrowTodayItem({
+    id: "opportunity:5",
+    type: "opportunity_follow_up",
+    dueAt: "2026-01-02T00:00:00.000Z",
+    reason: "Follow-up was due 2 Jan 2026.",
+    recommendedAction: "Call about the listing.",
+  });
+  const commitment = makeDueCommitment();
+  const ctx = makeContext({
+    grow: makeGrowContext({
+      todayItems: [followUp],
+      dueFollowUps: [followUp],
+      dueCommitments: [commitment],
+    }),
+  });
+  const tool = GROW_TOOL_REGISTRY.find((t) => t.name === "get_due_commitments")!;
+  const result = await tool.run(ctx, {});
+  assert.equal(result.ok, true);
+  assert.equal(result.tool, "get_due_commitments");
+  assert.deepEqual(result.data, [commitment]);
+
+  const rows = result.data as unknown as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "Open");
+  assert.equal(typeof rows[0].id, "number");
+  assert.equal(rows[0].description, commitment.description);
+  assert.equal(rows[0].type, undefined, "a commitment row is not a Grow Today card");
+  assert.equal(rows[0].recommendedAction, undefined);
+  assert.ok(!rows.some((row) => row.id === followUp.id));
+  assert.ok(!rows.some((row) => row.recommendedAction === followUp.recommendedAction));
+  assert.notDeepEqual(result.data, ctx.grow!.dueFollowUps);
+});
+
 test("get_grow_opportunity_pipeline returns exactly ctx.grow.opportunityPipeline", async () => {
   const pipeline = [{ stage: "Contacted", count: 2 }];
   const ctx = makeContext({ grow: makeGrowContext({ opportunityPipeline: pipeline }) });
@@ -235,10 +290,10 @@ test("explain_grow_today_item returns exactly ctx.grow.focusedItem, including nu
   assert.equal(unfocusedResult.data, null, "no growFocusItemId (or one that did not resolve) must come back as data: null, ok: true - never an error");
 });
 
-test("runAllTools(ctx) for a Grow context runs every Grow tool exactly once and returns 8 results, all ok:true against an empty-but-entitled brokerage", async () => {
+test("runAllTools(ctx) for a Grow context runs every Grow tool exactly once and returns 9 results, all ok:true against an empty-but-entitled brokerage", async () => {
   const ctx = makeContext({ grow: makeGrowContext() });
   const results = await runAllTools(ctx);
-  assert.equal(results.length, 8);
+  assert.equal(results.length, 9);
   assert.ok(results.every((r) => r.ok === true));
   const toolNames = results.map((r) => r.tool).sort();
   assert.deepEqual(toolNames, GROW_TOOL_REGISTRY.map((t) => t.name).sort());

@@ -1,9 +1,16 @@
-import { and, count, desc, eq, gte } from "drizzle-orm";
-import { db, growActivities, growOpportunities, growRelationships } from "@aee/db";
+import { and, asc, count, desc, eq, gte, lte } from "drizzle-orm";
+import { db, growActivities, growCommitments, growOpportunities, growRelationships, parties, properties } from "@aee/db";
 import { resolveEntitlements } from "../../entitlements/resolver.js";
 import type { EntitlementActor } from "../../entitlements/types.js";
 import { getGrowTodaySummary, type GrowTodayAction } from "../../growToday.js";
-import type { GrowContext, GrowOpportunityStageSummary, GrowRecentActivityView, GrowRelationshipTypeCount, GrowTodayItemView } from "../types.js";
+import type {
+  GrowContext,
+  GrowDueCommitmentView,
+  GrowOpportunityStageSummary,
+  GrowRecentActivityView,
+  GrowRelationshipTypeCount,
+  GrowTodayItemView,
+} from "../types.js";
 
 /**
  * AE GROW Priority 6 Stage B — Grow context builder.
@@ -20,6 +27,11 @@ import type { GrowContext, GrowOpportunityStageSummary, GrowRecentActivityView, 
  * here computes a NEW judgement about a contact or property that the rest
  * of the product doesn't already make and show.
  *
+ * F-6 adds one extra read, computeDueCommitments, of grow_commitments. It
+ * uses the same brokerage / Open / due-today-or-overdue predicate F-1
+ * already uses to build commitment cards, capped for the model. It is not
+ * a new ranking and it is not the Grow Today follow-up list.
+ *
  * Tenant isolation: every query below is scoped by brokerageId, taken from
  * the authenticated caller's own session (orchestrator.ts -> contextEngine.ts
  * -> here) and never from anything the client could influence. This function
@@ -29,8 +41,8 @@ import type { GrowContext, GrowOpportunityStageSummary, GrowRecentActivityView, 
  * constants below before it leaves this file, regardless of how much Grow
  * data the brokerage holds — the Stage B "avoid unbounded queries into
  * model context" requirement is enforced HERE, at the one place all of it
- * funnels through, rather than repeated in each of the eight tools that
- * merely read a field off the finished GrowContext.
+ * funnels through, rather than repeated in each of the tools that merely
+ * read a field off the finished GrowContext.
  *
  * Data minimisation: GrowTodayItemView deliberately drops the contact
  * email/mobile/availableActions fields the real GrowTodayAction carries —
@@ -47,6 +59,11 @@ import type { GrowContext, GrowOpportunityStageSummary, GrowRecentActivityView, 
 
 const GROW_TODAY_ITEMS_LIMIT = 20;
 const DUE_FOLLOWUPS_LIMIT = 20;
+// F-6 — same prompt bound as due follow-ups. The underlying Grow Today
+// commitment read (GROW_TODAY_COMMITMENT_ROW_CAP) is larger; this slice is
+// what the model is allowed to see in one call. Most overdue first, so a
+// truncation drops the least overdue.
+const DUE_COMMITMENTS_LIMIT = 20;
 const APPRAISAL_FOLLOWUPS_LIMIT = 15;
 const ACTIVE_SIGNALS_LIMIT = 20;
 const RECENT_ACTIVITY_LIMIT = 20;
@@ -100,6 +117,80 @@ async function computeOpportunityPipeline(brokerageId: number): Promise<GrowOppo
   return rows.map((row) => ({ stage: row.stage, count: Number(row.count) }));
 }
 
+// Same UTC end-of-today boundary Grow Today uses for "due today or overdue"
+// (growToday.ts endOfTodayUtc). Kept local: that helper is not exported, and
+// importing a second copy of the ranking rules from here would couple the
+// AI context builder to Grow Today's card logic. The predicate below is the
+// F-1 grow_commitments predicate (brokerage, Open, dueAt <= end of today).
+function endOfTodayUtc(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+}
+
+function contactDisplayName(party: {
+  firstName: string | null;
+  lastName: string | null;
+  organisationName: string | null;
+}): string {
+  if (party.organisationName) return party.organisationName;
+  const name = `${party.firstName ?? ""} ${party.lastName ?? ""}`.trim();
+  return name.length > 0 ? name : "Unknown contact";
+}
+
+// F-6 — the commitment read get_due_commitments exists to expose.
+//
+// This is not a filter of Grow Today cards. F-1 already surfaces Open
+// commitments that are due today or overdue as cards of type "commitment",
+// but those cards share GrowTodayItemView with opportunity next-actions and
+// appraisal follow-ups. Reading that list answered "what did I promise?"
+// with follow-ups. This query reads grow_commitments directly, with the
+// same brokerage, status, and due-date predicate F-1 uses, and returns the
+// row fields (id, description, dueAt, party, property, opportunity).
+//
+// The party join repeats brokerageId so a bad foreign key cannot attach
+// another tenant's name. The property join does the same for the address:
+// a property id that is not in this brokerage contributes a null label,
+// never the other tenant's address. Email and mobile are not selected.
+async function computeDueCommitments(brokerageId: number): Promise<GrowDueCommitmentView[]> {
+  const rows = await db
+    .select({
+      id: growCommitments.id,
+      partyId: growCommitments.partyId,
+      propertyId: growCommitments.propertyId,
+      opportunityId: growCommitments.opportunityId,
+      description: growCommitments.description,
+      dueAt: growCommitments.dueAt,
+      firstName: parties.firstName,
+      lastName: parties.lastName,
+      organisationName: parties.organisationName,
+      propertyAddress: properties.formattedAddress,
+    })
+    .from(growCommitments)
+    .innerJoin(parties, and(eq(growCommitments.partyId, parties.id), eq(parties.brokerageId, brokerageId)))
+    .leftJoin(properties, and(eq(growCommitments.propertyId, properties.id), eq(properties.brokerageId, brokerageId)))
+    .where(
+      and(
+        eq(growCommitments.brokerageId, brokerageId),
+        eq(growCommitments.status, "Open"),
+        lte(growCommitments.dueAt, endOfTodayUtc()),
+      ),
+    )
+    .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
+    .limit(DUE_COMMITMENTS_LIMIT);
+
+  return rows.map((row) => ({
+    id: row.id,
+    status: "Open",
+    partyId: row.partyId,
+    contactName: contactDisplayName(row),
+    propertyId: row.propertyId,
+    propertyLabel: row.propertyAddress ?? null,
+    opportunityId: row.opportunityId,
+    description: row.description,
+    dueAt: row.dueAt.toISOString(),
+  }));
+}
+
 async function computeRecentActivity(brokerageId: number): Promise<GrowRecentActivityView[]> {
   const since = new Date(Date.now() - RECENT_ACTIVITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const rows = await db
@@ -136,17 +227,21 @@ async function computeRecentActivity(brokerageId: number): Promise<GrowRecentAct
 export async function buildGrowContext(brokerageId: number, focusItemId: string | null): Promise<GrowContext> {
   const includePropertyIntelligenceSignals = await brokerageHasEntitlement(brokerageId, "grow.propertyIntelligence.read");
 
-  const [todaySummary, relationshipBreakdown, opportunityPipeline, recentActivity] = await Promise.all([
+  const [todaySummary, relationshipBreakdown, opportunityPipeline, recentActivity, dueCommitments] = await Promise.all([
     getGrowTodaySummary(brokerageId, { includePropertyIntelligenceSignals }),
     computeRelationshipBreakdown(brokerageId),
     computeOpportunityPipeline(brokerageId),
     computeRecentActivity(brokerageId),
+    computeDueCommitments(brokerageId),
   ]);
 
   const allItems = todaySummary.priorityActions.map(toItemView);
   const todayItems = allItems.slice(0, GROW_TODAY_ITEMS_LIMIT);
+  // Commitment cards carry a dueAt, but they are not follow-ups. Leaving
+  // them in this list is how get_grow_today_due_items used to answer a
+  // commitments question. Recorded promises are dueCommitments.
   const dueFollowUps = allItems
-    .filter((item) => item.dueAt !== null)
+    .filter((item) => item.dueAt !== null && item.type !== "commitment")
     .sort((a, b) => (a.dueAt as string).localeCompare(b.dueAt as string))
     .slice(0, DUE_FOLLOWUPS_LIMIT);
   const appraisalFollowUps = allItems.filter((item) => item.type === "appraisal_follow_up").slice(0, APPRAISAL_FOLLOWUPS_LIMIT);
@@ -161,6 +256,7 @@ export async function buildGrowContext(brokerageId: number, focusItemId: string 
     todayItems,
     focusedItem,
     dueFollowUps,
+    dueCommitments,
     appraisalFollowUps,
     activeSignals,
     opportunityPipeline,

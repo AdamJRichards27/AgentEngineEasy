@@ -10,7 +10,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { db, entitlementGrants } from "@aee/db";
+import { db, entitlementGrants, growCommitments } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { buildGrowContext } from "../../lib/ai/context/growContext.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
@@ -122,6 +122,7 @@ test("buildGrowContext: an entitled brokerage with zero Grow data gets hasAnyGro
     assert.equal(ctx.hasAnyGrowData, false);
     assert.deepEqual(ctx.todayItems, []);
     assert.deepEqual(ctx.dueFollowUps, []);
+    assert.deepEqual(ctx.dueCommitments, []);
     assert.deepEqual(ctx.appraisalFollowUps, []);
     assert.deepEqual(ctx.activeSignals, []);
     assert.deepEqual(ctx.relationshipBreakdown, []);
@@ -201,6 +202,131 @@ test("buildGrowContext: todayItems is bounded at 20 even when a brokerage has mo
     const ctx = await buildGrowContext(fresh.brokerageId, null);
     assert.equal(ctx.todayItems.length, 20, "todayItems must be capped at GROW_TODAY_ITEMS_LIMIT (20) regardless of how many qualifying items exist");
     assert.equal(ctx.hasAnyGrowData, true);
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+
+function startOfTodayUtc(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+}
+
+function endOfTodayUtc(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+}
+
+async function insertCommitment(values: {
+  brokerageId: number;
+  partyId: number;
+  propertyId: number | null;
+  description: string;
+  dueAt: Date;
+  status: "Open" | "Completed" | "Cancelled";
+  createdBy: number;
+}) {
+  const [row] = await db.insert(growCommitments).values(values).returning({ id: growCommitments.id });
+  return row.id;
+}
+
+// F-6 — get_due_commitments' source is grow_commitments, not the Grow Today
+// follow-up list. An overdue opportunity next-action must stay on
+// dueFollowUps and must not appear as a commitment row. A future Open
+// commitment and a Completed commitment are not due. Another brokerage's
+// row must not cross the tenant boundary.
+test("buildGrowContext: dueCommitments are Open grow_commitments due today or overdue, not Grow Today follow-ups", async () => {
+  const fresh = await createBrokerageWithUsers(baseUrl, `Grow Ask AE Due Commitments ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.opportunities.manage");
+    const propertyId = await createProperty(fresh.agent.cookie, `9 Due Commitment Ave ${suffix}`);
+    const partyId = await createParty(fresh.agent.cookie, propertyId, { firstName: "Casey", lastName: "Committed" });
+    const opportunityId = await createOpportunity(fresh.agent.cookie, {
+      partyId,
+      propertyId,
+      opportunityType: "Listing",
+      reason: "Opportunity follow-up, not a commitment.",
+    });
+    await makeOverdue(fresh.agent.cookie, opportunityId);
+
+    const today0 = startOfTodayUtc();
+    const today1 = endOfTodayUtc();
+    const dueDescription = "Send the signed section 32.";
+    const dueId = await insertCommitment({
+      brokerageId: fresh.brokerageId,
+      partyId,
+      propertyId,
+      description: dueDescription,
+      dueAt: new Date(today0.getTime() - 2 * DAY),
+      status: "Open",
+      createdBy: fresh.agent.user.id,
+    });
+    await insertCommitment({
+      brokerageId: fresh.brokerageId,
+      partyId,
+      propertyId,
+      description: "Call next month — not due yet.",
+      dueAt: new Date(today1.getTime() + DAY),
+      status: "Open",
+      createdBy: fresh.agent.user.id,
+    });
+    await insertCommitment({
+      brokerageId: fresh.brokerageId,
+      partyId,
+      propertyId,
+      description: "Already completed promise.",
+      dueAt: new Date(today0.getTime() - DAY),
+      status: "Completed",
+      createdBy: fresh.agent.user.id,
+    });
+
+    const otherPropertyId = await createProperty(B.agent.cookie, `10 Other Brokerage Ave ${suffix}`);
+    const otherPartyId = await createParty(B.agent.cookie, otherPropertyId, { firstName: "Other", lastName: "Tenant" });
+    const otherDescription = "Other brokerage promise must not leak.";
+    await insertCommitment({
+      brokerageId: B.brokerageId,
+      partyId: otherPartyId,
+      propertyId: otherPropertyId,
+      description: otherDescription,
+      dueAt: new Date(today0.getTime() - DAY),
+      status: "Open",
+      createdBy: B.agent.user.id,
+    });
+
+    const ctx = await buildGrowContext(fresh.brokerageId, null);
+    assert.equal(ctx.dueCommitments.length, 1);
+    const row = ctx.dueCommitments[0];
+    assert.equal(row.id, dueId);
+    assert.equal(row.status, "Open");
+    assert.equal(row.partyId, partyId);
+    assert.equal(row.contactName, "Casey Committed");
+    assert.equal(row.propertyId, propertyId);
+    assert.equal(row.description, dueDescription);
+    assert.equal(typeof row.dueAt, "string");
+    assert.equal("type" in row, false);
+    assert.equal("recommendedAction" in row, false);
+
+    const descriptions = ctx.dueCommitments.map((commitment) => commitment.description);
+    assert.ok(!descriptions.includes("Call next month — not due yet."));
+    assert.ok(!descriptions.includes("Already completed promise."));
+    assert.ok(!descriptions.includes(otherDescription));
+    assert.ok(!descriptions.includes("Opportunity follow-up, not a commitment."));
+
+    assert.ok(
+      ctx.dueFollowUps.some((item) => item.id === `opportunity:${opportunityId}` && item.type === "opportunity_follow_up"),
+      "the overdue opportunity stays a follow-up",
+    );
+    assert.ok(
+      !ctx.dueFollowUps.some((item) => item.type === "commitment" || item.id === `commitment:${dueId}`),
+      "recorded commitments must not be returned as Grow Today follow-ups",
+    );
+
+    const other = await buildGrowContext(B.brokerageId, null);
+    assert.ok(other.dueCommitments.some((commitment) => commitment.description === otherDescription));
+    assert.ok(!other.dueCommitments.some((commitment) => commitment.id === dueId || commitment.description === dueDescription));
   } finally {
     await cleanupBrokerages([fresh.brokerageId]);
   }
