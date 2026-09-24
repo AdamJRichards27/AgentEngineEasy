@@ -17,6 +17,14 @@
 // and keeps whatever it resolves, with no such asymmetry — which is what
 // marks the transaction branch as an oversight rather than a design.
 //
+// The non-transaction branch is a second drop of the same evidence. It calls
+// evaluateOutboundCallEligibility, which writes the row and then throws
+// CallConsentEligibilityError carrying that row's id and reason code. An
+// empty catch used to discard both, so outboundDecisionId and
+// outboundReasonCode were null on that path too, again exactly when the
+// call was blocked. The catch now keeps those two fields and still does not
+// feed the blocked decision into the legalPolicy gate.
+//
 // WHAT THIS FILE PINS
 //
 //   * A blocked in-transaction evaluation carries a non-null decision id and
@@ -33,8 +41,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
+  auditLogs,
   brokerages,
   db,
   entitlementGrants,
@@ -45,6 +54,7 @@ import {
 } from "@aee/db";
 import { recordConsentPolicy, withConsentBrokerageLock } from "../../consentControlsPersistence.js";
 import { evaluateRecordingGates, LIVE_RECORDING_APPROVAL_ENV } from "../recordingGates.js";
+import { confirmInCallRecording } from "../callSessions.js";
 import { captureRecordingConsent } from "../consent.js";
 import { invalidateEntitlementCache } from "../../entitlements/resolver.js";
 import { cleanupBrokerages } from "../../../routes/__tests__/testSupport.js";
@@ -275,5 +285,169 @@ test(
 
     // ...while the evidence still records it.
     assert.notEqual(evaluation.evidence.outboundDecisionId, null);
+  },
+);
+
+test(
+  "D-4: a blocked non-transaction recording evaluation retains the thrown decision id and reason code",
+  { skip: !databaseEnabled, concurrency: false },
+  async (t) => {
+    const fixture = await createEvidenceFixture("blocked-thrown-evidence");
+    const previousApproval = process.env[LIVE_RECORDING_APPROVAL_ENV];
+    t.after(async () => {
+      if (previousApproval === undefined) delete process.env[LIVE_RECORDING_APPROVAL_ENV];
+      else process.env[LIVE_RECORDING_APPROVAL_ENV] = previousApproval;
+      invalidateEntitlementCache(fixture.brokerageId);
+      await cleanupBrokerages([fixture.brokerageId]);
+    });
+    process.env[LIVE_RECORDING_APPROVAL_ENV] = "true";
+
+    // No tx and not readOnly: this is the branch that records the decision
+    // and then throws. The reason must still land on the evidence.
+    const evaluation = await evaluateRecordingGates({
+      session: {
+        brokerageId: fixture.brokerageId,
+        partyId: fixture.partyId,
+        destinationCountry: "AU",
+        recordingRequested: true,
+        recordingStatus: "PERMITTED_NOT_CAPTURED",
+        recordingConsentId: fixture.recordingConsentId,
+      },
+      actor: { id: fixture.userId, role: "Agent", brokerageId: fixture.brokerageId },
+      providerName: "synthetic-adapter",
+      providerCapabilities: recordingCapableAdapter,
+    });
+
+    assert.equal(evaluation.permitted, false);
+    assert.equal(evaluation.evidence.allPassed, false);
+    assert.equal(evaluation.outboundDecision, null, "a thrown ineligible decision must not become the call authority");
+    assert.equal(evaluation.evidence.gates.legalPolicy.passed, false);
+    assert.equal(evaluation.evidence.gates.legalPolicy.reason, "RECORDING_POLICY_NOT_CONFIGURED");
+    assert.equal(evaluation.evidence.gates.legalPolicy.policyVersion, null);
+    assert.equal(typeof evaluation.evidence.outboundDecisionId, "number");
+    assert.notEqual(evaluation.evidence.outboundReasonCode, null);
+
+    const [decision] = await db
+      .select()
+      .from(growConsentDecisions)
+      .where(eq(growConsentDecisions.id, evaluation.evidence.outboundDecisionId!));
+    assert.ok(decision, "the retained id must resolve to the row the thrown evaluator wrote");
+    assert.equal(decision.brokerageId, fixture.brokerageId);
+    assert.notEqual(decision.decision, "ELIGIBLE");
+    assert.equal(evaluation.evidence.outboundReasonCode, decision.reasonCode);
+  },
+);
+
+test(
+  "D-4: a blocked read-only recording evaluation keeps the reason code and does not invent a decision id",
+  { skip: !databaseEnabled, concurrency: false },
+  async (t) => {
+    const fixture = await createEvidenceFixture("blocked-readonly-evidence");
+    const previousApproval = process.env[LIVE_RECORDING_APPROVAL_ENV];
+    t.after(async () => {
+      if (previousApproval === undefined) delete process.env[LIVE_RECORDING_APPROVAL_ENV];
+      else process.env[LIVE_RECORDING_APPROVAL_ENV] = previousApproval;
+      invalidateEntitlementCache(fixture.brokerageId);
+      await cleanupBrokerages([fixture.brokerageId]);
+    });
+    process.env[LIVE_RECORDING_APPROVAL_ENV] = "true";
+
+    const before = await db
+      .select({ id: growConsentDecisions.id })
+      .from(growConsentDecisions)
+      .where(eq(growConsentDecisions.brokerageId, fixture.brokerageId));
+
+    const evaluation = await evaluateRecordingGates({
+      session: {
+        brokerageId: fixture.brokerageId,
+        partyId: fixture.partyId,
+        destinationCountry: "AU",
+        recordingRequested: true,
+        recordingStatus: "PERMITTED_NOT_CAPTURED",
+        recordingConsentId: fixture.recordingConsentId,
+      },
+      actor: { id: fixture.userId, role: "Agent", brokerageId: fixture.brokerageId },
+      providerName: "synthetic-adapter",
+      providerCapabilities: recordingCapableAdapter,
+      readOnly: true,
+    });
+
+    const after = await db
+      .select({ id: growConsentDecisions.id })
+      .from(growConsentDecisions)
+      .where(eq(growConsentDecisions.brokerageId, fixture.brokerageId));
+    assert.equal(after.length, before.length, "a read-only evaluation must not write a consent decision");
+    assert.notEqual(evaluation.outboundDecision, null);
+    assert.notEqual(evaluation.outboundDecision?.evaluation.decision, "ELIGIBLE");
+    assert.equal(evaluation.evidence.outboundDecisionId, null, "read-only evidence must not manufacture an authority id");
+    assert.equal(
+      evaluation.evidence.outboundReasonCode,
+      evaluation.outboundDecision?.evaluation.reasonCode,
+      "the blocked reason on a read must be the evaluator's own reason code",
+    );
+    assert.equal(typeof evaluation.evidence.outboundReasonCode, "string");
+    assert.notEqual(evaluation.evidence.outboundReasonCode, "");
+  },
+);
+
+test(
+  "D-4: confirming a blocked call persists the non-eligible decision id and reason on the unrecorded audit",
+  { skip: !databaseEnabled, concurrency: false },
+  async (t) => {
+    const fixture = await createEvidenceFixture("blocked-persisted-audit");
+    const previousApproval = process.env[LIVE_RECORDING_APPROVAL_ENV];
+    t.after(async () => {
+      if (previousApproval === undefined) delete process.env[LIVE_RECORDING_APPROVAL_ENV];
+      else process.env[LIVE_RECORDING_APPROVAL_ENV] = previousApproval;
+      invalidateEntitlementCache(fixture.brokerageId);
+      await cleanupBrokerages([fixture.brokerageId]);
+    });
+    process.env[LIVE_RECORDING_APPROVAL_ENV] = "true";
+
+    await db
+      .update(growCallSessions)
+      .set({ recordingStatus: "DISCLOSED", recordingPermitted: false })
+      .where(eq(growCallSessions.id, fixture.callSessionId));
+
+    const confirmed = await confirmInCallRecording({
+      brokerageId: fixture.brokerageId,
+      callSessionId: fixture.callSessionId,
+      confirmedByUserId: fixture.userId,
+      actorRole: "Agent",
+    });
+    assert.equal(confirmed.recordingPermitted, false);
+    assert.equal(confirmed.recordingStatus, "UNRECORDED");
+
+    const recordingAudits = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.action, "grow_call_recording_unrecorded"),
+          eq(auditLogs.recordId, String(fixture.callSessionId)),
+        ),
+      );
+    assert.equal(recordingAudits.length, 1);
+    const persisted = JSON.parse(recordingAudits[0]!.updatedValue ?? "{}") as {
+      allPassed?: boolean;
+      outboundDecisionId?: number | null;
+      outboundReasonCode?: string | null;
+      gates?: { legalPolicy?: { passed?: boolean; reason?: string; policyVersion?: string | null } };
+    };
+    assert.equal(persisted.allPassed, false);
+    assert.equal(typeof persisted.outboundDecisionId, "number");
+    assert.notEqual(persisted.outboundReasonCode, null);
+    assert.equal(persisted.gates?.legalPolicy?.passed, false);
+    assert.equal(persisted.gates?.legalPolicy?.reason, "RECORDING_POLICY_NOT_CONFIGURED");
+    assert.equal(persisted.gates?.legalPolicy?.policyVersion ?? null, null);
+
+    const [decision] = await db
+      .select()
+      .from(growConsentDecisions)
+      .where(eq(growConsentDecisions.id, persisted.outboundDecisionId!));
+    assert.ok(decision);
+    assert.equal(decision.brokerageId, fixture.brokerageId);
+    assert.notEqual(decision.decision, "ELIGIBLE");
+    assert.equal(persisted.outboundReasonCode, decision.reasonCode);
   },
 );
