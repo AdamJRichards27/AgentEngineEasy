@@ -1,12 +1,14 @@
-// Agent Engine 2.0 -- Agent Daily Command Centre (Priority 6), frontend types.
+// RUN Command Centre (Priority 6), frontend types. Route /today.
 //
-// Mirrors apps/api/src/lib/commandCentre/types.ts by hand (the web app doesn't
-// share a package with the API) so both read the same field names and enum
-// values -- same convention lib/riskExceptions.ts already uses for the
-// Exception & Risk Engine's types. The Command Centre answers one question,
-// "what needs my attention today?", by re-presenting ActionItems that are
-// already sourced from the Exception & Risk Engine, Property Timeline, Launch
-// stage, and Workflow Automation Engine -- it owns no data of its own.
+// This is property delivery (GET /command-centre). It is not Grow Today.
+// The user-facing name, purpose line, and cross-link live in
+// lib/todaySurfaces.ts. Mirrors apps/api/src/lib/commandCentre/types.ts by
+// hand (the web app doesn't share a package with the API) so both read the
+// same field names and enum values -- same convention lib/riskExceptions.ts
+// already uses for the Exception & Risk Engine's types. The Command Centre
+// re-presents ActionItems already sourced from the Exception & Risk Engine,
+// Property Timeline, Launch stage, and Workflow Automation Engine -- it owns
+// no data of its own.
 
 export const COMMAND_CENTRE_SOURCE_TYPES = [
   "EXCEPTION",

@@ -5,6 +5,14 @@ import { apiFetch } from "../lib/api";
 // presentation (components/GrowDataRegion.tsx). Named for Grow because that is
 // where it was first needed; the failure it prevents is not Grow-specific.
 import { GrowDataRegionStatus } from "../components/GrowDataRegion";
+import { TodaySurfaceCrossLink } from "../components/TodaySurfaceCrossLink";
+import {
+  commandCentreCrossLink,
+  commandCentreGreeting,
+  RUN_COMMAND_CENTRE_EYEBROW,
+  RUN_COMMAND_CENTRE_PURPOSE,
+  RUN_COMMAND_CENTRE_TITLE,
+} from "../lib/todaySurfaces";
 import {
   type ActionItem,
   type ActivePropertySummary,
@@ -19,17 +27,18 @@ import {
   sourceTypeLabel,
 } from "../lib/commandCentre";
 
-// Agent Engine 2.0 -- Agent Daily Command Centre (Priority 6).
+// RUN Command Centre (Priority 6), route /today. Property delivery, not Grow Today.
 //
-// "What needs my attention today?" A single read surface that re-presents
-// ActionItems already sourced from the Exception & Risk Engine (authoritative
-// for risk), Property Timeline, Launch stage, and Workflow Automation Engine --
-// deduplicated and prioritised P0-P4 by lib/commandCentre/queries.ts on the
-// API. This page owns no data or mutation logic of its own: every row links
-// (via deepLink, a uniform /properties/:id link) into the Property Workspace,
-// where the existing audited actions for that source already live -- the same
-// "progressive disclosure, no duplicated action surface" pattern
-// PropertyWorkspace.tsx itself uses for its own detail sections.
+// A single read surface that re-presents ActionItems already sourced from the
+// Exception & Risk Engine (authoritative for risk), Property Timeline, Launch
+// stage, and Workflow Automation Engine -- deduplicated and prioritised P0-P4
+// by lib/commandCentre/queries.ts on the API. This page owns no data or
+// mutation logic of its own, and it does not read GET /grow/today. Every row
+// links (via deepLink, a uniform /properties/:id link) into the Property
+// Workspace, where the existing audited actions for that source already live
+// -- the same "progressive disclosure, no duplicated action surface" pattern
+// PropertyWorkspace.tsx itself uses for its own detail sections. The name,
+// purpose line, and the link to Grow Today live in lib/todaySurfaces.ts.
 //
 // Section order follows mobile-responsive priority: what's urgent (Now,
 // Overdue, Today, Waiting On) leads as plain cards; what can wait (Coming Up,
@@ -46,18 +55,15 @@ export default function CommandCentre() {
   return (
     <div>
       <div className="primary-action">
-        <div className="eyebrow">Agent Engine 2.0</div>
-        <h1>Today</h1>
-        <p className="muted">
-          {data ? (
-            <>
-              Hi {data.agent.firstName} -- here's what needs your attention, as of{" "}
-              {formatGeneratedAt(data.generatedAt)} ({data.timeZone}).
-            </>
-          ) : (
-            "What needs your attention today, across every property you can see."
-          )}
-        </p>
+        <div className="eyebrow">{RUN_COMMAND_CENTRE_EYEBROW}</div>
+        <h1>{RUN_COMMAND_CENTRE_TITLE}</h1>
+        <p className="muted">{RUN_COMMAND_CENTRE_PURPOSE}</p>
+        {data ? (
+          <p className="muted">
+            {commandCentreGreeting(data.agent.firstName, formatGeneratedAt(data.generatedAt), data.timeZone)}
+          </p>
+        ) : null}
+        <TodaySurfaceCrossLink link={commandCentreCrossLink} />
       </div>
 
       {/* AE GROW Completion W2-B (G-4/G-5): the error branch used to be
