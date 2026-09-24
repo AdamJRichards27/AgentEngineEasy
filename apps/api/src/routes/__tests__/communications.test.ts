@@ -24,7 +24,8 @@ import type { Server } from "node:http";
 import { createHmac } from "node:crypto";
 import { eq, and } from "drizzle-orm";
 import { db, users, communicationThreads, communicationMessages, communicationWebhookEvents, entitlementGrants } from "@aee/db";
-import { dispatchMessage } from "../../lib/communications/outbox.js";
+import { dispatchMessage, queueMessage } from "../../lib/communications/outbox.js";
+import { CommunicationTransitionError } from "../../lib/communications/types.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -918,4 +919,67 @@ test("AE Grow Priority 3 regression — a property-first thread and message keep
   assert.equal(body.message.status, "SENT");
   assert.equal(body.message.propertyId, propertyId, "a property-first message must keep its propertyId unchanged by the Priority 3 anchoring change");
   assert.equal(body.message.partyId, null, "a property-first message must never pick up a partyId it was never given");
+});
+
+// ---------------------------------------------------------------------
+// B-5. SERVICE needs a human other than the sender.
+// ---------------------------------------------------------------------
+
+test("B-5: a SERVICE message is rejected when the only accountable human is the sender", async () => {
+  const threadId = await createThread(agent.cookie, "Service needs another human");
+  const participant = await addManualParticipant(agent.cookie, threadId, {
+    displayName: "Sam Seller",
+    role: "Seller",
+    email: `seller-b5-${Date.now()}@example.com`,
+    reason: "Service-message recipient",
+  });
+
+  const draft = await createDraft(agent.cookie, threadId, {
+    channel: "EMAIL",
+    classification: "SERVICE",
+    bodyText: "The photographer is confirmed for Tuesday 9am.",
+    recipientParticipantId: participant.id,
+  });
+  assert.equal(draft.status, "DRAFT");
+
+  const blockedSend = await sendMessage(agent.cookie, draft.id, draft.version);
+  assert.equal(blockedSend.status, 422, "the sender alone must not be able to send a SERVICE message");
+  assert.match(String(blockedSend.body.error), /requires approval/);
+
+  await assert.rejects(
+    () => queueMessage(draft.id, brokerageId, agent.user.id, draft.version),
+    (err: unknown) => err instanceof CommunicationTransitionError && /requires approval/.test(err.message),
+    "queueing a SERVICE draft must not skip the approval gate",
+  );
+
+  const approvalReq = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/request-approval`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: draft.version }),
+  });
+  const afterRequest = await jsonOf<{ status: string; version: number }>(approvalReq);
+  assert.equal(approvalReq.status, 200);
+  assert.equal(afterRequest.status, "AWAITING_APPROVAL");
+
+  const selfApprove = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/approve`, {
+    method: "POST",
+    headers: authHeaders(agent.cookie),
+    body: JSON.stringify({ expectedVersion: afterRequest.version }),
+  });
+  const selfBody = await jsonOf<{ error: string }>(selfApprove);
+  assert.equal(selfApprove.status, 422, "the sender must not be able to approve their own SERVICE message");
+  assert.match(selfBody.error, /someone other than the sender/);
+
+  const approveRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/approve`, {
+    method: "POST",
+    headers: authHeaders(admin.cookie),
+    body: JSON.stringify({ expectedVersion: afterRequest.version }),
+  });
+  const approved = await jsonOf<{ status: string; version: number }>(approveRes);
+  assert.equal(approveRes.status, 200);
+  assert.equal(approved.status, "APPROVED");
+
+  const sent = await sendMessage(agent.cookie, draft.id, approved.version);
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.status, "SENT");
 });

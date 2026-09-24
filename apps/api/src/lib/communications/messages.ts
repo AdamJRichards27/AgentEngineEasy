@@ -45,6 +45,16 @@ import {
 import { renderTemplate } from "./templates.js";
 import { partyDisplayName } from "./recipientResolution.js";
 import { applyMessageTransition, queueMessage, evaluateAndDispatchQueuedMessage, type QueueMessageResult } from "./outbox.js";
+import {
+  APPROVAL_REQUIRED_BEFORE_SEND,
+  SERVICE_NEEDS_ANOTHER_HUMAN,
+  accountableHumanUserIds,
+  requiresApproval,
+  serviceApproverIsAnotherHuman,
+  serviceHasOnlyTheSender,
+} from "./approvalPolicy.js";
+
+export { accountableHumanUserIds, requiresApproval, serviceApproverIsAnotherHuman, serviceHasOnlyTheSender };
 
 export interface CreateThreadInput {
   brokerageId: number;
@@ -399,16 +409,14 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
 
 /**
  * Section 15: which messages need a second set of eyes before they can be
- * queued. Kept as one small, clearly-documented policy function rather than
- * scattered checks — every MARKETING send always needs approval; a Pit Crew
- * send-on-behalf-of-agent always needs the agent's (or an admin's) approval
- * before it goes out under that agent's name (Section 12).
+ * queued. The predicate itself lives in approvalPolicy.ts so the outbox
+ * queue path can apply the same rule without an import cycle. MARKETING
+ * always needs approval (the sender may approve their own — scenario 6).
+ * A Pit Crew send-on-behalf-of-agent always needs the agent's (or an
+ * admin's) approval before it goes out under that agent's name (Section
+ * 12). SERVICE needs approval too, and the approver must be someone other
+ * than the sender (B-5) — see approveMessage.
  */
-export function requiresApproval(message: Pick<CommunicationMessage, "classification" | "sendOnBehalfOfUserId">): boolean {
-  if (message.classification === "MARKETING") return true;
-  if (message.sendOnBehalfOfUserId != null) return true;
-  return false;
-}
 
 export async function requestApproval(messageId: number, brokerageId: number, userId: number, expectedVersion: number): Promise<CommunicationMessage> {
   return applyMessageTransition({
@@ -422,6 +430,12 @@ export async function requestApproval(messageId: number, brokerageId: number, us
 }
 
 export async function approveMessage(messageId: number, brokerageId: number, userId: number, expectedVersion: number): Promise<CommunicationMessage> {
+  const existing = await getMessage(messageId, brokerageId);
+  // B-5: APPROVED is only reachable through this function. A SERVICE
+  // message whose approver is the sender still has one accountable human.
+  if (!serviceApproverIsAnotherHuman(existing, userId)) {
+    throw new CommunicationTransitionError(SERVICE_NEEDS_ANOTHER_HUMAN);
+  }
   return applyMessageTransition({
     messageId,
     brokerageId,
@@ -466,7 +480,7 @@ export async function cancelMessage(
 export async function sendMessageNow(messageId: number, brokerageId: number, userId: number, expectedVersion: number): Promise<QueueMessageResult> {
   const existing = await getMessage(messageId, brokerageId);
   if (requiresApproval(existing) && existing.status !== "APPROVED") {
-    throw new CommunicationTransitionError("This message requires approval before it can be sent — request approval first.");
+    throw new CommunicationTransitionError(APPROVAL_REQUIRED_BEFORE_SEND);
   }
   return queueMessage(messageId, brokerageId, userId, expectedVersion);
 }

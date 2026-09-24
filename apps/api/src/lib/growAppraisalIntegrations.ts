@@ -133,15 +133,20 @@ export async function sendAppraisal(input: SendAppraisalInput): Promise<SendAppr
   // appraisal that has already moved past SENT (e.g. re-sending after
   // PRESENTED) simply keeps its current, more-advanced status rather
   // than erroring the whole send out.
-  try {
-    await transitionAppraisalStatus({
-      appraisalId: appraisal.id,
-      brokerageId: input.brokerageId,
-      userId: input.userId,
-      toStatus: "SENT",
-    });
-  } catch (err) {
-    logger.error("appraisal_send_status_transition_skipped", { appraisalId: appraisal.id, error: err });
+  // B-5: a SERVICE appraisal message now waits for someone other than the
+  // sender. Do not record the appraisal as SENT until the message itself
+  // has been sent.
+  if (status === "sent") {
+    try {
+      await transitionAppraisalStatus({
+        appraisalId: appraisal.id,
+        brokerageId: input.brokerageId,
+        userId: input.userId,
+        toStatus: "SENT",
+      });
+    } catch (err) {
+      logger.error("appraisal_send_status_transition_skipped", { appraisalId: appraisal.id, error: err });
+    }
   }
 
   return { threadId: thread.id, messageId: message.id, status };
