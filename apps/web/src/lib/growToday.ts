@@ -39,6 +39,8 @@
 //   - signalSummary, so the screen can say what it is NOT showing rather than
 //     pretending the held-back items do not exist.
 
+import { COMMITMENT_LABEL, DUE_FOLLOW_UP_LABEL } from "./growTerms";
+
 export const GROW_TODAY_PRIORITIES = ["DoNow", "DoToday", "KeepWarm"] as const;
 export type GrowTodayPriority = (typeof GROW_TODAY_PRIORITIES)[number];
 
@@ -178,13 +180,13 @@ export interface GrowTodaySummary {
 }
 
 /**
- * F-1 — the only card kind that needs its own label. Every other Today card
- * is already named by its reason ("Follow-up is due today", "No contact
- * recorded…"). A commitment has to be recognisable as a promise the agent
- * already made, which those sentences do not say on their own.
+ * G-6 — a due follow-up (opportunity next action or appraisal follow-up) and
+ * an Open commitment are different records, so each card says which one it is.
+ * Cold contacts, signals, and opportunities with no next action are neither.
  */
 export function actionTypeLabel(type: GrowTodayActionType): string | null {
-  if (type === "commitment") return "Commitment";
+  if (type === "commitment") return COMMITMENT_LABEL;
+  if (type === "opportunity_follow_up" || type === "appraisal_follow_up") return DUE_FOLLOW_UP_LABEL;
   return null;
 }
 

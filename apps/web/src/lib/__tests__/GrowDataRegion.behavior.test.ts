@@ -230,7 +230,7 @@ test("P3-c: the proposal card header reflects the created commitment after appro
       };
 
       let tree = render();
-      assert.match(textContent(tree), /Proposed follow-up — nothing created yet/, "before approval the header is unchanged");
+      assert.match(textContent(tree), /Proposed commitment — nothing created yet/, "before approval the header names a commitment, not a follow-up");
 
       await (button(tree, "Approve & Create Commitment")!.props!.onClick as () => Promise<void>)();
       assert.deepEqual(calls, ["/ai/actions/requests/900/approve", "/ai/actions/requests/900/execute"]);
@@ -239,7 +239,8 @@ test("P3-c: the proposal card header reflects the created commitment after appro
       const text = textContent(tree);
       assert.match(text, /Commitment created/);
       assert.doesNotMatch(text, /nothing created yet/, "the header no longer contradicts the outcome");
-      assert.match(text, /Follow-up commitment created/, "the header itself reports the created state");
+      assert.match(text, /Commitment created/, "the header itself reports the created commitment");
+      assert.doesNotMatch(text, /follow-up commitment/i);
       assert.match(text, /View in Grow \(#55\)/);
     });
   } finally {

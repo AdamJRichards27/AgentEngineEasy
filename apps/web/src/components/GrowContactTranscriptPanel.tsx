@@ -12,6 +12,7 @@ import {
   type ReviewItemType,
 } from "../lib/callTranscriptReview";
 import { GrowCallFollowupsSection } from "./GrowCallFollowupsSection";
+import { CALL_COMMITMENT_LABEL, CALL_COMMITMENTS_GROUP, CALL_FOLLOW_UP_LABEL, CALL_FOLLOW_UPS_GROUP } from "../lib/growTerms";
 
 interface CallTranscription {
   id: number;
@@ -48,8 +49,16 @@ function manualId() {
 
 function itemTypeLabel(type: ReviewItemType) {
   if (type === "KEY_POINT") return "Key point";
-  if (type === "FOLLOWUP") return "Follow-up";
+  if (type === "FOLLOWUP") return CALL_FOLLOW_UP_LABEL;
+  if (type === "COMMITMENT") return CALL_COMMITMENT_LABEL;
   return type[0] + type.slice(1).toLowerCase();
+}
+
+function reviewGroupTitle(type: ReviewItemType) {
+  if (type === "KEY_POINT") return "Key points";
+  if (type === "FOLLOWUP") return CALL_FOLLOW_UPS_GROUP;
+  if (type === "COMMITMENT") return CALL_COMMITMENTS_GROUP;
+  return itemTypeLabel(type);
 }
 
 export function GrowContactTranscriptPanel({
@@ -195,7 +204,7 @@ export function GrowContactTranscriptPanel({
           <p className="muted">Save accepts the reviewed transcript. The original transcript remains unchanged.</p>
           {(["SUMMARY", "KEY_POINT", "COMMITMENT", "FOLLOWUP"] as ReviewItemType[]).map((type) => (
             <div className="grow-review-group" key={type}>
-              <div className="grow-review-group-title"><strong>{type === "KEY_POINT" ? "Key points" : type === "FOLLOWUP" ? "Follow-ups" : itemTypeLabel(type)}</strong>
+              <div className="grow-review-group-title"><strong>{reviewGroupTitle(type)}</strong>
                 {type !== "SUMMARY" || !items.some((item) => item.itemType === "SUMMARY") ? <button type="button" className="btn btn-link btn-small" disabled={pending} onClick={() => addItem(type)}>Add</button> : null}
               </div>
               {items.map((item, index) => item.itemType === type && (

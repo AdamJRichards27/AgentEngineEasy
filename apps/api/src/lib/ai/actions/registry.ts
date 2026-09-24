@@ -479,9 +479,9 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
 
   CREATE_GROW_COMMITMENT: {
     actionKey: "CREATE_GROW_COMMITMENT",
-    name: "Create Grow follow-up commitment",
+    name: "Create Grow commitment",
     description:
-      "Create a single follow-up commitment (a future-dated promise against a contact) proposed by Ask AE or the Business Coach from grounded Grow data. Always requires explicit human approval — riskLevel 2 combined with authorityLevel EXECUTE means isAutoExecuteEligible() is always false for this action (authority.ts), by construction, not a special case. Nothing is created until an authorised human reviews and approves the exact proposed contact, reason, and due date.",
+      "Create a single commitment (a recorded promise against a contact, stored as a grow_commitments row) proposed by Ask AE or the Business Coach from grounded Grow data. This is not an opportunity or appraisal due follow-up. Always requires explicit human approval — riskLevel 2 combined with authorityLevel EXECUTE means isAutoExecuteEligible() is always false for this action (authority.ts), by construction, not a special case. Nothing is created until an authorised human reviews and approves the exact proposed contact, reason, and due date.",
     category: "grow",
     authorityLevel: AUTHORITY_LEVELS.EXECUTE,
     riskLevel: 2,
@@ -508,7 +508,7 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
     enabled: true,
     version: 1,
     summarize: (input) =>
-      `Create a follow-up commitment for contact #${input.partyId}: "${input.description}" (due ${input.dueAt})`,
+      `Create a commitment for contact #${input.partyId}: "${input.description}" (due ${input.dueAt})`,
     execute: async (ctx, input) =>
       createApprovedGrowCommitment({
         brokerageId: ctx.brokerageId,

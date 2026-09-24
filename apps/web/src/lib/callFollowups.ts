@@ -10,6 +10,7 @@
 // existing /ai/actions/requests/:id/{approve,reject,execute} routes.
 
 import type { CommitmentProposalView } from "./commitmentProposals";
+import { CALL_COMMITMENT_LABEL, CALL_FOLLOW_UP_LABEL } from "./growTerms";
 
 export type CallFollowupItemType = "COMMITMENT" | "FOLLOWUP";
 
@@ -85,7 +86,7 @@ export function followupKey(item: { itemType: string; itemId: string }): string 
 }
 
 export function followupItemTypeLabel(itemType: CallFollowupItemType): string {
-  return itemType === "COMMITMENT" ? "Commitment" : "Follow-up";
+  return itemType === "COMMITMENT" ? CALL_COMMITMENT_LABEL : CALL_FOLLOW_UP_LABEL;
 }
 
 const DATE_INPUT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -214,9 +215,9 @@ export function buildProposePayload(
 }
 
 export const CONSENT_BLOCKED_MESSAGE =
-  "Recording consent for this call was withdrawn, so new follow-up proposals can’t be created. Existing proposals are unchanged.";
+  "Recording consent for this call was withdrawn, so new proposals from this call can’t be created. Existing proposals are unchanged.";
 
-/** Why "Propose selected follow-ups" is disabled, or null when enabled. */
+/** Why "Propose selected items" is disabled, or null when enabled. */
 export function proposeDisabledReason(
   candidates: CallFollowupCandidate[],
   drafts: Record<string, FollowupDraft>,
@@ -224,14 +225,14 @@ export function proposeDisabledReason(
 ): string | null {
   if (consentBlocked || candidates.some((candidate) => candidate.consentBlocked)) return CONSENT_BLOCKED_MESSAGE;
   if (!candidates.some((candidate) => canProposeCandidate(candidate, consentBlocked))) {
-    return "Every follow-up from this call has already been proposed.";
+    return "Every call follow-up and call commitment from this review has already been proposed.";
   }
   const selected = candidates.filter((candidate) => canProposeCandidate(candidate, consentBlocked) && drafts[followupKey(candidate)]?.selected);
-  if (selected.length === 0) return "Select at least one follow-up to propose.";
+  if (selected.length === 0) return "Select at least one call follow-up or call commitment to propose.";
   if (selected.some((candidate) => !isDraftDueDateConfirmed(drafts[followupKey(candidate)]))) {
-    return "Confirm the due date for each selected follow-up.";
+    return "Confirm the due date for each selected item.";
   }
-  if (selected.length > MAX_FOLLOWUPS_PER_PROPOSAL) return `Propose at most ${MAX_FOLLOWUPS_PER_PROPOSAL} follow-ups at a time.`;
+  if (selected.length > MAX_FOLLOWUPS_PER_PROPOSAL) return `Propose at most ${MAX_FOLLOWUPS_PER_PROPOSAL} items at a time.`;
   return null;
 }
 
@@ -335,7 +336,7 @@ export function viewFromFollowupRequest(
     contactName: context.contactName,
     dueAt: request.dueAt,
     timeZone: null,
-    reason: candidate.itemType === "COMMITMENT" ? "Commitment approved in call review" : "Follow-up approved in call review",
+    reason: candidate.itemType === "COMMITMENT" ? "Call commitment approved in call review" : "Call follow-up approved in call review",
     evidenceSummary: null,
     status: request.status,
     expiresAt: request.expiresAt,
@@ -356,27 +357,27 @@ export function followupErrorMessage(err: FollowupErrorLike): string {
     case "CONSENT_WITHDRAWN":
       return CONSENT_BLOCKED_MESSAGE;
     case "WRONG_STATE":
-      return "Follow-ups are only available for a saved call review. Nothing was proposed.";
+      return "Items from this call can be proposed only after the review is saved. Nothing was proposed.";
     case "ENTITLEMENT_REQUIRED":
-      return "Your access doesn’t include call follow-ups. Ask a Brokerage Administrator.";
+      return "Your access doesn’t include proposals from call reviews. Ask a Brokerage Administrator.";
     case "ACCESS_DENIED":
-      return "You can’t propose follow-ups for this call.";
+      return "You can’t propose items from this call.";
     case "POLICY_DENIED":
-      return "A follow-up proposal was blocked by policy. Refresh to see which follow-ups, if any, were proposed.";
+      return "A proposal from this call was blocked by policy. Refresh to see which items, if any, were proposed.";
     case "NOT_FOUND":
       return "This call review is no longer available.";
     case "INVALID_INPUT":
-      return "Check the selected follow-ups and their due dates (within two years of today), then try again.";
+      return "Check the selected call follow-ups and call commitments and their due dates (within two years of today), then try again.";
     case "AUDIT_FAILURE":
       return "Nothing was proposed because the audit record couldn’t be written. Try again.";
     case "AUDIT_INCOMPLETE":
-      return "The proposals were created and await your approval, but the audit record couldn’t be completed. Propose the same follow-ups again to finish it — this won’t create duplicates.";
+      return "The proposals were created and await your approval, but the audit record couldn’t be completed. Propose the same items again to finish it — this won’t create duplicates.";
     default:
       break;
   }
   if (err.status === 403) return "You don’t have permission to do that — ask a Brokerage Administrator.";
   if (err.status === 404) return "This call review is no longer available.";
-  return err.friendly ?? "Couldn’t propose these follow-ups. Try again.";
+  return err.friendly ?? "Couldn’t propose these items. Try again.";
 }
 
 /** React Query keys to refresh after any propose/approve/reject/execute. */

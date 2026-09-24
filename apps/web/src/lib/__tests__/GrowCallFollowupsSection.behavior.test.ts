@@ -250,8 +250,8 @@ test("follow-ups: pre-filled date alone never enables proposing; only an explici
 
       (byId(tree, "grow-followup-71-COMMITMENT-c-1-select")!.props!.onChange as (event: unknown) => void)({ target: { checked: true } });
       tree = render();
-      assert.equal(button(tree, "Propose selected follow-ups")!.props!.disabled, true, "selected + pre-filled but unconfirmed stays disabled");
-      (button(tree, "Propose selected follow-ups")!.props!.onClick as () => void)();
+      assert.equal(button(tree, "Propose selected items")!.props!.disabled, true, "selected + pre-filled but unconfirmed stays disabled");
+      (button(tree, "Propose selected items")!.props!.onClick as () => void)();
       assert.equal(calls.length, 0);
 
       (byId(tree, "grow-followup-71-COMMITMENT-c-1-confirm")!.props!.onChange as (event: unknown) => void)({ target: { checked: true } });
@@ -260,12 +260,12 @@ test("follow-ups: pre-filled date alone never enables proposing; only an explici
       (byId(tree, "grow-followup-71-COMMITMENT-c-1-due")!.props!.onChange as (event: unknown) => void)({ target: { value: "2026-10-02" } });
       tree = render();
       assert.equal(byId(tree, "grow-followup-71-COMMITMENT-c-1-confirm")!.props!.checked, false);
-      assert.equal(button(tree, "Propose selected follow-ups")!.props!.disabled, true);
+      assert.equal(button(tree, "Propose selected items")!.props!.disabled, true);
       (byId(tree, "grow-followup-71-COMMITMENT-c-1-confirm")!.props!.onChange as (event: unknown) => void)({ target: { checked: true } });
       tree = render();
-      assert.equal(button(tree, "Propose selected follow-ups")!.props!.disabled, false);
+      assert.equal(button(tree, "Propose selected items")!.props!.disabled, false);
 
-      (button(tree, "Propose selected follow-ups")!.props!.onClick as () => void)();
+      (button(tree, "Propose selected items")!.props!.onClick as () => void)();
       await Promise.all(pending);
       assert.equal(calls.length, 1, "exactly one explicit propose call");
       assert.equal(calls[0]!.path, "/grow/calls/81/transcription/71/followups/propose");
@@ -318,8 +318,8 @@ test("follow-ups: consent withdrawn shows the message, hides per-item controls, 
       const tree = GrowCallFollowupsSection({ callSessionId: 81, transcriptionId: 71, partyId: 12, contactName: null });
       assert.match(textContent(tree), /Recording consent for this call was withdrawn/);
       assert.equal(byId(tree, "grow-followup-71-COMMITMENT-c-1-select"), undefined);
-      assert.equal(button(tree, "Propose selected follow-ups")!.props!.disabled, true);
-      (button(tree, "Propose selected follow-ups")!.props!.onClick as () => void)();
+      assert.equal(button(tree, "Propose selected items")!.props!.disabled, true);
+      (button(tree, "Propose selected items")!.props!.onClick as () => void)();
       assert.equal(calls.length, 0);
     });
   } finally {

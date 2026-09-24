@@ -9,6 +9,7 @@ import {
   dateInputToIso,
   followupErrorMessage,
   followupInvalidationKeys,
+  followupItemTypeLabel,
   followupKey,
   followupStatus,
   isDraftDueDateConfirmed,
@@ -230,15 +231,15 @@ test("consent-blocked responses disable proposing entirely", () => {
 
 test("proposeDisabledReason explains exactly why the propose button is disabled", () => {
   const candidates = [candidate()];
-  assert.equal(proposeDisabledReason(candidates, createFollowupDrafts(candidates), false), "Select at least one follow-up to propose.");
+  assert.equal(proposeDisabledReason(candidates, createFollowupDrafts(candidates), false), "Select at least one call follow-up or call commitment to propose.");
   assert.equal(
     proposeDisabledReason(candidates, { "COMMITMENT:c-1": { selected: true, dueDate: "2026-10-01", confirmedDueDate: null } }, false),
-    "Confirm the due date for each selected follow-up.",
+    "Confirm the due date for each selected item.",
   );
   assert.equal(proposeDisabledReason(candidates, { "COMMITMENT:c-1": confirmedDraft("2026-10-01") }, false), null);
   assert.equal(
     proposeDisabledReason([candidate({ canPropose: false, existingProposal: { visibility: "ALREADY_PROPOSED" } })], {}, false),
-    "Every follow-up from this call has already been proposed.",
+    "Every call follow-up and call commitment from this review has already been proposed.",
   );
 });
 
@@ -331,9 +332,9 @@ test("summarizeProposeOutcomes reports each outcome status and that nothing is c
 });
 
 test("follow-up error codes map to specific agent-facing messages", () => {
-  assert.match(followupErrorMessage({ status: 409, code: "WRONG_STATE" }), /saved call review/);
+  assert.match(followupErrorMessage({ status: 409, code: "WRONG_STATE" }), /review is saved/);
   assert.match(followupErrorMessage({ status: 403, code: "ENTITLEMENT_REQUIRED" }), /Brokerage Administrator/);
-  assert.match(followupErrorMessage({ status: 403, code: "ACCESS_DENIED" }), /can’t propose follow-ups/);
+  assert.match(followupErrorMessage({ status: 403, code: "ACCESS_DENIED" }), /can’t propose items/);
   assert.match(followupErrorMessage({ status: 403, code: "POLICY_DENIED" }), /blocked by policy/);
   assert.match(followupErrorMessage({ status: 404, code: "NOT_FOUND" }), /no longer available/);
   assert.match(followupErrorMessage({ status: 400, code: "INVALID_INPUT" }), /due dates/);
@@ -347,6 +348,13 @@ test("view adapter labels call-review provenance and uses the approved text, nev
   assert.equal(view.summary, "Send the appraisal pack");
   assert.equal(view.contactName, "Jo Citizen");
   assert.equal(view.evidenceSummary, null);
+  assert.equal(view.reason, "Call follow-up approved in call review");
+  assert.equal(
+    viewFromFollowupRequest(request({ description: null }), candidate({ itemType: "COMMITMENT" }), { transcriptionId: 71, contactName: "Jo Citizen" }).reason,
+    "Call commitment approved in call review",
+  );
+  assert.equal(followupItemTypeLabel("FOLLOWUP"), "Call follow-up");
+  assert.equal(followupItemTypeLabel("COMMITMENT"), "Call commitment");
   assert.deepEqual(view.provenance, { source: "call_review", transcriptionId: 71, itemType: "FOLLOWUP", itemId: "c-1" });
 });
 

@@ -7,6 +7,13 @@
 // (`/ai/actions/requests/:id/{approve,reject,execute}`); nothing here
 // creates, approves, or executes anything by itself.
 
+import {
+  COMMITMENT_CREATED_HEADING,
+  COMMITMENT_MAY_EXIST_HEADING,
+  PROPOSED_COMMITMENT_PREFIX,
+  showCommitmentNotFollowUp,
+} from "./growTerms";
+
 /** Ids-only provenance the API parses from a server-built resourceId. */
 export interface CommitmentProposalProvenance {
   source: "call_review";
@@ -174,29 +181,31 @@ export function proposalCardStatusLabel(state: ProposalCardState, status: string
 export function proposalCardHeading(state: ProposalCardState, status: string): string {
   switch (state) {
     case "executed":
-      return "Follow-up commitment created";
+      return COMMITMENT_CREATED_HEADING;
     case "executing":
-      return "Proposed follow-up — creating the commitment…";
+      return `${PROPOSED_COMMITMENT_PREFIX} — creating it…`;
     case "approved":
-      return "Proposed follow-up — approved, not created yet";
+      return `${PROPOSED_COMMITMENT_PREFIX} — approved, not created yet`;
     case "approving":
-      return "Proposed follow-up — approving…";
+      return `${PROPOSED_COMMITMENT_PREFIX} — approving…`;
     case "rejecting":
-      return "Proposed follow-up — rejecting…";
+      return `${PROPOSED_COMMITMENT_PREFIX} — rejecting…`;
     case "rejected":
-      return "Proposed follow-up — rejected, nothing created";
+      return `${PROPOSED_COMMITMENT_PREFIX} — rejected, nothing created`;
     case "expired":
-      return "Proposed follow-up — expired, nothing created";
+      return `${PROPOSED_COMMITMENT_PREFIX} — expired, nothing created`;
     case "already_actioned":
-      return "Proposed follow-up — already actioned";
+      return `${PROPOSED_COMMITMENT_PREFIX} — already actioned`;
     case "not_available":
-      return "Proposed follow-up — no longer available";
+      return `${PROPOSED_COMMITMENT_PREFIX} — no longer available`;
     case "completed_after_recovery":
-      return "Follow-up commitment may already have been created";
+      return COMMITMENT_MAY_EXIST_HEADING;
     default:
       // review / permission_denied / validation_error / recoverable_failure —
       // every one of these leaves nothing created.
-      return status === "APPROVED" ? "Proposed follow-up — approved, not created yet" : "Proposed follow-up — nothing created yet";
+      return status === "APPROVED"
+        ? `${PROPOSED_COMMITMENT_PREFIX} — approved, not created yet`
+        : `${PROPOSED_COMMITMENT_PREFIX} — nothing created yet`;
   }
 }
 
@@ -213,11 +222,15 @@ export function proposalCardHeadingAccentClass(state: ProposalCardState): string
 // summary, so the raw id reference is replaced client-side rather than shown
 // to an agent. Only the *matching* party id is substituted: a summary that
 // mentioned some other contact's id must never be relabelled with this
-// contact's name. Nothing else about the summary is rewritten.
+// contact's name. The one other rewrite is the G-6 name: a stored
+// "follow-up commitment" is shown as a commitment. Due follow-ups and call
+// follow-ups are not rewritten.
 export function humaniseContactReference(summary: string, partyId: number | null, contactName: string | null): string {
   const name = contactName?.trim();
-  if (!name || partyId === null || !Number.isFinite(partyId)) return summary;
-  return summary.replace(new RegExp(`\\bcontact #${partyId}\\b`, "gi"), name);
+  const named = !name || partyId === null || !Number.isFinite(partyId)
+    ? summary
+    : summary.replace(new RegExp(`\\bcontact #${partyId}\\b`, "gi"), name);
+  return showCommitmentNotFollowUp(named);
 }
 
 /** The card's state on mount (never auto-executes an approved proposal). */

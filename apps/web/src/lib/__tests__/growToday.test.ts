@@ -208,10 +208,10 @@ test("stage 3 — signalWithholdingNotice says nothing when nothing is held back
  * F-1 — commitment cards use the existing contactability display rules.
  * -----------------------------------------------------------------*/
 
-test("F-1 — only a commitment card carries a kind label", () => {
+test("G-6 — a due follow-up and a commitment carry different kind labels", () => {
   assert.equal(actionTypeLabel("commitment"), "Commitment");
-  assert.equal(actionTypeLabel("opportunity_follow_up"), null);
-  assert.equal(actionTypeLabel("appraisal_follow_up"), null);
+  assert.equal(actionTypeLabel("opportunity_follow_up"), "Due follow-up");
+  assert.equal(actionTypeLabel("appraisal_follow_up"), "Due follow-up");
   assert.equal(actionTypeLabel("relationship_cold"), null);
   assert.equal(actionTypeLabel("property_intelligence_signal"), null);
   assert.equal(actionTypeLabel("opportunity_no_action_set"), null);
