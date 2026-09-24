@@ -248,6 +248,17 @@ function partyDisplayName(
   return p.organisationName || `${p.firstName ?? ""} ${p.lastName ?? ""}`.trim() || "A party";
 }
 
+// First row for an id wins, which is the same row a linear scan would have
+// returned. Primary keys make a duplicate id impossible for these batches;
+// the guard keeps a repeated id from changing which row a label uses.
+export function indexById<T extends { id: K }, K extends string | number>(rows: readonly T[]): Map<K, T> {
+  const byId = new Map<K, T>();
+  for (const row of rows) {
+    if (!byId.has(row.id)) byId.set(row.id, row);
+  }
+  return byId;
+}
+
 function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
@@ -470,19 +481,30 @@ export async function getPropertyTimeline(
 
   const offerBuyerIds = offerRows.map((o) => o.buyerPartyId).filter((id): id is number => id != null);
   const amlPartyIds = amlRows.map((a) => a.partyId);
-  const extraPartyIds = [...offerBuyerIds, ...amlPartyIds].filter((id) => !auditPartyAddedIds.includes(id));
+  // Membership is a set so this pass stays linear in the related-row count.
+  // The previous includes() scan walked every already-loaded party id once
+  // per buyer and AML party.
+  const loadedAuditPartyIds = new Set(auditPartyAddedIds);
+  const extraPartyIds = [...offerBuyerIds, ...amlPartyIds].filter((id) => !loadedAuditPartyIds.has(id));
   const extraPartyRows = extraPartyIds.length ? await db.select().from(parties).where(inArray(parties.id, extraPartyIds)) : [];
   const auditParties = [...auditPartyRows, ...extraPartyRows];
+  // I-15 code-path: label assembly resolves each related row by id. Building
+  // these once keeps the pass linear in timeline rows + related rows.
+  // domain_events / audit_logs indexes are a separate W1-D migration.
+  const eventPartiesById = indexById(eventPartyRows);
+  const auditPartiesById = indexById(auditParties);
+  const amlById = indexById(amlRows);
+  const offersById = indexById(offerRows);
   const exceptionsById = new Map<string, RiskException>(riskExceptionRows.map((e) => [e.id, e]));
 
   function domainEventLabel(row: DomainEventRow): string {
     if (row.eventType === "AML_REQUESTED" || row.eventType === "AML_COMPLETED") {
-      const party = eventPartyRows.find((p) => p.id === row.partyId);
+      const party = row.partyId == null ? undefined : eventPartiesById.get(row.partyId);
       const name = partyDisplayName(party);
       return row.eventType === "AML_REQUESTED" ? `AML verification requested for ${name}` : `AML verification completed for ${name}`;
     }
     if (row.eventType === "OFFER_RECEIVED" || row.eventType === "OFFER_ACCEPTED") {
-      const party = eventPartyRows.find((p) => p.id === row.partyId);
+      const party = row.partyId == null ? undefined : eventPartiesById.get(row.partyId);
       const name = party ? partyDisplayName(party) : "a buyer";
       const payload = (row.payload ?? {}) as { offerPriceCents?: number; purchasePriceCents?: number };
       const cents = payload.offerPriceCents ?? payload.purchasePriceCents;
@@ -562,18 +584,18 @@ export async function getPropertyTimeline(
       return riskExceptionLabel(row, exceptionsById.get(String(row.recordId)));
     }
     if (row.recordType === "party" && row.action === "party_added") {
-      const party = auditParties.find((p) => p.id === Number(row.recordId));
+      const party = auditPartiesById.get(Number(row.recordId));
       return `${partyDisplayName(party)} added`;
     }
     if (row.recordType === "aml_verification") {
-      const verification = amlRows.find((v) => v.id === Number(row.recordId));
-      const party = auditParties.find((p) => p.id === verification?.partyId);
+      const verification = amlById.get(Number(row.recordId));
+      const party = verification == null ? undefined : auditPartiesById.get(verification.partyId);
       const name = partyDisplayName(party);
       return row.action === "aml_exception_resolved" ? `${name}'s AML review resolved` : `${name}'s AML verification re-checked`;
     }
     if (row.recordType === "offer") {
-      const offer = offerRows.find((o) => o.id === Number(row.recordId));
-      const buyer = auditParties.find((p) => p.id === offer?.buyerPartyId);
+      const offer = offersById.get(Number(row.recordId));
+      const buyer = offer?.buyerPartyId == null ? undefined : auditPartiesById.get(offer.buyerPartyId);
       const buyerName = buyer ? partyDisplayName(buyer) : "Buyer";
       if (row.action === "offer_declined") return `Offer from ${buyerName} declined`;
       if (row.action === "offer_withdrawn") return `Offer from ${buyerName} withdrawn`;
