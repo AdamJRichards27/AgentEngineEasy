@@ -19,9 +19,13 @@
 //      row-id tiebreak, equally-scored cards order by whatever the database
 //      returned, and an agent's day reshuffles on refresh.
 //   3. THE SINGLE-SOURCED THRESHOLD. COLD_CONTACT_THRESHOLD_DAYS used to exist
-//      in two files kept equal by a comment.
+//      in two files kept equal by a comment. The exports being equal is not
+//      enough: two assignments that both happen to be 21 would still pass
+//      that check. The source lock below fails if either production file
+//      hardcodes the threshold number a second time.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   COLD_CONTACT_THRESHOLD_DAYS,
   PER_PARTY_SIGNAL_SELECTOR,
@@ -215,6 +219,68 @@ test("F-7 — Grow Today and the signal ranker read the SAME cold threshold, not
   // surfaces different definitions of the same word without anything failing.
   assert.equal(GROW_TODAY_COLD_THRESHOLD, COLD_CONTACT_THRESHOLD_DAYS);
   assert.equal(COLD_CONTACT_THRESHOLD_DAYS, 21, "the shipped value is unchanged by the single-sourcing");
+});
+
+// Block comments keep their newlines so a hit can name a line. Line comments
+// are cut, but `https://` is not a comment. Same approach as the G-5 web lock.
+function stripComments(source: string): string {
+  const withoutBlocks = source.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, " "));
+  return withoutBlocks.replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+function linesMatching(source: string, pattern: RegExp): string[] {
+  return source.split("\n").flatMap((line, index) => (pattern.test(line) ? [`${index + 1}: ${line.trim()}`] : []));
+}
+
+test("F-7 — the cold threshold number is hardcoded once, in signalRanking, and Grow Today imports that export", () => {
+  // Equality of the two exports does not catch a second `= 21` that happens
+  // to match. This reads the production sources (comments stripped) so a
+  // duplicate assignment, or a bare `21` at either call site, fails here.
+  const rankingRaw = readFileSync(new URL("../grow/signalRanking.ts", import.meta.url), "utf8");
+  const todayRaw = readFileSync(new URL("../growToday.ts", import.meta.url), "utf8");
+  const ranking = stripComments(rankingRaw);
+  const today = stripComments(todayRaw);
+
+  const assignment = /COLD_CONTACT_THRESHOLD_DAYS\s*=\s*(\d+)/g;
+  assert.deepEqual(
+    [...ranking.matchAll(assignment)].map((match) => match[1]),
+    ["21"],
+    "signalRanking.ts is the one declaration, and the shipped value stays 21",
+  );
+  assert.deepEqual(
+    [...today.matchAll(assignment)],
+    [],
+    "growToday.ts must not declare its own COLD_CONTACT_THRESHOLD_DAYS",
+  );
+
+  const rankingLiterals = linesMatching(ranking, /\b21\b/);
+  assert.equal(
+    rankingLiterals.length,
+    1,
+    `a second literal 21 in signalRanking.ts is a second cold threshold: ${rankingLiterals.join("; ")}`,
+  );
+  assert.match(rankingLiterals[0] ?? "", /COLD_CONTACT_THRESHOLD_DAYS\s*=\s*21/);
+
+  const todayLiterals = linesMatching(today, /\b21\b/);
+  assert.deepEqual(
+    todayLiterals,
+    [],
+    `growToday.ts must not hardcode 21; it imports the shared threshold. Hits: ${todayLiterals.join("; ")}`,
+  );
+
+  assert.match(
+    today,
+    /import\s*\{[\s\S]*?\bCOLD_CONTACT_THRESHOLD_DAYS\b[\s\S]*?\}\s*from\s*"\.\/grow\/signalRanking\.js"/,
+    "Grow Today must import the shared export",
+  );
+  assert.match(today, /export\s*\{\s*COLD_CONTACT_THRESHOLD_DAYS\s*\}/, "Grow Today re-exports the same binding");
+  assert.match(today, /days\s*>=\s*COLD_CONTACT_THRESHOLD_DAYS/);
+  assert.match(ranking, /days\s*>=\s*COLD_CONTACT_THRESHOLD_DAYS/);
+
+  // The old instruction was a comment that told the next editor to keep two
+  // copies equal. That sentence must not come back in either production file.
+  assert.doesNotMatch(rankingRaw, /keep in sync|kept in sync/i);
+  assert.doesNotMatch(todayRaw, /keep in sync|kept in sync/i);
 });
 
 test("F-7 — the cold factor fires at exactly the shared threshold and not a day before", () => {
