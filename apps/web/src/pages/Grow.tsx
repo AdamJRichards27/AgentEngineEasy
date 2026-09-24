@@ -16,7 +16,7 @@ import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePan
 import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptPanel";
 // AE GROW Completion W3-A (A-7) — Contact 360's contactability/consent surface.
 // Extracted into its own component rather than added to this file, which is
-// already the Daily Command Centre, Contact 360 and the call panel at once;
+// already Grow Today, Contact 360 and the call panel at once;
 // that extraction is the explicit mitigation recorded in the roadmap.
 import { GrowContactConsentPanel } from "../components/GrowContactConsentPanel";
 import type { GrowContactability } from "../lib/contactability";
@@ -51,6 +51,13 @@ import {
   signalWithholdingNotice,
   unlinkedContactNotice,
 } from "../lib/growToday";
+import { TodaySurfaceCrossLink } from "../components/TodaySurfaceCrossLink";
+import {
+  GROW_TODAY_EYEBROW,
+  GROW_TODAY_PURPOSE,
+  growTodayCrossLink,
+  growTodayHeading,
+} from "../lib/todaySurfaces";
 
 interface GrowAccess {
   entitled: boolean;
@@ -402,11 +409,11 @@ function RecordingGateReasons({ result }: { result: GrowCallFiveGateResult }) {
 // entitled. This page's own /grow/access check is a rendering convenience only - every
 // data-bearing request below is independently re-checked server-side via requireEntitlement.
 //
-// AE GROW Priority 1 — Daily Command Centre: the entitled workspace below (GrowWorkspace) is now
+// AE GROW Priority 1 — Grow Today: the entitled workspace below (GrowWorkspace) is now
 // tabbed rather than one long flat page — Today (this priority's actual deliverable, and the
 // default landing tab), Opportunities, Contacts, Nurture, Performance, Ask AE — mirroring
 // PitCrewCommandCentre.tsx's own internal `.pc-tabs` sub-navigation pattern rather than adding
-// new top-level wouter routes (RUN already owns the top-level /today route — see App.tsx).
+// new top-level wouter routes (RUN already owns the top-level /today Command Centre — see App.tsx).
 //
 // AE GROW Completion W2-B (G-8): this comment used to say "Nurture AND Performance are
 // clearly-labelled coming soon placeholders". Performance stopped being one in Priority 6 Stage C
@@ -614,7 +621,10 @@ function GrowWorkspace() {
   );
 }
 
-// AE GROW Priority 1 — Daily Command Centre. The screen this priority actually exists to build:
+// AE GROW Priority 1 — Grow Today. Relationships, follow-ups, and opportunities
+// (GET /grow/today). This is not the RUN Command Centre at /today. The name,
+// purpose line, and cross-link are lib/todaySurfaces.ts. The screen this
+// priority actually exists to build:
 // a small set of headline indicators (never vanity metrics -- each one is a real, countable
 // thing on this brokerage's own Grow data) plus a deterministically-prioritised action feed, each
 // item explaining, in plain language, why AE is surfacing it (see
@@ -651,25 +661,6 @@ export function GrowToday({
     queryFn: () => apiFetch("/grow/today"),
   });
 
-  // AE GROW Completion W2-B (G-4) — Today had an error branch already, but it
-  // was a bare sentence with no way out: an agent whose session had just expired
-  // saw one line of red and had to reload the whole app. It now uses the same
-  // region presentation (message + support reference + Try again) the four
-  // regions on the Contacts and Opportunities tabs have had since WP6b.
-  if (today.isLoading || today.isError || !today.data) {
-    return (
-      <GrowDataRegionStatus
-        query={today}
-        itemCount={undefined}
-        loadingMessage="Loading today's priorities…"
-        errorFallback="Couldn't load Today."
-        emptyMessage="Nothing to show yet."
-        onRetry={() => void today.refetch()}
-      />
-    );
-  }
-
-  const data = today.data;
   const canAddNote = hasEntitlement("grow.activities.manage");
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
   const canViewContacts = hasEntitlement("grow.contacts.read");
@@ -679,18 +670,40 @@ export function GrowToday({
   // on the same entitlement here keeps a button that would just 403 from ever being shown.
   const canManageContactComms = hasEntitlement("grow.contacts.manage");
 
-  const doNow = data.priorityActions.filter((a) => a.priority === "DoNow");
-  const doToday = data.priorityActions.filter((a) => a.priority === "DoToday");
-  const keepWarm = data.priorityActions.filter((a) => a.priority === "KeepWarm");
+  // G-3: the relationship to the RUN Command Centre stays visible while this
+  // feed is loading or has failed. The feed itself is still GET /grow/today.
+  const data = today.data;
+  const feedReady = !today.isLoading && !today.isError && !!data;
+  const doNow = data ? data.priorityActions.filter((a) => a.priority === "DoNow") : [];
+  const doToday = data ? data.priorityActions.filter((a) => a.priority === "DoToday") : [];
+  const keepWarm = data ? data.priorityActions.filter((a) => a.priority === "KeepWarm") : [];
 
   return (
     <div>
       <div className="primary-action">
-        <div className="eyebrow">Grow</div>
-        <h2>{user ? `Hi ${user.firstName} — here's what needs your attention today` : "Today"}</h2>
-        <p className="muted">As of {formatGeneratedAt(data.generatedAt)}.</p>
+        <div className="eyebrow">{GROW_TODAY_EYEBROW}</div>
+        <h2>{growTodayHeading(user?.firstName)}</h2>
+        <p className="muted">{GROW_TODAY_PURPOSE}</p>
+        {data ? <p className="muted">As of {formatGeneratedAt(data.generatedAt)}.</p> : null}
+        <TodaySurfaceCrossLink link={growTodayCrossLink} />
       </div>
 
+      {/* AE GROW Completion W2-B (G-4) — Today had an error branch already, but it
+          was a bare sentence with no way out: an agent whose session had just expired
+          saw one line of red and had to reload the whole app. It now uses the same
+          region presentation (message + support reference + Try again) the four
+          regions on the Contacts and Opportunities tabs have had since WP6b. */}
+      {!feedReady || !data ? (
+        <GrowDataRegionStatus
+          query={today}
+          itemCount={undefined}
+          loadingMessage="Loading today's priorities…"
+          errorFallback="Couldn't load Today."
+          emptyMessage="Nothing to show yet."
+          onRetry={() => void today.refetch()}
+        />
+      ) : (
+        <>
       <div className="stat-tiles">
         <StatTile label="Priority Actions" value={data.counts.priorityActions} />
         <StatTile label="Follow-Ups Due" value={data.counts.followUpsDue} />
@@ -790,6 +803,8 @@ export function GrowToday({
               </ul>
             </details>
           )}
+        </>
+      )}
         </>
       )}
     </div>

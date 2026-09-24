@@ -1,7 +1,9 @@
-// AE GROW Priority 1 — Daily Command Centre, frontend types + display helpers.
-// Mirrors apps/api/src/lib/growToday.ts by hand (the web app doesn't share a package with the
-// API) — the same convention apps/web/src/lib/commandCentre.ts already uses for RUN's
-// structurally analogous "Today" surface.
+// AE GROW Priority 1 — Grow Today, frontend types + display helpers.
+// This is the relationship list (GET /grow/today). It is not the RUN Command
+// Centre (GET /command-centre). User-facing names and the cross-link live in
+// lib/todaySurfaces.ts. Mirrors apps/api/src/lib/growToday.ts by hand (the web
+// app doesn't share a package with the API) — the same convention
+// apps/web/src/lib/commandCentre.ts already uses for RUN's separate Today screen.
 //
 // AE GROW Priority 3 — additive only: contactEmail/contactMobile on GrowTodayAction, and the
 // "email" / "sms" / "view_contact" GrowTodayActionButton kinds, mirror the exact same additions

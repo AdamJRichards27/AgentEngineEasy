@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
+import { RUN_COMMAND_CENTRE_PATH } from "../todaySurfaces.ts";
 
 // E-2 — Grow Today used to drop Rule E's view_appraisal action. The API
 // returned it and the web type named it, but GrowActionCard never rendered
@@ -302,7 +303,15 @@ test("E-2: View property is omitted when the API does not include it", async () 
 
       assert.equal(linkByLabel(tree, "View appraisal")?.props?.href, "/properties/77");
       assert.equal(linkByLabel(tree, "View property"), undefined, "propertyId alone does not invent View property");
-      assert.deepEqual(hrefs(tree), ["/properties/77"]);
+      assert.deepEqual(
+        hrefs(tree).filter((href) => href.startsWith("/properties/")),
+        ["/properties/77"],
+      );
+      assert.deepEqual(
+        hrefs(tree).filter((href) => href !== RUN_COMMAND_CENTRE_PATH),
+        ["/properties/77"],
+        "the only non-property link on this card is the Command Centre cross-link",
+      );
     });
   } finally {
     clearGlobals();
@@ -341,7 +350,12 @@ test("E-2: a view_appraisal card with no property does not link to /properties/n
       const tree = render();
       assert.equal(linkByLabel(tree, "View appraisal"), undefined, "no property means no View appraisal link");
       assert.equal(linkByLabel(tree, "View property"), undefined);
-      assert.deepEqual(hrefs(tree), [], "no /properties/null and no other property link");
+      assert.deepEqual(
+        hrefs(tree).filter((href) => href.startsWith("/properties/") || href.includes("null")),
+        [],
+        "no /properties/null and no other property link",
+      );
+      assert.deepEqual(hrefs(tree), [RUN_COMMAND_CENTRE_PATH]);
       assert.equal(textContent(tree).includes("/properties/null"), false);
 
       const viewContact = button(tree, "View contact");
@@ -354,7 +368,11 @@ test("E-2: a view_appraisal card with no property does not link to /properties/n
       const withoutContactRead = render();
       assert.equal(button(withoutContactRead, "View contact"), undefined, "without contact read, the dead action stays hidden");
       assert.equal(linkByLabel(withoutContactRead, "View appraisal"), undefined);
-      assert.deepEqual(hrefs(withoutContactRead), []);
+      assert.deepEqual(
+        hrefs(withoutContactRead).filter((href) => href.startsWith("/properties/") || href.includes("null")),
+        [],
+      );
+      assert.deepEqual(hrefs(withoutContactRead), [RUN_COMMAND_CENTRE_PATH]);
     });
   } finally {
     clearGlobals();
