@@ -109,13 +109,12 @@ export default function CommandCentre() {
           <CollapsibleActionSection
             title="Pit Crew Activity"
             items={data.pitCrew}
-            // AE GROW Completion W2-B (G-8): this used to say Pit Crew service
-            // assignment "isn't tracked in the schema yet, so this section will
-            // stay empty until that exists". It is tracked
-            // (packages/db/src/schema/pitCrew.ts's pitCrewAssignments) and this
-            // section is populated from it (lib/commandCentre/queries.ts's
-            // pitCrew filter), so the copy was telling the agent that a working
-            // feature did not exist — and that an empty list meant nothing.
+            // AE GROW Completion W2-E (G-8): Pit Crew service assignment is
+            // tracked (packages/db/src/schema/pitCrew.ts pitCrewAssignments).
+            // This list is the command-centre items whose accountable owner is
+            // PIT_CREW or whose performing party is Pit Crew
+            // (lib/commandCentre/queries.ts). An empty list means none of those
+            // items are in view right now.
             emptyText="No Pit Crew activity right now."
           />
 
