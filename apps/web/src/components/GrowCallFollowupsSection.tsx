@@ -28,6 +28,7 @@ import {
   type ProposeFollowupsPayload,
 } from "../lib/callFollowups";
 import { GrowCommitmentProposalCard } from "./GrowCommitmentProposalCard";
+import { CALL_ITEMS_EMPTY, CALL_ITEMS_HELP, CALL_ITEMS_LOADING, CALL_ITEMS_TITLE, PROPOSE_SELECTED_LABEL } from "../lib/growTerms";
 
 function errorFrom(error: unknown): string {
   return error instanceof ApiError
@@ -119,14 +120,12 @@ export function GrowCallFollowupsSection({
 
   return (
     <div className="grow-call-followups">
-      <div className="grow-review-group-title"><strong>Follow-ups from this call</strong></div>
-      <p className="muted">
-        Choose which approved items should become commitments. Each proposal still needs your approval before anything is created, and expires after 24 hours.
-      </p>
-      {followups.isLoading && <p className="muted">Loading follow-ups…</p>}
+      <div className="grow-review-group-title"><strong>{CALL_ITEMS_TITLE}</strong></div>
+      <p className="muted">{CALL_ITEMS_HELP}</p>
+      {followups.isLoading && <p className="muted">{CALL_ITEMS_LOADING}</p>}
       {followups.isError && <p className="error-text">{errorFrom(followups.error)}</p>}
       {followups.data && candidates.length === 0 && (
-        <p className="empty-state">No approved commitments or follow-ups in this call review.</p>
+        <p className="empty-state">{CALL_ITEMS_EMPTY}</p>
       )}
       {followups.data && consentBlocked && candidates.length > 0 && (
         <p className="grow-review-advisory" role="status">{CONSENT_BLOCKED_MESSAGE}</p>
@@ -215,7 +214,7 @@ export function GrowCallFollowupsSection({
             aria-describedby={disabledReason !== null && !consentBlocked ? `grow-followups-hint-${transcriptionId}` : undefined}
             onClick={submit}
           >
-            {propose.isPending ? "Proposing…" : "Propose selected follow-ups"}
+            {propose.isPending ? "Proposing…" : PROPOSE_SELECTED_LABEL}
           </button>
           {disabledReason !== null && !consentBlocked && (
             <small className="muted" id={`grow-followups-hint-${transcriptionId}`}>{disabledReason}</small>

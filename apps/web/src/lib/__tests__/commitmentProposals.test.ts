@@ -89,16 +89,19 @@ test("card status label follows the live card state", () => {
 // AE GROW Pilot Readiness WP6b P3-c — the header used to be the fixed string
 // "Proposed follow-up — nothing created yet", even once the commitment existed.
 test("card heading follows the live card state and never contradicts the outcome", () => {
-  assert.equal(proposalCardHeading("review", "AWAITING_APPROVAL"), "Proposed follow-up — nothing created yet");
-  assert.match(proposalCardHeading("executed", "AWAITING_APPROVAL"), /created/);
+  assert.equal(proposalCardHeading("review", "AWAITING_APPROVAL"), "Proposed commitment — nothing created yet");
+  assert.equal(proposalCardHeading("executed", "AWAITING_APPROVAL"), "Commitment created");
+  assert.doesNotMatch(proposalCardHeading("executed", "AWAITING_APPROVAL"), /follow-up/i);
   assert.doesNotMatch(proposalCardHeading("executed", "AWAITING_APPROVAL"), /nothing created yet/);
   assert.doesNotMatch(proposalCardHeading("executing", "AWAITING_APPROVAL"), /nothing created yet/);
   assert.doesNotMatch(proposalCardHeading("completed_after_recovery", "APPROVED"), /nothing created yet/);
-  assert.equal(proposalCardHeading("approved", "APPROVED"), "Proposed follow-up — approved, not created yet");
+  assert.equal(proposalCardHeading("completed_after_recovery", "APPROVED"), "Commitment may already have been created");
+  assert.equal(proposalCardHeading("approved", "APPROVED"), "Proposed commitment — approved, not created yet");
   // A card mounted straight into "approved" must not claim it is unapproved.
-  assert.equal(proposalCardHeading("review", "APPROVED"), "Proposed follow-up — approved, not created yet");
+  assert.equal(proposalCardHeading("review", "APPROVED"), "Proposed commitment — approved, not created yet");
   for (const state of ["rejected", "expired", "already_actioned", "not_available", "permission_denied", "validation_error", "recoverable_failure"] as const) {
-    assert.doesNotMatch(proposalCardHeading(state, "AWAITING_APPROVAL"), /^Follow-up commitment created/, `${state} never claims a commitment exists`);
+    assert.doesNotMatch(proposalCardHeading(state, "AWAITING_APPROVAL"), /^Commitment created$/, `${state} never claims a commitment exists`);
+    assert.doesNotMatch(proposalCardHeading(state, "AWAITING_APPROVAL"), /follow-up/i);
   }
   assert.equal(proposalCardHeadingAccentClass("executed"), "ai-copilot-kind-verified");
   assert.equal(proposalCardHeadingAccentClass("review"), "ai-copilot-kind-advisory");
@@ -109,8 +112,10 @@ test("card heading follows the live card state and never contradicts the outcome
 test("a raw contact id reference in the server summary is replaced with the contact's name", () => {
   assert.equal(
     humaniseContactReference('Create a follow-up commitment for contact #289: "Call back" (due 2026-09-25)', 289, "Jo Citizen"),
-    'Create a follow-up commitment for Jo Citizen: "Call back" (due 2026-09-25)',
+    'Create a commitment for Jo Citizen: "Call back" (due 2026-09-25)',
   );
+  assert.equal(humaniseContactReference("Set a due follow-up for contact #289", 289, "Jo Citizen"), "Set a due follow-up for Jo Citizen");
+  assert.equal(humaniseContactReference("Call follow-up for contact #289", 289, "Jo Citizen"), "Call follow-up for Jo Citizen");
   // Only the matching id — another contact's id is never relabelled.
   assert.equal(humaniseContactReference("commitment for contact #12", 289, "Jo Citizen"), "commitment for contact #12");
   assert.equal(humaniseContactReference("commitment for contact #2891", 289, "Jo Citizen"), "commitment for contact #2891");

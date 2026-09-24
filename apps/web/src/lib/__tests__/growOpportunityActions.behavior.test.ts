@@ -291,10 +291,10 @@ test("E-3: an Opportunities tab row offers contact, property and follow-up, and 
       assert.deepEqual(viewed, [12], "View contact opens THIS opportunity's contact");
 
       assert.deepEqual(links(tree), ["/properties/77"], "a row with a property links to it");
-      assert.ok(button(tree, "Create follow-up"), "a row offers the follow-up Grow Today already offered");
+      assert.ok(button(tree, "Set due follow-up"), "a row offers the follow-up Grow Today already offered");
 
       // Opening the form and saving hits the one opportunity write.
-      (button(tree, "Create follow-up")!.props!.onClick as () => void)();
+      (button(tree, "Set due follow-up")!.props!.onClick as () => void)();
       tree = render();
       const dueAt = byId(tree, "grow-opportunity-41-date");
       const text = byId(tree, "grow-opportunity-41-text");
@@ -343,7 +343,7 @@ test("E-3: a row with no property offers no property link, and an empty form nev
       assert.ok(button(tree, "View contact"), "the contact is still reachable");
       assert.doesNotMatch(textContent(tree), /null/, "a missing reason renders as a dash, not 'null'");
 
-      (button(tree, "Create follow-up")!.props!.onClick as () => void)();
+      (button(tree, "Set due follow-up")!.props!.onClick as () => void)();
       tree = render();
       await (form(tree)!.props!.onSubmit as (e: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
       await Promise.all(pending);
@@ -374,9 +374,9 @@ test("E-3: Contact 360's opportunities table is actionable too, without a redund
       let tree = render();
       assert.equal(button(tree, "View contact"), undefined, "you are already on this contact");
       assert.deepEqual(links(tree), ["/properties/77"], "the property is reachable");
-      assert.ok(button(tree, "Create follow-up"), "the same follow-up action as every other surface");
+      assert.ok(button(tree, "Set due follow-up"), "the same follow-up action as every other surface");
 
-      (button(tree, "Create follow-up")!.props!.onClick as () => void)();
+      (button(tree, "Set due follow-up")!.props!.onClick as () => void)();
       tree = render();
       (byId(tree, "grow-opportunity-41-text")!.props!.onChange as (e: unknown) => void)({ target: { value: "Book the appraisal" } });
       tree = render();
@@ -401,7 +401,7 @@ test("E-3: without grow.opportunities.manage no follow-up button is offered on e
       };
       hooks.beginRender();
       const tree = GrowOpportunitiesTab({ onViewContact: () => {} });
-      assert.equal(button(tree, "Create follow-up"), undefined, "a button that would only 403 is never shown");
+      assert.equal(button(tree, "Set due follow-up"), undefined, "a button that would only 403 is never shown");
       assert.equal(button(tree, "Add note"), undefined, "a note button that would only 403 is never shown");
       assert.equal(button(tree, "Ask AE"), undefined, "Ask AE is only offered when the tab is given Today's switch");
       assert.ok(button(tree, "View contact"), "reading the contact is still offered");
@@ -432,7 +432,7 @@ test("E-3: an Opportunities row adds a note with Today's POST, and Ask AE uses T
       let tree = render();
       assert.ok(button(tree, "Add note"), "the row offers the note Grow Today already offers");
       assert.ok(button(tree, "View contact"));
-      assert.ok(button(tree, "Create follow-up"));
+      assert.ok(button(tree, "Set due follow-up"));
       assert.deepEqual(links(tree), ["/properties/77"]);
 
       (button(tree, "Ask AE")!.props!.onClick as () => void)();

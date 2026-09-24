@@ -7,6 +7,7 @@ import { apiFetch, ApiError } from "../lib/api";
 // exactly the same governed approve/reject/execute behaviour.
 import { GrowCommitmentProposalCard } from "./GrowCommitmentProposalCard";
 import { viewFromAskAgentProposal, type AskAgentCommitmentProposal } from "../lib/commitmentProposals";
+import { ASK_DUE_FOLLOW_UPS_QUESTION } from "../lib/growTerms";
 // AE GROW Pilot Readiness WP6b (P3-b) — the feature-flag gate below, extracted
 // so "a disabled Grow tab still says something" is unit-testable.
 import { aiSurfaceAvailability, aiSurfaceUnavailableCopy } from "../lib/aiCapability";
@@ -204,7 +205,7 @@ const GROW_KIND_ACCENT_CLASS: Record<string, string> = {
 // behaves elsewhere in this app.
 const GROW_EXAMPLE_QUESTIONS = [
   "Who should I call today?",
-  "What follow-ups are overdue?",
+  ASK_DUE_FOLLOW_UPS_QUESTION,
   "What's my opportunity pipeline look like?",
   "Are there any appraisals that need attention?",
 ];
@@ -454,7 +455,7 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
         {isCoach
           ? "Read-only. The Business Coach looks at your own Grow activity, commitments, opportunities, and appraisals already recorded and summarises how things are going and what you might focus on next - it cannot contact anyone, send anything, or change any record, and every figure comes from your own logged data, never a prediction."
           : isGrow
-            ? "Read-only. Ask AE can only describe your own Grow relationship data already visible in Grow Today - it cannot contact anyone, send anything, or change any record. It may occasionally propose a follow-up commitment for you to review, but nothing is ever created until you explicitly approve it."
+            ? "Read-only. Ask AE can only describe your own Grow relationship data already visible in Grow Today - it cannot contact anyone, send anything, or change any record. It may occasionally propose a commitment for you to review, but nothing is ever created until you explicitly approve it. A commitment is a recorded promise, not a due follow-up on an opportunity or appraisal."
             : "Read-only. Copilot can only describe information already on this record - it cannot send anything or change anything."}
       </p>
       {isCoach && (

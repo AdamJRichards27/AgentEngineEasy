@@ -58,6 +58,15 @@ import {
   growTodayCrossLink,
   growTodayHeading,
 } from "../lib/todaySurfaces";
+import {
+  DUE_FOLLOW_UP_FORM_HINT,
+  DUE_TODAY_COUNT_HINT,
+  DUE_TODAY_COUNT_LABEL,
+  NEXT_COMMITMENT_LABEL,
+  NO_OPEN_COMMITMENT,
+  SAVE_DUE_FOLLOW_UP_LABEL,
+  SET_DUE_FOLLOW_UP_LABEL,
+} from "../lib/growTerms";
 
 interface GrowAccess {
   entitled: boolean;
@@ -706,10 +715,11 @@ export function GrowToday({
         <>
       <div className="stat-tiles">
         <StatTile label="Priority Actions" value={data.counts.priorityActions} />
-        <StatTile label="Follow-Ups Due" value={data.counts.followUpsDue} />
+        <StatTile label={DUE_TODAY_COUNT_LABEL} value={data.counts.followUpsDue} hint={DUE_TODAY_COUNT_HINT} />
         <StatTile label="Open Opportunities" value={data.counts.openOpportunities} />
         <StatTile label="Contacts Needing Attention" value={data.counts.contactsNeedingAttention} />
       </div>
+      <p className="muted">{DUE_TODAY_COUNT_HINT}</p>
 
       {/* AE GROW Signal Sweep stage 3: Today must be honest about what it is
           NOT showing. An Emerging signal held back by the daily cap, or a
@@ -811,9 +821,9 @@ export function GrowToday({
   );
 }
 
-function StatTile({ label, value }: { label: string; value: number }) {
+function StatTile({ label, value, hint }: { label: string; value: number; hint?: string }) {
   return (
-    <div className="stat-tile">
+    <div className="stat-tile" title={hint}>
       <div className="stat-tile-label">{label}</div>
       <div className="stat-tile-value">{value}</div>
     </div>
@@ -887,8 +897,9 @@ function GrowNextActionForm({
         value={nextActionText}
         onChange={(e) => setNextActionText(e.target.value)}
       />
+      <p className="muted">{DUE_FOLLOW_UP_FORM_HINT}</p>
       <button className="btn btn-primary btn-small" type="submit" disabled={submitting}>
-        Save follow-up
+        {SAVE_DUE_FOLLOW_UP_LABEL}
       </button>
     </form>
   );
@@ -1031,7 +1042,7 @@ function GrowOpportunityRowActions({
           disabled={busy}
           onClick={() => setOpenForm(openForm === "nextAction" ? null : "nextAction")}
         >
-          {openForm === "nextAction" ? "Cancel" : "Create follow-up"}
+          {openForm === "nextAction" ? "Cancel" : SET_DUE_FOLLOW_UP_LABEL}
         </button>
       )}
       {propertyId !== null && (
@@ -1264,7 +1275,7 @@ function GrowActionCard({
             disabled={busy}
             onClick={() => setOpenForm(openForm === "nextAction" ? null : "nextAction")}
           >
-            Create follow-up
+            {SET_DUE_FOLLOW_UP_LABEL}
           </button>
         )}
         {showViewAppraisal && item.propertyId !== null && (
@@ -2114,11 +2125,11 @@ function GrowContactDetail({
         </p>
         {data.intelligence.nextFollowUpAt ? (
           <p>
-            <strong>Next follow-up:</strong> {data.intelligence.nextFollowUpDescription} — due{" "}
+            <strong>{NEXT_COMMITMENT_LABEL}</strong> {data.intelligence.nextFollowUpDescription} — due{" "}
             {formatWhen(data.intelligence.nextFollowUpAt)}
           </p>
         ) : (
-          <p className="muted">No follow-up currently scheduled.</p>
+          <p className="muted">{NO_OPEN_COMMITMENT}</p>
         )}
       </section>
 

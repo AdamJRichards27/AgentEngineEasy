@@ -273,7 +273,7 @@ export function GrowCommitmentProposalCard({
       {state === "expired" && (
         <p className="muted">
           {fromCall
-            ? "This proposal has expired. No commitment was created — you can propose this follow-up again from the call review."
+            ? "This proposal has expired. No commitment was created — you can propose this call item again from the call review."
             : "This proposal has expired. Ask AE again to generate a fresh one if it’s still needed."}
         </p>
       )}
