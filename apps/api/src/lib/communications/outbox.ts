@@ -79,6 +79,7 @@ import {
   type CommunicationClassification,
   type CommunicationMessageStatus,
 } from "./types.js";
+import { APPROVAL_REQUIRED_BEFORE_SEND, requiresApproval } from "./approvalPolicy.js";
 import { checkConsent } from "./consent.js";
 import { checkCostControl, recordCost, SMS_ESTIMATED_COST_CENTS_PER_MESSAGE } from "./costControl.js";
 import { isWithinQuietHours, nextAllowedSendTime } from "./quietHours.js";
@@ -221,6 +222,11 @@ export async function queueMessage(messageId: number, brokerageId: number, actor
   if (!existing || existing.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   if (existing.status !== "DRAFT" && existing.status !== "APPROVED") {
     throw new CommunicationTransitionError(`Only a DRAFT or APPROVED message can be queued (this one is ${existing.status}).`);
+  }
+  // Same Section 15 gate as sendMessageNow. A direct queue of a DRAFT
+  // SERVICE (or MARKETING, or send-on-behalf) message must not skip it.
+  if (requiresApproval(existing) && existing.status !== "APPROVED") {
+    throw new CommunicationTransitionError(APPROVAL_REQUIRED_BEFORE_SEND);
   }
   if (isInternalOnlyChannel(existing.channel as CommunicationChannel)) {
     throw new CommunicationTransitionError("An INTERNAL_NOTE is never queued for sending — it never leaves this app.");
