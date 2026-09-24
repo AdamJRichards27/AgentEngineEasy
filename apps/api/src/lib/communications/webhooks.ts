@@ -23,17 +23,22 @@
 // hardcoding partyId to null.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import {
   db,
   communicationWebhookEvents,
   communicationMessages,
+  communicationThreads,
+  communicationParticipants,
   type CommunicationWebhookEvent,
   type CommunicationMessage,
+  type CommunicationThread,
 } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
+import { logAudit } from "../audit.js";
 import { applyMessageTransition } from "./outbox.js";
 import { recordConsent, normalizeDestination } from "./consent.js";
+import { assertCommunicationAnchor, type CommunicationClassification } from "./types.js";
 
 export type InboundWebhookEventType = "DELIVERY_RECEIPT" | "INBOUND_MESSAGE" | "BOUNCE" | "OPT_OUT";
 
@@ -154,16 +159,7 @@ async function applyWebhookEffect(input: InboundWebhookInput): Promise<WebhookEf
     case "OPT_OUT":
       return applyOptOut(input);
     case "INBOUND_MESSAGE":
-      // Recording an inbound reply as its own message row belongs to
-      // messages.ts (it needs thread resolution, participant matching,
-      // etc.). This build records the raw event for audit/inspection and
-      // leaves reply-threading as deferred scope (see completion report) —
-      // but the lifecycle event itself still fires, since
-      // packages/events/src/types.ts documents COMMUNICATION_MESSAGE_RECEIVED
-      // as part of this module's event coverage regardless of whether a
-      // message row exists yet.
-      await publishInboundMessageReceivedEvent(input);
-      return { summary: "Inbound message event recorded; reply-threading is deferred scope." };
+      return applyInboundMessage(input);
     default:
       return { summary: `Unrecognised event type ${input.eventType} — recorded only.` };
   }
@@ -210,23 +206,27 @@ async function publishCommunicationMessageEvent(
 }
 
 /**
- * INBOUND_MESSAGE has no message row yet (reply-threading is deferred
- * scope — see applyWebhookEffect above), so this carries only what the
- * webhook itself knows rather than being built from a CommunicationMessage.
+ * COMMUNICATION_MESSAGE_RECEIVED fires for every accepted inbound webhook.
+ * When a conversation in this brokerage resolves, the event carries that
+ * message and thread. When it does not, the event still records the
+ * receipt and does not invent a thread id.
  */
-async function publishInboundMessageReceivedEvent(input: InboundWebhookInput): Promise<void> {
+async function publishInboundMessageReceivedEvent(
+  input: InboundWebhookInput,
+  message: CommunicationMessage | null,
+): Promise<void> {
   await publishDomainEvent({
     eventType: "COMMUNICATION_MESSAGE_RECEIVED",
     occurredAt: new Date(),
-    propertyId: null,
-    transactionId: null,
-    partyId: null,
+    propertyId: message?.propertyId ?? null,
+    transactionId: message?.transactionId ?? null,
+    partyId: message?.partyId ?? null,
     brokerageId: input.brokerageId,
     agentId: null,
     actorType: "SYSTEM",
     actorId: null,
     source: "communications:webhooks",
-    correlationId: currentCorrelationId(),
+    correlationId: message?.correlationId ?? currentCorrelationId(),
     causationId: null,
     idempotencyKey: `COMMUNICATION_MESSAGE_RECEIVED:${input.provider}:${input.providerEventId}`,
     payload: {
@@ -234,9 +234,247 @@ async function publishInboundMessageReceivedEvent(input: InboundWebhookInput): P
       providerEventId: input.providerEventId,
       destination: input.destination ?? null,
       destinationChannel: input.destinationChannel ?? null,
+      messageId: message?.id ?? null,
+      threadId: message?.threadId ?? null,
+      channel: message?.channel ?? null,
+      classification: message?.classification ?? null,
+      status: message?.status ?? null,
     },
     metadata: {},
   }).catch((err) => logger.error("publish_domain_event_failed", { eventType: "COMMUNICATION_MESSAGE_RECEIVED", provider: input.provider, error: err instanceof Error ? err.message : String(err) }));
+}
+
+/** Statuses a contact can actually be replying to. Drafts and unsent blocks are not a conversation yet. */
+const INBOUND_REPLY_TARGET_STATUSES = ["SENT", "DELIVERED", "RECEIVED", "BOUNCED"] as const;
+
+function inboundIdempotencyKey(provider: string, providerEventId: string): string {
+  return `inbound:${provider}:${providerEventId}`;
+}
+
+function payloadString(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function inboundBodyText(payload: Record<string, unknown>): string {
+  return payloadString(payload, "bodyText") ?? payloadString(payload, "body") ?? payloadString(payload, "text") ?? "";
+}
+
+function inboundSubject(payload: Record<string, unknown>, priorSubject: string | null): string | null {
+  const explicit = payloadString(payload, "subject");
+  if (explicit) return explicit;
+  if (!priorSubject) return null;
+  return priorSubject.startsWith("Re:") ? priorSubject : `Re: ${priorSubject}`;
+}
+
+/**
+ * Same normalisation consent uses, expressed in SQL so a stored
+ * "Buyer@Example.com" or "0400 123 456" matches the webhook's sender.
+ * A leading "+" is significant: "+61400…" and "0400…" are not treated as
+ * the same number.
+ */
+function destinationEquals(column: SQL | unknown, channel: "EMAIL" | "SMS", raw: string): SQL {
+  const normalized = normalizeDestination(channel, raw);
+  if (!normalized || normalized === "+") return sql`false`;
+  if (channel === "EMAIL") {
+    return sql`lower(btrim(${column})) = ${normalized}`;
+  }
+  const digits = normalized.startsWith("+") ? normalized.slice(1) : normalized;
+  if (!digits) return sql`false`;
+  const storedDigits = sql`regexp_replace(btrim(${column}), '[^0-9]', '', 'g')`;
+  if (normalized.startsWith("+")) {
+    return sql`${column} is not null and left(btrim(${column}), 1) = '+' and ${storedDigits} = ${digits}`;
+  }
+  return sql`${column} is not null and coalesce(left(btrim(${column}), 1), '') <> '+' and ${storedDigits} = ${digits}`;
+}
+
+function replyChannel(messageChannel: string, destinationChannel: "EMAIL" | "SMS" | null | undefined): "EMAIL" | "SMS" | null {
+  if (destinationChannel === "EMAIL" || destinationChannel === "SMS") {
+    if (messageChannel === destinationChannel) return destinationChannel;
+    if (messageChannel !== "EMAIL" && messageChannel !== "SMS") return destinationChannel;
+    return null;
+  }
+  if (messageChannel === "EMAIL" || messageChannel === "SMS") return messageChannel;
+  return null;
+}
+
+function asClassification(value: string): CommunicationClassification {
+  if (value === "TRANSACTIONAL" || value === "SERVICE" || value === "MARKETING") return value;
+  return "TRANSACTIONAL";
+}
+
+interface ResolvedInboundReply {
+  thread: CommunicationThread;
+  replyTo: CommunicationMessage | null;
+  channel: "EMAIL" | "SMS";
+  recipientParticipantId: number | null;
+  recipientDisplayName: string | null;
+  recipientDestination: string | null;
+}
+
+async function threadForBrokerage(threadId: number, brokerageId: number): Promise<CommunicationThread | null> {
+  const [thread] = await db.select().from(communicationThreads).where(eq(communicationThreads.id, threadId));
+  if (!thread || thread.brokerageId !== brokerageId) return null;
+  return thread;
+}
+
+/**
+ * Resolve the conversation this reply belongs to, inside the webhook's
+ * brokerage only. A providerMessageId names the prior message. Failing
+ * that, the sender address names the latest sent/received message on this
+ * provider and channel, then the latest thread whose participant carries
+ * that address. Nothing in the payload (thread id, brokerage id, property
+ * id) is trusted.
+ */
+async function resolveInboundReply(input: InboundWebhookInput): Promise<ResolvedInboundReply | null> {
+  const destinationChannel = input.destinationChannel === "EMAIL" || input.destinationChannel === "SMS" ? input.destinationChannel : null;
+
+  if (input.providerMessageId) {
+    const prior = await findMessageForBrokerage(input.providerMessageId, input.brokerageId, input.provider);
+    const channel = prior ? replyChannel(prior.channel, destinationChannel) : null;
+    if (prior && channel) {
+      const thread = await threadForBrokerage(prior.threadId, input.brokerageId);
+      if (thread) {
+        return {
+          thread,
+          replyTo: prior,
+          channel,
+          recipientParticipantId: prior.recipientParticipantId,
+          recipientDisplayName: prior.recipientDisplayName,
+          recipientDestination: input.destination ?? prior.recipientDestination,
+        };
+      }
+    }
+  }
+
+  if (!input.destination || !destinationChannel) return null;
+  const normalizedDestination = normalizeDestination(destinationChannel, input.destination);
+  if (!normalizedDestination || normalizedDestination === "+") return null;
+
+  const [byDestination] = await db
+    .select()
+    .from(communicationMessages)
+    .where(
+      and(
+        eq(communicationMessages.brokerageId, input.brokerageId),
+        eq(communicationMessages.provider, input.provider),
+        eq(communicationMessages.channel, destinationChannel),
+        inArray(communicationMessages.status, [...INBOUND_REPLY_TARGET_STATUSES]),
+        destinationEquals(communicationMessages.recipientDestination, destinationChannel, input.destination),
+      ),
+    )
+    .orderBy(desc(communicationMessages.createdAt), desc(communicationMessages.id))
+    .limit(1);
+  if (byDestination) {
+    const thread = await threadForBrokerage(byDestination.threadId, input.brokerageId);
+    if (thread) {
+      return {
+        thread,
+        replyTo: byDestination,
+        channel: destinationChannel,
+        recipientParticipantId: byDestination.recipientParticipantId,
+        recipientDisplayName: byDestination.recipientDisplayName,
+        recipientDestination: normalizedDestination,
+      };
+    }
+  }
+
+  const participantColumn = destinationChannel === "EMAIL" ? communicationParticipants.email : communicationParticipants.mobile;
+  const [participantRow] = await db
+    .select({ participant: communicationParticipants, thread: communicationThreads })
+    .from(communicationParticipants)
+    .innerJoin(communicationThreads, eq(communicationThreads.id, communicationParticipants.threadId))
+    .where(
+      and(
+        eq(communicationThreads.brokerageId, input.brokerageId),
+        destinationEquals(participantColumn, destinationChannel, input.destination),
+      ),
+    )
+    .orderBy(desc(communicationThreads.lastActivityAt), desc(communicationThreads.id))
+    .limit(1);
+  if (!participantRow || participantRow.thread.brokerageId !== input.brokerageId) return null;
+  return {
+    thread: participantRow.thread,
+    replyTo: null,
+    channel: destinationChannel,
+    recipientParticipantId: participantRow.participant.id,
+    recipientDisplayName: participantRow.participant.displayName,
+    recipientDestination: normalizedDestination,
+  };
+}
+
+async function applyInboundMessage(input: InboundWebhookInput): Promise<WebhookEffectResult> {
+  const resolved = await resolveInboundReply(input);
+  if (!resolved) {
+    await publishInboundMessageReceivedEvent(input, null);
+    return { summary: "Inbound message event recorded; no conversation in this brokerage matched this reply." };
+  }
+
+  assertCommunicationAnchor(resolved.thread.propertyId, resolved.thread.partyId);
+  const idempotencyKey = inboundIdempotencyKey(input.provider, input.providerEventId);
+  const [inserted] = await db
+    .insert(communicationMessages)
+    .values({
+      threadId: resolved.thread.id,
+      brokerageId: input.brokerageId,
+      propertyId: resolved.thread.propertyId,
+      partyId: resolved.thread.partyId,
+      transactionId: resolved.thread.transactionId,
+      direction: "INBOUND",
+      channel: resolved.channel,
+      classification: resolved.replyTo ? asClassification(resolved.replyTo.classification) : "TRANSACTIONAL",
+      status: "RECEIVED",
+      subject: inboundSubject(input.payload, resolved.replyTo?.subject ?? resolved.thread.subject),
+      bodyText: inboundBodyText(input.payload),
+      recipientParticipantId: resolved.recipientParticipantId,
+      recipientDisplayName: resolved.recipientDisplayName,
+      recipientDestination: resolved.recipientDestination,
+      provider: input.provider,
+      // The webhook's providerMessageId names the prior outbound, when it
+      // names one. Copying it onto this row would make a later delivery
+      // receipt match either message.
+      providerMessageId: null,
+      replyToMessageId: resolved.replyTo?.id ?? null,
+      idempotencyKey,
+      correlationId: currentCorrelationId(),
+    })
+    .onConflictDoNothing({ target: communicationMessages.idempotencyKey })
+    .returning();
+
+  const message = inserted ?? (await findInboundMessageByIdempotencyKey(idempotencyKey, input.brokerageId));
+  if (!message) {
+    throw new Error("Inbound reply could not be recorded for this brokerage.");
+  }
+
+  if (inserted) {
+    await db
+      .update(communicationThreads)
+      .set({ lastActivityAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(communicationThreads.id, resolved.thread.id), eq(communicationThreads.brokerageId, input.brokerageId)));
+    await logAudit({
+      brokerageId: input.brokerageId,
+      userId: null,
+      action: "communication_message_received",
+      recordType: "communication_message",
+      recordId: String(message.id),
+      propertyId: message.propertyId ?? undefined,
+      updatedValue: `${message.channel} reply on thread ${message.threadId}`,
+    });
+  }
+
+  await publishInboundMessageReceivedEvent(input, message);
+  return {
+    summary: `Inbound reply recorded as message ${message.id} on thread ${message.threadId}.`,
+    relatedMessageId: message.id,
+  };
+}
+
+async function findInboundMessageByIdempotencyKey(idempotencyKey: string, brokerageId: number): Promise<CommunicationMessage | null> {
+  const [existing] = await db.select().from(communicationMessages).where(eq(communicationMessages.idempotencyKey, idempotencyKey));
+  if (!existing || existing.brokerageId !== brokerageId) return null;
+  return existing;
 }
 
 /** Tenant-safe lookup: only ever matches a message that already belongs to the webhook's own (URL-resolved) brokerage. */
