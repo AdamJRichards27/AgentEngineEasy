@@ -11,7 +11,7 @@
 // which already feeds the Property Timeline, rather than a second history
 // table -- see the comment at the top of packages/db/src/schema/pitCrew.ts.
 
-import { eq, and } from "drizzle-orm";
+import { and, eq, isNotNull, lt } from "drizzle-orm";
 import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
 import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
@@ -78,6 +78,13 @@ interface WorkItemRef {
 
 interface Actor {
   actorUserId: number;
+  actorEmail?: string;
+}
+
+// Ops sweeps have no signed-in user. Audit still records who moved the row:
+// a null user id plus a stable ops email, never a fabricated user id.
+interface AuditActor {
+  actorUserId: number | null;
   actorEmail?: string;
 }
 
@@ -216,7 +223,7 @@ async function applyTransition(
   patch: Partial<typeof pitCrewAssignments.$inferInsert>,
   action: string,
   ref: WorkItemRef,
-  actor: Actor,
+  actor: AuditActor,
 ): Promise<PitCrewAssignment> {
   const from = row.status as PitCrewItemStatus;
   if (!isValidPitCrewTransition(from, to)) {
@@ -304,9 +311,11 @@ export async function startProgress(input: MutationInput): Promise<PitCrewAssign
 }
 
 // Section 14: active Waiting-On management. waitingOnExpectedAt is when
-// this item should be surfaced again if nobody actively returns it first --
-// the frontend/ops job that auto-returns overdue waiting-on items reads
-// this field rather than inventing a second expiry mechanism.
+// this item should be surfaced again if nobody actively returns it first.
+// sweepOverdueWaitingOn() is that ops job: WAITING_ON rows whose expected-at
+// is earlier than now are returned through the same transition as
+// returnFromWaitingOn (IN_PROGRESS, waiting-on fields cleared, version
+// bumped, audit row). A null expected-at is never auto-returned.
 export async function setWaitingOn(
   input: MutationInput & { waitingOnParty: string; waitingOnNote?: string; waitingOnExpectedAt?: Date },
 ): Promise<PitCrewAssignment> {
@@ -327,17 +336,126 @@ export async function setWaitingOn(
   );
 }
 
-export async function returnFromWaitingOn(input: MutationInput): Promise<PitCrewAssignment> {
-  const row = await loadOrCreateOverlay(input);
+const WAITING_ON_CLEARED = {
+  waitingOnParty: null,
+  waitingOnNote: null,
+  waitingOnSince: null,
+  waitingOnExpectedAt: null,
+} as const;
+
+async function returnWaitingOnRow(
+  row: PitCrewAssignment,
+  expectedVersion: number,
+  actor: AuditActor,
+): Promise<PitCrewAssignment> {
   return applyTransition(
     row,
-    input.expectedVersion,
+    expectedVersion,
     "IN_PROGRESS",
-    { waitingOnParty: null, waitingOnNote: null, waitingOnSince: null, waitingOnExpectedAt: null },
+    { ...WAITING_ON_CLEARED },
     "PC_WAITING_ON_RETURNED",
-    input,
-    input,
+    {
+      brokerageId: row.brokerageId,
+      propertyId: row.propertyId,
+      sourceType: row.sourceType,
+      sourceRecordId: row.sourceRecordId,
+    },
+    actor,
   );
+}
+
+export async function returnFromWaitingOn(input: MutationInput): Promise<PitCrewAssignment> {
+  const row = await loadOrCreateOverlay(input);
+  return returnWaitingOnRow(row, input.expectedVersion, input);
+}
+
+// Stable audit identity for the ops sweep. userId stays null so the row is
+// not attributed to a real Pit Crew member.
+export const PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL = "ops:pit-crew-waiting-on-sweep";
+
+const PIT_CREW_WAITING_ON_SWEEP_ACTOR: AuditActor = {
+  actorUserId: null,
+  actorEmail: PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL,
+};
+
+export interface WaitingOnSweepOptions {
+  /** Clock override so tests can pin "now" without sleeping. Defaults to the current time. */
+  now?: Date;
+  /** When set, only this brokerage is scanned. Omitted means every brokerage. */
+  brokerageId?: number;
+  /**
+   * Invoked after a row is selected and before its return is applied.
+   * Tests use this to move the row first and prove a version conflict
+   * skips that row without aborting the rest of the sweep.
+   */
+  beforeReturn?: (row: PitCrewAssignment) => Promise<void>;
+}
+
+export interface WaitingOnSweepResult {
+  /** Detector hits: WAITING_ON with a non-null expected-at strictly before now. */
+  scanned: number;
+  /** Rows moved WAITING_ON → IN_PROGRESS with waiting-on fields cleared. */
+  returned: number;
+  /** Rows left alone because a concurrent writer moved them first. */
+  skipped: number;
+  returnedSourceRecordIds: string[];
+}
+
+// A null expected-at is not overdue. Equality with now is not overdue either:
+// the item is returned only once expected-at is strictly earlier than now.
+export function isWaitingOnExpectedAtOverdue(
+  status: string,
+  waitingOnExpectedAt: Date | null,
+  now: Date,
+): boolean {
+  return status === "WAITING_ON" && waitingOnExpectedAt != null && waitingOnExpectedAt.getTime() < now.getTime();
+}
+
+async function findOverdueWaitingOnAssignments(now: Date, brokerageId?: number): Promise<PitCrewAssignment[]> {
+  const filters = [
+    eq(pitCrewAssignments.status, "WAITING_ON"),
+    isNotNull(pitCrewAssignments.waitingOnExpectedAt),
+    lt(pitCrewAssignments.waitingOnExpectedAt, now),
+  ];
+  if (brokerageId != null) filters.push(eq(pitCrewAssignments.brokerageId, brokerageId));
+  return db
+    .select()
+    .from(pitCrewAssignments)
+    .where(and(...filters));
+}
+
+// Ops entry for the waiting-on expected-at sweep. Safe to call again: a row
+// already returned is IN_PROGRESS and is not selected. A version mismatch
+// (someone else returned or handed off the item between the read and the
+// write) skips that row and continues. Callers — a scheduler tick or an
+// ops invocation — pass no actor; the audit row uses the ops email above.
+export async function sweepOverdueWaitingOn(options: WaitingOnSweepOptions = {}): Promise<WaitingOnSweepResult> {
+  const now = options.now ?? new Date();
+  const rows = await findOverdueWaitingOnAssignments(now, options.brokerageId);
+  let returned = 0;
+  let skipped = 0;
+  const returnedSourceRecordIds: string[] = [];
+
+  for (const row of rows) {
+    if (!isWaitingOnExpectedAtOverdue(row.status, row.waitingOnExpectedAt, now)) {
+      skipped += 1;
+      continue;
+    }
+    if (options.beforeReturn) await options.beforeReturn(row);
+    try {
+      await returnWaitingOnRow(row, row.version, PIT_CREW_WAITING_ON_SWEEP_ACTOR);
+      returned += 1;
+      returnedSourceRecordIds.push(row.sourceRecordId);
+    } catch (err) {
+      if (err instanceof PitCrewConcurrencyError || err instanceof PitCrewTransitionError) {
+        skipped += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  return { scanned: rows.length, returned, skipped, returnedSourceRecordIds };
 }
 
 export async function completeWorkItem(input: MutationInput): Promise<PitCrewAssignment> {
