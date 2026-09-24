@@ -15,9 +15,9 @@ import { logger } from "@aee/events";
  * consent policy, does not pick a channel, does not write a
  * grow_consent_decisions row, and never writes anything at all — the F2
  * consent model's own writers (lib/consentControlsPersistence.ts) stay the
- * sole writers, and today they are only reachable from telephony. A later
- * consent phase extends THIS function; nothing else in the sweep knows the
- * consent tables exist.
+ * sole writers. The Grow consent routes (routes/growConsent.ts) call them.
+ * This function does not. Nothing else in the sweep knows the consent
+ * tables exist.
  *
  * "LATEST ROW" MEANS WHAT THE CONSENT MODEL SAYS IT MEANS.
  * lib/consentControlsPersistence.ts is the canonical resolver for these two
@@ -60,8 +60,8 @@ import { logger } from "@aee/events";
  *      to see. Only a contact suppressed everywhere is withheld.
  *
  * THE COMMON PILOT CASE IS "NO DATA", AND IT IS NOT A FAILURE. Neither table
- * has any rows for most tenants today (their only writers are on the
- * telephony path). Absence of consent data therefore changes nothing at all:
+ * has any rows until a Grow consent write records one. Absence of consent
+ * data therefore changes nothing at all:
  * no DNC row means not LISTED and not UNKNOWN, no suppression row means not
  * suppressed-everywhere, and the contact's signals behave exactly as they did
  * before this filter existed. The fail-closed rules above apply only to a row
