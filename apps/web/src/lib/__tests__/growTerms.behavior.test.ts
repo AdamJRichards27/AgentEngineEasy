@@ -7,7 +7,9 @@ import { createServer, type Plugin, type ViteDevServer } from "vite";
 import {
   ASK_DUE_FOLLOW_UPS_QUESTION,
   CALL_COMMITMENT_LABEL,
+  CALL_COMMITMENT_PROPOSAL_SOURCE,
   CALL_FOLLOW_UP_LABEL,
+  CALL_FOLLOW_UP_PROPOSAL_SOURCE,
   CALL_ITEMS_HELP,
   CALL_ITEMS_TITLE,
   COMMITMENT_LABEL,
@@ -20,6 +22,7 @@ import {
   PROPOSE_SELECTED_LABEL,
   SAVE_DUE_FOLLOW_UP_LABEL,
   SET_DUE_FOLLOW_UP_LABEL,
+  showCallProposalSource,
   showCommitmentNotFollowUp,
 } from "../growTerms";
 
@@ -49,6 +52,15 @@ test("G-6: the glossary keeps a due follow-up, a commitment, and a call item apa
   assert.equal(showCommitmentNotFollowUp("Create a follow-up commitment for Jo"), "Create a commitment for Jo");
   assert.equal(showCommitmentNotFollowUp("Set a due follow-up"), "Set a due follow-up");
   assert.equal(showCommitmentNotFollowUp("Call follow-up from the review"), "Call follow-up from the review");
+  assert.match(CALL_COMMITMENT_PROPOSAL_SOURCE, /Call commitment/);
+  assert.match(CALL_COMMITMENT_PROPOSAL_SOURCE, /not an open commitment until you approve/);
+  assert.match(CALL_COMMITMENT_PROPOSAL_SOURCE, /does not set a due follow-up/);
+  assert.match(CALL_FOLLOW_UP_PROPOSAL_SOURCE, /Call follow-up/);
+  assert.match(CALL_FOLLOW_UP_PROPOSAL_SOURCE, /not an open commitment until you approve/);
+  assert.equal(showCallProposalSource("Commitment approved in call review"), CALL_COMMITMENT_PROPOSAL_SOURCE);
+  assert.equal(showCallProposalSource("Follow-up approved in call review"), CALL_FOLLOW_UP_PROPOSAL_SOURCE);
+  assert.equal(showCallProposalSource(CALL_FOLLOW_UP_PROPOSAL_SOURCE), CALL_FOLLOW_UP_PROPOSAL_SOURCE);
+  assert.equal(showCallProposalSource("They asked for a market update"), "They asked for a market update");
 });
 
 const WEB_SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");

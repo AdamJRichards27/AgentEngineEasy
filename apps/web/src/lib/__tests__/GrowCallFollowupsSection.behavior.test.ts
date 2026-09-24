@@ -369,6 +369,9 @@ test("proposal card: one click approves then executes; COMPLETED_AFTER_RECOVERY 
       let tree = render();
       const text = textContent(tree);
       assert.match(text, /From call review/);
+      assert.match(text, /Call commitment from this review/);
+      assert.match(text, /not an open commitment until you approve/);
+      assert.match(text, /does not set a due follow-up/);
       assert.match(text, /Expires in 23h/);
       assert.match(text, /Jo Citizen/);
       assert.equal(button(tree, "Not now"), undefined, "persistent lists hide Not now");

@@ -7,7 +7,10 @@
  * through the real Stage D proposeAIAction/approve/execute functions.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { after, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   aiActionRequests,
@@ -19,6 +22,7 @@ import {
   entitlementGrants,
   growActivities,
   growCallRecordingConsents,
+  growCallReviewLinks,
   growCallSessions,
   growCallTranscriptions,
   growCommitments,
@@ -34,11 +38,14 @@ import { executeAIAction, LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "../ai/e
 import { getRelationshipTimeline } from "../relationshipTimeline.js";
 import { configureEvents } from "../events.js";
 import {
+  CALL_COMMITMENT_PROPOSAL_REASON,
+  CALL_FOLLOW_UP_PROPOSAL_REASON,
   GrowCallFollowupError,
   listCallFollowupCandidates,
   proposeCallFollowups,
   setGrowCallFollowupAuditFailureForTests,
 } from "../growCallFollowups.js";
+import { callReviewProvenanceForRequests } from "../growCallReviewLinks.js";
 
 process.env.NODE_ENV = "test";
 
@@ -193,6 +200,7 @@ before(async () => {
 
 after(async () => {
   setGrowCallFollowupAuditFailureForTests(null);
+  await db.delete(growCallReviewLinks).where(inArray(growCallReviewLinks.brokerageId, [brokerageId, foreignBrokerageId]));
   await db.delete(growCallTranscriptions).where(inArray(growCallTranscriptions.brokerageId, [brokerageId, foreignBrokerageId]));
   await db.delete(documentObjectVersions).where(inArray(documentObjectVersions.brokerageId, [brokerageId, foreignBrokerageId]));
   await db.delete(documents).where(inArray(documents.brokerageId, [brokerageId, foreignBrokerageId]));
@@ -631,4 +639,108 @@ test("C4: snapshot/review cross-check — a tampered snapshot text, or a snapsho
     reviewState: missingRow!.reviewState.filter((entry) => !(entry.itemType === "COMMITMENT" && entry.itemId === "com-1")),
   }).where(eq(growCallTranscriptions.id, missing.transcription.id));
   await assertExcluded(missing, "COMMITMENT", "com-1", "missing from review_state");
+});
+
+test("E-8: call review joins the proposal and the commitment through grow_call_review_links", async () => {
+  const fixture = await createFixture();
+  const due = inDays(6);
+  const proposed = await propose(fixture, owner, [{ itemType: "FOLLOWUP", itemId: "fu-1", dueAt: due }]);
+  assert.equal(proposed.proposals[0]!.status, "PROPOSED");
+  const requestId = proposed.proposals[0]!.actionRequest!.actionRequestId;
+  assert.equal((await commitmentsFor(fixture)).length, 0, "proposing does not create an Open commitment");
+
+  const [request] = await db.select().from(aiActionRequests).where(eq(aiActionRequests.id, requestId));
+  const payload = request!.inputPayload as {
+    reason?: string;
+    callReview?: { callSessionId: number; transcriptionId: number; itemType: string; itemId: string };
+  };
+  assert.equal(payload.reason, CALL_FOLLOW_UP_PROPOSAL_REASON);
+  assert.deepEqual(payload.callReview, {
+    callSessionId: fixture.session.id,
+    transcriptionId: fixture.transcription.id,
+    itemType: "FOLLOWUP",
+    itemId: "fu-1",
+  });
+  const [link] = await db.select().from(growCallReviewLinks).where(eq(growCallReviewLinks.actionRequestId, requestId));
+  assert.ok(link);
+  assert.equal(link.brokerageId, brokerageId);
+  assert.equal(link.callSessionId, fixture.session.id);
+  assert.equal(link.transcriptionId, fixture.transcription.id);
+  assert.equal(link.itemType, "FOLLOWUP");
+  assert.equal(link.itemId, "fu-1");
+  assert.equal(link.commitmentId, null, "the link is not an Open commitment until execution");
+
+  await db.update(aiActionRequests).set({ resourceId: `opaque-e8-${requestId}` }).where(eq(aiActionRequests.id, requestId));
+  const listed = await listCallFollowupCandidates({ brokerageId, actor: actorOf(owner), ...ids(fixture) });
+  const followup = listed.candidates.find((candidate) => candidate.itemId === "fu-1")!;
+  assert.equal(followup.canPropose, false);
+  assert.equal(followup.existingProposal.visibility, "VISIBLE");
+  if (followup.existingProposal.visibility === "VISIBLE") {
+    assert.equal(followup.existingProposal.actionRequest.actionRequestId, requestId);
+  }
+  const again = await propose(fixture, owner, [{ itemType: "FOLLOWUP", itemId: "fu-1", dueAt: due }]);
+  assert.equal(again.proposals[0]!.status, "EXISTING");
+  assert.equal(again.proposals[0]!.actionRequest!.actionRequestId, requestId);
+  assert.equal(
+    (await db.select().from(growCallReviewLinks).where(eq(growCallReviewLinks.transcriptionId, fixture.transcription.id))).length,
+    1,
+  );
+
+  const approved = await approveAIActionRequest(requestId, brokerageId, policyActorOf(owner));
+  assert.equal(approved.ok, true);
+  const executed = await executeAIAction(requestId, brokerageId, policyActorOf(owner));
+  assert.equal(executed.ok, true, JSON.stringify(executed));
+  const createdId = (executed as { result?: { id?: number } }).result?.id;
+  assert.equal(typeof createdId, "number");
+  const [linked] = await db.select().from(growCallReviewLinks).where(eq(growCallReviewLinks.actionRequestId, requestId));
+  assert.equal(linked!.commitmentId, createdId);
+  const [commitment] = await db.select().from(growCommitments).where(eq(growCommitments.id, createdId!));
+  assert.equal(commitment!.status, "Open");
+  assert.equal(commitment!.partyId, fixture.party.id);
+  assert.equal((await commitmentsFor(fixture)).length, 1);
+
+  const commitmentProposal = await propose(fixture, owner, [{ itemType: "COMMITMENT", itemId: "com-1", dueAt: inDays(8) }]);
+  const commitmentRequestId = commitmentProposal.proposals[0]!.actionRequest!.actionRequestId;
+  const [commitmentRequest] = await db.select().from(aiActionRequests).where(eq(aiActionRequests.id, commitmentRequestId));
+  assert.equal((commitmentRequest!.inputPayload as { reason?: string }).reason, CALL_COMMITMENT_PROPOSAL_REASON);
+  assert.match(commitmentRequest!.resourceId ?? "", /^transcription:\d+:item:COMMITMENT:com-1$/);
+  await db.delete(growCallReviewLinks).where(eq(growCallReviewLinks.actionRequestId, commitmentRequestId));
+
+  const afterUnlink = await listCallFollowupCandidates({ brokerageId, actor: actorOf(owner), ...ids(fixture) });
+  const unlinked = afterUnlink.candidates.find((candidate) => candidate.itemId === "com-1")!;
+  assert.equal(unlinked.canPropose, true, "a resourceId string alone does not block the item");
+  assert.equal(unlinked.existingProposal.visibility, "NONE");
+  const provenance = await callReviewProvenanceForRequests(brokerageId, [requestId, commitmentRequestId]);
+  assert.deepEqual(provenance.get(requestId), {
+    source: "call_review",
+    callSessionId: fixture.session.id,
+    transcriptionId: fixture.transcription.id,
+    itemType: "FOLLOWUP",
+    itemId: "fu-1",
+  });
+  assert.equal(provenance.has(commitmentRequestId), false, "provenance is the link row, not a parsed resourceId");
+});
+
+test("E-8: the call-review join source does not parse a composite resourceId", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../..");
+  const files = [
+    "apps/api/src/lib/growCallFollowups.ts",
+    "apps/api/src/lib/growCallReviewLinks.ts",
+    "apps/api/src/routes/growAiActions.ts",
+    "apps/api/src/lib/ai/actions/registry.ts",
+  ];
+  const forbidden = [
+    /parseCallFollowupResourceId/,
+    /RESOURCE_ID_PATTERN/,
+    /transcription:\(\\d\+\)/,
+    /regexp_match/,
+  ];
+  for (const file of files) {
+    const source = readFileSync(path.join(root, file), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+    for (const pattern of forbidden) {
+      assert.equal(pattern.test(source), false, `${file} matches ${pattern}`);
+    }
+  }
 });

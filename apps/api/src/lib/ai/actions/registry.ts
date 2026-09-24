@@ -71,6 +71,7 @@ import { assertNoProtectedOperationsRegistered } from "../protectedOperations.js
 import { createAutomationTask, assignAutomationTaskToRole } from "../../automation/tasks.js";
 import { raiseAttentionItem } from "../../automation/attentionItems.js";
 import { createApprovedGrowCommitment } from "../../growCommitmentActions.js";
+import { attachCommitmentToCallReviewLink, callReviewLinkSchema } from "../../growCallReviewLinks.js";
 import {
   AUTOMATION_TASK_KEYS,
   AUTOMATION_ATTENTION_REASON_CODES,
@@ -88,6 +89,10 @@ export interface ActionExecutionContext {
   userEmail: string;
   userRole: UserRole;
   actorType: ActorType;
+  // Set by the execution gateway so a call-review proposal can stamp
+  // grow_call_review_links.commitment_id. Absent only for callers that
+  // invoke execute() outside the gateway.
+  actionRequestId?: number;
 }
 
 export interface AIActionDefinition<TInput = unknown> {
@@ -219,10 +224,14 @@ const createGrowCommitmentInput = z.object({
   // A deterministic key the orchestrator derives from the source Grow Today
   // item + due date, carried as the action request's resourceId (not part
   // of the growCommitments row itself) so a repeat Ask AE/Coach call for
-  // the same underlying follow-up does not create a second, duplicate
+  // the same underlying item does not create a second, duplicate
   // proposal while one is already pending — see actionRequests.ts's
   // findOpenActionRequestByResource().
   dedupeKey: z.string().min(1).max(200).nullable().optional(),
+  // E-8: structured call-review source, stored on the approved payload.
+  // The join itself is grow_call_review_links (foreign keys). Absent for
+  // Ask AE / Coach proposals, which are not call-review items.
+  callReview: callReviewLinkSchema.nullable().optional(),
 });
 
 export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
@@ -509,8 +518,8 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
     version: 1,
     summarize: (input) =>
       `Create a commitment for contact #${input.partyId}: "${input.description}" (due ${input.dueAt})`,
-    execute: async (ctx, input) =>
-      createApprovedGrowCommitment({
+    execute: async (ctx, input) => {
+      const commitment = await createApprovedGrowCommitment({
         brokerageId: ctx.brokerageId,
         createdBy: ctx.userId,
         partyId: input.partyId,
@@ -518,7 +527,19 @@ export const ACTION_REGISTRY: Record<string, AIActionDefinition<any>> = {
         dueAt: input.dueAt,
         propertyId: input.propertyId ?? null,
         opportunityId: input.opportunityId ?? null,
-      }),
+      });
+      // Call-review proposals already have a link row from propose time.
+      // Stamp the Open commitment onto it. Ask AE proposals have no row;
+      // the update matches nothing and does not create a commitment.
+      if (ctx.actionRequestId !== undefined) {
+        await attachCommitmentToCallReviewLink({
+          brokerageId: ctx.brokerageId,
+          actionRequestId: ctx.actionRequestId,
+          commitmentId: commitment.id,
+        });
+      }
+      return commitment;
+    },
   },
 };
 

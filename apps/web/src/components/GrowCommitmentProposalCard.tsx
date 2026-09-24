@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "wouter";
 import { apiFetch, ApiError } from "../lib/api";
+import { showCallProposalSource } from "../lib/growTerms";
 import {
   canRetryProposalState,
   COMPLETED_AFTER_RECOVERY_MESSAGE,
@@ -25,7 +26,7 @@ interface GrowCommitmentExecutionResult {
 // AE GROW Priority 6 Stage D (extracted and made reusable in Stage F4.3) —
 // the human review/approval surface for one already-proposed
 // CREATE_GROW_COMMITMENT action request. Used by Ask AE / Business Coach
-// (AskAgentEngine.tsx), by "Follow-ups from this call"
+// (AskAgentEngine.tsx), by call follow-ups and call commitments
 // (GrowCallFollowupsSection.tsx), and by Contact 360's pending proposals
 // list (GrowPendingCommitmentProposals.tsx).
 //
@@ -173,7 +174,7 @@ export function GrowCommitmentProposalCard({
         )}
         {proposal.reason !== null && (
           <li>
-            {fromCall ? "Source" : "Why AE suggested this"}: {proposal.reason}
+            {fromCall ? "Source" : "Why AE suggested this"}: {fromCall ? showCallProposalSource(proposal.reason) : proposal.reason}
           </li>
         )}
         {proposal.evidenceSummary !== null && <li>Evidence: {proposal.evidenceSummary}</li>}

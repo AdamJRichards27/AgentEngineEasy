@@ -51,3 +51,5 @@ export * from "./telephony";
 export * from "./consentControls";
 // AE GROW Priority 6 Stage F3 — separate transcription and human-review artefacts.
 export * from "./callTranscriptions";
+// E-8 — call-review item to commitment-proposal to commitment link.
+export * from "./callReviewLinks";

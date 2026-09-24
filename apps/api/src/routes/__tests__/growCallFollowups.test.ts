@@ -23,6 +23,7 @@ import {
   documents,
   entitlementGrants,
   growCallRecordingConsents,
+  growCallReviewLinks,
   growCallSessions,
   growCallTranscriptions,
   growCommitments,
@@ -214,6 +215,7 @@ before(async () => {
 
 after(async () => {
   const brokerageIds = [A.brokerageId, B.brokerageId, C.brokerageId];
+  await db.delete(growCallReviewLinks).where(inArray(growCallReviewLinks.brokerageId, brokerageIds));
   await db.delete(growCallTranscriptions).where(inArray(growCallTranscriptions.brokerageId, brokerageIds));
   await db.delete(documentObjectVersions).where(inArray(documentObjectVersions.brokerageId, brokerageIds));
   await db.delete(documents).where(inArray(documents.brokerageId, brokerageIds));
@@ -471,7 +473,7 @@ test("pending-commitments ?partyId returns only the caller's own, non-expired pr
     assert.equal(res.status, 201);
   }
   const pendingUrl = (partyId: unknown) => `${baseUrl}/api/grow/ai-actions/pending-commitments?partyId=${partyId}`;
-  type Pending = { proposals: Array<{ id: number; input: { partyId: number }; provenance: { source: string; transcriptionId: number; itemType: string; itemId: string } | null }> };
+  type Pending = { proposals: Array<{ id: number; input: { partyId: number; callReview?: { callSessionId: number; transcriptionId: number; itemType: string; itemId: string } }; provenance: { source: string; callSessionId: number; transcriptionId: number; itemType: string; itemId: string } | null }> };
   const list = async (cookie: string, partyId: unknown) => {
     const res = await fetch(pendingUrl(partyId), { headers: { cookie } });
     assert.equal(res.status, 200);
@@ -481,10 +483,22 @@ test("pending-commitments ?partyId returns only the caller's own, non-expired pr
   const own = await list(A.agent.cookie, one.partyId);
   assert.equal(own.proposals.length, 2);
   assert.ok(own.proposals.every((p) => p.input.partyId === one.partyId));
-  assert.deepEqual(own.proposals.map((p) => p.provenance).sort((a, b) => a!.itemType.localeCompare(b!.itemType)), [
-    { source: "call_review", transcriptionId: one.transcriptionId, itemType: "COMMITMENT", itemId: "com-1" },
-    { source: "call_review", transcriptionId: one.transcriptionId, itemType: "FOLLOWUP", itemId: "fu-1" },
-  ]);
+  const expectedProvenance = [
+    { source: "call_review", callSessionId: one.sessionId, transcriptionId: one.transcriptionId, itemType: "COMMITMENT", itemId: "com-1" },
+    { source: "call_review", callSessionId: one.sessionId, transcriptionId: one.transcriptionId, itemType: "FOLLOWUP", itemId: "fu-1" },
+  ];
+  assert.deepEqual(own.proposals.map((p) => p.provenance).sort((a, b) => a!.itemType.localeCompare(b!.itemType)), expectedProvenance);
+  assert.deepEqual(
+    own.proposals.map((p) => p.input.callReview).sort((a, b) => a!.itemType.localeCompare(b!.itemType)),
+    expectedProvenance.map(({ source: _source, ...link }) => link),
+  );
+  // The historical resourceId string is not the join. Rewriting it must
+  // leave provenance on the link row.
+  for (const proposal of own.proposals) {
+    await db.update(aiActionRequests).set({ resourceId: `opaque-e8-${proposal.id}` }).where(eq(aiActionRequests.id, proposal.id));
+  }
+  const opaque = await list(A.agent.cookie, one.partyId);
+  assert.deepEqual(opaque.proposals.map((p) => p.provenance).sort((a, b) => a!.itemType.localeCompare(b!.itemType)), expectedProvenance);
   assert.equal((await list(A.admin.cookie, one.partyId)).proposals.length, 0, "only the caller's own requests");
   assert.equal((await list(other.cookie, one.partyId)).proposals.length, 0);
   assert.equal((await list(B.agent.cookie, one.partyId)).proposals.length, 0, "never cross-tenant");
