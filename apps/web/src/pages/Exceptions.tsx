@@ -13,7 +13,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 import {
   type CrossPropertyExceptionsResponse,
@@ -146,7 +146,7 @@ export default function Exceptions() {
           <button className="btn btn-small" onClick={() => triggerScan.mutate()} disabled={triggerScan.isPending}>
             Run Scan Now
           </button>
-          {triggerScan.isError && <p className="error-text">{(triggerScan.error as ApiError).friendly}</p>}
+          {triggerScan.isError && <p className="error-text">{apiErrorMessage(triggerScan.error, "Couldn't run the scan. Try again.")}</p>}
           {opsHealth.data && opsHealth.data.recentRuns.length > 0 ? (
             <ul className="item-list">
               {opsHealth.data.recentRuns.map((r) => (
@@ -173,7 +173,7 @@ export default function Exceptions() {
       <section className="card">
         <h2>Exceptions{typeof data?.total === "number" ? ` (${data.total})` : ""}</h2>
         {isLoading && <p className="muted">Loading…</p>}
-        {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+        {isError && <p className="error-text">{apiErrorMessage(error, "Couldn't load exceptions. Try again.")}</p>}
         {!isLoading && !isError && (data?.exceptions.length ?? 0) === 0 && <p className="muted">No exceptions match these filters.</p>}
         {!isLoading && !isError && (data?.exceptions.length ?? 0) > 0 && (
           <>

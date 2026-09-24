@@ -163,6 +163,10 @@ const virtualMocks: Plugin = {
       return `
         export const ApiError = globalThis.__w2bApiError;
         export const apiFetch = (path, options) => globalThis.__w2bApiFetch(path, options);
+        export function apiErrorMessage(error, fallback) {
+          if (error instanceof ApiError && typeof error.friendly === "string" && error.friendly.trim()) return error.friendly;
+          return fallback;
+        }
       `;
     }
     if (id === "\0w2b-session") {

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 
 interface Property {
   id: number;
@@ -18,7 +18,7 @@ export default function PropertiesList() {
     <div>
       <h1>Properties</h1>
       {isLoading && <p className="muted">Loading…</p>}
-      {isError && <p className="error-text">{(error as ApiError).friendly}</p>}
+      {isError && <p className="error-text">{apiErrorMessage(error, "Couldn't load properties. Try again.")}</p>}
       {!isLoading && !isError && (data?.properties.length ?? 0) === 0 && (
         <p className="muted">
           No properties yet.{" "}

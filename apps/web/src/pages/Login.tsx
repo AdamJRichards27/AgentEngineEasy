@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError, SESSION_ENDED_MESSAGE } from "../lib/api";
+import { apiFetch, apiErrorMessage, SESSION_ENDED_MESSAGE } from "../lib/api";
 import { useCompleteSignIn, useSessionEndedNotice, type SessionUser } from "../lib/session";
 
 interface KnownUser {
@@ -124,7 +124,7 @@ export default function Login() {
         )}
 
         {(login.isError || devSignIn.isError) && (
-          <p className="error-text">{((login.error ?? devSignIn.error) as ApiError).friendly}</p>
+          <p className="error-text">{apiErrorMessage(login.error ?? devSignIn.error, "Couldn't sign you in. Try again.")}</p>
         )}
         <p className="muted" style={{ fontSize: "0.8em", marginTop: "1.5rem" }}>
           New to Agent Engine? You'll need an invitation from your Brokerage Administrator — check

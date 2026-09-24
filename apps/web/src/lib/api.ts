@@ -88,6 +88,19 @@ export class ApiError extends Error {
   }
 }
 
+// G-5 — the one narrowing for a failure an agent might see. An `as ApiError`
+// cast reads `.friendly` as undefined when the thrown value is a plain Error,
+// a string, or anything else that is not an ApiError, and React renders that
+// as the word "undefined". A blank friendly string is the same hole. Callers
+// pass a sentence that still makes sense when the failure never reached the API.
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    const friendly = error.friendly.trim();
+    if (friendly.length > 0) return error.friendly;
+  }
+  return fallback;
+}
+
 // Shape emitted by requireEntitlement on denial:
 // `{ action: "grow.checkout", productCode: "grow" }`.
 export interface EntitlementUpgrade {

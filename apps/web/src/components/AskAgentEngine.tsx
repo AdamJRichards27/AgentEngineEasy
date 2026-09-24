@@ -624,7 +624,21 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
         )}
         {ask.isError &&
           (() => {
-            const err = ask.error as ApiError;
+            const err = ask.error instanceof ApiError ? ask.error : null;
+            // A non-ApiError (dropped connection, thrown string, plain Error)
+            // has no status and no friendly sentence. The cast used to render
+            // the word "undefined".
+            if (!err) {
+              return (
+                <p className="error-text">
+                  {isCoach
+                    ? "The Business Coach is temporarily unavailable. Try again."
+                    : isGrow
+                      ? "Ask AE is temporarily unavailable. Try again."
+                      : "Something went wrong. Try again."}
+                </p>
+              );
+            }
             // AE GROW Priority 6 Stage B — distinct empty/permission-denied/
             // provider-unavailable/error states, per the Response Contract's
             // requirement that a denial never looks like a generic failure.

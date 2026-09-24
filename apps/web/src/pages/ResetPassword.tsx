@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 
 // Critical Blocker Remediation, Phase 2 §4.5 — POST /auth/password-reset/confirm
 // consumes the single-use token from the emailed link, sets a new password,
@@ -64,7 +64,7 @@ export default function ResetPassword({ params }: { params: { token: string } })
             <button className="btn btn-primary btn-block" onClick={submit} disabled={!canSubmit}>
               {confirm.isPending ? "Resetting…" : "Reset password"}
             </button>
-            {confirm.isError && <p className="error-text">{(confirm.error as ApiError).friendly}</p>}
+            {confirm.isError && <p className="error-text">{apiErrorMessage(confirm.error, "Couldn't reset your password. Try again.")}</p>}
             <Link href="/forgot-password" className="btn btn-link">
               Request a new link
             </Link>

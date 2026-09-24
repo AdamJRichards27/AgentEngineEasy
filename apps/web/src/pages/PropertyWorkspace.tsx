@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AskAgentEngine } from "../components/AskAgentEngine";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 import {
   type PropertyExceptionsResponse,
   type RiskExceptionRow,
@@ -618,7 +618,9 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     onSuccess: invalidateLaunch,
   });
   const launchErrorFor = (path: string): string | null =>
-    launchAction.isError && launchAction.variables?.path === path ? (launchAction.error as ApiError).friendly : null;
+    launchAction.isError && launchAction.variables?.path === path
+      ? apiErrorMessage(launchAction.error, "Couldn't update the launch plan. Try again.")
+      : null;
   const launchPendingPath = launchAction.isPending ? (launchAction.variables?.path ?? null) : null;
 
   const [preview, setPreview] = useState<{ documentId: number; content: string } | null>(null);
@@ -629,7 +631,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   };
 
   if (isLoading || !data) {
-    if (isError) return <p className="error-text">{(error as ApiError).friendly}</p>;
+    if (isError) return <p className="error-text">{apiErrorMessage(error, "Couldn't load this property. Try again.")}</p>;
     return <p className="muted">Loading…</p>;
   }
 
@@ -1022,9 +1024,9 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <OffersBlock
             offers={offers}
             onCreate={(input) => createOffer.mutate(input)}
-            createError={createOffer.isError ? (createOffer.error as ApiError).friendly : null}
+            createError={createOffer.isError ? apiErrorMessage(createOffer.error, "Couldn't record that offer. Try again.") : null}
             onAccept={(id) => acceptOffer.mutate(id)}
-            acceptError={acceptOffer.isError ? (acceptOffer.error as ApiError).friendly : null}
+            acceptError={acceptOffer.isError ? apiErrorMessage(acceptOffer.error, "Couldn't accept that offer. Try again.") : null}
             onDecline={(id) => declineOffer.mutate(id)}
             onWithdraw={(id) => withdrawOffer.mutate(id)}
           />
@@ -1038,17 +1040,17 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <TransactionBlockView
             transaction={transaction}
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
-            error={transactionAction.isError ? (transactionAction.error as ApiError).friendly : null}
+            error={transactionAction.isError ? apiErrorMessage(transactionAction.error, "Couldn't update the transaction. Try again.") : null}
             conditions={conditionsData?.conditions ?? []}
             onAddCondition={(input) => addCondition.mutate(input)}
-            addConditionError={addCondition.isError ? (addCondition.error as ApiError).friendly : null}
+            addConditionError={addCondition.isError ? apiErrorMessage(addCondition.error, "Couldn't add that condition. Try again.") : null}
             onRescheduleCondition={(conditionId, newDueDate) => rescheduleCondition.mutate({ conditionId, newDueDate })}
             onResolveCondition={(conditionId, status, notes) => resolveConditionMut.mutate({ conditionId, status, notes })}
             onExchange={() => transactionAction.mutate({ transactionId: transaction.id, action: "exchange" })}
             onMarkUnconditional={() => transactionAction.mutate({ transactionId: transaction.id, action: "unconditional" })}
             unconditionalError={
               transactionAction.isError && transactionAction.variables?.action === "unconditional"
-                ? (transactionAction.error as ApiError).friendly
+                ? apiErrorMessage(transactionAction.error, "Couldn't mark this unconditional. Try again.")
                 : null
             }
             solicitors={solicitors}
@@ -1141,8 +1143,8 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           onStart={() => startAppraisal.mutate()}
           onSave={(input) => saveAppraisal.mutate(input)}
           onFinalise={() => finaliseAppraisalMut.mutate()}
-          saveError={saveAppraisal.isError ? (saveAppraisal.error as ApiError).friendly : null}
-          finaliseError={finaliseAppraisalMut.isError ? (finaliseAppraisalMut.error as ApiError).friendly : null}
+          saveError={saveAppraisal.isError ? apiErrorMessage(saveAppraisal.error, "Couldn't save this appraisal. Try again.") : null}
+          finaliseError={finaliseAppraisalMut.isError ? apiErrorMessage(finaliseAppraisalMut.error, "Couldn't finalise this appraisal. Try again.") : null}
         />
       </details>
 
@@ -1158,7 +1160,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             campaignEndDate: data.property.campaignEndDate ?? null,
           }}
           onSave={(input) => saveListingDetails.mutate(input)}
-          error={saveListingDetails.isError ? (saveListingDetails.error as ApiError).friendly : null}
+          error={saveListingDetails.isError ? apiErrorMessage(saveListingDetails.error, "Couldn't save the listing details. Try again.") : null}
         />
       </details>
 
@@ -1185,8 +1187,8 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           {((populatePackage.data as any)?.skipped?.length ?? 0) > 0 && (
             <p className="muted">{(populatePackage.data as any).skipped.map((s: { reason: string }) => s.reason).join(" ")}</p>
           )}
-          {populatePackage.isError && <p className="error-text">{(populatePackage.error as ApiError).friendly}</p>}
-          {sendForSignature.isError && <p className="error-text">{(sendForSignature.error as ApiError).friendly}</p>}
+          {populatePackage.isError && <p className="error-text">{apiErrorMessage(populatePackage.error, "Couldn't prepare those documents. Try again.")}</p>}
+          {sendForSignature.isError && <p className="error-text">{apiErrorMessage(sendForSignature.error, "Couldn't send documents for signature. Try again.")}</p>}
 
           {data.documentPackage.signatureRequest && (
             <p className="muted">
@@ -1213,7 +1215,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           mine={paymentMethodsData?.mine ?? []}
           brokerage={paymentMethodsData?.brokerage ?? []}
           onAdd={(input) => addPaymentMethod.mutate(input)}
-          error={addPaymentMethod.isError ? (addPaymentMethod.error as ApiError).friendly : null}
+          error={addPaymentMethod.isError ? apiErrorMessage(addPaymentMethod.error, "Couldn't add that payment method. Try again.") : null}
         />
 
         {serviceOrdersData && serviceOrdersData.serviceOrders.length > 0 && (
@@ -1226,9 +1228,13 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
                   serviceOrder={so}
                   onCharge={() => chargeServiceOrder.mutate(so.id)}
                   charging={chargeServiceOrder.isPending && chargeServiceOrder.variables === so.id}
-                  chargeError={chargeServiceOrder.isError && chargeServiceOrder.variables === so.id ? (chargeServiceOrder.error as ApiError).friendly : null}
+                  chargeError={
+                    chargeServiceOrder.isError && chargeServiceOrder.variables === so.id
+                      ? apiErrorMessage(chargeServiceOrder.error, "Couldn't charge that service order. Try again.")
+                      : null
+                  }
                   onRefund={(paymentId) => refundPayment.mutate({ paymentId, serviceOrderId: so.id })}
-                  refundError={refundPayment.isError ? (refundPayment.error as ApiError).friendly : null}
+                  refundError={refundPayment.isError ? apiErrorMessage(refundPayment.error, "Couldn't refund that payment. Try again.") : null}
                 />
               ))}
             </ul>
@@ -1250,13 +1256,13 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <button className="btn btn-primary" onClick={() => readyToList.mutate()} disabled={sellers.length === 0}>
             Ready to List
           </button>
-          {readyToList.isError && <p className="error-text">{(readyToList.error as ApiError).friendly}</p>}
+          {readyToList.isError && <p className="error-text">{apiErrorMessage(readyToList.error, "Couldn't mark this ready to list. Try again.")}</p>}
         </div>
       )}
       {readyToList.isError && data.property.workflowStage === "Appraisal" && primary && (
-        <p className="error-text">{(readyToList.error as ApiError).friendly}</p>
+        <p className="error-text">{apiErrorMessage(readyToList.error, "Couldn't mark this ready to list. Try again.")}</p>
       )}
-      {goLive.isError && <p className="error-text">{(goLive.error as ApiError).friendly}</p>}
+      {goLive.isError && <p className="error-text">{apiErrorMessage(goLive.error, "Couldn't take this listing live. Try again.")}</p>}
     </div>
   );
 }

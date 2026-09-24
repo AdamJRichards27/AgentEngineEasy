@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, ApiError } from "../lib/api";
+import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 
 interface CatalogueProduct {
@@ -27,7 +27,7 @@ interface SubscriptionResponse {
 }
 
 function billingErrorMessage(error: unknown): string {
-  return error instanceof ApiError ? error.friendly : "Something went wrong. Try again.";
+  return apiErrorMessage(error, "Something went wrong. Try again.");
 }
 
 function formatPrice(amountCents: number | null, currency: string | null, interval: string | null): string {
