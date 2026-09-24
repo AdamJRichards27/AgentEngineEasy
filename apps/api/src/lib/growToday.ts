@@ -8,6 +8,7 @@ import {
   RANK_OPPORTUNITY_NO_ACTION_SET,
   compareSignalStrength,
   confidenceBandLabel,
+  ruleDWinsOverSignal,
   rankColdRelationship,
   rankDueToday,
   rankOverdueCommitment,
@@ -226,7 +227,11 @@ import {
 // deliberately left alone here. Write-time exclusion already enforces "no open
 // opportunity, no open commitment" (evaluation.ts). Read-time signal-vs-cold
 // de-dup already works: a surfaced signal adds its partyId to
-// partyIdsWithOpportunityAction and Rule D skips it.
+// partyIdsWithOpportunityAction and Rule D skips it. F-5 is the case where
+// Rule D is the card that wins: its rank is strictly higher than the party's
+// best signal (ruleDWinsOverSignal), or the Emerging cap held that signal
+// back. The losing signal is not discarded. It rides on the cold card as
+// relatedSignals. A tie keeps the signal, which is the more specific card.
 //
 // The genuine gap was narrower: nothing de-duplicated signals AGAINST EACH
 // OTHER. partyIdsWithOpportunityAction suppressed only Rule D, never a sibling
@@ -331,9 +336,10 @@ export type GrowTodayActionButton =
  * NOT become the card, carried on the card that did so the evidence is never
  * lost. Two ways that happens, distinguished by `relationship`:
  *
- *   - "consolidated_into_this_card": a sibling signal for the same party lost
- *     the per-party selection (see PER_PARTY_SIGNAL_SELECTOR). Its card was
- *     folded into this one so the contact appears exactly once.
+ *   - "consolidated_into_this_card": this signal lost the one-card contest.
+ *     Either a sibling signal won on rankScore (see PER_PARTY_SIGNAL_SELECTOR),
+ *     or Rule D's cold-contact card outranked it (ruleDWinsOverSignal). The
+ *     evidence rides on the card that was kept.
  *   - "withheld_by_daily_cap": every signal for this party was held back by
  *     MAX_EMERGING_SIGNAL_ACTIONS, so a Rule D cold-contact card surfaced
  *     instead and carries them as its explanation (F-5).
@@ -869,6 +875,38 @@ function toRelatedSignal(
     rankScore: candidate.ranking.score,
     relationship,
   };
+}
+
+/**
+ * F-5 — the cold card's headline. Empty relatedSignals is the original
+ * threshold sentence. A signal Rule D outranked, or one the Emerging cap
+ * held back, is named here so the headline does not claim nothing more
+ * specific is on file while the evidence sits on the card.
+ */
+function coldContactHeadline(lastActivity: Date | null, related: GrowTodayRelatedSignal[]): string {
+  const gap = lastActivity ? `for ${daysSince(lastActivity)} days` : "at all";
+  const surfacedBecause = `AE surfaced this contact because your own records show no recorded contact with them ${gap}`;
+  const outranked = related.filter((signal) => signal.relationship === "consolidated_into_this_card");
+  const capped = related.filter((signal) => signal.relationship === "withheld_by_daily_cap");
+  if (outranked.length === 0 && capped.length === 0) {
+    return `${surfacedBecause}, and AE's threshold for "gone quiet" is ${COLD_CONTACT_THRESHOLD_DAYS} days. There is nothing more specific than that on file — this is a gap in the relationship, not evidence about this person.`;
+  }
+  const sentences = [`${surfacedBecause}.`];
+  if (outranked.length > 0) {
+    sentences.push(
+      outranked.length === 1
+        ? "AE also holds a signal about this person, and this gap outranked it, so this is the card that was kept — that signal is listed below and remains fully visible on the contact record."
+        : `AE also holds ${outranked.length} signals about this person, and this gap outranked them, so this is the card that was kept — they are listed below and remain fully visible on the contact record.`,
+    );
+  }
+  if (capped.length > 0) {
+    sentences.push(
+      capped.length === 1
+        ? "AE also holds another early-stage signal about this person that today's limit held back — it is listed below and remains fully visible on the contact record."
+        : `AE also holds ${capped.length} other early-stage signals about this person that today's limit held back — they are listed below and remain fully visible on the contact record.`,
+    );
+  }
+  return sentences.join(" ");
 }
 
 /**
@@ -1469,6 +1507,55 @@ export async function getGrowTodaySummary(
     consolidatedIntoStrongerSignal++;
   }
 
+  // Rule D's winning relationship per party, chosen before the signal contest
+  // so a cold card and a signal about the same person are compared on one
+  // rank. The preference (primary, then most recently established) is the
+  // same one the cold-card loop below emits.
+  const relationshipByParty = new Map<number, RelationshipRow>();
+  for (const r of relationshipRows) {
+    const existing = relationshipByParty.get(r.partyId);
+    if (
+      !existing ||
+      (r.isPrimary && !existing.isPrimary) ||
+      (r.isPrimary === existing.isPrimary && r.validFrom.getTime() > existing.validFrom.getTime())
+    ) {
+      relationshipByParty.set(r.partyId, r);
+    }
+  }
+  // Parties already claimed by an opportunity, appraisal follow-up, or open
+  // commitment are not cold-card candidates. A signal for them still surfaces
+  // on its own; Rule D will skip them below either way.
+  const ruleDRankByParty = new Map<number, number>();
+  for (const [partyId] of relationshipByParty) {
+    if (partyIdsWithOpportunityAction.has(partyId)) continue;
+    if (contactabilityOf(partyId) === "do_not_contact") continue;
+    const lastActivity = lastActivityByParty.get(partyId) ?? null;
+    if (!lastActivity) {
+      ruleDRankByParty.set(partyId, rankColdRelationship(null));
+      continue;
+    }
+    const days = daysSince(lastActivity);
+    if (days >= COLD_CONTACT_THRESHOLD_DAYS) ruleDRankByParty.set(partyId, rankColdRelationship(days));
+  }
+
+  // F-5 — a signal Rule D outranks does not become a card and does not consume
+  // an Emerging slot. The winner and every sibling folded into it travel
+  // together, so a second signal about the same person is not dropped when
+  // the cold card is the one that survives.
+  const signalsLostToColdByParty = new Map<number, RankedSignalCandidate[]>();
+  const signalsAfterColdContest: RankedSignalCandidate[] = [];
+  for (const candidate of consolidatedSignals) {
+    const partyId = candidate.row.partyId;
+    const coldScore = partyId === null ? undefined : ruleDRankByParty.get(partyId);
+    if (partyId !== null && coldScore !== undefined && ruleDWinsOverSignal(coldScore, candidate.ranking.score)) {
+      const lost = signalsLostToColdByParty.get(partyId) ?? [];
+      lost.push(candidate, ...candidate.consolidated);
+      signalsLostToColdByParty.set(partyId, lost);
+      continue;
+    }
+    signalsAfterColdContest.push(candidate);
+  }
+
   // W2-A (F-3) — THE EMERGING CAP NOW COUNTS CARDS, NOT ROWS, because it runs
   // AFTER consolidation. Before, a single contact holding four Emerging
   // signals consumed four of the ten daily slots by themselves, which is the
@@ -1481,7 +1568,7 @@ export async function getGrowTodaySummary(
   // this to explain itself instead of saying only "No contact recorded for N
   // days."
   const signalsWithheldByParty = new Map<number, RankedSignalCandidate[]>();
-  for (const candidate of consolidatedSignals) {
+  for (const candidate of signalsAfterColdContest) {
     if (candidate.row.confidenceBand === "Emerging") {
       if (emergingSurfaced >= MAX_EMERGING_SIGNAL_ACTIONS) {
         emergingWithheld++;
@@ -1557,23 +1644,11 @@ export async function getGrowTodaySummary(
     });
   }
 
-  // Rule D — cold Active relationships, deduped to one card per party
-  // (preferring the primary relationship, then the most recently
-  // established one) and skipped for a party already carrying an
-  // opportunity-based card above so the same person never shows twice on
-  // Today.
-  const relationshipByParty = new Map<number, RelationshipRow>();
-  for (const r of relationshipRows) {
-    const existing = relationshipByParty.get(r.partyId);
-    if (
-      !existing ||
-      (r.isPrimary && !existing.isPrimary) ||
-      (r.isPrimary === existing.isPrimary && r.validFrom.getTime() > existing.validFrom.getTime())
-    ) {
-      relationshipByParty.set(r.partyId, r);
-    }
-  }
-
+  // Rule D — cold Active relationships, one card per party. relationshipByParty
+  // was built above, before the signal contest, so the card emitted here is
+  // the same relationship that was compared with the signal. Skipped for a
+  // party already carrying an opportunity, appraisal, commitment, or surfaced
+  // signal card so the same person never shows twice on Today.
   for (const r of relationshipByParty.values()) {
     if (partyIdsWithOpportunityAction.has(r.partyId)) continue;
     // THE CONSENT GATE (finding P1-3). Rule D is a pure prospecting nudge —
@@ -1606,12 +1681,10 @@ export async function getGrowTodaySummary(
     // W2-A (F-5) — RULE D NOW EXPLAINS ITSELF.
     // =====================================================================
     //
-    // This card used to emit whyItMatters: null unconditionally. That was
-    // defensible while Rule D was only ever a fallback nobody had a better
-    // answer for — but it stopped being true the moment a cap could WITHHOLD a
-    // contact's signal and leave this card standing in its place. The agent
-    // then saw "No contact recorded for 240 days." with no way to know AE had
-    // something more specific about that exact person and had held it back.
+    // This card used to emit whyItMatters: null unconditionally. When Rule D
+    // won — because its rank beat the party's signal, or because the Emerging
+    // cap held that signal back — the agent saw "No contact recorded for N
+    // days." and the signal that lost was gone.
     //
     // NO CONFIDENCE BAND, DELIBERATELY. A cold-contact card is a date
     // comparison, not a signal, and it has no stored evidence band. Both band
@@ -1621,19 +1694,17 @@ export async function getGrowTodaySummary(
     //
     // NO FACTORS, for the same reason: there is no itemised score to itemise.
     // What this card can honestly carry is the rule it fired on, the limit of
-    // what that proves, and any signals held back for this contact.
+    // what that proves, and the signals that did not become the card. Each
+    // keeps its own stored explanation (toRelatedSignal). That is the same
+    // attachment a winning signal uses for a sibling it consolidated.
+    const lostToCold = signalsLostToColdByParty.get(r.partyId) ?? [];
     const withheldForParty = signalsWithheldByParty.get(r.partyId) ?? [];
+    const relatedSignals = [
+      ...lostToCold.map((c) => toRelatedSignal(c, "consolidated_into_this_card")),
+      ...withheldForParty.map((c) => toRelatedSignal(c, "withheld_by_daily_cap")),
+    ];
     const coldWhyItMatters: GrowTodayWhyItMatters = {
-      headline:
-        withheldForParty.length > 0
-          ? `AE surfaced this contact because your own records show no recorded contact with them${
-              lastActivity ? ` for ${daysSince(lastActivity)} days` : " at all"
-            }. AE also holds ${withheldForParty.length === 1 ? "another early-stage signal" : `${withheldForParty.length} other early-stage signals`} about this person that today's limit held back — ${
-              withheldForParty.length === 1 ? "it is" : "they are"
-            } listed below and remain fully visible on the contact record.`
-          : `AE surfaced this contact because your own records show no recorded contact with them${
-              lastActivity ? ` for ${daysSince(lastActivity)} days` : " at all"
-            }, and AE's threshold for "gone quiet" is ${COLD_CONTACT_THRESHOLD_DAYS} days. There is nothing more specific than that on file — this is a gap in the relationship, not evidence about this person.`,
+      headline: coldContactHeadline(lastActivity, relatedSignals),
       // Nothing to put in the agent's mouth. A gap in a record is not a
       // conversation starter, and inventing one here would be the exact
       // over-reach every narrative in signalRanking.ts is written to avoid.
@@ -1642,7 +1713,7 @@ export async function getGrowTodaySummary(
       confidenceBand: null,
       confidenceBandLabel: null,
       factors: [],
-      relatedSignals: withheldForParty.map((c) => toRelatedSignal(c, "withheld_by_daily_cap")),
+      relatedSignals,
     };
 
     actions.push({
@@ -1664,7 +1735,7 @@ export async function getGrowTodaySummary(
       dueAt: null,
       lastActivityAt: lastActivity ? lastActivity.toISOString() : null,
       availableActions,
-      rankScore: rankColdRelationship(lastActivity ? daysSince(lastActivity) : null),
+      rankScore: ruleDRankByParty.get(r.partyId) ?? rankColdRelationship(lastActivity ? daysSince(lastActivity) : null),
       confidenceBand: null,
       // Always "contactable" here: a suppressed contact was withheld above.
       contactability: "contactable",

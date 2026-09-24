@@ -31,6 +31,7 @@ import {
   PER_PARTY_SIGNAL_SELECTOR,
   compareSignalStrength,
   rankSignal,
+  ruleDWinsOverSignal,
   type RankableSignal,
   type SignalContactState,
 } from "../grow/signalRanking.js";
@@ -207,6 +208,15 @@ test("F-3 — the selector genuinely disagrees with signal-type weight, so choos
     compareSignalStrength({ score: reEngagement.score, rowId: 2 }, { score: longTenure.score, rowId: 1 }) < 0,
     "and the implemented selector follows rankScore",
   );
+});
+
+test("F-5 — Rule D wins the one-card contest only when its rank is strictly higher", () => {
+  // A tie keeps the signal. It is the more specific card, which is why a
+  // surfaced signal still suppresses the generic cold nudge.
+  assert.equal(ruleDWinsOverSignal(38, 34), true, "a never-contacted cold card (38) beats a weak Emerging signal");
+  assert.equal(ruleDWinsOverSignal(38, 38), false, "an equal score keeps the signal");
+  assert.equal(ruleDWinsOverSignal(38, 48), false, "a stronger signal still suppresses Rule D");
+  assert.equal(ruleDWinsOverSignal(37, 34), true, "a long-cold relationship still beats a weaker signal");
 });
 
 /* =====================================================================

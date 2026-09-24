@@ -22,7 +22,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { db, entitlementGrants, growOpportunitySignals, parties } from "@aee/db";
+import { db, entitlementGrants, growOpportunitySignals, growRelationships, parties } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { MAX_PRIORITY_ACTIONS } from "../../lib/growToday.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
@@ -335,6 +335,227 @@ test("F-5 — a cold-contact card carries an explanation, with NO confidence ban
   assert.match(card.whyItMatters.caution, /does not know that none happened/i, "the caution names the limit of what AE actually knows");
   // The card itself still carries no confidence band either, exactly as before.
   assert.equal(card.confidenceBand, null);
+});
+
+const RELATED_SIGNAL_SHAPE = [
+  "confidenceBand",
+  "confidenceBandLabel",
+  "explanation",
+  "rankScore",
+  "relationship",
+  "signalId",
+  "signalType",
+  "title",
+];
+
+function assertRelatedSignalShape(related: any) {
+  assert.deepEqual(
+    Object.keys(related).sort(),
+    RELATED_SIGNAL_SHAPE,
+    "dropping a field from the related-signal shape drops the evidence an agent reads",
+  );
+  assert.equal(typeof related.explanation, "string");
+  assert.ok(related.explanation.length > 0, "the stored explanation is the evidence; an empty string is a drop");
+  assert.equal(typeof related.rankScore, "number");
+  assert.equal(typeof related.signalId, "number");
+}
+
+test("F-5 — when Rule D outranks a signal, the cold card keeps that signal's explanation, and a second read returns the same evidence", async () => {
+  // Two weak Emerging signals for one never-contacted owner. Both score below
+  // Rule D's never-contacted rank (38): nearby sales is 34, planning activity
+  // is 35. Before F-5 the higher of those two became the card and Rule D was
+  // suppressed, so the cold card — when it was the survivor for any other
+  // reason — did not carry the signal that lost. The sibling must survive
+  // too: keeping only the winner's explanation would still drop evidence.
+  const fresh = await createBrokerageWithUsers(baseUrl, `W2A F5 Score ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.propertyIntelligence.read");
+
+    const [party] = await db
+      .insert(parties)
+      .values({ brokerageId: fresh.brokerageId, firstName: "Nora", lastName: "NeverContacted" })
+      .returning({ id: parties.id });
+    const [relationship] = await db
+      .insert(growRelationships)
+      .values({
+        brokerageId: fresh.brokerageId,
+        partyId: party.id,
+        propertyId: null,
+        relationshipType: "owner",
+        status: "Active",
+      })
+      .returning({ id: growRelationships.id });
+
+    const nearbyExplanation = "Nearby sales fixture kept as evidence when Rule D wins.";
+    const planningExplanation = "Planning activity fixture kept as evidence when Rule D wins.";
+    const [nearby, planning] = await db
+      .insert(growOpportunitySignals)
+      .values([
+        {
+          brokerageId: fresh.brokerageId,
+          partyId: party.id,
+          propertyId: null,
+          signalType: "recent_nearby_sales_activity",
+          title: "Recent nearby sales activity",
+          explanation: nearbyExplanation,
+          evidence: {},
+          source: "internal",
+          confidenceBand: "Emerging",
+          dedupeKey: `f5-score-nearby-${suffix}`,
+        },
+        {
+          brokerageId: fresh.brokerageId,
+          partyId: party.id,
+          propertyId: null,
+          signalType: "development_planning_activity",
+          title: "Development or planning activity",
+          explanation: planningExplanation,
+          evidence: {},
+          source: "internal",
+          confidenceBand: "Emerging",
+          dedupeKey: `f5-score-planning-${suffix}`,
+        },
+      ] as any)
+      .returning({ id: growOpportunitySignals.id });
+
+    const first = await fetchToday(fresh.agent.cookie);
+    assert.equal(first.status, 200);
+    const cardsForParty = first.body.priorityActions.filter((a: any) => a.partyId === party.id);
+    assert.equal(cardsForParty.length, 1, "Rule D and the signals are one card, not one card per signal");
+    const card = cardsForParty[0];
+    assert.equal(card.id, `relationship:${relationship.id}`);
+    assert.equal(card.type, "relationship_cold");
+    assert.equal(card.confidenceBand, null, "winning the contest must not put a signal band on the cold card");
+    assert.deepEqual(card.whyItMatters.factors, []);
+    assert.equal(card.whyItMatters.confidenceBand, null);
+    assert.doesNotMatch(card.whyItMatters.headline, /nothing more specific/i);
+    assert.match(card.whyItMatters.headline, /card that was kept/);
+
+    const related = card.whyItMatters.relatedSignals;
+    assert.equal(related.length, 2, "the losing signal and the sibling folded into it both stay on the cold card");
+    for (const entry of related) {
+      assertRelatedSignalShape(entry);
+      assert.equal(entry.relationship, "consolidated_into_this_card");
+      assert.ok(entry.rankScore < card.rankScore, "Rule D won on rank, so each carried signal scores below the cold card");
+    }
+    const byId = new Map<number, any>(related.map((entry: any) => [entry.signalId, entry]));
+    assert.equal(byId.get(nearby.id)?.explanation, nearbyExplanation);
+    assert.equal(byId.get(planning.id)?.explanation, planningExplanation);
+    assert.equal(byId.get(nearby.id)?.signalType, "recent_nearby_sales_activity");
+    assert.equal(byId.get(planning.id)?.signalType, "development_planning_activity");
+    assert.ok(!first.body.priorityActions.some((a: any) => a.id === `signal:${nearby.id}` || a.id === `signal:${planning.id}`));
+
+    const second = await fetchToday(fresh.agent.cookie);
+    const again = second.body.priorityActions.find((a: any) => a.id === card.id);
+    assert.deepEqual(
+      again.whyItMatters.relatedSignals,
+      related,
+      "a second read of the same day must return the same signal evidence; dropping it on redelivery is the regression",
+    );
+    assert.equal(again.whyItMatters.headline, card.whyItMatters.headline);
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
+});
+
+test("F-5 — when the Emerging cap lets Rule D win over a stronger signal, the cold card still keeps that signal's explanation", async () => {
+  // Eleven identical Emerging long-tenure signals, each on its own never-contacted
+  // owner. Tenure of 20 years scores well above Rule D (60 vs 38), so the cold
+  // card wins only because the cap of 10 holds the weakest back. The attachment
+  // has to be the cap relationship, and the stored explanation has to survive
+  // — a headline that merely says "held back" without the signal's own words
+  // is the drop this test exists to fail on.
+  const fresh = await createBrokerageWithUsers(baseUrl, `W2A F5 Cap ${suffix}`);
+  try {
+    await grant(fresh.brokerageId, "grow.access");
+    await grant(fresh.brokerageId, "grow.propertyIntelligence.read");
+
+    const contactRows = Array.from({ length: 11 }, (_, i) => ({
+      brokerageId: fresh.brokerageId,
+      firstName: "Cap",
+      lastName: `Owner${i}`,
+    }));
+    const insertedParties = await db.insert(parties).values(contactRows).returning({ id: parties.id });
+    const relationshipRows = await db
+      .insert(growRelationships)
+      .values(
+        insertedParties.map((party) => ({
+          brokerageId: fresh.brokerageId,
+          partyId: party.id,
+          propertyId: null,
+          relationshipType: "owner",
+          status: "Active",
+        })),
+      )
+      .returning({ id: growRelationships.id, partyId: growRelationships.partyId });
+
+    const signalRows = insertedParties.map((party, i) => ({
+      brokerageId: fresh.brokerageId,
+      partyId: party.id,
+      propertyId: null,
+      signalType: "long_ownership_tenure",
+      title: "Long ownership tenure",
+      explanation: `Cap-held tenure explanation ${i} for party ${party.id}.`,
+      evidence: { approximateTenureYears: 20 },
+      source: "internal",
+      confidenceBand: "Emerging",
+      dedupeKey: `f5-cap-${suffix}-${i}`,
+    }));
+    const insertedSignals = await db
+      .insert(growOpportunitySignals)
+      .values(signalRows as any)
+      .returning({ id: growOpportunitySignals.id, partyId: growOpportunitySignals.partyId, explanation: growOpportunitySignals.explanation });
+
+    const withheld = insertedSignals.reduce((highest, row) => (row.id > highest.id ? row : highest));
+    const withheldRelationship = relationshipRows.find((row) => row.partyId === withheld.partyId);
+    assert.ok(withheldRelationship, "the withheld signal's party has the cold relationship Rule D will emit");
+
+    const first = await fetchToday(fresh.agent.cookie);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.signalSummary.emergingSurfaced, 10);
+    assert.equal(first.body.signalSummary.emergingWithheld, 1);
+
+    assert.ok(
+      !first.body.priorityActions.some((a: any) => a.id === `signal:${withheld.id}`),
+      "the capped signal must not also emit its own card",
+    );
+    const card = first.body.priorityActions.find((a: any) => a.id === `relationship:${withheldRelationship.id}`);
+    assert.ok(card, "Rule D is the card that survives the cap");
+    assert.equal(card.type, "relationship_cold");
+    assert.equal(card.confidenceBand, null);
+    assert.deepEqual(card.whyItMatters.factors, []);
+    assert.match(card.whyItMatters.headline, /today's limit held back/);
+    assert.doesNotMatch(card.whyItMatters.headline, /nothing more specific/i);
+
+    const related = card.whyItMatters.relatedSignals;
+    assert.equal(related.length, 1);
+    assertRelatedSignalShape(related[0]);
+    assert.equal(related[0].signalId, withheld.id);
+    assert.equal(related[0].explanation, withheld.explanation);
+    assert.equal(related[0].signalType, "long_ownership_tenure");
+    assert.equal(related[0].relationship, "withheld_by_daily_cap");
+    assert.ok(
+      related[0].rankScore > card.rankScore,
+      "the cap, not the rank, is why Rule D won — the signal still outscores the cold card",
+    );
+
+    for (const signal of insertedSignals) {
+      if (signal.id === withheld.id) continue;
+      assert.ok(first.body.priorityActions.some((a: any) => a.id === `signal:${signal.id}`), "a signal inside the cap still surfaces");
+      const surfacedRelationship = relationshipRows.find((row) => row.partyId === signal.partyId);
+      assert.ok(
+        !first.body.priorityActions.some((a: any) => a.id === `relationship:${surfacedRelationship?.id}`),
+        "a surfaced signal still suppresses Rule D for that contact",
+      );
+    }
+
+    const second = await fetchToday(fresh.agent.cookie);
+    const again = second.body.priorityActions.find((a: any) => a.id === card.id);
+    assert.deepEqual(again.whyItMatters.relatedSignals, related, "redelivery of Today must not drop the capped signal's evidence");
+  } finally {
+    await cleanupBrokerages([fresh.brokerageId]);
+  }
 });
 
 /* =====================================================================
