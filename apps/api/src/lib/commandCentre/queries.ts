@@ -52,6 +52,126 @@ import type {
 const COMING_UP_HORIZON_DAYS = 7;
 const MAX_ITEMS_PER_SECTION = 50;
 
+/**
+ * I-14. drizzle's `inArray` is one bind parameter per id. Reusing every
+ * property id in the brokerage as that list, once per fan-out query, is
+ * unbounded. 500 stays far under Postgres's 65535-parameter limit. A scope
+ * at or under this size is one statement per table — the same shape a
+ * normal brokerage already had — except `automation_tasks`, which is one
+ * read for both ACTIVE and COMPLETED instead of two.
+ */
+export const COMMAND_CENTRE_ID_CHUNK = 500;
+
+export function chunkIds<T>(ids: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < ids.length; i += size) chunks.push(ids.slice(i, i + size));
+  return chunks;
+}
+
+/**
+ * Production always uses {@link COMMAND_CENTRE_ID_CHUNK}. A test may pass a
+ * smaller positive integer so a handful of rows crosses a chunk boundary.
+ * The cap cannot be raised, and the override is ignored outside tests.
+ */
+export function resolveCommandCentreIdChunkSize(requested: number | undefined): number {
+  if (process.env.NODE_ENV !== "test" || requested === undefined) return COMMAND_CENTRE_ID_CHUNK;
+  if (!Number.isInteger(requested) || requested < 1) return COMMAND_CENTRE_ID_CHUNK;
+  return Math.min(requested, COMMAND_CENTRE_ID_CHUNK);
+}
+
+async function selectInChunks<T>(
+  ids: readonly number[],
+  chunkSize: number,
+  run: (chunk: number[]) => Promise<T[]>,
+): Promise<T[]> {
+  if (ids.length === 0) return [];
+  const rows: T[] = [];
+  for (const chunk of chunkIds(ids, chunkSize)) {
+    rows.push(...(await run(chunk)));
+  }
+  return rows;
+}
+
+async function loadCommandCentreProperties(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null,
+  chunkSize: number,
+): Promise<Property[]> {
+  if (restrictToPropertyIds === null) {
+    return db.select().from(properties).where(eq(properties.brokerageId, brokerageId));
+  }
+  // Set keeps first-seen order. A repeated id is one bind slot and cannot
+  // by itself open another chunk. The rows are still this brokerage's.
+  const ids = [...new Set(restrictToPropertyIds)];
+  return selectInChunks(ids, chunkSize, (chunk) =>
+    db
+      .select()
+      .from(properties)
+      .where(and(eq(properties.brokerageId, brokerageId), inArray(properties.id, chunk))),
+  );
+}
+
+type ExceptionListFilters = Parameters<typeof listBrokerageExceptions>[3];
+
+function exceptionPageRank(severity: string): number {
+  switch (severity) {
+    case "CRITICAL":
+      return 4;
+    case "AT_RISK":
+      return 3;
+    case "ATTENTION":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Administrators pass null and this is one brokerage-scoped read, with no
+ * property-id bind list. A restrict list at or under the chunk size is the
+ * same single call as before. A longer list is partitioned, and each chunk
+ * keeps the page's severity-then-id order so the merged page is the same
+ * top slice.
+ */
+async function listCommandCentreExceptions(
+  brokerageId: number,
+  canViewFinancials: boolean,
+  restrictToPropertyIds: number[] | null,
+  filters: ExceptionListFilters,
+  chunkSize: number,
+): Promise<Awaited<ReturnType<typeof listBrokerageExceptions>>> {
+  if (restrictToPropertyIds === null || restrictToPropertyIds.length <= chunkSize) {
+    return listBrokerageExceptions(brokerageId, canViewFinancials, restrictToPropertyIds, filters);
+  }
+  const ids = [...new Set(restrictToPropertyIds)];
+  if (ids.length <= chunkSize) {
+    return listBrokerageExceptions(brokerageId, canViewFinancials, ids, filters);
+  }
+  const window = filters.limit + filters.offset;
+  const pages = [];
+  for (const chunk of chunkIds(ids, chunkSize)) {
+    pages.push(
+      await listBrokerageExceptions(brokerageId, canViewFinancials, chunk, {
+        ...filters,
+        limit: window,
+        offset: 0,
+      }),
+    );
+  }
+  const merged = pages.flatMap((page) => page.exceptions).sort((a, b) => {
+    const bySeverity = exceptionPageRank(b.severity) - exceptionPageRank(a.severity);
+    if (bySeverity !== 0) return bySeverity;
+    if (a.id === b.id) return 0;
+    return a.id < b.id ? -1 : 1;
+  });
+  return {
+    exceptions: merged.slice(filters.offset, filters.offset + filters.limit),
+    total: pages.reduce((sum, page) => sum + page.total, 0),
+    limit: filters.limit,
+    offset: filters.offset,
+  };
+}
+
 export interface CommandCentreActor {
   id: number;
   role: string;
@@ -63,6 +183,11 @@ export interface GetCommandCentreOptions {
   now?: Date;
   canViewFinancials: boolean;
   restrictToPropertyIds: number[] | null; // null = whole brokerage (Brokerage Administrator)
+  /**
+   * Test-only smaller bind chunk. Ignored outside NODE_ENV=test and cannot
+   * exceed COMMAND_CENTRE_ID_CHUNK. The HTTP route does not set this.
+   */
+  idChunkSize?: number;
 }
 
 export async function getCommandCentre(
@@ -76,11 +201,8 @@ export async function getCommandCentre(
     return emptyResponse(now, timeZone, timeZoneSource, actor);
   }
 
-  const propertyConditions = [eq(properties.brokerageId, actor.brokerageId)];
-  if (opts.restrictToPropertyIds !== null) {
-    propertyConditions.push(inArray(properties.id, opts.restrictToPropertyIds));
-  }
-  const propertyRows = await db.select().from(properties).where(and(...propertyConditions));
+  const chunkSize = resolveCommandCentreIdChunkSize(opts.idChunkSize);
+  const propertyRows = await loadCommandCentreProperties(actor.brokerageId, opts.restrictToPropertyIds, chunkSize);
   if (propertyRows.length === 0) return emptyResponse(now, timeZone, timeZoneSource, actor);
 
   const propertyIds = propertyRows.map((p) => p.id);
@@ -88,11 +210,12 @@ export async function getCommandCentre(
   const addressOf = (id: number) => propertyById.get(id)?.formattedAddress ?? `Property ${id}`;
 
   // 1. Exception & Risk Engine -- authoritative (Section 16).
-  const exceptionPage = await listBrokerageExceptions(
+  const exceptionPage = await listCommandCentreExceptions(
     actor.brokerageId,
     opts.canViewFinancials,
     opts.restrictToPropertyIds,
     { status: ["OPEN", "ACKNOWLEDGED", "IN_PROGRESS", "AWAITING_EXTERNAL", "REOPENED"], limit: 200, offset: 0 },
+    chunkSize,
   );
   const coveredSourceIds = new Set<string>();
   for (const exc of exceptionPage.exceptions) {
@@ -108,11 +231,12 @@ export async function getCommandCentre(
 
   // Recently resolved exceptions feed Completed Today -- listBrokerageExceptions
   // above only returned open statuses by design.
-  const resolvedPage = await listBrokerageExceptions(
+  const resolvedPage = await listCommandCentreExceptions(
     actor.brokerageId,
     opts.canViewFinancials,
     opts.restrictToPropertyIds,
     { status: ["RESOLVED"], limit: 100, offset: 0 },
+    chunkSize,
   );
   for (const exc of resolvedPage.exceptions) {
     if (exc.resolvedAt && isSameLocalDay(new Date(exc.resolvedAt), now, timeZone)) {
@@ -121,7 +245,12 @@ export async function getCommandCentre(
   }
 
   // 2. Launch: campaign items, vendor approvals, launch plan target dates.
-  const campaignRows = await db.select().from(campaignItems).where(inArray(campaignItems.propertyId, propertyIds));
+  // I-14: each property-id (and, below, transaction-id) list is one chunk.
+  // Chunks run serially. Under COMMAND_CENTRE_ID_CHUNK this is one statement,
+  // identical to the previous single inArray.
+  const campaignRows = await selectInChunks(propertyIds, chunkSize, (chunk) =>
+    db.select().from(campaignItems).where(inArray(campaignItems.propertyId, chunk)),
+  );
   for (const c of campaignRows) {
     if (coveredSourceIds.has(String(c.id))) continue;
     if (c.status === "COMPLETE") {
@@ -140,7 +269,9 @@ export async function getCommandCentre(
     }
   }
 
-  const launchPlanRows = await db.select().from(launchPlans).where(inArray(launchPlans.propertyId, propertyIds));
+  const launchPlanRows = await selectInChunks(propertyIds, chunkSize, (chunk) =>
+    db.select().from(launchPlans).where(inArray(launchPlans.propertyId, chunk)),
+  );
   for (const plan of launchPlanRows) {
     if (coveredSourceIds.has(String(plan.id))) continue;
     if (plan.targetLaunchDate && !plan.actualLaunchDate) {
@@ -157,17 +288,21 @@ export async function getCommandCentre(
     }
   }
 
-  const vendorApprovalRows = await db
-    .select()
-    .from(vendorApprovals)
-    .where(and(inArray(vendorApprovals.propertyId, propertyIds), eq(vendorApprovals.status, "PENDING")));
+  const vendorApprovalRows = await selectInChunks(propertyIds, chunkSize, (chunk) =>
+    db
+      .select()
+      .from(vendorApprovals)
+      .where(and(inArray(vendorApprovals.propertyId, chunk), eq(vendorApprovals.status, "PENDING"))),
+  );
   for (const va of vendorApprovalRows) {
     if (coveredSourceIds.has(String(va.id))) continue;
     items.push(vendorApprovalToActionItem(va, addressOf, now, timeZone));
   }
 
   // 3. Transactions: settlement dates, contract conditions, accepted offers.
-  const transactionRows = await db.select().from(transactions).where(inArray(transactions.propertyId, propertyIds));
+  const transactionRows = await selectInChunks(propertyIds, chunkSize, (chunk) =>
+    db.select().from(transactions).where(inArray(transactions.propertyId, chunk)),
+  );
   const transactionById = new Map(transactionRows.map((t) => [t.id, t]));
   for (const t of transactionRows) {
     if (coveredSourceIds.has(String(t.id))) continue;
@@ -186,10 +321,11 @@ export async function getCommandCentre(
   }
 
   if (transactionRows.length > 0) {
-    const conditionRows = await db
-      .select()
-      .from(transactionConditions)
-      .where(inArray(transactionConditions.transactionId, transactionRows.map((t) => t.id)));
+    const conditionRows = await selectInChunks(
+      transactionRows.map((t) => t.id),
+      chunkSize,
+      (chunk) => db.select().from(transactionConditions).where(inArray(transactionConditions.transactionId, chunk)),
+    );
     for (const cond of conditionRows) {
       if (coveredSourceIds.has(String(cond.id))) continue;
       const txn = transactionById.get(cond.transactionId);
@@ -206,7 +342,9 @@ export async function getCommandCentre(
     }
   }
 
-  const offerRows = await db.select().from(offers).where(inArray(offers.propertyId, propertyIds));
+  const offerRows = await selectInChunks(propertyIds, chunkSize, (chunk) =>
+    db.select().from(offers).where(inArray(offers.propertyId, chunk)),
+  );
   for (const o of offerRows) {
     if (coveredSourceIds.has(String(o.id))) continue;
     if (o.status === "Accepted" && isSameLocalDay(o.createdAt, now, timeZone)) {
@@ -216,12 +354,28 @@ export async function getCommandCentre(
 
   // 4. Workflow Automation Engine: non-overdue active tasks (overdue ones
   // already became WORKFLOW_OPERATIONAL exceptions via rule G39) and tasks
-  // completed today.
-  const activeTaskRows = await db
-    .select()
-    .from(automationTasks)
-    .where(and(inArray(automationTasks.propertyId, propertyIds), eq(automationTasks.status, "ACTIVE")));
-  for (const t of activeTaskRows) {
+  // completed today. One read covers both statuses. COMPLETED rows are not
+  // dropped by coveredSourceIds; ACTIVE rows still are. SUPERSEDED and
+  // CANCELLED stay out of the read.
+  const taskRows = await selectInChunks(propertyIds, chunkSize, (chunk) =>
+    db
+      .select()
+      .from(automationTasks)
+      .where(
+        and(
+          inArray(automationTasks.propertyId, chunk),
+          inArray(automationTasks.status, ["ACTIVE", "COMPLETED"]),
+        ),
+      ),
+  );
+  for (const t of taskRows) {
+    if (t.status === "COMPLETED") {
+      if (t.completedAt && isSameLocalDay(t.completedAt, now, timeZone)) {
+        items.push(automationTaskToActionItem(t, addressOf, now, timeZone, "completedToday"));
+      }
+      continue;
+    }
+    if (t.status !== "ACTIVE") continue;
     if (coveredSourceIds.has(String(t.id))) continue;
     if (!t.dueAt) continue;
     if (isOverdueLocal(t.dueAt, now, timeZone)) continue;
@@ -231,23 +385,23 @@ export async function getCommandCentre(
       items.push(automationTaskToActionItem(t, addressOf, now, timeZone, "comingUp"));
     }
   }
-  const completedTaskRows = await db
-    .select()
-    .from(automationTasks)
-    .where(and(inArray(automationTasks.propertyId, propertyIds), eq(automationTasks.status, "COMPLETED")));
-  for (const t of completedTaskRows) {
-    if (t.completedAt && isSameLocalDay(t.completedAt, now, timeZone)) {
-      items.push(automationTaskToActionItem(t, addressOf, now, timeZone, "completedToday"));
-    }
-  }
 
   // 5. Generic ready-to-act workflow steps -- no due date, capped (Section 25).
-  const readySteps = await db
-    .select({ step: workflowSteps, workflow: workflows })
-    .from(workflowSteps)
-    .innerJoin(workflows, eq(workflowSteps.workflowId, workflows.id))
-    .where(and(inArray(workflows.propertyId, propertyIds), eq(workflowSteps.status, "Ready")))
-    .limit(MAX_ITEMS_PER_SECTION);
+  // The cap is across the whole load. A single chunk (the normal case) is
+  // one statement with limit 50, matching the previous query. Further chunks
+  // are read only while the cap still has room.
+  const readySteps: Array<{ step: typeof workflowSteps.$inferSelect; workflow: typeof workflows.$inferSelect }> = [];
+  for (const chunk of chunkIds(propertyIds, chunkSize)) {
+    const remaining = MAX_ITEMS_PER_SECTION - readySteps.length;
+    if (remaining <= 0) break;
+    const part = await db
+      .select({ step: workflowSteps, workflow: workflows })
+      .from(workflowSteps)
+      .innerJoin(workflows, eq(workflowSteps.workflowId, workflows.id))
+      .where(and(inArray(workflows.propertyId, chunk), eq(workflowSteps.status, "Ready")))
+      .limit(remaining);
+    readySteps.push(...part);
+  }
   for (const row of readySteps) {
     items.push(workflowStepToActionItem(row.step, row.workflow, addressOf, now, timeZone, actor.brokerageId));
   }
