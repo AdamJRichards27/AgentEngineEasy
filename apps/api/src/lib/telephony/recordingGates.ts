@@ -2,6 +2,7 @@ import type { GrowCallSession } from "@aee/db";
 import type { ConsentTransaction } from "../consentControlsPersistence.js";
 import { resolveEntitlements } from "../entitlements/resolver.js";
 import {
+  CallConsentEligibilityError,
   evaluateOutboundCallEligibility,
   evaluateOutboundCallEligibilityInTransaction,
   evaluateOutboundCallEligibilityReadOnly,
@@ -166,6 +167,10 @@ export async function evaluateRecordingGates(input: {
   // regardless of its outcome. Kept separate from `outboundDecision` above on
   // purpose — see the comment at its assignment below.
   let recordedDecisionForEvidence: OutboundDecision | null = null;
+  // The non-transaction evaluator records the row and then throws. The id and
+  // reason code are on that error, not on a return value. Same evidence-only
+  // split: never copy this into `outboundDecision`.
+  let thrownEligibilityEvidence: { decisionId: number | null; reasonCode: string } | null = null;
   try {
     // Re-evaluate the canonical call decision now, so withdrawal/expiry and
     // policy retirement between creation and recording enable are observed.
@@ -215,16 +220,27 @@ export async function evaluateRecordingGates(input: {
         decidedByUserId: input.actor.id,
         jurisdiction: session.destinationCountry === "AU" || session.destinationCountry === "NZ" ? session.destinationCountry : null,
       });
-      // This evaluator THROWS on an ineligible decision, so an ineligible
-      // outcome lands in the catch below with no object to retain — a
-      // different shape of gap from the transaction branch's, and one that
-      // cannot be closed from inside this function. Left as-is deliberately.
+      // This evaluator throws CallConsentEligibilityError when the decision
+      // is not ELIGIBLE, after the row is already written. The catch below
+      // keeps that error's id and reason code. This assignment runs only
+      // when the evaluator returned, which is the eligible case.
       recordedDecisionForEvidence = outboundDecision;
     }
-  } catch {
+  } catch (err) {
     // The recording operation is fail-closed and must not make the base call
-    // fail.  The failed decision itself is already audited by the authority
-    // whenever evidence could be resolved.
+    // fail. A non-eligible outcome from evaluateOutboundCallEligibility is
+    // not a missing decision: the authority already wrote the row, then
+    // threw CallConsentEligibilityError carrying its id and reason code.
+    // Dropping those fields made outboundDecisionId and outboundReasonCode
+    // null precisely when the call was blocked. Keep them for evidence.
+    // Do not assign `outboundDecision` from the error. That object also
+    // feeds the legalPolicy gate, and a blocked decision must not satisfy it.
+    if (err instanceof CallConsentEligibilityError) {
+      thrownEligibilityEvidence = {
+        decisionId: err.decisionId,
+        reasonCode: err.reasonCode,
+      };
+    }
   }
 
   const entitlementKeys = await resolveEntitlements(input.actor).catch(() => new Set<string>());
@@ -319,10 +335,12 @@ export async function evaluateRecordingGates(input: {
       },
     },
     // AE GROW W3-B (D-4): sourced from the retained decision, not from the
-    // gate-feeding `outboundDecision`, so a blocked in-transaction evaluation
-    // still carries the id and reason code of the decision it just recorded.
-    outboundDecisionId: recordedDecisionForEvidence?.decision?.id ?? null,
-    outboundReasonCode: recordedDecisionForEvidence?.evaluation.reasonCode ?? null,
+    // gate-feeding `outboundDecision`. A blocked in-transaction evaluation
+    // still carries the id and reason code of the row it just recorded. A
+    // blocked non-transaction evaluation carries the same fields off the
+    // thrown CallConsentEligibilityError. Either way the reason survives.
+    outboundDecisionId: recordedDecisionForEvidence?.decision?.id ?? thrownEligibilityEvidence?.decisionId ?? null,
+    outboundReasonCode: recordedDecisionForEvidence?.evaluation.reasonCode ?? thrownEligibilityEvidence?.reasonCode ?? null,
   };
   // Exactly five recording gates are represented above.  `requested` is the
   // operation being attempted, not a sixth permission; the outbound decision
