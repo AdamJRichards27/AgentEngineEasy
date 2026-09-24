@@ -269,6 +269,7 @@ async function runExecution(requestId: number, brokerageId: number, caller: Exec
     userEmail: userRow.email,
     userRole: userRow.role as UserRole,
     actorType: row.actorType as ActorType,
+    actionRequestId: row.id,
   };
 
   let result: unknown;

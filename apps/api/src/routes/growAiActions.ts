@@ -2,7 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { listAwaitingApprovalForUser } from "../lib/ai/actionRequests.js";
-import { parseCallFollowupResourceId } from "../lib/growCallFollowups.js";
+import { callReviewProvenanceForRequests } from "../lib/growCallReviewLinks.js";
 
 // AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
 // Actions.
@@ -63,6 +63,12 @@ growAiActionsRouter.get(
     // internal, or anything cross-tenant (see AiStructuredResponse's
     // proposedCommitment field in lib/ai/types.ts for the same exclusion
     // list applied a second time here).
+    // E-8: call-review provenance is the grow_call_review_links row.
+    // A proposal with only the historical resourceId string has none.
+    const provenance = await callReviewProvenanceForRequests(
+      authedUser.brokerageId,
+      requests.map((r) => r.id),
+    );
     res.json({
       proposals: requests.map((r) => ({
         id: r.id,
@@ -72,9 +78,7 @@ growAiActionsRouter.get(
         status: r.status,
         createdAt: r.createdAt.toISOString(),
         expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
-        // Stage F4.1: ids-only provenance for call-review follow-ups, parsed
-        // from the server-built resourceId (null for any other proposal).
-        provenance: parseCallFollowupResourceId(r.resourceId),
+        provenance: provenance.get(r.id) ?? null,
       })),
     });
   },

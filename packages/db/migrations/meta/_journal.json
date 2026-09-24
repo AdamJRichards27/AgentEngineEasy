@@ -211,6 +211,13 @@
       "when": 1789975443794,
       "tag": "0029_ae_grow_w2c_ai_usage_interaction_index",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1790233468924,
+      "tag": "0030_low_whistler",
+      "breakpoints": true
     }
   ]
 }

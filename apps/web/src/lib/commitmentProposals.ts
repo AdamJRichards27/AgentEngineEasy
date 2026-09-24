@@ -14,9 +14,10 @@ import {
   showCommitmentNotFollowUp,
 } from "./growTerms";
 
-/** Ids-only provenance the API parses from a server-built resourceId. */
+/** Ids from grow_call_review_links. Not parsed from a resource id string. */
 export interface CommitmentProposalProvenance {
   source: "call_review";
+  callSessionId?: number;
   transcriptionId?: number;
   itemType?: string;
   itemId?: string;

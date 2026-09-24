@@ -84,6 +84,7 @@ import {
   growOpportunitySignals,
   growSignalSweepCursors,
   growCallSessions,
+  growCallReviewLinks,
   growCallRecordingConsents,
   growCallWebhookEvents,
   growContactChannelConsents,
@@ -495,7 +496,10 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * scoped by callSessionIds looked up from grow_call_sessions rather than
  * by `ids` directly for that one table. Internal ordering:
  * grow_call_webhook_events must be cleared before grow_call_sessions
- * (relatedCallSessionId, non-cascading); grow_call_sessions itself
+ * (relatedCallSessionId, non-cascading). E-8 grow_call_review_links
+ * references grow_call_sessions, grow_commitments, and ai_action_requests
+ * (all non-cascading), so that table is cleared at the start of this
+ * block, before sessions. grow_call_sessions itself
  * references grow_call_recording_consents.id (recordingConsentId,
  * non-cascading) and must therefore be cleared before
  * grow_call_recording_consents. Both grow_call_sessions and
@@ -627,6 +631,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
       sql`${growCallWebhookEvents.payload}->>'providerCallId' = ${session.providerCallId}`,
     ));
   }
+  await db.delete(growCallReviewLinks).where(inArray(growCallReviewLinks.brokerageId, ids));
   await db.delete(growCallSessions).where(inArray(growCallSessions.brokerageId, ids));
   await db.delete(growCallRecordingConsents).where(inArray(growCallRecordingConsents.brokerageId, ids));
   await db.delete(growConsentDecisions).where(inArray(growConsentDecisions.brokerageId, ids));

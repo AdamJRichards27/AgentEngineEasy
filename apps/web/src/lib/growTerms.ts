@@ -49,6 +49,25 @@ export const CALL_ITEMS_EMPTY = "No approved call commitments or call follow-ups
 export const CALL_ITEMS_LOADING = "Loading items from this call…";
 export const PROPOSE_SELECTED_LABEL = "Propose selected items";
 
+/** Source line on a proposal that came from a call commitment. */
+export const CALL_COMMITMENT_PROPOSAL_SOURCE =
+  "Call commitment from this review. Proposed as a commitment; it is not an open commitment until you approve, and it does not set a due follow-up.";
+
+/** Source line on a proposal that came from a call follow-up. */
+export const CALL_FOLLOW_UP_PROPOSAL_SOURCE =
+  "Call follow-up from this review. Proposed as a commitment; it is not an open commitment until you approve, and it does not set a due follow-up.";
+
+/**
+ * Stored proposals used to say "Commitment approved in call review" or
+ * "Follow-up approved in call review". Show the glossary sentence. A reason
+ * that already uses it is left as written.
+ */
+export function showCallProposalSource(reason: string): string {
+  if (reason === "Commitment approved in call review") return CALL_COMMITMENT_PROPOSAL_SOURCE;
+  if (reason === "Follow-up approved in call review") return CALL_FOLLOW_UP_PROPOSAL_SOURCE;
+  return reason;
+}
+
 export const PROPOSED_COMMITMENT_PREFIX = "Proposed commitment";
 export const COMMITMENT_CREATED_HEADING = "Commitment created";
 export const COMMITMENT_MAY_EXIST_HEADING = "Commitment may already have been created";

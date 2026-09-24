@@ -25,14 +25,16 @@
 // recordingConsentId) is withdrawn or cannot be resolved in this brokerage
 // for this party. Existing proposals are never cancelled here.
 //
-// Provenance (D3): no new columns. The action request's resourceId
-// (`transcription:<id>:item:<type>:<itemId>`) plus its reason/evidence
-// fields (ids only) and the strict audit rows below are the provenance.
+// Provenance (E-8): grow_call_review_links. One row per proposal, with
+// foreign keys to the call session, transcription, action request, and
+// (only after governed execution) the commitment. resourceId is only the
+// opaque dedupe token for the open-proposal unique index. This module
+// does not parse it. Proposing creates a commitment proposal. It does not
+// set a due follow-up, and it does not create an Open commitment.
 
-import { and, desc, eq, inArray, isNotNull, or } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import {
-  aiActionRequests,
   db,
   growActivities,
   growCallRecordingConsents,
@@ -50,10 +52,18 @@ import { summarizeErrorCause } from "./errorCause.js";
 import { explainEntitlementDecision } from "./entitlements/resolver.js";
 import {
   canActorAccessActionRequest,
-  findOpenActionRequestByResource,
+  DEFAULT_STUCK_EXECUTING_THRESHOLD_MS,
   proposeAIAction,
+  recoverStuckExecutingActionRequests,
   STUCK_EXECUTING_RECOVERED_MESSAGE,
+  transitionActionRequestToExpired,
 } from "./ai/actionRequests.js";
+import {
+  CALL_REVIEW_ITEM_ID_MAX,
+  ensureCallReviewLink,
+  listCallReviewLinkRequests,
+  type CallReviewLinkInput,
+} from "./growCallReviewLinks.js";
 import { LATE_COMPLETION_AFTER_RECOVERY_MESSAGE } from "./ai/executionGateway.js";
 import { isReasonableCommitmentDueDate } from "./ai/orchestrator.js";
 import type { PolicyActor } from "./ai/policyEngine.js";
@@ -65,7 +75,17 @@ import {
 
 export const GROW_CALL_FOLLOWUP_ACTION_KEY = "CREATE_GROW_COMMITMENT";
 export const MAX_FOLLOWUP_PROPOSALS_PER_REQUEST = 20;
-const MAX_ITEM_ID_LENGTH = 128;
+const MAX_ITEM_ID_LENGTH = CALL_REVIEW_ITEM_ID_MAX;
+
+// Shown on the proposal card as the call-review source. Wording matches
+// apps/web/src/lib/growTerms.ts (CALL_COMMITMENT_PROPOSAL_SOURCE /
+// CALL_FOLLOW_UP_PROPOSAL_SOURCE). A call follow-up and a call commitment
+// are proposed as commitments. Neither is a due follow-up, and neither is
+// an Open commitment until this proposal is approved and executed.
+export const CALL_COMMITMENT_PROPOSAL_REASON =
+  "Call commitment from this review. Proposed as a commitment; it is not an open commitment until you approve, and it does not set a due follow-up.";
+export const CALL_FOLLOW_UP_PROPOSAL_REASON =
+  "Call follow-up from this review. Proposed as a commitment; it is not an open commitment until you approve, and it does not set a due follow-up.";
 // Mirrors CREATE_GROW_COMMITMENT's description bound (actions/registry.ts).
 const MAX_DESCRIPTION_LENGTH = 2000;
 const AUDIT_RECORD_TYPE = "grow_call_followup";
@@ -116,25 +136,12 @@ export const proposeCallFollowupsBodySchema = z.object({
 
 export type ProposeCallFollowupItemInput = z.infer<typeof proposeCallFollowupsBodySchema>["items"][number];
 
+/**
+ * Opaque dedupe token for the open CREATE_GROW_COMMITMENT unique index.
+ * Not a join key: listing, provenance, and execution use grow_call_review_links.
+ */
 export function buildCallFollowupResourceId(transcriptionId: number, itemType: GrowCallFollowupItemType, itemId: string): string {
   return `transcription:${transcriptionId}:item:${itemType}:${itemId}`;
-}
-
-const RESOURCE_ID_PATTERN = /^transcription:(\d+):item:(COMMITMENT|FOLLOWUP):(.+)$/;
-
-/** Ids-only provenance parsed back out of a server-built resourceId. */
-export function parseCallFollowupResourceId(resourceId: string | null): {
-  source: "call_review";
-  transcriptionId: number;
-  itemType: GrowCallFollowupItemType;
-  itemId: string;
-} | null {
-  if (!resourceId) return null;
-  const match = RESOURCE_ID_PATTERN.exec(resourceId);
-  if (!match) return null;
-  const transcriptionId = Number(match[1]);
-  if (!Number.isSafeInteger(transcriptionId) || transcriptionId <= 0) return null;
-  return { source: "call_review", transcriptionId, itemType: match[2] as GrowCallFollowupItemType, itemId: match[3]! };
 }
 
 // ---------------------------------------------------------------------
@@ -353,40 +360,68 @@ function projectExisting(request: AiActionRequest | null, actor: PolicyActor): F
   return { visibility: "VISIBLE", actionRequest: summarizeFollowupActionRequest(request) };
 }
 
-async function latestRequestForResource(brokerageId: number, resourceId: string): Promise<AiActionRequest | null> {
-  const [row] = await db.select().from(aiActionRequests).where(and(
-    eq(aiActionRequests.brokerageId, brokerageId),
-    eq(aiActionRequests.actionKey, GROW_CALL_FOLLOWUP_ACTION_KEY),
-    eq(aiActionRequests.resourceId, resourceId),
-  )).orderBy(desc(aiActionRequests.createdAt), desc(aiActionRequests.id)).limit(1);
-  return row ?? null;
+// Same set as OPEN_ACTION_REQUEST_STATUSES in actionRequests.ts, and the
+// partial unique index on ai_action_requests. EXECUTING is never treated
+// as expired: its side effect may already be in flight.
+const OPEN_CALL_REVIEW_REQUEST_STATUSES = ["AWAITING_APPROVAL", "APPROVED", "EXECUTING"] as const;
+
+function callReviewItemKey(itemType: string, itemId: string): string {
+  return `${itemType}:${itemId}`;
 }
 
-// The most recent request for this item whose side effect ran or may have
-// run (see actionRequestSideEffectMayHaveRun), in any status.
-async function sideEffectRequestForResource(brokerageId: number, resourceId: string): Promise<AiActionRequest | null> {
-  const [row] = await db.select().from(aiActionRequests).where(and(
-    eq(aiActionRequests.brokerageId, brokerageId),
-    eq(aiActionRequests.actionKey, GROW_CALL_FOLLOWUP_ACTION_KEY),
-    eq(aiActionRequests.resourceId, resourceId),
-    or(
-      eq(aiActionRequests.status, "COMPLETED"),
-      isNotNull(aiActionRequests.executedAt),
-      inArray(aiActionRequests.errorMessage, SIDE_EFFECT_MARKER_MESSAGES),
-    ),
-  )).orderBy(desc(aiActionRequests.createdAt), desc(aiActionRequests.id)).limit(1);
-  return row ?? null;
+function isOpenCallReviewRequest(request: AiActionRequest, now: Date): boolean {
+  if (!OPEN_CALL_REVIEW_REQUEST_STATUSES.includes(request.status as (typeof OPEN_CALL_REVIEW_REQUEST_STATUSES)[number])) {
+    return false;
+  }
+  if (request.status === "EXECUTING") return true;
+  return request.expiresAt === null || request.expiresAt >= now;
 }
 
-// The item's governing request: an open one (expired rows are transitioned
-// first, audited, by the existing helper), else any request whose side
-// effect ran or may have run — COMPLETED, or FAILED after a late completion
-// / stuck-EXECUTING recovery. An item whose commitment already exists, or
-// may exist, is never proposed a second time.
-async function blockingRequestForResource(brokerageId: number, resourceId: string): Promise<AiActionRequest | null> {
-  const open = await findOpenActionRequestByResource(GROW_CALL_FOLLOWUP_ACTION_KEY, brokerageId, resourceId);
-  if (open) return open;
-  return sideEffectRequestForResource(brokerageId, resourceId);
+// Newest open link, else the newest link whose side effect ran or may
+// have run. Rows are already newest-first. An item whose commitment
+// already exists, or may exist, is never proposed a second time.
+function blockingCallReviewRequest(rows: AiActionRequest[], now: Date): AiActionRequest | null {
+  return rows.find((row) => isOpenCallReviewRequest(row, now))
+    ?? rows.find((row) => actionRequestSideEffectMayHaveRun(row))
+    ?? null;
+}
+
+// Expires stale open rows and recovers stuck EXECUTING rows for this
+// call-review scope, then returns the surviving requests grouped by item.
+// The scope is the link table, not resourceId.
+async function callReviewRequestsByItem(input: {
+  brokerageId: number;
+  transcriptionId: number;
+  itemType?: GrowCallFollowupItemType;
+  itemId?: string;
+}): Promise<Map<string, AiActionRequest[]>> {
+  const load = () => listCallReviewLinkRequests(input);
+  const first = await load();
+  const now = new Date();
+  for (const { request } of first) {
+    if ((request.status === "AWAITING_APPROVAL" || request.status === "APPROVED") &&
+        request.expiresAt !== null && request.expiresAt < now) {
+      await transitionActionRequestToExpired(request, request.status);
+    }
+  }
+  for (const { request } of first) {
+    if (request.status === "EXECUTING") {
+      await recoverStuckExecutingActionRequests(DEFAULT_STUCK_EXECUTING_THRESHOLD_MS, {
+        brokerageId: input.brokerageId,
+        actionKey: GROW_CALL_FOLLOWUP_ACTION_KEY,
+        requestId: request.id,
+      });
+    }
+  }
+  const fresh = await load();
+  const grouped = new Map<string, AiActionRequest[]>();
+  for (const { link, request } of fresh) {
+    const key = callReviewItemKey(link.itemType, link.itemId);
+    const list = grouped.get(key) ?? [];
+    list.push(request);
+    grouped.set(key, list);
+  }
+  return grouped;
 }
 
 // ---------------------------------------------------------------------
@@ -513,11 +548,16 @@ export async function listCallFollowupCandidates(input: {
   const source = await loadFollowupSource(input);
   const consentBlocked = await isCaptureConsentWithdrawn(source.session);
   const actor = policyActor(input.actor);
+  const requestsByItem = await callReviewRequestsByItem({
+    brokerageId: input.brokerageId,
+    transcriptionId: source.transcription.id,
+  });
+  const now = new Date();
   const candidates: CallFollowupCandidate[] = [];
   for (const item of source.approvedItems) {
-    const resourceId = buildCallFollowupResourceId(source.transcription.id, item.itemType, item.itemId);
-    const blocking = await blockingRequestForResource(input.brokerageId, resourceId);
-    const latest = blocking ?? await latestRequestForResource(input.brokerageId, resourceId);
+    const rows = requestsByItem.get(callReviewItemKey(item.itemType, item.itemId)) ?? [];
+    const blocking = blockingCallReviewRequest(rows, now);
+    const latest = blocking ?? rows[0] ?? null;
     candidates.push({
       itemType: item.itemType,
       itemId: item.itemId,
@@ -621,7 +661,13 @@ export async function proposeCallFollowups(input: {
   }
 
   const now = new Date();
-  const prepared: Array<{ item: ProposeCallFollowupItemInput & { itemType: GrowCallFollowupItemType }; description: string; dueAt: string; resourceId: string }> = [];
+  const prepared: Array<{
+    item: ProposeCallFollowupItemInput & { itemType: GrowCallFollowupItemType };
+    description: string;
+    dueAt: string;
+    resourceId: string;
+    callReview: CallReviewLinkInput;
+  }> = [];
   for (const item of items) {
     const approved = source.approvedItems.find((candidate) =>
       candidate.itemType === item.itemType && candidate.itemId === item.itemId);
@@ -644,6 +690,12 @@ export async function proposeCallFollowups(input: {
       description,
       dueAt: due.toISOString(),
       resourceId: buildCallFollowupResourceId(source.transcription.id, item.itemType, item.itemId),
+      callReview: {
+        callSessionId: source.session.id,
+        transcriptionId: source.transcription.id,
+        itemType: item.itemType,
+        itemId: item.itemId,
+      },
     });
   }
 
@@ -662,8 +714,14 @@ export async function proposeCallFollowups(input: {
   let policyDenial: string | null = null;
   let failure: unknown = null;
   try {
-    for (const { item, description, dueAt, resourceId } of prepared) {
-      const blocking = await blockingRequestForResource(input.brokerageId, resourceId);
+    for (const { item, description, dueAt, resourceId, callReview } of prepared) {
+      const rows = (await callReviewRequestsByItem({
+        brokerageId: input.brokerageId,
+        transcriptionId: source.transcription.id,
+        itemType: item.itemType,
+        itemId: item.itemId,
+      })).get(callReviewItemKey(item.itemType, item.itemId)) ?? [];
+      const blocking = blockingCallReviewRequest(rows, new Date());
       if (blocking) {
         const visible = canActorAccessActionRequest(blocking, actor);
         outcomes.push({
@@ -688,17 +746,25 @@ export async function proposeCallFollowups(input: {
           propertyId: null,
           opportunityId: null,
           reason: item.itemType === "COMMITMENT"
-            ? "Commitment approved in call review"
-            : "Follow-up approved in call review",
+            ? CALL_COMMITMENT_PROPOSAL_REASON
+            : CALL_FOLLOW_UP_PROPOSAL_REASON,
           evidenceSummary:
             `callSession:${source.session.id} transcription:${source.transcription.id} item:${item.itemType}:${item.itemId}`,
           originatingInteractionId: null,
           dedupeKey: resourceId,
+          callReview,
         },
       });
       if (!decision.allowed) {
         policyDenial = decision.reason;
         break;
+      }
+      if (request) {
+        await ensureCallReviewLink({
+          brokerageId: input.brokerageId,
+          actionRequestId: request.id,
+          ...callReview,
+        });
       }
       if (deduplicated) {
         outcomes.push({
