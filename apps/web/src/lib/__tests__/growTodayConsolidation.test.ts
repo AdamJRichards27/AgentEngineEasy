@@ -136,6 +136,35 @@ test("W2-A — a consolidated sibling is rendered on the winning card, with its 
   );
 });
 
+test("F-5 — a signal Rule D outranked is rendered on the cold card, and the cold card still has no priority score", () => {
+  const cold = coldCard({
+    whyItMatters: {
+      ...coldCard().whyItMatters!,
+      headline:
+        "AE surfaced this contact because your own records show no recorded contact with them at all. AE also holds a signal about this person, and this gap outranked it, so this is the card that was kept — that signal is listed below and remains fully visible on the contact record.",
+      relatedSignals: [
+        {
+          signalId: 77,
+          signalType: "recent_nearby_sales_activity",
+          title: "Recent nearby sales activity",
+          explanation: "A provider observation recorded recent sales activity relevant to this property.",
+          confidenceBand: "Emerging",
+          confidenceBandLabel: "Emerging",
+          rankScore: 34,
+          relationship: "consolidated_into_this_card",
+        },
+      ],
+    },
+  });
+
+  const lines = rankExplanationLines(cold);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /Recent nearby sales activity/);
+  assert.match(lines[0], /AE showed the stronger of the two/, "the agent is told the cold card won the contest");
+  assert.match(lines[0], /recent sales activity relevant to this property/, "the losing signal's own wording survives");
+  assert.equal(rankSummaryLine(cold), null, "carrying the losing signal must not put a priority score on the cold card");
+});
+
 test("W2-A — a signal held back by the daily cap is rendered on the cold card that replaced it, and says so", () => {
   const cold = coldCard({
     whyItMatters: {

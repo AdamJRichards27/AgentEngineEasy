@@ -744,6 +744,20 @@ export function compareSignalStrength(a: ComparableRankedSignal, b: ComparableRa
   return a.rowId - b.rowId;
 }
 
+/**
+ * F-5 — Rule D versus the party's best signal, on the same rankScore the
+ * rest of Grow Today already uses.
+ *
+ * Strictly greater: a tie keeps the signal. The signal is the more specific
+ * card, which is the rule a surfaced signal already followed when it
+ * suppressed the generic cold nudge. When this returns true, the cold card
+ * is the one card and the signal must ride on it as evidence — dropping the
+ * signal is how Rule D used to win without being able to explain itself.
+ */
+export function ruleDWinsOverSignal(coldScore: number, signalScore: number): boolean {
+  return coldScore > signalScore;
+}
+
 /** The bands are stored as identifiers; agents read prose. */
 export function confidenceBandLabel(band: string): string {
   switch (band) {
