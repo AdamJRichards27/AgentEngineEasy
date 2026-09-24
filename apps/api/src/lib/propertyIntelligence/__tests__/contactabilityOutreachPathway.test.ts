@@ -619,8 +619,7 @@ test("W2-D pathway: a suppressed contact is refused by the outbound-call eligibi
 
   // AND THE HONEST NOTE ON WHAT THIS DOES AND DOES NOT SHOW.
   //
-  // In a database with no consent rows — which is every pilot tenant, since
-  // the consent tables' only writers are on the telephony path — this gate
+  // In a database with no consent rows, this gate
   // refuses EVERY contact with REVIEW_REQUIRED / UNKNOWN_CONSENT, not only a
   // suppressed one. So the assertion above is not by itself evidence that the
   // gate discriminates on suppression; it is evidence of something stronger

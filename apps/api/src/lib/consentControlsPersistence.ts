@@ -669,9 +669,12 @@ export async function evaluateAndRecordConsentDecision(input: EvaluateAndRecordC
   return withConsentBrokerageLock(input.brokerageId, (tx) => evaluateAndRecordConsentDecisionInTransaction(tx, input));
 }
 
-// Short aliases keep the library usable by future callers without exposing a
-// route or tying the model to a particular transport.
-export const recordConsent = captureConsentState;
+// Short aliases for callers that want a shorter name. recordConsent is not
+// one of them. That name is the legacy Comms Hub writer in
+// lib/communications/consent.ts (communication_consent: destination-based
+// marketing and transactional consent). Grow channel-consent capture is
+// captureConsentState (grow_contact_channel_consents). Aliasing it as
+// recordConsent made the two writers look interchangeable (A-11).
 export const recordDncrObservation = recordDncrStatus;
 export const recordSuppression = recordConsentSuppression;
 export const decideConsent = evaluateAndRecordConsentDecision;

@@ -171,10 +171,11 @@ import {
 //
 // This filter is a READ. It resolves no consent policy, picks no channel, and
 // writes nothing — lib/propertyIntelligence/contactability.ts's own header
-// documents that boundary and nothing here widens it. For pilot tenants
-// (whose DNC/suppression tables are empty, since their only writers are on
-// the telephony path) it is two statements that match nothing and change no
-// behaviour at all.
+// documents that boundary and nothing here widens it. When a tenant has no
+// DNCR or suppression rows, it is two statements that match nothing and
+// change no behaviour at all. Those rows are appended by
+// lib/consentControlsPersistence.ts, and the Grow consent routes call those
+// writers. This read does not.
 //
 // STILL OUTSTANDING, AND NOT FIXABLE FROM THIS FILE:
 // lib/propertyIntelligence/signals.ts's listActiveSignalsForParty() — the

@@ -14,8 +14,9 @@
 // test, which made the whole Do Not Contact control inert in production —
 // lib/propertyIntelligence/contactability.ts and evaluateConsentDecision()
 // both read tables that nothing running in production could populate.
-// (contactability.ts's own header records this as the state of the world:
-// "their only writers are on the telephony path".)
+// contactability.ts's header, at the time, said the same thing about who
+// could write those tables. This router is that writer. The read path
+// still does not write.
 //
 // WHAT THIS FILE IS. The missing transport, and nothing else. Every write
 // below calls the existing library function UNCHANGED. There is no new
@@ -63,13 +64,14 @@
 // packages/db/src/schema/billing.ts, applied through the existing
 // requireEntitlement middleware exactly as the neighbouring Grow routers do.
 //
-// NAMING FOOTGUN, RECORDED SO IT IS NOT REPEATED. There are two unrelated
-// exported functions called recordConsent in this codebase:
-// lib/consentControlsPersistence.ts's (an alias of captureConsentState, over
-// grow_contact_channel_consents) and lib/communications/consent.ts's (a
-// different feature over a different table entirely). This file imports the
-// F2 writers by their full, unambiguous names from an explicit path and never
-// touches the communications one.
+// NAMING. lib/communications/consent.ts exports recordConsent for legacy
+// Comms Hub destination consent (communication_consent). This file imports
+// the F2 channel-consent writer as captureConsentState from
+// lib/consentControlsPersistence.ts. Do not alias that writer as
+// recordConsent. A-11 removed that alias so the two writers cannot share a
+// name. The other short aliases in that module (recordDncrObservation,
+// recordSuppression, decideConsent) are different names and are not this
+// writer. This file never imports the communications writer.
 
 import { Router } from "express";
 import { z } from "zod";
