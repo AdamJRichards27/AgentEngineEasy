@@ -28,6 +28,7 @@ import {
 } from "./stateMachine.js";
 import { resolveRecordingPermission } from "./consent.js";
 import { SandboxTelephonyProvider } from "./sandboxProvider.js";
+import type { TelephonyProvider } from "./provider.js";
 import { CallConsentEligibilityError, evaluateOutboundCallEligibility } from "./eligibility.js";
 import { evaluateRecordingGates, recordingEvidenceSummary } from "./recordingGates.js";
 
@@ -45,7 +46,19 @@ import { evaluateRecordingGates, recordingEvidenceSummary } from "./recordingGat
 // exists as a kill switch for a FUTURE real provider, but no real provider
 // adapter is implemented in F1 at all, so there is nothing for that flag to
 // unlock yet).
-const telephonyProvider = new SandboxTelephonyProvider();
+const sandboxTelephonyProvider = new SandboxTelephonyProvider();
+
+// The module owns one adapter. Production constructs only the sandbox.
+// A test may substitute another in-process adapter; that seam is refused
+// outside NODE_ENV=test and does not read or set LIVE_*_APPROVED.
+let telephonyProvider: TelephonyProvider = sandboxTelephonyProvider;
+
+export function setTelephonyProviderForTests(provider: TelephonyProvider | null): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("Telephony provider override is test-only.");
+  }
+  telephonyProvider = provider ?? sandboxTelephonyProvider;
+}
 
 export class GrowCallSessionValidationError extends Error {
   constructor(message: string) {
@@ -238,7 +251,7 @@ export async function createCallSession(input: CreateCallSessionInput): Promise<
       destinationRaw: normalized.raw,
       destinationNormalized: normalized.e164,
       destinationCountry: normalized.country,
-      provider: "sandbox",
+      provider: telephonyProvider.name,
       status: "DRAFT",
       recordingRequested,
       // Recording cannot be enabled before an in-call disclosure and
