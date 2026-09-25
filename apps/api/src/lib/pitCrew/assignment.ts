@@ -384,6 +384,13 @@ export interface WaitingOnSweepOptions {
   /** When set, only this brokerage is scanned. Omitted means every brokerage. */
   brokerageId?: number;
   /**
+   * Who the audit row names. When omitted, the ops identity above is used
+   * so a future scheduler tick stays attributable without a signed-in user.
+   * A human-triggered call passes the caller; that replaces the ops
+   * identity for the rows this invocation returns.
+   */
+  actor?: AuditActor;
+  /**
    * Invoked after a row is selected and before its return is applied.
    * Tests use this to move the row first and prove a version conflict
    * skips that row without aborting the rest of the sweep.
@@ -427,10 +434,12 @@ async function findOverdueWaitingOnAssignments(now: Date, brokerageId?: number):
 // Ops entry for the waiting-on expected-at sweep. Safe to call again: a row
 // already returned is IN_PROGRESS and is not selected. A version mismatch
 // (someone else returned or handed off the item between the read and the
-// write) skips that row and continues. Callers — a scheduler tick or an
-// ops invocation — pass no actor; the audit row uses the ops email above.
+// write) skips that row and continues. With no actor, the audit row uses
+// the ops email above. A human-triggered caller passes actor so the
+// timeline names that person instead of the ops identity.
 export async function sweepOverdueWaitingOn(options: WaitingOnSweepOptions = {}): Promise<WaitingOnSweepResult> {
   const now = options.now ?? new Date();
+  const actor = options.actor ?? PIT_CREW_WAITING_ON_SWEEP_ACTOR;
   const rows = await findOverdueWaitingOnAssignments(now, options.brokerageId);
   let returned = 0;
   let skipped = 0;
@@ -443,7 +452,7 @@ export async function sweepOverdueWaitingOn(options: WaitingOnSweepOptions = {})
     }
     if (options.beforeReturn) await options.beforeReturn(row);
     try {
-      await returnWaitingOnRow(row, row.version, PIT_CREW_WAITING_ON_SWEEP_ACTOR);
+      await returnWaitingOnRow(row, row.version, actor);
       returned += 1;
       returnedSourceRecordIds.push(row.sourceRecordId);
     } catch (err) {
