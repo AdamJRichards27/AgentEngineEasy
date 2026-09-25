@@ -4,10 +4,18 @@ import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
 export const offersRouter = Router();
+
+// R-F2 — authenticated offer routes are the same Run surface as transactions
+// (accept is the chokepoint that creates a transaction). requireEntitlement("run.access")
+// sits after requireAuth and before the handler's tenant check, matching
+// routes/transactions.ts. GET /public/:shareToken stays unauthenticated: it is
+// the buyer status link (no session), not an agent Run route.
+const requiresRunAccess = requireEntitlement("run.access");
 
 // AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
 // routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
@@ -103,7 +111,7 @@ const createOfferSchema = z.object({
     .optional(),
 });
 
-offersRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
+offersRouter.post("/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const parsed = createOfferSchema.safeParse(req.body);
@@ -133,7 +141,7 @@ offersRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
   }
 });
 
-offersRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
+offersRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -145,7 +153,7 @@ offersRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   res.json({ offers: rows });
 });
 
-offersRouter.get("/:id", requireAuth, async (req, res) => {
+offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
   const id = readIdParam(res, req.params.id, "offer");
   if (id === null) return;
   const user = req.authedUser!;
@@ -160,7 +168,7 @@ offersRouter.get("/:id", requireAuth, async (req, res) => {
 // The chokepoint that converts a Property into an active Transaction —
 // idempotent, and auto-declines every other still-open offer on the
 // property (see lib/transactions.ts acceptOffer).
-offersRouter.post("/:id/accept", requireAuth, async (req, res) => {
+offersRouter.post("/:id/accept", requireAuth, requiresRunAccess, async (req, res) => {
   const id = readIdParam(res, req.params.id, "offer");
   if (id === null) return;
   const user = req.authedUser!;
@@ -177,7 +185,7 @@ offersRouter.post("/:id/accept", requireAuth, async (req, res) => {
   }
 });
 
-offersRouter.post("/:id/decline", requireAuth, async (req, res) => {
+offersRouter.post("/:id/decline", requireAuth, requiresRunAccess, async (req, res) => {
   const id = readIdParam(res, req.params.id, "offer");
   if (id === null) return;
   const user = req.authedUser!;
@@ -194,7 +202,7 @@ offersRouter.post("/:id/decline", requireAuth, async (req, res) => {
   }
 });
 
-offersRouter.post("/:id/withdraw", requireAuth, async (req, res) => {
+offersRouter.post("/:id/withdraw", requireAuth, requiresRunAccess, async (req, res) => {
   const id = readIdParam(res, req.params.id, "offer");
   if (id === null) return;
   const user = req.authedUser!;

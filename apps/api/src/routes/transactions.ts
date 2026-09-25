@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, transactions, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   getTransactionByProperty,
   recordContractSigned,
@@ -20,6 +21,25 @@ import {
 import { listConditions, addCondition, rescheduleConditionDueDate, resolveCondition, recordExchange, maybeRecordUnconditional } from "../lib/transactionConditions.js";
 
 export const transactionsRouter = Router();
+
+// R-F2 — Run entitlement consistency. Transactions are part of the RUN product.
+// Every route below requires run.access alongside the existing auth, tenant, and
+// role gates, never instead of them. Same shape as Pit Crew (routes/pitCrew.ts):
+// a named requiresRunAccess middleware, applied on the route, not via Router.use()
+// (financial.ts explains why a blanket use() is unsafe on an unprefixed sibling;
+// this router is prefixed, but per-route gates stay the established convention).
+//
+// Ordering: requireAuth, then requiresRunAccess, then requireTransactionAccess
+// (and requireRole, where that gate already exists). The product check runs
+// before the transaction-row lookup so an unentitled caller is refused without
+// a same-brokerage existence oracle. requireTransactionAccess still runs for
+// every entitled caller, so a malformed id stays 400 and a cross-tenant id
+// stays 404 — the handler's accessCheckedTransactionId assumption is unchanged,
+// and requireRole stays after the tenant gate so an entitled non-admin naming
+// another brokerage's id still sees 404 rather than a role 403. Existing
+// brokerages keep access via the run.access backfill
+// (lib/billing/runAccessBackfill.ts) and the dev-login auto-grant (routes/auth.ts).
+const requiresRunAccess = requireEntitlement("run.access");
 
 // AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
 // routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
@@ -128,7 +148,7 @@ async function requireTransactionAccess(req: Request, res: Response, next: NextF
   next();
 }
 
-transactionsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
+transactionsRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -140,7 +160,7 @@ transactionsRouter.get("/by-property/:propertyId", requireAuth, async (req, res)
   res.json({ transaction });
 });
 
-transactionsRouter.get("/:id", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, id));
   res.json({ transaction });
@@ -159,13 +179,13 @@ async function handle(fn: () => Promise<unknown>, res: Response): Promise<void> 
   }
 }
 
-transactionsRouter.post("/:id/contract-signed", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/contract-signed", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => recordContractSigned({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
 
-transactionsRouter.post("/:id/finance-approved", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/finance-approved", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => recordFinanceApproved({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
@@ -173,7 +193,7 @@ transactionsRouter.post("/:id/finance-approved", requireAuth, requireTransaction
 
 const settlementScheduleSchema = z.object({ settlementDate: z.coerce.date() });
 
-transactionsRouter.post("/:id/settlement-schedule", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/settlement-schedule", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const parsed = settlementScheduleSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -193,13 +213,13 @@ transactionsRouter.post("/:id/settlement-schedule", requireAuth, requireTransact
   );
 });
 
-transactionsRouter.post("/:id/settlement-complete", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/settlement-complete", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
 
-transactionsRouter.post("/:id/calculate-commission", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/calculate-commission", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(
@@ -210,7 +230,7 @@ transactionsRouter.post("/:id/calculate-commission", requireAuth, requireTransac
 
 const fundsReceivedSchema = z.object({ amountCents: z.number().int().positive() });
 
-transactionsRouter.post("/:id/funds-received", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/funds-received", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const parsed = fundsReceivedSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -235,6 +255,7 @@ transactionsRouter.post("/:id/funds-received", requireAuth, requireTransactionAc
 transactionsRouter.post(
   "/:id/agent-paid",
   requireAuth,
+  requiresRunAccess,
   requireTransactionAccess,
   requireRole(...BROKERAGE_ADMIN_ROLES),
   async (req, res) => {
@@ -253,6 +274,7 @@ transactionsRouter.post(
 transactionsRouter.post(
   "/:id/close",
   requireAuth,
+  requiresRunAccess,
   requireTransactionAccess,
   requireRole(...BROKERAGE_ADMIN_ROLES),
   async (req, res) => {
@@ -265,7 +287,7 @@ transactionsRouter.post(
 
 // --- Stage E: Contract & Conditions (#118) ---
 
-transactionsRouter.get("/:id/conditions", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.get("/:id/conditions", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const conditions = await listConditions(id);
   res.json({ conditions });
@@ -273,7 +295,7 @@ transactionsRouter.get("/:id/conditions", requireAuth, requireTransactionAccess,
 
 const addConditionSchema = z.object({ description: z.string().min(1), dueDate: z.coerce.date().optional() });
 
-transactionsRouter.post("/:id/conditions", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/conditions", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const parsed = addConditionSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -301,7 +323,7 @@ const rescheduleConditionSchema = z.object({ newDueDate: z.coerce.date().nullabl
 // lib/transactionConditions.ts (loadTransactionInBrokerage) rather than via
 // requireTransactionAccess, since the route param here is a conditionId,
 // not a transactionId.
-transactionsRouter.post("/conditions/:conditionId/reschedule", requireAuth, async (req, res) => {
+transactionsRouter.post("/conditions/:conditionId/reschedule", requireAuth, requiresRunAccess, async (req, res) => {
   const conditionId = readIdParam(res, req.params.conditionId, "condition");
   if (conditionId === null) return;
   const parsed = rescheduleConditionSchema.safeParse(req.body);
@@ -328,7 +350,7 @@ const resolveConditionSchema = z.object({
   notes: z.string().optional(),
 });
 
-transactionsRouter.post("/conditions/:conditionId/resolve", requireAuth, async (req, res) => {
+transactionsRouter.post("/conditions/:conditionId/resolve", requireAuth, requiresRunAccess, async (req, res) => {
   const conditionId = readIdParam(res, req.params.conditionId, "condition");
   if (conditionId === null) return;
   const parsed = resolveConditionSchema.safeParse(req.body);
@@ -351,13 +373,13 @@ transactionsRouter.post("/conditions/:conditionId/resolve", requireAuth, async (
   }
 });
 
-transactionsRouter.post("/:id/exchange", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/exchange", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   await handle(() => recordExchange({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
 });
 
-transactionsRouter.post("/:id/unconditional", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/unconditional", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
   try {
@@ -386,7 +408,7 @@ const legalRepsSchema = z.object({
   buyerSolicitorPartyId: z.number().int().optional().nullable(),
 });
 
-transactionsRouter.post("/:id/legal-representatives", requireAuth, requireTransactionAccess, async (req, res) => {
+transactionsRouter.post("/:id/legal-representatives", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const parsed = legalRepsSchema.safeParse(req.body);
   if (!parsed.success) {
