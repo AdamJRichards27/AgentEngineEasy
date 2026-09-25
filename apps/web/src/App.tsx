@@ -1,18 +1,5 @@
+import { lazy, Suspense } from "react";
 import { Switch, Route, Link, Redirect, useLocation } from "wouter";
-import Home from "./pages/Home";
-import PropertiesList from "./pages/PropertiesList";
-import StartProperty from "./pages/StartProperty";
-import PropertyWorkspace from "./pages/PropertyWorkspace";
-import CommandCentre from "./pages/CommandCentre";
-import Grow from "./pages/Grow";
-import GrowImport from "./pages/GrowImport";
-import Exceptions from "./pages/Exceptions";
-import PitCrewCommandCentre from "./pages/PitCrewCommandCentre";
-import CommunicationsHub from "./pages/CommunicationsHub";
-import FinancialOperations from "./pages/FinancialOperations";
-import Settings from "./pages/Settings";
-import SettingsIntegrations from "./pages/SettingsIntegrations";
-import SettingsUsers from "./pages/SettingsUsers";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -20,6 +7,24 @@ import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
 import { buildProductNavLinks, resolveLandingRoute } from "./lib/productNav";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+
+// I-18 — each authenticated page is its own chunk. Pre-session pages stay
+// eager: they render before a session exists, outside the Suspense below,
+// and Login is the first paint for a signed-out visitor.
+const Home = lazy(() => import("./pages/Home"));
+const PropertiesList = lazy(() => import("./pages/PropertiesList"));
+const StartProperty = lazy(() => import("./pages/StartProperty"));
+const PropertyWorkspace = lazy(() => import("./pages/PropertyWorkspace"));
+const CommandCentre = lazy(() => import("./pages/CommandCentre"));
+const Grow = lazy(() => import("./pages/Grow"));
+const GrowImport = lazy(() => import("./pages/GrowImport"));
+const Exceptions = lazy(() => import("./pages/Exceptions"));
+const PitCrewCommandCentre = lazy(() => import("./pages/PitCrewCommandCentre"));
+const CommunicationsHub = lazy(() => import("./pages/CommunicationsHub"));
+const FinancialOperations = lazy(() => import("./pages/FinancialOperations"));
+const Settings = lazy(() => import("./pages/Settings"));
+const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
+const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -198,25 +203,27 @@ function SidebarLayout({
               contained fallback here (sidebar stays usable); navigating away
               resets it. */}
           <ErrorBoundary label="this page" resetKey={location}>
-            <Switch>
-              <Route path="/" component={Home} />
-              <Route path="/today" component={CommandCentre} />
-              <Route path="/properties" component={PropertiesList} />
-              <Route path="/properties/start" component={StartProperty} />
-              <Route path="/properties/:id" component={PropertyWorkspace} />
-              <Route path="/exceptions" component={Exceptions} />
-              <Route path="/communications" component={CommunicationsHub} />
-              <Route path="/financial" component={FinancialOperations} />
-              <Route path="/pit-crew" component={PitCrewCommandCentre} />
-              <Route path="/grow" component={Grow} />
-              <Route path="/grow/import" component={GrowImport} />
-              <Route path="/settings" component={Settings} />
-              <Route path="/settings/integrations" component={SettingsIntegrations} />
-              <Route path="/settings/users" component={SettingsUsers} />
-              <Route>
-                <p>Page not found.</p>
-              </Route>
-            </Switch>
+            <Suspense fallback={<div className="app-loading">Loading…</div>}>
+              <Switch>
+                <Route path="/" component={Home} />
+                <Route path="/today" component={CommandCentre} />
+                <Route path="/properties" component={PropertiesList} />
+                <Route path="/properties/start" component={StartProperty} />
+                <Route path="/properties/:id" component={PropertyWorkspace} />
+                <Route path="/exceptions" component={Exceptions} />
+                <Route path="/communications" component={CommunicationsHub} />
+                <Route path="/financial" component={FinancialOperations} />
+                <Route path="/pit-crew" component={PitCrewCommandCentre} />
+                <Route path="/grow" component={Grow} />
+                <Route path="/grow/import" component={GrowImport} />
+                <Route path="/settings" component={Settings} />
+                <Route path="/settings/integrations" component={SettingsIntegrations} />
+                <Route path="/settings/users" component={SettingsUsers} />
+                <Route>
+                  <p>Page not found.</p>
+                </Route>
+              </Switch>
+            </Suspense>
           </ErrorBoundary>
         </main>
       </div>
