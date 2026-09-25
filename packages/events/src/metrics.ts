@@ -178,6 +178,46 @@ export const METRIC_DEFINITIONS = {
     help: "A financial_reconciliations row was recorded with status VARIANCE — reported evidence (e.g. a mock payment-status webhook) disagrees with the payment request's expected amount/currency and needs human review (see FIN05_RECONCILIATION_VARIANCE_UNRESOLVED).",
     labels: { source: ["mock_integration_payment_status", "other"] },
   },
+  // AE GROW C-10 — AI provider and voice transcription observability.
+  // Process-level only. Provider labels are closed sets with an "other"
+  // fallback, so an unrecognised adapter name cannot open a series. Outcomes
+  // below have no "other" value: a bad call site throws in test/development
+  // (and becomes "unlabelled" in production) rather than inventing a series.
+  // Never a brokerageId, userId, raw model string, or correlationId.
+  ai_provider_call_total: {
+    help: "One attempt inside generateWithGateway (lib/ai/gateway.ts), by the adapter that was called and whether that attempt returned. Retries are separate attempts. Provider is mock, anthropic, or other — never a model id.",
+    labels: { provider: ["mock", "anthropic", "other"], outcome: ["success", "failure"] },
+  },
+  ai_provider_call_duration_ms: {
+    help: "Duration in milliseconds of one generateWithGateway attempt, by adapter and outcome.",
+    labels: { provider: ["mock", "anthropic", "other"], outcome: ["success", "failure"] },
+  },
+  ai_gateway_result_total: {
+    help: "Terminal result of one generateWithGateway call: the primary adapter answered, the fallback adapter answered after the primary's attempts failed, or the call failed. One series per call, not per attempt.",
+    labels: { result: ["primary_success", "fallback_success", "failed"] },
+  },
+  ai_provider_tokens_total: {
+    help: "Prompt and completion tokens reported by a successful generateWithGateway attempt, by adapter. Not a dollar amount and not a ceiling — estimated cost stays on the admin-only usage snapshot.",
+    labels: { provider: ["mock", "anthropic", "other"], kind: ["prompt", "completion"] },
+  },
+  voice_transcription_total: {
+    help: "A POST /api/ai/voice/transcribe request that reached provider.transcribe, by adapter and terminal outcome. Requests refused before the provider (entitlement, upload validation, rate limit, daily cap) are not counted. Provider is mock, deepgram, or other.",
+    labels: {
+      provider: ["mock", "deepgram", "other"],
+      outcome: ["success", "provider_error", "rejected_after_provider", "empty_transcript"],
+    },
+  },
+  voice_transcription_duration_ms: {
+    help: "Duration in milliseconds from the provider.transcribe call to its terminal outcome, for requests that reached the provider.",
+    labels: {
+      provider: ["mock", "deepgram", "other"],
+      outcome: ["success", "provider_error", "rejected_after_provider", "empty_transcript"],
+    },
+  },
+  voice_transcription_audio_seconds_total: {
+    help: "Sum of provider-reported audio durationSeconds on successful voice transcriptions. This is the speech-to-text spend meter. No per-request table. Not recorded on failure, and not recorded when the provider reports no duration.",
+    labels: { provider: ["mock", "deepgram", "other"] },
+  },
 } as const satisfies Record<string, MetricDefinition>;
 
 export type MetricName = keyof typeof METRIC_DEFINITIONS;
@@ -229,7 +269,14 @@ const gauges = new Map<string, GaugeSeries>();
 // metric's name (a suffix-guessing scheme silently misclassifies the next
 // metric someone adds with an unexpected name). A metric not listed in
 // either set below is a counter, the default and most common shape.
-const HISTOGRAM_METRICS = new Set<MetricName>(["http_request_duration_ms", "health_check_duration_ms", "communications_webhook_duration_ms", "financial_webhook_duration_ms"]);
+const HISTOGRAM_METRICS = new Set<MetricName>([
+  "http_request_duration_ms",
+  "health_check_duration_ms",
+  "communications_webhook_duration_ms",
+  "financial_webhook_duration_ms",
+  "ai_provider_call_duration_ms",
+  "voice_transcription_duration_ms",
+]);
 const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge"]);
 
 export function incrementCounter(metric: MetricName, labels: LabelValues = {}, by = 1): void {

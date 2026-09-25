@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { logger } from "@aee/events";
+import { incrementCounter, logger, observeHistogram } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { isRoleEnabled } from "../lib/ai/featureFlags.js";
 import { resolveBrokerageTier, isRoleEntitled } from "../lib/ai/entitlements.js";
@@ -108,6 +108,26 @@ const transcribeSchema = z.object({
 // already ran first and would have failed the request outright if the
 // provider's raw response was implausibly large in the first place.
 const MAX_RETURNED_TRANSCRIPT_LENGTH = 2000;
+
+type VoiceTranscriptionOutcome = "success" | "provider_error" | "rejected_after_provider" | "empty_transcript";
+
+// Recorded only after provider.transcribe has been entered. The provider
+// label is the adapter's name; the catalogue coerces anything outside
+// mock | deepgram | other. Audio seconds are the STT meter and are added
+// only on success when the provider reported a duration. No brokerage, user,
+// model, or correlation id is a label, and this function writes no row.
+function recordVoiceTranscription(
+  providerName: string,
+  outcome: VoiceTranscriptionOutcome,
+  durationMs: number,
+  audioSeconds: number | null,
+): void {
+  incrementCounter("voice_transcription_total", { provider: providerName, outcome });
+  observeHistogram("voice_transcription_duration_ms", durationMs, { provider: providerName, outcome });
+  if (outcome === "success" && audioSeconds !== null && Number.isFinite(audioSeconds) && audioSeconds >= 0) {
+    incrementCounter("voice_transcription_audio_seconds_total", { provider: providerName }, audioSeconds);
+  }
+}
 
 function mapVoiceUploadError(res: Response, error: VoiceUploadValidationError): void {
   const status = error.code === "AUDIO_TOO_LARGE" ? 413 : 400;
@@ -303,6 +323,7 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
       throw err;
     }
 
+    const providerStartedAt = Date.now();
     let result: TranscriptionResponse;
     try {
       // The MIME type the SERVER detected from the audio's own bytes is
@@ -315,6 +336,9 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
         correlationId,
       });
     } catch (err) {
+      const outcome: VoiceTranscriptionOutcome =
+        err instanceof TranscriptionProviderError && err.code === "empty_transcript" ? "empty_transcript" : "provider_error";
+      recordVoiceTranscription(provider.name, outcome, Date.now() - providerStartedAt, null);
       if (err instanceof TranscriptionProviderError) {
         mapTranscriptionProviderError(res, err);
         return;
@@ -329,6 +353,7 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
       assertProviderReportedDurationWithinLimit(result.durationSeconds);
       assertTranscriptSizeIsSane(result.transcript, result.provider);
     } catch (err) {
+      recordVoiceTranscription(provider.name, "rejected_after_provider", Date.now() - providerStartedAt, null);
       if (err instanceof VoiceUploadValidationError) {
         mapVoiceUploadError(res, err);
         return;
@@ -342,10 +367,12 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
 
     const trimmedTranscript = result.transcript.trim();
     if (trimmedTranscript.length === 0) {
+      recordVoiceTranscription(provider.name, "empty_transcript", Date.now() - providerStartedAt, null);
       res.status(422).json({ error: "No speech was detected in that recording. Try again, or type your question instead." });
       return;
     }
     const transcript = trimmedTranscript.slice(0, MAX_RETURNED_TRANSCRIPT_LENGTH);
+    recordVoiceTranscription(provider.name, "success", Date.now() - providerStartedAt, result.durationSeconds);
 
     // Privacy-safe operational metadata only — provider name, byte count,
     // duration, latency, a correlation id, brokerage/user ids. Never the
