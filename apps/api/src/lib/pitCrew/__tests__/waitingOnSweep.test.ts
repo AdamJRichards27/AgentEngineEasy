@@ -220,6 +220,29 @@ test("a second sweep is a no-op for an item already auto-returned", async () => 
   assert.equal(logs.length, 1, "re-running the sweep must not write a second ops audit row");
 });
 
+test("a supplied actor replaces the ops identity on the audit row", async () => {
+  const now = new Date();
+  const past = new Date(now.getTime() - 60 * 1000);
+  const { sourceRecordId } = await parkWaitingOn(past);
+  const actorEmail = "waiting-on-sweep-caller@example.com";
+
+  await sweepOverdueWaitingOn({
+    now,
+    brokerageId,
+    actor: { actorUserId: agent.user.id, actorEmail },
+  });
+
+  const logs = await db.select().from(auditLogs).where(and(
+    eq(auditLogs.recordType, "EXCEPTION"),
+    eq(auditLogs.recordId, sourceRecordId),
+    eq(auditLogs.action, "PC_WAITING_ON_RETURNED"),
+  ));
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0]!.userId, agent.user.id);
+  assert.equal(logs[0]!.userEmail, actorEmail);
+  assert.notEqual(logs[0]!.userEmail, PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL);
+});
+
 test("a version conflict skips that row and still returns the other overdue item", async () => {
   const now = new Date();
   const past = new Date(now.getTime() - 5 * 60 * 1000);

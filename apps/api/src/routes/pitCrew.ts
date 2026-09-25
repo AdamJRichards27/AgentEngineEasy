@@ -19,6 +19,7 @@
 
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { logger } from "@aee/events";
 import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getPitCrewWorkspace, getPitCrewTeam } from "../lib/pitCrew/queries.js";
@@ -31,6 +32,7 @@ import {
   completeWorkItem,
   releaseWorkItem,
   handoffWorkItem,
+  sweepOverdueWaitingOn,
   PitCrewTransitionError,
   PitCrewConcurrencyError,
   PitCrewPropertyMismatchError,
@@ -279,4 +281,33 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/note", requireAu
     actorType: "PIT_CREW",
   });
   res.json(result);
+});
+
+// R-F3: the human-triggered caller for sweepOverdueWaitingOn. Same gates as
+// every other Pit Crew route. brokerageId, the clock, and the audit actor
+// all come from the session -- the body is not read, so a client cannot name
+// another brokerage, pin "now", or impersonate the ops identity. Each
+// returned row is audited as the caller (user id + email). Omitting actor
+// on the sweep itself stays the ops identity for a future scheduler (R-F4);
+// this route always passes the caller. GET /pit-crew/workspace does not
+// sweep.
+pitCrewRouter.post("/pit-crew/ops/waiting-on/sweep", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  const user = req.authedUser!;
+  try {
+    const [dbUser] = await db.select({ email: users.email }).from(users).where(eq(users.id, user.id));
+    const result = await sweepOverdueWaitingOn({
+      brokerageId: user.brokerageId,
+      actor: { actorUserId: user.id, actorEmail: dbUser?.email },
+    });
+    logger.info("pit_crew_waiting_on_sweep_completed", {
+      brokerageId: user.brokerageId,
+      actorUserId: user.id,
+      scanned: result.scanned,
+      returned: result.returned,
+      skipped: result.skipped,
+    });
+    res.json(result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
 });
