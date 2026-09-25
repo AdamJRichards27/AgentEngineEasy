@@ -3,7 +3,7 @@ import { AnthropicAiProvider } from "./providers/anthropicProvider.js";
 import type { AiProvider } from "./providers/provider.js";
 import { AiProviderError } from "./types.js";
 import type { AiProviderRequest, AiProviderResponse } from "./types.js";
-import { logger } from "@aee/events";
+import { incrementCounter, logger, observeHistogram } from "@aee/events";
 import { mustForceMockAiProvider } from "../env.js";
 
 // AI Gateway: the one place that knows how to reach a model provider. Config is
@@ -60,7 +60,22 @@ export function loadAiGatewayConfig(): AiGatewayConfig {
 // configuration that is simply not yet approved.
 const unapprovedProviderWarned = new Set<string>();
 
+// Test-only. Production selection stays in buildProvider. A factory here
+// never reads LIVE_AI_PROVIDER_APPROVED or a credential — tests that need a
+// failing primary install an in-process adapter instead of opening the live gate.
+let providerFactoryForTests: ((name: string) => AiProvider) | null = null;
+
+export function setAiGatewayProviderForTests(factory: ((name: string) => AiProvider) | null): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setAiGatewayProviderForTests is only available when NODE_ENV=test");
+  }
+  providerFactoryForTests = factory;
+}
+
 function buildProvider(name: string): AiProvider {
+  if (process.env.NODE_ENV === "test" && providerFactoryForTests !== null) {
+    return providerFactoryForTests(name);
+  }
   if (name !== "mock" && mustForceMockAiProvider()) {
     // Once per process per requested provider — this runs on every request.
     if (!unapprovedProviderWarned.has(name)) {
@@ -89,15 +104,44 @@ export interface AiGenerateResult {
   primaryError?: string;
 }
 
+type GatewayResultLabel = "primary_success" | "fallback_success" | "failed";
+
+// One attempt. The label is the adapter's own name (mock | anthropic, or
+// whatever the test seam installed). The catalogue coerces anything else to
+// "other", so a raw model string cannot become a series. Tokens are recorded
+// only when the attempt returns; dollars are not a metric.
+async function generateOnce(provider: AiProvider, request: AiProviderRequest): Promise<AiProviderResponse> {
+  const startedAt = Date.now();
+  try {
+    const response = await provider.generate(request);
+    const durationMs = Date.now() - startedAt;
+    incrementCounter("ai_provider_call_total", { provider: provider.name, outcome: "success" });
+    observeHistogram("ai_provider_call_duration_ms", durationMs, { provider: provider.name, outcome: "success" });
+    incrementCounter("ai_provider_tokens_total", { provider: provider.name, kind: "prompt" }, response.usage.promptTokens);
+    incrementCounter("ai_provider_tokens_total", { provider: provider.name, kind: "completion" }, response.usage.completionTokens);
+    return response;
+  } catch (err) {
+    incrementCounter("ai_provider_call_total", { provider: provider.name, outcome: "failure" });
+    observeHistogram("ai_provider_call_duration_ms", Date.now() - startedAt, { provider: provider.name, outcome: "failure" });
+    throw err;
+  }
+}
+
+function recordGatewayResult(result: GatewayResultLabel): void {
+  incrementCounter("ai_gateway_result_total", { result });
+}
+
 // Retries the primary provider up to retryLimit times, then makes a single
 // attempt against the fallback provider. Every AiGenerateResult says which
 // provider actually answered so audit/telemetry is never silently blended.
+// Metrics for every caller are recorded here and nowhere else.
 export async function generateWithGateway(request: AiProviderRequest, config: AiGatewayConfig): Promise<AiGenerateResult> {
   const primary = buildProvider(config.provider);
   let lastError: unknown;
   for (let attempt = 0; attempt <= config.retryLimit; attempt++) {
     try {
-      const response = await primary.generate(request);
+      const response = await generateOnce(primary, request);
+      recordGatewayResult("primary_success");
       return { response, usedFallback: false };
     } catch (err) {
       lastError = err;
@@ -105,9 +149,16 @@ export async function generateWithGateway(request: AiProviderRequest, config: Ai
   }
   const primaryErrorMessage = lastError instanceof Error ? lastError.message : "unknown provider error";
   if (config.fallbackProvider === config.provider) {
+    recordGatewayResult("failed");
     throw new AiProviderError(config.provider, primaryErrorMessage);
   }
   const fallback = buildProvider(config.fallbackProvider);
-  const response = await fallback.generate(request);
-  return { response, usedFallback: true, primaryError: primaryErrorMessage };
+  try {
+    const response = await generateOnce(fallback, request);
+    recordGatewayResult("fallback_success");
+    return { response, usedFallback: true, primaryError: primaryErrorMessage };
+  } catch (err) {
+    recordGatewayResult("failed");
+    throw err;
+  }
 }

@@ -14,6 +14,11 @@ real metric name is grounded in the actual registry and can be scraped today; ev
 that describes an alert firing or a page going out describes the specification a real
 alerting system should implement against, not a live behaviour.
 
+The Step 2 closure pass stopped at twenty-three metrics. Five signal-sweep metrics were
+added after that. **C-10 (2026-09-26)** added seven more for AI provider calls and voice
+transcription. The catalogue now declares **thirty-five** metrics. Alert-ready conditions
+are **thirty-four** (§2, including §2a and §2b).
+
 As with the rest of this step's documentation, the original governing instruction's exact
 verbatim enumerated lists were not recoverable across an earlier context compaction. This
 revision keeps the same eleven SLI areas from the prior revision (they still hold up) and
@@ -91,11 +96,11 @@ cross-check against the instruction's named list.
 | 10 | Auth and tenant-isolation signal | cross-tenant rejection / auth-attack patterns | **now partially metric-backed**: `auth_security_event_total{event}` (invalid session token, revoked-session reuse, dev-login-disabled probing, auth rate-limiting — `middlewares/auth.ts`, `routes/auth.ts`, `middlewares/rateLimit.ts`) and `tenant_isolation_rejection_total{boundary}` for the three domains named in §0 item 1; the remaining inline-404 tenant checks are still log-based only, see §4 |
 | 11 | Build/test health (a process SLI, not a runtime one) | full regression suite pass rate over time, typecheck pass/fail | Measured manually per run today — see the completion report's test-evidence section for the current value; not exported as a runtime metric (it isn't a runtime signal) |
 | 12 | Background queue health | current backlog depth and oldest-item age per queue, distinct from the per-attempt dispatch counters in #4/#6 | **new:** `queue_backlog_size{queue}` / `queue_oldest_item_age_ms{queue}` — `lib/observability/queueGauges.ts`, covering `integration_outbox`, `financial_payment_outbox`, `communications_outbox`, sampled fresh (never accumulated) immediately before every `GET /api/internal/metrics` render |
-| 13 | AI action governance | allow/deny split of every AI action policy decision | **new:** `ai_action_decision_total{outcome}` — `lib/ai/policyEngine.ts`'s `evaluateAIAction` wrapper around the pre-existing `evaluateAIActionCore` |
+| 13 | AI action governance and provider observability | allow/deny split of every AI action policy decision; provider-call attempts, latency, gateway fallback, and tokens; voice transcription attempts, latency, and transcribed audio seconds | `ai_action_decision_total{outcome}` — `lib/ai/policyEngine.ts`. **C-10:** `ai_provider_call_total{provider,outcome}`, `ai_provider_call_duration_ms{provider,outcome}`, `ai_gateway_result_total{result}`, `ai_provider_tokens_total{provider,kind}` recorded inside `generateWithGateway` (`lib/ai/gateway.ts`), which is the one text-generation call site. `voice_transcription_total{provider,outcome}`, `voice_transcription_duration_ms{provider,outcome}`, `voice_transcription_audio_seconds_total{provider}` recorded in `routes/aiVoice.ts` only after `provider.transcribe`. Provider is `mock`, `anthropic`, or `other` for text, and `mock`, `deepgram`, or `other` for voice. No brokerage, user, model, or correlation id label. Dollars stay on the admin-only usage snapshot, not a metric. |
 | 14 | Workflow/automation execution health | automation-rule (and, by label, other workflow-family) execution failures | **new:** `workflow_execution_failure_total{workflow}` — wired at `lib/automation/engine.ts`'s rule-evaluation catch site; `ready_to_list`/`launch_plan`/`other` labels are declared but not yet wired at a throw site (see §4) |
 | 15 | Signal-sweep liveness and lock health | sweeps completing on schedule; refusals that are a leaked lock rather than an ordinary race; per-tenant failures isolated from whole-sweep failures | `property_signal_sweep_total{trigger,outcome}` / `property_signal_sweep_duration_ms{trigger}` — `lib/propertyIntelligence/sweep.ts`; **new in W1-D:** `property_signal_sweep_lock_orphaned_total{trigger,kind}` and `property_signal_sweep_brokerage_failure_total{kind}`. The same judgement is available on demand, without a scrape target, at `GET /api/grow/property-intelligence/ops/health` (Brokerage Administrator only). See §2a |
 
-## 2. Alert-ready conditions (31)
+## 2. Alert-ready conditions (34)
 
 Every condition below names the real metric or log signal it evaluates. **None of these
 page anyone today** — there is no alerting/paging pipeline in this repository — but each is
@@ -295,6 +300,41 @@ Project Owner decision and is out of scope here. The recommendation on the table
 instance out of rotation over a background job that raises reviewable indicators and
 contacts nobody.
 
+### 2b. AI provider calls and voice transcription (conditions 32–34)
+
+Added by AE GROW C-10. These series are process-level and closed. Text-generation
+`provider` is `mock`, `anthropic`, or `other`. Voice `provider` is `mock`, `deepgram`,
+or `other`. An unrecognised provider name is coerced to `other`. Outcomes have no
+`other` value, so a bad call site throws in test and development and does not open a
+free-form series. No label is a brokerage id, user id, raw model string, or correlation
+id. There is no dollar metric: estimated provider cost stays on the administrator-only
+`GET /api/ai/usage` snapshot. Token counters are not a ceiling.
+
+`ai_provider_call_total` and `ai_provider_call_duration_ms` are one observation per
+attempt inside `generateWithGateway` (a retry is another attempt). `ai_gateway_result_total`
+is one observation per call: `primary_success`, `fallback_success`, or `failed`.
+`ai_provider_tokens_total{kind}` (`prompt` or `completion`) increments only when an
+attempt returns. `voice_transcription_total` and `voice_transcription_duration_ms` count
+only a request that reached `provider.transcribe`, with outcome `success`,
+`provider_error`, `rejected_after_provider`, or `empty_transcript`.
+`voice_transcription_audio_seconds_total` sums `durationSeconds` on success. That is
+the speech-to-text spend meter, and it does not add a table. A refusal before the
+provider (entitlement, upload validation, rate limit, daily cap) is absent from these
+series. Call-transcription (`buildCallTranscriptionProvider`) is not this route and is
+not instrumented here. Both duration metrics are registered in `HISTOGRAM_METRICS`.
+
+32. `ai_gateway_result_total{result="fallback_success"}` share of gateway results
+    exceeds a sustained threshold (for example more than 10% over 15 minutes) → the
+    primary provider is failing and generation is being served by the fallback.
+33. `ai_provider_call_total{outcome="failure"}` share of attempts, or any sustained
+    `ai_gateway_result_total{result="failed"}`, rises above a small baseline →
+    generation is failing outright: the primary's attempts were exhausted and the
+    fallback did not answer.
+34. `voice_transcription_total{outcome="provider_error"}` share of transcriptions that
+    reached the provider exceeds a sustained threshold → speech-to-text is failing
+    after the request was accepted. `voice_transcription_audio_seconds_total` is the
+    spend reading for that same traffic. It is not itself an alert.
+
 ## 3. What it would take to make alerting real
 
 1. A scrape target and rule engine (Prometheus + Alertmanager, or a hosted equivalent like
@@ -376,7 +416,11 @@ boundaries; #11 workflow execution, 1 of 3 workflow families) — #8/#9's outbou
 already covered by #6, and the AI-governance category named separately from the numbered 13
 is also closed, bringing the total to 11 of 14 fully closed.
 
-Items in this section and §4 are the honest boundary of what "operational metrics with
-strict cardinality bounds" means in this codebase today: twenty-three real, wired,
-bounded-cardinality metrics backing fourteen SLIs and twenty-seven alert-ready conditions,
-with named, scoped-out extensions rather than a claim of exhaustive coverage.
+Items in this section and §4 are the honest boundary of what the Step 2 closure pass
+meant by "operational metrics with strict cardinality bounds": twenty-three metrics
+backing fourteen SLIs and twenty-seven alert-ready conditions, with named, scoped-out
+extensions rather than a claim of exhaustive coverage. The catalogue has since grown.
+C-10 brings it to **thirty-five** metrics and **thirty-four** alert-ready conditions.
+SLI #13 now covers provider calls, latency, fallback, tokens, and voice transcription
+as well as the policy-decision counter. Token ceilings, dollar ceilings, and a durable
+voice-metering table are still out of this registry.
