@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import {
   db,
@@ -15,7 +15,7 @@ import {
   agencyAgreementTerms,
   insertPropertySchema,
 } from "@aee/db";
-import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
+import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
@@ -96,6 +96,37 @@ function handlePropertyError(err: unknown, res: import("express").Response, expe
     errorName: err instanceof Error ? (err.constructor?.name ?? err.name) : typeof err,
   });
   res.status(500).json({ error: GENERIC_PROPERTY_ERROR });
+}
+
+// R-F9 — the property boundary of tenant_isolation_rejection_total.
+// The brokerage-scoped load cannot tell a missing property from one in
+// another brokerage. On a miss only, one existence lookup (never on the
+// success path) checks whether that id belongs to another brokerage and,
+// if so, increments once. The lookup selects no brokerage id and no other
+// tenant's columns. Callers still answer 404 either way. Same rule as
+// routes/transactions.ts and routes/offers.ts: a missing row does not
+// increment, and the other brokerage's id is not logged or returned.
+async function notePropertyIsolationRejection(propertyId: number, brokerageId: number): Promise<void> {
+  if (!Number.isInteger(propertyId) || propertyId <= 0) return;
+  const [elsewhere] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), ne(properties.brokerageId, brokerageId)));
+  if (elsewhere) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "property" });
+  }
+}
+
+async function loadPropertyInBrokerage(propertyId: number, brokerageId: number) {
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
+  if (!property) {
+    await notePropertyIsolationRejection(propertyId, brokerageId);
+    return null;
+  }
+  return property;
 }
 
 const READY_TO_LIST_STEPS = [
@@ -206,7 +237,7 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -221,7 +252,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -348,6 +379,12 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
     // own "Property <id> not found" — the 404 this route has always answered.
     // A driver fault used to be returned here verbatim as a 404 carrying the
     // driver's message; it is now a logged, generic 500.
+    // R-F9 — that not-found covers both a missing property and one in another
+    // brokerage. Count only the latter. The thrown message, and therefore
+    // this 404 body, stays exactly as assertPropertyInBrokerage wrote it.
+    if (isOperatorAuthoredError(err) && err.message === `Property ${id} not found`) {
+      await notePropertyIsolationRejection(id, user.brokerageId);
+    }
     handlePropertyError(err, res, 404);
   }
 });
@@ -367,7 +404,7 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
   }
   const user = req.authedUser!;
 
-  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -417,7 +454,7 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
     return;
   }
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -459,7 +496,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -592,7 +629,7 @@ propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
-  const [property] = await db.select().from(properties).where(and(eq(properties.id, id), eq(properties.brokerageId, user.brokerageId)));
+  const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
     return;
