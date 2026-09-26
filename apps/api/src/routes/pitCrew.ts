@@ -23,6 +23,8 @@ import { logger } from "@aee/events";
 import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getPitCrewWorkspace, getPitCrewTeam } from "../lib/pitCrew/queries.js";
+import { listOverdueWaitingOnDetections } from "../lib/pitCrew/waitingOnDetectionRun.js";
+import { loadPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnSweepSettings.js";
 import {
   claimWorkItem,
   assignWorkItem,
@@ -283,14 +285,24 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/note", requireAu
   res.json(result);
 });
 
+// R-F5: read-only detection queue for the caller's brokerage. Same gates as
+// every other Pit Crew route. Does not write sightings, settings, or
+// assignment state, and does not contact anyone. The operating window gates
+// the scheduler, not this read: a human can still see the current queue.
+pitCrewRouter.get("/pit-crew/ops/waiting-on/detections", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  const user = req.authedUser!;
+  const settings = await loadPitCrewWaitingOnSweepSettings(user.brokerageId);
+  const result = await listOverdueWaitingOnDetections({ brokerageId: user.brokerageId, settings });
+  res.json(result);
+});
+
 // R-F3: the human-triggered caller for sweepOverdueWaitingOn. Same gates as
 // every other Pit Crew route. brokerageId, the clock, and the audit actor
 // all come from the session -- the body is not read, so a client cannot name
 // another brokerage, pin "now", or impersonate the ops identity. Each
-// returned row is audited as the caller (user id + email). Omitting actor
-// on the sweep itself stays the ops identity for a future scheduler (R-F4);
-// this route always passes the caller. GET /pit-crew/workspace does not
-// sweep.
+// returned row is audited as the caller (user id + email). This route still
+// returns overdue rows to IN_PROGRESS. The scheduled sweep does not call it.
+// GET /pit-crew/workspace does not sweep.
 pitCrewRouter.post("/pit-crew/ops/waiting-on/sweep", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   try {

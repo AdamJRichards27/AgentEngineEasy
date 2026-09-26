@@ -218,6 +218,13 @@
       "when": 1790233468924,
       "tag": "0030_low_whistler",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1790386082643,
+      "tag": "0031_pit_crew_waiting_on_detection",
+      "breakpoints": true
     }
   ]
 }
