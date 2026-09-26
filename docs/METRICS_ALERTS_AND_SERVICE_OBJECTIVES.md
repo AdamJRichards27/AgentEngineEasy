@@ -420,17 +420,23 @@ details is never a metric label.
 
 1. **Cross-tenant rejections (SLI #10, alert #9) are only PARTIALLY a metric.**
    `tenant_isolation_rejection_total{boundary}` is wired at the `communications`, `pit_crew`,
-   and `integrations` boundary constructors only, because those are the three domains with a
-   single shared, dedicated tenant-mismatch error class this pass could wire once each. Every
-   other domain's tenant check (properties, parties, transactions, financial, grow,
-   documents, AML, pit-crew work-item overlays outside the two wired classes, and the
-   `IntegrationError` reasons other than `NOT_FOUND`/`TENANT_MISMATCH`) uses the inline
-   "identical 404" pattern with no shared error class to hook — wiring each of those
-   individually is real, scoped follow-up work (touching on the order of 28 route/lib files),
-   deliberately not done in this bounded pass per the governing instruction's own "do not
-   conduct another whole-of-app audit" constraint. Detected today by grep-ing/alerting on
+   and `integrations` boundary constructors, because those are the three domains with a
+   single shared, dedicated tenant-mismatch error class the Step 2 pass could wire once each.
+   **R-F8** also emits it at the Run transaction, financial, and offer boundaries.
+   Transactions: `requireTransactionAccess` and the `GET /transactions/by-property/:propertyId`
+   property check (`boundary="transaction"`). Financial: `resolveTransactionScope` only
+   (`boundary="financial"`), after a rejection-path existence lookup that does not select
+   the other brokerage's id. Offers: the authenticated offer routes' property-brokerage
+   check. The declared label set has no `offer` value and R-F8 does not change the metrics
+   module, so offer rejections use the closest declared value, `boundary="transaction"`.
+   The counter increments only when the named row exists in another brokerage. A missing
+   row, a role or entitlement 403, and a successful request do not increment it, and the
+   response stays the same 404. Still not wired, and still on the inline "identical 404"
+   pattern: properties, parties, grow, documents, AML, pit-crew work-item overlays outside
+   the two wired classes, and the `IntegrationError` reasons other than `NOT_FOUND`/
+   `TENANT_MISMATCH`. Detected for those unwired boundaries by grep-ing/alerting on
    structured log lines from `middlewares/auth.ts`/`middlewares/entitlement.ts` and the
-   individual chokepoints, same as before this pass for the unwired boundaries.
+   individual chokepoints.
 2. **Per-rule exception-engine failures are not separately counted.** Unchanged from the
    prior revision: `exceptions_scan_total` records that a scan ran, by trigger, but not
    whether every rule inside that scan pass succeeded.

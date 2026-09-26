@@ -2,7 +2,7 @@ import { Router, type Response } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
-import { logger } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
@@ -92,9 +92,20 @@ function handleOfferError(err: unknown, res: Response): void {
 // offer's (or property's) brokerage matched the caller's — a property id
 // or offer id from any brokerage worked as long as the caller was
 // authenticated at all.
+// R-F8 — offer-route tenant check. The declared boundary set has no
+// "offer" value (packages/events is unchanged), so this uses the closest
+// declared value, "transaction". Same rule as routes/transactions.ts: a
+// missing property does not increment; a property in another brokerage
+// does, exactly once, and the response stays 404. The other brokerage's
+// id is not logged or returned.
 async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
   const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
-  return !!property && property.brokerageId === brokerageId;
+  if (!property) return false;
+  if (property.brokerageId !== brokerageId) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "transaction" });
+    return false;
+  }
+  return true;
 }
 
 const createOfferSchema = z.object({
