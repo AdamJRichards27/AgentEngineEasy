@@ -118,8 +118,9 @@ registerExceptionEngine();
 // lib/propertyIntelligence/sweep.ts's sweepConfig() for every variable).
 registerSignalSweep();
 
-// R-F4: Pit Crew WAITING_ON expected-at sweep. Off unless
-// PIT_CREW_WAITING_ON_SWEEP_ENABLED=true.
+// R-F5: Pit Crew WAITING_ON detection sweep. Off unless
+// PIT_CREW_WAITING_ON_SWEEP_ENABLED=true. Identifies and prioritises
+// overdue items. It does not return them to IN_PROGRESS.
 registerPitCrewWaitingOnSweep();
 
 // Agent Engine 2.0 — Property Launch & Campaign Coordination. Registers

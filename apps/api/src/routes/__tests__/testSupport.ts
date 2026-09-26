@@ -46,6 +46,8 @@ import {
   vendorApprovals,
   launchPlanTransitions,
   pitCrewAssignments,
+  pitCrewWaitingOnSweepSettings,
+  pitCrewWaitingOnSweepSightings,
   communicationThreads,
   communicationParticipants,
   communicationMessages,
@@ -680,7 +682,10 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7). pit_crew_assignments
   // carries brokerageId directly and FKs onto brokerages/properties/users, all
   // non-cascading, so (like automationTasks/automationAttentionItems above) it
-  // must be cleared before those tables are deleted below.
+  // must be cleared before those tables are deleted below. Sightings reference
+  // assignments, so they go first. Sweep settings reference brokerages only
+  // and are removed with the other brokerage-scoped rows further down.
+  await db.delete(pitCrewWaitingOnSweepSightings).where(inArray(pitCrewWaitingOnSweepSightings.brokerageId, ids));
   await db.delete(pitCrewAssignments).where(inArray(pitCrewAssignments.brokerageId, ids));
 
   const propertyRows = await db.select().from(properties).where(inArray(properties.brokerageId, ids));
@@ -835,5 +840,6 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(paymentMethods).where(and(eq(paymentMethods.payerType, "Brokerage"), inArray(paymentMethods.payerId, ids)));
 
   await db.delete(users).where(inArray(users.brokerageId, ids));
+  await db.delete(pitCrewWaitingOnSweepSettings).where(inArray(pitCrewWaitingOnSweepSettings.brokerageId, ids));
   await db.delete(brokerages).where(inArray(brokerages.id, ids));
 }

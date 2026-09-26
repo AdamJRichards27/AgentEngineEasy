@@ -6,7 +6,7 @@ import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, auditLogs, entitlementGrants, pitCrewAssignments, users } from "@aee/db";
+import { db, auditLogs, entitlementGrants, pitCrewAssignments, pitCrewWaitingOnSweepSightings, users } from "@aee/db";
 import { claimWorkItem, startProgress, setWaitingOn, PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL } from "../../lib/pitCrew/assignment.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createOrUpdateException, newCorrelationId } from "../../lib/exceptions/model.js";
@@ -325,5 +325,44 @@ describe("POST /pit-crew/ops/waiting-on/sweep", { concurrency: 1 }, () => {
       eq(auditLogs.action, "PC_WAITING_ON_RETURNED"),
     ));
     assert.equal(logsAfter.length, 1);
+  });
+
+  test("GET detections lists an overdue item and does not change it", async () => {
+    const unauthenticated = await fetch(`${baseUrl}/api/pit-crew/ops/waiting-on/detections`);
+    assert.equal(unauthenticated.status, 401);
+    const agentRes = await fetch(`${baseUrl}/api/pit-crew/ops/waiting-on/detections`, {
+      headers: { cookie: agent.cookie },
+    });
+    assert.equal(agentRes.status, 403);
+
+    const parked = await parkWaitingOn({
+      brokerageId,
+      propertyId,
+      actorUserId: pitCrewMember.user.id,
+      waitingOnExpectedAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+    });
+    const before = await loadAssignment(parked.sourceRecordId);
+    const res = await fetch(`${baseUrl}/api/pit-crew/ops/waiting-on/detections`, {
+      headers: { cookie: pitCrewMember.cookie },
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      items: Array<{ sourceRecordId: string; tier: string; priorityException: boolean }>;
+      withinOperatingWindow: boolean;
+    };
+    assert.equal(typeof body.withinOperatingWindow, "boolean");
+    const listed = body.items.find((item) => item.sourceRecordId === parked.sourceRecordId);
+    assert.ok(listed);
+    assert.equal(listed.tier, "pit_crew_attention");
+    assert.equal(listed.priorityException, false);
+    const after = await loadAssignment(parked.sourceRecordId);
+    assert.equal(after.status, "WAITING_ON");
+    assert.equal(after.version, before.version);
+    assert.equal(after.waitingOnExpectedAt?.toISOString(), before.waitingOnExpectedAt?.toISOString());
+    const sightings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, before.id));
+    assert.equal(sightings.length, 0);
   });
 });

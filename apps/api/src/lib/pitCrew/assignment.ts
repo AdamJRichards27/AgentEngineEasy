@@ -312,10 +312,12 @@ export async function startProgress(input: MutationInput): Promise<PitCrewAssign
 
 // Section 14: active Waiting-On management. waitingOnExpectedAt is when
 // this item should be surfaced again if nobody actively returns it first.
-// sweepOverdueWaitingOn() is that ops job: WAITING_ON rows whose expected-at
-// is earlier than now are returned through the same transition as
-// returnFromWaitingOn (IN_PROGRESS, waiting-on fields cleared, version
-// bumped, audit row). A null expected-at is never auto-returned.
+// The human sweep (POST /pit-crew/ops/waiting-on/sweep) still calls
+// sweepOverdueWaitingOn(), which returns WAITING_ON rows whose expected-at
+// is earlier than now through the same transition as returnFromWaitingOn
+// (IN_PROGRESS, waiting-on fields cleared, version bumped, audit row). A
+// null expected-at is never auto-returned. The scheduled sweep does not
+// call this function: it only detects and prioritises (R-F5).
 export async function setWaitingOn(
   input: MutationInput & { waitingOnParty: string; waitingOnNote?: string; waitingOnExpectedAt?: Date },
 ): Promise<PitCrewAssignment> {

@@ -26,7 +26,7 @@
 // Timeline) so Pit Crew activity shows up in the same timeline an agent
 // already reads, instead of a second, competing history mechanism.
 
-import { pgTable, serial, integer, text, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { properties } from "./property";
@@ -100,3 +100,66 @@ export const insertPitCrewAssignmentSchema = createInsertSchema(pitCrewAssignmen
 });
 export type InsertPitCrewAssignment = z.infer<typeof insertPitCrewAssignmentSchema>;
 export type PitCrewAssignment = typeof pitCrewAssignments.$inferSelect;
+
+// R-F5: per-brokerage policy for the scheduled WAITING_ON detection sweep.
+// One row per brokerage, created on the first successful detection run (or
+// by an explicit upsert). A brokerage with no row uses the code defaults in
+// apps/api/src/lib/pitCrew/waitingOnDetection.ts. This is detection policy
+// only — it does not authorise the scheduler to change Pit Crew status.
+export const pitCrewWaitingOnSweepSettings = pgTable(
+  "pit_crew_waiting_on_sweep_settings",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id).unique(),
+
+    // How often this brokerage is detected. The process wake interval is a
+    // separate env knob; a brokerage is skipped until this cadence has elapsed.
+    cadenceMs: integer("cadence_ms").notNull().default(1_800_000),
+
+    // Local operating window. "HH:MM", start inclusive, end exclusive.
+    // windowWeekdays is ISO weekday numbers (Monday=1 .. Sunday=7), comma-separated.
+    // Null timeZone means "use communication settings, else Australia/Brisbane".
+    windowStart: text("window_start").notNull().default("08:00"),
+    windowEnd: text("window_end").notNull().default("18:00"),
+    windowWeekdays: text("window_weekdays").notNull().default("1,2,3,4,5"),
+    timeZone: text("time_zone"),
+
+    // Hour boundaries against waitingOnExpectedAt. Overdue but below
+    // attentionThresholdHours is "visible"; below elevatedThresholdHours is
+    // "pit_crew_attention"; at or above elevatedThresholdHours is "elevated_attention".
+    attentionThresholdHours: integer("attention_threshold_hours").notNull().default(2),
+    elevatedThresholdHours: integer("elevated_threshold_hours").notNull().default(4),
+
+    // Clock of the last detection run that got past the window and cadence
+    // gates. Not a task-state field.
+    lastDetectionAt: timestamp("last_detection_at"),
+
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+);
+
+// Last surfaced fingerprint per assignment. A later scheduled run does not
+// alert again while this fingerprint still matches. Not a task-state field:
+// the assignment row itself is not updated.
+export const pitCrewWaitingOnSweepSightings = pgTable(
+  "pit_crew_waiting_on_sweep_sightings",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    assignmentId: integer("assignment_id").notNull().references(() => pitCrewAssignments.id),
+    fingerprint: text("fingerprint").notNull(),
+    tier: text("tier").notNull(),
+    priorityException: boolean("priority_exception").notNull(),
+    surfacedAt: timestamp("surfaced_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    assignmentUnique: uniqueIndex("pit_crew_waiting_on_sweep_sightings_assignment_uidx").on(table.assignmentId),
+    brokerageIdx: index("pit_crew_waiting_on_sweep_sightings_brokerage_idx").on(table.brokerageId),
+  }),
+);
+
+export type PitCrewWaitingOnSweepSettings = typeof pitCrewWaitingOnSweepSettings.$inferSelect;
+export type PitCrewWaitingOnSweepSighting = typeof pitCrewWaitingOnSweepSightings.$inferSelect;

@@ -1,15 +1,23 @@
-// R-F4: opt-in scheduled WAITING_ON sweep. The flag is off unless it is the
-// literal string "true". Under NODE_ENV=test the registrar arms no timer.
-// A tick returns overdue rows per brokerage with the ops audit identity,
-// isolates a brokerage that throws, and a second tick returns nothing new.
-// Two sweeps in parallel prove the version check: each row moves once.
-// run.access is not consulted here. lib/entitlements/resolver.ts answers
-// per user, and this scheduler has no user, so every overdue brokerage is swept.
-import { test, before, after, describe } from "node:test";
+// R-F5: opt-in scheduled WAITING_ON detection. The flag is off unless it is
+// the literal string "true". Under NODE_ENV=test the registrar arms no timer.
+// A tick classifies overdue rows and does not change assignment state. A
+// second in-cadence tick dedupes. The manual sweepOverdueWaitingOn race
+// still returns each row once. run.access is not consulted here.
+// lib/entitlements/resolver.ts answers per user, and this scheduler has no
+// user, so every overdue brokerage is considered.
+import { test, before, after, afterEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { and, eq } from "drizzle-orm";
-import { db, auditLogs, pitCrewAssignments } from "@aee/db";
+import { and, eq, inArray } from "drizzle-orm";
+import {
+  db,
+  auditLogs,
+  pitCrewAssignments,
+  pitCrewWaitingOnSweepSettings,
+  pitCrewWaitingOnSweepSightings,
+  riskExceptions,
+  transactions,
+} from "@aee/db";
 import {
   claimWorkItem,
   startProgress,
@@ -24,6 +32,14 @@ import {
   runScheduledWaitingOnSweep,
   stopPitCrewWaitingOnSweepScheduler,
 } from "../waitingOnSweepBootstrap.js";
+import { upsertPitCrewWaitingOnSweepSettings } from "../waitingOnSweepSettings.js";
+import { listOverdueWaitingOnDetections } from "../waitingOnDetectionRun.js";
+import { loadPitCrewWaitingOnSweepSettings } from "../waitingOnSweepSettings.js";
+
+/** Wednesday 10:00 Australia/Brisbane. Inside the default Mon–Fri 08:00–18:00 window. */
+const INSIDE_WINDOW = new Date("2026-09-23T00:00:00.000Z");
+/** Saturday 10:00 Australia/Brisbane. Outside the default window. */
+const OUTSIDE_WINDOW = new Date("2026-09-26T00:00:00.000Z");
 import { createOrUpdateException, newCorrelationId } from "../../exceptions/model.js";
 import type { RiskFinding } from "../../exceptions/types.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
@@ -45,6 +61,14 @@ interface LogLine {
   scanned?: number;
   returned?: number;
   skipped?: number;
+  surfaced?: number;
+  deduped?: number;
+  skippedWindow?: number;
+  skippedCadence?: number;
+  tier?: string;
+  sourceRecordId?: string;
+  priorityException?: boolean;
+  priorityReasons?: string[];
   failedBrokerages?: number;
   durationMs?: number;
   cap?: number;
@@ -95,8 +119,9 @@ describe("pitCrewWaitingOnSweepConfig", () => {
     assert.equal(pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_ENABLED: "true" }).enabled, true);
   });
 
-  test("interval defaults to 900000 and clamps into [60000, 86400000]", () => {
-    assert.equal(pitCrewWaitingOnSweepConfig({}).intervalMs, 900000);
+  test("interval defaults to 1800000 and clamps into [60000, 86400000]", () => {
+    assert.equal(pitCrewWaitingOnSweepConfig({}).intervalMs, 1800000);
+    assert.equal(pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS: "1800000" }).intervalMs, 1800000);
     assert.equal(pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS: "900000" }).intervalMs, 900000);
     assert.equal(pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS: "60000" }).intervalMs, 60000);
     assert.equal(pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS: "59999" }).intervalMs, 60000);
@@ -106,16 +131,16 @@ describe("pitCrewWaitingOnSweepConfig", () => {
     assert.equal(pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS: "90000000" }).intervalMs, 86400000);
   });
 
-  test("a non-numeric interval falls back to 900000 and warns", async () => {
+  test("a non-numeric interval falls back to 1800000 and warns", async () => {
     const { result, logs } = await captureLogs(() =>
       pitCrewWaitingOnSweepConfig({ PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS: "nope" }),
     );
-    assert.equal(result.intervalMs, 900000);
+    assert.equal(result.intervalMs, 1800000);
     const warning = logs.find((line) => line.message === "pit_crew_waiting_on_sweep_interval_invalid");
     assert.ok(warning, "expected a warning for a non-numeric interval");
     assert.equal(warning.level, "warn");
     assert.equal(warning.value, "nope");
-    assert.equal(warning.fallbackMs, 900000);
+    assert.equal(warning.fallbackMs, 1800000);
   });
 });
 
@@ -182,12 +207,12 @@ describe("registerPitCrewWaitingOnSweep", { concurrency: 1 }, () => {
         registerPitCrewWaitingOnSweep({ startScheduler: true });
       });
       assert.equal(calls, 1);
-      assert.equal(delay, 900000);
+      assert.equal(delay, 1800000);
       assert.ok(armed.handle, "expected the scheduler to arm one interval");
       assert.equal(armed.handle.hasRef(), false, "the interval must be unref'd");
       const started = logs.filter((line) => line.message === "pit_crew_waiting_on_sweep_scheduler_started");
       assert.equal(started.length, 1);
-      assert.equal(started[0]!.intervalMs, 900000);
+      assert.equal(started[0]!.intervalMs, 1800000);
     } finally {
       globalThis.setInterval = original;
       stopPitCrewWaitingOnSweepScheduler();
@@ -217,7 +242,11 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     return property.id;
   }
 
-  function buildFinding(targetBrokerageId: number, targetPropertyId: number): RiskFinding {
+  function buildFinding(
+    targetBrokerageId: number,
+    targetPropertyId: number,
+    overrides: Partial<RiskFinding> = {},
+  ): RiskFinding {
     fixtureCounter += 1;
     return {
       ruleId: "TEST_PITCREW_WAITING_ON_SCHEDULER_RULE",
@@ -242,11 +271,16 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
       dedupKey: `TEST_PITCREW_WAITING_ON_SCHEDULER_RULE:${targetBrokerageId}:SCHED_${fixtureCounter}`,
       recurrenceMode: "REOPEN",
       requiresFinancialEntitlement: false,
+      ...overrides,
     };
   }
 
-  async function createException(targetBrokerageId: number, targetPropertyId: number): Promise<string> {
-    const finding = buildFinding(targetBrokerageId, targetPropertyId);
+  async function createException(
+    targetBrokerageId: number,
+    targetPropertyId: number,
+    overrides: Partial<RiskFinding> = {},
+  ): Promise<string> {
+    const finding = buildFinding(targetBrokerageId, targetPropertyId, overrides);
     const result = await createOrUpdateException(finding, targetBrokerageId, targetPropertyId, null, newCorrelationId(), null);
     return result.exception.id;
   }
@@ -256,8 +290,9 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     propertyId: number;
     actorUserId: number;
     waitingOnExpectedAt?: Date;
+    finding?: Partial<RiskFinding>;
   }): Promise<{ sourceRecordId: string; version: number }> {
-    const sourceRecordId = await createException(input.brokerageId, input.propertyId);
+    const sourceRecordId = await createException(input.brokerageId, input.propertyId, input.finding);
     let row = await claimWorkItem({
       brokerageId: input.brokerageId,
       propertyId: input.propertyId,
@@ -335,9 +370,20 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     }
   });
 
-  test("a tick returns overdue rows in two brokerages and leaves null and future expected-at rows WAITING_ON", async () => {
-    const now = new Date();
-    const past = new Date(now.getTime() - 60 * 60 * 1000);
+  afterEach(async () => {
+    const ids = [brokerageA, brokerageB].filter((id) => typeof id === "number");
+    if (ids.length === 0) return;
+    await db.delete(pitCrewWaitingOnSweepSightings).where(inArray(pitCrewWaitingOnSweepSightings.brokerageId, ids));
+    await db.delete(pitCrewWaitingOnSweepSettings).where(inArray(pitCrewWaitingOnSweepSettings.brokerageId, ids));
+    await db
+      .update(pitCrewAssignments)
+      .set({ waitingOnExpectedAt: new Date("2099-01-01T00:00:00.000Z") })
+      .where(and(inArray(pitCrewAssignments.brokerageId, ids), eq(pitCrewAssignments.status, "WAITING_ON")));
+  });
+
+  test("a tick detects overdue rows in two brokerages and does not change WAITING_ON state", async () => {
+    const now = INSIDE_WINDOW;
+    const past = new Date(now.getTime() - 3 * 60 * 60 * 1000);
     const future = new Date(now.getTime() + 60 * 60 * 1000);
     const overdueA = await parkWaitingOn({
       brokerageId: brokerageA,
@@ -362,6 +408,14 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
       actorUserId: agentB.user.id,
       waitingOnExpectedAt: future,
     });
+    const beforeRows = new Map<string, Awaited<ReturnType<typeof loadAssignment>>>();
+    const beforeExceptions = new Map<string, typeof riskExceptions.$inferSelect>();
+    for (const parked of [overdueA, overdueB, openEnded, later]) {
+      beforeRows.set(parked.sourceRecordId, await loadAssignment(parked.sourceRecordId));
+      const [exception] = await db.select().from(riskExceptions).where(eq(riskExceptions.id, parked.sourceRecordId));
+      assert.ok(exception);
+      beforeExceptions.set(parked.sourceRecordId, exception);
+    }
 
     const { result, logs } = await captureLogs(() => runScheduledWaitingOnSweep(now, {
       brokerageIds: [brokerageA, brokerageB],
@@ -369,8 +423,10 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     assert.equal(result.overlapSkipped, false);
     assert.equal(result.brokerages, 2);
     assert.equal(result.scanned, 2);
-    assert.equal(result.returned, 2);
-    assert.equal(result.skipped, 0);
+    assert.equal(result.surfaced, 2);
+    assert.equal(result.deduped, 0);
+    assert.equal(result.skippedWindow, 0);
+    assert.equal(result.skippedCadence, 0);
     assert.equal(result.failedBrokerages, 0);
     assert.equal(typeof result.durationMs, "number");
 
@@ -378,25 +434,30 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     assert.ok(summary, "expected one tick summary");
     assert.equal(summary.brokerages, 2);
     assert.equal(summary.scanned, 2);
-    assert.equal(summary.returned, 2);
-    assert.equal(summary.skipped, 0);
+    assert.equal(summary.surfaced, 2);
+    assert.equal(summary.deduped, 0);
     assert.equal(summary.failedBrokerages, 0);
     assert.equal(summary.durationMs, result.durationMs);
+    const detected = logs.filter((line) => line.message === "pit_crew_waiting_on_detected");
+    assert.equal(detected.length, 2);
+    assert.equal(detected.every((line) => line.tier === "pit_crew_attention"), true);
 
-    for (const parked of [overdueA, overdueB]) {
+    for (const parked of [overdueA, overdueB, openEnded, later]) {
       const row = await loadAssignment(parked.sourceRecordId);
-      assert.equal(row.status, "IN_PROGRESS");
-      assert.equal(row.waitingOnParty, null);
-      assert.equal(row.waitingOnNote, null);
-      assert.equal(row.waitingOnSince, null);
-      assert.equal(row.waitingOnExpectedAt, null);
-      assert.equal(row.version, parked.version + 1);
+      assert.deepStrictEqual(row, beforeRows.get(parked.sourceRecordId));
+      const [exception] = await db.select().from(riskExceptions).where(eq(riskExceptions.id, parked.sourceRecordId));
+      assert.deepStrictEqual(exception, beforeExceptions.get(parked.sourceRecordId));
       const audits = await returnedAudits(parked.sourceRecordId);
-      assert.equal(audits.length, 1);
-      assert.equal(audits[0]!.userId, null);
-      assert.equal(audits[0]!.userEmail, PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL);
-      assert.equal(audits[0]!.previousValue, "WAITING_ON");
-      assert.equal(audits[0]!.updatedValue, "IN_PROGRESS");
+      assert.equal(audits.length, 0);
+    }
+    for (const parked of [overdueA, overdueB]) {
+      const row = beforeRows.get(parked.sourceRecordId)!;
+      const sightings = await db
+        .select()
+        .from(pitCrewWaitingOnSweepSightings)
+        .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, row.id));
+      assert.equal(sightings.length, 1);
+      assert.equal(sightings[0]!.tier, "pit_crew_attention");
     }
 
     const openRow = await loadAssignment(openEnded.sourceRecordId);
@@ -410,8 +471,8 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     assert.equal(laterRow.version, later.version);
   });
 
-  test("a second tick returns nothing new", async () => {
-    const now = new Date();
+  test("a later in-window tick dedupes an unchanged item and re-alerts when the tier changes", async () => {
+    const now = INSIDE_WINDOW;
     const past = new Date(now.getTime() - 5 * 60 * 1000);
     const parked = await parkWaitingOn({
       brokerageId: brokerageA,
@@ -421,27 +482,98 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     });
 
     const first = await runScheduledWaitingOnSweep(now, { brokerageIds: [brokerageA, brokerageB] });
-    assert.ok(first.returned >= 1);
+    assert.equal(first.surfaced, 1);
+    assert.equal(first.deduped, 0);
     const afterFirst = await loadAssignment(parked.sourceRecordId);
-    assert.equal(afterFirst.status, "IN_PROGRESS");
-    assert.equal(afterFirst.version, parked.version + 1);
+    assert.equal(afterFirst.status, "WAITING_ON");
+    assert.equal(afterFirst.version, parked.version);
+    const [sighting] = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, afterFirst.id));
+    assert.ok(sighting);
+    assert.equal(sighting.tier, "visible");
 
-    const second = await runScheduledWaitingOnSweep(now, { brokerageIds: [brokerageA, brokerageB] });
+    const second = await runScheduledWaitingOnSweep(new Date(now.getTime() + 30 * 60 * 1000), {
+      brokerageIds: [brokerageA, brokerageB],
+    });
     assert.equal(second.overlapSkipped, false);
-    assert.equal(second.returned, 0);
-    assert.equal(second.scanned, 0);
+    assert.equal(second.surfaced, 0);
+    assert.equal(second.deduped, 1);
+    assert.equal(second.skippedCadence, 0);
     const afterSecond = await loadAssignment(parked.sourceRecordId);
-    assert.equal(afterSecond.status, "IN_PROGRESS");
-    assert.equal(afterSecond.version, afterFirst.version);
-    assert.equal(afterSecond.waitingOnExpectedAt, null);
+    assert.deepStrictEqual(afterSecond, afterFirst);
     const audits = await returnedAudits(parked.sourceRecordId);
-    assert.equal(audits.length, 1);
-    assert.equal(audits[0]!.userId, null);
-    assert.equal(audits[0]!.userEmail, PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL);
+    assert.equal(audits.length, 0);
+    const [sightingAfter] = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, afterFirst.id));
+    assert.equal(sightingAfter!.fingerprint, sighting.fingerprint);
+    assert.equal(sightingAfter!.surfacedAt?.toISOString(), sighting.surfacedAt?.toISOString());
+
+    const { result: third, logs } = await captureLogs(() =>
+      runScheduledWaitingOnSweep(new Date(now.getTime() + 2 * 60 * 60 * 1000), {
+        brokerageIds: [brokerageA, brokerageB],
+      }),
+    );
+    assert.equal(third.surfaced, 1);
+    assert.equal(third.deduped, 0);
+    const realert = logs.find((line) => line.message === "pit_crew_waiting_on_detected");
+    assert.equal(realert?.tier, "pit_crew_attention");
+    assert.equal(realert?.sourceRecordId, parked.sourceRecordId);
+    const stillWaiting = await loadAssignment(parked.sourceRecordId);
+    assert.equal(stillWaiting.status, "WAITING_ON");
+    assert.equal(stillWaiting.version, parked.version);
   });
 
-  test("one brokerage throwing does not stop the other brokerage's return", async () => {
-    const now = new Date();
+  test("a tick inside the cadence does not detect again", async () => {
+    const now = INSIDE_WINDOW;
+    const parked = await parkWaitingOn({
+      brokerageId: brokerageA,
+      propertyId: propertyA,
+      actorUserId: agentA.user.id,
+      waitingOnExpectedAt: new Date(now.getTime() - 60 * 60 * 1000),
+    });
+    const first = await runScheduledWaitingOnSweep(now, { brokerageIds: [brokerageA] });
+    assert.equal(first.surfaced, 1);
+    const second = await runScheduledWaitingOnSweep(new Date(now.getTime() + 60 * 1000), { brokerageIds: [brokerageA] });
+    assert.equal(second.skippedCadence, 1);
+    assert.equal(second.scanned, 0);
+    assert.equal(second.surfaced, 0);
+    const row = await loadAssignment(parked.sourceRecordId);
+    assert.equal(row.status, "WAITING_ON");
+    assert.equal(row.version, parked.version);
+  });
+
+  test("a tick outside the operating window does not detect or write a sighting", async () => {
+    const parked = await parkWaitingOn({
+      brokerageId: brokerageA,
+      propertyId: propertyA,
+      actorUserId: agentA.user.id,
+      waitingOnExpectedAt: new Date(OUTSIDE_WINDOW.getTime() - 3 * 60 * 60 * 1000),
+    });
+    const before = await loadAssignment(parked.sourceRecordId);
+    const result = await runScheduledWaitingOnSweep(OUTSIDE_WINDOW, { brokerageIds: [brokerageA, brokerageB] });
+    assert.equal(result.skippedWindow, 1);
+    assert.equal(result.scanned, 0);
+    assert.equal(result.surfaced, 0);
+    const after = await loadAssignment(parked.sourceRecordId);
+    assert.deepStrictEqual(after, before);
+    const sightings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, before.id));
+    assert.equal(sightings.length, 0);
+    const settings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSettings)
+      .where(eq(pitCrewWaitingOnSweepSettings.brokerageId, brokerageA));
+    assert.equal(settings.length, 0);
+  });
+
+  test("one brokerage throwing does not stop the other brokerage's detection", async () => {
+    const now = INSIDE_WINDOW;
     const past = new Date(now.getTime() - 60 * 1000);
     const stuck = await parkWaitingOn({
       brokerageId: brokerageA,
@@ -464,7 +596,7 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     }));
     assert.equal(result.overlapSkipped, false);
     assert.equal(result.failedBrokerages, 1);
-    assert.equal(result.returned, 1);
+    assert.equal(result.surfaced, 1);
     assert.equal(result.brokerages, 2);
 
     const failure = logs.find((line) => line.message === "pit_crew_waiting_on_sweep_brokerage_failed");
@@ -476,21 +608,28 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
     const summary = logs.find((line) => line.message === "pit_crew_waiting_on_sweep_tick_completed");
     assert.ok(summary);
     assert.equal(summary.failedBrokerages, 1);
-    assert.equal(summary.returned, 1);
+    assert.equal(summary.surfaced, 1);
 
     const stuckRow = await loadAssignment(stuck.sourceRecordId);
     assert.equal(stuckRow.status, "WAITING_ON");
     assert.equal(stuckRow.version, stuck.version);
-    await sweepOverdueWaitingOn({ now, brokerageId: brokerageA });
+    const stuckSightings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, stuckRow.id));
+    assert.equal(stuckSightings.length, 0);
 
     const otherRow = await loadAssignment(other.sourceRecordId);
-    assert.equal(otherRow.status, "IN_PROGRESS");
-    assert.equal(otherRow.version, other.version + 1);
-    assert.equal(otherRow.waitingOnExpectedAt, null);
+    assert.equal(otherRow.status, "WAITING_ON");
+    assert.equal(otherRow.version, other.version);
+    assert.ok(otherRow.waitingOnExpectedAt);
     const audits = await returnedAudits(other.sourceRecordId);
-    assert.equal(audits.length, 1);
-    assert.equal(audits[0]!.userId, null);
-    assert.equal(audits[0]!.userEmail, PIT_CREW_WAITING_ON_SWEEP_ACTOR_EMAIL);
+    assert.equal(audits.length, 0);
+    const otherSightings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, otherRow.id));
+    assert.equal(otherSightings.length, 1);
   });
 
   test("two sweeps in parallel return each overdue row once and skip the loser", async () => {
@@ -548,7 +687,7 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
   });
 
   test("a second tick started while the first is still running is skipped", async () => {
-    const now = new Date();
+    const now = INSIDE_WINDOW;
     const past = new Date(now.getTime() - 60 * 1000);
     const parked = await parkWaitingOn({
       brokerageId: brokerageB,
@@ -578,22 +717,22 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
       brokerageIds: [brokerageB],
     }));
     assert.equal(second.overlapSkipped, true);
-    assert.equal(second.returned, 0);
+    assert.equal(second.surfaced, 0);
     assert.ok(logs.some((line) => line.message === "pit_crew_waiting_on_sweep_tick_skipped_overlap"));
     release();
     const first = await firstPromise;
     assert.equal(first.overlapSkipped, false);
-    assert.equal(first.returned, 1);
+    assert.equal(first.surfaced, 1);
 
     const row = await loadAssignment(parked.sourceRecordId);
-    assert.equal(row.status, "IN_PROGRESS");
-    assert.equal(row.version, parked.version + 1);
+    assert.equal(row.status, "WAITING_ON");
+    assert.equal(row.version, parked.version);
     const audits = await returnedAudits(parked.sourceRecordId);
-    assert.equal(audits.length, 1);
+    assert.equal(audits.length, 0);
   });
 
-  test("a tick that hits the brokerage cap sweeps the lowest ids and logs truncation", async () => {
-    const now = new Date();
+  test("a tick that hits the brokerage cap detects the lowest ids and logs truncation", async () => {
+    const now = INSIDE_WINDOW;
     const past = new Date(now.getTime() - 60 * 1000);
     const lowerId = Math.min(brokerageA, brokerageB);
     const higherId = Math.max(brokerageA, brokerageB);
@@ -611,17 +750,131 @@ describe("runScheduledWaitingOnSweep", { concurrency: 1 }, () => {
       maxBrokerages: 1,
     }));
     assert.equal(result.brokerages, 1);
-    assert.equal(result.returned, 1);
+    assert.equal(result.surfaced, 1);
     const truncation = logs.find((line) => line.message === "pit_crew_waiting_on_sweep_brokerages_truncated");
     assert.ok(truncation, "expected a truncation warning");
     assert.equal(truncation.level, "warn");
     assert.equal(truncation.cap, 1);
 
     const keptRow = await loadAssignment(kept.sourceRecordId);
-    assert.equal(keptRow.status, "IN_PROGRESS");
-    assert.equal(keptRow.version, kept.version + 1);
+    assert.equal(keptRow.status, "WAITING_ON");
+    assert.equal(keptRow.version, kept.version);
+    const keptSightings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, keptRow.id));
+    assert.equal(keptSightings.length, 1);
     const deferredRow = await loadAssignment(deferred.sourceRecordId);
     assert.equal(deferredRow.status, "WAITING_ON");
     assert.equal(deferredRow.version, deferred.version);
+    const deferredSightings = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, deferredRow.id));
+    assert.equal(deferredSightings.length, 0);
+  });
+
+  test("per-brokerage tier thresholds change classification and a read does not write", async () => {
+    const now = INSIDE_WINDOW;
+    const expectedAt = new Date(now.getTime() - 90 * 60 * 1000);
+    await upsertPitCrewWaitingOnSweepSettings(brokerageA, {
+      attentionThresholdHours: 1,
+      elevatedThresholdHours: 3,
+    });
+    const tight = await parkWaitingOn({
+      brokerageId: brokerageA,
+      propertyId: propertyA,
+      actorUserId: agentA.user.id,
+      waitingOnExpectedAt: expectedAt,
+    });
+    const loose = await parkWaitingOn({
+      brokerageId: brokerageB,
+      propertyId: propertyB,
+      actorUserId: agentB.user.id,
+      waitingOnExpectedAt: expectedAt,
+    });
+    const beforeTight = await loadAssignment(tight.sourceRecordId);
+    const settingsA = await loadPitCrewWaitingOnSweepSettings(brokerageA);
+    const settingsB = await loadPitCrewWaitingOnSweepSettings(brokerageB);
+    assert.equal(settingsA.attentionThresholdHours, 1);
+    assert.equal(settingsA.elevatedThresholdHours, 3);
+    assert.equal(settingsB.attentionThresholdHours, 2);
+    assert.equal(settingsB.elevatedThresholdHours, 4);
+
+    const read = await listOverdueWaitingOnDetections({ brokerageId: brokerageA, now, settings: settingsA });
+    assert.equal(read.items.length, 1);
+    assert.equal(read.items[0]!.tier, "pit_crew_attention");
+    assert.equal(read.items[0]!.sourceRecordId, tight.sourceRecordId);
+    const afterRead = await loadAssignment(tight.sourceRecordId);
+    assert.deepStrictEqual(afterRead, beforeTight);
+    const sightingsAfterRead = await db
+      .select()
+      .from(pitCrewWaitingOnSweepSightings)
+      .where(eq(pitCrewWaitingOnSweepSightings.assignmentId, beforeTight.id));
+    assert.equal(sightingsAfterRead.length, 0);
+
+    const { logs } = await captureLogs(() =>
+      runScheduledWaitingOnSweep(now, { brokerageIds: [brokerageA, brokerageB] }),
+    );
+    const detected = logs.filter((line) => line.message === "pit_crew_waiting_on_detected");
+    const tightLog = detected.find((line) => line.sourceRecordId === tight.sourceRecordId);
+    const looseLog = detected.find((line) => line.sourceRecordId === loose.sourceRecordId);
+    assert.equal(tightLog?.tier, "pit_crew_attention");
+    assert.equal(looseLog?.tier, "visible");
+    const tightRow = await loadAssignment(tight.sourceRecordId);
+    const looseRow = await loadAssignment(loose.sourceRecordId);
+    assert.equal(tightRow.status, "WAITING_ON");
+    assert.equal(tightRow.version, tight.version);
+    assert.equal(looseRow.status, "WAITING_ON");
+    assert.equal(looseRow.version, loose.version);
+  });
+
+  test("settlement and compliance signals are priority exceptions and transaction state is unchanged", async () => {
+    const now = INSIDE_WINDOW;
+    const settlementDate = new Date("2026-09-24T07:00:00.000Z");
+    const [transaction] = await db
+      .insert(transactions)
+      .values({
+        propertyId: propertyA,
+        sellerPartyIds: [],
+        buyerPartyIds: [],
+        purchasePriceCents: 100,
+        settlementDate,
+      })
+      .returning();
+    assert.ok(transaction);
+    const compliance = await parkWaitingOn({
+      brokerageId: brokerageA,
+      propertyId: propertyA,
+      actorUserId: agentA.user.id,
+      waitingOnExpectedAt: new Date(now.getTime() - 30 * 60 * 1000),
+      finding: { category: "AML_CTF", dueAt: new Date("2027-01-01T00:00:00.000Z") },
+    });
+    const ordinary = await parkWaitingOn({
+      brokerageId: brokerageB,
+      propertyId: propertyB,
+      actorUserId: agentB.user.id,
+      waitingOnExpectedAt: new Date(now.getTime() - 30 * 60 * 1000),
+      finding: { category: "WORKFLOW_OPERATIONAL", dueAt: new Date("2027-01-01T00:00:00.000Z") },
+    });
+    const beforeTxn = await db.select().from(transactions).where(eq(transactions.id, transaction.id));
+    const { logs } = await captureLogs(() =>
+      runScheduledWaitingOnSweep(now, { brokerageIds: [brokerageA, brokerageB] }),
+    );
+    const detected = logs.filter((line) => line.message === "pit_crew_waiting_on_detected");
+    const complianceLog = detected.find((line) => line.sourceRecordId === compliance.sourceRecordId);
+    const ordinaryLog = detected.find((line) => line.sourceRecordId === ordinary.sourceRecordId);
+    assert.equal(complianceLog?.priorityException, true);
+    assert.equal(complianceLog?.priorityReasons?.includes("aml_ctf_category"), true);
+    assert.equal(complianceLog?.priorityReasons?.includes("settlement_date_next_business_day"), true);
+    assert.equal(complianceLog?.priorityReasons?.includes("exception_due_next_business_day"), false);
+    assert.equal(ordinaryLog?.priorityException, false);
+    assert.deepEqual(ordinaryLog?.priorityReasons, []);
+    const afterTxn = await db.select().from(transactions).where(eq(transactions.id, transaction.id));
+    assert.deepStrictEqual(afterTxn, beforeTxn);
+    const complianceRow = await loadAssignment(compliance.sourceRecordId);
+    assert.equal(complianceRow.status, "WAITING_ON");
+    assert.equal(complianceRow.version, compliance.version);
+    await db.delete(transactions).where(eq(transactions.id, transaction.id));
   });
 });
