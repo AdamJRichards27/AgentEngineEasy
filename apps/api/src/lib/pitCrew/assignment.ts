@@ -11,7 +11,7 @@
 // which already feeds the Property Timeline, rather than a second history
 // table -- see the comment at the top of packages/db/src/schema/pitCrew.ts.
 
-import { and, eq, isNotNull, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, lt } from "drizzle-orm";
 import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
 import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
@@ -418,17 +418,50 @@ export function isWaitingOnExpectedAtOverdue(
   return status === "WAITING_ON" && waitingOnExpectedAt != null && waitingOnExpectedAt.getTime() < now.getTime();
 }
 
-async function findOverdueWaitingOnAssignments(now: Date, brokerageId?: number): Promise<PitCrewAssignment[]> {
+function overdueWaitingOnFilters(now: Date, brokerageId?: number) {
   const filters = [
     eq(pitCrewAssignments.status, "WAITING_ON"),
     isNotNull(pitCrewAssignments.waitingOnExpectedAt),
     lt(pitCrewAssignments.waitingOnExpectedAt, now),
   ];
   if (brokerageId != null) filters.push(eq(pitCrewAssignments.brokerageId, brokerageId));
+  return filters;
+}
+
+async function findOverdueWaitingOnAssignments(now: Date, brokerageId?: number): Promise<PitCrewAssignment[]> {
   return db
     .select()
     .from(pitCrewAssignments)
-    .where(and(...filters));
+    .where(and(...overdueWaitingOnFilters(now, brokerageId)));
+}
+
+// Read-only. Distinct brokerages that have at least one overdue WAITING_ON
+// row, ascending by brokerage id, using the same filters as the sweep.
+// `limit + 1` is fetched so the caller can tell a full page from a truncated one.
+export async function findBrokerageIdsWithOverdueWaitingOn(
+  now: Date,
+  options: { limit: number; brokerageIds?: readonly number[] },
+): Promise<{ brokerageIds: number[]; truncated: boolean }> {
+  if (options.brokerageIds != null && options.brokerageIds.length === 0) {
+    return { brokerageIds: [], truncated: false };
+  }
+  const overdue = and(...overdueWaitingOnFilters(now));
+  const where =
+    options.brokerageIds != null
+      ? and(overdue, inArray(pitCrewAssignments.brokerageId, [...options.brokerageIds]))
+      : overdue;
+  const rows = await db
+    .select({ brokerageId: pitCrewAssignments.brokerageId })
+    .from(pitCrewAssignments)
+    .where(where)
+    .groupBy(pitCrewAssignments.brokerageId)
+    .orderBy(asc(pitCrewAssignments.brokerageId))
+    .limit(options.limit + 1);
+  const truncated = rows.length > options.limit;
+  return {
+    brokerageIds: rows.slice(0, options.limit).map((row) => row.brokerageId),
+    truncated,
+  };
 }
 
 // Ops entry for the waiting-on expected-at sweep. Safe to call again: a row

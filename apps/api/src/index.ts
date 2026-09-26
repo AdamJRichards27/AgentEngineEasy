@@ -20,6 +20,7 @@ import { registerAutomationEngine } from "./lib/automation/bootstrap.js";
 import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap.js";
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
 import { registerSignalSweep } from "./lib/propertyIntelligence/sweepBootstrap.js";
+import { registerPitCrewWaitingOnSweep } from "./lib/pitCrew/waitingOnSweepBootstrap.js";
 import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
@@ -116,6 +117,10 @@ registerExceptionEngine();
 // be disabled entirely with GROW_SIGNAL_SWEEP_ENABLED=false (see
 // lib/propertyIntelligence/sweep.ts's sweepConfig() for every variable).
 registerSignalSweep();
+
+// R-F4: Pit Crew WAITING_ON expected-at sweep. Off unless
+// PIT_CREW_WAITING_ON_SWEEP_ENABLED=true.
+registerPitCrewWaitingOnSweep();
 
 // Agent Engine 2.0 — Property Launch & Campaign Coordination. Registers
 // the AGENCY_AGREEMENT_SIGNED auto-propose handler — same ordering
