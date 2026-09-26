@@ -44,8 +44,9 @@ import { loadPitCrewWaitingOnSweepSettings, markPitCrewWaitingOnSweepRan } from 
  * fire until the Owner enables the sweep. Surfacing for a person is still a
  * log line plus the internal read GET /pit-crew/ops/waiting-on/detections.
  *
- * Follow-ups: rate-of-absence alerting needs an external rule engine; an ops
- * health read is a candidate R-F7.
+ * The in-app read is GET /pit-crew/ops/waiting-on/health (R-F7). It reports
+ * this process's last tick and the caller's own settings. Rate-of-absence
+ * alerting still needs an external rule engine.
  */
 
 export const PIT_CREW_WAITING_ON_SWEEP_DEFAULT_INTERVAL_MS = PIT_CREW_WAITING_ON_SWEEP_DEFAULT_CADENCE_MS;
@@ -116,6 +117,30 @@ let consecutiveUnhealthyTicks = 0;
 /** Completed ticks with at least one brokerage failure. A thrown tick does not move this. */
 let consecutiveBrokerageFailureTicks = 0;
 
+export type PitCrewWaitingOnSweepTickOutcome = "completed" | "failed" | "skipped_overlap";
+
+/**
+ * The most recent tick in this process. Job-level only: no brokerage id and
+ * no per-brokerage count. durationMs is null for an overlap skip.
+ */
+export interface PitCrewWaitingOnSweepLastTick {
+  at: string;
+  outcome: PitCrewWaitingOnSweepTickOutcome;
+  durationMs: number | null;
+}
+
+let lastTick: PitCrewWaitingOnSweepLastTick | null = null;
+/**
+ * Brokerages that failed in the last completed tick. Null until a tick
+ * completes. Never returned whole. The health route answers membership for
+ * the caller's id only. A thrown tick and an overlap skip do not replace it.
+ */
+let lastCompletedTickFailedBrokerageIds: Set<number> | null = null;
+
+function recordLastTick(outcome: PitCrewWaitingOnSweepTickOutcome, durationMs: number | null): void {
+  lastTick = { at: new Date().toISOString(), outcome, durationMs };
+}
+
 export interface RegisterPitCrewWaitingOnSweepOptions {
   /** Set false to register without arming the timer. Defaults to (enabled && NODE_ENV !== "test"). */
   startScheduler?: boolean;
@@ -157,12 +182,50 @@ export interface WaitingOnSweepTickResult {
   overlapSkipped: boolean;
 }
 
-/** Read-only view of the in-process streaks. No route reads this in R-F6. */
+/** Read-only view of the in-process streaks. The health route reads the ops snapshot below. */
 export function pitCrewWaitingOnSweepHealthSnapshot(): {
   consecutiveUnhealthyTicks: number;
   consecutiveBrokerageFailureTicks: number;
 } {
   return { consecutiveUnhealthyTicks, consecutiveBrokerageFailureTicks };
+}
+
+export interface PitCrewWaitingOnSweepOpsSnapshot {
+  enabled: boolean;
+  started: boolean;
+  intervalMs: number;
+  lastTick: PitCrewWaitingOnSweepLastTick | null;
+  consecutiveUnhealthyTicks: number;
+  consecutiveBrokerageFailureTicks: number;
+  alertThreshold: number;
+}
+
+/**
+ * Read-only, in-process view for GET /pit-crew/ops/waiting-on/health.
+ * Job-level only. The failed-brokerage set is not included.
+ */
+export function pitCrewWaitingOnSweepOpsSnapshot(
+  env: NodeJS.ProcessEnv = process.env,
+): PitCrewWaitingOnSweepOpsSnapshot {
+  const config = pitCrewWaitingOnSweepConfig(env);
+  return {
+    enabled: config.enabled,
+    started: intervalHandle !== null,
+    intervalMs: config.intervalMs,
+    lastTick: lastTick === null ? null : { ...lastTick },
+    consecutiveUnhealthyTicks,
+    consecutiveBrokerageFailureTicks,
+    alertThreshold: PIT_CREW_WAITING_ON_SWEEP_ALERT_AFTER_CONSECUTIVE_FAILURES,
+  };
+}
+
+/**
+ * Whether `brokerageId` failed in the last completed tick.
+ * Null when no tick has completed in this process.
+ */
+export function pitCrewWaitingOnSweepCallerFailedLastTick(brokerageId: number): boolean | null {
+  if (lastCompletedTickFailedBrokerageIds === null) return null;
+  return lastCompletedTickFailedBrokerageIds.has(brokerageId);
 }
 
 function cappedFailedBrokerageIds(ids: readonly number[]): {
@@ -244,6 +307,7 @@ function noteCompletedTick(input: {
   else consecutiveUnhealthyTicks = 0;
   if (input.failedBrokerages > 0) consecutiveBrokerageFailureTicks += 1;
   else consecutiveBrokerageFailureTicks = 0;
+  lastCompletedTickFailedBrokerageIds = new Set(input.failedBrokerageIds);
   dispatchSweepHealthIfDue({ ...input, errorMessage: null });
 }
 
@@ -273,6 +337,7 @@ export async function runScheduledWaitingOnSweep(
   if (tickInFlight) {
     logger.info("pit_crew_waiting_on_sweep_tick_skipped_overlap");
     incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome: "skipped_overlap" });
+    recordLastTick("skipped_overlap", null);
     return {
       brokerages: 0,
       scanned: 0,
@@ -357,6 +422,7 @@ export async function runScheduledWaitingOnSweep(
     incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome: "completed" });
     observeHistogram("pit_crew_waiting_on_sweep_tick_duration_ms", durationMs, { outcome: "completed" });
     noteCompletedTick({ brokerages: brokeragesConsidered, failedBrokerages, failedBrokerageIds });
+    recordLastTick("completed", durationMs);
     return { ...summary, overlapSkipped: false };
   } catch (err) {
     const durationMs = Date.now() - started;
@@ -368,6 +434,7 @@ export async function runScheduledWaitingOnSweep(
       failedBrokerageIds,
       errorMessage: err instanceof Error ? err.message : String(err),
     });
+    recordLastTick("failed", durationMs);
     throw err;
   } finally {
     tickInFlight = false;
@@ -414,7 +481,8 @@ export function stopPitCrewWaitingOnSweepScheduler(): void {
 /**
  * Test-only. stopPitCrewWaitingOnSweepScheduler does not clear the latch;
  * this does, so a suite can register more than once. Also clears a stuck
- * in-process overlap flag and both repeated-failure counters.
+ * in-process overlap flag, both repeated-failure counters, the last-tick
+ * record, and the last-completed-tick failure set.
  */
 export function resetPitCrewWaitingOnSweepSchedulerForTests(): void {
   stopPitCrewWaitingOnSweepScheduler();
@@ -422,4 +490,6 @@ export function resetPitCrewWaitingOnSweepSchedulerForTests(): void {
   tickInFlight = false;
   consecutiveUnhealthyTicks = 0;
   consecutiveBrokerageFailureTicks = 0;
+  lastTick = null;
+  lastCompletedTickFailedBrokerageIds = null;
 }

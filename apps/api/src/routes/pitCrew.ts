@@ -24,7 +24,13 @@ import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from 
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getPitCrewWorkspace, getPitCrewTeam } from "../lib/pitCrew/queries.js";
 import { listOverdueWaitingOnDetections } from "../lib/pitCrew/waitingOnDetectionRun.js";
+import type { ResolvedPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnDetection.js";
 import { loadPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnSweepSettings.js";
+import {
+  pitCrewWaitingOnSweepCallerFailedLastTick,
+  pitCrewWaitingOnSweepOpsSnapshot,
+  type PitCrewWaitingOnSweepOpsSnapshot,
+} from "../lib/pitCrew/waitingOnSweepBootstrap.js";
 import {
   claimWorkItem,
   assignWorkItem,
@@ -322,4 +328,113 @@ pitCrewRouter.post("/pit-crew/ops/waiting-on/sweep", requireAuth, canAccess, req
   } catch (err) {
     if (!handlePitCrewError(err, res)) throw err;
   }
+});
+
+// R-F7: read-only ops health for the scheduled WAITING_ON detection sweep.
+// Same role gate, run.access check, and caller-brokerage resolution as
+// POST /pit-crew/ops/waiting-on/sweep. The brokerage id comes only from the
+// session. This handler does not write, sweep, audit, or alert.
+//
+// Health is derived from the in-process streaks versus alertThreshold:
+// - "not_running" when the sweep is disabled (PIT_CREW_WAITING_ON_SWEEP_ENABLED
+//   is not the literal "true") or this process has never recorded a tick.
+// - "unhealthy" when consecutiveUnhealthyTicks or
+//   consecutiveBrokerageFailureTicks has reached alertThreshold (3).
+// - "degraded" when either streak is above zero and still below that
+//   threshold (1 or 2). A whole-tick failure and a partial brokerage
+//   failure both count.
+// - "ok" when the sweep is enabled, a tick has been recorded, and both
+//   streaks are zero.
+// The streaks and lastTick are job-level. They are not per-brokerage counts.
+// failedLastTick is the only tenant-specific failure bit, and it is a
+// boolean for the authenticated caller's brokerage. A missing migration
+// 0031 (or any settings read error) stays 200 with settingsAvailable false.
+
+type WaitingOnSweepHealthStatus = "ok" | "degraded" | "unhealthy" | "not_running";
+
+function waitingOnSweepHealthStatus(snapshot: PitCrewWaitingOnSweepOpsSnapshot): WaitingOnSweepHealthStatus {
+  if (!snapshot.enabled || snapshot.lastTick === null) return "not_running";
+  const threshold = snapshot.alertThreshold;
+  if (
+    snapshot.consecutiveUnhealthyTicks >= threshold ||
+    snapshot.consecutiveBrokerageFailureTicks >= threshold
+  ) {
+    return "unhealthy";
+  }
+  if (snapshot.consecutiveUnhealthyTicks > 0 || snapshot.consecutiveBrokerageFailureTicks > 0) {
+    return "degraded";
+  }
+  return "ok";
+}
+
+type WaitingOnHealthSettingsLoader = (brokerageId: number) => Promise<ResolvedPitCrewWaitingOnSweepSettings>;
+
+let waitingOnHealthSettingsLoader: WaitingOnHealthSettingsLoader = loadPitCrewWaitingOnSweepSettings;
+
+/** Test-only. Pass null to restore the real settings reader. */
+export function __setPitCrewWaitingOnHealthSettingsLoaderForTests(
+  loader: WaitingOnHealthSettingsLoader | null,
+): void {
+  waitingOnHealthSettingsLoader = loader ?? loadPitCrewWaitingOnSweepSettings;
+}
+
+function brokerageSettingsFields(settings: ResolvedPitCrewWaitingOnSweepSettings) {
+  return {
+    settingsAvailable: true as const,
+    cadenceMs: settings.cadenceMs,
+    windowStart: settings.windowStart,
+    windowEnd: settings.windowEnd,
+    weekdays: [...settings.weekdays].sort((left, right) => left - right),
+    timeZone: settings.timeZone,
+    timeZoneSource: settings.timeZoneSource,
+    attentionThresholdHours: settings.attentionThresholdHours,
+    elevatedThresholdHours: settings.elevatedThresholdHours,
+    lastDetectionAt: settings.lastDetectionAt,
+  };
+}
+
+function brokerageSettingsUnavailable() {
+  return {
+    settingsAvailable: false as const,
+    cadenceMs: null,
+    windowStart: null,
+    windowEnd: null,
+    weekdays: null,
+    timeZone: null,
+    timeZoneSource: null,
+    attentionThresholdHours: null,
+    elevatedThresholdHours: null,
+    lastDetectionAt: null,
+  };
+}
+
+pitCrewRouter.get("/pit-crew/ops/waiting-on/health", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  const user = req.authedUser!;
+  const snapshot = pitCrewWaitingOnSweepOpsSnapshot();
+  let settingsFields: ReturnType<typeof brokerageSettingsFields> | ReturnType<typeof brokerageSettingsUnavailable>;
+  try {
+    settingsFields = brokerageSettingsFields(await waitingOnHealthSettingsLoader(user.brokerageId));
+  } catch (err) {
+    logger.warn("pit_crew_waiting_on_sweep_health_settings_unavailable", {
+      brokerageId: user.brokerageId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    settingsFields = brokerageSettingsUnavailable();
+  }
+  res.json({
+    scheduler: {
+      enabled: snapshot.enabled,
+      started: snapshot.started,
+      intervalMs: snapshot.intervalMs,
+      lastTick: snapshot.lastTick,
+      health: waitingOnSweepHealthStatus(snapshot),
+      consecutiveUnhealthyTicks: snapshot.consecutiveUnhealthyTicks,
+      consecutiveBrokerageFailureTicks: snapshot.consecutiveBrokerageFailureTicks,
+      alertThreshold: snapshot.alertThreshold,
+    },
+    brokerage: {
+      ...settingsFields,
+      failedLastTick: pitCrewWaitingOnSweepCallerFailedLastTick(user.brokerageId),
+    },
+  });
 });
