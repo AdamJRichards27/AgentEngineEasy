@@ -308,6 +308,10 @@ sign in.
 
 ## 8. Configure and prepare the Replit deployment
 
+### Runtime environment
+
+`.replit` pins Node.js 24 in both places Replit reads, and those pins must stay aligned: `modules = ["nodejs-24"]` and `[nix] packages = ["nodejs_24"]` (channel `stable-24_05`). Do not regenerate `.replit` from an embedded or base64 copy of an older file. Doing so overwrites this pin and the `[deployment]` section. Edit `.replit` in place.
+
 A `[deployment]` section has already been added to `.replit` by this readiness pass:
 
 ```

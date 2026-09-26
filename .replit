@@ -18,7 +18,7 @@ externalPort = 8081
 
 [nix]
 channel = "stable-24_05"
-packages = ["nodejs_20", "nodePackages.pnpm"]
+packages = ["nodejs_24"]
 
 # Critical Blocker Remediation, Phase 9 — production-mode pilot deployment
 # readiness (docs/gate-evidence/PHASE9_DEPLOYMENT_READINESS_AUDIT.md,
@@ -50,12 +50,3 @@ args = "pnpm dev:api"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
-
-[[workflows.workflow]]
-name = "FixConfig"
-mode = "sequential"
-author = 48455239
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "echo cnVuID0gInBucG0gaW5zdGFsbCAmJiAocG5wbSBydW4gZGV2OmFwaSAmKSAmJiBiYXNoIC1sYyAncG5wbSAtLWZpbHRlciBAYWVlL3dlYiBleGVjIHZpdGUgLS1ob3N0IDAuMC4wLjAgLS1wb3J0IDUwMDAnIgplbnRyeXBvaW50ID0gImFwcHMvYXBpL3NyYy9pbmRleC50cyIKCltlbnZdClBPUlQgPSAiODA4MCIKCltbcG9ydHNdXQpsb2NhbFBvcnQgPSA1MDAwCmV4dGVybmFsUG9ydCA9IDgwCgpbW3BvcnRzXV0KbG9jYWxQb3J0ID0gNTAwMQpleHRlcm5hbFBvcnQgPSAzMDAwCgpbW3BvcnRzXV0KbG9jYWxQb3J0ID0gODA4MApleHRlcm5hbFBvcnQgPSA4MDgxCgpbbml4XQpjaGFubmVsID0gInN0YWJsZS0yNF8wNSIKcGFja2FnZXMgPSBbIm5vZGVqc18yMCIsICJub2RlUGFja2FnZXMucG5wbSJdCgpbd29ya2Zsb3dzXQoKW1t3b3JrZmxvd3Mud29ya2Zsb3ddXQpuYW1lID0gIkRldiIKbW9kZSA9ICJwYXJhbGxlbCIKYXV0aG9yID0gNDg0NTUyMzkKCltbd29ya2Zsb3dzLndvcmtmbG93LnRhc2tzXV0KdGFzayA9ICJzaGVsbC5leGVjIgphcmdzID0gInBucG0gZGV2OmFwaSIKCltbd29ya2Zsb3dzLndvcmtmbG93LnRhc2tzXV0KdGFzayA9ICJzaGVsbC5leGVjIgphcmdzID0gImJhc2ggLWxjICdwbnBtIC0tZmlsdGVyIEBhZWUvd2ViIGV4ZWMgdml0ZSAtLWhvc3QgMC4wLjAuMCAtLXBvcnQgNTAwMCciCg== | base64 -d > .replit && echo ___VERIFY___ && cat .replit && echo ___END___"
