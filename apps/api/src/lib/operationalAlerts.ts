@@ -33,6 +33,16 @@ export type OperationalAlertType =
   | "GROW_SIGNAL_SWEEP_UNHEALTHY"
   | "GROW_SIGNAL_SWEEP_BROKERAGE_FAILED"
   | "GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED"
+  // R-F6: PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY and
+  // PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED. Both call sites are in
+  // lib/pitCrew/waitingOnSweepBootstrap.ts's runScheduledWaitingOnSweep:
+  // the unhealthy branch (a tick that threw, or a tick where every
+  // considered brokerage failed) and the brokerage-failure branch (a
+  // completed tick that still had some brokerage failures). Each fires only
+  // after 3 consecutive ticks of that kind. These alerts fire on sweep
+  // health only, never for an overdue item.
+  | "PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY"
+  | "PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED"
   | "TEST";
 
 export interface AlertPolicy {
@@ -56,6 +66,8 @@ export const OPERATIONAL_ALERT_POLICIES: Readonly<Record<OperationalAlertType, A
   GROW_SIGNAL_SWEEP_UNHEALTHY: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
   GROW_SIGNAL_SWEEP_BROKERAGE_FAILED: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
   GROW_SIGNAL_SWEEP_CURSOR_TOUCH_FAILED: { severity: "high", owner: "operations", runbook: "grow-signal-sweep" },
+  PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY: { severity: "high", owner: "operations", runbook: "pit-crew-waiting-on-sweep" },
+  PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED: { severity: "high", owner: "operations", runbook: "pit-crew-waiting-on-sweep" },
   TEST: { severity: "low", owner: "operations", runbook: "alert-delivery-test" },
 };
 

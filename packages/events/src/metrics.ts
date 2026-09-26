@@ -218,6 +218,28 @@ export const METRIC_DEFINITIONS = {
     help: "Sum of provider-reported audio durationSeconds on successful voice transcriptions. This is the speech-to-text spend meter. No per-request table. Not recorded on failure, and not recorded when the provider reports no duration.",
     labels: { provider: ["mock", "deepgram", "other"] },
   },
+  // R-F6 — Pit Crew WAITING_ON detection sweep. Scheduled path only
+  // (runScheduledWaitingOnSweep in lib/pitCrew/waitingOnSweepBootstrap.ts),
+  // not the human POST /pit-crew/ops/waiting-on/sweep route. Closed label
+  // sets with no "other" fallback, so a bad call site throws in test.
+  // Never a brokerageId, assignmentId, propertyId, userId, or a per-item
+  // tier. This path never returns, reassigns, or contacts anyone.
+  pit_crew_waiting_on_sweep_tick_total: {
+    help: "Scheduled Pit Crew WAITING_ON detection ticks only (runScheduledWaitingOnSweep, not POST /pit-crew/ops/waiting-on/sweep), by outcome. completed includes a tick that finished with some brokerage failures. failed means the tick threw. skipped_overlap means the in-process overlap guard skipped the tick, and no duration is recorded for it. This path never returns, reassigns, or contacts anyone.",
+    labels: { outcome: ["completed", "failed", "skipped_overlap"] },
+  },
+  pit_crew_waiting_on_sweep_tick_duration_ms: {
+    help: "Duration in milliseconds of a scheduled Pit Crew WAITING_ON detection tick (runScheduledWaitingOnSweep only, not POST /pit-crew/ops/waiting-on/sweep), by outcome. completed is a tick that finished, including one with some brokerage failures. failed is a tick that threw. An overlap skip is not observed. This path never returns, reassigns, or contacts anyone.",
+    labels: { outcome: ["completed", "failed"] },
+  },
+  pit_crew_waiting_on_sweep_brokerage_total: {
+    help: "Brokerages considered by one scheduled Pit Crew WAITING_ON detection tick (runScheduledWaitingOnSweep only, not POST /pit-crew/ops/waiting-on/sweep), one increment per brokerage. detected ran detection. skipped_window was outside the operating window. skipped_cadence was inside the cadence. failed threw. This path never returns, reassigns, or contacts anyone.",
+    labels: { outcome: ["detected", "skipped_window", "skipped_cadence", "failed"] },
+  },
+  pit_crew_waiting_on_sweep_item_total: {
+    help: "WAITING_ON items classified by the scheduled detection path only (runScheduledWaitingOnSweep, not POST /pit-crew/ops/waiting-on/sweep). surfaced is a new or materially changed sighting. deduped is an unchanged sighting suppressed by the fingerprint. Incremented by the per-brokerage counts. This path never returns, reassigns, or contacts anyone.",
+    labels: { outcome: ["surfaced", "deduped"] },
+  },
 } as const satisfies Record<string, MetricDefinition>;
 
 export type MetricName = keyof typeof METRIC_DEFINITIONS;
@@ -276,6 +298,7 @@ const HISTOGRAM_METRICS = new Set<MetricName>([
   "financial_webhook_duration_ms",
   "ai_provider_call_duration_ms",
   "voice_transcription_duration_ms",
+  "pit_crew_waiting_on_sweep_tick_duration_ms",
 ]);
 const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge"]);
 

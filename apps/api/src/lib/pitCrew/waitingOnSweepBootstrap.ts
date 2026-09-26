@@ -1,4 +1,5 @@
-import { logger } from "@aee/events";
+import { incrementCounter, logger, observeHistogram } from "@aee/events";
+import { dispatchOperationalAlert } from "../operationalAlerts.js";
 import { findBrokerageIdsWithOverdueWaitingOn } from "./assignment.js";
 import { recordWaitingOnDetections } from "./waitingOnDetectionRun.js";
 import {
@@ -32,11 +33,19 @@ import { loadPitCrewWaitingOnSweepSettings, markPitCrewWaitingOnSweepRan } from 
  * in this process while the previous one is still running. Repeat alerts are
  * suppressed by the sighting fingerprint, not by mutating the assignment.
  *
- * This slice does not emit a metric and does not raise an operational alert
- * (those webhooks can leave the process). Surfacing is a log line plus the
- * internal read GET /pit-crew/ops/waiting-on/detections.
+ * The scheduled path emits four bounded metrics
+ * (pit_crew_waiting_on_sweep_tick_total,
+ * pit_crew_waiting_on_sweep_tick_duration_ms,
+ * pit_crew_waiting_on_sweep_brokerage_total,
+ * pit_crew_waiting_on_sweep_item_total). It pages operations only when the
+ * sweep itself fails PIT_CREW_WAITING_ON_SWEEP_ALERT_AFTER_CONSECUTIVE_FAILURES
+ * (3) ticks in a row. It never alerts, escalates, reassigns, or contacts
+ * anyone about an overdue item. The flag stays default off, so nothing can
+ * fire until the Owner enables the sweep. Surfacing for a person is still a
+ * log line plus the internal read GET /pit-crew/ops/waiting-on/detections.
  *
- * Follow-ups: operational alert on repeated tick failure; sweep metric.
+ * Follow-ups: rate-of-absence alerting needs an external rule engine; an ops
+ * health read is a candidate R-F7.
  */
 
 export const PIT_CREW_WAITING_ON_SWEEP_DEFAULT_INTERVAL_MS = PIT_CREW_WAITING_ON_SWEEP_DEFAULT_CADENCE_MS;
@@ -45,6 +54,15 @@ export const PIT_CREW_WAITING_ON_SWEEP_MAX_INTERVAL_MS = PIT_CREW_WAITING_ON_SWE
 
 /** Distinct brokerages considered in one tick, lowest brokerage id first. */
 export const PIT_CREW_WAITING_ON_SWEEP_MAX_BROKERAGES_PER_TICK = 200;
+
+/**
+ * Same "repeated" bar as LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS.
+ * A code constant: not an environment variable.
+ */
+export const PIT_CREW_WAITING_ON_SWEEP_ALERT_AFTER_CONSECUTIVE_FAILURES = 3;
+
+/** Brokerage ids carried on one alert. One dedup key per type, so this cap is detail, not paging volume. */
+const FAILED_BROKERAGE_IDS_IN_ALERT = 20;
 
 export interface PitCrewWaitingOnSweepConfig {
   enabled: boolean;
@@ -93,6 +111,10 @@ function readIntervalMs(raw: string | undefined): number {
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
 let tickInFlight = false;
+/** Ticks that threw, or finished with every considered brokerage failing. */
+let consecutiveUnhealthyTicks = 0;
+/** Completed ticks with at least one brokerage failure. A thrown tick does not move this. */
+let consecutiveBrokerageFailureTicks = 0;
 
 export interface RegisterPitCrewWaitingOnSweepOptions {
   /** Set false to register without arming the timer. Defaults to (enabled && NODE_ENV !== "test"). */
@@ -106,6 +128,12 @@ export interface RunScheduledWaitingOnSweepOptions {
    * with the remaining brokerages.
    */
   beforeBrokerage?: (brokerageId: number) => Promise<void> | void;
+  /**
+   * Test seam. Invoked inside the tick, before findBrokerageIdsWithOverdueWaitingOn.
+   * A throw is a whole-tick failure: the function rejects, the same contract as
+   * the scan itself throwing. Never passed in production.
+   */
+  beforeScan?: () => Promise<void> | void;
   /**
    * Restrict the tick to these brokerages. Omitted on the scheduler path,
    * which considers every brokerage with an overdue row. Tests pass their
@@ -129,6 +157,111 @@ export interface WaitingOnSweepTickResult {
   overlapSkipped: boolean;
 }
 
+/** Read-only view of the in-process streaks. No route reads this in R-F6. */
+export function pitCrewWaitingOnSweepHealthSnapshot(): {
+  consecutiveUnhealthyTicks: number;
+  consecutiveBrokerageFailureTicks: number;
+} {
+  return { consecutiveUnhealthyTicks, consecutiveBrokerageFailureTicks };
+}
+
+function cappedFailedBrokerageIds(ids: readonly number[]): {
+  failedBrokerageIds: number[];
+  failedBrokerageIdsTruncated: boolean;
+} {
+  const sorted = [...ids].sort((left, right) => left - right);
+  return {
+    failedBrokerageIds: sorted.slice(0, FAILED_BROKERAGE_IDS_IN_ALERT),
+    failedBrokerageIdsTruncated: sorted.length > FAILED_BROKERAGE_IDS_IN_ALERT,
+  };
+}
+
+/**
+ * At most one dispatch per tick. Unhealthy wins over partial brokerage
+ * failures. Fire-and-forget: the real dispatcher owns cooldown, the
+ * disabled short-circuit, and transport retries. A failed or slow alert
+ * must not reject the tick, delay the next one, or change a row. Tests
+ * stub that transport; this module does not add a second seam.
+ */
+function dispatchSweepHealthIfDue(input: {
+  brokerages: number;
+  failedBrokerages: number;
+  failedBrokerageIds: readonly number[];
+  /** Set only when the tick threw. Per-brokerage messages stay in the log. */
+  errorMessage: string | null;
+}): void {
+  const threshold = PIT_CREW_WAITING_ON_SWEEP_ALERT_AFTER_CONSECUTIVE_FAILURES;
+  const ids = cappedFailedBrokerageIds(input.failedBrokerageIds);
+  const intervalMs = pitCrewWaitingOnSweepConfig().intervalMs;
+  const shared = {
+    intervalMs,
+    brokerages: input.brokerages,
+    failedBrokerages: input.failedBrokerages,
+    failedBrokerageIds: ids.failedBrokerageIds,
+    failedBrokerageIdsTruncated: ids.failedBrokerageIdsTruncated,
+  };
+  const alert =
+    consecutiveUnhealthyTicks >= threshold
+      ? {
+          type: "PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY" as const,
+          summary:
+            input.errorMessage != null
+              ? `The scheduled Pit Crew WAITING_ON detection sweep failed ${consecutiveUnhealthyTicks} ticks in a row and did not finish.`
+              : `The scheduled Pit Crew WAITING_ON detection sweep failed for every considered brokerage ${consecutiveUnhealthyTicks} ticks in a row.`,
+          dedupKey: "pit-crew-waiting-on-sweep:unhealthy",
+          details: {
+            consecutiveTicks: consecutiveUnhealthyTicks,
+            ...shared,
+            ...(input.errorMessage != null ? { error: input.errorMessage } : {}),
+          },
+        }
+      : consecutiveBrokerageFailureTicks >= threshold
+        ? {
+            type: "PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED" as const,
+            summary: `The scheduled Pit Crew WAITING_ON detection sweep has had brokerage failures on ${consecutiveBrokerageFailureTicks} consecutive completed ticks.`,
+            dedupKey: "pit-crew-waiting-on-sweep:brokerage-failures",
+            details: {
+              consecutiveTicks: consecutiveBrokerageFailureTicks,
+              ...shared,
+            },
+          }
+        : null;
+  if (!alert) return;
+  void dispatchOperationalAlert(alert).catch((err) => {
+    logger.error("pit_crew_waiting_on_sweep_alert_dispatch_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+}
+
+function noteCompletedTick(input: {
+  brokerages: number;
+  failedBrokerages: number;
+  failedBrokerageIds: readonly number[];
+}): void {
+  const unhealthy = input.brokerages > 0 && input.failedBrokerages === input.brokerages;
+  if (unhealthy) consecutiveUnhealthyTicks += 1;
+  else consecutiveUnhealthyTicks = 0;
+  if (input.failedBrokerages > 0) consecutiveBrokerageFailureTicks += 1;
+  else consecutiveBrokerageFailureTicks = 0;
+  dispatchSweepHealthIfDue({ ...input, errorMessage: null });
+}
+
+function noteThrownTick(input: {
+  brokerages: number;
+  failedBrokerages: number;
+  failedBrokerageIds: readonly number[];
+  errorMessage: string;
+}): void {
+  consecutiveUnhealthyTicks += 1;
+  dispatchSweepHealthIfDue(input);
+}
+
+function recordItemCounts(surfaced: number, deduped: number): void {
+  if (surfaced > 0) incrementCounter("pit_crew_waiting_on_sweep_item_total", { outcome: "surfaced" }, surfaced);
+  if (deduped > 0) incrementCounter("pit_crew_waiting_on_sweep_item_total", { outcome: "deduped" }, deduped);
+}
+
 /**
  * One scheduler tick. Detection and prioritisation only. Does not return
  * WAITING_ON rows to IN_PROGRESS and does not write an audit row.
@@ -139,6 +272,7 @@ export async function runScheduledWaitingOnSweep(
 ): Promise<WaitingOnSweepTickResult> {
   if (tickInFlight) {
     logger.info("pit_crew_waiting_on_sweep_tick_skipped_overlap");
+    incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome: "skipped_overlap" });
     return {
       brokerages: 0,
       scanned: 0,
@@ -153,7 +287,11 @@ export async function runScheduledWaitingOnSweep(
   }
   tickInFlight = true;
   const started = Date.now();
+  const failedBrokerageIds: number[] = [];
+  let brokeragesConsidered = 0;
+  let failedBrokerages = 0;
   try {
+    if (options.beforeScan) await options.beforeScan();
     const cap =
       options.maxBrokerages != null && Number.isInteger(options.maxBrokerages) && options.maxBrokerages > 0
         ? options.maxBrokerages
@@ -166,22 +304,24 @@ export async function runScheduledWaitingOnSweep(
       logger.warn("pit_crew_waiting_on_sweep_brokerages_truncated", { cap });
     }
 
+    brokeragesConsidered = found.brokerageIds.length;
     let scanned = 0;
     let surfaced = 0;
     let deduped = 0;
     let skippedWindow = 0;
     let skippedCadence = 0;
-    let failedBrokerages = 0;
     for (const brokerageId of found.brokerageIds) {
       try {
         if (options.beforeBrokerage) await options.beforeBrokerage(brokerageId);
         const settings = await loadPitCrewWaitingOnSweepSettings(brokerageId);
         if (!isWithinOperatingWindow(now, settings)) {
           skippedWindow += 1;
+          incrementCounter("pit_crew_waiting_on_sweep_brokerage_total", { outcome: "skipped_window" });
           continue;
         }
         if (!isWaitingOnSweepDue(settings.lastDetectionAt, now, settings.cadenceMs)) {
           skippedCadence += 1;
+          incrementCounter("pit_crew_waiting_on_sweep_brokerage_total", { outcome: "skipped_cadence" });
           continue;
         }
         const result = await recordWaitingOnDetections({ now, brokerageId, settings });
@@ -189,8 +329,12 @@ export async function runScheduledWaitingOnSweep(
         scanned += result.scanned;
         surfaced += result.surfaced;
         deduped += result.deduped;
+        incrementCounter("pit_crew_waiting_on_sweep_brokerage_total", { outcome: "detected" });
+        recordItemCounts(result.surfaced, result.deduped);
       } catch (err) {
         failedBrokerages += 1;
+        failedBrokerageIds.push(brokerageId);
+        incrementCounter("pit_crew_waiting_on_sweep_brokerage_total", { outcome: "failed" });
         logger.error("pit_crew_waiting_on_sweep_brokerage_failed", {
           brokerageId,
           error: err instanceof Error ? err.message : String(err),
@@ -198,18 +342,33 @@ export async function runScheduledWaitingOnSweep(
       }
     }
 
+    const durationMs = Date.now() - started;
     const summary = {
-      brokerages: found.brokerageIds.length,
+      brokerages: brokeragesConsidered,
       scanned,
       surfaced,
       deduped,
       skippedWindow,
       skippedCadence,
       failedBrokerages,
-      durationMs: Date.now() - started,
+      durationMs,
     };
     logger.info("pit_crew_waiting_on_sweep_tick_completed", summary);
+    incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome: "completed" });
+    observeHistogram("pit_crew_waiting_on_sweep_tick_duration_ms", durationMs, { outcome: "completed" });
+    noteCompletedTick({ brokerages: brokeragesConsidered, failedBrokerages, failedBrokerageIds });
     return { ...summary, overlapSkipped: false };
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome: "failed" });
+    observeHistogram("pit_crew_waiting_on_sweep_tick_duration_ms", durationMs, { outcome: "failed" });
+    noteThrownTick({
+      brokerages: brokeragesConsidered,
+      failedBrokerages,
+      failedBrokerageIds,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   } finally {
     tickInFlight = false;
   }
@@ -232,6 +391,8 @@ export function registerPitCrewWaitingOnSweep(options: RegisterPitCrewWaitingOnS
 
   intervalHandle = setInterval(() => {
     runScheduledWaitingOnSweep().catch((err) => {
+      // The tick already recorded the failure and, at the repeated-failure
+      // threshold, dispatched the one alert. Do not dispatch a second one.
       logger.error("pit_crew_waiting_on_sweep_scheduled_run_failed", {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -253,10 +414,12 @@ export function stopPitCrewWaitingOnSweepScheduler(): void {
 /**
  * Test-only. stopPitCrewWaitingOnSweepScheduler does not clear the latch;
  * this does, so a suite can register more than once. Also clears a stuck
- * in-process overlap flag.
+ * in-process overlap flag and both repeated-failure counters.
  */
 export function resetPitCrewWaitingOnSweepSchedulerForTests(): void {
   stopPitCrewWaitingOnSweepScheduler();
   registered = false;
   tickInFlight = false;
+  consecutiveUnhealthyTicks = 0;
+  consecutiveBrokerageFailureTicks = 0;
 }
