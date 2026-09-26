@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, transactions, properties } from "@aee/db";
-import { logger } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
@@ -126,9 +126,19 @@ function handleTransactionError(err: unknown, res: Response): void {
   res.status(500).json({ error: GENERIC_TRANSACTION_ERROR });
 }
 
+// R-F8 — the transaction boundary of tenant_isolation_rejection_total.
+// The property row is already loaded here, so a missing property and a
+// property in another brokerage stay distinguishable without a second
+// query. Increment only for the latter. The other brokerage's id is not
+// logged or returned; the caller still answers 404 either way.
 async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
   const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
-  return !!property && property.brokerageId === brokerageId;
+  if (!property) return false;
+  if (property.brokerageId !== brokerageId) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "transaction" });
+    return false;
+  }
+  return true;
 }
 
 // #123 — tenant scoping. None of this router's :id routes previously

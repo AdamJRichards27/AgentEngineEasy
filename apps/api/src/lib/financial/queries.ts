@@ -8,7 +8,7 @@
 // redactPcFeeAuthority — the raw mandateProviderRef is never serialised
 // by any function in this file.
 
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, ne } from "drizzle-orm";
 import {
   db,
   commissionAgreements,
@@ -27,6 +27,7 @@ import {
   transactions,
   type FinancialSettingsRow,
 } from "@aee/db";
+import { incrementCounter } from "@aee/events";
 import { redactPcFeeAuthority, type RedactedPcFeeAuthority } from "./pcFeeAuthorities.js";
 import { getLegacyCommissionContext, getExistingLegacyReconciliation, type LegacyCommissionContext } from "./legacyReconciliation.js";
 
@@ -174,6 +175,13 @@ export async function getOrCreateFinancialSettings(brokerageId: number): Promise
  * tenant id"). Returns null if the transaction doesn't exist or its
  * property doesn't belong to the given brokerage — routes turn that into
  * a 404, exactly like a cross-tenant id anywhere else in this app.
+ *
+ * R-F8 — the scoped query cannot tell those two misses apart. On a miss
+ * only, one existence lookup (never on the success path) checks whether
+ * the transaction's property belongs to another brokerage and, if so,
+ * increments tenant_isolation_rejection_total{boundary="financial"} once.
+ * That lookup selects no brokerage id and no other tenant's columns.
+ * The return value stays null either way.
  */
 export async function resolveTransactionScope(transactionId: number, brokerageId: number): Promise<{ transactionId: number; propertyId: number } | null> {
   const [row] = await db
@@ -181,7 +189,21 @@ export async function resolveTransactionScope(transactionId: number, brokerageId
     .from(transactions)
     .innerJoin(properties, eq(properties.id, transactions.propertyId))
     .where(and(eq(transactions.id, transactionId), eq(properties.brokerageId, brokerageId)));
-  return row ? { transactionId: row.transactionId, propertyId: row.propertyId } : null;
+  if (row) return { transactionId: row.transactionId, propertyId: row.propertyId };
+  if (await transactionExistsInAnotherBrokerage(transactionId, brokerageId)) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "financial" });
+  }
+  return null;
+}
+
+async function transactionExistsInAnotherBrokerage(transactionId: number, brokerageId: number): Promise<boolean> {
+  if (!Number.isInteger(transactionId) || transactionId <= 0) return false;
+  const [elsewhere] = await db
+    .select({ transactionId: transactions.id })
+    .from(transactions)
+    .innerJoin(properties, eq(properties.id, transactions.propertyId))
+    .where(and(eq(transactions.id, transactionId), ne(properties.brokerageId, brokerageId)));
+  return Boolean(elsewhere);
 }
 
 /**
