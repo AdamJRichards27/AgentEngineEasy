@@ -93,7 +93,7 @@ cross-check against the instruction's named list.
 | 7 | Exception-engine scan health and unresolved critical risk | scheduled scans completing, by trigger; current count of OPEN CRITICAL risk exceptions | `exceptions_scan_total{trigger}` — `lib/exceptions/engine.ts`; **new:** `unresolved_critical_risk_gauge{status="open"}` — `lib/observability/queueGauges.ts`, sampled fresh at every metrics scrape |
 | 8 | Domain-event publish reliability | events published successfully vs. with at least one handler failure | `domain_event_publish_total{outcome}` — `packages/events/src/publisher.ts`, incremented on every `publishDomainEvent` call regardless of caller |
 | 9 | Readiness latency distribution | the same `select 1` health probe's own duration, bucketed by resulting status | `health_check_duration_ms{status}` — doubles as SLI #1's supporting distribution and the source for the "degraded" alert (§2, #2) |
-| 10 | Auth and tenant-isolation signal | cross-tenant rejection / auth-attack patterns | **now partially metric-backed**: `auth_security_event_total{event}` (invalid session token, revoked-session reuse, dev-login-disabled probing, auth rate-limiting — `middlewares/auth.ts`, `routes/auth.ts`, `middlewares/rateLimit.ts`) and `tenant_isolation_rejection_total{boundary}` for the three domains named in §0 item 1; the remaining inline-404 tenant checks are still log-based only, see §4 |
+| 10 | Auth and tenant-isolation signal | cross-tenant rejection / auth-attack patterns | **now partially metric-backed**: `auth_security_event_total{event}` (invalid session token, revoked-session reuse, dev-login-disabled probing, auth rate-limiting — `middlewares/auth.ts`, `routes/auth.ts`, `middlewares/rateLimit.ts`) and `tenant_isolation_rejection_total{boundary}` for the boundaries named in §4 item 1; the remaining inline-404 tenant checks are still log-based only, see §4 |
 | 11 | Build/test health (a process SLI, not a runtime one) | full regression suite pass rate over time, typecheck pass/fail | Measured manually per run today — see the completion report's test-evidence section for the current value; not exported as a runtime metric (it isn't a runtime signal) |
 | 12 | Background queue health | current backlog depth and oldest-item age per queue, distinct from the per-attempt dispatch counters in #4/#6 | **new:** `queue_backlog_size{queue}` / `queue_oldest_item_age_ms{queue}` — `lib/observability/queueGauges.ts`, covering `integration_outbox`, `financial_payment_outbox`, `communications_outbox`, sampled fresh (never accumulated) immediately before every `GET /api/internal/metrics` render |
 | 13 | AI action governance and provider observability | allow/deny split of every AI action policy decision; provider-call attempts, latency, gateway fallback, and tokens; voice transcription attempts, latency, and transcribed audio seconds | `ai_action_decision_total{outcome}` — `lib/ai/policyEngine.ts`. **C-10:** `ai_provider_call_total{provider,outcome}`, `ai_provider_call_duration_ms{provider,outcome}`, `ai_gateway_result_total{result}`, `ai_provider_tokens_total{provider,kind}` recorded inside `generateWithGateway` (`lib/ai/gateway.ts`), which is the one text-generation call site. `voice_transcription_total{provider,outcome}`, `voice_transcription_duration_ms{provider,outcome}`, `voice_transcription_audio_seconds_total{provider}` recorded in `routes/aiVoice.ts` only after `provider.transcribe`. Provider is `mock`, `anthropic`, or `other` for text, and `mock`, `deepgram`, or `other` for voice. No brokerage, user, model, or correlation id label. Dollars stay on the admin-only usage snapshot, not a metric. |
@@ -135,12 +135,12 @@ where a metric referenced there is now more precisely named); 22–27 were new i
    (via logs, not the metric itself — no per-account label exists, by design) to a single
    account → active session-token-abuse suspicion (Runbook: session token compromise).
 9. `tenant_isolation_rejection_total{boundary}` any non-zero sustained rate → active
-   IDOR-probing suspicion (Runbook: suspected cross-tenant exposure). **Now metric-backed for
-   the `communications`/`pit_crew`/`integrations` boundaries**; the remaining boundaries
-   (`property`, `party`, `transaction`, `financial`, `other`) are still log-based only — see
-   §4 item 1. A metric reading zero across all boundaries is not proof no cross-tenant
-   attempt occurred anywhere in the app; it is proof none occurred at the three wired
-   chokepoints.
+   IDOR-probing suspicion (Runbook: suspected cross-tenant exposure). **Metric-backed for
+   the `communications`, `pit_crew`, `integrations`, `transaction`, `financial`, `property`,
+   and `party` boundaries** (offers emit `transaction`; see §4 item 1). The remaining
+   declared boundary (`other`) is unused. A metric reading zero across all
+   boundaries is not proof no cross-tenant attempt occurred anywhere in the app; it is
+   proof none occurred at the wired chokepoints.
 10. `communications_webhook_total{outcome="invalid_signature"}` or
     `financial_webhook_total{outcome="invalid_signature"}` or
     `integration_webhook_total{outcome="rejected"}` rate spikes, any of the three webhook
@@ -431,12 +431,22 @@ details is never a metric label.
    module, so offer rejections use the closest declared value, `boundary="transaction"`.
    The counter increments only when the named row exists in another brokerage. A missing
    row, a role or entitlement 403, and a successful request do not increment it, and the
-   response stays the same 404. Still not wired, and still on the inline "identical 404"
-   pattern: properties, parties, grow, documents, AML, pit-crew work-item overlays outside
-   the two wired classes, and the `IntegrationError` reasons other than `NOT_FOUND`/
-   `TENANT_MISMATCH`. Detected for those unwired boundaries by grep-ing/alerting on
-   structured log lines from `middlewares/auth.ts`/`middlewares/entitlement.ts` and the
-   individual chokepoints.
+   response stays the same 404. **R-F9** also emits it at the properties and parties API
+   boundaries. Properties: every authenticated `:id` route that rejects a property in
+   another brokerage (`GET /:id`, workspace, timeline, ownership-review, listing-details,
+   ready-to-list, go-live) uses `boundary="property"`. The timeline route's check still
+   lives in `assertPropertyInBrokerage` (`lib/timeline.ts`); the route counts only when
+   that function's existing `Property <id> not found` error is a cross-tenant id, and the
+   404 body stays that same message. Parties: `POST /`, `GET /by-property/:propertyId`,
+   and `DELETE /link/:linkId` use `boundary="party"`. On a miss only, one existence
+   lookup that selects no brokerage id and no other tenant columns (no party PII)
+   distinguishes a cross-tenant id from a missing one. The counter increments only for
+   the former, exactly once, and the response stays the same 404. Still not wired, and
+   still on the inline "identical 404" pattern: grow, documents, AML, pit-crew work-item
+   overlays outside the two wired classes, and the `IntegrationError` reasons other than
+   `NOT_FOUND`/`TENANT_MISMATCH`. The declared `other` boundary is unused. Detected for
+   those unwired boundaries by grep-ing/alerting on structured log lines from
+   `middlewares/auth.ts`/`middlewares/entitlement.ts` and the individual chokepoints.
 2. **Per-rule exception-engine failures are not separately counted.** Unchanged from the
    prior revision: `exceptions_scan_total` records that a scan ran, by trigger, but not
    whether every rule inside that scan pass succeeded.
@@ -466,7 +476,7 @@ still open — no category is silently marked done without saying which metric/l
 | # | Named category | Status | Backing |
 |---|---|---|---|
 | 1 | Auth attack patterns | **Closed** | `auth_security_event_total{event: invalid_session_token, revoked_session_reused, dev_login_disabled_attempt, auth_rate_limited}` |
-| 2 | Tenant-isolation rejections | **Partially closed** — see §4 item 1 | `tenant_isolation_rejection_total{boundary}`, 3 of 8 declared boundaries actually wired |
+| 2 | Tenant-isolation rejections | **Partially closed** — see §4 item 1 | `tenant_isolation_rejection_total{boundary}`, 7 of 8 declared boundaries actually wired (`other` is unused; offers emit `transaction`) |
 | 3 | API failure/latency | **Already closed pre-existing** | `http_requests_total{method,status_class}` / `http_request_duration_ms{method,status_class}` — predates this pass, confirmed still correctly wired via `middlewares/httpMetrics.ts` |
 | 4 | Queue backlog | **Closed** | `queue_backlog_size{queue: integration_outbox, financial_payment_outbox, communications_outbox}` |
 | 5 | Oldest-item age | **Closed** | `queue_oldest_item_age_ms{queue}` — same three queues |
@@ -481,7 +491,7 @@ still open — no category is silently marked done without saying which metric/l
 | — | AI action denial/allowance threshold | **Closed** (named separately from the numbered 13 in the governing instruction, included here for completeness) | `ai_action_decision_total{outcome: allowed, denied}` |
 
 **Honest summary of this cross-check:** 10 of 13 named categories are fully closed, and 2 are
-partially closed with the exact wired/unwired boundary named (#2 tenant-isolation, 3 of 8
+partially closed with the exact wired/unwired boundary named (#2 tenant-isolation, 7 of 8
 boundaries; #11 workflow execution, 1 of 3 workflow families) — #8/#9's outbound side is
 already covered by #6, and the AI-governance category named separately from the numbered 13
 is also closed, bringing the total to 11 of 14 fully closed.

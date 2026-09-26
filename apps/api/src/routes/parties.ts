@@ -1,8 +1,8 @@
 import { Router } from "express";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import { db, parties, propertyParties, properties, workflows } from "@aee/db";
-import { logger } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
@@ -15,6 +15,38 @@ async function readyToListWorkflowExists(propertyId: number): Promise<boolean> {
     .from(workflows)
     .where(and(eq(workflows.propertyId, propertyId), eq(workflows.workflowType, "ReadyToList")));
   return Boolean(workflow);
+}
+
+// R-F9 — the party boundary of tenant_isolation_rejection_total.
+// Scoped loads cannot tell a missing id from one in another brokerage.
+// On a miss only, one existence lookup (never on the success path) checks
+// whether the record belongs to another brokerage and, if so, increments
+// once with boundary "party". The lookup selects no brokerage id and no
+// other tenant's columns (no party PII). Callers still answer 404 either
+// way. Same rule as routes/transactions.ts and routes/offers.ts: a missing
+// row does not increment, and the other brokerage's id is not logged or
+// returned.
+async function notePartyPropertyIsolationRejection(propertyId: number, brokerageId: number): Promise<void> {
+  if (!Number.isInteger(propertyId) || propertyId <= 0) return;
+  const [elsewhere] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), ne(properties.brokerageId, brokerageId)));
+  if (elsewhere) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "party" });
+  }
+}
+
+async function notePartyLinkIsolationRejection(linkId: number, brokerageId: number): Promise<void> {
+  if (!Number.isInteger(linkId) || linkId <= 0) return;
+  const [elsewhere] = await db
+    .select({ id: propertyParties.id })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .where(and(eq(propertyParties.id, linkId), ne(properties.brokerageId, brokerageId)));
+  if (elsewhere) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "party" });
+  }
 }
 
 export const partiesRouter = Router();
@@ -57,6 +89,7 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
     .from(properties)
     .where(and(eq(properties.id, parsed.data.propertyId), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
+    await notePartyPropertyIsolationRejection(parsed.data.propertyId, user.brokerageId);
     res.status(404).json({ error: "Property not found" });
     return;
   }
@@ -133,6 +166,7 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
     .from(properties)
     .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
+    await notePartyPropertyIsolationRejection(propertyId, user.brokerageId);
     res.status(404).json({ error: "Not found" });
     return;
   }
@@ -171,6 +205,7 @@ partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
     .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
     .where(and(eq(propertyParties.id, linkId), eq(properties.brokerageId, user.brokerageId)));
   if (!row) {
+    await notePartyLinkIsolationRejection(linkId, user.brokerageId);
     res.status(404).json({ error: "Not found" });
     return;
   }
