@@ -24,7 +24,9 @@ import {
 import { PIT_CREW_WAITING_ON_SWEEP_DEFAULT_CADENCE_MS } from "../waitingOnDetection.js";
 import {
   PIT_CREW_WAITING_ON_SWEEP_ALERT_AFTER_CONSECUTIVE_FAILURES,
+  pitCrewWaitingOnSweepCallerFailedLastTick,
   pitCrewWaitingOnSweepHealthSnapshot,
+  pitCrewWaitingOnSweepOpsSnapshot,
   resetPitCrewWaitingOnSweepSchedulerForTests,
   runScheduledWaitingOnSweep,
   stopPitCrewWaitingOnSweepScheduler,
@@ -394,6 +396,12 @@ describe("waiting-on sweep operability", { concurrency: 1 }, () => {
       consecutiveUnhealthyTicks: 0,
       consecutiveBrokerageFailureTicks: 0,
     });
+    const ops = pitCrewWaitingOnSweepOpsSnapshot();
+    assert.equal(ops.lastTick?.outcome, "completed");
+    assert.equal(typeof ops.lastTick?.durationMs, "number");
+    assert.equal(pitCrewWaitingOnSweepCallerFailedLastTick(brokerageA), false);
+    assert.equal(pitCrewWaitingOnSweepCallerFailedLastTick(brokerageB), false);
+    assert.equal(JSON.stringify(ops).includes("failedBrokerageIds"), false);
   });
 
   test("an overlap skip increments skipped_overlap, records no duration, and leaves the streaks unchanged", async () => {
@@ -451,6 +459,11 @@ describe("waiting-on sweep operability", { concurrency: 1 }, () => {
       );
       assert.deepEqual(pitCrewWaitingOnSweepHealthSnapshot(), streakBefore);
       assert.equal(captured.length, 0);
+      const skippedTick = pitCrewWaitingOnSweepOpsSnapshot().lastTick;
+      assert.equal(skippedTick?.outcome, "skipped_overlap");
+      assert.equal(skippedTick?.durationMs, null);
+      assert.equal(pitCrewWaitingOnSweepCallerFailedLastTick(brokerageA), true);
+      assert.equal(pitCrewWaitingOnSweepCallerFailedLastTick(brokerageB), false);
     } finally {
       release();
       const finished = await held;
@@ -546,6 +559,10 @@ describe("waiting-on sweep operability", { concurrency: 1 }, () => {
     assert.equal(captured[0]!.details?.error, "scan down");
     assert.equal(pitCrewWaitingOnSweepHealthSnapshot().consecutiveUnhealthyTicks, 3);
     assert.equal(pitCrewWaitingOnSweepHealthSnapshot().consecutiveBrokerageFailureTicks, 0);
+    const failedTick = pitCrewWaitingOnSweepOpsSnapshot().lastTick;
+    assert.equal(failedTick?.outcome, "failed");
+    assert.equal(typeof failedTick?.durationMs, "number");
+    assert.equal(pitCrewWaitingOnSweepCallerFailedLastTick(brokerageA), null);
 
     const healthy = await runScheduledWaitingOnSweep(now, { brokerageIds: scope() });
     assert.equal(healthy.overlapSkipped, false);

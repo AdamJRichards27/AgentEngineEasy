@@ -345,6 +345,7 @@ WAITING_ON items. It does not return them, reassign them, or contact anyone.
 The human `POST /pit-crew/ops/waiting-on/sweep` route is a different path and
 is not these metrics. Label sets are closed and have no `other` fallback.
 No label is a brokerage id, assignment id, property id, user id, or tier.
+`GET /pit-crew/ops/waiting-on/health` (R-F7) is the in-app read of whether this sweep is on and healthy for the caller's brokerage; it adds no metric and no alert.
 
 Like conditions 28–30, **35 and 36 page today, via a real code path**. They
 dispatch from `runScheduledWaitingOnSweep` to the configured
@@ -391,6 +392,12 @@ enables the sweep.
 `pit_crew_waiting_on_sweep_item_total`) carry only closed label sets and no
 tenant identifier. 3 + 2 + 4 + 2 = 11 series maximum. A brokerage id in alert
 details is never a metric label.
+
+#### Ops health read (R-F7)
+
+`GET /pit-crew/ops/waiting-on/health` answers, for the signed-in Pit Crew user or Brokerage Administrator, whether the scheduled sweep is switched on, when it last ticked in this process, and whether that tick is healthy. It uses the same role gate and `run.access` check as `POST /pit-crew/ops/waiting-on/sweep`. The brokerage id comes only from the session. The handler does not write, sweep, audit, or alert.
+
+`scheduler` is job-level: `enabled`, `started`, `intervalMs`, `lastTick` (`at`, `outcome`, `durationMs`), `health` (`ok`, `degraded`, `unhealthy`, or `not_running`), the two consecutive-failure streaks, and `alertThreshold`. `health` is `not_running` when the flag is off or this process has never ticked; `unhealthy` when either streak has reached the threshold (3); `degraded` when either streak is 1 or 2; otherwise `ok`. `brokerage` is the caller's row only: settings availability, the resolved cadence and window, `lastDetectionAt`, and `failedLastTick` (a boolean, or null when no tick has completed). The response has no other brokerage's id, settings, counts, or failure status, and no platform-wide brokerage aggregate. If migration 0031 is missing, or any settings read throws, the route stays 200 with `brokerage.settingsAvailable` false and the settings fields null.
 
 ## 3. What it would take to make alerting real
 
