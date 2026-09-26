@@ -7,10 +7,15 @@
 // double-submit a no-op rather than a double-import).
 //
 // How this file satisfies the spec's execution constraints:
-//  - No single giant transaction: work is processed in small BATCH_SIZE
-//    chunks, each its own drizzle transaction, so one bad chunk doesn't
-//    roll back everything already committed and a large import doesn't
-//    hold one long-lived lock.
+//  - No single giant transaction: work is processed in
+//    IMPORT_EXECUTION_CHUNK_SIZE chunks, each its own drizzle transaction,
+//    so one bad chunk doesn't roll back everything already committed and a
+//    large import doesn't hold one long-lived lock.
+//  - Inside a chunk, groups are written with set-based statements (one
+//    lookup, one insert, one audit update) instead of a savepoint +
+//    statement per group. A bulk write that fails is rolled back to a
+//    savepoint and that chunk is retried one group at a time, so one bad
+//    row is still recorded and skipped without losing the rest of the chunk.
 //  - No full file in memory beyond what earlier stages already held --
 //    this module only receives the already-resolved plan (contacts /
 //    properties / relationships), never the raw file.
@@ -40,7 +45,7 @@
 // never silently deleted. Matched (not created) existing records are
 // NEVER touched by rollback.
 
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -54,7 +59,22 @@ import {
   type ImportResolution,
 } from "@aee/db";
 
-const BATCH_SIZE = 25; // groups per transaction -- keeps each transaction short-lived even for a large import
+/**
+ * Groups per transaction.
+ *
+ * 100 keeps each transaction to a handful of set-based statements (a lookup,
+ * an insert, an audit update) so the lock window stays short, while a 20k-row
+ * import still commits 200 times per phase: a crash replays at most 100
+ * groups, and a client polling the job still sees progress throughout.
+ * 100 groups is also far under Postgres's 65535-parameter limit. The audit
+ * update is split again at IMPORT_MARK_ROWS_PER_STATEMENT so one group that
+ * collapses thousands of duplicate source rows cannot blow that limit on its
+ * own.
+ */
+export const IMPORT_EXECUTION_CHUNK_SIZE = 100;
+
+/** Source-row tuples per import_records UPDATE. See IMPORT_EXECUTION_CHUNK_SIZE. */
+const IMPORT_MARK_ROWS_PER_STATEMENT = 200;
 
 type DbClient = typeof db | Parameters<Parameters<(typeof db)["transaction"]>[0]>[0];
 
@@ -134,11 +154,20 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+function sameStored(actual: unknown, expected: unknown): boolean {
+  return actual === expected || (actual == null && expected == null);
+}
+
 /**
  * Idempotency guard: which source rows has this job already resolved to a
  * real party/property/relationship id? Re-derived from importRecords on
  * every call so a resumed execute() never re-creates something it already
  * created.
+ *
+ * This is one statement for the job, not one per row. An index on
+ * import_records(import_job_id) would make the read an index scan; that
+ * index belongs to the separate W1-D index migration and is intentionally
+ * not added here.
  */
 async function loadAlreadyExecuted(importJobId: number): Promise<{
   contactResultByRow: Map<number, number>;
@@ -179,9 +208,124 @@ async function markRows(
     .where(and(eq(importRecords.importJobId, importJobId), inArray(importRecords.sourceRowNumber, sourceRowNumbers)));
 }
 
+type ErrorMark = { sourceRowNumbers: number[]; message: string };
+
+/** Last write for a source row wins, matching the previous per-group updates. */
+function expandSourceRows<T extends { sourceRowNumbers: number[] }>(
+  marks: T[],
+): Array<Omit<T, "sourceRowNumbers"> & { sourceRowNumber: number }> {
+  const byRow = new Map<number, Omit<T, "sourceRowNumbers"> & { sourceRowNumber: number }>();
+  for (const mark of marks) {
+    const { sourceRowNumbers, ...rest } = mark;
+    for (const sourceRowNumber of sourceRowNumbers) {
+      byRow.set(sourceRowNumber, { ...rest, sourceRowNumber });
+    }
+  }
+  return [...byRow.values()];
+}
+
+async function flushErrorMarks(client: DbClient, importJobId: number, marks: ErrorMark[]): Promise<void> {
+  const rows = expandSourceRows(marks);
+  if (rows.length === 0) return;
+  const now = new Date();
+  for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
+    const values = sql.join(
+      slice.map((row) => sql`(${row.sourceRowNumber}::int, ${JSON.stringify([row.message])}::jsonb)`),
+      sql`, `,
+    );
+    await client.execute(sql`
+      UPDATE import_records AS r
+      SET status = 'error',
+          errors = v.errors,
+          updated_at = ${now}
+      FROM (VALUES ${values}) AS v(source_row_number, errors)
+      WHERE r.import_job_id = ${importJobId}
+        AND r.source_row_number = v.source_row_number
+    `);
+  }
+}
+
+async function flushPartyMarks(
+  client: DbClient,
+  importJobId: number,
+  marks: { sourceRowNumbers: number[]; partyId: number; created: boolean }[],
+): Promise<void> {
+  const rows = expandSourceRows(marks);
+  if (rows.length === 0) return;
+  const now = new Date();
+  for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
+    const values = sql.join(
+      slice.map((row) => sql`(${row.sourceRowNumber}::int, ${row.partyId}::int, ${row.created}::boolean)`),
+      sql`, `,
+    );
+    await client.execute(sql`
+      UPDATE import_records AS r
+      SET result_party_id = v.party_id,
+          party_was_created = v.was_created,
+          status = 'imported',
+          updated_at = ${now}
+      FROM (VALUES ${values}) AS v(source_row_number, party_id, was_created)
+      WHERE r.import_job_id = ${importJobId}
+        AND r.source_row_number = v.source_row_number
+    `);
+  }
+}
+
+async function flushPropertyMarks(
+  client: DbClient,
+  importJobId: number,
+  marks: { sourceRowNumbers: number[]; propertyId: number; created: boolean }[],
+): Promise<void> {
+  const rows = expandSourceRows(marks);
+  if (rows.length === 0) return;
+  const now = new Date();
+  for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
+    const values = sql.join(
+      slice.map((row) => sql`(${row.sourceRowNumber}::int, ${row.propertyId}::int, ${row.created}::boolean)`),
+      sql`, `,
+    );
+    await client.execute(sql`
+      UPDATE import_records AS r
+      SET result_property_id = v.property_id,
+          property_was_created = v.was_created,
+          status = 'imported',
+          updated_at = ${now}
+      FROM (VALUES ${values}) AS v(source_row_number, property_id, was_created)
+      WHERE r.import_job_id = ${importJobId}
+        AND r.source_row_number = v.source_row_number
+    `);
+  }
+}
+
+async function flushRelationshipMarks(
+  client: DbClient,
+  importJobId: number,
+  marks: { sourceRowNumbers: number[]; relationshipId: number; created: boolean }[],
+): Promise<void> {
+  const rows = expandSourceRows(marks);
+  if (rows.length === 0) return;
+  const now = new Date();
+  for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
+    const values = sql.join(
+      slice.map((row) => sql`(${row.sourceRowNumber}::int, ${row.relationshipId}::int, ${row.created}::boolean)`),
+      sql`, `,
+    );
+    await client.execute(sql`
+      UPDATE import_records AS r
+      SET result_relationship_id = v.relationship_id,
+          relationship_was_created = v.was_created,
+          status = 'imported',
+          updated_at = ${now}
+      FROM (VALUES ${values}) AS v(source_row_number, relationship_id, was_created)
+      WHERE r.import_job_id = ${importJobId}
+        AND r.source_row_number = v.source_row_number
+    `);
+  }
+}
+
 /* ------------------------------------------------------------------ */
-/* Per-group execution -- `client` is either `db` or a `db.transaction`  */
-/* callback's `tx`, so callers control exactly what's atomic together.  */
+/* Per-group execution -- kept as the fallback when a bulk write fails. */
+/* `client` is either `db` or a `db.transaction` callback's `tx`.       */
 /* ------------------------------------------------------------------ */
 
 async function executeContactGroup(
@@ -373,17 +517,719 @@ async function executeRelationshipLink(
   return { relationshipId: created.id, created: true };
 }
 
+type PartyGap = {
+  id: number;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  mobile: string | null;
+  residentialAddress: string | null;
+};
+
+function fillPartyGaps(existing: PartyGap, person: ContactExecutionPlanItem["person"]): boolean {
+  let changed = false;
+  if (!existing.firstName && person.firstName) {
+    existing.firstName = person.firstName;
+    changed = true;
+  }
+  if (!existing.lastName && person.lastName) {
+    existing.lastName = person.lastName;
+    changed = true;
+  }
+  if (!existing.email && person.email) {
+    existing.email = person.email;
+    changed = true;
+  }
+  if (!existing.mobile && person.mobile) {
+    existing.mobile = person.mobile;
+    changed = true;
+  }
+  if (!existing.residentialAddress && person.residentialAddress) {
+    existing.residentialAddress = person.residentialAddress;
+    changed = true;
+  }
+  return changed;
+}
+
+type PropertyGap = {
+  id: number;
+  suburb: string | null;
+  state: string | null;
+  postcode: string | null;
+};
+
+function fillPropertyGaps(existing: PropertyGap, item: PropertyExecutionPlanItem): boolean {
+  let changed = false;
+  if (!existing.suburb && item.suburb) {
+    existing.suburb = item.suburb;
+    changed = true;
+  }
+  if (!existing.state && item.state) {
+    existing.state = item.state;
+    changed = true;
+  }
+  if (!existing.postcode && item.postcode) {
+    existing.postcode = item.postcode;
+    changed = true;
+  }
+  return changed;
+}
+
+interface ContactChunkDelta {
+  created: number;
+  updated: number;
+  links: { groupKey: string; partyId: number }[];
+}
+
+async function flushPartyGapUpdates(client: DbClient, brokerageId: number, rows: PartyGap[]): Promise<void> {
+  if (rows.length === 0) return;
+  const now = new Date();
+  const values = sql.join(
+    rows.map(
+      (row) =>
+        sql`(${row.id}::int, ${row.firstName}::text, ${row.lastName}::text, ${row.email}::text, ${row.mobile}::text, ${row.residentialAddress}::text)`,
+    ),
+    sql`, `,
+  );
+  await client.execute(sql`
+    UPDATE parties AS p
+    SET first_name = v.first_name,
+        last_name = v.last_name,
+        email = v.email,
+        mobile = v.mobile,
+        residential_address = v.residential_address,
+        updated_at = ${now}
+    FROM (VALUES ${values}) AS v(id, first_name, last_name, email, mobile, residential_address)
+    WHERE p.id = v.id
+      AND p.brokerage_id = ${brokerageId}
+  `);
+}
+
+async function executeContactChunkBatched(
+  client: DbClient,
+  batch: ContactExecutionPlanItem[],
+  brokerageId: number,
+  importJobId: number,
+  alreadyDone: Map<number, number>,
+): Promise<ContactChunkDelta> {
+  const delta: ContactChunkDelta = { created: 0, updated: 0, links: [] };
+  const errors: ErrorMark[] = [];
+  const partyMarks: { sourceRowNumbers: number[]; partyId: number; created: boolean }[] = [];
+  const creates: ContactExecutionPlanItem[] = [];
+  const matches: ContactExecutionPlanItem[] = [];
+
+  for (const item of batch) {
+    const doneRow = item.sourceRowNumbers.find((row) => alreadyDone.has(row));
+    if (doneRow !== undefined) {
+      const partyId = alreadyDone.get(doneRow) as number;
+      if (item.resolution === "merge") delta.updated += 1;
+      delta.links.push({ groupKey: item.groupKey, partyId });
+      partyMarks.push({ sourceRowNumbers: item.sourceRowNumbers, partyId, created: false });
+      continue;
+    }
+    if (item.resolution === "skip") continue;
+    if (item.resolution === "use_existing" || item.resolution === "merge") {
+      if (!item.candidatePartyId) {
+        errors.push({
+          sourceRowNumbers: item.sourceRowNumbers,
+          message: `Contact group ${item.groupKey}: resolution "${item.resolution}" requires candidatePartyId`,
+        });
+        continue;
+      }
+      matches.push(item);
+      continue;
+    }
+    creates.push(item);
+  }
+
+  if (matches.length > 0) {
+    const ids = [...new Set(matches.map((item) => item.candidatePartyId as number))];
+    const rows = await client
+      .select({
+        id: parties.id,
+        firstName: parties.firstName,
+        lastName: parties.lastName,
+        email: parties.email,
+        mobile: parties.mobile,
+        residentialAddress: parties.residentialAddress,
+      })
+      .from(parties)
+      .where(and(eq(parties.brokerageId, brokerageId), inArray(parties.id, ids)));
+    const working = new Map<number, PartyGap>();
+    for (const row of rows) working.set(row.id, { ...row });
+    const dirty = new Map<number, PartyGap>();
+
+    for (const item of matches) {
+      const partyId = item.candidatePartyId as number;
+      const existing = working.get(partyId);
+      if (!existing) {
+        errors.push({
+          sourceRowNumbers: item.sourceRowNumbers,
+          message: `Contact group ${item.groupKey}: candidate party ${partyId} not found in this brokerage`,
+        });
+        continue;
+      }
+      if (item.resolution === "merge") {
+        if (fillPartyGaps(existing, item.person)) dirty.set(partyId, existing);
+        delta.updated += 1;
+      }
+      delta.links.push({ groupKey: item.groupKey, partyId });
+      partyMarks.push({ sourceRowNumbers: item.sourceRowNumbers, partyId, created: false });
+    }
+    await flushPartyGapUpdates(client, brokerageId, [...dirty.values()]);
+  }
+
+  if (creates.length > 0) {
+    const values = creates.map((item) => ({
+      brokerageId,
+      partyType: (item.person.organisationName ? "Organisation" : "Person") as "Organisation" | "Person",
+      firstName: item.person.firstName ?? null,
+      middleName: item.person.middleName ?? null,
+      lastName: item.person.lastName ?? null,
+      organisationName: item.person.organisationName ?? null,
+      mobile: item.person.mobile ?? null,
+      email: item.person.email ?? null,
+      residentialAddress: item.person.residentialAddress ?? null,
+    }));
+    const inserted = await client.insert(parties).values(values).returning({
+      id: parties.id,
+      partyType: parties.partyType,
+      firstName: parties.firstName,
+      middleName: parties.middleName,
+      lastName: parties.lastName,
+      organisationName: parties.organisationName,
+      mobile: parties.mobile,
+      email: parties.email,
+      residentialAddress: parties.residentialAddress,
+    });
+    if (inserted.length !== values.length) {
+      throw new Error(`Contact insert returned ${inserted.length} rows for ${values.length} groups`);
+    }
+    for (let i = 0; i < values.length; i++) {
+      const row = inserted[i];
+      const expected = values[i];
+      if (
+        !row ||
+        !expected ||
+        !sameStored(row.partyType, expected.partyType) ||
+        !sameStored(row.firstName, expected.firstName) ||
+        !sameStored(row.middleName, expected.middleName) ||
+        !sameStored(row.lastName, expected.lastName) ||
+        !sameStored(row.organisationName, expected.organisationName) ||
+        !sameStored(row.mobile, expected.mobile) ||
+        !sameStored(row.email, expected.email) ||
+        !sameStored(row.residentialAddress, expected.residentialAddress)
+      ) {
+        throw new Error("Contact insert returning order did not match the batch");
+      }
+    }
+    for (let i = 0; i < creates.length; i++) {
+      const item = creates[i];
+      const partyId = inserted[i]?.id;
+      if (!item || partyId === undefined) throw new Error("Contact insert returned no id");
+      delta.created += 1;
+      delta.links.push({ groupKey: item.groupKey, partyId });
+      partyMarks.push({ sourceRowNumbers: item.sourceRowNumbers, partyId, created: true });
+    }
+  }
+
+  await flushPartyMarks(client, importJobId, partyMarks);
+  await flushErrorMarks(client, importJobId, errors);
+  return delta;
+}
+
+async function executeContactChunkPerRow(
+  client: DbClient,
+  batch: ContactExecutionPlanItem[],
+  brokerageId: number,
+  importJobId: number,
+  alreadyDone: Map<number, number>,
+  result: ExecuteImportBatchResult,
+  contactPartyIdByGroup: Map<string, number>,
+): Promise<void> {
+  for (const item of batch) {
+    try {
+      const { partyId, created } = await client.transaction((tx2) =>
+        executeContactGroup(tx2, item, brokerageId, alreadyDone),
+      );
+      if (partyId !== undefined) {
+        contactPartyIdByGroup.set(item.groupKey, partyId);
+        if (created) result.contactsCreated += 1;
+        else if (item.resolution === "merge") result.contactsUpdated += 1;
+        await markRows(client, importJobId, item.sourceRowNumbers, {
+          resultPartyId: partyId,
+          partyWasCreated: created,
+          status: "imported",
+        });
+      }
+    } catch (err) {
+      await markRows(client, importJobId, item.sourceRowNumbers, {
+        status: "error",
+        errors: [err instanceof Error ? err.message : String(err)],
+      });
+    }
+  }
+}
+
+interface PropertyChunkDelta {
+  created: number;
+  updated: number;
+  links: { groupKey: string; propertyId: number }[];
+}
+
+async function flushPropertyGapUpdates(client: DbClient, brokerageId: number, rows: PropertyGap[]): Promise<void> {
+  if (rows.length === 0) return;
+  const now = new Date();
+  const values = sql.join(
+    rows.map((row) => sql`(${row.id}::int, ${row.suburb}::text, ${row.state}::text, ${row.postcode}::text)`),
+    sql`, `,
+  );
+  await client.execute(sql`
+    UPDATE properties AS p
+    SET suburb = v.suburb,
+        state = v.state,
+        postcode = v.postcode,
+        updated_at = ${now}
+    FROM (VALUES ${values}) AS v(id, suburb, state, postcode)
+    WHERE p.id = v.id
+      AND p.brokerage_id = ${brokerageId}
+  `);
+}
+
+async function executePropertyChunkBatched(
+  client: DbClient,
+  batch: PropertyExecutionPlanItem[],
+  brokerageId: number,
+  agentId: number,
+  importJobId: number,
+  alreadyDone: Map<number, number>,
+): Promise<PropertyChunkDelta> {
+  const delta: PropertyChunkDelta = { created: 0, updated: 0, links: [] };
+  const errors: ErrorMark[] = [];
+  const propertyMarks: { sourceRowNumbers: number[]; propertyId: number; created: boolean }[] = [];
+  const creates: PropertyExecutionPlanItem[] = [];
+  const matches: PropertyExecutionPlanItem[] = [];
+
+  for (const item of batch) {
+    const doneRow = item.sourceRowNumbers.find((row) => alreadyDone.has(row));
+    if (doneRow !== undefined) {
+      const propertyId = alreadyDone.get(doneRow) as number;
+      if (item.resolution === "merge") delta.updated += 1;
+      delta.links.push({ groupKey: item.groupKey, propertyId });
+      propertyMarks.push({ sourceRowNumbers: item.sourceRowNumbers, propertyId, created: false });
+      continue;
+    }
+    if (item.resolution === "skip") continue;
+    if (item.resolution === "use_existing" || item.resolution === "merge") {
+      if (!item.candidatePropertyId) {
+        errors.push({
+          sourceRowNumbers: item.sourceRowNumbers,
+          message: `Property group ${item.groupKey}: resolution "${item.resolution}" requires candidatePropertyId`,
+        });
+        continue;
+      }
+      matches.push(item);
+      continue;
+    }
+    if (!item.formattedAddress) {
+      errors.push({
+        sourceRowNumbers: item.sourceRowNumbers,
+        message: `Property group ${item.groupKey}: create_new requires a formattedAddress`,
+      });
+      continue;
+    }
+    creates.push(item);
+  }
+
+  if (matches.length > 0) {
+    const ids = [...new Set(matches.map((item) => item.candidatePropertyId as number))];
+    const rows = await client
+      .select({
+        id: properties.id,
+        suburb: properties.suburb,
+        state: properties.state,
+        postcode: properties.postcode,
+      })
+      .from(properties)
+      .where(and(eq(properties.brokerageId, brokerageId), inArray(properties.id, ids)));
+    const working = new Map<number, PropertyGap>();
+    for (const row of rows) working.set(row.id, { ...row });
+    const dirty = new Map<number, PropertyGap>();
+
+    for (const item of matches) {
+      const propertyId = item.candidatePropertyId as number;
+      const existing = working.get(propertyId);
+      if (!existing) {
+        errors.push({
+          sourceRowNumbers: item.sourceRowNumbers,
+          message: `Property group ${item.groupKey}: candidate property ${propertyId} not found in this brokerage`,
+        });
+        continue;
+      }
+      if (item.resolution === "merge") {
+        if (fillPropertyGaps(existing, item)) dirty.set(propertyId, existing);
+        delta.updated += 1;
+      }
+      delta.links.push({ groupKey: item.groupKey, propertyId });
+      propertyMarks.push({ sourceRowNumbers: item.sourceRowNumbers, propertyId, created: false });
+    }
+    await flushPropertyGapUpdates(client, brokerageId, [...dirty.values()]);
+  }
+
+  if (creates.length > 0) {
+    const values = creates.map((item) => ({
+      brokerageId,
+      agentId,
+      formattedAddress: item.formattedAddress as string,
+      suburb: item.suburb ?? null,
+      state: item.state ?? null,
+      postcode: item.postcode ?? null,
+      isManualAddress: item.isManualAddress,
+    }));
+    const inserted = await client.insert(properties).values(values).returning({
+      id: properties.id,
+      formattedAddress: properties.formattedAddress,
+      suburb: properties.suburb,
+      state: properties.state,
+      postcode: properties.postcode,
+      isManualAddress: properties.isManualAddress,
+      agentId: properties.agentId,
+    });
+    if (inserted.length !== values.length) {
+      throw new Error(`Property insert returned ${inserted.length} rows for ${values.length} groups`);
+    }
+    for (let i = 0; i < values.length; i++) {
+      const row = inserted[i];
+      const expected = values[i];
+      if (
+        !row ||
+        !expected ||
+        !sameStored(row.formattedAddress, expected.formattedAddress) ||
+        !sameStored(row.suburb, expected.suburb) ||
+        !sameStored(row.state, expected.state) ||
+        !sameStored(row.postcode, expected.postcode) ||
+        row.isManualAddress !== expected.isManualAddress ||
+        row.agentId !== expected.agentId
+      ) {
+        throw new Error("Property insert returning order did not match the batch");
+      }
+    }
+    for (let i = 0; i < creates.length; i++) {
+      const item = creates[i];
+      const propertyId = inserted[i]?.id;
+      if (!item || propertyId === undefined) throw new Error("Property insert returned no id");
+      delta.created += 1;
+      delta.links.push({ groupKey: item.groupKey, propertyId });
+      propertyMarks.push({ sourceRowNumbers: item.sourceRowNumbers, propertyId, created: true });
+    }
+  }
+
+  await flushPropertyMarks(client, importJobId, propertyMarks);
+  await flushErrorMarks(client, importJobId, errors);
+  return delta;
+}
+
+async function executePropertyChunkPerRow(
+  client: DbClient,
+  batch: PropertyExecutionPlanItem[],
+  brokerageId: number,
+  agentId: number,
+  importJobId: number,
+  alreadyDone: Map<number, number>,
+  result: ExecuteImportBatchResult,
+  propertyIdByGroup: Map<string, number>,
+): Promise<void> {
+  for (const item of batch) {
+    try {
+      const { propertyId, created } = await client.transaction((tx2) =>
+        executePropertyGroup(tx2, item, brokerageId, agentId, alreadyDone),
+      );
+      if (propertyId !== undefined) {
+        propertyIdByGroup.set(item.groupKey, propertyId);
+        if (created) result.propertiesCreated += 1;
+        else if (item.resolution === "merge") result.propertiesUpdated += 1;
+        await markRows(client, importJobId, item.sourceRowNumbers, {
+          resultPropertyId: propertyId,
+          propertyWasCreated: created,
+          status: "imported",
+        });
+      }
+    } catch (err) {
+      await markRows(client, importJobId, item.sourceRowNumbers, {
+        status: "error",
+        errors: [err instanceof Error ? err.message : String(err)],
+      });
+    }
+  }
+}
+
+function relationshipKey(partyId: number, propertyId: number, relationshipType: string): string {
+  return `${partyId}\0${propertyId}\0${relationshipType}`;
+}
+
+interface ActiveSlot {
+  id: number | null;
+  pendingIndex: number | null;
+  ownershipStartDate: Date | null;
+}
+
+async function flushOwnershipBackfills(
+  client: DbClient,
+  brokerageId: number,
+  rows: { id: number; dateIso: string; precision: string }[],
+): Promise<void> {
+  const byId = new Map<number, { id: number; dateIso: string; precision: string }>();
+  for (const row of rows) if (!byId.has(row.id)) byId.set(row.id, row);
+  const unique = [...byId.values()];
+  if (unique.length === 0) return;
+  const now = new Date();
+  const values = sql.join(
+    unique.map((row) => sql`(${row.id}::int, ${new Date(row.dateIso)}::timestamp, ${row.precision}::text)`),
+    sql`, `,
+  );
+  await client.execute(sql`
+    UPDATE grow_relationships AS g
+    SET ownership_start_date = v.ownership_start_date,
+        ownership_start_source = 'import',
+        ownership_start_precision = v.start_precision,
+        updated_at = ${now}
+    FROM (VALUES ${values}) AS v(id, ownership_start_date, start_precision)
+    WHERE g.id = v.id
+      AND g.brokerage_id = ${brokerageId}
+      AND g.ownership_start_date IS NULL
+  `);
+}
+
+async function executeRelationshipChunkBatched(
+  client: DbClient,
+  batch: RelationshipExecutionPlanItem[],
+  brokerageId: number,
+  agentId: number,
+  importJobId: number,
+  alreadyDone: Set<number>,
+  contactPartyIdByGroup: Map<string, number>,
+  propertyIdByGroup: Map<string, number>,
+): Promise<{ created: number }> {
+  const errors: ErrorMark[] = [];
+  const work: { item: RelationshipExecutionPlanItem; partyId: number; propertyId: number }[] = [];
+
+  for (const item of batch) {
+    const partyId = contactPartyIdByGroup.get(item.contactGroupKey);
+    const propertyId = propertyIdByGroup.get(item.propertyGroupKey);
+    if (partyId === undefined || propertyId === undefined) {
+      errors.push({
+        sourceRowNumbers: item.sourceRowNumbers,
+        message: `Relationship could not resolve its ${partyId === undefined ? "contact" : "property"} group (${
+          partyId === undefined ? item.contactGroupKey : item.propertyGroupKey
+        })`,
+      });
+      continue;
+    }
+    const doneRow = item.sourceRowNumbers.find((row) => alreadyDone.has(row));
+    if (doneRow !== undefined) continue;
+    work.push({ item, partyId, propertyId });
+  }
+
+  const activeByKey = new Map<string, ActiveSlot>();
+  if (work.length > 0) {
+    const partyIds = [...new Set(work.map((row) => row.partyId))];
+    const propertyIds = [...new Set(work.map((row) => row.propertyId))];
+    const types = [...new Set(work.map((row) => row.item.relationshipType))];
+    const existing = await client
+      .select({
+        id: growRelationships.id,
+        partyId: growRelationships.partyId,
+        propertyId: growRelationships.propertyId,
+        relationshipType: growRelationships.relationshipType,
+        ownershipStartDate: growRelationships.ownershipStartDate,
+      })
+      .from(growRelationships)
+      .where(
+        and(
+          eq(growRelationships.brokerageId, brokerageId),
+          eq(growRelationships.status, "Active"),
+          inArray(growRelationships.partyId, partyIds),
+          inArray(growRelationships.propertyId, propertyIds),
+          inArray(growRelationships.relationshipType, types),
+        ),
+      );
+    for (const row of existing) {
+      if (row.propertyId == null) continue;
+      const key = relationshipKey(row.partyId, row.propertyId, row.relationshipType);
+      if (!activeByKey.has(key)) {
+        activeByKey.set(key, { id: row.id, pendingIndex: null, ownershipStartDate: row.ownershipStartDate });
+      }
+    }
+  }
+
+  const inserts: { item: RelationshipExecutionPlanItem; partyId: number; propertyId: number }[] = [];
+  const backfills: { id?: number; pendingIndex?: number; dateIso: string; precision: string }[] = [];
+  const links: {
+    item: RelationshipExecutionPlanItem;
+    relationshipId: number | null;
+    pendingIndex: number | null;
+    created: boolean;
+  }[] = [];
+
+  for (const row of work) {
+    const key = relationshipKey(row.partyId, row.propertyId, row.item.relationshipType);
+    const slot = activeByKey.get(key);
+    if (slot) {
+      if (row.item.ownershipStart && slot.ownershipStartDate === null) {
+        backfills.push({
+          id: slot.id ?? undefined,
+          pendingIndex: slot.pendingIndex ?? undefined,
+          dateIso: row.item.ownershipStart.dateIso,
+          precision: row.item.ownershipStart.precision,
+        });
+        slot.ownershipStartDate = new Date(row.item.ownershipStart.dateIso);
+      }
+      links.push({
+        item: row.item,
+        relationshipId: slot.id,
+        pendingIndex: slot.pendingIndex,
+        created: false,
+      });
+      continue;
+    }
+
+    const pendingIndex = inserts.length;
+    inserts.push(row);
+    if (!row.item.needsPendingReview) {
+      activeByKey.set(key, {
+        id: null,
+        pendingIndex,
+        ownershipStartDate: row.item.ownershipStart ? new Date(row.item.ownershipStart.dateIso) : null,
+      });
+    }
+    links.push({ item: row.item, relationshipId: null, pendingIndex, created: true });
+  }
+
+  const pendingIds: number[] = [];
+  if (inserts.length > 0) {
+    const values = inserts.map((row) => ({
+      brokerageId,
+      partyId: row.partyId,
+      propertyId: row.propertyId,
+      relationshipType: row.item.relationshipType,
+      status: row.item.needsPendingReview ? "PendingReview" : "Active",
+      sourceType: "import" as const,
+      sourceId: `${importJobId}:${row.item.sourceRowNumbers.join(",")}`,
+      sourceEvidence: row.item.rawType ?? null,
+      ownershipStartDate: row.item.ownershipStart ? new Date(row.item.ownershipStart.dateIso) : null,
+      ownershipStartSource: row.item.ownershipStart ? "import" : null,
+      ownershipStartPrecision: row.item.ownershipStart ? row.item.ownershipStart.precision : null,
+      createdBy: agentId,
+    }));
+    const inserted = await client.insert(growRelationships).values(values).returning({
+      id: growRelationships.id,
+      partyId: growRelationships.partyId,
+      propertyId: growRelationships.propertyId,
+      relationshipType: growRelationships.relationshipType,
+      status: growRelationships.status,
+      sourceId: growRelationships.sourceId,
+    });
+    if (inserted.length !== values.length) {
+      throw new Error(`Relationship insert returned ${inserted.length} rows for ${values.length} groups`);
+    }
+    for (let i = 0; i < values.length; i++) {
+      const actual = inserted[i];
+      const expected = values[i];
+      if (
+        !actual ||
+        !expected ||
+        actual.partyId !== expected.partyId ||
+        actual.propertyId !== expected.propertyId ||
+        actual.relationshipType !== expected.relationshipType ||
+        actual.status !== expected.status ||
+        actual.sourceId !== expected.sourceId
+      ) {
+        throw new Error("Relationship insert returning order did not match the batch");
+      }
+      pendingIds.push(actual.id);
+    }
+  }
+
+  const resolvedBackfills: { id: number; dateIso: string; precision: string }[] = [];
+  for (const backfill of backfills) {
+    const id = backfill.id ?? (backfill.pendingIndex != null ? pendingIds[backfill.pendingIndex] : undefined);
+    if (id === undefined) throw new Error("Ownership backfill could not resolve a relationship id");
+    resolvedBackfills.push({ id, dateIso: backfill.dateIso, precision: backfill.precision });
+  }
+  await flushOwnershipBackfills(client, brokerageId, resolvedBackfills);
+
+  const relationshipMarks: { sourceRowNumbers: number[]; relationshipId: number; created: boolean }[] = [];
+  let created = 0;
+  for (const link of links) {
+    const relationshipId = link.relationshipId ?? (link.pendingIndex != null ? pendingIds[link.pendingIndex] : undefined);
+    if (relationshipId === undefined) throw new Error("Relationship link could not resolve an id");
+    if (link.created) created += 1;
+    relationshipMarks.push({
+      sourceRowNumbers: link.item.sourceRowNumbers,
+      relationshipId,
+      created: link.created,
+    });
+  }
+
+  await flushRelationshipMarks(client, importJobId, relationshipMarks);
+  await flushErrorMarks(client, importJobId, errors);
+  return { created };
+}
+
+async function executeRelationshipChunkPerRow(
+  client: DbClient,
+  batch: RelationshipExecutionPlanItem[],
+  brokerageId: number,
+  agentId: number,
+  importJobId: number,
+  alreadyDone: Set<number>,
+  contactPartyIdByGroup: Map<string, number>,
+  propertyIdByGroup: Map<string, number>,
+  result: ExecuteImportBatchResult,
+): Promise<void> {
+  for (const item of batch) {
+    const partyId = contactPartyIdByGroup.get(item.contactGroupKey);
+    const propertyId = propertyIdByGroup.get(item.propertyGroupKey);
+    if (partyId === undefined || propertyId === undefined) {
+      await markRows(client, importJobId, item.sourceRowNumbers, {
+        status: "error",
+        errors: [
+          `Relationship could not resolve its ${partyId === undefined ? "contact" : "property"} group (${
+            partyId === undefined ? item.contactGroupKey : item.propertyGroupKey
+          })`,
+        ],
+      });
+      continue;
+    }
+    try {
+      const { relationshipId, created } = await client.transaction((tx2) =>
+        executeRelationshipLink(tx2, item, partyId, propertyId, brokerageId, agentId, importJobId, alreadyDone),
+      );
+      if (relationshipId !== undefined) {
+        if (created) result.relationshipsCreated += 1;
+        await markRows(client, importJobId, item.sourceRowNumbers, {
+          resultRelationshipId: relationshipId,
+          relationshipWasCreated: created,
+          status: "imported",
+        });
+      }
+    } catch (err) {
+      await markRows(client, importJobId, item.sourceRowNumbers, {
+        status: "error",
+        errors: [err instanceof Error ? err.message : String(err)],
+      });
+    }
+  }
+}
+
 /**
  * B.16-19 orchestrator. Processes contacts, then properties, then relationships
  * (in that order -- relationships need both sides' real ids first), each in
- * BATCH_SIZE chunks, each chunk its own db.transaction(). Within a chunk, each
- * row additionally runs in its own nested transaction (a Postgres SAVEPOINT via
- * Drizzle) so one bad row is recorded as an error and skipped without rolling
- * back the other rows already committed in the same chunk. importJobs' running
- * counters are persisted after every chunk so a client polling the job sees
- * live progress, and every resolved/errored row is written back to importRecords
- * immediately -- this is both the audit trail and the resumability checkpoint
- * loadAlreadyExecuted() reads on a re-run.
+ * IMPORT_EXECUTION_CHUNK_SIZE chunks, each chunk its own db.transaction().
+ * importJobs' running counters are persisted after every chunk so a client
+ * polling the job sees live progress, and every resolved/errored row is
+ * written back to importRecords immediately -- this is both the audit trail
+ * and the resumability checkpoint loadAlreadyExecuted() reads on a re-run.
  */
 export async function executeImportBatch(input: ExecuteImportBatchInput): Promise<ExecuteImportBatchResult> {
   const { importJobId, brokerageId, agentId, contacts, contactProperties, relationships } = input;
@@ -430,29 +1276,28 @@ export async function executeImportBatch(input: ExecuteImportBatchInput): Promis
   }
 
   // --- Contacts ---
-  for (const batch of chunk(contacts, BATCH_SIZE)) {
+  for (const batch of chunk(contacts, IMPORT_EXECUTION_CHUNK_SIZE)) {
     await db.transaction(async (tx) => {
-      for (const item of batch) {
-        try {
-          const { partyId, created } = await tx.transaction((tx2) =>
-            executeContactGroup(tx2, item, brokerageId, already.contactResultByRow),
-          );
-          if (partyId !== undefined) {
-            contactPartyIdByGroup.set(item.groupKey, partyId);
-            if (created) result.contactsCreated += 1;
-            else if (item.resolution === "merge") result.contactsUpdated += 1;
-            await markRows(tx, importJobId, item.sourceRowNumbers, {
-              resultPartyId: partyId,
-              partyWasCreated: created,
-              status: "imported",
-            });
-          }
-        } catch (err) {
-          await markRows(tx, importJobId, item.sourceRowNumbers, {
-            status: "error",
-            errors: [err instanceof Error ? err.message : String(err)],
-          });
-        }
+      try {
+        const delta = await tx.transaction((tx2) =>
+          executeContactChunkBatched(tx2, batch, brokerageId, importJobId, already.contactResultByRow),
+        );
+        result.contactsCreated += delta.created;
+        result.contactsUpdated += delta.updated;
+        for (const link of delta.links) contactPartyIdByGroup.set(link.groupKey, link.partyId);
+      } catch {
+        // Bulk write failed, or the inserted rows could not be lined up with
+        // the plan. The savepoint rolled those writes back; repeat the chunk
+        // one group at a time so one bad row is recorded and the others commit.
+        await executeContactChunkPerRow(
+          tx,
+          batch,
+          brokerageId,
+          importJobId,
+          already.contactResultByRow,
+          result,
+          contactPartyIdByGroup,
+        );
       }
     });
     await db
@@ -462,29 +1307,27 @@ export async function executeImportBatch(input: ExecuteImportBatchInput): Promis
   }
 
   // --- Properties ---
-  for (const batch of chunk(contactProperties, BATCH_SIZE)) {
+  for (const batch of chunk(contactProperties, IMPORT_EXECUTION_CHUNK_SIZE)) {
     await db.transaction(async (tx) => {
-      for (const item of batch) {
-        try {
-          const { propertyId, created } = await tx.transaction((tx2) =>
-            executePropertyGroup(tx2, item, brokerageId, agentId, already.propertyResultByRow),
-          );
-          if (propertyId !== undefined) {
-            propertyIdByGroup.set(item.groupKey, propertyId);
-            if (created) result.propertiesCreated += 1;
-            else if (item.resolution === "merge") result.propertiesUpdated += 1;
-            await markRows(tx, importJobId, item.sourceRowNumbers, {
-              resultPropertyId: propertyId,
-              propertyWasCreated: created,
-              status: "imported",
-            });
-          }
-        } catch (err) {
-          await markRows(tx, importJobId, item.sourceRowNumbers, {
-            status: "error",
-            errors: [err instanceof Error ? err.message : String(err)],
-          });
-        }
+      try {
+        const delta = await tx.transaction((tx2) =>
+          executePropertyChunkBatched(tx2, batch, brokerageId, agentId, importJobId, already.propertyResultByRow),
+        );
+        result.propertiesCreated += delta.created;
+        result.propertiesUpdated += delta.updated;
+        for (const link of delta.links) propertyIdByGroup.set(link.groupKey, link.propertyId);
+      } catch {
+        // See the contact chunk: savepoint already rolled the bulk write back.
+        await executePropertyChunkPerRow(
+          tx,
+          batch,
+          brokerageId,
+          agentId,
+          importJobId,
+          already.propertyResultByRow,
+          result,
+          propertyIdByGroup,
+        );
       }
     });
     await db
@@ -494,40 +1337,35 @@ export async function executeImportBatch(input: ExecuteImportBatchInput): Promis
   }
 
   // --- Relationships (needs both sides resolved above) ---
-  for (const batch of chunk(relationships, BATCH_SIZE)) {
+  for (const batch of chunk(relationships, IMPORT_EXECUTION_CHUNK_SIZE)) {
     await db.transaction(async (tx) => {
-      for (const item of batch) {
-        const partyId = contactPartyIdByGroup.get(item.contactGroupKey);
-        const propertyId = propertyIdByGroup.get(item.propertyGroupKey);
-        if (partyId === undefined || propertyId === undefined) {
-          await markRows(tx, importJobId, item.sourceRowNumbers, {
-            status: "error",
-            errors: [
-              `Relationship could not resolve its ${partyId === undefined ? "contact" : "property"} group (${
-                partyId === undefined ? item.contactGroupKey : item.propertyGroupKey
-              })`,
-            ],
-          });
-          continue;
-        }
-        try {
-          const { relationshipId, created } = await tx.transaction((tx2) =>
-            executeRelationshipLink(tx2, item, partyId, propertyId, brokerageId, agentId, importJobId, already.relationshipDoneRows),
-          );
-          if (relationshipId !== undefined) {
-            if (created) result.relationshipsCreated += 1;
-            await markRows(tx, importJobId, item.sourceRowNumbers, {
-              resultRelationshipId: relationshipId,
-              relationshipWasCreated: created,
-              status: "imported",
-            });
-          }
-        } catch (err) {
-          await markRows(tx, importJobId, item.sourceRowNumbers, {
-            status: "error",
-            errors: [err instanceof Error ? err.message : String(err)],
-          });
-        }
+      try {
+        const delta = await tx.transaction((tx2) =>
+          executeRelationshipChunkBatched(
+            tx2,
+            batch,
+            brokerageId,
+            agentId,
+            importJobId,
+            already.relationshipDoneRows,
+            contactPartyIdByGroup,
+            propertyIdByGroup,
+          ),
+        );
+        result.relationshipsCreated += delta.created;
+      } catch {
+        // See the contact chunk: savepoint already rolled the bulk write back.
+        await executeRelationshipChunkPerRow(
+          tx,
+          batch,
+          brokerageId,
+          agentId,
+          importJobId,
+          already.relationshipDoneRows,
+          contactPartyIdByGroup,
+          propertyIdByGroup,
+          result,
+        );
       }
     });
     await db
@@ -556,6 +1394,10 @@ export interface RollbackResult {
   entries: RollbackReportEntry[];
 }
 
+function addReferencedIds(target: Set<number>, ids: Array<number | null>): void {
+  for (const id of ids) if (id != null) target.add(id);
+}
+
 /**
  * B.19 rollback -- see the header comment at the top of this file for the full
  * safety rule. Order matters: relationships this job created are removed first
@@ -564,6 +1406,10 @@ export interface RollbackResult {
  * still references it". Every row this job touched is reported, never silently
  * skipped -- a false "rolled back" would be worse than an honest "not rolled
  * back, has since been used".
+ *
+ * Property and party decisions are still one report entry per id, in the same
+ * order, with the same reasons. The existence and "still referenced" checks
+ * are read once per chunk instead of once per id.
  */
 export async function rollbackImportJob(importJobId: number, brokerageId: number): Promise<RollbackResult> {
   const [job] = await db
@@ -581,7 +1427,7 @@ export async function rollbackImportJob(importJobId: number, brokerageId: number
       rows.filter((r) => r.relationshipWasCreated && r.resultRelationshipId != null).map((r) => r.resultRelationshipId as number),
     ),
   ];
-  for (const idBatch of chunk(relationshipIds, BATCH_SIZE)) {
+  for (const idBatch of chunk(relationshipIds, IMPORT_EXECUTION_CHUNK_SIZE)) {
     if (idBatch.length === 0) continue;
     // importRecords.resultRelationshipId FKs to growRelationships.id with no
     // cascade -- clear the audit link before deleting the row it points to,
@@ -599,67 +1445,95 @@ export async function rollbackImportJob(importJobId: number, brokerageId: number
   const propertyIds = [
     ...new Set(rows.filter((r) => r.propertyWasCreated && r.resultPropertyId != null).map((r) => r.resultPropertyId as number)),
   ];
-  for (const id of propertyIds) {
-    const [prop] = await db
+  for (const idBatch of chunk(propertyIds, IMPORT_EXECUTION_CHUNK_SIZE)) {
+    const found = await db
       .select()
       .from(properties)
-      .where(and(eq(properties.id, id), eq(properties.brokerageId, brokerageId)))
-      .limit(1);
-    if (!prop) {
-      entries.push({ kind: "property", id, rolledBack: false, reason: "not found in this brokerage" });
-      continue;
+      .where(and(inArray(properties.id, idBatch), eq(properties.brokerageId, brokerageId)));
+    const byId = new Map(found.map((row) => [row.id, row]));
+    const referenced = new Set<number>();
+    const [rels, acts, opps] = await Promise.all([
+      db.select({ id: growRelationships.propertyId }).from(growRelationships).where(inArray(growRelationships.propertyId, idBatch)),
+      db.select({ id: growActivities.propertyId }).from(growActivities).where(inArray(growActivities.propertyId, idBatch)),
+      db.select({ id: growOpportunities.propertyId }).from(growOpportunities).where(inArray(growOpportunities.propertyId, idBatch)),
+    ]);
+    addReferencedIds(referenced, rels.map((row) => row.id));
+    addReferencedIds(referenced, acts.map((row) => row.id));
+    addReferencedIds(referenced, opps.map((row) => row.id));
+
+    const deletable: number[] = [];
+    for (const id of idBatch) {
+      const prop = byId.get(id);
+      if (!prop) {
+        entries.push({ kind: "property", id, rolledBack: false, reason: "not found in this brokerage" });
+        continue;
+      }
+      if (prop.updatedAt.getTime() !== prop.createdAt.getTime()) {
+        entries.push({ kind: "property", id, rolledBack: false, reason: "modified since import -- not rolled back" });
+        continue;
+      }
+      if (referenced.has(id)) {
+        entries.push({ kind: "property", id, rolledBack: false, reason: "has since been used -- referenced by other Grow records" });
+        continue;
+      }
+      deletable.push(id);
+      entries.push({ kind: "property", id, rolledBack: true });
     }
-    if (prop.updatedAt.getTime() !== prop.createdAt.getTime()) {
-      entries.push({ kind: "property", id, rolledBack: false, reason: "modified since import -- not rolled back" });
-      continue;
+    if (deletable.length > 0) {
+      // Same FK-before-delete ordering as relationships above.
+      await db
+        .update(importRecords)
+        .set({ resultPropertyId: null })
+        .where(and(eq(importRecords.importJobId, importJobId), inArray(importRecords.resultPropertyId, deletable)));
+      await db.delete(properties).where(inArray(properties.id, deletable));
     }
-    const [rel] = await db.select({ id: growRelationships.id }).from(growRelationships).where(eq(growRelationships.propertyId, id)).limit(1);
-    const [act] = await db.select({ id: growActivities.id }).from(growActivities).where(eq(growActivities.propertyId, id)).limit(1);
-    const [opp] = await db.select({ id: growOpportunities.id }).from(growOpportunities).where(eq(growOpportunities.propertyId, id)).limit(1);
-    if (rel || act || opp) {
-      entries.push({ kind: "property", id, rolledBack: false, reason: "has since been used -- referenced by other Grow records" });
-      continue;
-    }
-    // Same FK-before-delete ordering as relationships above.
-    await db
-      .update(importRecords)
-      .set({ resultPropertyId: null })
-      .where(and(eq(importRecords.importJobId, importJobId), eq(importRecords.resultPropertyId, id)));
-    await db.delete(properties).where(eq(properties.id, id));
-    entries.push({ kind: "property", id, rolledBack: true });
   }
 
   const partyIds = [
     ...new Set(rows.filter((r) => r.partyWasCreated && r.resultPartyId != null).map((r) => r.resultPartyId as number)),
   ];
-  for (const id of partyIds) {
-    const [party] = await db
+  for (const idBatch of chunk(partyIds, IMPORT_EXECUTION_CHUNK_SIZE)) {
+    const found = await db
       .select()
       .from(parties)
-      .where(and(eq(parties.id, id), eq(parties.brokerageId, brokerageId)))
-      .limit(1);
-    if (!party) {
-      entries.push({ kind: "party", id, rolledBack: false, reason: "not found in this brokerage" });
-      continue;
+      .where(and(inArray(parties.id, idBatch), eq(parties.brokerageId, brokerageId)));
+    const byId = new Map(found.map((row) => [row.id, row]));
+    const referenced = new Set<number>();
+    const [rels, acts, opps] = await Promise.all([
+      db.select({ id: growRelationships.partyId }).from(growRelationships).where(inArray(growRelationships.partyId, idBatch)),
+      db.select({ id: growActivities.partyId }).from(growActivities).where(inArray(growActivities.partyId, idBatch)),
+      db.select({ id: growOpportunities.partyId }).from(growOpportunities).where(inArray(growOpportunities.partyId, idBatch)),
+    ]);
+    addReferencedIds(referenced, rels.map((row) => row.id));
+    addReferencedIds(referenced, acts.map((row) => row.id));
+    addReferencedIds(referenced, opps.map((row) => row.id));
+
+    const deletable: number[] = [];
+    for (const id of idBatch) {
+      const party = byId.get(id);
+      if (!party) {
+        entries.push({ kind: "party", id, rolledBack: false, reason: "not found in this brokerage" });
+        continue;
+      }
+      if (party.updatedAt.getTime() !== party.createdAt.getTime()) {
+        entries.push({ kind: "party", id, rolledBack: false, reason: "modified since import -- not rolled back" });
+        continue;
+      }
+      if (referenced.has(id)) {
+        entries.push({ kind: "party", id, rolledBack: false, reason: "has since been used -- referenced by other Grow records" });
+        continue;
+      }
+      deletable.push(id);
+      entries.push({ kind: "party", id, rolledBack: true });
     }
-    if (party.updatedAt.getTime() !== party.createdAt.getTime()) {
-      entries.push({ kind: "party", id, rolledBack: false, reason: "modified since import -- not rolled back" });
-      continue;
+    if (deletable.length > 0) {
+      // Same FK-before-delete ordering as relationships/properties above.
+      await db
+        .update(importRecords)
+        .set({ resultPartyId: null })
+        .where(and(eq(importRecords.importJobId, importJobId), inArray(importRecords.resultPartyId, deletable)));
+      await db.delete(parties).where(inArray(parties.id, deletable));
     }
-    const [rel] = await db.select({ id: growRelationships.id }).from(growRelationships).where(eq(growRelationships.partyId, id)).limit(1);
-    const [act] = await db.select({ id: growActivities.id }).from(growActivities).where(eq(growActivities.partyId, id)).limit(1);
-    const [opp] = await db.select({ id: growOpportunities.id }).from(growOpportunities).where(eq(growOpportunities.partyId, id)).limit(1);
-    if (rel || act || opp) {
-      entries.push({ kind: "party", id, rolledBack: false, reason: "has since been used -- referenced by other Grow records" });
-      continue;
-    }
-    // Same FK-before-delete ordering as relationships/properties above.
-    await db
-      .update(importRecords)
-      .set({ resultPartyId: null })
-      .where(and(eq(importRecords.importJobId, importJobId), eq(importRecords.resultPartyId, id)));
-    await db.delete(parties).where(eq(parties.id, id));
-    entries.push({ kind: "party", id, rolledBack: true });
   }
 
   await db.update(importJobs).set({ status: "ROLLED_BACK", updatedAt: new Date() }).where(eq(importJobs.id, importJobId));
