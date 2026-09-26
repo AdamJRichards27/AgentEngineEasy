@@ -205,3 +205,43 @@ test("auth_security_event_total, tenant_isolation_rejection_total, ai_action_dec
     assert.doesNotThrow(() => incrementCounter("financial_reconciliation_variance_total", { source }));
   }
 });
+
+test("R-F6 pit crew waiting-on sweep metrics accept every declared label, reject an out-of-set value, and render as counter or summary", () => {
+  for (const outcome of METRIC_DEFINITIONS.pit_crew_waiting_on_sweep_tick_total.labels.outcome) {
+    assert.doesNotThrow(() => incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome }));
+  }
+  assert.throws(
+    () => incrementCounter("pit_crew_waiting_on_sweep_tick_total", { outcome: "skipped_locked" }),
+    /not in the declared allowed set/,
+  );
+
+  for (const outcome of METRIC_DEFINITIONS.pit_crew_waiting_on_sweep_tick_duration_ms.labels.outcome) {
+    assert.doesNotThrow(() => observeHistogram("pit_crew_waiting_on_sweep_tick_duration_ms", 12, { outcome }));
+  }
+  assert.throws(
+    () => observeHistogram("pit_crew_waiting_on_sweep_tick_duration_ms", 12, { outcome: "skipped_overlap" }),
+    /not in the declared allowed set/,
+  );
+
+  for (const outcome of METRIC_DEFINITIONS.pit_crew_waiting_on_sweep_brokerage_total.labels.outcome) {
+    assert.doesNotThrow(() => incrementCounter("pit_crew_waiting_on_sweep_brokerage_total", { outcome }));
+  }
+  assert.throws(
+    () => incrementCounter("pit_crew_waiting_on_sweep_brokerage_total", { outcome: "other" }),
+    /not in the declared allowed set/,
+  );
+
+  for (const outcome of METRIC_DEFINITIONS.pit_crew_waiting_on_sweep_item_total.labels.outcome) {
+    assert.doesNotThrow(() => incrementCounter("pit_crew_waiting_on_sweep_item_total", { outcome }));
+  }
+  assert.throws(
+    () => incrementCounter("pit_crew_waiting_on_sweep_item_total", { outcome: "detected" }),
+    /not in the declared allowed set/,
+  );
+
+  const text = renderMetricsText();
+  assert.match(text, /# TYPE pit_crew_waiting_on_sweep_tick_duration_ms summary/);
+  assert.match(text, /# TYPE pit_crew_waiting_on_sweep_tick_total counter/);
+  assert.match(text, /# TYPE pit_crew_waiting_on_sweep_brokerage_total counter/);
+  assert.match(text, /# TYPE pit_crew_waiting_on_sweep_item_total counter/);
+});

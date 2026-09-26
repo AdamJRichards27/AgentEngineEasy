@@ -92,3 +92,30 @@ test("test alert requires a separate explicit opt-in and has no caller payload",
   assert.equal((await dispatchTestOperationalAlert()).status, "delivered");
   assert.equal(calls, 1);
 });
+
+test("R-F6 pit crew waiting-on sweep alerts deliver with severity high, owner operations, and the pit-crew runbook", async () => {
+  configure();
+  const envelopes: Array<{ type: string; severity: string; owner: string; runbook: string }> = [];
+  __setOperationalAlertTransportForTesting(async (_url, _token, envelope) => {
+    envelopes.push(envelope);
+    return 202;
+  });
+  for (const type of ["PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY", "PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED"] as const) {
+    const result = await dispatchOperationalAlert({
+      type,
+      summary: "sweep health",
+      dedupKey: `pit-crew-waiting-on-sweep:policy:${type}`,
+    });
+    assert.equal(result.status, "delivered");
+  }
+  assert.equal(envelopes.length, 2);
+  assert.deepEqual(
+    envelopes.map((envelope) => envelope.type),
+    ["PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY", "PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED"],
+  );
+  for (const envelope of envelopes) {
+    assert.equal(envelope.severity, "high");
+    assert.equal(envelope.owner, "operations");
+    assert.equal(envelope.runbook, "pit-crew-waiting-on-sweep");
+  }
+});

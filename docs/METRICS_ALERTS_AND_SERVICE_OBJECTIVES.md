@@ -16,8 +16,8 @@ alerting system should implement against, not a live behaviour.
 
 The Step 2 closure pass stopped at twenty-three metrics. Five signal-sweep metrics were
 added after that. **C-10 (2026-09-26)** added seven more for AI provider calls and voice
-transcription. The catalogue now declares **thirty-five** metrics. Alert-ready conditions
-are **thirty-four** (§2, including §2a and §2b).
+transcription. The catalogue now declares **thirty-nine** metrics. Alert-ready conditions
+are **thirty-seven** (§2, including §2a, §2b, and §2c).
 
 As with the rest of this step's documentation, the original governing instruction's exact
 verbatim enumerated lists were not recoverable across an earlier context compaction. This
@@ -99,8 +99,9 @@ cross-check against the instruction's named list.
 | 13 | AI action governance and provider observability | allow/deny split of every AI action policy decision; provider-call attempts, latency, gateway fallback, and tokens; voice transcription attempts, latency, and transcribed audio seconds | `ai_action_decision_total{outcome}` — `lib/ai/policyEngine.ts`. **C-10:** `ai_provider_call_total{provider,outcome}`, `ai_provider_call_duration_ms{provider,outcome}`, `ai_gateway_result_total{result}`, `ai_provider_tokens_total{provider,kind}` recorded inside `generateWithGateway` (`lib/ai/gateway.ts`), which is the one text-generation call site. `voice_transcription_total{provider,outcome}`, `voice_transcription_duration_ms{provider,outcome}`, `voice_transcription_audio_seconds_total{provider}` recorded in `routes/aiVoice.ts` only after `provider.transcribe`. Provider is `mock`, `anthropic`, or `other` for text, and `mock`, `deepgram`, or `other` for voice. No brokerage, user, model, or correlation id label. Dollars stay on the admin-only usage snapshot, not a metric. |
 | 14 | Workflow/automation execution health | automation-rule (and, by label, other workflow-family) execution failures | **new:** `workflow_execution_failure_total{workflow}` — wired at `lib/automation/engine.ts`'s rule-evaluation catch site; `ready_to_list`/`launch_plan`/`other` labels are declared but not yet wired at a throw site (see §4) |
 | 15 | Signal-sweep liveness and lock health | sweeps completing on schedule; refusals that are a leaked lock rather than an ordinary race; per-tenant failures isolated from whole-sweep failures | `property_signal_sweep_total{trigger,outcome}` / `property_signal_sweep_duration_ms{trigger}` — `lib/propertyIntelligence/sweep.ts`; **new in W1-D:** `property_signal_sweep_lock_orphaned_total{trigger,kind}` and `property_signal_sweep_brokerage_failure_total{kind}`. The same judgement is available on demand, without a scrape target, at `GET /api/grow/property-intelligence/ops/health` (Brokerage Administrator only). See §2a |
+| 16 | Pit Crew WAITING_ON detection sweep liveness | scheduled detection ticks completing; a tick that threw, or every brokerage failing, distinguished from a tick where only some brokerages failed; items surfaced versus deduped | `pit_crew_waiting_on_sweep_tick_total{outcome}` / `pit_crew_waiting_on_sweep_tick_duration_ms{outcome}` / `pit_crew_waiting_on_sweep_brokerage_total{outcome}` / `pit_crew_waiting_on_sweep_item_total{outcome}` — `lib/pitCrew/waitingOnSweepBootstrap.ts`, scheduled path only (not `POST /pit-crew/ops/waiting-on/sweep`). See §2c |
 
-## 2. Alert-ready conditions (34)
+## 2. Alert-ready conditions (37)
 
 Every condition below names the real metric or log signal it evaluates. **None of these
 page anyone today** — there is no alerting/paging pipeline in this repository — but each is
@@ -335,6 +336,62 @@ not instrumented here. Both duration metrics are registered in `HISTOGRAM_METRIC
     after the request was accepted. `voice_transcription_audio_seconds_total` is the
     spend reading for that same traffic. It is not itself an alert.
 
+### 2c. Pit Crew WAITING_ON detection sweep (conditions 35–37)
+
+Added by Run slice R-F6. The scheduled detection sweep
+(`lib/pitCrew/waitingOnSweepBootstrap.ts`) is opt-in
+(`PIT_CREW_WAITING_ON_SWEEP_ENABLED`, default off). It identifies overdue
+WAITING_ON items. It does not return them, reassign them, or contact anyone.
+The human `POST /pit-crew/ops/waiting-on/sweep` route is a different path and
+is not these metrics. Label sets are closed and have no `other` fallback.
+No label is a brokerage id, assignment id, property id, user id, or tier.
+
+Like conditions 28–30, **35 and 36 page today, via a real code path**. They
+dispatch from `runScheduledWaitingOnSweep` to the configured
+`OPERATIONAL_ALERTS_WEBHOOK_URL` (severity `high`, owner `operations`,
+runbook `pit-crew-waiting-on-sweep`). `logger.error` is not bridged to
+`dispatchOperationalAlert()` (`logger.ts` only writes JSON to stderr), so a
+sweep that throws on every tick would otherwise surface only as stderr.
+At most one alert is dispatched per tick. The dispatcher's cooldown is what
+limits repeats. The setInterval catch logs and does not dispatch a second
+alert. The flag stays default off, so nothing can fire until the Owner
+enables the sweep.
+
+35. The sweep is unhealthy for ≥ `PIT_CREW_WAITING_ON_SWEEP_ALERT_AFTER_CONSECUTIVE_FAILURES`
+    (3) consecutive ticks → **already dispatches `PIT_CREW_WAITING_ON_SWEEP_UNHEALTHY`**
+    (dedup key `pit-crew-waiting-on-sweep:unhealthy`). An unhealthy tick is one
+    that threw, or one where every considered brokerage failed (`brokerages > 0`
+    and `failedBrokerages === brokerages`). A completed tick that is not
+    unhealthy resets the streak. An overlap skip does not move it. The
+    realistic case is the flag switched on before migration 0031
+    (`pit_crew_waiting_on_sweep_settings` and `pit_crew_waiting_on_sweep_sightings`)
+    is applied: `loadPitCrewWaitingOnSweepSettings` throws for every brokerage
+    on every tick, and this condition pages. One stable dedup key, not one per
+    brokerage, so two hundred failing tenants are one page per cooldown.
+    `failedBrokerageIds` in the details are ascending and capped at 20. The
+    whole-tick error is `err.message` only. Per-brokerage messages stay in
+    `pit_crew_waiting_on_sweep_brokerage_failed`. (Runbook:
+    `pit-crew-waiting-on-sweep`.)
+36. Some brokerages fail on ≥ 3 consecutive completed ticks while the sweep
+    itself finishes → **already dispatches `PIT_CREW_WAITING_ON_SWEEP_BROKERAGE_FAILED`**
+    (dedup key `pit-crew-waiting-on-sweep:brokerage-failures`, same policy
+    shape). This is not condition 35: at least one brokerage in the tick did
+    not fail. A tick that threw does not move this counter. A completed tick
+    with `failedBrokerages === 0` resets it. When both streaks are at the
+    threshold, condition 35 wins and this type is not sent.
+37. No `pit_crew_waiting_on_sweep_tick_total{outcome="completed"}` for longer
+    than 3 × `PIT_CREW_WAITING_ON_SWEEP_INTERVAL_MS` while the sweep is enabled
+    → the timer is not running. **Not wired.** This is a rate-of-absence rule
+    and needs an external rule engine (§3). The scheduler is off by default,
+    so absence is expected until the Owner enables the sweep.
+
+**Cardinality note.** The four series (`pit_crew_waiting_on_sweep_tick_total`,
+`pit_crew_waiting_on_sweep_tick_duration_ms`,
+`pit_crew_waiting_on_sweep_brokerage_total`,
+`pit_crew_waiting_on_sweep_item_total`) carry only closed label sets and no
+tenant identifier. 3 + 2 + 4 + 2 = 11 series maximum. A brokerage id in alert
+details is never a metric label.
+
 ## 3. What it would take to make alerting real
 
 1. A scrape target and rule engine (Prometheus + Alertmanager, or a hosted equivalent like
@@ -421,6 +478,7 @@ meant by "operational metrics with strict cardinality bounds": twenty-three metr
 backing fourteen SLIs and twenty-seven alert-ready conditions, with named, scoped-out
 extensions rather than a claim of exhaustive coverage. The catalogue has since grown.
 C-10 brings it to **thirty-five** metrics and **thirty-four** alert-ready conditions.
+R-F6 brings it to thirty-nine metrics and thirty-seven conditions.
 SLI #13 now covers provider calls, latency, fallback, tokens, and voice transcription
 as well as the policy-decision counter. Token ceilings, dollar ceilings, and a durable
 voice-metering table are still out of this registry.
