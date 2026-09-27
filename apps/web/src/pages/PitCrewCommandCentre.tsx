@@ -17,23 +17,43 @@ import { Link } from "wouter";
 import { useSession } from "../lib/session";
 import { ApiError } from "../lib/api";
 import {
+  acknowledgePcEscalation,
   addPcNote,
   assignPcItem,
+  canAcknowledgeEscalation,
+  canResolveOrReturnEscalation,
   claimPcItem,
   completePcItem,
+  escalatePcItem,
   fetchPitCrewWorkspace,
+  handBackPcItem,
   handoffPcItem,
+  isPitCrewActiveActionStatus,
+  PIT_CREW_ESCALATION_REASON_CATEGORIES,
+  PIT_CREW_ESCALATION_SEVERITIES,
+  PIT_CREW_HAND_BACK_REASON_CATEGORIES,
+  pitCrewReasonLabel,
+  pitCrewResponsibilityActionError,
+  pitCrewResponsibilityActionsVisible,
   pcStatusLabel,
   pcStatusPillClass,
   pcTeamMemberName,
+  reclaimPcHandBack,
   releasePcItem,
+  resolvePcEscalation,
+  returnPcEscalation,
   returnPcItem,
   setPcWaitingOn,
   startPcItem,
   type PcMutationBase,
+  type PcOpenResponsibility,
+  type PcResponsibilityWorkItem,
   type PcTeamMember,
   type PcWorkItem,
   type PcWorkspace,
+  type PitCrewEscalationReasonCategory,
+  type PitCrewEscalationSeverity,
+  type PitCrewHandBackReasonCategory,
 } from "../lib/pitCrew";
 import { categoryLabel, formatDueDate, isOverdue, severityLabel, severityPillClass } from "../lib/riskExceptions";
 
@@ -52,9 +72,16 @@ const SECTIONS = [
   { key: "completedToday", label: "Completed Today" },
 ] as const;
 
-type SectionKey = (typeof SECTIONS)[number]["key"];
+const RESPONSIBILITY_SECTIONS = [
+  { key: "handedBack", label: "Handed back" },
+  { key: "escalated", label: "Escalated" },
+] as const;
 
-function sectionItems(data: PcWorkspace, key: SectionKey): PcWorkItem[] | null {
+type BaseSectionKey = (typeof SECTIONS)[number]["key"];
+type ResponsibilitySectionKey = (typeof RESPONSIBILITY_SECTIONS)[number]["key"];
+type SectionKey = BaseSectionKey | ResponsibilitySectionKey;
+
+function sectionItems(data: PcWorkspace, key: BaseSectionKey): PcWorkItem[] | null {
   switch (key) {
     case "myWork":
       return data.myWork;
@@ -75,7 +102,7 @@ function sectionItems(data: PcWorkspace, key: SectionKey): PcWorkItem[] | null {
   }
 }
 
-const EMPTY_LABELS: Record<Exclude<SectionKey, "overview">, string> = {
+const EMPTY_LABELS: Record<Exclude<BaseSectionKey, "overview">, string> = {
   myWork: "Nothing claimed yet. Pick something up from Unassigned Work.",
   unassignedWork: "Nothing waiting for a Pit Crew member right now.",
   teamWork: "No active Pit Crew work across the team.",
@@ -83,6 +110,11 @@ const EMPTY_LABELS: Record<Exclude<SectionKey, "overview">, string> = {
   transactionCoordination: "No offer, condition, or settlement items need Pit Crew right now.",
   waitingOn: "Nothing is currently blocked waiting on someone else.",
   completedToday: "Nothing completed yet today.",
+};
+
+const RESPONSIBILITY_EMPTY_LABELS: Record<ResponsibilitySectionKey, string> = {
+  handedBack: "Nothing has been handed back.",
+  escalated: "Nothing is escalated.",
 };
 
 interface PcItemActions {
@@ -95,6 +127,39 @@ interface PcItemActions {
   release: (args: PcMutationBase) => void;
   handoff: (args: PcMutationBase & { toUserId: number; note?: string }) => void;
   note: (args: { sourceType: string; sourceRecordId: string; propertyId: number; note: string }) => void;
+  handBack: (args: PcMutationBase & { reasonCategory: PitCrewHandBackReasonCategory; nextAction: string; note?: string; recipientUserId?: number }) => void;
+  escalate: (
+    args: PcMutationBase & {
+      reasonCategory: PitCrewEscalationReasonCategory;
+      severity: PitCrewEscalationSeverity;
+      note: string;
+      nextAction: string;
+      recipientUserId?: number;
+      expectedResponseAt?: string;
+    },
+  ) => void;
+  acknowledge: (args: PcMutationBase & { note?: string }) => void;
+  resolve: (args: PcMutationBase & { note: string }) => void;
+  returnEscalation: (args: PcMutationBase & { note: string }) => void;
+  reclaim: (args: PcMutationBase) => void;
+}
+
+type PcCardItem = PcWorkItem & { responsibility?: PcOpenResponsibility };
+
+function readOptionalUserId(value: string): { ok: true; id?: number } | { ok: false } {
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: true };
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed <= 0) return { ok: false };
+  return { ok: true, id: parsed };
+}
+
+function expectedResponseIso(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
 }
 
 export default function PitCrewCommandCentre() {
@@ -108,6 +173,16 @@ export default function PitCrewCommandCentre() {
     queryFn: fetchPitCrewWorkspace,
     refetchInterval: 30000,
   });
+
+  // 404 from the inbox route means the responsibility routes are not
+  // registered. While this is loading or anything other than a confirmed
+  // 200, the new controls stay unmounted.
+  const responsibilitySignal = useQuery({
+    queryKey: ["pit-crew-responsibility-actions"],
+    queryFn: pitCrewResponsibilityActionsVisible,
+    retry: false,
+  });
+  const responsibilityActionsVisible = responsibilitySignal.data === true;
 
   function opts() {
     return {
@@ -124,6 +199,21 @@ export default function PitCrewCommandCentre() {
     };
   }
 
+  function responsibilityOpts() {
+    return {
+      onSuccess: () => {
+        setActionError(null);
+        queryClient.invalidateQueries({ queryKey: ["pit-crew-workspace"] });
+      },
+      onError: (err: unknown, vars: { sourceType: string; sourceRecordId: string }) => {
+        setActionError({
+          key: pcKey(vars.sourceType, vars.sourceRecordId),
+          message: pitCrewResponsibilityActionError(err),
+        });
+      },
+    };
+  }
+
   const claimMutation = useMutation({ mutationFn: claimPcItem, ...opts() });
   const assignMutation = useMutation({ mutationFn: assignPcItem, ...opts() });
   const startMutation = useMutation({ mutationFn: startPcItem, ...opts() });
@@ -133,6 +223,12 @@ export default function PitCrewCommandCentre() {
   const releaseMutation = useMutation({ mutationFn: releasePcItem, ...opts() });
   const handoffMutation = useMutation({ mutationFn: handoffPcItem, ...opts() });
   const noteMutation = useMutation({ mutationFn: addPcNote, ...opts() });
+  const handBackMutation = useMutation({ mutationFn: handBackPcItem, ...responsibilityOpts() });
+  const escalateMutation = useMutation({ mutationFn: escalatePcItem, ...responsibilityOpts() });
+  const acknowledgeMutation = useMutation({ mutationFn: acknowledgePcEscalation, ...responsibilityOpts() });
+  const resolveMutation = useMutation({ mutationFn: resolvePcEscalation, ...responsibilityOpts() });
+  const returnEscalationMutation = useMutation({ mutationFn: returnPcEscalation, ...responsibilityOpts() });
+  const reclaimMutation = useMutation({ mutationFn: reclaimPcHandBack, ...responsibilityOpts() });
 
   const allMutations = [
     claimMutation,
@@ -144,6 +240,12 @@ export default function PitCrewCommandCentre() {
     releaseMutation,
     handoffMutation,
     noteMutation,
+    handBackMutation,
+    escalateMutation,
+    acknowledgeMutation,
+    resolveMutation,
+    returnEscalationMutation,
+    reclaimMutation,
   ];
 
   const actions: PcItemActions = {
@@ -156,6 +258,12 @@ export default function PitCrewCommandCentre() {
     release: (args) => releaseMutation.mutate(args),
     handoff: (args) => handoffMutation.mutate(args),
     note: (args) => noteMutation.mutate(args),
+    handBack: (args) => handBackMutation.mutate(args),
+    escalate: (args) => escalateMutation.mutate(args),
+    acknowledge: (args) => acknowledgeMutation.mutate(args),
+    resolve: (args) => resolveMutation.mutate(args),
+    returnEscalation: (args) => returnEscalationMutation.mutate(args),
+    reclaim: (args) => reclaimMutation.mutate(args),
   };
 
   if (isLoading || !user) {
@@ -174,8 +282,11 @@ export default function PitCrewCommandCentre() {
     );
   }
 
-  const team = data.team;
+  const workspace = data;
+  const team = workspace.team;
   const currentUserId = user.id;
+  const currentUserRole = user.role;
+  const sections = responsibilityActionsVisible ? [...SECTIONS, ...RESPONSIBILITY_SECTIONS] : [...SECTIONS];
 
   function isBusy(item: PcWorkItem): boolean {
     const key = pcKey(item.sourceType, item.sourceRecordId);
@@ -185,15 +296,14 @@ export default function PitCrewCommandCentre() {
     });
   }
 
-  function renderSection(key: Exclude<SectionKey, "overview">, title: string) {
-    const items = sectionItems(data as PcWorkspace, key) ?? [];
+  function renderItems(items: PcCardItem[], emptyLabel: string, title: string) {
     return (
       <section className="card">
         <h2>
           {title} ({items.length})
         </h2>
         {items.length === 0 ? (
-          <p className="muted">{EMPTY_LABELS[key]}</p>
+          <p className="muted">{emptyLabel}</p>
         ) : (
           <ul className="item-list pc-item-list">
             {items.map((item) => {
@@ -203,10 +313,12 @@ export default function PitCrewCommandCentre() {
                   key={itemKey}
                   item={item}
                   currentUserId={currentUserId}
+                  currentUserRole={currentUserRole}
                   team={team}
                   busy={isBusy(item)}
                   error={actionError?.key === itemKey ? actionError.message : null}
                   actions={actions}
+                  responsibilityActionsVisible={responsibilityActionsVisible}
                 />
               );
             })}
@@ -214,6 +326,22 @@ export default function PitCrewCommandCentre() {
         )}
       </section>
     );
+  }
+
+  function renderSection(key: Exclude<BaseSectionKey, "overview">, title: string) {
+    const items = sectionItems(workspace, key) ?? [];
+    return renderItems(items, EMPTY_LABELS[key], title);
+  }
+
+  function renderResponsibilitySection(key: ResponsibilitySectionKey, title: string) {
+    const items = workspace[key] ?? [];
+    return renderItems(items, RESPONSIBILITY_EMPTY_LABELS[key], title);
+  }
+
+  function sectionCount(key: SectionKey): number {
+    if (key === "overview") return 0;
+    if (key === "handedBack" || key === "escalated") return (workspace[key] ?? []).length;
+    return (sectionItems(workspace, key) ?? []).length;
   }
 
   return (
@@ -226,7 +354,7 @@ export default function PitCrewCommandCentre() {
       </div>
 
       <nav className="pc-tabs">
-        {SECTIONS.map((s) => (
+        {sections.map((s) => (
           <button
             key={s.key}
             type="button"
@@ -234,9 +362,7 @@ export default function PitCrewCommandCentre() {
             onClick={() => setTab(s.key)}
           >
             {s.label}
-            {s.key !== "overview" && (
-              <span className="pc-tab-count">{(sectionItems(data, s.key) ?? []).length}</span>
-            )}
+            {s.key !== "overview" && <span className="pc-tab-count">{sectionCount(s.key)}</span>}
           </button>
         ))}
       </nav>
@@ -282,6 +408,8 @@ export default function PitCrewCommandCentre() {
       {tab === "transactionCoordination" && renderSection("transactionCoordination", "Transaction Coordination")}
       {tab === "waitingOn" && renderSection("waitingOn", "Waiting On")}
       {tab === "completedToday" && renderSection("completedToday", "Completed Today")}
+      {responsibilityActionsVisible && tab === "handedBack" && renderResponsibilitySection("handedBack", "Handed back")}
+      {responsibilityActionsVisible && tab === "escalated" && renderResponsibilitySection("escalated", "Escalated")}
     </div>
   );
 }
@@ -301,17 +429,29 @@ function StatTile({ label, value }: { label: string; value: number }) {
 // allow -- there is no separate "detail" screen that could drift out of
 // sync with what the list view shows.
 interface PcItemCardProps {
-  item: PcWorkItem;
+  item: PcCardItem;
   currentUserId: number;
+  currentUserRole: string;
   team: PcTeamMember[];
   busy: boolean;
   error: string | null;
   actions: PcItemActions;
+  responsibilityActionsVisible: boolean;
 }
 
-type PcOpenForm = "assign" | "waitingOn" | "handoff" | "note" | null;
+type PcOpenForm =
+  | "assign"
+  | "waitingOn"
+  | "handoff"
+  | "note"
+  | "handBack"
+  | "escalate"
+  | "acknowledge"
+  | "resolve"
+  | "returnEscalation"
+  | null;
 
-function PcItemCard({ item, currentUserId, team, busy, error, actions }: PcItemCardProps) {
+function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, actions, responsibilityActionsVisible }: PcItemCardProps) {
   const [openForm, setOpenForm] = useState<PcOpenForm>(null);
   const [assigneeUserId, setAssigneeUserId] = useState("");
   const [waitingOnParty, setWaitingOnParty] = useState("");
@@ -319,8 +459,28 @@ function PcItemCard({ item, currentUserId, team, busy, error, actions }: PcItemC
   const [handoffToUserId, setHandoffToUserId] = useState("");
   const [handoffNote, setHandoffNote] = useState("");
   const [noteText, setNoteText] = useState("");
+  const [handBackReason, setHandBackReason] = useState<PitCrewHandBackReasonCategory | "">("");
+  const [handBackNextAction, setHandBackNextAction] = useState("");
+  const [handBackNote, setHandBackNote] = useState("");
+  const [handBackRecipient, setHandBackRecipient] = useState("");
+  const [escalateReason, setEscalateReason] = useState<PitCrewEscalationReasonCategory | "">("");
+  const [escalateSeverity, setEscalateSeverity] = useState<PitCrewEscalationSeverity | "">("");
+  const [escalateNote, setEscalateNote] = useState("");
+  const [escalateNextAction, setEscalateNextAction] = useState("");
+  const [escalateRecipient, setEscalateRecipient] = useState("");
+  const [escalateExpectedResponse, setEscalateExpectedResponse] = useState("");
+  const [acknowledgeNote, setAcknowledgeNote] = useState("");
+  const [resolveNote, setResolveNote] = useState("");
+  const [returnEscalationNote, setReturnEscalationNote] = useState("");
 
   const isMine = item.assignedToUserId === currentUserId;
+  const actor = { id: currentUserId, role: currentUserRole };
+  const responsibilityItem = item.responsibility ? (item as PcResponsibilityWorkItem) : null;
+  const showHandBackOrEscalate = responsibilityActionsVisible && isPitCrewActiveActionStatus(item.pcStatus);
+  const showReclaim = responsibilityActionsVisible && item.pcStatus === "HANDED_BACK";
+  const showAcknowledge = responsibilityItem != null && responsibilityActionsVisible && canAcknowledgeEscalation(responsibilityItem, actor);
+  const showResolveOrReturn = responsibilityItem != null && responsibilityActionsVisible && canResolveOrReturnEscalation(responsibilityItem, actor);
+  const expectedResponseRequired = escalateSeverity === "AT_RISK" || escalateSeverity === "CRITICAL";
   const base: PcMutationBase = {
     sourceType: item.sourceType,
     sourceRecordId: item.sourceRecordId,
@@ -371,6 +531,22 @@ function PcItemCard({ item, currentUserId, team, busy, error, actions }: PcItemC
 
       {item.pcStatus === "DONE" && item.completedAt && <p className="muted">Completed {formatDueDate(item.completedAt)}</p>}
 
+      {item.responsibility && (
+        <div className="muted">
+          <p>Reason: {pitCrewReasonLabel(item.responsibility.reasonCategory)}</p>
+          <p>Next action: {item.responsibility.nextAction}</p>
+          {item.responsibility.severity && <p>Severity: {severityLabel(item.responsibility.severity)}</p>}
+          {item.responsibility.expectedResponseAt && (
+            <p>Expected response: {formatDueDate(item.responsibility.expectedResponseAt)}</p>
+          )}
+          {item.responsibility.recipientRole && <p>Recipient: {item.responsibility.recipientRole}</p>}
+          {item.responsibility.recipientUserId != null && !item.responsibility.recipientRole && (
+            <p>Recipient user {item.responsibility.recipientUserId}</p>
+          )}
+          {item.responsibility.note && <p>Note: {item.responsibility.note}</p>}
+        </div>
+      )}
+
       {error && <p className="error-text">{error}</p>}
 
       <div className="pc-item-actions">
@@ -403,7 +579,7 @@ function PcItemCard({ item, currentUserId, team, busy, error, actions }: PcItemC
           </button>
         )}
 
-        {isMine && item.pcStatus !== "UNCLAIMED" && item.pcStatus !== "DONE" && (
+        {isMine && isPitCrewActiveActionStatus(item.pcStatus) && (
           <>
             <button className="btn btn-primary btn-small" disabled={busy} onClick={() => actions.complete(base)}>
               Complete
@@ -413,6 +589,40 @@ function PcItemCard({ item, currentUserId, team, busy, error, actions }: PcItemC
             </button>
             <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => toggle("handoff")}>
               Hand off…
+            </button>
+          </>
+        )}
+
+        {showHandBackOrEscalate && (
+          <>
+            <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => toggle("handBack")}>
+              Hand back…
+            </button>
+            <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => toggle("escalate")}>
+              Escalate…
+            </button>
+          </>
+        )}
+
+        {showReclaim && (
+          <button className="btn btn-primary btn-small" disabled={busy} onClick={() => actions.reclaim(base)}>
+            Reclaim
+          </button>
+        )}
+
+        {showAcknowledge && (
+          <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => toggle("acknowledge")}>
+            Acknowledge…
+          </button>
+        )}
+
+        {showResolveOrReturn && (
+          <>
+            <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => toggle("resolve")}>
+              Resolve…
+            </button>
+            <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => toggle("returnEscalation")}>
+              Return…
             </button>
           </>
         )}
@@ -532,6 +742,214 @@ function PcItemCard({ item, currentUserId, team, busy, error, actions }: PcItemC
           />
           <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
             Save note
+          </button>
+        </form>
+      )}
+
+      {openForm === "handBack" && (
+        <form
+          className="stack pc-inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const nextAction = handBackNextAction.trim();
+            const recipient = readOptionalUserId(handBackRecipient);
+            if (!handBackReason || !nextAction || !recipient.ok) return;
+            actions.handBack({
+              ...base,
+              reasonCategory: handBackReason,
+              nextAction,
+              note: handBackNote.trim() || undefined,
+              recipientUserId: recipient.id,
+            });
+            setOpenForm(null);
+          }}
+        >
+          <select
+            name="reasonCategory"
+            value={handBackReason}
+            onChange={(e) => setHandBackReason(e.target.value as PitCrewHandBackReasonCategory | "")}
+            required
+          >
+            <option value="">Reason</option>
+            {PIT_CREW_HAND_BACK_REASON_CATEGORIES.map((reason) => (
+              <option key={reason} value={reason}>
+                {pitCrewReasonLabel(reason)}
+              </option>
+            ))}
+          </select>
+          <input
+            name="nextAction"
+            placeholder="Next action"
+            value={handBackNextAction}
+            onChange={(e) => setHandBackNextAction(e.target.value)}
+            required
+          />
+          <input
+            name="note"
+            placeholder="Note (optional)"
+            value={handBackNote}
+            onChange={(e) => setHandBackNote(e.target.value)}
+          />
+          <input
+            name="recipientUserId"
+            placeholder="Recipient user id (optional)"
+            value={handBackRecipient}
+            onChange={(e) => setHandBackRecipient(e.target.value)}
+          />
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+            Hand back
+          </button>
+        </form>
+      )}
+
+      {openForm === "escalate" && (
+        <form
+          className="stack pc-inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const note = escalateNote.trim();
+            const nextAction = escalateNextAction.trim();
+            const recipient = readOptionalUserId(escalateRecipient);
+            const expectedResponseAt = expectedResponseIso(escalateExpectedResponse);
+            if (!escalateReason || !escalateSeverity || !note || !nextAction || !recipient.ok) return;
+            if (expectedResponseRequired && !expectedResponseAt) return;
+            actions.escalate({
+              ...base,
+              reasonCategory: escalateReason,
+              severity: escalateSeverity,
+              note,
+              nextAction,
+              recipientUserId: recipient.id,
+              expectedResponseAt,
+            });
+            setOpenForm(null);
+          }}
+        >
+          <select
+            name="reasonCategory"
+            value={escalateReason}
+            onChange={(e) => setEscalateReason(e.target.value as PitCrewEscalationReasonCategory | "")}
+            required
+          >
+            <option value="">Reason</option>
+            {PIT_CREW_ESCALATION_REASON_CATEGORIES.map((reason) => (
+              <option key={reason} value={reason}>
+                {pitCrewReasonLabel(reason)}
+              </option>
+            ))}
+          </select>
+          <select
+            name="severity"
+            value={escalateSeverity}
+            onChange={(e) => setEscalateSeverity(e.target.value as PitCrewEscalationSeverity | "")}
+            required
+          >
+            <option value="">Severity</option>
+            {PIT_CREW_ESCALATION_SEVERITIES.map((severity) => (
+              <option key={severity} value={severity}>
+                {severityLabel(severity)}
+              </option>
+            ))}
+          </select>
+          <input name="note" placeholder="Note" value={escalateNote} onChange={(e) => setEscalateNote(e.target.value)} required />
+          <input
+            name="nextAction"
+            placeholder="Next action"
+            value={escalateNextAction}
+            onChange={(e) => setEscalateNextAction(e.target.value)}
+            required
+          />
+          <input
+            name="recipientUserId"
+            placeholder="Recipient user id (optional)"
+            value={escalateRecipient}
+            onChange={(e) => setEscalateRecipient(e.target.value)}
+          />
+          <input
+            name="expectedResponseAt"
+            type="datetime-local"
+            aria-label="Expected response"
+            value={escalateExpectedResponse}
+            onChange={(e) => setEscalateExpectedResponse(e.target.value)}
+            required={expectedResponseRequired}
+          />
+          <p className="muted">Expected response is required for At Risk and Critical.</p>
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+            Escalate
+          </button>
+        </form>
+      )}
+
+      {openForm === "acknowledge" && (
+        <form
+          className="stack pc-inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            actions.acknowledge({ ...base, note: acknowledgeNote.trim() || undefined });
+            setAcknowledgeNote("");
+            setOpenForm(null);
+          }}
+        >
+          <input
+            name="note"
+            placeholder="Note (optional)"
+            value={acknowledgeNote}
+            onChange={(e) => setAcknowledgeNote(e.target.value)}
+          />
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+            Acknowledge
+          </button>
+        </form>
+      )}
+
+      {openForm === "resolve" && (
+        <form
+          className="stack pc-inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const note = resolveNote.trim();
+            if (!note) return;
+            actions.resolve({ ...base, note });
+            setResolveNote("");
+            setOpenForm(null);
+          }}
+        >
+          <textarea
+            name="note"
+            placeholder="Note"
+            value={resolveNote}
+            onChange={(e) => setResolveNote(e.target.value)}
+            required
+            rows={2}
+          />
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+            Resolve
+          </button>
+        </form>
+      )}
+
+      {openForm === "returnEscalation" && (
+        <form
+          className="stack pc-inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const note = returnEscalationNote.trim();
+            if (!note) return;
+            actions.returnEscalation({ ...base, note });
+            setReturnEscalationNote("");
+            setOpenForm(null);
+          }}
+        >
+          <textarea
+            name="note"
+            placeholder="Note"
+            value={returnEscalationNote}
+            onChange={(e) => setReturnEscalationNote(e.target.value)}
+            required
+            rows={2}
+          />
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+            Return
           </button>
         </form>
       )}
