@@ -454,7 +454,8 @@ details is never a metric label.
    read/write via `getPaymentRequest`. `resolveTransactionScope` remains the transaction-id
    chokepoint from R-F8. Pit crew: `loadOrCreateOverlay`'s property check (claim, assign,
    start, waiting-on, return, complete, release, handoff), the exception source-record
-   check, and `assertUserInBrokerage` (assign). The note route counts only when
+   check, and `assertUserInBrokerage` (assign and, as of R-F11, handoff's `toUserId`).
+   The note route counts only when
    `addPropertyNote` has already rejected the property, then rethrows that same error.
    The two Pit Crew mismatch error classes no longer increment the counter themselves —
    a genuine not-found, including a malformed exception id, was previously counted — so
@@ -463,9 +464,12 @@ details is never a metric label.
    Responses, status codes, and access rules are unchanged. Not by-id scoped misses, and
    deliberately not counted here: financial collection reads (a foreign filter returns an
    empty list, not a 404), `GET /financial/settings`, `POST /financial/ops/dispatch-outbox`,
-   provider webhooks, pit crew workspace/team/detections/sweep/health (session-scoped, no
-   foreign id), and `handoffWorkItem`'s `toUserId` (not tenant-checked today; adding a
-   check would be a new access rule). Secondary financial ids that are loaded unscoped
+   provider webhooks, and pit crew workspace/team/detections/sweep/health (session-scoped, no
+   foreign id). **R-F11** tenant-checks `handoffWorkItem`'s `toUserId` with the existing
+   `assertUserInBrokerage` call, before `loadOrCreateOverlay`. A recipient in another
+   brokerage is now checked and counted (`tenant_isolation_rejection_total{boundary="pit_crew"}`,
+   once); a user id that does not exist is rejected and not counted. A valid same-brokerage
+   handoff response is unchanged. Secondary financial ids that are loaded unscoped
    and then rejected with a distinct "does not belong to this transaction" error
    (`commissionAgreementId` on commission calculations, `commissionCalculationId` and
    `pcFeeCalculationId` on the settlement helpers) are not scoped-load misses.
