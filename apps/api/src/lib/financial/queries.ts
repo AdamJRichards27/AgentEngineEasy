@@ -30,6 +30,12 @@ import {
 import { incrementCounter } from "@aee/events";
 import { redactPcFeeAuthority, type RedactedPcFeeAuthority } from "./pcFeeAuthorities.js";
 import { getLegacyCommissionContext, getExistingLegacyReconciliation, type LegacyCommissionContext } from "./legacyReconciliation.js";
+import {
+  noteFinancialCommissionAgreementIsolationRejection,
+  noteFinancialPaymentRequestIsolationRejection,
+  noteFinancialPcFeeAuthorityIsolationRejection,
+  noteFinancialPropertyIsolationRejection,
+} from "./isolationRejection.js";
 
 export async function listCommissionAgreements(brokerageId: number, transactionId?: number) {
   const conditions = [eq(commissionAgreements.brokerageId, brokerageId)];
@@ -43,7 +49,11 @@ export async function listCommissionAgreements(brokerageId: number, transactionI
 
 export async function getCommissionAgreement(id: number, brokerageId: number) {
   const [row] = await db.select().from(commissionAgreements).where(and(eq(commissionAgreements.id, id), eq(commissionAgreements.brokerageId, brokerageId)));
-  return row ?? null;
+  if (!row) {
+    await noteFinancialCommissionAgreementIsolationRejection(id, brokerageId);
+    return null;
+  }
+  return row;
 }
 
 export async function listCommissionCalculations(brokerageId: number, transactionId?: number) {
@@ -69,7 +79,11 @@ export async function listPcFeeAuthorities(brokerageId: number, agentUserId?: nu
 
 export async function getPcFeeAuthority(id: number, brokerageId: number): Promise<RedactedPcFeeAuthority | null> {
   const [row] = await db.select().from(pcFeeAuthorities).where(and(eq(pcFeeAuthorities.id, id), eq(pcFeeAuthorities.brokerageId, brokerageId)));
-  return row ? redactPcFeeAuthority(row) : null;
+  if (!row) {
+    await noteFinancialPcFeeAuthorityIsolationRejection(id, brokerageId);
+    return null;
+  }
+  return redactPcFeeAuthority(row);
 }
 
 export async function listPcFeeCalculations(brokerageId: number, transactionId?: number) {
@@ -98,7 +112,11 @@ export async function listPaymentRequests(brokerageId: number, filters: { transa
 
 export async function getPaymentRequest(id: number, brokerageId: number) {
   const [row] = await db.select().from(financialPaymentRequests).where(and(eq(financialPaymentRequests.id, id), eq(financialPaymentRequests.brokerageId, brokerageId)));
-  return row ?? null;
+  if (!row) {
+    await noteFinancialPaymentRequestIsolationRejection(id, brokerageId);
+    return null;
+  }
+  return row;
 }
 
 export async function listDisputesForPaymentRequest(paymentRequestId: number, brokerageId: number) {
@@ -246,7 +264,10 @@ export interface LegacyCommissionSummary extends LegacyCommissionContext {
  */
 export async function getPropertyFinancialSummary(propertyId: number, brokerageId: number) {
   const [property] = await db.select({ id: properties.id }).from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
-  if (!property) return null;
+  if (!property) {
+    await noteFinancialPropertyIsolationRejection(propertyId, brokerageId);
+    return null;
+  }
 
   const [agreements, calculations, pcCalculations, paymentRequests, deposits] = await Promise.all([
     db

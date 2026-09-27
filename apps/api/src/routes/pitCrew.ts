@@ -45,6 +45,7 @@ import {
   PitCrewConcurrencyError,
   PitCrewPropertyMismatchError,
   PitCrewAssigneeMismatchError,
+  notePitCrewPropertyIsolationRejection,
 } from "../lib/pitCrew/assignment.js";
 import { addPropertyNote } from "../lib/propertyNotes.js";
 
@@ -280,15 +281,25 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/note", requireAu
   const body = noteSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
   const [dbUser] = await db.select({ email: users.email }).from(users).where(eq(users.id, user.id));
-  const result = await addPropertyNote({
-    propertyId: body.data.propertyId,
-    brokerageId: user.brokerageId,
-    userId: user.id,
-    userEmail: dbUser?.email ?? "",
-    note: body.data.note,
-    actorType: "PIT_CREW",
-  });
-  res.json(result);
+  try {
+    const result = await addPropertyNote({
+      propertyId: body.data.propertyId,
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      userEmail: dbUser?.email ?? "",
+      note: body.data.note,
+      actorType: "PIT_CREW",
+    });
+    res.json(result);
+  } catch (err) {
+    // R-F10 — addPropertyNote already rejects a missing property and a
+    // property in another brokerage with the same error. Count only the
+    // latter, then rethrow so the response stays whatever it is today.
+    if (err instanceof Error && err.message === "Property not found in this brokerage.") {
+      await notePitCrewPropertyIsolationRejection(body.data.propertyId, user.brokerageId);
+    }
+    throw err;
+  }
 });
 
 // R-F5: read-only detection queue for the caller's brokerage. Same gates as

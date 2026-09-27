@@ -137,10 +137,12 @@ where a metric referenced there is now more precisely named); 22–27 were new i
 9. `tenant_isolation_rejection_total{boundary}` any non-zero sustained rate → active
    IDOR-probing suspicion (Runbook: suspected cross-tenant exposure). **Metric-backed for
    the `communications`, `pit_crew`, `integrations`, `transaction`, `financial`, `property`,
-   and `party` boundaries** (offers emit `transaction`; see §4 item 1). The remaining
-   declared boundary (`other`) is unused. A metric reading zero across all
-   boundaries is not proof no cross-tenant attempt occurred anywhere in the app; it is
-   proof none occurred at the wired chokepoints.
+   and `party` boundaries** (offers emit `transaction`; see §4 item 1). **R-F10** extends
+   `financial` past `resolveTransactionScope` to the other by-id financial misses, and
+   changes `pit_crew` from "every mismatch error" to a miss-only existence lookup, so a
+   genuine not-found does not increment. The remaining declared boundary (`other`) is
+   unused. A metric reading zero across all boundaries is not proof no cross-tenant
+   attempt occurred anywhere in the app; it is proof none occurred at the wired chokepoints.
 10. `communications_webhook_total{outcome="invalid_signature"}` or
     `financial_webhook_total{outcome="invalid_signature"}` or
     `integration_webhook_total{outcome="rejected"}` rate spikes, any of the three webhook
@@ -441,12 +443,37 @@ details is never a metric label.
    and `DELETE /link/:linkId` use `boundary="party"`. On a miss only, one existence
    lookup that selects no brokerage id and no other tenant columns (no party PII)
    distinguishes a cross-tenant id from a missing one. The counter increments only for
-   the former, exactly once, and the response stays the same 404. Still not wired, and
-   still on the inline "identical 404" pattern: grow, documents, AML, pit-crew work-item
-   overlays outside the two wired classes, and the `IntegrationError` reasons other than
-   `NOT_FOUND`/`TENANT_MISMATCH`. The declared `other` boundary is unused. Detected for
-   those unwired boundaries by grep-ing/alerting on structured log lines from
-   `middlewares/auth.ts`/`middlewares/entitlement.ts` and the individual chokepoints.
+   the former, exactly once, and the response stays the same 404. **R-F10** extends that
+   same miss-only id lookup to the remaining financial by-id handlers and to the pit crew
+   API boundary, using the labels already declared (`financial`, `pit_crew`). Financial:
+   `GET /properties/:propertyId/financial/summary` (property id),
+   `GET /financial/commission-agreements/:id`, approve, and cancel (agreement id),
+   `GET /financial/pc-fee-authorities/:id`, activate, and revoke (authority id),
+   `POST /financial/pc-fee-authorities` (agent user id), `POST /financial/pc-fee-calculations`
+   (authority id, after the transaction-scope check), and every payment-request `:id`
+   read/write via `getPaymentRequest`. `resolveTransactionScope` remains the transaction-id
+   chokepoint from R-F8. Pit crew: `loadOrCreateOverlay`'s property check (claim, assign,
+   start, waiting-on, return, complete, release, handoff), the exception source-record
+   check, and `assertUserInBrokerage` (assign). The note route counts only when
+   `addPropertyNote` has already rejected the property, then rethrows that same error.
+   The two Pit Crew mismatch error classes no longer increment the counter themselves —
+   a genuine not-found, including a malformed exception id, was previously counted — so
+   the counter moves only when an id-only existence lookup finds the record in another
+   brokerage. The operational alert those constructors already dispatch is unchanged.
+   Responses, status codes, and access rules are unchanged. Not by-id scoped misses, and
+   deliberately not counted here: financial collection reads (a foreign filter returns an
+   empty list, not a 404), `GET /financial/settings`, `POST /financial/ops/dispatch-outbox`,
+   provider webhooks, pit crew workspace/team/detections/sweep/health (session-scoped, no
+   foreign id), and `handoffWorkItem`'s `toUserId` (not tenant-checked today; adding a
+   check would be a new access rule). Secondary financial ids that are loaded unscoped
+   and then rejected with a distinct "does not belong to this transaction" error
+   (`commissionAgreementId` on commission calculations, `commissionCalculationId` and
+   `pcFeeCalculationId` on the settlement helpers) are not scoped-load misses.
+   Still not wired, and still on the inline "identical 404" pattern: grow, documents, AML,
+   and the `IntegrationError` reasons other than `NOT_FOUND`/`TENANT_MISMATCH`. The declared
+   `other` boundary is unused. Detected for those unwired boundaries by grep-ing/alerting
+   on structured log lines from `middlewares/auth.ts`/`middlewares/entitlement.ts` and the
+   individual chokepoints.
 2. **Per-rule exception-engine failures are not separately counted.** Unchanged from the
    prior revision: `exceptions_scan_total` records that a scan ran, by trigger, but not
    whether every rule inside that scan pass succeeded.

@@ -77,6 +77,7 @@ import {
   dispatchPendingPaymentOutbox,
 } from "../lib/financial/paymentOutbox.js";
 import { reconcileLegacyCommission } from "../lib/financial/legacyReconciliation.js";
+import { noteFinancialUserIsolationRejection } from "../lib/financial/isolationRejection.js";
 import {
   listCommissionAgreements,
   getCommissionAgreement,
@@ -143,7 +144,10 @@ function handlePlainError(err: unknown, res: Response): boolean {
 
 async function agentBelongsToBrokerage(agentUserId: number, brokerageId: number): Promise<boolean> {
   const [row] = await db.select({ id: users.id }).from(users).where(and(eq(users.id, agentUserId), eq(users.brokerageId, brokerageId)));
-  return Boolean(row);
+  if (row) return true;
+  // R-F10 — scoped miss. The existence lookup selects only the user id.
+  await noteFinancialUserIsolationRejection(agentUserId, brokerageId);
+  return false;
 }
 
 // ---------------------------------------------------------------------
