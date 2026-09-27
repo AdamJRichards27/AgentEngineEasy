@@ -91,6 +91,7 @@ import {
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { ConsentControlsValidationError } from "../lib/consentControls.js";
+import { noteGrowPartyIsolationRejection } from "../lib/grow/isolationRejection.js";
 import {
   ConsentControlsNotFoundError,
   captureConsentState,
@@ -259,6 +260,7 @@ async function resolvePartyForBrokerage(
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)))
     .limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, brokerageId);
     res.status(404).json({ error: "Contact not found." });
     return null;
   }

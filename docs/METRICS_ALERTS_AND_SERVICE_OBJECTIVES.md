@@ -137,12 +137,15 @@ where a metric referenced there is now more precisely named); 22–27 were new i
 9. `tenant_isolation_rejection_total{boundary}` any non-zero sustained rate → active
    IDOR-probing suspicion (Runbook: suspected cross-tenant exposure). **Metric-backed for
    the `communications`, `pit_crew`, `integrations`, `transaction`, `financial`, `property`,
-   and `party` boundaries** (offers emit `transaction`; see §4 item 1). **R-F10** extends
+   `party`, and `grow` boundaries** (offers emit `transaction`; see §4 item 1). **R-F10** extends
    `financial` past `resolveTransactionScope` to the other by-id financial misses, and
    changes `pit_crew` from "every mismatch error" to a miss-only existence lookup, so a
-   genuine not-found does not increment. The remaining declared boundary (`other`) is
-   unused. A metric reading zero across all boundaries is not proof no cross-tenant
-   attempt occurred anywhere in the app; it is proof none occurred at the wired chokepoints.
+   genuine not-found does not increment. **G-12** adds the declared `grow` value and wires
+   it at Grow's by-id brokerage-scoped misses the same way: one id-only existence lookup
+   on the miss, never on success, and never for a genuine not-found. The remaining declared
+   boundary (`other`) is unused. A metric reading zero across all boundaries is not proof no
+   cross-tenant attempt occurred anywhere in the app; it is proof none occurred at the wired
+   chokepoints.
 10. `communications_webhook_total{outcome="invalid_signature"}` or
     `financial_webhook_total{outcome="invalid_signature"}` or
     `integration_webhook_total{outcome="rejected"}` rate spikes, any of the three webhook
@@ -473,7 +476,30 @@ details is never a metric label.
    and then rejected with a distinct "does not belong to this transaction" error
    (`commissionAgreementId` on commission calculations, `commissionCalculationId` and
    `pcFeeCalculationId` on the settlement helpers) are not scoped-load misses.
-   Still not wired, and still on the inline "identical 404" pattern: grow, documents, AML,
+   **G-12** adds `grow` to the declared boundary set (`other` stays the fallback) and
+   emits it at Grow's by-id brokerage-scoped misses. On a miss only, one existence lookup
+   selects the id and no other tenant column, and increments once when that id belongs to
+   another brokerage. A missing id, a same-tenant success, and a role or entitlement
+   rejection do not increment. Responses, status codes, and access rules are unchanged.
+   Wired where the scoped load lives: `routes/grow.ts` (relationship, activity, and
+   opportunity by-id misses, including referenced party/property/opportunity ids),
+   `routes/contacts.ts` (contact, role assignment, household relationship, commitment,
+   and referenced property/opportunity ids), `routes/appraisals.ts` plus `lib/appraisals.ts`
+   (property id), `lib/growAppraisals.ts` (appraisal via its property, contact, opportunity,
+   and owner user) and `lib/growAppraisalIntegrations.ts` (comparable sale and market
+   competition ids), `lib/telephony/callSessions.ts` and `lib/telephony/consent.ts`
+   (call session, contact, and recording consent), `lib/telephony/callTranscriptionReview.ts`
+   and `lib/growCallFollowups.ts` (transcription id, after the call-session load), and
+   `routes/growConsent.ts` plus `lib/consentControlsPersistence.ts` (contact and referenced
+   user). Not counted, because they are not a by-id scoped miss: Grow collection reads
+   (`/overview`, `/today`, `/relationships`, `/activities`, `/opportunities`, contact
+   list, appraisal pipeline, contact transcription list), session-scoped reads
+   (`GET /grow/access`, `GET /grow/ai-actions/pending-commitments`), provider webhooks
+   (`routes/growCallsWebhooks.ts` and `applySandboxLifecycleEvent`), silent child deletes
+   that do not observe a miss, and a superseded-consent id that is compared to the
+   current stream head rather than loaded by id. A foreign appraisal id on those child
+   routes is still counted by `assertAppraisalInBrokerage`.
+   Still not wired, and still on the inline "identical 404" pattern: documents, AML,
    and the `IntegrationError` reasons other than `NOT_FOUND`/`TENANT_MISMATCH`. The declared
    `other` boundary is unused. Detected for those unwired boundaries by grep-ing/alerting
    on structured log lines from `middlewares/auth.ts`/`middlewares/entitlement.ts` and the
@@ -507,7 +533,7 @@ still open — no category is silently marked done without saying which metric/l
 | # | Named category | Status | Backing |
 |---|---|---|---|
 | 1 | Auth attack patterns | **Closed** | `auth_security_event_total{event: invalid_session_token, revoked_session_reused, dev_login_disabled_attempt, auth_rate_limited}` |
-| 2 | Tenant-isolation rejections | **Partially closed** — see §4 item 1 | `tenant_isolation_rejection_total{boundary}`, 7 of 8 declared boundaries actually wired (`other` is unused; offers emit `transaction`) |
+| 2 | Tenant-isolation rejections | **Partially closed** — see §4 item 1 | `tenant_isolation_rejection_total{boundary}`, 8 of 9 declared boundaries actually wired (`other` is unused; offers emit `transaction`; Grow emits `grow`) |
 | 3 | API failure/latency | **Already closed pre-existing** | `http_requests_total{method,status_class}` / `http_request_duration_ms{method,status_class}` — predates this pass, confirmed still correctly wired via `middlewares/httpMetrics.ts` |
 | 4 | Queue backlog | **Closed** | `queue_backlog_size{queue: integration_outbox, financial_payment_outbox, communications_outbox}` |
 | 5 | Oldest-item age | **Closed** | `queue_oldest_item_age_ms{queue}` — same three queues |
@@ -522,7 +548,7 @@ still open — no category is silently marked done without saying which metric/l
 | — | AI action denial/allowance threshold | **Closed** (named separately from the numbered 13 in the governing instruction, included here for completeness) | `ai_action_decision_total{outcome: allowed, denied}` |
 
 **Honest summary of this cross-check:** 10 of 13 named categories are fully closed, and 2 are
-partially closed with the exact wired/unwired boundary named (#2 tenant-isolation, 7 of 8
+partially closed with the exact wired/unwired boundary named (#2 tenant-isolation, 8 of 9
 boundaries; #11 workflow execution, 1 of 3 workflow families) — #8/#9's outbound side is
 already covered by #6, and the AI-governance category named separately from the numbered 13
 is also closed, bringing the total to 11 of 14 fully closed.

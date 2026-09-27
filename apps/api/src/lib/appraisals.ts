@@ -4,6 +4,7 @@ import { db, appraisals, properties } from "@aee/db";
 import type { Appraisal } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
+import { noteGrowPropertyIsolationRejection } from "./grow/isolationRejection.js";
 
 /**
  * Stage A — Appraisals (Agent Engine 2.0 — Run Transaction Vertical
@@ -29,6 +30,7 @@ export async function getOrCreateAppraisal(input: {
 }): Promise<{ appraisal: Appraisal; created: boolean }> {
   const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
   if (!property || property.brokerageId !== input.brokerageId) {
+    await noteGrowPropertyIsolationRejection(input.propertyId, input.brokerageId);
     throw new Error(`Property ${input.propertyId} not found`);
   }
 
@@ -119,6 +121,7 @@ export async function updateAppraisal(input: {
 export async function finaliseAppraisal(input: { propertyId: number; userId: number; brokerageId: number }): Promise<Appraisal> {
   const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
   if (!property || property.brokerageId !== input.brokerageId) {
+    await noteGrowPropertyIsolationRejection(input.propertyId, input.brokerageId);
     throw new Error(`Property ${input.propertyId} not found`);
   }
 

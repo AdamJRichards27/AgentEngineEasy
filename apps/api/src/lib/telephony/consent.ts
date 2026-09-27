@@ -1,5 +1,10 @@
 import { and, eq, isNull, or, gt } from "drizzle-orm";
 import {
+  noteGrowCallSessionIsolationRejection,
+  noteGrowPartyIsolationRejection,
+  noteGrowRecordingConsentIsolationRejection,
+} from "../grow/isolationRejection.js";
+import {
   db,
   growCallRecordingConsents,
   growCallSessions,
@@ -81,6 +86,7 @@ async function assertPartyInBrokerage(brokerageId: number, partyId: number, tx: 
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)))
     .limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, brokerageId);
     throw new GrowCallConsentNotFoundError("Contact not found in this brokerage.");
   }
 }
@@ -103,6 +109,7 @@ export async function captureRecordingConsent(input: CaptureRecordingConsentInpu
         )
         .limit(1);
       if (!row) {
+        await noteGrowCallSessionIsolationRejection(input.callSessionId, input.brokerageId);
         throw new GrowCallConsentNotFoundError("Call session not found for this contact in this brokerage.");
       }
       session = row;
@@ -159,6 +166,7 @@ export async function withdrawRecordingConsent(input: WithdrawRecordingConsentIn
       .where(and(eq(growCallRecordingConsents.id, input.consentId), eq(growCallRecordingConsents.brokerageId, input.brokerageId)))
       .limit(1);
     if (!existing) {
+      await noteGrowRecordingConsentIsolationRejection(input.consentId, input.brokerageId);
       throw new GrowCallConsentNotFoundError("Recording consent not found in this brokerage.");
     }
     if (existing.status === "WITHDRAWN") {

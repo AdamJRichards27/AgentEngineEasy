@@ -14,6 +14,12 @@ import { publishDomainEvent, currentCorrelationId, logger, type AgentEngineEasyE
 import { partyDisplayName as computePartyDisplayName } from "./communications/recipientResolution.js";
 import { logAudit } from "./audit.js";
 import { getOrCreateAppraisal } from "./appraisals.js";
+import {
+  noteGrowAppraisalIsolationRejection,
+  noteGrowOpportunityIsolationRejection,
+  noteGrowPartyIsolationRejection,
+  noteGrowUserIsolationRejection,
+} from "./grow/isolationRejection.js";
 
 /**
  * AE GROW Priority 4 -- Appraisal Workspace. This file is the Grow-facing
@@ -83,6 +89,7 @@ export async function assertAppraisalInBrokerage(appraisalId: number, brokerageI
     .innerJoin(properties, eq(properties.id, appraisals.propertyId))
     .where(eq(appraisals.id, appraisalId));
   if (!row || row.propertyBrokerageId !== brokerageId) {
+    await noteGrowAppraisalIsolationRejection(appraisalId, brokerageId);
     throw new AppraisalAccessError("Appraisal not found");
   }
   return row.appraisal;
@@ -114,7 +121,10 @@ export async function createAppraisalFromContact(input: {
   userId: number;
 }): Promise<Appraisal> {
   const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
-  if (!party || party.brokerageId !== input.brokerageId) throw new AppraisalAccessError("Contact not found");
+  if (!party || party.brokerageId !== input.brokerageId) {
+    await noteGrowPartyIsolationRejection(input.partyId, input.brokerageId);
+    throw new AppraisalAccessError("Contact not found");
+  }
 
   const { appraisal: base } = await getOrCreateAppraisal({
     propertyId: input.propertyId,
@@ -157,6 +167,7 @@ export async function createAppraisalFromOpportunity(input: {
 }): Promise<Appraisal> {
   const [opportunity] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, input.opportunityId));
   if (!opportunity || opportunity.brokerageId !== input.brokerageId) {
+    await noteGrowOpportunityIsolationRejection(input.opportunityId, input.brokerageId);
     throw new AppraisalAccessError("Opportunity not found");
   }
   if (!opportunity.propertyId) {
@@ -246,6 +257,7 @@ export async function updateAppraisalWorkspace(input: UpdateAppraisalWorkspaceIn
       .from(users)
       .where(and(eq(users.id, input.ownerUserId), eq(users.brokerageId, input.brokerageId)));
     if (!owner) {
+      await noteGrowUserIsolationRejection(input.ownerUserId, input.brokerageId);
       throw new AppraisalAccessError("Owner user not found");
     }
   }

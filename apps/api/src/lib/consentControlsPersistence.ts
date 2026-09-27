@@ -4,6 +4,7 @@
 // decision is insert-only evidence.
 
 import { and, desc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
+import { noteGrowPartyIsolationRejection, noteGrowUserIsolationRejection } from "./grow/isolationRejection.js";
 import {
   db,
   auditLogs,
@@ -103,7 +104,10 @@ async function assertPartyInBrokerage(tx: ConsentExecutor, brokerageId: number, 
     .from(parties)
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)))
     .limit(1);
-  if (!party) throw new ConsentControlsNotFoundError("Contact not found in this brokerage.");
+  if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, brokerageId);
+    throw new ConsentControlsNotFoundError("Contact not found in this brokerage.");
+  }
 }
 
 async function assertUserInBrokerage(tx: ConsentTransaction, brokerageId: number, userId: number): Promise<void> {
@@ -112,7 +116,10 @@ async function assertUserInBrokerage(tx: ConsentTransaction, brokerageId: number
     .from(users)
     .where(and(eq(users.id, userId), eq(users.brokerageId, brokerageId)))
     .limit(1);
-  if (!user) throw new ConsentControlsNotFoundError("User not found in this brokerage.");
+  if (!user) {
+    await noteGrowUserIsolationRejection(userId, brokerageId);
+    throw new ConsentControlsNotFoundError("User not found in this brokerage.");
+  }
 }
 
 export async function captureConsentState(input: CaptureConsentStateInput) {

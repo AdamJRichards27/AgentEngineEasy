@@ -12,6 +12,12 @@ import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
+import {
+  noteGrowOpportunityIsolationRejection,
+  noteGrowPartyIsolationRejection,
+  noteGrowPropertyIsolationRejection,
+  noteGrowRelationshipIsolationRejection,
+} from "../lib/grow/isolationRejection.js";
 import { getBillingProvider } from "../lib/billing/gateway.js";
 import { getGrowTodaySummary } from "../lib/growToday.js";
 import { logAudit } from "../lib/audit.js";
@@ -163,12 +169,14 @@ growRouter.post(
     // legitimately has none yet (see the comment above).
     const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
     if (!party) {
+      await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
       res.status(404).json({ error: "Party not found in this brokerage" });
       return;
     }
     if (propertyId !== null) {
       const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
       if (!property) {
+        await noteGrowPropertyIsolationRejection(propertyId, user.brokerageId);
         res.status(404).json({ error: "Property not found in this brokerage" });
         return;
       }
@@ -259,6 +267,7 @@ growRouter.patch(
       .where(and(eq(growRelationships.id, id), eq(growRelationships.brokerageId, user.brokerageId)))
       .limit(1);
     if (!existing) {
+      await noteGrowRelationshipIsolationRejection(id, user.brokerageId);
       res.status(404).json({ error: "Relationship not found" });
       return;
     }
@@ -338,6 +347,7 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
   if (partyId !== null) {
     const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
     if (!party) {
+      await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
       res.status(404).json({ error: "Party not found in this brokerage" });
       return;
     }
@@ -345,6 +355,7 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
   if (propertyId !== null) {
     const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
     if (!property) {
+      await noteGrowPropertyIsolationRejection(propertyId, user.brokerageId);
       res.status(404).json({ error: "Property not found in this brokerage" });
       return;
     }
@@ -356,6 +367,7 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
       .where(and(eq(growOpportunities.id, opportunityId), eq(growOpportunities.brokerageId, user.brokerageId)))
       .limit(1);
     if (!opportunity) {
+      await noteGrowOpportunityIsolationRejection(opportunityId, user.brokerageId);
       res.status(404).json({ error: "Opportunity not found in this brokerage" });
       return;
     }
@@ -407,6 +419,7 @@ growRouter.post(
 
     const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
     if (!party) {
+      await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
       res.status(404).json({ error: "Party not found in this brokerage" });
       return;
     }
@@ -479,6 +492,7 @@ growRouter.patch(
       .where(and(eq(growOpportunities.id, id), eq(growOpportunities.brokerageId, user.brokerageId)))
       .limit(1);
     if (!existing) {
+      await noteGrowOpportunityIsolationRejection(id, user.brokerageId);
       res.status(404).json({ error: "Opportunity not found" });
       return;
     }

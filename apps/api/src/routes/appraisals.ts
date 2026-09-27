@@ -5,6 +5,7 @@ import { db, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal, finaliseAppraisal } from "../lib/appraisals.js";
+import { noteGrowPropertyIsolationRejection } from "../lib/grow/isolationRejection.js";
 
 export const appraisalsRouter = Router();
 
@@ -80,7 +81,11 @@ function handleAppraisalError(err: unknown, res: Response): void {
 
 async function assertPropertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
   const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
-  return !!property && property.brokerageId === brokerageId;
+  if (!property || property.brokerageId !== brokerageId) {
+    await noteGrowPropertyIsolationRejection(propertyId, brokerageId);
+    return false;
+  }
+  return true;
 }
 
 appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {

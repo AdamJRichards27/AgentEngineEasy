@@ -117,7 +117,7 @@ export const METRIC_DEFINITIONS = {
   },
   tenant_isolation_rejection_total: {
     help: "A request or lookup was rejected because the resolved record belongs to a different brokerage than the caller's — every occurrence is a cross-tenant access attempt, whether malicious or a stale/incorrect id.",
-    labels: { boundary: ["property", "party", "transaction", "financial", "communications", "integrations", "pit_crew", "other"] },
+    labels: { boundary: ["property", "party", "transaction", "financial", "communications", "integrations", "pit_crew", "grow", "other"] },
   },
   queue_backlog_size: {
     help: "Current count of not-yet-dispatched items in a background processing queue, sampled at read time.",

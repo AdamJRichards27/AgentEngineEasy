@@ -1,4 +1,5 @@
 import { and, eq, isNull } from "drizzle-orm";
+import { noteGrowCallSessionIsolationRejection, noteGrowPartyIsolationRejection } from "../grow/isolationRejection.js";
 import { logger } from "@aee/events";
 import {
   db,
@@ -97,7 +98,10 @@ async function loadSessionForBrokerage(brokerageId: number, callSessionId: numbe
     .from(growCallSessions)
     .where(and(eq(growCallSessions.id, callSessionId), eq(growCallSessions.brokerageId, brokerageId)))
     .limit(1);
-  if (!session) throw new GrowCallSessionNotFoundError();
+  if (!session) {
+    await noteGrowCallSessionIsolationRejection(callSessionId, brokerageId);
+    throw new GrowCallSessionNotFoundError();
+  }
   return session;
 }
 
@@ -126,7 +130,10 @@ async function assertDestinationMatchesParty(
     .from(parties)
     .where(and(eq(parties.id, session.partyId), eq(parties.brokerageId, session.brokerageId)))
     .limit(1);
-  if (!party) throw new GrowCallSessionValidationError("Contact not found in this brokerage.");
+  if (!party) {
+    await noteGrowPartyIsolationRejection(session.partyId, session.brokerageId);
+    throw new GrowCallSessionValidationError("Contact not found in this brokerage.");
+  }
   const partyDestination = normalizePartyDestination(party.mobile, session.destinationCountry as PhoneCountry);
   if (partyDestination !== session.destinationNormalized) {
     await logAudit(
@@ -177,6 +184,7 @@ export async function createCallSession(input: CreateCallSessionInput): Promise<
     .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)))
     .limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(input.partyId, input.brokerageId);
     throw new GrowCallSessionValidationError("Contact not found in this brokerage.");
   }
 
@@ -320,7 +328,10 @@ export async function confirmCallSession(input: ConfirmCallSessionInput): Promis
       .from(growCallSessions)
       .where(and(eq(growCallSessions.id, input.callSessionId), eq(growCallSessions.brokerageId, input.brokerageId)))
       .limit(1);
-    if (!session) throw new GrowCallSessionNotFoundError();
+    if (!session) {
+      await noteGrowCallSessionIsolationRejection(input.callSessionId, input.brokerageId);
+      throw new GrowCallSessionNotFoundError();
+    }
     assertCallSessionActorAuthorized(session, input.confirmedByUserId, input.confirmedByUserRole);
     const destinationBound = await assertDestinationMatchesParty(tx, session, input.confirmedByUserId, String(session.id));
     if (!destinationBound) return { session, deniedReason: null, bindingDenied: true, dialled: null };
@@ -415,7 +426,10 @@ export async function cancelCallSession(input: CancelCallSessionInput): Promise<
       .from(growCallSessions)
       .where(and(eq(growCallSessions.id, input.callSessionId), eq(growCallSessions.brokerageId, input.brokerageId)))
       .limit(1);
-    if (!session) throw new GrowCallSessionNotFoundError();
+    if (!session) {
+      await noteGrowCallSessionIsolationRejection(input.callSessionId, input.brokerageId);
+      throw new GrowCallSessionNotFoundError();
+    }
     assertCallSessionActorAuthorized(session, input.cancelledByUserId, input.cancelledByUserRole);
     if (TERMINAL_CALL_SESSION_STATUSES.includes(session.status)) {
       throw new GrowCallSessionValidationError(`Call session is already ${session.status} and cannot be cancelled.`);
@@ -741,7 +755,10 @@ export async function recordInCallRecordingDisclosure(input: {
       .from(growCallSessions)
       .where(and(eq(growCallSessions.id, input.callSessionId), eq(growCallSessions.brokerageId, input.brokerageId)))
       .limit(1);
-    if (!session) throw new GrowCallSessionNotFoundError();
+    if (!session) {
+      await noteGrowCallSessionIsolationRejection(input.callSessionId, input.brokerageId);
+      throw new GrowCallSessionNotFoundError();
+    }
     assertCallSessionActorAuthorized(session, input.disclosedByUserId, input.disclosedByUserRole);
     if (session.status !== "CONNECTED") {
       throw new GrowCallSessionValidationError("Recording disclosure is only valid while the call is connected.");
@@ -786,7 +803,10 @@ export async function confirmInCallRecording(input: {
       .from(growCallSessions)
       .where(and(eq(growCallSessions.id, input.callSessionId), eq(growCallSessions.brokerageId, input.brokerageId)))
       .limit(1);
-    if (!session) throw new GrowCallSessionNotFoundError();
+    if (!session) {
+      await noteGrowCallSessionIsolationRejection(input.callSessionId, input.brokerageId);
+      throw new GrowCallSessionNotFoundError();
+    }
     assertCallSessionActorAuthorized(session, input.confirmedByUserId, input.actorRole);
     if (session.status !== "CONNECTED") {
       throw new GrowCallSessionValidationError("Recording confirmation is only valid while the call is connected.");
@@ -859,7 +879,10 @@ export async function declineInCallRecording(input: {
       .from(growCallSessions)
       .where(and(eq(growCallSessions.id, input.callSessionId), eq(growCallSessions.brokerageId, input.brokerageId)))
       .limit(1);
-    if (!session) throw new GrowCallSessionNotFoundError();
+    if (!session) {
+      await noteGrowCallSessionIsolationRejection(input.callSessionId, input.brokerageId);
+      throw new GrowCallSessionNotFoundError();
+    }
     assertCallSessionActorAuthorized(session, input.declinedByUserId, input.declinedByUserRole);
     if (session.status !== "CONNECTED") {
       throw new GrowCallSessionValidationError("Recording response is only valid while the call is connected.");

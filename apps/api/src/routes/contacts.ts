@@ -25,6 +25,14 @@ import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
 import { logAudit } from "../lib/audit.js";
+import {
+  noteGrowCommitmentIsolationRejection,
+  noteGrowContactRelationshipIsolationRejection,
+  noteGrowContactRoleIsolationRejection,
+  noteGrowOpportunityIsolationRejection,
+  noteGrowPartyIsolationRejection,
+  noteGrowPropertyIsolationRejection,
+} from "../lib/grow/isolationRejection.js";
 // AE GROW Completion W3-A (A-6) — Contact 360's contactability read model. See
 // buildContactability() below for why these three imports and no others.
 import { isWithinConsentHours } from "../lib/consentControls.js";
@@ -559,6 +567,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
 
   const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId))).limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
   }
@@ -744,6 +753,7 @@ contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.con
 
   const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
   }
@@ -789,6 +799,7 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
     .where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.role, role), eq(growContactRoles.brokerageId, user.brokerageId)))
     .limit(1);
   if (!existing) {
+    await noteGrowContactRoleIsolationRejection(partyId, role, user.brokerageId);
     res.status(404).json({ error: "Role assignment not found in this brokerage" });
     return;
   }
@@ -833,6 +844,8 @@ contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("
     db.select().from(parties).where(and(eq(parties.id, relatedPartyId), eq(parties.brokerageId, user.brokerageId))).limit(1).then((r) => r[0]),
   ]);
   if (!party || !relatedParty) {
+    if (!party) await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
+    if (!relatedParty) await noteGrowPartyIsolationRejection(relatedPartyId, user.brokerageId);
     res.status(404).json({ error: "Both contacts must exist in this brokerage" });
     return;
   }
@@ -894,6 +907,7 @@ contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("gro
     .where(and(eq(growContactRelationships.id, id), eq(growContactRelationships.brokerageId, user.brokerageId)))
     .limit(1);
   if (!existing) {
+    await noteGrowContactRelationshipIsolationRejection(id, user.brokerageId);
     res.status(404).json({ error: "Relationship not found in this brokerage" });
     return;
   }
@@ -942,6 +956,7 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
 
   const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
   }
@@ -949,6 +964,7 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
   if (propertyId !== null) {
     const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
     if (!property) {
+      await noteGrowPropertyIsolationRejection(propertyId, user.brokerageId);
       res.status(404).json({ error: "Property not found in this brokerage" });
       return;
     }
@@ -961,6 +977,7 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
       .where(and(eq(growOpportunities.id, opportunityId), eq(growOpportunities.brokerageId, user.brokerageId)))
       .limit(1);
     if (!opportunity) {
+      await noteGrowOpportunityIsolationRejection(opportunityId, user.brokerageId);
       res.status(404).json({ error: "Opportunity not found in this brokerage" });
       return;
     }
@@ -1019,6 +1036,7 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     .where(and(eq(growCommitments.id, id), eq(growCommitments.brokerageId, user.brokerageId)))
     .limit(1);
   if (!existing) {
+    await noteGrowCommitmentIsolationRejection(id, user.brokerageId);
     res.status(404).json({ error: "Commitment not found in this brokerage" });
     return;
   }
