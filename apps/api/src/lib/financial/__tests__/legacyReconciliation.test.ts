@@ -209,22 +209,15 @@ describe("reconcileLegacyCommission — run twice", () => {
 // same (brokerageId, transactionId) so both SELECTs can genuinely run
 // before either INSERT commits.
 //
-// Today, in this environment, this test is expected to PASS for the wrong
-// reason: this repo's sqlite/postgres test harness serialises overlapping
-// writes to the same row closely enough in practice that the race is hard
-// to hit reliably in an automated single-process test run even without a
-// DB-level constraint — so this test's real job is not proving today's
-// safety, it is being the acceptance test for the fix. It asserts the
-// property that must hold regardless of timing (exactly one reconciliation
-// row, and every returned result points at that same row) — the same
-// assertion this test would make before AND after the
-// financial_reconciliations_legacy_commission_unique_idx migration lands
-// (see schema/financial.ts). Once that migration is applied, this test
-// additionally becomes a genuine regression guard against the race
-// reappearing (e.g. if the constraint were ever accidentally dropped) — a
-// value it cannot fully deliver without a real database and migration
-// pipeline in the environment that runs it, which is exactly the gap
-// documented in docs/FINANCIAL_TRANSACTION_ENGINE_VERIFICATION.md.
+// A single-process run often serialises overlapping writes closely enough
+// that the race is hard to hit, so a green result is not proof the
+// conflict path executed. The test asserts the property that must hold
+// regardless of timing (exactly one reconciliation row, and every returned
+// result points at that same row).
+// financial_reconciliations_legacy_commission_unique_idx is created by
+// migration 0009_flimsy_norrin_radd (see schema/financial.ts) and is the
+// database race guard. This test remains the regression guard if that
+// index is dropped.
 describe("reconcileLegacyCommission — concurrent requests for the same transaction (FIN-001)", () => {
   test("two simultaneous calls create exactly one reconciliation row between them", async () => {
     const { propertyId, transactionId } = await createClosedLegacyTransaction(A.agent.cookie, { addressSuffix: "14" });
@@ -239,8 +232,9 @@ describe("reconcileLegacyCommission — concurrent requests for the same transac
 
     // Exactly one of the two calls did the creating; the other observed it
     // (either via its own SELECT finding the winner's row, or via the
-    // onConflictDoNothing + re-select race-loser path once the unique
-    // index exists) — both outcomes are correct, "both created" is not.
+    // onConflictDoNothing + re-select race-loser path, which migration
+    // 0009 makes the active race guard) — both outcomes are correct,
+    // "both created" is not.
     assert.notEqual(first.created, second.created, "exactly one of the two concurrent calls must report created:true");
     const winner = first.created ? first : second;
     const loser = first.created ? second : first;

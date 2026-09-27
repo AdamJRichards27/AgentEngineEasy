@@ -1,6 +1,7 @@
 // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7). DB-backed
 // coverage for queries.ts: sourcing from listBrokerageExceptions (Section
-// 22's "tested read interface" instead of the unmerged Command Centre),
+// 22's "tested read interface"; the Command Centre is on staging and this
+// suite does not import it),
 // the PC-relevance filter, workspace bucketing (Sections 7/10/27), and the
 // workload/capacity signal (Section 15 -- a live count, never a speed or
 // completion metric).

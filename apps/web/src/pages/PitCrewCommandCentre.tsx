@@ -7,8 +7,10 @@
 // ROLES) in routes/pitCrew.ts) -- the nav hiding is a UX nicety, not the
 // security boundary.
 //
-// Section 22: the Agent Daily Command Centre (Priority 6, PR #14) is still
-// unmerged, so this reads straight from getPitCrewWorkspace (which itself
+// Section 22: the Agent Daily Command Centre (Priority 6) is on staging
+// (apps/api/src/lib/commandCentre/ and apps/web/src/pages/CommandCentre.tsx,
+// route /today). This page does not import it, so this reads straight from
+// getPitCrewWorkspace (which itself
 // sources from the Exception & Risk Engine's listBrokerageExceptions) rather
 // than depending on or duplicating that feature.
 import { useState } from "react";

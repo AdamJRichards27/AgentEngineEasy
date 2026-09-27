@@ -63,22 +63,12 @@
 // INSERT, and a re-SELECT on a race so the caller never has to catch a
 // unique-violation error itself.
 //
-// IMPORTANT — this fix is currently code-only. It is fully protective only
-// once financial_reconciliations_legacy_commission_unique_idx (the new
-// partial unique index declared on financialReconciliations in
-// schema/financial.ts, directly above the table's index block) exists as a
-// real Postgres constraint. That index has NOT yet been applied as a
-// migration — see the extensive comment at that declaration for why (no
-// drizzle-kit/DATABASE_URL access in the environment that authored this
-// change) and the exact next steps to generate and apply it. Until that
-// migration lands, `.onConflictDoNothing()` below has NO effect (Postgres
-// ignores an ON CONFLICT clause when no matching constraint exists yet —
-// it is not an error, it is simply a no-op), so this is a genuinely
-// zero-behavior-change-today, forward-compatible change: the SELECT-before-
-// INSERT check keeps behaving exactly as before for sequential callers,
-// and the new re-select-on-conflict branch below is unreachable until the
-// constraint exists, at which point it activates automatically with no
-// further code change required.
+// financial_reconciliations_legacy_commission_unique_idx is the partial
+// unique index declared on financialReconciliations in schema/financial.ts
+// (directly above the table's index block). Migration
+// 0009_flimsy_norrin_radd creates that index on (brokerage_id, record_id)
+// WHERE record_type = 'LEGACY_TRANSACTION_COMMISSION', matching the
+// declaration. `.onConflictDoNothing()` below is the active race guard.
 
 import { eq, and, isNull } from "drizzle-orm";
 import {
@@ -246,19 +236,15 @@ export async function reconcileLegacyCommission(input: ReconcileLegacyCommission
         `No commissionAgreement/commissionCalculation exists for this transaction and none was fabricated by this process — the original calculation method and rate were never captured by the legacy schema. ` +
         `Resolve by drafting and approving a real commission agreement (Financial Summary → Commission Agreement) if the historical terms are known, or by manually marking this record RECONCILED with a note if no further action is warranted.`,
     })
-    // FIN-001: no-op today (no matching constraint exists yet — see the
-    // module header above and the index declaration in schema/financial.ts),
-    // becomes the real race guard automatically once that migration lands.
+    // FIN-001: race guard for financial_reconciliations_legacy_commission_unique_idx
+    // (migration 0009_flimsy_norrin_radd; declared in schema/financial.ts).
     .onConflictDoNothing()
     .returning();
 
   if (!inserted) {
     // Someone else's insert won the race between our SELECT and our INSERT
     // — re-select rather than error, exactly mirroring
-    // settlement.ts's ensurePcSuccessFeeRequest. Unreachable until the
-    // financial_reconciliations_legacy_commission_unique_idx migration
-    // (see schema/financial.ts) exists, at which point it activates with
-    // no further code change.
+    // settlement.ts's ensurePcSuccessFeeRequest.
     const raceWinner = await getExistingLegacyReconciliation(input.transactionId, input.brokerageId);
     if (!raceWinner) throw new Error("Failed to create or find a legacy commission reconciliation record.");
     return { created: false, dryRun: false, reconciliation: raceWinner, skippedReason: "Already created (concurrent reconcile request)." };
