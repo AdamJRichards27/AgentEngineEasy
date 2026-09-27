@@ -12,6 +12,7 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 
 **Canonical source of truth is `staging` on GitHub.** This file records ownership, not state — for
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
+Run lane status lives in [`AE_RUN_COMPLETION_ROADMAP.md`](./AE_RUN_COMPLETION_ROADMAP.md).
 
 Current staging: `a0d01f988c7b323102bcfe311a4c756bf3246b0e` (2026-09-26, C-10 #107 merged). I-18 is this claim and is not yet a staging landing.
 
