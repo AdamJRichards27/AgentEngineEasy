@@ -26,21 +26,28 @@
 // Timeline) so Pit Crew activity shows up in the same timeline an agent
 // already reads, instead of a second, competing history mechanism.
 
-import { pgTable, serial, integer, text, boolean, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, serial, integer, text, boolean, timestamp, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { properties } from "./property";
 import { users, brokerages } from "./users";
 
 // Section 9 status vocabulary. UNCLAIMED is the implicit starting state (no
-// row, or a row reset back to it) -- the other four are the states a row
-// actually gets persisted in.
+// row, or a row reset back to it). HANDED_BACK and ESCALATED are the R-F14
+// responsibility buckets (design decision 2). They are listed here so the
+// schema module carries the approved vocabulary. The transition map that
+// moves an assignment lives in apps/api/src/lib/pitCrew/types.ts, which
+// keeps its own copy of the five pre-R-F14 statuses and is not changed in
+// this slice, so these two strings do not change runtime behaviour.
 export const PIT_CREW_ITEM_STATUSES = [
   "UNCLAIMED",
   "CLAIMED",
   "IN_PROGRESS",
   "WAITING_ON",
   "DONE",
+  "HANDED_BACK",
+  "ESCALATED",
 ] as const;
 export type PitCrewItemStatus = (typeof PIT_CREW_ITEM_STATUSES)[number];
 
@@ -163,3 +170,177 @@ export const pitCrewWaitingOnSweepSightings = pgTable(
 
 export type PitCrewWaitingOnSweepSettings = typeof pitCrewWaitingOnSweepSettings.$inferSelect;
 export type PitCrewWaitingOnSweepSighting = typeof pitCrewWaitingOnSweepSightings.$inferSelect;
+
+// R-F14: append-only hand-back and escalation record. The assignment row
+// stays the workspace bucket (status + version). This table holds the
+// reason, severity, recipient, next action, and event lifecycle. There is
+// no routing_rule_id until a later migration adds the rules table.
+// Application constants are mirrored by CHECKs. Not Postgres enum types.
+export const PIT_CREW_RESPONSIBILITY_EVENT_KINDS = ["HAND_BACK", "ESCALATION"] as const;
+export type PitCrewResponsibilityEventKind = (typeof PIT_CREW_RESPONSIBILITY_EVENT_KINDS)[number];
+
+export const PIT_CREW_HAND_BACK_REASON_CATEGORIES = [
+  "WORK_COMPLETE",
+  "NEXT_ACTION_WITH_AGENT",
+  "INFORMATION_RETURNED",
+  "NOT_PIT_CREW_WORK",
+] as const;
+export type PitCrewHandBackReasonCategory = (typeof PIT_CREW_HAND_BACK_REASON_CATEGORIES)[number];
+
+export const PIT_CREW_ESCALATION_REASON_CATEGORIES = [
+  "BLOCKED_DEPENDENCY",
+  "OVERDUE_THIRD_PARTY",
+  "SETTLEMENT_OR_COMPLIANCE_RISK",
+  "MISSING_AUTHORITY",
+  "MISSING_INFORMATION",
+  "OTHER_MATERIAL_EXCEPTION",
+] as const;
+export type PitCrewEscalationReasonCategory = (typeof PIT_CREW_ESCALATION_REASON_CATEGORIES)[number];
+
+export const PIT_CREW_ESCALATION_SEVERITIES = ["ATTENTION", "AT_RISK", "CRITICAL"] as const;
+export type PitCrewEscalationSeverity = (typeof PIT_CREW_ESCALATION_SEVERITIES)[number];
+
+export const PIT_CREW_RESPONSIBILITY_EVENT_STATUSES = [
+  "OPEN",
+  "ACKNOWLEDGED",
+  "RESOLVED",
+  "RETURNED",
+  "SUPERSEDED",
+] as const;
+export type PitCrewResponsibilityEventStatus = (typeof PIT_CREW_RESPONSIBILITY_EVENT_STATUSES)[number];
+
+export const PIT_CREW_RESULTING_RESPONSIBILITIES = ["AGENT", "BROKERAGE_ADMINISTRATOR"] as const;
+export type PitCrewResultingResponsibility = (typeof PIT_CREW_RESULTING_RESPONSIBILITIES)[number];
+
+// v1 recipient_role vocabulary. Hand-back names a user and leaves this null.
+export const PIT_CREW_RESPONSIBILITY_RECIPIENT_ROLES = ["Brokerage Administrator"] as const;
+export type PitCrewResponsibilityRecipientRole = (typeof PIT_CREW_RESPONSIBILITY_RECIPIENT_ROLES)[number];
+
+export const pitCrewResponsibilityEvents = pgTable(
+  "pit_crew_responsibility_events",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    assignmentId: integer("assignment_id").notNull().references(() => pitCrewAssignments.id),
+    propertyId: integer("property_id").notNull().references(() => properties.id),
+    kind: text("kind").notNull(),
+    reasonCategory: text("reason_category").notNull(),
+    severity: text("severity"),
+    note: text("note"),
+    nextAction: text("next_action").notNull(),
+    originatingUserId: integer("originating_user_id").notNull().references(() => users.id),
+    recipientUserId: integer("recipient_user_id").references(() => users.id),
+    recipientRole: text("recipient_role"),
+    resultingResponsibility: text("resulting_responsibility").notNull(),
+    expectedResponseAt: timestamp("expected_response_at"),
+    status: text("status").notNull().default("OPEN"),
+    acknowledgedAt: timestamp("acknowledged_at"),
+    acknowledgedByUserId: integer("acknowledged_by_user_id").references(() => users.id),
+    closedAt: timestamp("closed_at"),
+    closedByUserId: integer("closed_by_user_id").references(() => users.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    oneOpenUidx: uniqueIndex("pit_crew_responsibility_events_one_open_uidx")
+      .on(table.assignmentId)
+      .where(sql`${table.status} in ('OPEN', 'ACKNOWLEDGED')`),
+    brokerageRecipientIdx: index("pit_crew_responsibility_events_brokerage_recipient_idx").on(
+      table.brokerageId,
+      table.recipientUserId,
+      table.status,
+    ),
+    brokerageRoleIdx: index("pit_crew_responsibility_events_brokerage_role_idx").on(
+      table.brokerageId,
+      table.recipientRole,
+      table.status,
+    ),
+    assignmentCreatedIdx: index("pit_crew_responsibility_events_assignment_created_idx").on(
+      table.assignmentId,
+      table.createdAt,
+    ),
+    propertyIdx: index("pit_crew_responsibility_events_property_idx").on(table.propertyId),
+    kindCheck: check(
+      "pit_crew_responsibility_events_kind_check",
+      sql`${table.kind} in ('HAND_BACK', 'ESCALATION')`,
+    ),
+    statusCheck: check(
+      "pit_crew_responsibility_events_status_check",
+      sql`${table.status} in ('OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'RETURNED', 'SUPERSEDED')`,
+    ),
+    resultingResponsibilityCheck: check(
+      "pit_crew_responsibility_events_resulting_responsibility_check",
+      sql`${table.resultingResponsibility} in ('AGENT', 'BROKERAGE_ADMINISTRATOR')`,
+    ),
+    oneRecipientCheck: check(
+      "pit_crew_responsibility_events_one_recipient_check",
+      sql`(${table.recipientUserId} is not null)::int + (${table.recipientRole} is not null)::int = 1`,
+    ),
+    handBackShapeCheck: check(
+      "pit_crew_responsibility_events_hand_back_shape_check",
+      sql`${table.kind} <> 'HAND_BACK' OR (
+        ${table.severity} is null
+        and ${table.expectedResponseAt} is null
+        and ${table.resultingResponsibility} = 'AGENT'
+        and ${table.status} in ('OPEN', 'SUPERSEDED')
+      )`,
+    ),
+    escalationShapeCheck: check(
+      "pit_crew_responsibility_events_escalation_shape_check",
+      sql`${table.kind} <> 'ESCALATION' OR (
+        ${table.severity} is not null
+        and ${table.severity} in ('ATTENTION', 'AT_RISK', 'CRITICAL')
+        and ${table.resultingResponsibility} = 'BROKERAGE_ADMINISTRATOR'
+        and ${table.status} in ('OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'RETURNED')
+      )`,
+    ),
+    nextActionCheck: check(
+      "pit_crew_responsibility_events_next_action_check",
+      sql`char_length(trim(${table.nextAction})) > 0`,
+    ),
+    reasonCategoryNonemptyCheck: check(
+      "pit_crew_responsibility_events_reason_nonempty_check",
+      sql`char_length(trim(${table.reasonCategory})) > 0`,
+    ),
+    recipientRoleCheck: check(
+      "pit_crew_responsibility_events_recipient_role_check",
+      sql`${table.recipientRole} is null or ${table.recipientRole} = 'Brokerage Administrator'`,
+    ),
+    acknowledgementCheck: check(
+      "pit_crew_responsibility_events_acknowledgement_check",
+      sql`(
+        ${table.acknowledgedAt} is null
+        and ${table.acknowledgedByUserId} is null
+      ) or (
+        ${table.acknowledgedAt} is not null
+        and ${table.acknowledgedByUserId} is not null
+        and ${table.status} in ('ACKNOWLEDGED', 'RESOLVED', 'RETURNED')
+      )`,
+    ),
+    closedCheck: check(
+      "pit_crew_responsibility_events_closed_check",
+      sql`(
+        ${table.status} in ('OPEN', 'ACKNOWLEDGED')
+        and ${table.closedAt} is null
+        and ${table.closedByUserId} is null
+      ) or (
+        ${table.status} in ('RESOLVED', 'RETURNED', 'SUPERSEDED')
+        and ${table.closedAt} is not null
+        and ${table.closedByUserId} is not null
+      )`,
+    ),
+    reasonCategoryCheck: check(
+      "pit_crew_responsibility_events_reason_category_check",
+      sql`(
+        ${table.kind} = 'HAND_BACK'
+        and ${table.reasonCategory} in ('WORK_COMPLETE', 'NEXT_ACTION_WITH_AGENT', 'INFORMATION_RETURNED', 'NOT_PIT_CREW_WORK')
+      ) or (
+        ${table.kind} = 'ESCALATION'
+        and ${table.reasonCategory} in ('BLOCKED_DEPENDENCY', 'OVERDUE_THIRD_PARTY', 'SETTLEMENT_OR_COMPLIANCE_RISK', 'MISSING_AUTHORITY', 'MISSING_INFORMATION', 'OTHER_MATERIAL_EXCEPTION')
+      )`,
+    ),
+  }),
+);
+
+export type PitCrewResponsibilityEvent = typeof pitCrewResponsibilityEvents.$inferSelect;
+export type InsertPitCrewResponsibilityEvent = typeof pitCrewResponsibilityEvents.$inferInsert;
