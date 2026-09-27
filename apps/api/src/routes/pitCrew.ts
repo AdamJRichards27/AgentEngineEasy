@@ -3,7 +3,9 @@
 //
 // Visible to Pit Crew and Brokerage Administrator only (Section 26) --
 // Agents keep their existing workflows unchanged and do not get this
-// surface. Every mutating route requires expectedVersion in the body
+// surface, except GET /pit-crew/responsibility-inbox, which has its own
+// role list (Agent, Pit Crew, Brokerage Administrator). canAccess is not
+// widened. Every mutating route requires expectedVersion in the body
 // (Section 12) and maps the resulting concurrency/transition errors to
 // 409/422 so the frontend can tell "someone else moved this" apart from
 // "that move isn't allowed from here."
@@ -17,12 +19,12 @@
 // and the dev-login auto-grant (routes/auth.ts) -- this is additive entitlement enforcement, not
 // a new business rule about who may use Pit Crew.
 
-import { Router, type Response } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { getPitCrewWorkspace, getPitCrewTeam } from "../lib/pitCrew/queries.js";
+import { getPitCrewWorkspace, getPitCrewTeam, listResponsibilityItemsForRecipient } from "../lib/pitCrew/queries.js";
 import { listOverdueWaitingOnDetections } from "../lib/pitCrew/waitingOnDetectionRun.js";
 import type { ResolvedPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnDetection.js";
 import { loadPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnSweepSettings.js";
@@ -71,6 +73,8 @@ import { addPropertyNote } from "../lib/propertyNotes.js";
 export const pitCrewRouter = Router();
 
 const canAccess = requireRole(...PIT_CREW_ROLES, ...BROKERAGE_ADMIN_ROLES);
+// Inbox only. Do not reuse this on the workspace or mutation routes.
+const canReadResponsibilityInbox = requireRole("Agent", ...PIT_CREW_ROLES, ...BROKERAGE_ADMIN_ROLES);
 const requiresRunAccess = requireEntitlement("run.access");
 
 function handlePitCrewError(err: unknown, res: Response): boolean {
@@ -120,6 +124,15 @@ function rejectIfResponsibilityActionsDisabled(res: Response): boolean {
   return true;
 }
 
+// First middleware on the inbox route, before auth, role, and entitlement,
+// so a flag that is not the literal "true" returns 404 without the handler
+// reading pit_crew_responsibility_events (that table is absent on the pilot
+// database until 0032/0033 are applied).
+function requireResponsibilityActionsEnabled(_req: Request, res: Response, next: NextFunction): void {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  next();
+}
+
 function sendResponsibilityMutation(res: Response, result: ResponsibilityMutationResult): void {
   res.json({ ...result.assignment, responsibilityEvent: result.responsibilityEvent });
 }
@@ -139,6 +152,25 @@ pitCrewRouter.get("/pit-crew/team", requireAuth, canAccess, requiresRunAccess, a
   const team = await getPitCrewTeam(user.brokerageId);
   res.json({ team });
 });
+
+// Recipient inbox. No query params. brokerageId, user id, and role come
+// from the session. The caller cannot name another user.
+pitCrewRouter.get(
+  "/pit-crew/responsibility-inbox",
+  requireResponsibilityActionsEnabled,
+  requireAuth,
+  canReadResponsibilityInbox,
+  requiresRunAccess,
+  async (req, res) => {
+    const user = req.authedUser!;
+    try {
+      const inbox = await listResponsibilityItemsForRecipient(user.brokerageId, user.id, user.role);
+      res.json(inbox);
+    } catch (err) {
+      if (!handlePitCrewError(err, res)) throw err;
+    }
+  },
+);
 
 // ---------------------------------------------------------------------
 // Writes. Every body carries propertyId (the frontend already has the

@@ -140,6 +140,37 @@ export interface PcWorkspace {
   team: PcTeamMember[];
 }
 
+// Recipient inbox row. Not an ActionItem. title is null when
+// listBrokerageExceptions would omit the exception (listedExceptionTitle).
+// That read has no substitute title. closingNote is omitted: inbox rows
+// are OPEN or ACKNOWLEDGED, and the closing note is null on those statuses.
+export interface ResponsibilityInboxItem {
+  sourceType: PitCrewWorkSourceType;
+  sourceRecordId: string;
+  propertyId: number;
+  propertyAddress: string;
+  title: string | null;
+  nextAction: string;
+  kind: "HAND_BACK" | "ESCALATION";
+  reasonCategory: string;
+  severity: "ATTENTION" | "AT_RISK" | "CRITICAL" | null;
+  note: string | null;
+  originatingUserId: number;
+  recipientUserId: number | null;
+  recipientRole: string | null;
+  expectedResponseAt: string | null;
+  eventStatus: "OPEN" | "ACKNOWLEDGED";
+  assignmentStatus: PitCrewItemStatus;
+  version: number;
+  deepLink: string;
+  createdAt: string;
+}
+
+export interface ResponsibilityInbox {
+  generatedAt: string;
+  items: ResponsibilityInboxItem[];
+}
+
 // Section 10-11: dedup/prioritisation mirrors the Command Centre's own
 // philosophy (severity first, then due date) rather than inventing a new
 // ranking scheme.
