@@ -1,48 +1,45 @@
 
-// Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7), shared types.
+// Agent Engine 2.0 -- Pit Crew Command Centre, shared types.
 //
-// The Agent Daily Command Centre (Priority 6, PR #14) is not yet merged
-// into staging -- per this build's Section 22 that is non-blocking, and the
-// instruction is to "prepare a tested read interface without building or
-// duplicating that entire feature." So rather than depending on its
-// unmerged ActionItem model, this module sources work items directly from
-// the Exception & Risk Engine (Priority 4, merged, and explicitly
-// documented as "authoritative" -- see exceptions/queries.ts's own
-// listBrokerageExceptions), which already covers every category Pit Crew
-// needs (AML/CTF, appraisal agreement, contract conditions, launch/
-// campaign, listing, offers, settlement closure, workflow operational) and
-// already redacts financial exceptions from non-entitled viewers, which
-// Pit Crew always is. PcWorkItem's field names deliberately mirror the
-// Command Centre's ActionItem shape (sourceType/sourceRecordId/deepLink/
-// severity/etc.) so that once PR #14 merges, queries.ts here can be
-// repointed at getCommandCentre() with minimal changes instead of a
-// rewrite -- see the note at the top of queries.ts.
+// PcWorkItem's field names mirror the Command Centre ActionItem shape
+// (sourceType, sourceRecordId, deepLink, severity). getCommandCentre is on
+// staging; this module still does not import lib/commandCentre. The
+// workspace reads open exceptions directly (queries.ts) so financial
+// exceptions stay on the Risk Engine's non-entitled view. Hand-back and
+// escalate lists stay on PcWorkspace and are not folded into ActionItem.
 
 export const PIT_CREW_WORK_SOURCE_TYPES = ["EXCEPTION"] as const;
 export type PitCrewWorkSourceType = (typeof PIT_CREW_WORK_SOURCE_TYPES)[number];
 
-// Section 9: the Pit Crew work-item status vocabulary. UNCLAIMED is the
-// implicit state of any source item with no pit_crew_assignments row.
+// Pit Crew overlay status vocabulary. UNCLAIMED is the implicit state of
+// any source item with no pit_crew_assignments row. HANDED_BACK and
+// ESCALATED leave the active workspace buckets. The event payload lives
+// on pit_crew_responsibility_events, not on the assignment row.
 export const PIT_CREW_ITEM_STATUSES = [
   "UNCLAIMED",
   "CLAIMED",
   "IN_PROGRESS",
   "WAITING_ON",
   "DONE",
+  "HANDED_BACK",
+  "ESCALATED",
 ] as const;
 export type PitCrewItemStatus = (typeof PIT_CREW_ITEM_STATUSES)[number];
 
-// Validated transitions (Section 9: "PC work-item status enum with
-// validated transitions"). Keys are the FROM status; values are the
-// allowed TO statuses. Two entry points assign an item into CLAIMED without
-// it ever having been UNCLAIMED-with-a-row: claim() and assign() both call
-// this from the synthetic "UNCLAIMED" state.
+// Validated transitions. Existing edges stay. R-F15 adds only:
+// CLAIMED | IN_PROGRESS | WAITING_ON -> HANDED_BACK | ESCALATED,
+// HANDED_BACK -> CLAIMED (reclaim), and ESCALATED -> IN_PROGRESS
+// (resolve or return). Acknowledge leaves the assignment on ESCALATED,
+// so it is not an edge here. DONE stays terminal. UNCLAIMED still only
+// reaches CLAIMED, via claim or assign.
 export const PIT_CREW_STATUS_TRANSITIONS: Record<PitCrewItemStatus, PitCrewItemStatus[]> = {
   UNCLAIMED: ["CLAIMED"],
-  CLAIMED: ["IN_PROGRESS", "WAITING_ON", "DONE", "UNCLAIMED"],
-  IN_PROGRESS: ["WAITING_ON", "DONE", "UNCLAIMED"],
-  WAITING_ON: ["IN_PROGRESS", "DONE", "UNCLAIMED"],
+  CLAIMED: ["IN_PROGRESS", "WAITING_ON", "DONE", "UNCLAIMED", "HANDED_BACK", "ESCALATED"],
+  IN_PROGRESS: ["WAITING_ON", "DONE", "UNCLAIMED", "HANDED_BACK", "ESCALATED"],
+  WAITING_ON: ["IN_PROGRESS", "DONE", "UNCLAIMED", "HANDED_BACK", "ESCALATED"],
   DONE: [],
+  HANDED_BACK: ["CLAIMED"],
+  ESCALATED: ["IN_PROGRESS"],
 };
 
 export function isValidPitCrewTransition(from: PitCrewItemStatus, to: PitCrewItemStatus): boolean {
@@ -105,6 +102,26 @@ export interface PcTeamMember {
   activeItemCount: number; // capacity signal only -- never a performance metric (Section 15)
 }
 
+// Open responsibility event joined onto a workspace item. Present only on
+// handedBack and escalated. The active buckets do not carry this payload.
+export interface PcOpenResponsibility {
+  eventId: number;
+  kind: "HAND_BACK" | "ESCALATION";
+  reasonCategory: string;
+  severity: "ATTENTION" | "AT_RISK" | "CRITICAL" | null;
+  note: string | null;
+  nextAction: string;
+  originatingUserId: number;
+  recipientUserId: number | null;
+  recipientRole: string | null;
+  expectedResponseAt: string | null;
+  eventStatus: "OPEN" | "ACKNOWLEDGED";
+}
+
+export interface PcResponsibilityWorkItem extends PcWorkItem {
+  responsibility: PcOpenResponsibility;
+}
+
 export interface PcWorkspace {
   generatedAt: string;
   summary: PcWorkspaceSummary;
@@ -115,6 +132,10 @@ export interface PcWorkspace {
   transactionCoordination: PcWorkItem[];
   waitingOn: PcWorkItem[];
   completedToday: PcWorkItem[];
+  // Left the active lists. Empty when the responsibility flag is off,
+  // because that path does not read pit_crew_responsibility_events.
+  handedBack: PcResponsibilityWorkItem[];
+  escalated: PcResponsibilityWorkItem[];
   team: PcTeamMember[];
 }
 

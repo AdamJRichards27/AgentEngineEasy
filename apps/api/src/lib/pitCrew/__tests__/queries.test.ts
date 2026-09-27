@@ -125,6 +125,7 @@ test("an AGENT-owned exception with no Pit Crew overlay is not PC-relevant", asy
   const inAnyBucket = [
     ...workspace.unassignedWork, ...workspace.myWork, ...workspace.teamWork,
     ...workspace.waitingOn, ...workspace.completedToday,
+    ...workspace.handedBack, ...workspace.escalated,
   ].some((i) => i.sourceRecordId === exceptionId);
   assert.equal(inAnyBucket, false, "an untouched agent-owned exception should not appear in any PC bucket");
 });
