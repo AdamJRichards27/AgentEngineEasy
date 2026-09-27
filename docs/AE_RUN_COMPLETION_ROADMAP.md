@@ -176,4 +176,4 @@ Do not edit these Grow-owned trees in a Run slice. Paths below are where those t
 
 | Date | Change |
 |---|---|
-| 2026-09-27 | **R-F12.** This document added. Verified against staging tip `d0a7e771bc96124b18ba3064fdb03dbb3885de4c`. One pointer line added to `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`. No code, test, migration, config, or feature-flag change. |
+| 2026-09-27 | **R-F12 (#120).** This document added. Verified against staging tip `d0a7e771bc96124b18ba3064fdb03dbb3885de4c`. One pointer line added to `docs/AE_WORKSTREAM_OWNERSHIP_REGISTER.md`. No code, test, migration, config, or feature-flag change. |
