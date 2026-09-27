@@ -318,6 +318,9 @@ interface CommitInput {
   auditAction: string;
   previousValue: string;
   updatedValue: string;
+  // audit_logs has no metadata column. Close writes the closing note here
+  // as JSON so previousValue and updatedValue stay the status pair.
+  providerReference?: string;
   event:
     | { mode: "insert"; values: typeof pitCrewResponsibilityEvents.$inferInsert }
     | {
@@ -349,6 +352,7 @@ async function commitResponsibility(commit: CommitInput): Promise<Responsibility
       propertyId: commit.input.propertyId,
       previousValue: commit.previousValue,
       updatedValue: commit.updatedValue,
+      providerReference: commit.providerReference,
     };
     await logAudit(audit, {
       strict: true,
@@ -558,7 +562,7 @@ async function closeEscalation(
 ): Promise<ResponsibilityMutationResult> {
   assertResponsibilityActionsEnabled();
   assertExceptionSource(input.sourceType);
-  const note = requireText(input.note, "note");
+  const closingNote = requireText(input.note, "note");
   const row = await loadOwnedOverlay(input);
   assertStatus(row, ["ESCALATED"], action);
   assertTransition("ESCALATED", "IN_PROGRESS");
@@ -576,13 +580,14 @@ async function closeEscalation(
     auditAction,
     previousValue: "ESCALATED",
     updatedValue: "IN_PROGRESS",
+    providerReference: JSON.stringify({ closingNote }),
     event: {
       mode: "update",
       eventId: event.id,
       fromStatuses: ["OPEN", "ACKNOWLEDGED"],
       values: {
         status: eventStatus,
-        note,
+        closingNote,
         closedAt: now,
         closedByUserId: input.actorUserId,
       },

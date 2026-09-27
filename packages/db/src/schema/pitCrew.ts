@@ -227,6 +227,10 @@ export const pitCrewResponsibilityEvents = pgTable(
     reasonCategory: text("reason_category").notNull(),
     severity: text("severity"),
     note: text("note"),
+    // Resolve and return write the closing note here. The original escalation
+    // note stays in `note`. Nullable, no default, no length check: 0032 does
+    // not constrain `note`, and the design does not require one here.
+    closingNote: text("closing_note"),
     nextAction: text("next_action").notNull(),
     originatingUserId: integer("originating_user_id").notNull().references(() => users.id),
     recipientUserId: integer("recipient_user_id").references(() => users.id),

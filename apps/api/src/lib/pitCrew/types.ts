@@ -110,6 +110,7 @@ export interface PcOpenResponsibility {
   reasonCategory: string;
   severity: "ATTENTION" | "AT_RISK" | "CRITICAL" | null;
   note: string | null;
+  closingNote: string | null;
   nextAction: string;
   originatingUserId: number;
   recipientUserId: number | null;

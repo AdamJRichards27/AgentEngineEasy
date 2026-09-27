@@ -232,6 +232,13 @@
       "when": 1790494995840,
       "tag": "0032_pit_crew_responsibility_events",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790500320594,
+      "tag": "0033_pit_crew_responsibility_closing_note",
+      "breakpoints": true
     }
   ]
 }

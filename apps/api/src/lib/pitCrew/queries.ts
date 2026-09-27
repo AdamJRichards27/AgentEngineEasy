@@ -92,6 +92,7 @@ function toResponsibilityWorkItem(
       reasonCategory: event.reasonCategory,
       severity: escalationSeverity(event.severity),
       note: event.note,
+      closingNote: event.closingNote,
       nextAction: event.nextAction,
       originatingUserId: event.originatingUserId,
       recipientUserId: event.recipientUserId,

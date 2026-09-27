@@ -177,6 +177,8 @@ test("0032 table exists with the responsibility-event indexes and without routin
     "kind",
     "reason_category",
     "severity",
+    "note",
+    "closing_note",
     "next_action",
     "originating_user_id",
     "recipient_user_id",
@@ -206,6 +208,29 @@ test("0032 table exists with the responsibility-event indexes and without routin
   ]) {
     assert.ok(indexNames.includes(indexName), indexName);
   }
+});
+
+test("0033 closing_note is nullable text with no default and no length check", async () => {
+  const columns = await db.execute(sql`
+    select data_type, is_nullable, column_default
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'pit_crew_responsibility_events'
+      and column_name = 'closing_note'
+  `);
+  const column = (columns as unknown as { rows: Array<{ data_type: string; is_nullable: string; column_default: string | null }> }).rows[0];
+  assert.equal(column?.data_type, "text");
+  assert.equal(column?.is_nullable, "YES");
+  assert.equal(column?.column_default, null);
+
+  const checks = await db.execute(sql`
+    select conname
+    from pg_constraint
+    where contype = 'c'
+      and conrelid = 'public.pit_crew_responsibility_events'::regclass
+      and pg_get_constraintdef(oid) ilike '%closing_note%'
+  `);
+  assert.equal((checks as unknown as { rows: unknown[] }).rows.length, 0);
 });
 
 test("checks reject an incoherent responsibility event and the partial unique index allows one open event", async () => {
@@ -307,9 +332,13 @@ test("checks reject an incoherent responsibility event and the partial unique in
   }).where(eq(pitCrewResponsibilityEvents.id, openHandBack!.id)).returning();
   assert.equal(superseded[0]?.status, "SUPERSEDED");
 
-  const [openEscalation] = await db.insert(pitCrewResponsibilityEvents).values(escalation()).returning();
+  const [openEscalation] = await db.insert(pitCrewResponsibilityEvents).values(escalation({
+    note: "Original escalation note.",
+  })).returning();
   assert.equal(openEscalation?.status, "OPEN");
   assert.equal(openEscalation?.severity, "ATTENTION");
+  assert.equal(openEscalation?.note, "Original escalation note.");
+  assert.equal(openEscalation?.closingNote, null);
 
   await expectDbRejection(
     () => db.insert(pitCrewResponsibilityEvents).values(handBack()),
@@ -319,11 +348,14 @@ test("checks reject an incoherent responsibility event and the partial unique in
 
   const resolved = await db.update(pitCrewResponsibilityEvents).set({
     status: "RESOLVED",
+    closingNote: "Closing note that must not replace the original.",
     closedAt: new Date(),
     closedByUserId: userId,
     updatedAt: new Date(),
   }).where(eq(pitCrewResponsibilityEvents.id, openEscalation!.id)).returning();
   assert.equal(resolved[0]?.status, "RESOLVED");
+  assert.equal(resolved[0]?.note, "Original escalation note.");
+  assert.equal(resolved[0]?.closingNote, "Closing note that must not replace the original.");
 
   const [afterResolved] = await db.insert(pitCrewResponsibilityEvents).values(handBack({
     reasonCategory: "INFORMATION_RETURNED",

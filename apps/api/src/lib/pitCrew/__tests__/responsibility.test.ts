@@ -639,6 +639,7 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.equal(acknowledged.assignment.version, namedEscalation.assignment.version + 1);
     assert.equal(acknowledged.responsibilityEvent.status, "ACKNOWLEDGED");
     assert.equal(acknowledged.responsibilityEvent.note, "The authority for this step is missing.");
+    assert.equal(acknowledged.responsibilityEvent.closingNote, null);
     assert.equal(acknowledged.responsibilityEvent.acknowledgedByUserId, admin.user.id);
     assert.ok(acknowledged.responsibilityEvent.acknowledgedAt);
     const [ackAudit] = await db.select().from(auditLogs).where(and(eq(auditLogs.recordId, namedId), eq(auditLogs.action, "PC_ESCALATION_ACKNOWLEDGED")));
@@ -655,7 +656,8 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.equal(resolved.assignment.assignedToUserId, assigneeBefore);
     assert.equal(resolved.assignment.waitingOnParty, null);
     assert.equal(resolved.responsibilityEvent.status, "RESOLVED");
-    assert.equal(resolved.responsibilityEvent.note, "The brokerage has authorised the step.");
+    assert.equal(resolved.responsibilityEvent.note, "The authority for this step is missing.");
+    assert.equal(resolved.responsibilityEvent.closingNote, "The brokerage has authorised the step.");
     assert.equal(resolved.responsibilityEvent.closedByUserId, admin.user.id);
     assert.equal(resolved.responsibilityEvent.acknowledgedByUserId, admin.user.id);
     assert.equal((await openEvents(resolved.assignment.id)).length, 0);
@@ -690,10 +692,13 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.equal(returned.assignment.status, "IN_PROGRESS");
     assert.equal(returned.assignment.assignedToUserId, pitCrew.user.id);
     assert.equal(returned.responsibilityEvent.status, "RETURNED");
+    assert.equal(returned.responsibilityEvent.note, "The third party has not replied. This records that fact only.");
+    assert.equal(returned.responsibilityEvent.closingNote, "Returned to Pit Crew with the brokerage decision.");
     assert.equal(returned.responsibilityEvent.closedByUserId, secondAdmin.user.id);
     const [returnAudit] = await db.select().from(auditLogs).where(and(eq(auditLogs.recordId, roleId), eq(auditLogs.action, "PC_ESCALATION_RETURNED")));
     assert.equal(returnAudit?.previousValue, "ESCALATED");
     assert.equal(returnAudit?.updatedValue, "IN_PROGRESS");
+    assert.equal(returnAudit?.providerReference, JSON.stringify({ closingNote: "Returned to Pit Crew with the brokerage decision." }));
     const afterRole = await sideEffects(roleId);
     assert.deepEqual(afterRole.exception, beforeRole.exception);
     assert.deepEqual(afterRole.messageIds, beforeRole.messageIds);
@@ -718,6 +723,60 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.equal(resolved.assignment.status, "IN_PROGRESS");
     assert.equal(resolved.assignment.assignedToUserId, admin.user.id);
     assert.equal(resolved.responsibilityEvent.status, "RESOLVED");
+    assert.equal(resolved.responsibilityEvent.note, "Pit Crew must not progress this settlement step.");
+    assert.equal(resolved.responsibilityEvent.closingNote, "The brokerage position is recorded.");
+  });
+
+  test("resolve and return keep the escalation note and store the closing note", async () => {
+    const resolveId = await createException();
+    const returnId = await createException();
+    const resolveClaimed = await claim(resolveId);
+    const returnClaimed = await claim(returnId);
+
+    const escalatedForResolve = await escalateWorkItem({
+      ...base(resolveId, pitCrew, resolveClaimed.version),
+      reasonCategory: "MISSING_AUTHORITY",
+      severity: "ATTENTION",
+      note: "Original escalation note for resolve.",
+      nextAction: "Decide whether the brokerage authorises the step.",
+    });
+    const resolved = await resolveEscalation({
+      ...base(resolveId, admin, escalatedForResolve.assignment.version),
+      note: "Closing note for resolve.",
+    });
+    assert.equal(resolved.responsibilityEvent.note, "Original escalation note for resolve.");
+    assert.equal(resolved.responsibilityEvent.closingNote, "Closing note for resolve.");
+    assert.equal(resolved.responsibilityEvent.status, "RESOLVED");
+    const [storedResolve] = await db.select().from(pitCrewResponsibilityEvents).where(eq(pitCrewResponsibilityEvents.id, resolved.responsibilityEvent.id));
+    assert.equal(storedResolve?.note, "Original escalation note for resolve.");
+    assert.equal(storedResolve?.closingNote, "Closing note for resolve.");
+    const [resolveAudit] = await db.select().from(auditLogs).where(and(eq(auditLogs.recordId, resolveId), eq(auditLogs.action, "PC_ESCALATION_RESOLVED")));
+    assert.equal(resolveAudit?.previousValue, "ESCALATED");
+    assert.equal(resolveAudit?.updatedValue, "IN_PROGRESS");
+    assert.equal(resolveAudit?.brokerageId, brokerageId);
+    assert.equal(resolveAudit?.providerReference, JSON.stringify({ closingNote: "Closing note for resolve." }));
+
+    const escalatedForReturn = await escalateWorkItem({
+      ...base(returnId, pitCrew, returnClaimed.version),
+      reasonCategory: "MISSING_INFORMATION",
+      severity: "ATTENTION",
+      note: "Original escalation note for return.",
+      nextAction: "Decide what information the brokerage still needs.",
+    });
+    const returned = await returnEscalation({
+      ...base(returnId, admin, escalatedForReturn.assignment.version),
+      note: "Closing note for return.",
+    });
+    assert.equal(returned.responsibilityEvent.note, "Original escalation note for return.");
+    assert.equal(returned.responsibilityEvent.closingNote, "Closing note for return.");
+    assert.equal(returned.responsibilityEvent.status, "RETURNED");
+    const [storedReturn] = await db.select().from(pitCrewResponsibilityEvents).where(eq(pitCrewResponsibilityEvents.id, returned.responsibilityEvent.id));
+    assert.equal(storedReturn?.note, "Original escalation note for return.");
+    assert.equal(storedReturn?.closingNote, "Closing note for return.");
+    const [returnAudit] = await db.select().from(auditLogs).where(and(eq(auditLogs.recordId, returnId), eq(auditLogs.action, "PC_ESCALATION_RETURNED")));
+    assert.equal(returnAudit?.previousValue, "ESCALATED");
+    assert.equal(returnAudit?.updatedValue, "IN_PROGRESS");
+    assert.equal(returnAudit?.providerReference, JSON.stringify({ closingNote: "Closing note for return." }));
   });
 
   test("AT_RISK and CRITICAL require expectedResponseAt, and escalate requires a note", async () => {
@@ -790,11 +849,14 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.equal(handedItem?.responsibility.recipientUserId, agent.user.id);
     assert.equal(handedItem?.responsibility.nextAction, "Confirm the launch evidence.");
     assert.equal(handedItem?.responsibility.severity, null);
+    assert.equal(handedItem?.responsibility.closingNote, null);
     assert.equal(handedItem?.responsibility.expectedResponseAt, null);
     assert.equal(handedItem?.overdue, true);
     const escalatedItem = workspace.escalated.find((item) => item.sourceRecordId === escalatedId);
     assert.ok(escalatedItem);
     assert.equal(escalatedItem?.responsibility.severity, "AT_RISK");
+    assert.equal(escalatedItem?.responsibility.note, "The offer file is incomplete.");
+    assert.equal(escalatedItem?.responsibility.closingNote, null);
     assert.equal(escalatedItem?.responsibility.recipientRole, "Brokerage Administrator");
     assert.equal(escalatedItem?.responsibility.nextAction, "Decide whether the brokerage will chase the missing offer document.");
     assert.equal(escalatedItem?.responsibility.expectedResponseAt, "2026-10-03T00:00:00.000Z");
