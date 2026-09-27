@@ -573,6 +573,7 @@ export async function releaseWorkItem(input: MutationInput): Promise<PitCrewAssi
 export async function handoffWorkItem(
   input: MutationInput & { toUserId: number; note?: string },
 ): Promise<PitCrewAssignment> {
+  await assertUserInBrokerage(input.toUserId, input.brokerageId);
   const row = await loadOrCreateOverlay(input);
   const from = row.status as PitCrewItemStatus;
   if (from !== "CLAIMED" && from !== "IN_PROGRESS" && from !== "WAITING_ON") {
