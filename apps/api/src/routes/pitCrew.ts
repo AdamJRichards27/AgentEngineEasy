@@ -32,6 +32,11 @@ import {
   type PitCrewWaitingOnSweepOpsSnapshot,
 } from "../lib/pitCrew/waitingOnSweepBootstrap.js";
 import {
+  PIT_CREW_ESCALATION_REASON_CATEGORIES,
+  PIT_CREW_ESCALATION_SEVERITIES,
+  PIT_CREW_HAND_BACK_REASON_CATEGORIES,
+} from "@aee/db";
+import {
   claimWorkItem,
   assignWorkItem,
   startProgress,
@@ -47,6 +52,20 @@ import {
   PitCrewAssigneeMismatchError,
   notePitCrewPropertyIsolationRejection,
 } from "../lib/pitCrew/assignment.js";
+import {
+  acknowledgeEscalation,
+  escalateWorkItem,
+  handBackWorkItem,
+  isPitCrewResponsibilityActionsEnabled,
+  reclaimHandedBack,
+  resolveEscalation,
+  returnEscalation,
+  PitCrewResponsibilityDisabledError,
+  PitCrewResponsibilityForbiddenError,
+  PitCrewResponsibilityNotFoundError,
+  PitCrewResponsibilityValidationError,
+  type ResponsibilityMutationResult,
+} from "../lib/pitCrew/responsibility.js";
 import { addPropertyNote } from "../lib/propertyNotes.js";
 
 export const pitCrewRouter = Router();
@@ -77,7 +96,32 @@ function handlePitCrewError(err: unknown, res: Response): boolean {
     res.status(404).json({ error: err.message });
     return true;
   }
+  if (err instanceof PitCrewResponsibilityDisabledError || err instanceof PitCrewResponsibilityNotFoundError) {
+    res.status(404).json({ error: err.message });
+    return true;
+  }
+  if (err instanceof PitCrewResponsibilityForbiddenError) {
+    res.status(403).json({ error: err.message });
+    return true;
+  }
+  if (err instanceof PitCrewResponsibilityValidationError) {
+    res.status(400).json({ error: "Invalid request." });
+    return true;
+  }
   return false;
+}
+
+// R-F16: hand-back and escalate stay invisible until the flag is the literal
+// "true". This runs before zod and before any table read. The library throws
+// the same error if a caller reaches it while the flag is off.
+function rejectIfResponsibilityActionsDisabled(res: Response): boolean {
+  if (isPitCrewResponsibilityActionsEnabled()) return false;
+  res.status(404).json({ error: new PitCrewResponsibilityDisabledError().message });
+  return true;
+}
+
+function sendResponsibilityMutation(res: Response, result: ResponsibilityMutationResult): void {
+  res.json({ ...result.assignment, responsibilityEvent: result.responsibilityEvent });
 }
 
 // ---------------------------------------------------------------------
@@ -261,6 +305,166 @@ pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/handoff", requir
     });
     res.json(row);
   } catch (err) { if (!handlePitCrewError(err, res)) throw err; }
+});
+
+// R-F16: hand-back and escalate. Same canAccess gate as claim (Pit Crew and
+// Brokerage Administrator) plus run.access. Agents stay on requireRole's 403.
+// The client never sends a recipient role; escalate omits recipientUserId to
+// address the Brokerage Administrator role. Audit rows are written inside
+// the library transaction (brokerageId, strict). These handlers do not
+// write a second audit row.
+const handBackSchema = baseMutationSchema.extend({
+  reasonCategory: z.enum(PIT_CREW_HAND_BACK_REASON_CATEGORIES),
+  note: z.string().optional(),
+  recipientUserId: z.coerce.number().int().optional(),
+  nextAction: z.string().trim().min(1),
+}).strict();
+
+const escalateSchema = baseMutationSchema.extend({
+  reasonCategory: z.enum(PIT_CREW_ESCALATION_REASON_CATEGORIES),
+  severity: z.enum(PIT_CREW_ESCALATION_SEVERITIES),
+  note: z.string().trim().min(1),
+  nextAction: z.string().trim().min(1),
+  recipientUserId: z.coerce.number().int().optional(),
+  expectedResponseAt: z.coerce.date().optional(),
+}).strict().superRefine((body, ctx) => {
+  if ((body.severity === "AT_RISK" || body.severity === "CRITICAL") && body.expectedResponseAt == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedResponseAt"],
+      message: "expectedResponseAt is required when severity is AT_RISK or CRITICAL.",
+    });
+  }
+});
+
+const acknowledgeSchema = baseMutationSchema.extend({
+  note: z.string().optional(),
+}).strict();
+
+const closeEscalationSchema = baseMutationSchema.extend({
+  note: z.string().trim().min(1),
+}).strict();
+
+const reclaimSchema = baseMutationSchema.strict();
+
+function responsibilityActor(user: { brokerageId: number; id: number }, propertyId: number, sourceType: string, sourceRecordId: string, expectedVersion: number) {
+  return {
+    brokerageId: user.brokerageId,
+    propertyId,
+    sourceType,
+    sourceRecordId,
+    expectedVersion,
+    actorUserId: user.id,
+  };
+}
+
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/hand-back", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  const user = req.authedUser!;
+  const params = itemParamsSchema.safeParse(req.params);
+  const body = handBackSchema.safeParse(req.body);
+  if (!params.success || !body.success) return void res.status(400).json({ error: "Invalid request." });
+  try {
+    const result = await handBackWorkItem({
+      ...responsibilityActor(user, body.data.propertyId, params.data.sourceType, params.data.sourceRecordId, body.data.expectedVersion),
+      reasonCategory: body.data.reasonCategory,
+      note: body.data.note,
+      recipientUserId: body.data.recipientUserId,
+      nextAction: body.data.nextAction,
+    });
+    sendResponsibilityMutation(res, result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
+});
+
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/escalate", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  const user = req.authedUser!;
+  const params = itemParamsSchema.safeParse(req.params);
+  const body = escalateSchema.safeParse(req.body);
+  if (!params.success || !body.success) return void res.status(400).json({ error: "Invalid request." });
+  try {
+    const result = await escalateWorkItem({
+      ...responsibilityActor(user, body.data.propertyId, params.data.sourceType, params.data.sourceRecordId, body.data.expectedVersion),
+      reasonCategory: body.data.reasonCategory,
+      severity: body.data.severity,
+      note: body.data.note,
+      nextAction: body.data.nextAction,
+      recipientUserId: body.data.recipientUserId,
+      expectedResponseAt: body.data.expectedResponseAt,
+    });
+    sendResponsibilityMutation(res, result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
+});
+
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/escalation/acknowledge", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  const user = req.authedUser!;
+  const params = itemParamsSchema.safeParse(req.params);
+  const body = acknowledgeSchema.safeParse(req.body);
+  if (!params.success || !body.success) return void res.status(400).json({ error: "Invalid request." });
+  try {
+    const result = await acknowledgeEscalation({
+      ...responsibilityActor(user, body.data.propertyId, params.data.sourceType, params.data.sourceRecordId, body.data.expectedVersion),
+      note: body.data.note,
+    });
+    sendResponsibilityMutation(res, result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
+});
+
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/escalation/resolve", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  const user = req.authedUser!;
+  const params = itemParamsSchema.safeParse(req.params);
+  const body = closeEscalationSchema.safeParse(req.body);
+  if (!params.success || !body.success) return void res.status(400).json({ error: "Invalid request." });
+  try {
+    const result = await resolveEscalation({
+      ...responsibilityActor(user, body.data.propertyId, params.data.sourceType, params.data.sourceRecordId, body.data.expectedVersion),
+      note: body.data.note,
+    });
+    sendResponsibilityMutation(res, result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
+});
+
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/escalation/return", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  const user = req.authedUser!;
+  const params = itemParamsSchema.safeParse(req.params);
+  const body = closeEscalationSchema.safeParse(req.body);
+  if (!params.success || !body.success) return void res.status(400).json({ error: "Invalid request." });
+  try {
+    const result = await returnEscalation({
+      ...responsibilityActor(user, body.data.propertyId, params.data.sourceType, params.data.sourceRecordId, body.data.expectedVersion),
+      note: body.data.note,
+    });
+    sendResponsibilityMutation(res, result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
+});
+
+pitCrewRouter.post("/pit-crew/items/:sourceType/:sourceRecordId/hand-back/reclaim", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  if (rejectIfResponsibilityActionsDisabled(res)) return;
+  const user = req.authedUser!;
+  const params = itemParamsSchema.safeParse(req.params);
+  const body = reclaimSchema.safeParse(req.body);
+  if (!params.success || !body.success) return void res.status(400).json({ error: "Invalid request." });
+  try {
+    const result = await reclaimHandedBack(
+      responsibilityActor(user, body.data.propertyId, params.data.sourceType, params.data.sourceRecordId, body.data.expectedVersion),
+    );
+    sendResponsibilityMutation(res, result);
+  } catch (err) {
+    if (!handlePitCrewError(err, res)) throw err;
+  }
 });
 
 // Section 23: Internal Notes -- reuse addPropertyNote (already privacy-scoped
