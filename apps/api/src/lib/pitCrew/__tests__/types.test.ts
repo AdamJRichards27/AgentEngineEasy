@@ -26,6 +26,14 @@ test("isValidPitCrewTransition allows every documented edge", () => {
   assert.equal(isValidPitCrewTransition("WAITING_ON", "IN_PROGRESS"), true);
   assert.equal(isValidPitCrewTransition("WAITING_ON", "DONE"), true);
   assert.equal(isValidPitCrewTransition("WAITING_ON", "UNCLAIMED"), true);
+  assert.equal(isValidPitCrewTransition("CLAIMED", "HANDED_BACK"), true);
+  assert.equal(isValidPitCrewTransition("CLAIMED", "ESCALATED"), true);
+  assert.equal(isValidPitCrewTransition("IN_PROGRESS", "HANDED_BACK"), true);
+  assert.equal(isValidPitCrewTransition("IN_PROGRESS", "ESCALATED"), true);
+  assert.equal(isValidPitCrewTransition("WAITING_ON", "HANDED_BACK"), true);
+  assert.equal(isValidPitCrewTransition("WAITING_ON", "ESCALATED"), true);
+  assert.equal(isValidPitCrewTransition("HANDED_BACK", "CLAIMED"), true);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "IN_PROGRESS"), true);
 });
 
 test("isValidPitCrewTransition rejects everything not explicitly listed", () => {
@@ -36,6 +44,21 @@ test("isValidPitCrewTransition rejects everything not explicitly listed", () => 
   assert.equal(isValidPitCrewTransition("UNCLAIMED", "WAITING_ON"), false);
   assert.equal(isValidPitCrewTransition("UNCLAIMED", "DONE"), false);
   assert.equal(isValidPitCrewTransition("CLAIMED", "CLAIMED"), false);
+  assert.equal(isValidPitCrewTransition("UNCLAIMED", "HANDED_BACK"), false);
+  assert.equal(isValidPitCrewTransition("UNCLAIMED", "ESCALATED"), false);
+  assert.equal(isValidPitCrewTransition("DONE", "HANDED_BACK"), false);
+  assert.equal(isValidPitCrewTransition("DONE", "ESCALATED"), false);
+  assert.equal(isValidPitCrewTransition("HANDED_BACK", "ESCALATED"), false);
+  assert.equal(isValidPitCrewTransition("HANDED_BACK", "DONE"), false);
+  assert.equal(isValidPitCrewTransition("HANDED_BACK", "IN_PROGRESS"), false);
+  assert.equal(isValidPitCrewTransition("HANDED_BACK", "WAITING_ON"), false);
+  assert.equal(isValidPitCrewTransition("HANDED_BACK", "UNCLAIMED"), false);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "HANDED_BACK"), false);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "DONE"), false);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "CLAIMED"), false);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "UNCLAIMED"), false);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "WAITING_ON"), false);
+  assert.equal(isValidPitCrewTransition("ESCALATED", "ESCALATED"), false);
 });
 
 test("every status has a transition table entry (no silently-terminal gaps)", () => {
@@ -49,6 +72,10 @@ test("every status has a transition table entry (no silently-terminal gaps)", ()
   }
   const outboundFromDone = PIT_CREW_ITEM_STATUSES.filter((t) => isValidPitCrewTransition("DONE", t));
   assert.deepEqual(outboundFromDone, []);
+  const terminal = PIT_CREW_ITEM_STATUSES.filter((status) =>
+    PIT_CREW_ITEM_STATUSES.every((target) => !isValidPitCrewTransition(status, target)),
+  );
+  assert.deepEqual(terminal, ["DONE"]);
 });
 
 function buildItem(overrides: Partial<PcWorkItem> = {}): PcWorkItem {

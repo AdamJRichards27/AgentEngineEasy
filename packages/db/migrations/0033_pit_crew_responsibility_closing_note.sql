@@ -1,0 +1,1 @@
+ALTER TABLE "pit_crew_responsibility_events" ADD COLUMN "closing_note" text;

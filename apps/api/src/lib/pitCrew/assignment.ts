@@ -192,7 +192,9 @@ async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promis
 // caller's expectedVersion is checked against the row that actually comes
 // back, so a client that believed the item was untouched (expectedVersion
 // 0) correctly loses the race if someone beat it to the first touch too.
-async function loadOrCreateOverlay(ref: WorkItemRef): Promise<PitCrewAssignment> {
+// Exported for the responsibility actions, which must reuse this brokerage
+// and source-record check instead of writing a second overlay loader.
+export async function loadOrCreateOverlay(ref: WorkItemRef): Promise<PitCrewAssignment> {
   // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7). ref.brokerageId is
   // trustworthy (the route layer sets it from the caller's own session), but
   // ref.propertyId is client-supplied. Without this lookup a Pit Crew member in
@@ -321,7 +323,10 @@ export async function claimWorkItem(input: MutationInput): Promise<PitCrewAssign
 // as the payment-method ownership checks in routes/payments.ts: the
 // candidate id and the caller's own brokerageId are checked together in
 // one query, never as two separate facts assembled after the fact.
-async function assertUserInBrokerage(userId: number, brokerageId: number): Promise<void> {
+// Exported for resolveResponsibilityRecipient. A miss throws
+// PitCrewAssigneeMismatchError and increments the pit_crew isolation
+// counter once. Callers add their own role check after this returns.
+export async function assertUserInBrokerage(userId: number, brokerageId: number): Promise<void> {
   const [assignee] = await db
     .select({ id: users.id })
     .from(users)
