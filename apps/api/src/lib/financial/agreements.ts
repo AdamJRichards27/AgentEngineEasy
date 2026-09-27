@@ -27,6 +27,7 @@
 import { eq, and } from "drizzle-orm";
 import { db, commissionAgreements, financialLedgerEvents, type CommissionAgreement, type CommissionTier, type CommissionMethod } from "@aee/db";
 import { emitFinancialEvent } from "./events.js";
+import { noteFinancialCommissionAgreementIsolationRejection } from "./isolationRejection.js";
 
 export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES" | "CUSTODY_BOUNDARY_VIOLATION";
 
@@ -140,6 +141,7 @@ export async function createCommissionAgreement(input: CreateCommissionAgreement
 export async function approveCommissionAgreement(id: number, brokerageId: number, actorUserId: number): Promise<CommissionAgreement> {
   const [agreement] = await db.select().from(commissionAgreements).where(eq(commissionAgreements.id, id));
   if (!agreement || agreement.brokerageId !== brokerageId) {
+    await noteFinancialCommissionAgreementIsolationRejection(id, brokerageId);
     throw new FinancialControlError("NOT_FOUND", `Commission agreement ${id} not found.`);
   }
   if (agreement.status !== "DRAFT" && agreement.status !== "AWAITING_APPROVAL") {
@@ -199,6 +201,7 @@ export async function approveCommissionAgreement(id: number, brokerageId: number
 export async function cancelCommissionAgreement(id: number, brokerageId: number, actorUserId: number, reason: string): Promise<CommissionAgreement> {
   const [agreement] = await db.select().from(commissionAgreements).where(eq(commissionAgreements.id, id));
   if (!agreement || agreement.brokerageId !== brokerageId) {
+    await noteFinancialCommissionAgreementIsolationRejection(id, brokerageId);
     throw new FinancialControlError("NOT_FOUND", `Commission agreement ${id} not found.`);
   }
   if (agreement.status === "CANCELLED" || agreement.status === "SUPERSEDED") {

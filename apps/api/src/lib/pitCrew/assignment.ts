@@ -11,7 +11,7 @@
 // which already feeds the Property Timeline, rather than a second history
 // table -- see the comment at the top of packages/db/src/schema/pitCrew.ts.
 
-import { and, asc, eq, inArray, isNotNull, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, lt, ne } from "drizzle-orm";
 import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
 import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
@@ -32,15 +32,16 @@ export class PitCrewConcurrencyError extends Error {
   }
 }
 
-// AE Step 2 closure — Part B: incrementing tenant_isolation_rejection_total
-// at the shared constructor these two error classes' throw sites all use
-// (rather than at each individual call site) — see
+// AE Step 2 closure — Part B dispatched TENANT_SECURITY_SIGNAL from this
+// constructor. R-F10 leaves that alert here. The counter is not incremented
+// here: a genuine not-found and a cross-tenant id both throw this class
+// (identical 404). The miss-only existence lookups below count only the
+// latter, once, with boundary "pit_crew". See
 // docs/METRICS_ALERTS_AND_SERVICE_OBJECTIVES.md.
 export class PitCrewPropertyMismatchError extends Error {
   constructor(message = "Property not found in this brokerage.") {
     super(message);
     this.name = "PitCrewPropertyMismatchError";
-    incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
     void dispatchOperationalAlert({
       type: "TENANT_SECURITY_SIGNAL",
       summary: "Tenant-scoped Pit Crew property access was rejected",
@@ -59,7 +60,6 @@ export class PitCrewAssigneeMismatchError extends Error {
   constructor(message = "Assignee not found in this brokerage.") {
     super(message);
     this.name = "PitCrewAssigneeMismatchError";
-    incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
     void dispatchOperationalAlert({
       type: "TENANT_SECURITY_SIGNAL",
       summary: "Tenant-scoped Pit Crew assignee access was rejected",
@@ -99,6 +99,47 @@ interface AuditActor {
 // sourceRecordId behaving exactly like a well-formed one that simply isn't
 // found -- never a different, more revealing failure mode.
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// R-F10 — the pit_crew boundary of tenant_isolation_rejection_total.
+// Scoped loads cannot tell a missing id from one in another brokerage.
+// On a miss only, one existence lookup (never on the success path) checks
+// whether the record belongs to another brokerage and, if so, increments
+// once. The lookup selects no brokerage id and no other tenant's columns.
+// Callers still throw the same mismatch error either way. A missing row
+// does not increment, and the other brokerage's id is not logged or returned.
+function notePitCrewRejection(found: { id: number | string } | undefined): void {
+  if (found) incrementCounter("tenant_isolation_rejection_total", { boundary: "pit_crew" });
+}
+
+export async function notePitCrewPropertyIsolationRejection(propertyId: number, brokerageId: number): Promise<void> {
+  if (!Number.isInteger(propertyId) || propertyId <= 0) return;
+  const [elsewhere] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), ne(properties.brokerageId, brokerageId)))
+    .limit(1);
+  notePitCrewRejection(elsewhere);
+}
+
+async function notePitCrewWorkItemIsolationRejection(sourceRecordId: string, brokerageId: number): Promise<void> {
+  if (!UUID_SHAPE.test(sourceRecordId)) return;
+  const [elsewhere] = await db
+    .select({ id: riskExceptions.id })
+    .from(riskExceptions)
+    .where(and(eq(riskExceptions.id, sourceRecordId), ne(riskExceptions.brokerageId, brokerageId)))
+    .limit(1);
+  notePitCrewRejection(elsewhere);
+}
+
+async function notePitCrewAssigneeIsolationRejection(userId: number, brokerageId: number): Promise<void> {
+  if (!Number.isInteger(userId) || userId <= 0) return;
+  const [elsewhere] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, userId), ne(users.brokerageId, brokerageId)))
+    .limit(1);
+  notePitCrewRejection(elsewhere);
+}
 
 // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7), STEP 2 security
 // hardening (cross-tenant IDOR fix). ref.propertyId is already checked
@@ -140,6 +181,7 @@ async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promis
     )
     .limit(1);
   if (!exception) {
+    await notePitCrewWorkItemIsolationRejection(ref.sourceRecordId, ref.brokerageId);
     throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
   }
 }
@@ -158,12 +200,16 @@ async function loadOrCreateOverlay(ref: WorkItemRef): Promise<PitCrewAssignment>
   // property belonging to brokerage B simply by passing its id in the request
   // body. This mirrors the same tenant-isolation guard used elsewhere in the
   // codebase (see propertyNotes.ts, aml.ts, appraisals.ts, transactionConditions.ts).
+  // R-F10 — scoped to this brokerage and selecting only the id. A miss
+  // cannot tell "no such property" from another brokerage; the existence
+  // lookup does, without reading the other brokerage's id.
   const [property] = await db
-    .select({ id: properties.id, brokerageId: properties.brokerageId })
+    .select({ id: properties.id })
     .from(properties)
-    .where(eq(properties.id, ref.propertyId))
+    .where(and(eq(properties.id, ref.propertyId), eq(properties.brokerageId, ref.brokerageId)))
     .limit(1);
-  if (!property || property.brokerageId !== ref.brokerageId) {
+  if (!property) {
+    await notePitCrewPropertyIsolationRejection(ref.propertyId, ref.brokerageId);
     throw new PitCrewPropertyMismatchError();
   }
 
@@ -282,6 +328,7 @@ async function assertUserInBrokerage(userId: number, brokerageId: number): Promi
     .where(and(eq(users.id, userId), eq(users.brokerageId, brokerageId)))
     .limit(1);
   if (!assignee) {
+    await notePitCrewAssigneeIsolationRejection(userId, brokerageId);
     throw new PitCrewAssigneeMismatchError();
   }
 }

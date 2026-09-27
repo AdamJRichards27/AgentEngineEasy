@@ -10,6 +10,7 @@ import { and, eq } from "drizzle-orm";
 import { db, pcFeeAuthorities, pcFeeCalculations, commissionCalculations } from "@aee/db";
 import type { PcFeeAuthority, CommissionCalculation, InsertPcFeeCalculation, PcFeeCalculation } from "@aee/db";
 import type { RoundingAdjustment } from "./calculations.js";
+import { noteFinancialPcFeeAuthorityIsolationRejection } from "./isolationRejection.js";
 
 // AU 10% — same convention as commissionAgreements.gstRateBps's default
 // and lib/transactions.ts's own GST_RATE_BPS constant. pcFeeAuthorities
@@ -119,7 +120,10 @@ export async function createPcFeeCalculation(input: CreatePcFeeCalculationInput)
   // Deliberately identical to a nonexistent id — a foreign brokerage's
   // authority (and its confidential mandate terms) must never be
   // distinguishable from one that simply doesn't exist.
-  if (!authority) throw new Error(`PC fee authority ${input.pcFeeAuthorityId} not found.`);
+  if (!authority) {
+    await noteFinancialPcFeeAuthorityIsolationRejection(input.pcFeeAuthorityId, input.brokerageId);
+    throw new Error(`PC fee authority ${input.pcFeeAuthorityId} not found.`);
+  }
   if (authority.status !== "ACTIVE") {
     throw new Error(`PC fee authority ${input.pcFeeAuthorityId} is ${authority.status}, not ACTIVE — cannot calculate a fee against it.`);
   }

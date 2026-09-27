@@ -31,6 +31,7 @@ import { eq, and } from "drizzle-orm";
 import { db, pcFeeAuthorities, financialLedgerEvents, type PcFeeAuthority, type PcFeeBasis } from "@aee/db";
 import { FinancialControlError } from "./agreements.js";
 import { emitFinancialEvent } from "./events.js";
+import { noteFinancialPcFeeAuthorityIsolationRejection } from "./isolationRejection.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -147,6 +148,7 @@ export async function activatePcFeeAuthority(
 ): Promise<PcFeeAuthority> {
   const [authority] = await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, id));
   if (!authority || authority.brokerageId !== brokerageId) {
+    await noteFinancialPcFeeAuthorityIsolationRejection(id, brokerageId);
     throw new FinancialControlError("NOT_FOUND", `PC fee authority ${id} not found.`);
   }
   if (authority.status !== "PENDING") {
@@ -208,6 +210,7 @@ export async function activatePcFeeAuthority(
 export async function revokePcFeeAuthority(id: number, brokerageId: number, actorUserId: number, reason: string): Promise<PcFeeAuthority> {
   const [authority] = await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, id));
   if (!authority || authority.brokerageId !== brokerageId) {
+    await noteFinancialPcFeeAuthorityIsolationRejection(id, brokerageId);
     throw new FinancialControlError("NOT_FOUND", `PC fee authority ${id} not found.`);
   }
   if (authority.status !== "PENDING" && authority.status !== "ACTIVE") {
