@@ -17,10 +17,11 @@
 // before reading that table unless the flag is the literal "true".
 
 import { eq, and, asc, inArray, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../middlewares/auth.js";
 import { listBrokerageExceptions, listedExceptionTitle } from "../exceptions/queries.js";
-import { isPitCrewResponsibilityActionsEnabled, PitCrewResponsibilityDisabledError } from "./responsibility.js";
+import { explicitResponsibilityRecipientRole, isPitCrewResponsibilityActionsEnabled, PitCrewResponsibilityDisabledError } from "./responsibility.js";
 import {
   type PcWorkItem,
   type PcWorkspace,
@@ -43,6 +44,70 @@ import {
 // own involvement, not whether the underlying exception auto-resolved).
 const OPEN_EXCEPTION_STATUSES = ["OPEN", "ACKNOWLEDGED", "IN_PROGRESS", "AWAITING_EXTERNAL", "REOPENED"];
 
+// Two aliases so a responsibility read can name the operator and the
+// recipient without joining users twice under the same name. Both joins
+// require users.brokerage_id to equal the session brokerage.
+const responsibilityRecipientUser = alias(users, "pc_responsibility_recipient_user");
+const responsibilityOperatorUser = alias(users, "pc_responsibility_operator_user");
+
+/**
+ * Ceiling for GET /pit-crew/responsibility-recipients. Applied after
+ * displayName order, so a brokerage with more matching users than this
+ * returns the first 500 names. This is a picker ceiling, not a page token.
+ */
+export const RESPONSIBILITY_RECIPIENT_LIST_CAP = 500;
+
+export interface ResponsibilityRecipientOption {
+  userId: number;
+  displayName: string;
+  role: "Agent" | "Brokerage Administrator";
+}
+
+/**
+ * "First Last" when either name is non-empty. Otherwise the email local
+ * part. Otherwise "User <id>". Email itself is never returned to the client.
+ */
+export function responsibilityUserDisplayName(user: { id: number; firstName: string; lastName: string; email: string }): string {
+  const name = [user.firstName.trim(), user.lastName.trim()].filter((part) => part.length > 0).join(" ");
+  if (name.length > 0) return name;
+  const local = user.email.split("@")[0]?.trim() ?? "";
+  if (local.length > 0) return local;
+  return `User ${user.id}`;
+}
+
+export function capOrderedResponsibilityRecipients<T extends { userId: number; displayName: string }>(
+  recipients: readonly T[],
+  cap = RESPONSIBILITY_RECIPIENT_LIST_CAP,
+): T[] {
+  return [...recipients]
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, "en", { sensitivity: "base" }) || a.userId - b.userId)
+    .slice(0, cap);
+}
+
+interface JoinedUserName {
+  id: number | null;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+}
+
+function displayNameForJoinedUser(userId: number | null, joined: JoinedUserName): string | null {
+  if (userId == null) return null;
+  if (joined.id == null) return `User ${userId}`;
+  return responsibilityUserDisplayName({
+    id: joined.id,
+    firstName: joined.firstName ?? "",
+    lastName: joined.lastName ?? "",
+    email: joined.email ?? "",
+  });
+}
+
+interface LoadedOpenResponsibility {
+  event: PitCrewResponsibilityEvent;
+  operatorDisplayName: string;
+  recipientDisplayName: string | null;
+}
+
 function isSameUtcDay(a: Date, b: Date): boolean {
   return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth() && a.getUTCDate() === b.getUTCDate();
 }
@@ -54,12 +119,30 @@ function isActiveWorkspaceStatus(status: PitCrewItemStatus): boolean {
 async function loadOpenResponsibilityBySourceRecordId(
   brokerageId: number,
   overlayRows: Array<{ id: number; sourceRecordId: string }>,
-): Promise<Map<string, PitCrewResponsibilityEvent>> {
-  const bySource = new Map<string, PitCrewResponsibilityEvent>();
+): Promise<Map<string, LoadedOpenResponsibility>> {
+  const bySource = new Map<string, LoadedOpenResponsibility>();
   if (!isPitCrewResponsibilityActionsEnabled() || overlayRows.length === 0) return bySource;
   const events = await db
-    .select()
+    .select({
+      event: pitCrewResponsibilityEvents,
+      recipientId: responsibilityRecipientUser.id,
+      recipientFirstName: responsibilityRecipientUser.firstName,
+      recipientLastName: responsibilityRecipientUser.lastName,
+      recipientEmail: responsibilityRecipientUser.email,
+      operatorId: responsibilityOperatorUser.id,
+      operatorFirstName: responsibilityOperatorUser.firstName,
+      operatorLastName: responsibilityOperatorUser.lastName,
+      operatorEmail: responsibilityOperatorUser.email,
+    })
     .from(pitCrewResponsibilityEvents)
+    .leftJoin(
+      responsibilityRecipientUser,
+      and(eq(responsibilityRecipientUser.id, pitCrewResponsibilityEvents.recipientUserId), eq(responsibilityRecipientUser.brokerageId, brokerageId)),
+    )
+    .leftJoin(
+      responsibilityOperatorUser,
+      and(eq(responsibilityOperatorUser.id, pitCrewResponsibilityEvents.originatingUserId), eq(responsibilityOperatorUser.brokerageId, brokerageId)),
+    )
     .where(
       and(
         eq(pitCrewResponsibilityEvents.brokerageId, brokerageId),
@@ -70,10 +153,26 @@ async function loadOpenResponsibilityBySourceRecordId(
         inArray(pitCrewResponsibilityEvents.status, ["OPEN", "ACKNOWLEDGED"]),
       ),
     );
-  const byAssignment = new Map(events.map((event) => [event.assignmentId, event]));
+  const byAssignment = new Map(events.map((row) => [row.event.assignmentId, row]));
   for (const row of overlayRows) {
-    const event = byAssignment.get(row.id);
-    if (event) bySource.set(row.sourceRecordId, event);
+    const loaded = byAssignment.get(row.id);
+    if (!loaded) continue;
+    bySource.set(row.sourceRecordId, {
+      event: loaded.event,
+      operatorDisplayName:
+        displayNameForJoinedUser(loaded.event.originatingUserId, {
+          id: loaded.operatorId,
+          firstName: loaded.operatorFirstName,
+          lastName: loaded.operatorLastName,
+          email: loaded.operatorEmail,
+        }) ?? `User ${loaded.event.originatingUserId}`,
+      recipientDisplayName: displayNameForJoinedUser(loaded.event.recipientUserId, {
+        id: loaded.recipientId,
+        firstName: loaded.recipientFirstName,
+        lastName: loaded.recipientLastName,
+        email: loaded.recipientEmail,
+      }),
+    });
   }
   return bySource;
 }
@@ -91,10 +190,11 @@ function callerCanViewFinancials(role: string): boolean {
 
 function toResponsibilityWorkItem(
   item: PcWorkItem,
-  event: PitCrewResponsibilityEvent | undefined,
+  loaded: LoadedOpenResponsibility | undefined,
   kind: "HAND_BACK" | "ESCALATION",
 ): PcResponsibilityWorkItem | null {
-  if (!event || event.kind !== kind) return null;
+  if (!loaded || loaded.event.kind !== kind) return null;
+  const event = loaded.event;
   if (event.status !== "OPEN" && event.status !== "ACKNOWLEDGED") return null;
   return {
     ...item,
@@ -107,7 +207,9 @@ function toResponsibilityWorkItem(
       closingNote: event.closingNote,
       nextAction: event.nextAction,
       originatingUserId: event.originatingUserId,
+      operatorDisplayName: loaded.operatorDisplayName,
       recipientUserId: event.recipientUserId,
+      recipientDisplayName: loaded.recipientDisplayName,
       recipientRole: event.recipientRole,
       expectedResponseAt: event.expectedResponseAt ? event.expectedResponseAt.toISOString() : null,
       eventStatus: event.status,
@@ -315,6 +417,14 @@ export async function listResponsibilityItemsForRecipient(
       title: riskExceptions.title,
       requiresFinancialEntitlement: riskExceptions.requiresFinancialEntitlement,
       propertyAddress: properties.formattedAddress,
+      recipientId: responsibilityRecipientUser.id,
+      recipientFirstName: responsibilityRecipientUser.firstName,
+      recipientLastName: responsibilityRecipientUser.lastName,
+      recipientEmail: responsibilityRecipientUser.email,
+      operatorId: responsibilityOperatorUser.id,
+      operatorFirstName: responsibilityOperatorUser.firstName,
+      operatorLastName: responsibilityOperatorUser.lastName,
+      operatorEmail: responsibilityOperatorUser.email,
     })
     .from(pitCrewResponsibilityEvents)
     .innerJoin(pitCrewAssignments, eq(pitCrewResponsibilityEvents.assignmentId, pitCrewAssignments.id))
@@ -329,6 +439,14 @@ export async function listResponsibilityItemsForRecipient(
     .innerJoin(
       properties,
       and(eq(properties.id, pitCrewResponsibilityEvents.propertyId), eq(properties.brokerageId, brokerageId)),
+    )
+    .leftJoin(
+      responsibilityRecipientUser,
+      and(eq(responsibilityRecipientUser.id, pitCrewResponsibilityEvents.recipientUserId), eq(responsibilityRecipientUser.brokerageId, brokerageId)),
+    )
+    .leftJoin(
+      responsibilityOperatorUser,
+      and(eq(responsibilityOperatorUser.id, pitCrewResponsibilityEvents.originatingUserId), eq(responsibilityOperatorUser.brokerageId, brokerageId)),
     )
     .where(
       and(
@@ -359,7 +477,20 @@ export async function listResponsibilityItemsForRecipient(
     severity: escalationSeverity(row.event.severity),
     note: row.event.note,
     originatingUserId: row.event.originatingUserId,
+    operatorDisplayName:
+      displayNameForJoinedUser(row.event.originatingUserId, {
+        id: row.operatorId,
+        firstName: row.operatorFirstName,
+        lastName: row.operatorLastName,
+        email: row.operatorEmail,
+      }) ?? `User ${row.event.originatingUserId}`,
     recipientUserId: row.event.recipientUserId,
+    recipientDisplayName: displayNameForJoinedUser(row.event.recipientUserId, {
+      id: row.recipientId,
+      firstName: row.recipientFirstName,
+      lastName: row.recipientLastName,
+      email: row.recipientEmail,
+    }),
     recipientRole: row.event.recipientRole,
     expectedResponseAt: row.event.expectedResponseAt ? row.event.expectedResponseAt.toISOString() : null,
     eventStatus: row.event.status === "ACKNOWLEDGED" ? "ACKNOWLEDGED" : "OPEN",
@@ -370,4 +501,47 @@ export async function listResponsibilityItemsForRecipient(
   }));
 
   return { generatedAt, items };
+}
+
+export type ResponsibilityRecipientListKind = "HAND_BACK" | "ESCALATE";
+
+/**
+ * Active users in this brokerage who can be named on a hand-back or an
+ * escalation. HAND_BACK is an Agent. ESCALATE is a Brokerage Administrator.
+ * The role is explicitResponsibilityRecipientRole, the same helper
+ * resolveResponsibilityRecipient uses for an explicit recipientUserId.
+ *
+ * displayName is responsibilityUserDisplayName. The response has userId,
+ * displayName, and role only: no email, phone, or other personal fields.
+ * Order is displayName (case-insensitive), then userId. The list is capped
+ * at RESPONSIBILITY_RECIPIENT_LIST_CAP (500) after that order.
+ *
+ * Refuses before reading users when the responsibility flag is not the
+ * literal "true".
+ */
+export async function listResponsibilityRecipients(
+  brokerageId: number,
+  kind: ResponsibilityRecipientListKind,
+): Promise<{ recipients: ResponsibilityRecipientOption[] }> {
+  if (!isPitCrewResponsibilityActionsEnabled()) {
+    throw new PitCrewResponsibilityDisabledError();
+  }
+  const role = explicitResponsibilityRecipientRole(kind === "HAND_BACK" ? "HAND_BACK" : "ESCALATION");
+  const rows = await db
+    .select({
+      id: users.id,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+    })
+    .from(users)
+    .where(and(eq(users.brokerageId, brokerageId), eq(users.isActive, true), eq(users.role, role)));
+  const recipients = capOrderedResponsibilityRecipients(
+    rows.map((row) => ({
+      userId: row.id,
+      displayName: responsibilityUserDisplayName(row),
+      role,
+    })),
+  );
+  return { recipients };
 }

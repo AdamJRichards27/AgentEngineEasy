@@ -285,7 +285,9 @@ describe("listResponsibilityItemsForRecipient", { concurrency: false }, () => {
     assert.equal(own.severity, null);
     assert.equal(own.note, "Evidence is back with the agent.");
     assert.equal(own.originatingUserId, pitCrew.user.id);
+    assert.equal(own.operatorDisplayName, "Pit Crew");
     assert.equal(own.recipientUserId, agent.user.id);
+    assert.equal(own.recipientDisplayName, "Agent User");
     assert.equal(own.recipientRole, null);
     assert.equal(own.expectedResponseAt, null);
     assert.equal(own.eventStatus, "OPEN");
@@ -336,6 +338,9 @@ describe("listResponsibilityItemsForRecipient", { concurrency: false }, () => {
     assert.ok(byId(second, roleId));
     assert.equal(byId(first, roleId)?.recipientRole, "Brokerage Administrator");
     assert.equal(byId(first, roleId)?.recipientUserId, null);
+    assert.equal(byId(first, roleId)?.recipientDisplayName, null);
+    assert.equal(byId(first, roleId)?.operatorDisplayName, "Pit Crew");
+    assert.equal(byId(first, namedId)?.recipientDisplayName, "Admin User");
     assert.equal(byId(first, roleId)?.kind, "ESCALATION");
     assert.equal(byId(first, roleId)?.note, ESCALATION_NOTE);
     assert.equal(byId(first, roleId)?.nextAction, ESCALATION_NEXT);

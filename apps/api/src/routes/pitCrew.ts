@@ -24,7 +24,7 @@ import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { getPitCrewWorkspace, getPitCrewTeam, listResponsibilityItemsForRecipient } from "../lib/pitCrew/queries.js";
+import { getPitCrewWorkspace, getPitCrewTeam, listResponsibilityItemsForRecipient, listResponsibilityRecipients } from "../lib/pitCrew/queries.js";
 import { listOverdueWaitingOnDetections } from "../lib/pitCrew/waitingOnDetectionRun.js";
 import type { ResolvedPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnDetection.js";
 import { loadPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnSweepSettings.js";
@@ -152,6 +152,34 @@ pitCrewRouter.get("/pit-crew/team", requireAuth, canAccess, requiresRunAccess, a
   const team = await getPitCrewTeam(user.brokerageId);
   res.json({ team });
 });
+
+// Searchable names for the hand-back and escalate forms. GET /pit-crew/team
+// is Pit Crew members only, and GET /auth/admin/users is admin-only, so
+// neither list is the recipient set resolveResponsibilityRecipient accepts.
+// Flag first (404), then the same canAccess gate as those two POST routes.
+// Result cap is RESPONSIBILITY_RECIPIENT_LIST_CAP in queries.ts (500), after displayName order.
+const responsibilityRecipientsQuerySchema = z.object({
+  kind: z.enum(["HAND_BACK", "ESCALATE"]),
+});
+
+pitCrewRouter.get(
+  "/pit-crew/responsibility-recipients",
+  requireResponsibilityActionsEnabled,
+  requireAuth,
+  canAccess,
+  requiresRunAccess,
+  async (req, res) => {
+    const user = req.authedUser!;
+    const query = responsibilityRecipientsQuerySchema.safeParse({ kind: req.query.kind });
+    if (!query.success) return void res.status(400).json({ error: "Invalid request." });
+    try {
+      const list = await listResponsibilityRecipients(user.brokerageId, query.data.kind);
+      res.json(list);
+    } catch (err) {
+      if (!handlePitCrewError(err, res)) throw err;
+    }
+  },
+);
 
 // Recipient inbox. No query params. brokerageId, user id, and role come
 // from the session. The caller cannot name another user.
