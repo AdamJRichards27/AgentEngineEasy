@@ -33,6 +33,7 @@ const DECLARED_BOUNDARIES = new Set([
   "communications",
   "integrations",
   "pit_crew",
+  "grow",
   "other",
 ]);
 

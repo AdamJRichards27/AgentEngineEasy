@@ -38,6 +38,7 @@ import { db, parties } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { normalizePhoneNumber, PhoneNumberValidationError } from "../lib/telephony/phoneNumber.js";
+import { noteGrowPartyIsolationRejection } from "../lib/grow/isolationRejection.js";
 import {
   createCallSession,
   confirmCallSession,
@@ -215,6 +216,7 @@ growCallsRouter.get("/contacts/:partyId/eligibility", requireEntitlement("grow.c
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, authedUser.brokerageId)))
     .limit(1);
   if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, authedUser.brokerageId);
     res.status(404).json({ error: "Contact not found." });
     return;
   }

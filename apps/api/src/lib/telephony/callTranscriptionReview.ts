@@ -13,6 +13,10 @@ import {
 } from "@aee/db";
 import { hasEntitlement } from "../entitlements/resolver.js";
 import {
+  noteGrowCallTranscriptionIsolationRejection,
+  noteGrowPartyIsolationRejection,
+} from "../grow/isolationRejection.js";
+import {
   assertCallSessionActorAuthorized,
   getCallSessionForBrokerage,
   GrowCallSessionAuthorizationError,
@@ -211,7 +215,10 @@ async function loadReviewRow(
     eq(growCallTranscriptions.callSessionId, callSessionId),
     eq(growCallTranscriptions.brokerageId, brokerageId),
   )).limit(1);
-  if (!row) throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+  if (!row) {
+    await noteGrowCallTranscriptionIsolationRejection(transcriptionId, brokerageId);
+    throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+  }
   if (session.partyId !== row.partyId) {
     throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription source does not belong to this call.");
   }
@@ -219,7 +226,10 @@ async function loadReviewRow(
     eq(parties.id, row.partyId),
     eq(parties.brokerageId, brokerageId),
   )).limit(1);
-  if (!party) throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription contact is not in this brokerage.");
+  if (!party) {
+    await noteGrowPartyIsolationRejection(row.partyId, brokerageId);
+    throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription contact is not in this brokerage.");
+  }
   const unavailable = await sourceLedgerStatus(db, row);
   if (unavailable) {
     if (readOnly) return unavailableReadProjection(row, unavailable);
@@ -402,7 +412,10 @@ export async function saveCallTranscriptionReview(input: {
       eq(growCallTranscriptions.callSessionId, input.callSessionId),
       eq(growCallTranscriptions.brokerageId, input.brokerageId),
     )).for("update");
-    if (!locked) throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+    if (!locked) {
+      await noteGrowCallTranscriptionIsolationRejection(input.transcriptionId, input.brokerageId);
+      throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+    }
     await assertSourceLedger(tx, locked, true);
     assertMutable(locked);
     validateReviewState(locked, items);
@@ -462,7 +475,10 @@ export async function discardCallTranscription(input: {
       eq(growCallTranscriptions.callSessionId, input.callSessionId),
       eq(growCallTranscriptions.brokerageId, input.brokerageId),
     )).for("update");
-    if (!locked) throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+    if (!locked) {
+      await noteGrowCallTranscriptionIsolationRejection(input.transcriptionId, input.brokerageId);
+      throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+    }
     await assertSourceLedger(tx, locked, true);
     assertMutable(locked);
     const [updated] = await tx.update(growCallTranscriptions).set({ processingState: "DISCARDED", updatedAt: new Date() })

@@ -19,6 +19,10 @@ import type {
 import { logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 import {
+  noteGrowComparableSaleIsolationRejection,
+  noteGrowMarketCompetitionIsolationRejection,
+} from "./grow/isolationRejection.js";
+import {
   assertAppraisalInBrokerage,
   getAppraisalWorkspace,
   transitionAppraisalStatus,
@@ -523,7 +527,10 @@ export async function updateComparableSale(
     .set({ ...input, updatedAt: new Date() })
     .where(and(eq(appraisalComparableSales.id, saleId), eq(appraisalComparableSales.appraisalId, appraisalId)))
     .returning();
-  if (!row) throw new AppraisalAccessError("Comparable sale not found.");
+  if (!row) {
+    await noteGrowComparableSaleIsolationRejection(saleId, brokerageId);
+    throw new AppraisalAccessError("Comparable sale not found.");
+  }
   return row;
 }
 
@@ -559,7 +566,10 @@ export async function updateMarketCompetitionItem(
     .set({ ...input, updatedAt: new Date() })
     .where(and(eq(appraisalMarketCompetition.id, itemId), eq(appraisalMarketCompetition.appraisalId, appraisalId)))
     .returning();
-  if (!row) throw new AppraisalAccessError("Market competition entry not found.");
+  if (!row) {
+    await noteGrowMarketCompetitionIsolationRejection(itemId, brokerageId);
+    throw new AppraisalAccessError("Market competition entry not found.");
+  }
   return row;
 }
 

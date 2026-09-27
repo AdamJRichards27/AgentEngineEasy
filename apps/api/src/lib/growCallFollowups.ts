@@ -72,6 +72,10 @@ import {
   GrowCallSessionAuthorizationError,
   GrowCallSessionNotFoundError,
 } from "./telephony/callSessions.js";
+import {
+  noteGrowCallTranscriptionIsolationRejection,
+  noteGrowPartyIsolationRejection,
+} from "./grow/isolationRejection.js";
 
 export const GROW_CALL_FOLLOWUP_ACTION_KEY = "CREATE_GROW_COMMITMENT";
 export const MAX_FOLLOWUP_PROPOSALS_PER_REQUEST = 20;
@@ -246,13 +250,17 @@ async function loadFollowupSource(input: {
     eq(growCallTranscriptions.brokerageId, input.brokerageId),
   )).limit(1);
   if (!transcription || transcription.partyId !== session.partyId) {
+    if (!transcription) await noteGrowCallTranscriptionIsolationRejection(input.transcriptionId, input.brokerageId);
     throw new GrowCallFollowupError("NOT_FOUND", "Transcription not found.");
   }
   const [party] = await db.select({ id: parties.id }).from(parties).where(and(
     eq(parties.id, transcription.partyId),
     eq(parties.brokerageId, input.brokerageId),
   )).limit(1);
-  if (!party) throw new GrowCallFollowupError("NOT_FOUND", "Transcription contact is not in this brokerage.");
+  if (!party) {
+    await noteGrowPartyIsolationRejection(transcription.partyId, input.brokerageId);
+    throw new GrowCallFollowupError("NOT_FOUND", "Transcription contact is not in this brokerage.");
+  }
 
   if ((transcription.processingState !== "APPROVED" && transcription.processingState !== "PARTIALLY_APPROVED") ||
       transcription.approvedBy === null || transcription.approvedAt === null) {
