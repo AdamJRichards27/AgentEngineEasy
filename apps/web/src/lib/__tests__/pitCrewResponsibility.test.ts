@@ -11,6 +11,7 @@ import {
   canAcknowledgeEscalation,
   canResolveOrReturnEscalation,
   escalatePcItem,
+  fetchResponsibilityRecipients,
   handBackPcItem,
   isPitCrewActiveActionStatus,
   pitCrewResponsibilityActionError,
@@ -107,6 +108,19 @@ const mutationResponse = {
     updatedAt: "2026-09-27T00:00:00.000Z",
   },
 };
+
+test("fetchResponsibilityRecipients requests one kind and does not expect contact fields", async () => {
+  const { result, call } = await capture(
+    200,
+    { recipients: [{ userId: 7, displayName: "Amy Agent", role: "Agent" }] },
+    () => fetchResponsibilityRecipients("ESCALATE"),
+  );
+  assert.equal(call.url, "/api/pit-crew/responsibility-recipients?kind=ESCALATE");
+  assert.equal(call.init?.method, undefined);
+  assert.equal(result.recipients[0]?.displayName, "Amy Agent");
+  assert.equal(result.recipients[0]?.userId, 7);
+  assert.equal("email" in (result.recipients[0] ?? {}), false);
+});
 
 test("reason and severity lists mirror packages/db/src/schema/pitCrew.ts", () => {
   const schema = readFileSync(new URL("../../../../../packages/db/src/schema/pitCrew.ts", import.meta.url), "utf8");

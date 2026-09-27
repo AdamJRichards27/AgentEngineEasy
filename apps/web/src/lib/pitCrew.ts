@@ -155,7 +155,9 @@ export interface PcOpenResponsibility {
   closingNote: string | null;
   nextAction: string;
   originatingUserId: number;
+  operatorDisplayName: string | null;
   recipientUserId: number | null;
+  recipientDisplayName: string | null;
   recipientRole: string | null;
   expectedResponseAt: string | null;
   eventStatus: "OPEN" | "ACKNOWLEDGED";
@@ -203,6 +205,28 @@ export function fetchPitCrewWorkspace(): Promise<PcWorkspace> {
 export function fetchPitCrewTeam(): Promise<PcTeamMember[]> {
   return apiFetch<PcTeamMember[]>("/pit-crew/team");
 }
+
+// HAND_BACK lists active Agents. ESCALATE lists active Brokerage
+// Administrators. Same split as resolveResponsibilityRecipient.
+export type PcResponsibilityRecipientKind = "HAND_BACK" | "ESCALATE";
+
+export interface PcResponsibilityRecipient {
+  userId: number;
+  displayName: string;
+  role: string;
+}
+
+export interface PcResponsibilityRecipientList {
+  recipients: PcResponsibilityRecipient[];
+}
+
+export function fetchResponsibilityRecipients(kind: PcResponsibilityRecipientKind): Promise<PcResponsibilityRecipientList> {
+  return apiFetch<PcResponsibilityRecipientList>(`/pit-crew/responsibility-recipients?kind=${encodeURIComponent(kind)}`);
+}
+
+// Shown on the hand-back and escalate forms when the recipient list cannot
+// be loaded. The form can still be submitted with the default recipient.
+export const PIT_CREW_RECIPIENTS_UNAVAILABLE_MESSAGE = "Recipients couldn't be loaded. You can still submit with the default recipient.";
 
 export interface PcMutationBase {
   sourceType: string;

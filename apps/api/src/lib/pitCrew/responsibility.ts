@@ -196,6 +196,15 @@ async function loadBrokerageUser(
   return user;
 }
 
+/**
+ * Role an explicit recipient must already have. Hand-back accepts an active
+ * Agent. Escalation accepts an active Brokerage Administrator. The recipient
+ * picker reads this same helper so its list cannot drift from this resolver.
+ */
+export function explicitResponsibilityRecipientRole(kind: "HAND_BACK" | "ESCALATION"): "Agent" | "Brokerage Administrator" {
+  return kind === "HAND_BACK" ? "Agent" : "Brokerage Administrator";
+}
+
 async function assertActiveRole(userId: number, brokerageId: number, role: "Agent" | "Brokerage Administrator"): Promise<void> {
   const user = await loadBrokerageUser(userId, brokerageId);
   const label = role === "Agent" ? "an active Agent" : "an active Brokerage Administrator";
@@ -227,11 +236,7 @@ export async function resolveResponsibilityRecipient(input: {
 
   if (input.recipientUserId != null) {
     await assertUserInBrokerage(input.recipientUserId, input.brokerageId);
-    if (input.kind === "HAND_BACK") {
-      await assertActiveRole(input.recipientUserId, input.brokerageId, "Agent");
-    } else {
-      await assertActiveRole(input.recipientUserId, input.brokerageId, "Brokerage Administrator");
-    }
+    await assertActiveRole(input.recipientUserId, input.brokerageId, explicitResponsibilityRecipientRole(input.kind));
     return { recipientUserId: input.recipientUserId, recipientRole: null, routingRuleId: null };
   }
 
@@ -243,7 +248,7 @@ export async function resolveResponsibilityRecipient(input: {
       .limit(1);
     if (!property) throw new PitCrewPropertyMismatchError();
     await assertUserInBrokerage(property.agentId, input.brokerageId);
-    await assertActiveRole(property.agentId, input.brokerageId, "Agent");
+    await assertActiveRole(property.agentId, input.brokerageId, explicitResponsibilityRecipientRole("HAND_BACK"));
     return { recipientUserId: property.agentId, recipientRole: null, routingRuleId: null };
   }
 

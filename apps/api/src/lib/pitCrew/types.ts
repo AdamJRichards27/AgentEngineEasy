@@ -113,7 +113,13 @@ export interface PcOpenResponsibility {
   closingNote: string | null;
   nextAction: string;
   originatingUserId: number;
+  // Brokerage-scoped name for originatingUserId. "User <id>" when that user
+  // is not in this brokerage. Email is not included.
+  operatorDisplayName: string;
   recipientUserId: number | null;
+  // Null when the recipient is a role. Otherwise the brokerage-scoped name,
+  // or "User <id>" when the user row is outside this brokerage.
+  recipientDisplayName: string | null;
   recipientRole: string | null;
   expectedResponseAt: string | null;
   eventStatus: "OPEN" | "ACKNOWLEDGED";
@@ -156,7 +162,9 @@ export interface ResponsibilityInboxItem {
   severity: "ATTENTION" | "AT_RISK" | "CRITICAL" | null;
   note: string | null;
   originatingUserId: number;
+  operatorDisplayName: string;
   recipientUserId: number | null;
+  recipientDisplayName: string | null;
   recipientRole: string | null;
   expectedResponseAt: string | null;
   eventStatus: "OPEN" | "ACKNOWLEDGED";

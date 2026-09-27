@@ -847,6 +847,8 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.ok(handedItem);
     assert.equal(handedItem?.responsibility.reasonCategory, "NEXT_ACTION_WITH_AGENT");
     assert.equal(handedItem?.responsibility.recipientUserId, agent.user.id);
+    assert.equal(handedItem?.responsibility.recipientDisplayName, "Agent User");
+    assert.equal(handedItem?.responsibility.operatorDisplayName, "Pit Crew");
     assert.equal(handedItem?.responsibility.nextAction, "Confirm the launch evidence.");
     assert.equal(handedItem?.responsibility.severity, null);
     assert.equal(handedItem?.responsibility.closingNote, null);
@@ -858,6 +860,8 @@ describe("pit crew responsibility actions", { concurrency: false }, () => {
     assert.equal(escalatedItem?.responsibility.note, "The offer file is incomplete.");
     assert.equal(escalatedItem?.responsibility.closingNote, null);
     assert.equal(escalatedItem?.responsibility.recipientRole, "Brokerage Administrator");
+    assert.equal(escalatedItem?.responsibility.recipientDisplayName, null);
+    assert.equal(escalatedItem?.responsibility.operatorDisplayName, "Pit Crew");
     assert.equal(escalatedItem?.responsibility.nextAction, "Decide whether the brokerage will chase the missing offer document.");
     assert.equal(escalatedItem?.responsibility.expectedResponseAt, "2026-10-03T00:00:00.000Z");
     assert.equal(escalatedItem?.assignedToUserId, pitCrew.user.id);

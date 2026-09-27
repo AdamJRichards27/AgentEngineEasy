@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { PIT_CREW_RESPONSIBILITY_UNAVAILABLE_MESSAGE } from "../pitCrew.ts";
+import { PIT_CREW_RECIPIENTS_UNAVAILABLE_MESSAGE, PIT_CREW_RESPONSIBILITY_UNAVAILABLE_MESSAGE } from "../pitCrew.ts";
 
 // R-F16 PR 5 — the Pit Crew page renders hand-back and escalate controls
 // only after GET /pit-crew/responsibility-inbox returns 200. These tests
@@ -124,6 +124,9 @@ const virtualMocks: Plugin = {
         });
         export const useQuery = (options) => {
           const key = JSON.stringify(options.queryKey);
+          if (Array.isArray(globalThis.__pcQueryCalls)) {
+            globalThis.__pcQueryCalls.push({ queryKey: options.queryKey, enabled: options.enabled !== false });
+          }
           const table = globalThis.__pcQueries || {};
           if (Object.prototype.hasOwnProperty.call(table, key)) return table[key];
           return { isLoading: false, isError: false, data: undefined, error: null };
@@ -229,7 +232,9 @@ const handedResponsibility = {
   closingNote: null,
   nextAction: "UNIQUE_HANDED_NEXT_ACTION",
   originatingUserId: 9,
+  operatorDisplayName: "Pat Crew",
   recipientUserId: 42,
+  recipientDisplayName: "Alex Agent",
   recipientRole: null,
   expectedResponseAt: null,
   eventStatus: "OPEN",
@@ -244,7 +249,9 @@ const escalatedResponsibility = {
   closingNote: null,
   nextAction: "UNIQUE_ESCALATED_NEXT_ACTION",
   originatingUserId: 9,
+  operatorDisplayName: "Pat Crew",
   recipientUserId: null,
+  recipientDisplayName: null,
   recipientRole: "Brokerage Administrator",
   expectedResponseAt: "2026-10-03T00:00:00.000Z",
   eventStatus: "OPEN",
@@ -318,6 +325,7 @@ function install(user: { id: number; role: string }, data: unknown, visible: boo
     __pcPending: pending,
     __pcInvalidated: invalidated,
     __pcQueries: queries(data, visible),
+    __pcQueryCalls: [] as Array<{ queryKey: unknown; enabled: boolean }>,
     __pcUser: user,
   });
   const render = () => {
@@ -328,7 +336,7 @@ function install(user: { id: number; role: string }, data: unknown, visible: boo
 }
 
 function clearGlobals() {
-  for (const key of ["__pcHooks", "__pcPending", "__pcInvalidated", "__pcQueries", "__pcUser"]) {
+  for (const key of ["__pcHooks", "__pcPending", "__pcInvalidated", "__pcQueries", "__pcQueryCalls", "__pcUser"]) {
     delete (globalThis as Record<string, unknown>)[key];
   }
 }
@@ -347,6 +355,9 @@ test("responsibility controls render nothing when the inbox probe is off or stil
       tree = render();
       assert.equal(buttonsExact(tree, "Hand back…").length, 0);
       assert.equal(buttonsExact(tree, "Escalate…").length, 0);
+      assert.equal(field(tree, "handBackRecipientSearch"), undefined);
+      assert.equal(field(tree, "escalateRecipientSearch"), undefined);
+      assert.equal(textContent(tree).includes("Property's agent (default)"), false);
       assert.equal(buttonExact(tree, "Reclaim"), undefined);
       assert.equal(buttonExact(tree, "Acknowledge…"), undefined);
       assert.equal(textContent(tree).includes("UNIQUE_HANDED_NEXT_ACTION"), false);
@@ -392,7 +403,8 @@ test("handed-back and escalated lists show the event, and only a valid responder
     const handed = textContent(tree);
     assert.match(handed, /Reason: Work complete/);
     assert.match(handed, /Next action: UNIQUE_HANDED_NEXT_ACTION/);
-    assert.match(handed, /Recipient user 42/);
+    assert.match(handed, /Recipient: Alex Agent/);
+    assert.equal(handed.includes("Recipient user 42"), false);
     assert.ok(buttonExact(tree, "Reclaim"));
     assert.equal(buttonExact(tree, "Hand back…"), undefined);
     assert.equal(buttonExact(tree, "Escalate…"), undefined);
@@ -449,10 +461,108 @@ async function submit(tree: unknown, pending: Promise<unknown>[]) {
   await Promise.all(pending);
 }
 
+const HAND_BACK_RECIPIENTS = [
+  { userId: 42, displayName: "Zoe Agent", role: "Agent" },
+  { userId: 7, displayName: "Amy Agent", role: "Agent" },
+];
+
+function stubRecipients(kind: "HAND_BACK" | "ESCALATE", recipients: Array<{ userId: number; displayName: string; role: string }>, failed = false) {
+  const queries = (globalThis as { __pcQueries?: Record<string, unknown> }).__pcQueries;
+  if (!queries) throw new Error("missing query table");
+  queries[JSON.stringify(["pit-crew-responsibility-recipients", kind])] = failed
+    ? { isLoading: false, isError: true, data: undefined, error: new Error("unavailable") }
+    : { isLoading: false, isError: false, data: { recipients }, error: null };
+}
+
+function recipientQueryEnabled(kind: "HAND_BACK" | "ESCALATE"): boolean[] {
+  const calls = (globalThis as { __pcQueryCalls?: Array<{ queryKey: unknown; enabled: boolean }> }).__pcQueryCalls ?? [];
+  return calls.filter((call) => JSON.stringify(call.queryKey) === JSON.stringify(["pit-crew-responsibility-recipients", kind])).map((call) => call.enabled);
+}
+
+test("the recipient picker filters by name, sends the selected id, and omits the default", async () => {
+  const original = globalThis.fetch;
+  const calls = stubFetch(200, { id: 1, version: 4, responsibilityEvent: { closingNote: null } });
+  const { render, pending } = install(pitCrew, workspace(), true);
+  stubRecipients("HAND_BACK", HAND_BACK_RECIPIENTS);
+  try {
+    let tree = render();
+    click(tabButton(tree, "My Work"));
+    tree = render();
+    assert.deepEqual(recipientQueryEnabled("HAND_BACK"), [false, false, false]);
+    click(buttonExact(tree, "Hand back…"));
+    tree = render();
+    assert.equal(recipientQueryEnabled("HAND_BACK").includes(true), true);
+    assert.ok(buttonExact(tree, "Property's agent (default)"));
+    assert.ok(buttonExact(tree, "Amy Agent · Agent"));
+    assert.ok(buttonExact(tree, "Zoe Agent · Agent"));
+    change(field(tree, "handBackRecipientSearch"), "amy");
+    tree = render();
+    assert.ok(buttonExact(tree, "Amy Agent · Agent"));
+    assert.equal(buttonExact(tree, "Zoe Agent · Agent"), undefined);
+    click(buttonExact(tree, "Amy Agent · Agent"));
+    tree = render();
+    assert.match(textContent(tree), /Selected: Amy Agent · Agent/);
+    click(buttonExact(tree, "Property's agent (default)"));
+    tree = render();
+    change(field(tree, "reasonCategory"), "WORK_COMPLETE");
+    tree = render();
+    change(field(tree, "nextAction"), "Review the returned evidence.");
+    tree = render();
+    await submit(tree, pending);
+    assert.equal("recipientUserId" in (calls[0]?.body ?? {}), false);
+
+    click(buttonExact(tree, "Hand back…"));
+    tree = render();
+    change(field(tree, "handBackRecipientSearch"), "");
+    tree = render();
+    click(buttonExact(tree, "Zoe Agent · Agent"));
+    tree = render();
+    change(field(tree, "reasonCategory"), "WORK_COMPLETE");
+    tree = render();
+    change(field(tree, "nextAction"), "Review the returned evidence.");
+    tree = render();
+    await submit(tree, pending);
+    assert.equal(calls[1]?.body.recipientUserId, 42);
+  } finally {
+    globalThis.fetch = original;
+    clearGlobals();
+  }
+});
+
+test("a failed recipient list still submits the default recipient", async () => {
+  const original = globalThis.fetch;
+  const calls = stubFetch(200, { id: 1, version: 4, responsibilityEvent: { closingNote: null } });
+  const { render, pending } = install(pitCrew, workspace(), true);
+  stubRecipients("ESCALATE", [], true);
+  try {
+    let tree = render();
+    click(tabButton(tree, "My Work"));
+    tree = render();
+    click(buttonExact(tree, "Escalate…"));
+    tree = render();
+    assert.match(textContent(tree), new RegExp(PIT_CREW_RECIPIENTS_UNAVAILABLE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.ok(buttonExact(tree, "Any Brokerage Administrator (default)"));
+    change(field(tree, "reasonCategory"), "MISSING_AUTHORITY");
+    tree = render();
+    change(field(tree, "severity"), "ATTENTION");
+    tree = render();
+    change(field(tree, "note"), "Outside authority.");
+    tree = render();
+    change(field(tree, "nextAction"), "Decide the next step.");
+    tree = render();
+    await submit(tree, pending);
+    assert.equal("recipientUserId" in (calls[0]?.body ?? {}), false);
+  } finally {
+    globalThis.fetch = original;
+    clearGlobals();
+  }
+});
+
 test("hand back, escalate, reclaim, and resolve submit the loaded version and the route body", async () => {
   const original = globalThis.fetch;
   const calls = stubFetch(200, { id: 1, version: 4, responsibilityEvent: { closingNote: null } });
   const { render, pending, invalidated } = install(pitCrew, workspace(), true);
+  stubRecipients("HAND_BACK", HAND_BACK_RECIPIENTS);
   try {
     let tree = render();
     click(tabButton(tree, "My Work"));
@@ -463,7 +573,7 @@ test("hand back, escalate, reclaim, and resolve submit the loaded version and th
     tree = render();
     change(field(tree, "nextAction"), "Review the returned evidence.");
     tree = render();
-    change(field(tree, "recipientUserId"), "42");
+    click(buttonExact(tree, "Zoe Agent · Agent"));
     tree = render();
     await submit(tree, pending);
     assert.equal(calls[0]?.url, "/api/pit-crew/items/EXCEPTION/claimed-item/hand-back");

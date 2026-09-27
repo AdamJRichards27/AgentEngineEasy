@@ -26,12 +26,14 @@ import {
   completePcItem,
   escalatePcItem,
   fetchPitCrewWorkspace,
+  fetchResponsibilityRecipients,
   handBackPcItem,
   handoffPcItem,
   isPitCrewActiveActionStatus,
   PIT_CREW_ESCALATION_REASON_CATEGORIES,
   PIT_CREW_ESCALATION_SEVERITIES,
   PIT_CREW_HAND_BACK_REASON_CATEGORIES,
+  PIT_CREW_RECIPIENTS_UNAVAILABLE_MESSAGE,
   pitCrewReasonLabel,
   pitCrewResponsibilityActionError,
   pitCrewResponsibilityActionsVisible,
@@ -47,6 +49,8 @@ import {
   startPcItem,
   type PcMutationBase,
   type PcOpenResponsibility,
+  type PcResponsibilityRecipient,
+  type PcResponsibilityRecipientKind,
   type PcResponsibilityWorkItem,
   type PcTeamMember,
   type PcWorkItem,
@@ -146,12 +150,18 @@ interface PcItemActions {
 
 type PcCardItem = PcWorkItem & { responsibility?: PcOpenResponsibility };
 
-function readOptionalUserId(value: string): { ok: true; id?: number } | { ok: false } {
-  const trimmed = value.trim();
-  if (!trimmed) return { ok: true };
-  const parsed = Number(trimmed);
-  if (!Number.isInteger(parsed) || parsed <= 0) return { ok: false };
-  return { ok: true, id: parsed };
+function selectedRecipientId(value: string): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+function responsibilityRecipientLabel(responsibility: PcOpenResponsibility): string | null {
+  if (responsibility.recipientRole) return responsibility.recipientRole;
+  if (responsibility.recipientUserId == null) return null;
+  const name = responsibility.recipientDisplayName?.trim();
+  return name && name.length > 0 ? name : `User ${responsibility.recipientUserId}`;
 }
 
 function expectedResponseIso(value: string): string | undefined {
@@ -414,6 +424,66 @@ export default function PitCrewCommandCentre() {
   );
 }
 
+function ResponsibilityRecipientPicker({
+  kind,
+  emptyLabel,
+  filter,
+  onFilter,
+  selectedUserId,
+  onSelect,
+  recipients,
+  loadError,
+}: {
+  kind: PcResponsibilityRecipientKind;
+  emptyLabel: string;
+  filter: string;
+  onFilter: (value: string) => void;
+  selectedUserId: string;
+  onSelect: (userId: string) => void;
+  recipients: PcResponsibilityRecipient[];
+  loadError: boolean;
+}) {
+  const needle = filter.trim().toLowerCase();
+  const visible = recipients.filter((recipient) => recipient.displayName.toLowerCase().includes(needle));
+  const selected = recipients.find((recipient) => String(recipient.userId) === selectedUserId);
+  const searchName = kind === "HAND_BACK" ? "handBackRecipientSearch" : "escalateRecipientSearch";
+  return (
+    <div className="pc-recipient-picker">
+      <input
+        name={searchName}
+        aria-label={kind === "HAND_BACK" ? "Search hand-back recipients" : "Search escalation recipients"}
+        placeholder="Search by name"
+        value={filter}
+        onChange={(e) => onFilter(e.target.value)}
+        autoComplete="off"
+      />
+      {loadError && <p className="muted">{PIT_CREW_RECIPIENTS_UNAVAILABLE_MESSAGE}</p>}
+      {selected && (
+        <p className="muted">
+          Selected: {selected.displayName} · {selected.role}
+        </p>
+      )}
+      <div className="pc-recipient-options" role="listbox" aria-label={emptyLabel}>
+        <button type="button" className="btn btn-secondary btn-small" aria-pressed={selectedUserId === ""} onClick={() => onSelect("")}>
+          {emptyLabel}
+        </button>
+        {visible.map((recipient) => (
+          <button
+            key={recipient.userId}
+            type="button"
+            role="option"
+            className="btn btn-secondary btn-small"
+            aria-pressed={selectedUserId === String(recipient.userId)}
+            onClick={() => onSelect(String(recipient.userId))}
+          >
+            {recipient.displayName} · {recipient.role}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StatTile({ label, value }: { label: string; value: number }) {
   return (
     <div className="stat-tile">
@@ -463,15 +533,34 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
   const [handBackNextAction, setHandBackNextAction] = useState("");
   const [handBackNote, setHandBackNote] = useState("");
   const [handBackRecipient, setHandBackRecipient] = useState("");
+  const [handBackRecipientFilter, setHandBackRecipientFilter] = useState("");
   const [escalateReason, setEscalateReason] = useState<PitCrewEscalationReasonCategory | "">("");
   const [escalateSeverity, setEscalateSeverity] = useState<PitCrewEscalationSeverity | "">("");
   const [escalateNote, setEscalateNote] = useState("");
   const [escalateNextAction, setEscalateNextAction] = useState("");
   const [escalateRecipient, setEscalateRecipient] = useState("");
+  const [escalateRecipientFilter, setEscalateRecipientFilter] = useState("");
   const [escalateExpectedResponse, setEscalateExpectedResponse] = useState("");
   const [acknowledgeNote, setAcknowledgeNote] = useState("");
   const [resolveNote, setResolveNote] = useState("");
   const [returnEscalationNote, setReturnEscalationNote] = useState("");
+
+  // Loaded when this card opens the form. The query key is the per-kind
+  // cache for the page session, so another card or a reopened form reuses it.
+  const handBackRecipients = useQuery({
+    queryKey: ["pit-crew-responsibility-recipients", "HAND_BACK"],
+    queryFn: () => fetchResponsibilityRecipients("HAND_BACK"),
+    enabled: responsibilityActionsVisible && openForm === "handBack",
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const escalateRecipients = useQuery({
+    queryKey: ["pit-crew-responsibility-recipients", "ESCALATE"],
+    queryFn: () => fetchResponsibilityRecipients("ESCALATE"),
+    enabled: responsibilityActionsVisible && openForm === "escalate",
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
 
   const isMine = item.assignedToUserId === currentUserId;
   const actor = { id: currentUserId, role: currentUserRole };
@@ -539,10 +628,7 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
           {item.responsibility.expectedResponseAt && (
             <p>Expected response: {formatDueDate(item.responsibility.expectedResponseAt)}</p>
           )}
-          {item.responsibility.recipientRole && <p>Recipient: {item.responsibility.recipientRole}</p>}
-          {item.responsibility.recipientUserId != null && !item.responsibility.recipientRole && (
-            <p>Recipient user {item.responsibility.recipientUserId}</p>
-          )}
+          {responsibilityRecipientLabel(item.responsibility) && <p>Recipient: {responsibilityRecipientLabel(item.responsibility)}</p>}
           {item.responsibility.note && <p>Note: {item.responsibility.note}</p>}
         </div>
       )}
@@ -752,14 +838,13 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
           onSubmit={(e) => {
             e.preventDefault();
             const nextAction = handBackNextAction.trim();
-            const recipient = readOptionalUserId(handBackRecipient);
-            if (!handBackReason || !nextAction || !recipient.ok) return;
+            if (!handBackReason || !nextAction) return;
             actions.handBack({
               ...base,
               reasonCategory: handBackReason,
               nextAction,
               note: handBackNote.trim() || undefined,
-              recipientUserId: recipient.id,
+              recipientUserId: selectedRecipientId(handBackRecipient),
             });
             setOpenForm(null);
           }}
@@ -790,11 +875,15 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
             value={handBackNote}
             onChange={(e) => setHandBackNote(e.target.value)}
           />
-          <input
-            name="recipientUserId"
-            placeholder="Recipient user id (optional)"
-            value={handBackRecipient}
-            onChange={(e) => setHandBackRecipient(e.target.value)}
+          <ResponsibilityRecipientPicker
+            kind="HAND_BACK"
+            emptyLabel="Property's agent (default)"
+            filter={handBackRecipientFilter}
+            onFilter={setHandBackRecipientFilter}
+            selectedUserId={handBackRecipient}
+            onSelect={setHandBackRecipient}
+            recipients={handBackRecipients.data?.recipients ?? []}
+            loadError={handBackRecipients.isError}
           />
           <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
             Hand back
@@ -809,9 +898,8 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
             e.preventDefault();
             const note = escalateNote.trim();
             const nextAction = escalateNextAction.trim();
-            const recipient = readOptionalUserId(escalateRecipient);
             const expectedResponseAt = expectedResponseIso(escalateExpectedResponse);
-            if (!escalateReason || !escalateSeverity || !note || !nextAction || !recipient.ok) return;
+            if (!escalateReason || !escalateSeverity || !note || !nextAction) return;
             if (expectedResponseRequired && !expectedResponseAt) return;
             actions.escalate({
               ...base,
@@ -819,7 +907,7 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
               severity: escalateSeverity,
               note,
               nextAction,
-              recipientUserId: recipient.id,
+              recipientUserId: selectedRecipientId(escalateRecipient),
               expectedResponseAt,
             });
             setOpenForm(null);
@@ -859,11 +947,15 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
             onChange={(e) => setEscalateNextAction(e.target.value)}
             required
           />
-          <input
-            name="recipientUserId"
-            placeholder="Recipient user id (optional)"
-            value={escalateRecipient}
-            onChange={(e) => setEscalateRecipient(e.target.value)}
+          <ResponsibilityRecipientPicker
+            kind="ESCALATE"
+            emptyLabel="Any Brokerage Administrator (default)"
+            filter={escalateRecipientFilter}
+            onFilter={setEscalateRecipientFilter}
+            selectedUserId={escalateRecipient}
+            onSelect={setEscalateRecipient}
+            recipients={escalateRecipients.data?.recipients ?? []}
+            loadError={escalateRecipients.isError}
           />
           <input
             name="expectedResponseAt"
