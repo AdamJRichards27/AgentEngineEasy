@@ -24,8 +24,31 @@ export interface RedactedRiskException extends Omit<RiskException, "resolutionEv
 // returning the row at all to a viewer without financial visibility
 // (Build Instructions §20: "must stay hidden unless ... evidence is
 // authoritative" — the safest reading of "hidden" for free-text fields).
+// There is no substitute title string in this read.
+function hidesFromNonFinancialViewer(
+  row: { requiresFinancialEntitlement: boolean },
+  canViewFinancials: boolean,
+): boolean {
+  return row.requiresFinancialEntitlement && !canViewFinancials;
+}
+
+/**
+ * Title `listBrokerageExceptions` contributes for this row.
+ * When `canViewFinancials` is false and the row requires financial
+ * entitlement, `redact()` drops the row, so this returns null. It does
+ * not invent a placeholder. Callers that still list another record (the
+ * Pit Crew responsibility inbox) copy this result instead of the raw title.
+ */
+export function listedExceptionTitle(
+  row: { title: string; requiresFinancialEntitlement: boolean },
+  canViewFinancials: boolean,
+): string | null {
+  if (hidesFromNonFinancialViewer(row, canViewFinancials)) return null;
+  return row.title;
+}
+
 function redact(row: RiskException, canViewFinancials: boolean): RedactedRiskException | null {
-  if (row.requiresFinancialEntitlement && !canViewFinancials) return null;
+  if (hidesFromNonFinancialViewer(row, canViewFinancials)) return null;
   return { ...row, redacted: false };
 }
 

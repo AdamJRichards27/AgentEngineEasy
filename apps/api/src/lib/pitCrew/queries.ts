@@ -12,11 +12,15 @@
 // read does not query pit_crew_responsibility_events. When the flag is on,
 // handedBack and escalated join the open event for reason, recipient,
 // next action, severity, and expected response.
+//
+// listResponsibilityItemsForRecipient is the recipient inbox. It refuses
+// before reading that table unless the flag is the literal "true".
 
-import { eq, and, inArray } from "drizzle-orm";
-import { db, pitCrewAssignments, pitCrewResponsibilityEvents, users, type PitCrewResponsibilityEvent } from "@aee/db";
-import { listBrokerageExceptions } from "../exceptions/queries.js";
-import { isPitCrewResponsibilityActionsEnabled } from "./responsibility.js";
+import { eq, and, asc, inArray, or, sql } from "drizzle-orm";
+import { db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
+import { BROKERAGE_ADMIN_ROLES } from "../../middlewares/auth.js";
+import { listBrokerageExceptions, listedExceptionTitle } from "../exceptions/queries.js";
+import { isPitCrewResponsibilityActionsEnabled, PitCrewResponsibilityDisabledError } from "./responsibility.js";
 import {
   type PcWorkItem,
   type PcWorkspace,
@@ -24,6 +28,8 @@ import {
   type PcResponsibilityWorkItem,
   type PcOpenResponsibility,
   type PitCrewItemStatus,
+  type ResponsibilityInbox,
+  type ResponsibilityInboxItem,
   isPitCrewRelevantOwnerType,
   comparePcWorkItems,
   LAUNCH_COORDINATION_CATEGORIES,
@@ -75,6 +81,12 @@ async function loadOpenResponsibilityBySourceRecordId(
 function escalationSeverity(value: string | null): PcOpenResponsibility["severity"] {
   if (value === "ATTENTION" || value === "AT_RISK" || value === "CRITICAL") return value;
   return null;
+}
+
+// Same boolean as routes/exceptions.ts canViewFinancials: only Brokerage
+// Administrator is in BROKERAGE_ADMIN_ROLES. Agent and Pit Crew are not.
+function callerCanViewFinancials(role: string): boolean {
+  return (BROKERAGE_ADMIN_ROLES as readonly string[]).includes(role);
 }
 
 function toResponsibilityWorkItem(
@@ -267,4 +279,95 @@ export async function getPitCrewTeam(brokerageId: number): Promise<PcTeamMember[
     lastName: m.lastName,
     activeItemCount: countByUserId.get(m.id) ?? 0,
   }));
+}
+
+/**
+ * Open responsibility events for this caller in this brokerage.
+ * Status is OPEN or ACKNOWLEDGED. A row matches when recipient_user_id is
+ * the caller or recipient_role equals the caller's role. Brokerage id comes
+ * from the caller; this function does not accept another user's id.
+ *
+ * Order is deterministic: expectedResponseAt ascending with nulls last,
+ * then createdAt ascending, then id ascending.
+ *
+ * The exception title is listedExceptionTitle. Agent and Pit Crew therefore
+ * get null for a row listBrokerageExceptions would omit. A Brokerage
+ * Administrator gets the raw title. note and nextAction are the text on
+ * the event. This read does not join financial tables.
+ */
+export async function listResponsibilityItemsForRecipient(
+  brokerageId: number,
+  userId: number,
+  role: string,
+): Promise<ResponsibilityInbox> {
+  if (!isPitCrewResponsibilityActionsEnabled()) {
+    throw new PitCrewResponsibilityDisabledError();
+  }
+
+  const generatedAt = new Date().toISOString();
+  const canViewFinancials = callerCanViewFinancials(role);
+  const rows = await db
+    .select({
+      event: pitCrewResponsibilityEvents,
+      sourceRecordId: pitCrewAssignments.sourceRecordId,
+      assignmentStatus: pitCrewAssignments.status,
+      version: pitCrewAssignments.version,
+      title: riskExceptions.title,
+      requiresFinancialEntitlement: riskExceptions.requiresFinancialEntitlement,
+      propertyAddress: properties.formattedAddress,
+    })
+    .from(pitCrewResponsibilityEvents)
+    .innerJoin(pitCrewAssignments, eq(pitCrewResponsibilityEvents.assignmentId, pitCrewAssignments.id))
+    .innerJoin(
+      riskExceptions,
+      and(
+        eq(pitCrewAssignments.sourceType, "EXCEPTION"),
+        sql`${pitCrewAssignments.sourceRecordId} = ${riskExceptions.id}::text`,
+        eq(riskExceptions.brokerageId, brokerageId),
+      ),
+    )
+    .innerJoin(
+      properties,
+      and(eq(properties.id, pitCrewResponsibilityEvents.propertyId), eq(properties.brokerageId, brokerageId)),
+    )
+    .where(
+      and(
+        eq(pitCrewResponsibilityEvents.brokerageId, brokerageId),
+        eq(pitCrewAssignments.brokerageId, brokerageId),
+        inArray(pitCrewResponsibilityEvents.status, ["OPEN", "ACKNOWLEDGED"]),
+        or(eq(pitCrewResponsibilityEvents.recipientUserId, userId), eq(pitCrewResponsibilityEvents.recipientRole, role)),
+      ),
+    )
+    .orderBy(
+      sql`${pitCrewResponsibilityEvents.expectedResponseAt} asc nulls last`,
+      asc(pitCrewResponsibilityEvents.createdAt),
+      asc(pitCrewResponsibilityEvents.id),
+    );
+
+  const items: ResponsibilityInboxItem[] = rows.map((row) => ({
+    sourceType: "EXCEPTION",
+    sourceRecordId: row.sourceRecordId,
+    propertyId: row.event.propertyId,
+    propertyAddress: row.propertyAddress,
+    title: listedExceptionTitle(
+      { title: row.title, requiresFinancialEntitlement: row.requiresFinancialEntitlement },
+      canViewFinancials,
+    ),
+    nextAction: row.event.nextAction,
+    kind: row.event.kind === "ESCALATION" ? "ESCALATION" : "HAND_BACK",
+    reasonCategory: row.event.reasonCategory,
+    severity: escalationSeverity(row.event.severity),
+    note: row.event.note,
+    originatingUserId: row.event.originatingUserId,
+    recipientUserId: row.event.recipientUserId,
+    recipientRole: row.event.recipientRole,
+    expectedResponseAt: row.event.expectedResponseAt ? row.event.expectedResponseAt.toISOString() : null,
+    eventStatus: row.event.status === "ACKNOWLEDGED" ? "ACKNOWLEDGED" : "OPEN",
+    assignmentStatus: row.assignmentStatus as PitCrewItemStatus,
+    version: row.version,
+    deepLink: `/properties/${row.event.propertyId}`,
+    createdAt: row.event.createdAt.toISOString(),
+  }));
+
+  return { generatedAt, items };
 }
