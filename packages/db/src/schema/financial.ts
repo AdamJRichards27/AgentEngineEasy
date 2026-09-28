@@ -644,12 +644,12 @@ export const financialDeposits = pgTable(
 // ---------------------------------------------------------------------
 //
 // FIN-001 (Step 3 integration-readiness brief, Section 4): reconcileLegacyCommission
-// (lib/financial/legacyReconciliation.ts) currently does a SELECT-before-INSERT
-// with no backing DB-level uniqueness constraint, so two concurrent calls for
-// the same (brokerageId, transactionId) can both pass the SELECT check before
-// either INSERT commits, producing duplicate LEGACY_TRANSACTION_COMMISSION
-// reconciliation rows for one transaction. This is the same class of race
-// ensurePcSuccessFeeRequest (lib/financial/settlement.ts) already closed via
+// (lib/financial/legacyReconciliation.ts) does a SELECT-before-INSERT. Two
+// concurrent calls for the same (brokerageId, transactionId) can both pass
+// that SELECT before either INSERT commits. That race would duplicate a
+// LEGACY_TRANSACTION_COMMISSION reconciliation row for one transaction.
+// It is the same class of race ensurePcSuccessFeeRequest
+// (lib/financial/settlement.ts) already closed via
 // financial_payment_requests_transaction_kind_idx.
 //
 // legacyCommissionUniqueIdx below declares the fix at the schema level: a
@@ -671,32 +671,14 @@ export const financialDeposits = pgTable(
 //     type only, more than one row per (brokerageId, transactionId) is never
 //     a legitimate second version, it is always a duplicate of the same flag.
 //
-// NOT YET APPLIED AS A MIGRATION. This session has no drizzle-kit/DATABASE_URL
-// access (see docs/FINANCIAL_TRANSACTION_ENGINE_VERIFICATION.md and the Step 3
-// completion report for the full environment-limitation evidence), so the raw
-// SQL migration file and its meta/_journal.json + snapshot entries have
-// deliberately NOT been hand-authored here — doing so blind, without being
-// able to run `drizzle-kit generate`/`drizzle-kit check` against the real
-// schema, risks producing a migration that silently diverges from what
-// drizzle-kit would itself generate (wrong index name, wrong operator class,
-// a missed snapshot field) and that no one in this session could catch.
-// Exact next steps for a session with real DB access:
-//   1. `pnpm --filter @agent-engine/db exec drizzle-kit generate` — should
-//      produce exactly one new migration adding this partial unique index
-//      (and no other diff, if this is the only schema change).
-//   2. `pnpm --filter @agent-engine/db exec drizzle-kit check` — confirm no
-//      drift between schema and the generated migration history.
-//   3. Apply the migration to a scratch/staging database and re-run
-//      apps/api/src/lib/financial/__tests__/legacyReconciliation.test.ts's
-//      "concurrent reconcile requests" scenario (added alongside this
-//      change) to confirm the constraint actually serialises the race that
-//      test documents as a known gap today.
-// Until that migration lands, this index declaration has NO runtime effect —
-// Drizzle's schema module does not itself apply DDL — so this is a
-// zero-behavior-change-today, schema-first declaration of intent, paired
-// with a forward-compatible `.onConflictDoNothing()` guard already added to
-// reconcileLegacyCommission (see legacyReconciliation.ts) that is inert until
-// this constraint exists and becomes actively protective the moment it does.
+// Applied by migration 0009_flimsy_norrin_radd
+// (packages/db/migrations/0009_flimsy_norrin_radd.sql, journal idx 9).
+// That migration creates financial_reconciliations_legacy_commission_unique_idx
+// as a unique btree on (brokerage_id, record_id) WHERE
+// record_type = 'LEGACY_TRANSACTION_COMMISSION', the same columns and
+// predicate as legacyCommissionUniqueIdx below. `.onConflictDoNothing()`
+// in reconcileLegacyCommission (legacyReconciliation.ts) is the active
+// race guard against that index.
 
 export const financialReconciliations = pgTable(
   "financial_reconciliations",
@@ -730,7 +712,8 @@ export const financialReconciliations = pgTable(
     // uniqueness of (brokerageId, recordId) among rows where recordType is
     // the legacy one-shot flag, leaving every other recordType free to have
     // multiple reconciliation rows per record (expected for versioned
-    // financial records). NOT YET migrated — see the rationale above.
+    // financial records). Created by migration 0009_flimsy_norrin_radd —
+    // see the rationale above.
     legacyCommissionUniqueIdx: uniqueIndex("financial_reconciliations_legacy_commission_unique_idx")
       .on(table.brokerageId, table.recordId)
       .where(sql`${table.recordType} = 'LEGACY_TRANSACTION_COMMISSION'`),
