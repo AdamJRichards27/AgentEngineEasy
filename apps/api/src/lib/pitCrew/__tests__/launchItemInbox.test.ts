@@ -1,10 +1,14 @@
-// R-F24 — inbox title for a LAUNCH_ITEM responsibility row.
+// R-F24 / R-F25 — inbox title for a LAUNCH_ITEM responsibility row, and the
+// property match on that join.
 // While PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is not the literal "true",
 // exception inbox rows are unchanged and campaign_items is not queried.
 // While it is, a fixture LAUNCH_ITEM event (inserted directly, not via
-// hand-back) is titled with campaign_items.title. A campaign item in
-// another brokerage is absent. cost_cents and vendor_name are not in the
-// payload. Hand-back and escalate stay the exception-only rejection.
+// hand-back) is titled with campaign_items.title when the campaign item is
+// in the caller's brokerage and on the event's property. A campaign item in
+// another brokerage is absent. A campaign item in the same brokerage on a
+// different property than the event is excluded, and its title is absent.
+// cost_cents and vendor_name are not in the payload. Hand-back and escalate
+// stay the exception-only rejection.
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -43,6 +47,7 @@ const FOREIGN_COST_SENTINEL = 77220019;
 const FOREIGN_VENDOR_SENTINEL = "Rf24-Foreign-Vendor-Sentinel-2ab7";
 const LAUNCH_TITLE = "Book the Saturday photographer";
 const FOREIGN_TITLE = "Foreign brokerage floor plan";
+const MISMATCH_TITLE = "Rf25-Mismatch-Property-Title-4c8e";
 const ORDINARY_TITLE = "RF24 ordinary exception";
 const AGENT_FINANCIAL_TITLE = "RF24 agent financial 771199";
 const ADMIN_FINANCIAL_TITLE = "RF24 admin financial 661188";
@@ -58,12 +63,14 @@ let foreignAdmin: DevLoginResult;
 let brokerageId: number;
 let otherBrokerageId: number;
 let propertyId: number;
+let mismatchPropertyId: number;
 let foreignPropertyId: number;
 let ordinaryExceptionId: string;
 let agentFinancialExceptionId: string;
 let adminFinancialExceptionId: string;
 let launchItemId: string;
 let foreignItemId: string;
+let mismatchItemId: string;
 let launchAssignmentId: number;
 let savedResponsibilityFlag: string | undefined;
 let savedLaunchFlag: string | undefined;
@@ -180,14 +187,14 @@ async function insertCampaignItem(input: {
   return item.id;
 }
 
-async function insertLaunchResponsibility(sourceRecordId: string): Promise<number> {
+async function insertLaunchResponsibility(sourceRecordId: string, eventPropertyId = propertyId): Promise<number> {
   const [assignment] = await db
     .insert(pitCrewAssignments)
     .values({
       brokerageId,
       sourceType: "LAUNCH_ITEM",
       sourceRecordId,
-      propertyId,
+      propertyId: eventPropertyId,
       status: "HANDED_BACK",
       assignedToUserId: admin.user.id,
       version: 2,
@@ -196,7 +203,7 @@ async function insertLaunchResponsibility(sourceRecordId: string): Promise<numbe
   await db.insert(pitCrewResponsibilityEvents).values({
     brokerageId,
     assignmentId: assignment.id,
-    propertyId,
+    propertyId: eventPropertyId,
     kind: "HAND_BACK",
     reasonCategory: "WORK_COMPLETE",
     note: LAUNCH_NOTE,
@@ -240,6 +247,7 @@ before(async () => {
   otherBrokerageId = foreign.brokerageId;
 
   propertyId = await createProperty(agent.cookie, `${Date.now()} Inbox Launch St`);
+  mismatchPropertyId = await createProperty(agent.cookie, `${Date.now()} Inbox Mismatch St`);
   foreignPropertyId = await createProperty(foreignAdmin.cookie, `${Date.now()} Foreign Launch St`);
 
   ordinaryExceptionId = await createException(brokerageId, propertyId, { title: ORDINARY_TITLE });
@@ -303,8 +311,18 @@ before(async () => {
     costCents: FOREIGN_COST_SENTINEL,
     vendorName: FOREIGN_VENDOR_SENTINEL,
   });
+  mismatchItemId = await insertCampaignItem({
+    targetBrokerageId: brokerageId,
+    targetPropertyId: mismatchPropertyId,
+    createdBy: admin.user.id,
+    title: MISMATCH_TITLE,
+    costCents: COST_SENTINEL,
+    vendorName: VENDOR_SENTINEL,
+  });
   launchAssignmentId = await insertLaunchResponsibility(launchItemId);
   await insertLaunchResponsibility(foreignItemId);
+  // Event stays on propertyId. The campaign item is on mismatchPropertyId.
+  await insertLaunchResponsibility(mismatchItemId, propertyId);
 });
 
 after(async () => {
@@ -339,6 +357,8 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
           const { agentInbox, adminInbox } = await readInboxes();
           assert.equal(agentInbox.items.some((item) => item.sourceRecordId === launchItemId), false, flagCase.label);
           assert.equal(agentInbox.items.some((item) => item.sourceRecordId === foreignItemId), false, flagCase.label);
+          assert.equal(agentInbox.items.some((item) => item.sourceRecordId === mismatchItemId), false, flagCase.label);
+          assert.equal(JSON.stringify({ agentInbox, adminInbox }).includes(MISMATCH_TITLE), false, flagCase.label);
           assert.equal(adminInbox.items.some((item) => item.sourceType === "LAUNCH_ITEM"), false, flagCase.label);
           assert.equal(agentInbox.items.every((item) => item.sourceType === "EXCEPTION"), true, flagCase.label);
           const ordinary = agentInbox.items.find((item) => item.sourceRecordId === ordinaryExceptionId);
@@ -368,6 +388,11 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
         [],
         flagCase.label,
       );
+      assert.equal(
+        statements.some((query) => query.includes('"risk_exceptions"."property_id" = "pit_crew_responsibility_events"."property_id"')),
+        false,
+        flagCase.label,
+      );
     }
   });
 
@@ -395,6 +420,16 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
     for (const query of launchQueries) {
       assert.equal(query.includes("cost_cents"), false, query);
       assert.equal(query.includes("vendor_name"), false, query);
+      assert.equal(
+        query.includes('"campaign_items"."property_id" = "pit_crew_responsibility_events"."property_id"'),
+        true,
+        query,
+      );
+      assert.equal(
+        query.includes('"risk_exceptions"."property_id" = "pit_crew_responsibility_events"."property_id"'),
+        true,
+        query,
+      );
     }
 
     const encoded = JSON.stringify({ agentInbox, adminInbox });
@@ -404,6 +439,7 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
     assert.equal(encoded.includes(String(FOREIGN_COST_SENTINEL)), false);
     assert.equal(encoded.includes(FOREIGN_VENDOR_SENTINEL), false);
     assert.equal(encoded.includes(FOREIGN_TITLE), false);
+    assert.equal(encoded.includes(MISMATCH_TITLE), false);
     assert.equal(encoded.includes(AGENT_FINANCIAL_TITLE), false);
 
     const launch = agentInbox.items.find((item) => item.sourceRecordId === launchItemId);
@@ -416,6 +452,8 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
     assert.equal(launch.propertyId, propertyId);
     assert.equal(agentInbox.items.some((item) => item.sourceRecordId === foreignItemId), false);
     assert.equal(adminInbox.items.some((item) => item.sourceRecordId === foreignItemId), false);
+    assert.equal(agentInbox.items.some((item) => item.sourceRecordId === mismatchItemId), false);
+    assert.equal(adminInbox.items.some((item) => item.sourceRecordId === mismatchItemId), false);
     assert.equal(adminInbox.items.some((item) => item.sourceType === "LAUNCH_ITEM"), false);
 
     const ordinary = agentInbox.items.find((item) => item.sourceRecordId === ordinaryExceptionId);
@@ -449,6 +487,101 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
     assert.deepEqual(offStatements.filter((query) => query.includes("campaign_items")), []);
     assert.deepEqual(exceptionItems(agentInbox), offAgent);
     assert.deepEqual(adminInbox.items, offAdmin);
+  });
+
+  test("flag on: same property is shown, a different property is excluded, and another brokerage stays hidden", async () => {
+    const [mismatchItem] = await db
+      .select({ propertyId: campaignItems.propertyId, brokerageId: campaignItems.brokerageId })
+      .from(campaignItems)
+      .where(eq(campaignItems.id, mismatchItemId));
+    assert.equal(mismatchItem.brokerageId, brokerageId);
+    assert.equal(mismatchItem.propertyId, mismatchPropertyId);
+    assert.notEqual(mismatchPropertyId, propertyId);
+
+    let agentInbox: ResponsibilityInbox | undefined;
+    let adminInbox: ResponsibilityInbox | undefined;
+    await withLaunchFlag("true", async () => {
+      assert.equal(isPitCrewLaunchItemSourceEnabled(), true);
+      const read = await readInboxes();
+      agentInbox = read.agentInbox;
+      adminInbox = read.adminInbox;
+    });
+    assert.ok(agentInbox && adminInbox);
+
+    const sameProperty = agentInbox.items.find((item) => item.sourceRecordId === launchItemId);
+    assert.ok(sameProperty);
+    assert.equal(sameProperty.sourceType, "LAUNCH_ITEM");
+    assert.equal(sameProperty.title, LAUNCH_TITLE);
+    assert.equal(sameProperty.propertyId, propertyId);
+
+    assert.equal(agentInbox.items.some((item) => item.sourceRecordId === mismatchItemId), false);
+    assert.equal(adminInbox.items.some((item) => item.sourceRecordId === mismatchItemId), false);
+    assert.equal(agentInbox.items.some((item) => item.sourceRecordId === foreignItemId), false);
+    assert.equal(adminInbox.items.some((item) => item.sourceRecordId === foreignItemId), false);
+
+    const encoded = JSON.stringify({ agentInbox, adminInbox });
+    assert.equal(encoded.includes(MISMATCH_TITLE), false);
+    assert.equal(encoded.includes(FOREIGN_TITLE), false);
+    assert.equal(encoded.includes(LAUNCH_TITLE), true);
+  });
+
+  test("flag on excludes an exception on a different property; flag off still returns it and does not read campaign_items", async () => {
+    const mismatchExceptionTitle = "Rf25 exception on the other property 4c8e";
+    const mismatchExceptionId = await createException(brokerageId, mismatchPropertyId, { title: mismatchExceptionTitle });
+    const [assignment] = await db
+      .insert(pitCrewAssignments)
+      .values({
+        brokerageId,
+        sourceType: "EXCEPTION",
+        sourceRecordId: mismatchExceptionId,
+        propertyId,
+        status: "HANDED_BACK",
+        assignedToUserId: admin.user.id,
+        version: 2,
+      })
+      .returning({ id: pitCrewAssignments.id });
+    await db.insert(pitCrewResponsibilityEvents).values({
+      brokerageId,
+      assignmentId: assignment.id,
+      propertyId,
+      kind: "HAND_BACK",
+      reasonCategory: "WORK_COMPLETE",
+      note: "Exception property does not match the event.",
+      nextAction: "Leave this row out of the flag-on inbox.",
+      originatingUserId: admin.user.id,
+      recipientUserId: agent.user.id,
+      resultingResponsibility: "AGENT",
+      status: "OPEN",
+    });
+
+    await withLaunchFlag("true", async () => {
+      const { agentInbox, adminInbox } = await readInboxes();
+      const encoded = JSON.stringify({ agentInbox, adminInbox });
+      assert.equal(agentInbox.items.some((item) => item.sourceRecordId === mismatchExceptionId), false);
+      assert.equal(adminInbox.items.some((item) => item.sourceRecordId === mismatchExceptionId), false);
+      assert.equal(encoded.includes(mismatchExceptionTitle), false);
+    });
+
+    const statements: string[] = [];
+    await withLaunchFlag(undefined, async () => {
+      const uninstall = setDbQueryObserver((query) => {
+        statements.push(query);
+      });
+      try {
+        const { agentInbox } = await readInboxes();
+        const row = agentInbox.items.find((item) => item.sourceRecordId === mismatchExceptionId);
+        assert.ok(row);
+        assert.equal(row.sourceType, "EXCEPTION");
+        assert.equal(row.title, mismatchExceptionTitle);
+        assert.equal(row.propertyId, propertyId);
+      } finally {
+        uninstall();
+      }
+    });
+    assert.deepEqual(
+      statements.filter((query) => query.includes("campaign_items")),
+      [],
+    );
   });
 
   test("flag on: LAUNCH_ITEM hand-back and escalate still return the exception-only rejection", async () => {

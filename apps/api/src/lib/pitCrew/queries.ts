@@ -18,8 +18,12 @@
 // "true". While PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is not the literal
 // "true", that read keeps the exception inner join and does not query
 // campaign_items. While it is, a LAUNCH_ITEM row left-joins campaign_items
-// on the item id and the caller's brokerage id, and the title is
-// campaign_items.title. cost_cents and vendor_name are not selected.
+// on the item id, the caller's brokerage id, and
+// campaign_items.property_id = the event's property_id. A campaign item on
+// a different property is excluded, the same way a missing exception is
+// excluded, and its title is not returned. The flag-on exception join
+// requires risk_exceptions.property_id to match the event as well. The
+// flag-off inbox does not. cost_cents and vendor_name are not selected.
 // Hand-back and escalate stay EXCEPTION-only.
 //
 // Open campaign items are included only when
@@ -572,9 +576,15 @@ function responsibilityInboxItem(row: ResponsibilityInboxRowIdentity): Responsib
  * PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". Its title is
  * campaign_items.title. That branch selects the campaign item id, title,
  * property id, and brokerage id, and does not select cost_cents or
- * vendor_name. While the flag is not that literal, this function does not
- * query campaign_items. Hand-back and escalate stay EXCEPTION-only, so no
- * LAUNCH_ITEM responsibility event is created through the app today.
+ * vendor_name. The campaign_items join also requires
+ * campaign_items.property_id to equal the event's property_id. A row whose
+ * campaign item is on a different property is excluded from the inbox, the
+ * same way a missing exception is excluded, so the campaign item title is
+ * not returned. The flag-on exception join requires the same property
+ * match. The flag-off function does not. While the launch-item flag is not
+ * the literal "true", this function does not query campaign_items.
+ * Hand-back and escalate stay EXCEPTION-only, so no LAUNCH_ITEM
+ * responsibility event is created through the app today.
  */
 export async function listResponsibilityItemsForRecipient(
   brokerageId: number,
@@ -682,7 +692,13 @@ async function listExceptionResponsibilityInbox(
 
 // Flag-on inbox. Exception rows still use listedExceptionTitle. A
 // LAUNCH_ITEM row survives only when campaign_items matches the assignment
-// id and the caller's brokerage. cost_cents and vendor_name are not selected.
+// id, the caller's brokerage, and the event's property. A campaign item on
+// a different property than the event is excluded, the same way a missing
+// exception is excluded: the left join does not match, and the row is
+// dropped. The exception left join in this function also requires
+// risk_exceptions.property_id to equal the event's property_id. The
+// flag-off function does not add that condition. cost_cents and
+// vendor_name are not selected.
 async function listResponsibilityInboxIncludingLaunchItems(
   brokerageId: number,
   userId: number,
@@ -721,6 +737,7 @@ async function listResponsibilityInboxIncludingLaunchItems(
         eq(pitCrewAssignments.sourceType, "EXCEPTION"),
         sql`${pitCrewAssignments.sourceRecordId} = ${riskExceptions.id}::text`,
         eq(riskExceptions.brokerageId, brokerageId),
+        eq(riskExceptions.propertyId, pitCrewResponsibilityEvents.propertyId),
       ),
     )
     .leftJoin(
@@ -729,6 +746,7 @@ async function listResponsibilityInboxIncludingLaunchItems(
         eq(pitCrewAssignments.sourceType, PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE),
         sql`${pitCrewAssignments.sourceRecordId} = ${campaignItems.id}::text`,
         eq(campaignItems.brokerageId, brokerageId),
+        eq(campaignItems.propertyId, pitCrewResponsibilityEvents.propertyId),
       ),
     )
     .innerJoin(
@@ -755,6 +773,7 @@ async function listResponsibilityInboxIncludingLaunchItems(
             eq(pitCrewAssignments.sourceType, PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE),
             isNotNull(campaignItems.id),
             eq(campaignItems.brokerageId, brokerageId),
+            eq(campaignItems.propertyId, pitCrewResponsibilityEvents.propertyId),
           ),
         ),
       ),
@@ -768,7 +787,13 @@ async function listResponsibilityInboxIncludingLaunchItems(
   const items = rows.flatMap((row) => {
     const launchItem = row.assignmentSourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE;
     if (launchItem) {
-      if (row.campaignItemId == null || row.campaignBrokerageId !== brokerageId || row.campaignPropertyId == null) {
+      // Excluded when the campaign item is missing, another brokerage, or a
+      // different property than the event. Same outcome as a missing exception.
+      if (
+        row.campaignItemId == null ||
+        row.campaignBrokerageId !== brokerageId ||
+        row.campaignPropertyId !== row.event.propertyId
+      ) {
         return [];
       }
       return [
