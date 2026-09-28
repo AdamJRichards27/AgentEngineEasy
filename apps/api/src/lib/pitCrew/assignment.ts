@@ -12,10 +12,16 @@
 // table -- see the comment at the top of packages/db/src/schema/pitCrew.ts.
 
 import { and, asc, eq, inArray, isNotNull, lt, ne } from "drizzle-orm";
-import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
+import { campaignItems, db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
 import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
-import { isValidPitCrewTransition, PIT_CREW_WORK_SOURCE_TYPES, type PitCrewItemStatus } from "./types.js";
+import { isPitCrewLaunchItemSourceEnabled } from "./launchItemSource.js";
+import {
+  isValidPitCrewTransition,
+  PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE,
+  PIT_CREW_WORK_SOURCE_TYPES,
+  type PitCrewItemStatus,
+} from "./types.js";
 import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export class PitCrewTransitionError extends Error {
@@ -160,19 +166,65 @@ async function notePitCrewAssigneeIsolationRejection(userId: number, brokerageId
 // happens to be the UUID A guessed. This closes that gap by requiring
 // sourceRecordId to name a real exception that belongs to BOTH
 // ref.propertyId AND ref.brokerageId before any overlay row is ever
-// touched. PIT_CREW_WORK_SOURCE_TYPES (types.ts) is the only set of source
-// types accepted here. Anything else throws the same
+// touched. PIT_CREW_WORK_SOURCE_TYPES (types.ts) is the R-F21 allow-list.
+// Anything outside it throws the same
 // PitCrewPropertyMismatchError a missing exception throws ("Work item not
 // found in this brokerage.") and does not increment
 // tenant_isolation_rejection_total: there is no other-brokerage lookup for
 // an unknown type. The EXCEPTION branch below is unchanged. A second
 // member of PIT_CREW_WORK_SOURCE_TYPES, if one is ever added, needs its
 // own branch here rather than falling through unchecked.
+//
+// R-F22: LAUNCH_ITEM is not a member of that list. It is accepted only
+// when PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true", and then
+// only when campaign_items has that UUID on this brokerage and this
+// property. The miss uses the same 404 as a missing exception. Any other
+// flag value throws that 404 and does not query campaign_items. Every
+// other non-EXCEPTION source type is still rejected with that 404 and
+// does not increment tenant_isolation_rejection_total.
 function isKnownPitCrewWorkSourceType(sourceType: string): boolean {
   return (PIT_CREW_WORK_SOURCE_TYPES as readonly string[]).includes(sourceType);
 }
 
+async function notePitCrewLaunchItemIsolationRejection(sourceRecordId: string, brokerageId: number): Promise<void> {
+  if (!UUID_SHAPE.test(sourceRecordId)) return;
+  const [elsewhere] = await db
+    .select({ id: campaignItems.id })
+    .from(campaignItems)
+    .where(and(eq(campaignItems.id, sourceRecordId), ne(campaignItems.brokerageId, brokerageId)))
+    .limit(1);
+  notePitCrewRejection(elsewhere);
+}
+
+async function assertLaunchItemOnPropertyInBrokerage(ref: WorkItemRef): Promise<void> {
+  if (!UUID_SHAPE.test(ref.sourceRecordId)) {
+    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+  }
+  const [item] = await db
+    .select({ id: campaignItems.id })
+    .from(campaignItems)
+    .where(
+      and(
+        eq(campaignItems.id, ref.sourceRecordId),
+        eq(campaignItems.brokerageId, ref.brokerageId),
+        eq(campaignItems.propertyId, ref.propertyId),
+      ),
+    )
+    .limit(1);
+  if (!item) {
+    await notePitCrewLaunchItemIsolationRejection(ref.sourceRecordId, ref.brokerageId);
+    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+  }
+}
+
 async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promise<void> {
+  if (ref.sourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE) {
+    if (!isPitCrewLaunchItemSourceEnabled()) {
+      throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+    }
+    await assertLaunchItemOnPropertyInBrokerage(ref);
+    return;
+  }
   if (!isKnownPitCrewWorkSourceType(ref.sourceType)) {
     throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
   }
