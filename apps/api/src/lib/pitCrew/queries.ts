@@ -14,7 +14,13 @@
 // next action, severity, and expected response.
 //
 // listResponsibilityItemsForRecipient is the recipient inbox. It refuses
-// before reading that table unless the flag is the literal "true".
+// before reading that table unless the responsibility flag is the literal
+// "true". While PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is not the literal
+// "true", that read keeps the exception inner join and does not query
+// campaign_items. While it is, a LAUNCH_ITEM row left-joins campaign_items
+// on the item id and the caller's brokerage id, and the title is
+// campaign_items.title. cost_cents and vendor_name are not selected.
+// Hand-back and escalate stay EXCEPTION-only.
 //
 // Open campaign items are included only when
 // PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". While it is
@@ -23,7 +29,7 @@
 // overlay the workspace already treats as touched (version > 0). There is
 // no due-date horizon. Pit Crew actions do not write campaign_items.
 
-import { eq, and, asc, inArray, ne, or, sql } from "drizzle-orm";
+import { eq, and, asc, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { campaignItems, db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../middlewares/auth.js";
@@ -493,6 +499,61 @@ export async function getPitCrewTeam(brokerageId: number): Promise<PcTeamMember[
   }));
 }
 
+interface ResponsibilityInboxRowIdentity {
+  sourceType: "EXCEPTION" | typeof PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE;
+  sourceRecordId: string;
+  propertyAddress: string;
+  title: string | null;
+  assignmentStatus: string;
+  version: number;
+  event: PitCrewResponsibilityEvent;
+  recipientId: number | null;
+  recipientFirstName: string | null;
+  recipientLastName: string | null;
+  recipientEmail: string | null;
+  operatorId: number | null;
+  operatorFirstName: string | null;
+  operatorLastName: string | null;
+  operatorEmail: string | null;
+}
+
+function responsibilityInboxItem(row: ResponsibilityInboxRowIdentity): ResponsibilityInboxItem {
+  return {
+    sourceType: row.sourceType,
+    sourceRecordId: row.sourceRecordId,
+    propertyId: row.event.propertyId,
+    propertyAddress: row.propertyAddress,
+    title: row.title,
+    nextAction: row.event.nextAction,
+    kind: row.event.kind === "ESCALATION" ? "ESCALATION" : "HAND_BACK",
+    reasonCategory: row.event.reasonCategory,
+    severity: escalationSeverity(row.event.severity),
+    note: row.event.note,
+    originatingUserId: row.event.originatingUserId,
+    operatorDisplayName:
+      displayNameForJoinedUser(row.event.originatingUserId, {
+        id: row.operatorId,
+        firstName: row.operatorFirstName,
+        lastName: row.operatorLastName,
+        email: row.operatorEmail,
+      }) ?? `User ${row.event.originatingUserId}`,
+    recipientUserId: row.event.recipientUserId,
+    recipientDisplayName: displayNameForJoinedUser(row.event.recipientUserId, {
+      id: row.recipientId,
+      firstName: row.recipientFirstName,
+      lastName: row.recipientLastName,
+      email: row.recipientEmail,
+    }),
+    recipientRole: row.event.recipientRole,
+    expectedResponseAt: row.event.expectedResponseAt ? row.event.expectedResponseAt.toISOString() : null,
+    eventStatus: row.event.status === "ACKNOWLEDGED" ? "ACKNOWLEDGED" : "OPEN",
+    assignmentStatus: row.assignmentStatus as PitCrewItemStatus,
+    version: row.version,
+    deepLink: `/properties/${row.event.propertyId}`,
+    createdAt: row.event.createdAt.toISOString(),
+  };
+}
+
 /**
  * Open responsibility events for this caller in this brokerage.
  * Status is OPEN or ACKNOWLEDGED. A row matches when recipient_user_id is
@@ -506,6 +567,14 @@ export async function getPitCrewTeam(brokerageId: number): Promise<PcTeamMember[
  * get null for a row listBrokerageExceptions would omit. A Brokerage
  * Administrator gets the raw title. note and nextAction are the text on
  * the event. This read does not join financial tables.
+ *
+ * A LAUNCH_ITEM row is included only when
+ * PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". Its title is
+ * campaign_items.title. That branch selects the campaign item id, title,
+ * property id, and brokerage id, and does not select cost_cents or
+ * vendor_name. While the flag is not that literal, this function does not
+ * query campaign_items. Hand-back and escalate stay EXCEPTION-only, so no
+ * LAUNCH_ITEM responsibility event is created through the app today.
  */
 export async function listResponsibilityItemsForRecipient(
   brokerageId: number,
@@ -515,7 +584,20 @@ export async function listResponsibilityItemsForRecipient(
   if (!isPitCrewResponsibilityActionsEnabled()) {
     throw new PitCrewResponsibilityDisabledError();
   }
+  if (!isPitCrewLaunchItemSourceEnabled()) {
+    return listExceptionResponsibilityInbox(brokerageId, userId, role);
+  }
+  return listResponsibilityInboxIncludingLaunchItems(brokerageId, userId, role);
+}
 
+// Flag-off inbox. The exception inner join and the selected columns stay
+// as they were before LAUNCH_ITEM. This function does not mention
+// campaign_items.
+async function listExceptionResponsibilityInbox(
+  brokerageId: number,
+  userId: number,
+  role: string,
+): Promise<ResponsibilityInbox> {
   const generatedAt = new Date().toISOString();
   const canViewFinancials = callerCanViewFinancials(role);
   const rows = await db
@@ -572,43 +654,167 @@ export async function listResponsibilityItemsForRecipient(
       asc(pitCrewResponsibilityEvents.id),
     );
 
-  const items: ResponsibilityInboxItem[] = rows.map((row) => ({
-    sourceType: "EXCEPTION",
-    sourceRecordId: row.sourceRecordId,
-    propertyId: row.event.propertyId,
-    propertyAddress: row.propertyAddress,
-    title: listedExceptionTitle(
-      { title: row.title, requiresFinancialEntitlement: row.requiresFinancialEntitlement },
-      canViewFinancials,
-    ),
-    nextAction: row.event.nextAction,
-    kind: row.event.kind === "ESCALATION" ? "ESCALATION" : "HAND_BACK",
-    reasonCategory: row.event.reasonCategory,
-    severity: escalationSeverity(row.event.severity),
-    note: row.event.note,
-    originatingUserId: row.event.originatingUserId,
-    operatorDisplayName:
-      displayNameForJoinedUser(row.event.originatingUserId, {
-        id: row.operatorId,
-        firstName: row.operatorFirstName,
-        lastName: row.operatorLastName,
-        email: row.operatorEmail,
-      }) ?? `User ${row.event.originatingUserId}`,
-    recipientUserId: row.event.recipientUserId,
-    recipientDisplayName: displayNameForJoinedUser(row.event.recipientUserId, {
-      id: row.recipientId,
-      firstName: row.recipientFirstName,
-      lastName: row.recipientLastName,
-      email: row.recipientEmail,
+  const items = rows.map((row) =>
+    responsibilityInboxItem({
+      sourceType: "EXCEPTION",
+      sourceRecordId: row.sourceRecordId,
+      propertyAddress: row.propertyAddress,
+      title: listedExceptionTitle(
+        { title: row.title, requiresFinancialEntitlement: row.requiresFinancialEntitlement },
+        canViewFinancials,
+      ),
+      assignmentStatus: row.assignmentStatus,
+      version: row.version,
+      event: row.event,
+      recipientId: row.recipientId,
+      recipientFirstName: row.recipientFirstName,
+      recipientLastName: row.recipientLastName,
+      recipientEmail: row.recipientEmail,
+      operatorId: row.operatorId,
+      operatorFirstName: row.operatorFirstName,
+      operatorLastName: row.operatorLastName,
+      operatorEmail: row.operatorEmail,
     }),
-    recipientRole: row.event.recipientRole,
-    expectedResponseAt: row.event.expectedResponseAt ? row.event.expectedResponseAt.toISOString() : null,
-    eventStatus: row.event.status === "ACKNOWLEDGED" ? "ACKNOWLEDGED" : "OPEN",
-    assignmentStatus: row.assignmentStatus as PitCrewItemStatus,
-    version: row.version,
-    deepLink: `/properties/${row.event.propertyId}`,
-    createdAt: row.event.createdAt.toISOString(),
-  }));
+  );
+
+  return { generatedAt, items };
+}
+
+// Flag-on inbox. Exception rows still use listedExceptionTitle. A
+// LAUNCH_ITEM row survives only when campaign_items matches the assignment
+// id and the caller's brokerage. cost_cents and vendor_name are not selected.
+async function listResponsibilityInboxIncludingLaunchItems(
+  brokerageId: number,
+  userId: number,
+  role: string,
+): Promise<ResponsibilityInbox> {
+  const generatedAt = new Date().toISOString();
+  const canViewFinancials = callerCanViewFinancials(role);
+  const rows = await db
+    .select({
+      event: pitCrewResponsibilityEvents,
+      assignmentSourceType: pitCrewAssignments.sourceType,
+      sourceRecordId: pitCrewAssignments.sourceRecordId,
+      assignmentStatus: pitCrewAssignments.status,
+      version: pitCrewAssignments.version,
+      exceptionTitle: riskExceptions.title,
+      requiresFinancialEntitlement: riskExceptions.requiresFinancialEntitlement,
+      campaignItemId: campaignItems.id,
+      campaignTitle: campaignItems.title,
+      campaignPropertyId: campaignItems.propertyId,
+      campaignBrokerageId: campaignItems.brokerageId,
+      propertyAddress: properties.formattedAddress,
+      recipientId: responsibilityRecipientUser.id,
+      recipientFirstName: responsibilityRecipientUser.firstName,
+      recipientLastName: responsibilityRecipientUser.lastName,
+      recipientEmail: responsibilityRecipientUser.email,
+      operatorId: responsibilityOperatorUser.id,
+      operatorFirstName: responsibilityOperatorUser.firstName,
+      operatorLastName: responsibilityOperatorUser.lastName,
+      operatorEmail: responsibilityOperatorUser.email,
+    })
+    .from(pitCrewResponsibilityEvents)
+    .innerJoin(pitCrewAssignments, eq(pitCrewResponsibilityEvents.assignmentId, pitCrewAssignments.id))
+    .leftJoin(
+      riskExceptions,
+      and(
+        eq(pitCrewAssignments.sourceType, "EXCEPTION"),
+        sql`${pitCrewAssignments.sourceRecordId} = ${riskExceptions.id}::text`,
+        eq(riskExceptions.brokerageId, brokerageId),
+      ),
+    )
+    .leftJoin(
+      campaignItems,
+      and(
+        eq(pitCrewAssignments.sourceType, PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE),
+        sql`${pitCrewAssignments.sourceRecordId} = ${campaignItems.id}::text`,
+        eq(campaignItems.brokerageId, brokerageId),
+      ),
+    )
+    .innerJoin(
+      properties,
+      and(eq(properties.id, pitCrewResponsibilityEvents.propertyId), eq(properties.brokerageId, brokerageId)),
+    )
+    .leftJoin(
+      responsibilityRecipientUser,
+      and(eq(responsibilityRecipientUser.id, pitCrewResponsibilityEvents.recipientUserId), eq(responsibilityRecipientUser.brokerageId, brokerageId)),
+    )
+    .leftJoin(
+      responsibilityOperatorUser,
+      and(eq(responsibilityOperatorUser.id, pitCrewResponsibilityEvents.originatingUserId), eq(responsibilityOperatorUser.brokerageId, brokerageId)),
+    )
+    .where(
+      and(
+        eq(pitCrewResponsibilityEvents.brokerageId, brokerageId),
+        eq(pitCrewAssignments.brokerageId, brokerageId),
+        inArray(pitCrewResponsibilityEvents.status, ["OPEN", "ACKNOWLEDGED"]),
+        or(eq(pitCrewResponsibilityEvents.recipientUserId, userId), eq(pitCrewResponsibilityEvents.recipientRole, role)),
+        or(
+          and(eq(pitCrewAssignments.sourceType, "EXCEPTION"), isNotNull(riskExceptions.id)),
+          and(
+            eq(pitCrewAssignments.sourceType, PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE),
+            isNotNull(campaignItems.id),
+            eq(campaignItems.brokerageId, brokerageId),
+          ),
+        ),
+      ),
+    )
+    .orderBy(
+      sql`${pitCrewResponsibilityEvents.expectedResponseAt} asc nulls last`,
+      asc(pitCrewResponsibilityEvents.createdAt),
+      asc(pitCrewResponsibilityEvents.id),
+    );
+
+  const items = rows.flatMap((row) => {
+    const launchItem = row.assignmentSourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE;
+    if (launchItem) {
+      if (row.campaignItemId == null || row.campaignBrokerageId !== brokerageId || row.campaignPropertyId == null) {
+        return [];
+      }
+      return [
+        responsibilityInboxItem({
+          sourceType: PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE,
+          sourceRecordId: row.sourceRecordId,
+          propertyAddress: row.propertyAddress,
+          title: row.campaignTitle,
+          assignmentStatus: row.assignmentStatus,
+          version: row.version,
+          event: row.event,
+          recipientId: row.recipientId,
+          recipientFirstName: row.recipientFirstName,
+          recipientLastName: row.recipientLastName,
+          recipientEmail: row.recipientEmail,
+          operatorId: row.operatorId,
+          operatorFirstName: row.operatorFirstName,
+          operatorLastName: row.operatorLastName,
+          operatorEmail: row.operatorEmail,
+        }),
+      ];
+    }
+    if (row.exceptionTitle == null || row.requiresFinancialEntitlement == null) return [];
+    return [
+      responsibilityInboxItem({
+        sourceType: "EXCEPTION",
+        sourceRecordId: row.sourceRecordId,
+        propertyAddress: row.propertyAddress,
+        title: listedExceptionTitle(
+          { title: row.exceptionTitle, requiresFinancialEntitlement: row.requiresFinancialEntitlement },
+          canViewFinancials,
+        ),
+        assignmentStatus: row.assignmentStatus,
+        version: row.version,
+        event: row.event,
+        recipientId: row.recipientId,
+        recipientFirstName: row.recipientFirstName,
+        recipientLastName: row.recipientLastName,
+        recipientEmail: row.recipientEmail,
+        operatorId: row.operatorId,
+        operatorFirstName: row.operatorFirstName,
+        operatorLastName: row.operatorLastName,
+        operatorEmail: row.operatorEmail,
+      }),
+    ];
+  });
 
   return { generatedAt, items };
 }

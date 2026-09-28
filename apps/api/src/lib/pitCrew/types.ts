@@ -152,12 +152,14 @@ export interface PcWorkspace {
   team: PcTeamMember[];
 }
 
-// Recipient inbox row. Not an ActionItem. title is null when
-// listBrokerageExceptions would omit the exception (listedExceptionTitle).
-// That read has no substitute title. closingNote is omitted: inbox rows
-// are OPEN or ACKNOWLEDGED, and the closing note is null on those statuses.
+// Recipient inbox row. Not an ActionItem. For an EXCEPTION, title is null
+// when listBrokerageExceptions would omit the exception
+// (listedExceptionTitle). That read has no substitute title. For a
+// LAUNCH_ITEM, title is campaign_items.title and is not passed through
+// listedExceptionTitle. closingNote is omitted: inbox rows are OPEN or
+// ACKNOWLEDGED, and the closing note is null on those statuses.
 export interface ResponsibilityInboxItem {
-  sourceType: PitCrewWorkSourceType;
+  sourceType: PcWorkspaceSourceType;
   sourceRecordId: string;
   propertyId: number;
   propertyAddress: string;
