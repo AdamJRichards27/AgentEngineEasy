@@ -13,6 +13,13 @@
 // getPitCrewWorkspace (which itself
 // sources from the Exception & Risk Engine's listBrokerageExceptions) rather
 // than depending on or duplicating that feature.
+//
+// R-F23: the Launch section renders launchCoordination as the workspace
+// sends it. That list can hold LAUNCH_CAMPAIGN exceptions and LAUNCH_ITEM
+// campaign items together. Campaign-item actions stay on the Pit Crew item
+// routes (sourceType LAUNCH_ITEM). This page does not call /launch. Hand-back
+// and escalate stay off LAUNCH_ITEM cards. With no campaign items in the
+// list, the section text is the same as before those labels existed.
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -65,6 +72,14 @@ import { categoryLabel, formatDueDate, isOverdue, severityLabel, severityPillCla
 
 function pcKey(sourceType: string, sourceRecordId: string): string {
   return `${sourceType}:${sourceRecordId}`;
+}
+
+// Shown on Launch cards only when that section includes a campaign item, so
+// an exception-only list (the flag-off payload) keeps today's wording.
+function pitCrewLaunchSourceLabel(sourceType: string): string | null {
+  if (sourceType === "LAUNCH_ITEM") return "Campaign item";
+  if (sourceType === "EXCEPTION") return "Exception";
+  return null;
 }
 
 const SECTIONS = [
@@ -308,7 +323,8 @@ export default function PitCrewCommandCentre() {
     });
   }
 
-  function renderItems(items: PcCardItem[], emptyLabel: string, title: string) {
+  function renderItems(items: PcCardItem[], emptyLabel: string, title: string, distinguishLaunchSources = false) {
+    const showSourceLabel = distinguishLaunchSources && items.some((item) => item.sourceType === "LAUNCH_ITEM");
     return (
       <section className="card">
         <h2>
@@ -331,6 +347,7 @@ export default function PitCrewCommandCentre() {
                   error={actionError?.key === itemKey ? actionError.message : null}
                   actions={actions}
                   responsibilityActionsVisible={responsibilityActionsVisible}
+                  sourceLabel={showSourceLabel ? pitCrewLaunchSourceLabel(item.sourceType) : null}
                 />
               );
             })}
@@ -342,7 +359,7 @@ export default function PitCrewCommandCentre() {
 
   function renderSection(key: Exclude<BaseSectionKey, "overview">, title: string) {
     const items = sectionItems(workspace, key) ?? [];
-    return renderItems(items, EMPTY_LABELS[key], title);
+    return renderItems(items, EMPTY_LABELS[key], title, key === "launchCoordination");
   }
 
   function renderResponsibilitySection(key: ResponsibilitySectionKey, title: string) {
@@ -395,6 +412,7 @@ export default function PitCrewCommandCentre() {
           </section>
           <section className="card">
             <h2>Team Capacity ({team.length})</h2>
+            {/* activeItemCount is the API team total. Claimed launch items are already in it. */}
             {team.length === 0 ? (
               <p className="muted">No Pit Crew members in this brokerage yet.</p>
             ) : (
@@ -509,6 +527,7 @@ interface PcItemCardProps {
   error: string | null;
   actions: PcItemActions;
   responsibilityActionsVisible: boolean;
+  sourceLabel: string | null;
 }
 
 type PcOpenForm =
@@ -523,7 +542,17 @@ type PcOpenForm =
   | "returnEscalation"
   | null;
 
-function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, actions, responsibilityActionsVisible }: PcItemCardProps) {
+function PcItemCard({
+  item,
+  currentUserId,
+  currentUserRole,
+  team,
+  busy,
+  error,
+  actions,
+  responsibilityActionsVisible,
+  sourceLabel,
+}: PcItemCardProps) {
   const [openForm, setOpenForm] = useState<PcOpenForm>(null);
   const [assigneeUserId, setAssigneeUserId] = useState("");
   const [waitingOnParty, setWaitingOnParty] = useState("");
@@ -567,7 +596,9 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
   const isMine = item.assignedToUserId === currentUserId;
   const actor = { id: currentUserId, role: currentUserRole };
   const responsibilityItem = item.responsibility ? (item as PcResponsibilityWorkItem) : null;
-  const showHandBackOrEscalate = responsibilityActionsVisible && isPitCrewActiveActionStatus(item.pcStatus);
+  // Hand-back and escalate for LAUNCH_ITEM are deferred. EXCEPTION cards keep both.
+  const showHandBackOrEscalate =
+    responsibilityActionsVisible && isPitCrewActiveActionStatus(item.pcStatus) && item.sourceType !== "LAUNCH_ITEM";
   const showReclaim = responsibilityActionsVisible && item.pcStatus === "HANDED_BACK";
   const showAcknowledge = responsibilityItem != null && responsibilityActionsVisible && canAcknowledgeEscalation(responsibilityItem, actor);
   const showResolveOrReturn = responsibilityItem != null && responsibilityActionsVisible && canResolveOrReturnEscalation(responsibilityItem, actor);
@@ -591,6 +622,12 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
       </div>
 
       <p className="muted">
+        {sourceLabel ? (
+          <>
+            <span className="pc-source-label">{sourceLabel}</span>
+            {" · "}
+          </>
+        ) : null}
         {item.propertyAddress ?? `Property #${item.propertyId}`} · {categoryLabel(item.category)}
         {item.dueAt ? (
           <>
@@ -834,7 +871,7 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
         </form>
       )}
 
-      {openForm === "handBack" && (
+      {showHandBackOrEscalate && openForm === "handBack" && (
         <form
           className="stack pc-inline-form"
           onSubmit={(e) => {
@@ -893,7 +930,7 @@ function PcItemCard({ item, currentUserId, currentUserRole, team, busy, error, a
         </form>
       )}
 
-      {openForm === "escalate" && (
+      {showHandBackOrEscalate && openForm === "escalate" && (
         <form
           className="stack pc-inline-form"
           onSubmit={(e) => {
