@@ -8,7 +8,9 @@
 // another brokerage is absent. A campaign item in the same brokerage on a
 // different property than the event is excluded, and its title is absent.
 // cost_cents and vendor_name are not in the payload. Hand-back and escalate
-// stay the exception-only rejection.
+// return 404 unless both responsibility flags are the literal "true", and
+// then they succeed without writing campaign_items. A COMPLETE campaign
+// item is absent from the flag-on inbox. A BLOCKED one stays.
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -167,6 +169,7 @@ async function insertCampaignItem(input: {
   title: string;
   costCents: number;
   vendorName: string;
+  status?: string;
 }): Promise<string> {
   const launchPlanId = await ensurePlan(input.targetBrokerageId, input.targetPropertyId, input.createdBy);
   const [item] = await db
@@ -178,7 +181,7 @@ async function insertCampaignItem(input: {
       itemType: "PHOTOGRAPHY",
       title: input.title,
       description: DESCRIPTION_SENTINEL,
-      status: "TO_ORGANISE",
+      status: input.status ?? "TO_ORGANISE",
       responsibleOwnerType: "PIT_CREW",
       costCents: input.costCents,
       vendorName: input.vendorName,
@@ -584,79 +587,234 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
     );
   });
 
-  test("flag on: LAUNCH_ITEM hand-back and escalate still return the exception-only rejection", async () => {
-    const [beforeItem] = await db
-      .select({
-        title: campaignItems.title,
-        status: campaignItems.status,
-        costCents: campaignItems.costCents,
-        vendorName: campaignItems.vendorName,
-        description: campaignItems.description,
-      })
-      .from(campaignItems)
-      .where(eq(campaignItems.id, launchItemId));
-    const [beforeEvents] = await db
+  test("flag on excludes a COMPLETE campaign item and still shows a BLOCKED one", async () => {
+    const completeTitle = "Rf28 complete campaign item 3e91";
+    const blockedTitle = "Rf28 blocked campaign item 3e91";
+    const completeId = await insertCampaignItem({
+      targetBrokerageId: brokerageId,
+      targetPropertyId: propertyId,
+      createdBy: admin.user.id,
+      title: completeTitle,
+      costCents: COST_SENTINEL,
+      vendorName: VENDOR_SENTINEL,
+      status: "COMPLETE",
+    });
+    const blockedId = await insertCampaignItem({
+      targetBrokerageId: brokerageId,
+      targetPropertyId: propertyId,
+      createdBy: admin.user.id,
+      title: blockedTitle,
+      costCents: COST_SENTINEL,
+      vendorName: VENDOR_SENTINEL,
+      status: "BLOCKED",
+    });
+    await insertLaunchResponsibility(completeId);
+    await insertLaunchResponsibility(blockedId);
+
+    await withLaunchFlag("true", async () => {
+      const { agentInbox, adminInbox } = await readInboxes();
+      const encoded = JSON.stringify({ agentInbox, adminInbox });
+      assert.equal(agentInbox.items.some((item) => item.sourceRecordId === completeId), false);
+      assert.equal(adminInbox.items.some((item) => item.sourceRecordId === completeId), false);
+      assert.equal(encoded.includes(completeTitle), false);
+      const blocked = agentInbox.items.find((item) => item.sourceRecordId === blockedId);
+      assert.ok(blocked);
+      assert.equal(blocked.sourceType, "LAUNCH_ITEM");
+      assert.equal(blocked.title, blockedTitle);
+      assert.equal(blocked.propertyId, propertyId);
+      assert.equal(encoded.includes(String(COST_SENTINEL)), false);
+      assert.equal(encoded.includes(VENDOR_SENTINEL), false);
+    });
+
+    const statements: string[] = [];
+    await withLaunchFlag(undefined, async () => {
+      const uninstall = setDbQueryObserver((query) => {
+        statements.push(query);
+      });
+      try {
+        const { agentInbox } = await readInboxes();
+        assert.equal(agentInbox.items.some((item) => item.sourceRecordId === completeId), false);
+        assert.equal(agentInbox.items.some((item) => item.sourceRecordId === blockedId), false);
+        assert.equal(agentInbox.items.some((item) => item.sourceType === "LAUNCH_ITEM"), false);
+      } finally {
+        uninstall();
+      }
+    });
+    assert.deepEqual(
+      statements.filter((query) => query.includes("campaign_items")),
+      [],
+    );
+  });
+
+  test("LAUNCH_ITEM hand-back and escalate 404 unless both flags are on, then succeed without writing the campaign item", async () => {
+    const handBackId = await insertCampaignItem({
+      targetBrokerageId: brokerageId,
+      targetPropertyId: propertyId,
+      createdBy: admin.user.id,
+      title: "Rf28 hand back photographer",
+      costCents: COST_SENTINEL,
+      vendorName: VENDOR_SENTINEL,
+    });
+    const escalateId = await insertCampaignItem({
+      targetBrokerageId: brokerageId,
+      targetPropertyId: propertyId,
+      createdBy: admin.user.id,
+      title: "Rf28 escalate photographer",
+      costCents: COST_SENTINEL,
+      vendorName: VENDOR_SENTINEL,
+    });
+    const [beforeHandBack] = await db.select().from(campaignItems).where(eq(campaignItems.id, handBackId));
+    const [beforeEscalate] = await db.select().from(campaignItems).where(eq(campaignItems.id, escalateId));
+    const [beforeFixtureEvents] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(pitCrewResponsibilityEvents)
       .where(eq(pitCrewResponsibilityEvents.assignmentId, launchAssignmentId));
 
+    const cases = [
+      {
+        action: "hand-back",
+        sourceRecordId: handBackId,
+        body: {
+          propertyId,
+          expectedVersion: 0,
+          reasonCategory: "WORK_COMPLETE",
+          nextAction: "Confirm the Saturday shoot time.",
+        },
+      },
+      {
+        action: "escalate",
+        sourceRecordId: escalateId,
+        body: {
+          propertyId,
+          expectedVersion: 0,
+          reasonCategory: "MISSING_AUTHORITY",
+          severity: "ATTENTION",
+          note: "Outside Pit Crew authority.",
+          nextAction: "Decide the next step.",
+        },
+      },
+    ];
+
     const previousResponsibility = process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG];
-    process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = "true";
     try {
-      await withLaunchFlag("true", async () => {
-        const cases = [
-          {
-            action: "hand-back",
-            body: {
-              propertyId,
-              expectedVersion: 0,
-              reasonCategory: "WORK_COMPLETE",
-              nextAction: "Confirm the Saturday shoot time.",
-            },
-          },
-          {
-            action: "escalate",
-            body: {
-              propertyId,
-              expectedVersion: 0,
-              reasonCategory: "MISSING_AUTHORITY",
-              severity: "ATTENTION",
-              note: "Outside Pit Crew authority.",
-              nextAction: "Decide the next step.",
-            },
-          },
-        ];
-        for (const actionCase of cases) {
-          const res = await fetch(`${baseUrl}/api/pit-crew/items/LAUNCH_ITEM/${launchItemId}/${actionCase.action}`, {
-            method: "POST",
-            headers: { cookie: admin.cookie, "content-type": "application/json" },
-            body: JSON.stringify(actionCase.body),
+      for (const flagCase of FLAG_OFF) {
+        if (flagCase.value === undefined) delete process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG];
+        else process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = flagCase.value;
+        await withLaunchFlag("true", async () => {
+          for (const actionCase of cases) {
+            const res = await fetch(`${baseUrl}/api/pit-crew/items/LAUNCH_ITEM/${actionCase.sourceRecordId}/${actionCase.action}`, {
+              method: "POST",
+              headers: { cookie: admin.cookie, "content-type": "application/json" },
+              body: JSON.stringify(actionCase.body),
+            });
+            const text = await res.text();
+            assert.equal(res.status, 404, `${flagCase.label} ${actionCase.action} ${text}`);
+            assert.equal(text, JSON.stringify({ error: "Not found." }), `${flagCase.label} ${actionCase.action}`);
+          }
+        });
+      }
+
+      process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = "true";
+      for (const flagCase of FLAG_OFF) {
+        const statements: string[] = [];
+        await withLaunchFlag(flagCase.value, async () => {
+          const uninstall = setDbQueryObserver((query) => {
+            statements.push(query);
           });
-          const text = await res.text();
-          assert.equal(res.status, 404, `${actionCase.action} ${text}`);
-          assert.equal(text, WORK_ITEM_NOT_FOUND, actionCase.action);
-        }
+          try {
+            for (const actionCase of cases) {
+              const res = await fetch(`${baseUrl}/api/pit-crew/items/LAUNCH_ITEM/${actionCase.sourceRecordId}/${actionCase.action}`, {
+                method: "POST",
+                headers: { cookie: admin.cookie, "content-type": "application/json" },
+                body: JSON.stringify(actionCase.body),
+              });
+              const text = await res.text();
+              assert.equal(res.status, 404, `${flagCase.label} ${actionCase.action} ${text}`);
+              assert.equal(text, WORK_ITEM_NOT_FOUND, `${flagCase.label} ${actionCase.action}`);
+            }
+          } finally {
+            uninstall();
+          }
+        });
+        assert.deepEqual(
+          statements.filter((query) => query.includes("campaign_items")),
+          [],
+          flagCase.label,
+        );
+      }
+
+      await withLaunchFlag("true", async () => {
+        const handClaim = await claimWorkItem({
+          brokerageId,
+          propertyId,
+          sourceType: "LAUNCH_ITEM",
+          sourceRecordId: handBackId,
+          expectedVersion: 0,
+          actorUserId: admin.user.id,
+          actorEmail: admin.user.email,
+        });
+        const escalateClaim = await claimWorkItem({
+          brokerageId,
+          propertyId,
+          sourceType: "LAUNCH_ITEM",
+          sourceRecordId: escalateId,
+          expectedVersion: 0,
+          actorUserId: admin.user.id,
+          actorEmail: admin.user.email,
+        });
+        const handed = await fetch(`${baseUrl}/api/pit-crew/items/LAUNCH_ITEM/${handBackId}/hand-back`, {
+          method: "POST",
+          headers: { cookie: admin.cookie, "content-type": "application/json" },
+          body: JSON.stringify({ ...cases[0].body, expectedVersion: handClaim.version }),
+        });
+        const handedText = await handed.text();
+        assert.equal(handed.status, 200, handedText);
+        const handedBody = JSON.parse(handedText) as {
+          status: string;
+          responsibilityEvent: { kind: string; resultingResponsibility: string; recipientUserId: number; severity: null };
+        };
+        assert.equal(handedBody.status, "HANDED_BACK");
+        assert.equal(handedBody.responsibilityEvent.kind, "HAND_BACK");
+        assert.equal(handedBody.responsibilityEvent.resultingResponsibility, "AGENT");
+        assert.equal(handedBody.responsibilityEvent.recipientUserId, agent.user.id);
+        assert.equal(handedBody.responsibilityEvent.severity, null);
+        assert.equal(handedText.includes(String(COST_SENTINEL)), false);
+        assert.equal(handedText.includes(VENDOR_SENTINEL), false);
+
+        const escalated = await fetch(`${baseUrl}/api/pit-crew/items/LAUNCH_ITEM/${escalateId}/escalate`, {
+          method: "POST",
+          headers: { cookie: admin.cookie, "content-type": "application/json" },
+          body: JSON.stringify({ ...cases[1].body, expectedVersion: escalateClaim.version }),
+        });
+        const escalatedText = await escalated.text();
+        assert.equal(escalated.status, 200, escalatedText);
+        const escalatedBody = JSON.parse(escalatedText) as {
+          status: string;
+          assignedToUserId: number;
+          responsibilityEvent: { kind: string; resultingResponsibility: string; recipientUserId: number | null; recipientRole: string };
+        };
+        assert.equal(escalatedBody.status, "ESCALATED");
+        assert.equal(escalatedBody.assignedToUserId, admin.user.id);
+        assert.equal(escalatedBody.responsibilityEvent.kind, "ESCALATION");
+        assert.equal(escalatedBody.responsibilityEvent.resultingResponsibility, "BROKERAGE_ADMINISTRATOR");
+        assert.equal(escalatedBody.responsibilityEvent.recipientUserId, null);
+        assert.equal(escalatedBody.responsibilityEvent.recipientRole, "Brokerage Administrator");
+        assert.equal(escalatedText.includes(String(COST_SENTINEL)), false);
+        assert.equal(escalatedText.includes(VENDOR_SENTINEL), false);
       });
     } finally {
       if (previousResponsibility === undefined) delete process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG];
       else process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = previousResponsibility;
     }
 
-    const [afterItem] = await db
-      .select({
-        title: campaignItems.title,
-        status: campaignItems.status,
-        costCents: campaignItems.costCents,
-        vendorName: campaignItems.vendorName,
-        description: campaignItems.description,
-      })
-      .from(campaignItems)
-      .where(eq(campaignItems.id, launchItemId));
-    assert.deepEqual(afterItem, beforeItem);
-    const [afterEvents] = await db
+    const [afterHandBack] = await db.select().from(campaignItems).where(eq(campaignItems.id, handBackId));
+    const [afterEscalate] = await db.select().from(campaignItems).where(eq(campaignItems.id, escalateId));
+    assert.deepEqual(afterHandBack, beforeHandBack);
+    assert.deepEqual(afterEscalate, beforeEscalate);
+    const [afterFixtureEvents] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(pitCrewResponsibilityEvents)
       .where(eq(pitCrewResponsibilityEvents.assignmentId, launchAssignmentId));
-    assert.equal(Number(afterEvents?.n ?? 0), Number(beforeEvents?.n ?? 0));
+    assert.equal(Number(afterFixtureEvents?.n ?? 0), Number(beforeFixtureEvents?.n ?? 0));
   });
 });

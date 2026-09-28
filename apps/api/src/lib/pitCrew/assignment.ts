@@ -181,7 +181,11 @@ async function notePitCrewAssigneeIsolationRejection(userId: number, brokerageId
 // property. The miss uses the same 404 as a missing exception. Any other
 // flag value throws that 404 and does not query campaign_items. Every
 // other non-EXCEPTION source type is still rejected with that 404 and
-// does not increment tenant_isolation_rejection_total.
+// does not increment tenant_isolation_rejection_total. The default check
+// does not read status. Responsibility actions pass
+// rejectCompleteLaunchItem so a COMPLETE campaign item uses that same 404
+// before the overlay is touched. BLOCKED still passes. Claim and the other
+// assignment actions do not pass that option.
 function isKnownPitCrewWorkSourceType(sourceType: string): boolean {
   return (PIT_CREW_WORK_SOURCE_TYPES as readonly string[]).includes(sourceType);
 }
@@ -196,33 +200,52 @@ async function notePitCrewLaunchItemIsolationRejection(sourceRecordId: string, b
   notePitCrewRejection(elsewhere);
 }
 
-async function assertLaunchItemOnPropertyInBrokerage(ref: WorkItemRef): Promise<void> {
+async function assertLaunchItemOnPropertyInBrokerage(ref: WorkItemRef, rejectComplete = false): Promise<void> {
   if (!UUID_SHAPE.test(ref.sourceRecordId)) {
     throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
   }
+  const where = and(
+    eq(campaignItems.id, ref.sourceRecordId),
+    eq(campaignItems.brokerageId, ref.brokerageId),
+    eq(campaignItems.propertyId, ref.propertyId),
+  );
+  // Claim, complete, and the other assignment actions leave this false.
+  // Their select stays id-only and does not read status. Responsibility
+  // actions pass true so a COMPLETE campaign item is the same not-found
+  // 404, before any overlay insert or update. BLOCKED and the other
+  // non-complete statuses still pass. A miss still notes a cross-brokerage
+  // id. A COMPLETE row in this brokerage is not that miss.
+  if (!rejectComplete) {
+    const [item] = await db.select({ id: campaignItems.id }).from(campaignItems).where(where).limit(1);
+    if (!item) {
+      await notePitCrewLaunchItemIsolationRejection(ref.sourceRecordId, ref.brokerageId);
+      throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+    }
+    return;
+  }
   const [item] = await db
-    .select({ id: campaignItems.id })
+    .select({ id: campaignItems.id, status: campaignItems.status })
     .from(campaignItems)
-    .where(
-      and(
-        eq(campaignItems.id, ref.sourceRecordId),
-        eq(campaignItems.brokerageId, ref.brokerageId),
-        eq(campaignItems.propertyId, ref.propertyId),
-      ),
-    )
+    .where(where)
     .limit(1);
   if (!item) {
     await notePitCrewLaunchItemIsolationRejection(ref.sourceRecordId, ref.brokerageId);
     throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
   }
+  if (item.status === "COMPLETE") {
+    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+  }
 }
 
-async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promise<void> {
+async function assertSourceRecordOnPropertyInBrokerage(
+  ref: WorkItemRef,
+  options?: { rejectCompleteLaunchItem?: boolean },
+): Promise<void> {
   if (ref.sourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE) {
     if (!isPitCrewLaunchItemSourceEnabled()) {
       throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
     }
-    await assertLaunchItemOnPropertyInBrokerage(ref);
+    await assertLaunchItemOnPropertyInBrokerage(ref, options?.rejectCompleteLaunchItem === true);
     return;
   }
   if (!isKnownPitCrewWorkSourceType(ref.sourceType)) {
@@ -257,7 +280,10 @@ async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promis
 // 0) correctly loses the race if someone beat it to the first touch too.
 // Exported for the responsibility actions, which must reuse this brokerage
 // and source-record check instead of writing a second overlay loader.
-export async function loadOrCreateOverlay(ref: WorkItemRef): Promise<PitCrewAssignment> {
+export async function loadOrCreateOverlay(
+  ref: WorkItemRef,
+  options?: { rejectCompleteLaunchItem?: boolean },
+): Promise<PitCrewAssignment> {
   // Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7). ref.brokerageId is
   // trustworthy (the route layer sets it from the caller's own session), but
   // ref.propertyId is client-supplied. Without this lookup a Pit Crew member in
@@ -283,7 +309,7 @@ export async function loadOrCreateOverlay(ref: WorkItemRef): Promise<PitCrewAssi
   // needs before it ever touches pit_crew_assignments: the property check
   // above proves ref.propertyId is really brokerage A's, but says nothing
   // about whether ref.sourceRecordId is too.
-  await assertSourceRecordOnPropertyInBrokerage(ref);
+  await assertSourceRecordOnPropertyInBrokerage(ref, options);
 
   const [existing] = await db
     .select()

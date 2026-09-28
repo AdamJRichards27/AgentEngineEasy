@@ -21,10 +21,13 @@
 // on the item id, the caller's brokerage id, and
 // campaign_items.property_id = the event's property_id. A campaign item on
 // a different property is excluded, the same way a missing exception is
-// excluded, and its title is not returned. The flag-on exception join
-// requires risk_exceptions.property_id to match the event as well. The
-// flag-off inbox does not. cost_cents and vendor_name are not selected.
-// Hand-back and escalate stay EXCEPTION-only.
+// excluded, and its title is not returned. A COMPLETE campaign item is
+// excluded the same way. BLOCKED and the other non-complete statuses stay.
+// The flag-on exception join requires risk_exceptions.property_id to match
+// the event as well. The flag-off inbox does not. cost_cents and
+// vendor_name are not selected. LAUNCH_ITEM hand-back, escalate,
+// acknowledge, resolve, return, and reclaim run only when both flags are
+// the literal "true". The flag-off inbox function is unchanged.
 //
 // Open campaign items are included only when
 // PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". While it is
@@ -135,9 +138,21 @@ function isActiveWorkspaceStatus(status: PitCrewItemStatus): boolean {
   return status !== "DONE" && status !== "HANDED_BACK" && status !== "ESCALATED";
 }
 
+interface OpenResponsibilityOverlayRef {
+  id: number;
+  sourceType: string;
+  sourceRecordId: string;
+}
+
+// Source type and id, so an exception event and a launch-item event cannot
+// attach to each other when both sets share this map.
+function openResponsibilityKey(sourceType: string, sourceRecordId: string): string {
+  return `${sourceType}\u0000${sourceRecordId}`;
+}
+
 async function loadOpenResponsibilityBySourceRecordId(
   brokerageId: number,
-  overlayRows: Array<{ id: number; sourceRecordId: string }>,
+  overlayRows: OpenResponsibilityOverlayRef[],
 ): Promise<Map<string, LoadedOpenResponsibility>> {
   const bySource = new Map<string, LoadedOpenResponsibility>();
   if (!isPitCrewResponsibilityActionsEnabled() || overlayRows.length === 0) return bySource;
@@ -176,7 +191,7 @@ async function loadOpenResponsibilityBySourceRecordId(
   for (const row of overlayRows) {
     const loaded = byAssignment.get(row.id);
     if (!loaded) continue;
-    bySource.set(row.sourceRecordId, {
+    bySource.set(openResponsibilityKey(row.sourceType, row.sourceRecordId), {
       event: loaded.event,
       operatorDisplayName:
         displayNameForJoinedUser(loaded.event.originatingUserId, {
@@ -242,7 +257,10 @@ const launchItemOwner = alias(users, "pc_launch_item_owner");
 // the campaign item is not COMPLETE. COMPLETE rows stay out even if an
 // overlay exists: Pit Crew done is the overlay, and a finished campaign
 // item is not an open work item. cost_cents and vendor_name are not selected.
-async function loadLaunchItemWorkItems(brokerageId: number, now: Date): Promise<PcWorkItem[]> {
+async function loadLaunchItemWorkItems(
+  brokerageId: number,
+  now: Date,
+): Promise<{ items: PcWorkItem[]; overlays: OpenResponsibilityOverlayRef[] }> {
   const rows = await db
     .select({
       id: campaignItems.id,
@@ -267,7 +285,7 @@ async function loadLaunchItemWorkItems(brokerageId: number, now: Date): Promise<
       and(eq(launchItemOwner.id, campaignItems.responsibleUserId), eq(launchItemOwner.brokerageId, brokerageId)),
     )
     .where(and(eq(campaignItems.brokerageId, brokerageId), ne(campaignItems.status, "COMPLETE")));
-  if (rows.length === 0) return [];
+  if (rows.length === 0) return { items: [], overlays: [] };
 
   const overlayRows = await db
     .select()
@@ -291,7 +309,7 @@ async function loadLaunchItemWorkItems(brokerageId: number, now: Date): Promise<
     : [];
   const nameByUserId = new Map(assignedUsers.map((user) => [user.id, `${user.firstName} ${user.lastName}`.trim()]));
 
-  return rows.map((row) => {
+  const items: PcWorkItem[] = rows.map((row) => {
     const overlay = overlayByRecordId.get(row.id);
     const pcStatus: PitCrewItemStatus = (overlay?.status as PitCrewItemStatus | undefined) ?? "UNCLAIMED";
     const dueAt = row.dueAt ? new Date(row.dueAt) : null;
@@ -332,6 +350,14 @@ async function loadLaunchItemWorkItems(brokerageId: number, now: Date): Promise<
       version: overlay?.version ?? 0,
     };
   });
+  return {
+    items,
+    overlays: overlayRows.map((row) => ({
+      id: row.id,
+      sourceType: row.sourceType,
+      sourceRecordId: row.sourceRecordId,
+    })),
+  };
 }
 
 export async function getPitCrewWorkspace(brokerageId: number, actorUserId: number): Promise<PcWorkspace> {
@@ -407,7 +433,14 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
   });
 
   // Flag off must not call the loader. That call is the only campaign_items read.
-  const launchItems = isPitCrewLaunchItemSourceEnabled() ? await loadLaunchItemWorkItems(brokerageId, now) : [];
+  const launchLoaded = isPitCrewLaunchItemSourceEnabled()
+    ? await loadLaunchItemWorkItems(brokerageId, now)
+    : { items: [] as PcWorkItem[], overlays: [] as OpenResponsibilityOverlayRef[] };
+  if (launchLoaded.overlays.length > 0) {
+    const launchOpen = await loadOpenResponsibilityBySourceRecordId(brokerageId, launchLoaded.overlays);
+    for (const [key, loaded] of launchOpen) openResponsibilityBySourceId.set(key, loaded);
+  }
+  const launchItems = launchLoaded.items;
   const workspaceItems = items.concat(launchItems);
 
   // Section 6/10: an item is Pit Crew's to see when the owner is already
@@ -434,12 +467,12 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
   const overdueCount = pcRelevant.filter((item) => item.overdue && isActiveWorkspaceStatus(item.pcStatus)).length;
   const handedBack = pcRelevant
     .filter((item) => item.pcStatus === "HANDED_BACK")
-    .map((item) => toResponsibilityWorkItem(item, openResponsibilityBySourceId.get(item.sourceRecordId), "HAND_BACK"))
+    .map((item) => toResponsibilityWorkItem(item, openResponsibilityBySourceId.get(openResponsibilityKey(item.sourceType, item.sourceRecordId)), "HAND_BACK"))
     .filter((item): item is PcResponsibilityWorkItem => item != null)
     .sort(comparePcWorkItems);
   const escalated = pcRelevant
     .filter((item) => item.pcStatus === "ESCALATED")
-    .map((item) => toResponsibilityWorkItem(item, openResponsibilityBySourceId.get(item.sourceRecordId), "ESCALATION"))
+    .map((item) => toResponsibilityWorkItem(item, openResponsibilityBySourceId.get(openResponsibilityKey(item.sourceType, item.sourceRecordId)), "ESCALATION"))
     .filter((item): item is PcResponsibilityWorkItem => item != null)
     .sort(comparePcWorkItems);
 
@@ -575,16 +608,16 @@ function responsibilityInboxItem(row: ResponsibilityInboxRowIdentity): Responsib
  * A LAUNCH_ITEM row is included only when
  * PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". Its title is
  * campaign_items.title. That branch selects the campaign item id, title,
- * property id, and brokerage id, and does not select cost_cents or
+ * property id, brokerage id, and status, and does not select cost_cents or
  * vendor_name. The campaign_items join also requires
- * campaign_items.property_id to equal the event's property_id. A row whose
- * campaign item is on a different property is excluded from the inbox, the
- * same way a missing exception is excluded, so the campaign item title is
- * not returned. The flag-on exception join requires the same property
- * match. The flag-off function does not. While the launch-item flag is not
- * the literal "true", this function does not query campaign_items.
- * Hand-back and escalate stay EXCEPTION-only, so no LAUNCH_ITEM
- * responsibility event is created through the app today.
+ * campaign_items.property_id to equal the event's property_id, and
+ * campaign_items.status to be anything other than COMPLETE. A row whose
+ * campaign item is on a different property, or is COMPLETE, is excluded
+ * from the inbox, the same way a missing exception is excluded, so the
+ * campaign item title is not returned. BLOCKED stays. The flag-on exception
+ * join requires the same property match. The flag-off function does not.
+ * While the launch-item flag is not the literal "true", this function does
+ * not query campaign_items.
  */
 export async function listResponsibilityItemsForRecipient(
   brokerageId: number,
@@ -692,13 +725,14 @@ async function listExceptionResponsibilityInbox(
 
 // Flag-on inbox. Exception rows still use listedExceptionTitle. A
 // LAUNCH_ITEM row survives only when campaign_items matches the assignment
-// id, the caller's brokerage, and the event's property. A campaign item on
-// a different property than the event is excluded, the same way a missing
-// exception is excluded: the left join does not match, and the row is
-// dropped. The exception left join in this function also requires
-// risk_exceptions.property_id to equal the event's property_id. The
-// flag-off function does not add that condition. cost_cents and
-// vendor_name are not selected.
+// id, the caller's brokerage, and the event's property, and its status is
+// not COMPLETE. A campaign item on a different property than the event, or
+// a COMPLETE campaign item, is excluded, the same way a missing exception
+// is excluded: the left join does not match, and the row is dropped.
+// BLOCKED and the other non-complete statuses stay. The exception left join
+// in this function also requires risk_exceptions.property_id to equal the
+// event's property_id. The flag-off function does not add that condition.
+// cost_cents and vendor_name are not selected.
 async function listResponsibilityInboxIncludingLaunchItems(
   brokerageId: number,
   userId: number,
@@ -719,6 +753,7 @@ async function listResponsibilityInboxIncludingLaunchItems(
       campaignTitle: campaignItems.title,
       campaignPropertyId: campaignItems.propertyId,
       campaignBrokerageId: campaignItems.brokerageId,
+      campaignStatus: campaignItems.status,
       propertyAddress: properties.formattedAddress,
       recipientId: responsibilityRecipientUser.id,
       recipientFirstName: responsibilityRecipientUser.firstName,
@@ -747,6 +782,7 @@ async function listResponsibilityInboxIncludingLaunchItems(
         sql`${pitCrewAssignments.sourceRecordId} = ${campaignItems.id}::text`,
         eq(campaignItems.brokerageId, brokerageId),
         eq(campaignItems.propertyId, pitCrewResponsibilityEvents.propertyId),
+        ne(campaignItems.status, "COMPLETE"),
       ),
     )
     .innerJoin(
@@ -774,6 +810,7 @@ async function listResponsibilityInboxIncludingLaunchItems(
             isNotNull(campaignItems.id),
             eq(campaignItems.brokerageId, brokerageId),
             eq(campaignItems.propertyId, pitCrewResponsibilityEvents.propertyId),
+            ne(campaignItems.status, "COMPLETE"),
           ),
         ),
       ),
@@ -787,12 +824,14 @@ async function listResponsibilityInboxIncludingLaunchItems(
   const items = rows.flatMap((row) => {
     const launchItem = row.assignmentSourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE;
     if (launchItem) {
-      // Excluded when the campaign item is missing, another brokerage, or a
-      // different property than the event. Same outcome as a missing exception.
+      // Excluded when the campaign item is missing, another brokerage, a
+      // different property than the event, or COMPLETE. Same outcome as a
+      // missing exception. BLOCKED stays.
       if (
         row.campaignItemId == null ||
         row.campaignBrokerageId !== brokerageId ||
-        row.campaignPropertyId !== row.event.propertyId
+        row.campaignPropertyId !== row.event.propertyId ||
+        row.campaignStatus === "COMPLETE"
       ) {
         return [];
       }
