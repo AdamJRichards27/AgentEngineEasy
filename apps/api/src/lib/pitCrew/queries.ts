@@ -15,12 +15,20 @@
 //
 // listResponsibilityItemsForRecipient is the recipient inbox. It refuses
 // before reading that table unless the flag is the literal "true".
+//
+// Open campaign items are included only when
+// PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". While it is
+// not, this read does not query campaign_items. Relevance matches
+// exceptions: responsible owner PIT_CREW or UNASSIGNED_QUEUE, or an
+// overlay the workspace already treats as touched (version > 0). There is
+// no due-date horizon. Pit Crew actions do not write campaign_items.
 
-import { eq, and, asc, inArray, or, sql } from "drizzle-orm";
+import { eq, and, asc, inArray, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
+import { campaignItems, db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../middlewares/auth.js";
 import { listBrokerageExceptions, listedExceptionTitle } from "../exceptions/queries.js";
+import { isPitCrewLaunchItemSourceEnabled } from "./launchItemSource.js";
 import { explicitResponsibilityRecipientRole, isPitCrewResponsibilityActionsEnabled, PitCrewResponsibilityDisabledError } from "./responsibility.js";
 import {
   type PcWorkItem,
@@ -34,6 +42,7 @@ import {
   isPitCrewRelevantOwnerType,
   comparePcWorkItems,
   LAUNCH_COORDINATION_CATEGORIES,
+  PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE,
   TRANSACTION_COORDINATION_CATEGORIES,
 } from "./types.js";
 
@@ -217,6 +226,104 @@ function toResponsibilityWorkItem(
   };
 }
 
+const launchItemOwner = alias(users, "pc_launch_item_owner");
+
+// Only called when the launch-item flag is the literal "true". Open means
+// the campaign item is not COMPLETE. COMPLETE rows stay out even if an
+// overlay exists: Pit Crew done is the overlay, and a finished campaign
+// item is not an open work item. cost_cents and vendor_name are not selected.
+async function loadLaunchItemWorkItems(brokerageId: number, now: Date): Promise<PcWorkItem[]> {
+  const rows = await db
+    .select({
+      id: campaignItems.id,
+      propertyId: campaignItems.propertyId,
+      brokerageId: campaignItems.brokerageId,
+      title: campaignItems.title,
+      description: campaignItems.description,
+      status: campaignItems.status,
+      responsibleOwnerType: campaignItems.responsibleOwnerType,
+      responsibleUserId: campaignItems.responsibleUserId,
+      dueAt: campaignItems.dueAt,
+      createdAt: campaignItems.createdAt,
+      propertyAddress: properties.formattedAddress,
+      ownerId: launchItemOwner.id,
+      ownerFirstName: launchItemOwner.firstName,
+      ownerLastName: launchItemOwner.lastName,
+    })
+    .from(campaignItems)
+    .innerJoin(properties, and(eq(properties.id, campaignItems.propertyId), eq(properties.brokerageId, brokerageId)))
+    .leftJoin(
+      launchItemOwner,
+      and(eq(launchItemOwner.id, campaignItems.responsibleUserId), eq(launchItemOwner.brokerageId, brokerageId)),
+    )
+    .where(and(eq(campaignItems.brokerageId, brokerageId), ne(campaignItems.status, "COMPLETE")));
+  if (rows.length === 0) return [];
+
+  const overlayRows = await db
+    .select()
+    .from(pitCrewAssignments)
+    .where(
+      and(
+        eq(pitCrewAssignments.sourceType, PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE),
+        inArray(
+          pitCrewAssignments.sourceRecordId,
+          rows.map((row) => row.id),
+        ),
+      ),
+    );
+  const overlayByRecordId = new Map(overlayRows.map((row) => [row.sourceRecordId, row]));
+  const assignedUserIds = [...new Set(overlayRows.map((row) => row.assignedToUserId).filter((id): id is number => id != null))];
+  const assignedUsers = assignedUserIds.length
+    ? await db
+        .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+        .from(users)
+        .where(and(inArray(users.id, assignedUserIds), eq(users.brokerageId, brokerageId)))
+    : [];
+  const nameByUserId = new Map(assignedUsers.map((user) => [user.id, `${user.firstName} ${user.lastName}`.trim()]));
+
+  return rows.map((row) => {
+    const overlay = overlayByRecordId.get(row.id);
+    const pcStatus: PitCrewItemStatus = (overlay?.status as PitCrewItemStatus | undefined) ?? "UNCLAIMED";
+    const dueAt = row.dueAt ? new Date(row.dueAt) : null;
+    const ownerName =
+      row.ownerId != null ? `${row.ownerFirstName ?? ""} ${row.ownerLastName ?? ""}`.trim() : "";
+    return {
+      sourceType: PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE,
+      sourceRecordId: row.id,
+      propertyId: row.propertyId,
+      propertyAddress: row.propertyAddress,
+      brokerageId: row.brokerageId,
+      title: row.title,
+      description: row.description ?? "",
+      category: "LAUNCH_CAMPAIGN",
+      severity: "INFORMATION",
+      exceptionStatus: row.status,
+      ownerType: row.responsibleOwnerType,
+      ownerUserId: row.responsibleUserId,
+      ownerName: ownerName.length > 0 ? ownerName : null,
+      dueAt: dueAt ? dueAt.toISOString() : null,
+      overdue: dueAt ? dueAt.getTime() < now.getTime() : false,
+      recommendedAction: "",
+      deepLink: `/properties/${row.propertyId}`,
+      detectedAt: new Date(row.createdAt).toISOString(),
+      pcStatus,
+      assignedToUserId: overlay?.assignedToUserId ?? null,
+      assignedToName: overlay?.assignedToUserId != null ? (nameByUserId.get(overlay.assignedToUserId) ?? null) : null,
+      claimedAt: overlay?.claimedAt ? overlay.claimedAt.toISOString() : null,
+      waitingOnParty: overlay?.waitingOnParty ?? null,
+      waitingOnNote: overlay?.waitingOnNote ?? null,
+      waitingOnSince: overlay?.waitingOnSince ? overlay.waitingOnSince.toISOString() : null,
+      waitingOnExpectedAt: overlay?.waitingOnExpectedAt ? overlay.waitingOnExpectedAt.toISOString() : null,
+      handoffFromUserId: overlay?.handoffFromUserId ?? null,
+      handoffToUserId: overlay?.handoffToUserId ?? null,
+      handoffNote: overlay?.handoffNote ?? null,
+      handoffAt: overlay?.handoffAt ? overlay.handoffAt.toISOString() : null,
+      completedAt: overlay?.completedAt ? overlay.completedAt.toISOString() : null,
+      version: overlay?.version ?? 0,
+    };
+  });
+}
+
 export async function getPitCrewWorkspace(brokerageId: number, actorUserId: number): Promise<PcWorkspace> {
   const now = new Date();
 
@@ -289,12 +396,15 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
     };
   });
 
-  // Section 6/10: an item is Pit Crew's to see when the Risk Engine already
-  // says so (ownerType PIT_CREW or UNASSIGNED_QUEUE) or when Pit Crew has
-  // already touched it (an overlay row exists, whatever the exception's
-  // own ownerType says -- e.g. an agent-owned exception Pit Crew was asked
-  // to help chase down).
-  const pcRelevant = items.filter((item) => isPitCrewRelevantOwnerType(item.ownerType) || item.version > 0);
+  // Flag off must not call the loader. That call is the only campaign_items read.
+  const launchItems = isPitCrewLaunchItemSourceEnabled() ? await loadLaunchItemWorkItems(brokerageId, now) : [];
+  const workspaceItems = items.concat(launchItems);
+
+  // Section 6/10: an item is Pit Crew's to see when the owner is already
+  // PIT_CREW or UNASSIGNED_QUEUE, or when Pit Crew has already touched it
+  // (version > 0, whatever the source owner says). Launch items use the
+  // same rule. A due date outside today does not hide a launch item.
+  const pcRelevant = workspaceItems.filter((item) => isPitCrewRelevantOwnerType(item.ownerType) || item.version > 0);
 
   const unassignedWork = pcRelevant.filter((item) => item.pcStatus === "UNCLAIMED").sort(comparePcWorkItems);
   const myWork = pcRelevant

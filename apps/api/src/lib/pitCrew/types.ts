@@ -8,8 +8,14 @@
 // exceptions stay on the Risk Engine's non-entitled view. Hand-back and
 // escalate lists stay on PcWorkspace and are not folded into ActionItem.
 
+// R-F21 allow-list. LAUNCH_ITEM is intentionally absent. The tenant check
+// accepts it only while PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal
+// "true". Putting it in this list would let the flag-off path treat it as known.
 export const PIT_CREW_WORK_SOURCE_TYPES = ["EXCEPTION"] as const;
 export type PitCrewWorkSourceType = (typeof PIT_CREW_WORK_SOURCE_TYPES)[number];
+
+export const PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE = "LAUNCH_ITEM" as const;
+export type PcWorkspaceSourceType = PitCrewWorkSourceType | typeof PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE;
 
 // Pit Crew overlay status vocabulary. UNCLAIMED is the implicit state of
 // any source item with no pit_crew_assignments row. HANDED_BACK and
@@ -50,7 +56,7 @@ export function isValidPitCrewTransition(from: PitCrewItemStatus, to: PitCrewIte
 // own fields (authoritative, read-only from here) plus the Pit Crew overlay
 // (assignment/status/waiting-on/handoff -- writable via assignment.ts).
 export interface PcWorkItem {
-  sourceType: PitCrewWorkSourceType;
+  sourceType: PcWorkspaceSourceType;
   sourceRecordId: string;
   propertyId: number;
   propertyAddress: string | null;
