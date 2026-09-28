@@ -15,7 +15,7 @@ import { and, asc, eq, inArray, isNotNull, lt, ne } from "drizzle-orm";
 import { db, pitCrewAssignments, properties, riskExceptions, users, type PitCrewAssignment } from "@aee/db";
 import { incrementCounter } from "@aee/events";
 import { logAudit } from "../audit.js";
-import { isValidPitCrewTransition, type PitCrewItemStatus } from "./types.js";
+import { isValidPitCrewTransition, PIT_CREW_WORK_SOURCE_TYPES, type PitCrewItemStatus } from "./types.js";
 import { dispatchOperationalAlert } from "../operationalAlerts.js";
 
 export class PitCrewTransitionError extends Error {
@@ -160,11 +160,22 @@ async function notePitCrewAssigneeIsolationRejection(userId: number, brokerageId
 // happens to be the UUID A guessed. This closes that gap by requiring
 // sourceRecordId to name a real exception that belongs to BOTH
 // ref.propertyId AND ref.brokerageId before any overlay row is ever
-// touched. PIT_CREW_WORK_SOURCE_TYPES (types.ts) currently has exactly one
-// member, "EXCEPTION" -- this check is scoped to that; a second source
-// type, if one is ever added, needs its own branch here rather than
-// silently falling through unchecked.
+// touched. PIT_CREW_WORK_SOURCE_TYPES (types.ts) is the only set of source
+// types accepted here. Anything else throws the same
+// PitCrewPropertyMismatchError a missing exception throws ("Work item not
+// found in this brokerage.") and does not increment
+// tenant_isolation_rejection_total: there is no other-brokerage lookup for
+// an unknown type. The EXCEPTION branch below is unchanged. A second
+// member of PIT_CREW_WORK_SOURCE_TYPES, if one is ever added, needs its
+// own branch here rather than falling through unchecked.
+function isKnownPitCrewWorkSourceType(sourceType: string): boolean {
+  return (PIT_CREW_WORK_SOURCE_TYPES as readonly string[]).includes(sourceType);
+}
+
 async function assertSourceRecordOnPropertyInBrokerage(ref: WorkItemRef): Promise<void> {
+  if (!isKnownPitCrewWorkSourceType(ref.sourceType)) {
+    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
+  }
   if (ref.sourceType !== "EXCEPTION") return;
   if (!UUID_SHAPE.test(ref.sourceRecordId)) {
     throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
