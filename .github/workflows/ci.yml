@@ -6,8 +6,9 @@ name: CI
 # the declared Node.js and pnpm versions from a committed lockfile, then
 # runs the workspace typecheck, the API automated test suite (against a
 # disposable, ephemeral Postgres service container — never a real
-# database), a deterministic clean-database migration check, and both
-# production builds. Any required step failing fails the workflow.
+# database), the existing web automated test suite, a deterministic
+# clean-database migration check, and both production builds. Any
+# required step failing fails the workflow.
 #
 # This workflow deliberately requires no production secrets. It uses a
 # throwaway Postgres connection, CI-only dummy values, and a temporary
@@ -120,6 +121,11 @@ jobs:
           NODE_ENV: test
           ALLOW_DEV_AUTH: "true"
         run: pnpm --filter @aee/api run test
+
+      - name: Web automated test suite
+        # Existing @aee/web script: `tsx --test src/lib/__tests__/*.test.ts`.
+        # No extra runner. A failing test fails this job.
+        run: pnpm --filter @aee/web run test
 
       - name: API production build
         run: pnpm --filter @aee/api run build
