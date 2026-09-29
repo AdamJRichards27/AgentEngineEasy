@@ -9,6 +9,14 @@
 // assignment update guarded by expectedVersion, and logAudit with strict
 // true bound to that same transaction. A zero-row assignment update throws
 // PitCrewConcurrencyError and rolls the event back.
+//
+// LAUNCH_ITEM is accepted only when this flag and
+// PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED are both the literal string "true".
+// With either flag off, LAUNCH_ITEM is rejected the same way any
+// non-exception source is rejected today, before an overlay write. A
+// COMPLETE campaign item is rejected inside that same load, before the
+// overlay is inserted or updated. This module does not write the launch
+// source row.
 
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -36,7 +44,8 @@ import {
   PitCrewPropertyMismatchError,
   PitCrewTransitionError,
 } from "./assignment.js";
-import { isValidPitCrewTransition, type PitCrewItemStatus } from "./types.js";
+import { isPitCrewLaunchItemSourceEnabled } from "./launchItemSource.js";
+import { isValidPitCrewTransition, PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE, type PitCrewItemStatus } from "./types.js";
 
 export const PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG = "PIT_CREW_RESPONSIBILITY_ACTIONS_ENABLED";
 
@@ -143,10 +152,15 @@ function assertResponsibilityActionsEnabled(): void {
   }
 }
 
-function assertExceptionSource(sourceType: string): void {
-  if (sourceType !== "EXCEPTION") {
-    throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
-  }
+// EXCEPTION returns immediately, before the launch-item flag is read.
+// LAUNCH_ITEM passes only while that flag is the literal "true". The
+// owned-overlay load then re-checks brokerage, property, and a
+// non-COMPLETE campaign item. Every other source type throws here, before
+// that load, so no overlay row is created.
+function assertResponsibilitySource(sourceType: string): void {
+  if (sourceType === "EXCEPTION") return;
+  if (sourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE && isPitCrewLaunchItemSourceEnabled()) return;
+  throw new PitCrewPropertyMismatchError("Work item not found in this brokerage.");
 }
 
 function assertIncluded<T extends string>(value: string, allowed: readonly T[], label: string): T {
@@ -256,12 +270,16 @@ export async function resolveResponsibilityRecipient(input: {
 }
 
 async function loadOwnedOverlay(input: ResponsibilityMutationInput): Promise<PitCrewAssignment> {
-  const row = await loadOrCreateOverlay({
+  const ref = {
     brokerageId: input.brokerageId,
     propertyId: input.propertyId,
     sourceType: input.sourceType,
     sourceRecordId: input.sourceRecordId,
-  });
+  };
+  const row =
+    input.sourceType === PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE
+      ? await loadOrCreateOverlay(ref, { rejectCompleteLaunchItem: true })
+      : await loadOrCreateOverlay(ref);
   if (
     row.brokerageId !== input.brokerageId ||
     row.propertyId !== input.propertyId ||
@@ -401,7 +419,7 @@ async function writeEvent(tx: ResponsibilityTx, commit: CommitInput, now: Date):
 
 export async function handBackWorkItem(input: HandBackInput): Promise<ResponsibilityMutationResult> {
   assertResponsibilityActionsEnabled();
-  assertExceptionSource(input.sourceType);
+  assertResponsibilitySource(input.sourceType);
   const reasonCategory: PitCrewHandBackReasonCategory = assertIncluded(
     input.reasonCategory,
     PIT_CREW_HAND_BACK_REASON_CATEGORIES,
@@ -473,7 +491,7 @@ function requireExpectedResponseAt(severity: PitCrewEscalationSeverity, value: D
 
 export async function escalateWorkItem(input: EscalateInput): Promise<ResponsibilityMutationResult> {
   assertResponsibilityActionsEnabled();
-  assertExceptionSource(input.sourceType);
+  assertResponsibilitySource(input.sourceType);
   const reasonCategory: PitCrewEscalationReasonCategory = assertIncluded(
     input.reasonCategory,
     PIT_CREW_ESCALATION_REASON_CATEGORIES,
@@ -529,7 +547,7 @@ export async function escalateWorkItem(input: EscalateInput): Promise<Responsibi
 
 export async function acknowledgeEscalation(input: AcknowledgeEscalationInput): Promise<ResponsibilityMutationResult> {
   assertResponsibilityActionsEnabled();
-  assertExceptionSource(input.sourceType);
+  assertResponsibilitySource(input.sourceType);
   const row = await loadOwnedOverlay(input);
   assertStatus(row, ["ESCALATED"], "acknowledge");
   const event = await loadOpenEvent(row.id, input.brokerageId, "ESCALATION");
@@ -566,7 +584,7 @@ async function closeEscalation(
   action: string,
 ): Promise<ResponsibilityMutationResult> {
   assertResponsibilityActionsEnabled();
-  assertExceptionSource(input.sourceType);
+  assertResponsibilitySource(input.sourceType);
   const closingNote = requireText(input.note, "note");
   const row = await loadOwnedOverlay(input);
   assertStatus(row, ["ESCALATED"], action);
@@ -610,7 +628,7 @@ export async function returnEscalation(input: CloseEscalationInput): Promise<Res
 
 export async function reclaimHandedBack(input: ResponsibilityMutationInput): Promise<ResponsibilityMutationResult> {
   assertResponsibilityActionsEnabled();
-  assertExceptionSource(input.sourceType);
+  assertResponsibilitySource(input.sourceType);
   const row = await loadOwnedOverlay(input);
   assertStatus(row, ["HANDED_BACK"], "reclaim");
   assertTransition(row.status, "CLAIMED");

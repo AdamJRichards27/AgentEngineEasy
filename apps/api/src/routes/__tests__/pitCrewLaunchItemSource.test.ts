@@ -393,35 +393,98 @@ describe("R-F22 LAUNCH_ITEM source stays off unless the flag is the literal true
     assert.equal(after.completedAt, null);
   });
 
-  test("flag on: hand-back of a launch item stays the exception-only not-found and writes no campaign item", async () => {
-    const before = await campaignSnapshot(launchItemId);
+  test("LAUNCH_ITEM hand-back is not-found unless both flags are the literal true", async () => {
+    const actionItemId = await insertItem(A.brokerageId, propertyId, A.admin.user.id, "Rf28 hand back the photographer");
+    const beforeAction = await campaignSnapshot(actionItemId);
+    const beforeDone = await campaignSnapshot(launchItemId);
+    const handBackBody = {
+      propertyId,
+      expectedVersion: 0,
+      reasonCategory: "WORK_COMPLETE",
+      nextAction: "Review the returned condition evidence and confirm the next step.",
+    };
     const previous = process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG];
-    process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = "true";
     try {
+      for (const flagCase of FLAG_OFF) {
+        if (flagCase.value === undefined) delete process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG];
+        else process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = flagCase.value;
+        await withLaunchFlag("true", async () => {
+          const rejected = await responseText(
+            await postRaw(`/pit-crew/items/LAUNCH_ITEM/${actionItemId}/hand-back`, A.admin.cookie, handBackBody),
+          );
+          assert.equal(rejected.status, 404, flagCase.label);
+          assert.equal(rejected.text, JSON.stringify({ error: "Not found." }), flagCase.label);
+        });
+      }
+
+      process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = "true";
+      for (const flagCase of FLAG_OFF) {
+        const statements: string[] = [];
+        await withLaunchFlag(flagCase.value, async () => {
+          const uninstall = setDbQueryObserver((query) => {
+            statements.push(query);
+          });
+          try {
+            const rejected = await responseText(
+              await postRaw(`/pit-crew/items/LAUNCH_ITEM/${actionItemId}/hand-back`, A.admin.cookie, handBackBody),
+            );
+            assert.equal(rejected.status, 404, flagCase.label);
+            assert.equal(rejected.text, WORK_ITEM_NOT_FOUND, flagCase.label);
+          } finally {
+            uninstall();
+          }
+        });
+        assert.deepEqual(
+          statements.filter((query) => query.includes("campaign_items")),
+          [],
+          flagCase.label,
+        );
+      }
+      assert.equal(await keyCount("LAUNCH_ITEM", actionItemId), 0);
+
       await withLaunchFlag("true", async () => {
-        const rejected = await responseText(
-          await postRaw(`/pit-crew/items/LAUNCH_ITEM/${launchItemId}/hand-back`, A.admin.cookie, {
+        const claim = await responseText(
+          await postRaw(`/pit-crew/items/LAUNCH_ITEM/${actionItemId}/claim`, A.admin.cookie, {
             propertyId,
             expectedVersion: 0,
-            reasonCategory: "WORK_COMPLETE",
-            nextAction: "Review the returned condition evidence and confirm the next step.",
           }),
         );
-        assert.equal(rejected.status, 404);
-        assert.equal(rejected.text, WORK_ITEM_NOT_FOUND);
+        assert.equal(claim.status, 200, claim.text);
+        const claimed = JSON.parse(claim.text) as { version: number; status: string };
+        assert.equal(claimed.status, "CLAIMED");
+        const handed = await responseText(
+          await postRaw(`/pit-crew/items/LAUNCH_ITEM/${actionItemId}/hand-back`, A.admin.cookie, {
+            ...handBackBody,
+            expectedVersion: claimed.version,
+          }),
+        );
+        assert.equal(handed.status, 200, handed.text);
+        const body = JSON.parse(handed.text) as {
+          status: string;
+          responsibilityEvent: { kind: string; resultingResponsibility: string; recipientUserId: number; severity: null };
+        };
+        assert.equal(body.status, "HANDED_BACK");
+        assert.equal(body.responsibilityEvent.kind, "HAND_BACK");
+        assert.equal(body.responsibilityEvent.resultingResponsibility, "AGENT");
+        assert.equal(body.responsibilityEvent.recipientUserId, A.agent.user.id);
+        assert.equal(body.responsibilityEvent.severity, null);
+        assert.equal(handed.text.includes("Acme Photos"), false);
+        assert.equal(handed.text.includes("250000"), false);
       });
     } finally {
       if (previous === undefined) delete process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG];
       else process.env[PIT_CREW_RESPONSIBILITY_ACTIONS_FLAG] = previous;
     }
-    const after = await campaignSnapshot(launchItemId);
-    assert.equal(after.status, before.status);
-    assert.equal(after.completedAt, before.completedAt);
-    const [event] = await db
-      .select({ id: pitCrewResponsibilityEvents.id })
-      .from(pitCrewResponsibilityEvents)
-      .where(eq(pitCrewResponsibilityEvents.brokerageId, A.brokerageId))
-      .limit(1);
-    assert.equal(event, undefined);
+    const afterAction = await campaignSnapshot(actionItemId);
+    assert.equal(afterAction.status, beforeAction.status);
+    assert.equal(afterAction.completedAt, beforeAction.completedAt);
+    const afterDone = await campaignSnapshot(launchItemId);
+    assert.equal(afterDone.status, beforeDone.status);
+    assert.equal(afterDone.completedAt, beforeDone.completedAt);
+    const [doneOverlay] = await db
+      .select({ status: pitCrewAssignments.status })
+      .from(pitCrewAssignments)
+      .where(and(eq(pitCrewAssignments.sourceType, "LAUNCH_ITEM"), eq(pitCrewAssignments.sourceRecordId, launchItemId)));
+    assert.equal(doneOverlay?.status, "DONE");
   });
 });
