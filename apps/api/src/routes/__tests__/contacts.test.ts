@@ -109,6 +109,7 @@ function uniqueEmail(label: string): string {
 test("unauthenticated requests are rejected across the contacts surface", async () => {
   const endpoints: Array<[string, string]> = [
     ["GET", "/"],
+    ["POST", "/"],
     ["GET", "/1"],
     ["POST", "/1/roles"],
     ["DELETE", "/1/roles/Prospect"],

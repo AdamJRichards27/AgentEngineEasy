@@ -60,6 +60,9 @@ export class ApiError extends Error {
   // role. This slice does not start a checkout; `upgrade` is data only.
   entitlementKey?: string;
   upgrade?: EntitlementUpgrade;
+  // G-UAT-2 — POST /grow/contacts answers 409 with the existing party's id
+  // so the Contacts form can open that Contact 360. Other error bodies omit it.
+  contactId?: number;
 
   constructor(
     status: number,
@@ -73,6 +76,7 @@ export class ApiError extends Error {
       serverMessage?: string;
       entitlementKey?: string;
       upgrade?: EntitlementUpgrade;
+      contactId?: number;
     },
   ) {
     super(technical ?? friendly);
@@ -85,6 +89,7 @@ export class ApiError extends Error {
     this.serverMessage = extras?.serverMessage;
     this.entitlementKey = extras?.entitlementKey;
     this.upgrade = extras?.upgrade;
+    this.contactId = extras?.contactId;
   }
 }
 
@@ -327,6 +332,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     let sideEffectApplied: boolean | undefined;
     let entitlementKey: string | undefined;
     let upgrade: EntitlementUpgrade | undefined;
+    let contactId: number | undefined;
     try {
       const body = await res.json();
       serverMessage = typeof body?.error === "string" ? body.error : undefined;
@@ -339,6 +345,10 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
         entitlementKey = readEntitlementKey(body?.entitlementKey);
         upgrade = readEntitlementUpgrade(body?.upgrade);
       }
+      const rawContactId = body?.contactId;
+      if (typeof rawContactId === "number" && Number.isInteger(rawContactId) && rawContactId > 0) {
+        contactId = rawContactId;
+      }
     } catch {
       // Non-JSON error body — fall through with no server message.
     }
@@ -350,6 +360,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
       serverMessage,
       entitlementKey,
       upgrade,
+      contactId,
     });
   }
   if (res.status === 204) {
