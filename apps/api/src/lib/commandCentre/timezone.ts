@@ -1,15 +1,24 @@
-// Agent-local time for "today" / "overdue" / "coming up" (Build Instructions
-// Section 12). Neither `users` nor `brokerages` carries a stored time zone
-// today (verified directly in packages/db/src/schema/users.ts before this
-// build) -- there is no "user's stored time zone" or "brokerage time zone"
-// to read yet, so every caller resolves to the documented fallback below.
-// This is the "1/2/3, document the fallback" path the spec requires, not an
-// oversight: when a time zone column is added to users/brokerages, only
-// resolveTimeZone() needs to change.
+import { eq } from "drizzle-orm";
+import { db, communicationSettings } from "@aee/db";
+import { logger } from "@aee/events";
+
+// Brokerage-local time for "today" / "overdue" / "coming up" (Build Instructions
+// Section 12). The canonical day boundary is the brokerage's IANA zone on
+// communication_settings.time_zone. Resolution order:
+//   1. That column, when a row exists and Intl accepts the value as an IANA
+//      zone. Source is "brokerage".
+//   2. DEFAULT_TIME_ZONE (Australia/Brisbane), source "fallback", when there
+//      is no row, the column is null, or the stored value is not a valid
+//      IANA zone.
 //
-// AT Realty's seed data is Queensland (no DST); Australia/Brisbane is the
-// fallback both because it matches that data and because it is the example
-// used in the spec's own illustrative API response.
+// The lookup is a plain select. It does not call getOrCreateCommunicationSettings,
+// which inserts a settings row on first read. A brokerage with no row stays
+// without one. An invalid stored value is logged once, at debug, for that
+// resolution — each request resolves the zone once.
+//
+// Australia/Brisbane remains the fallback because AT Realty's seed data is
+// Queensland (no DST) and because it is the example in the spec's own
+// illustrative API response. It is not the long-term rule: a stored zone wins.
 //
 // AE GROW Priority 6 Stage C timezone remediation reuse note: Stage C's own
 // coaching-specific timezone resolution (lib/ai/coaching/timezone.ts) reuses
@@ -28,8 +37,36 @@ export interface TimeZoneResolution {
   source: "user" | "brokerage" | "fallback";
 }
 
-export function resolveTimeZone(_user: { id: number; brokerageId: number }): TimeZoneResolution {
+export function isValidIanaTimeZone(timeZone: string): boolean {
+  if (typeof timeZone !== "string" || timeZone.length === 0) return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Pure classification of a stored value. Null means "no row or no value". */
+export function resolveStoredTimeZone(stored: string | null): TimeZoneResolution {
+  if (stored !== null && isValidIanaTimeZone(stored)) {
+    return { timeZone: stored, source: "brokerage" };
+  }
   return { timeZone: DEFAULT_TIME_ZONE, source: "fallback" };
+}
+
+export async function resolveTimeZone(user: { brokerageId: number }): Promise<TimeZoneResolution> {
+  const rows = await db
+    .select({ timeZone: communicationSettings.timeZone })
+    .from(communicationSettings)
+    .where(eq(communicationSettings.brokerageId, user.brokerageId))
+    .limit(1);
+  const stored = rows[0]?.timeZone ?? null;
+  const resolution = resolveStoredTimeZone(stored);
+  if (stored !== null && resolution.source === "fallback") {
+    logger.debug("brokerage_time_zone_invalid", { brokerageId: user.brokerageId, timeZone: stored });
+  }
+  return resolution;
 }
 
 interface ZonedParts {
@@ -74,12 +111,18 @@ export function offsetMs(instant: Date, timeZone: string): number {
 }
 
 /** The UTC instant that is local midnight, in `timeZone`, on the calendar
- * day that `instant` falls on in that zone. */
+ * day that `instant` falls on in that zone.
+ *
+ * One offset correction is enough on a day whose offset does not change.
+ * On a DST transition the offset at the UTC-midnight guess (late morning,
+ * local) is not the offset at local midnight, so the correction is applied
+ * twice. The second pass is a no-op when the offset is stable. */
 export function startOfLocalDay(instant: Date, timeZone: string): Date {
   const p = zonedParts(instant, timeZone);
-  const utcGuess = Date.UTC(p.year, p.month - 1, p.day, 0, 0, 0);
-  const guessDate = new Date(utcGuess);
-  return new Date(utcGuess - offsetMs(guessDate, timeZone));
+  const utcMidnight = Date.UTC(p.year, p.month - 1, p.day, 0, 0, 0);
+  let utc = utcMidnight - offsetMs(new Date(utcMidnight), timeZone);
+  utc = utcMidnight - offsetMs(new Date(utc), timeZone);
+  return new Date(utc);
 }
 
 /** Exclusive upper bound: local midnight of the following day. */

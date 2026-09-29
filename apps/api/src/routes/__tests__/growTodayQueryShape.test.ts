@@ -203,16 +203,18 @@ test("the statement count is FIXED — it does not grow with the size of the ten
   // serial.
   //
   // F-1 adds exactly one bounded grow_commitments read to that first wave.
+  // UAT-TZ adds one read-only communication_settings select for the brokerage
+  // zone. It does not create a settings row.
   assert.equal(
     large.length,
-    7,
-    `expected 7 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
+    8,
+    `expected 8 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
   );
 
   const withSignals = await captureStatements(brokerageId, { includePropertyIntelligenceSignals: true });
   assert.equal(
     withSignals.length,
-    8,
+    9,
     `Rule F adds exactly one statement and no more; got ${withSignals.length}:\n${withSignals.join("\n---\n")}`,
   );
 });

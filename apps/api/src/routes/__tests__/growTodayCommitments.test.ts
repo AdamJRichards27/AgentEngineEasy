@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { db, entitlementGrants, growCommitments, growContactDncrStatuses } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { DEFAULT_TIME_ZONE, startOfLocalDay, startOfNextLocalDay } from "../../lib/commandCentre/timezone.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -26,14 +27,12 @@ let B: { admin: DevLoginResult; agent: DevLoginResult; brokerageId: number };
 
 const DAY = 24 * 60 * 60 * 1000;
 
-function startOfTodayUtc(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+function startOfToday(): Date {
+  return startOfLocalDay(new Date(), DEFAULT_TIME_ZONE);
 }
 
-function endOfTodayUtc(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+function endOfToday(): Date {
+  return new Date(startOfNextLocalDay(new Date(), DEFAULT_TIME_ZONE).getTime() - 1);
 }
 
 before(async () => {
@@ -137,8 +136,8 @@ test("F-1 — due-today and overdue Open commitments appear; future, Completed, 
       mobile: "+61411110001",
     });
 
-    const today0 = startOfTodayUtc();
-    const today1 = endOfTodayUtc();
+    const today0 = startOfToday();
+    const today1 = endOfToday();
     const overdueId = await insertCommitment({
       brokerageId: fresh.brokerageId,
       partyId,
@@ -270,7 +269,7 @@ test("F-1 — a do-not-contact party keeps the commitment card and loses outreac
       partyId,
       propertyId,
       description: "Ring Dana back about the listing.",
-      dueAt: new Date(startOfTodayUtc().getTime() - DAY),
+      dueAt: new Date(startOfToday().getTime() - DAY),
       status: "Open",
       createdBy: fresh.agent.user.id,
     });
@@ -321,7 +320,7 @@ test("F-1 — a due commitment suppresses the cold-contact nudge for that same p
     partyId,
     propertyId,
     description: "Prepare the appraisal Riley was promised.",
-    dueAt: new Date(startOfTodayUtc().getTime() - 3 * DAY),
+    dueAt: new Date(startOfToday().getTime() - 3 * DAY),
     status: "Open",
     createdBy: A.agent.user.id,
   });
@@ -337,7 +336,7 @@ test("F-1 — a due commitment suppresses the cold-contact nudge for that same p
     partyId: otherPartyId,
     propertyId: otherPropertyId,
     description: "Brokerage B's own promise.",
-    dueAt: startOfTodayUtc(),
+    dueAt: startOfToday(),
     status: "Open",
     createdBy: B.agent.user.id,
   });

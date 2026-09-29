@@ -1,5 +1,6 @@
-import { and, asc, desc, eq, gt, isNotNull, isNull, lte, max, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
 import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import { isOverdueLocal, isToday, localDateKey, resolveTimeZone, startOfLocalDay } from "./commandCentre/timezone.js";
 import { loadContactabilityFilter } from "./propertyIntelligence/contactability.js";
 import {
   COLD_CONTACT_THRESHOLD_DAYS,
@@ -615,22 +616,29 @@ const DO_NOT_CONTACT_RECOMMENDED_ACTION =
 const DO_NOT_CONTACT_NOTE =
   "A do-not-contact listing or a full-channel suppression is on file for this contact. AE will not present them as someone to reach out to, and no outreach action is offered here.";
 
-function startOfTodayUtc(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
-}
-
-function endOfTodayUtc(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
-}
-
 function daysSince(date: Date): number {
   return Math.floor((Date.now() - date.getTime()) / (24 * 60 * 60 * 1000));
 }
 
-function formatDateUtc(date: Date): string {
-  return date.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+function formatLocalDate(date: Date, timeZone: string): string {
+  return date.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone });
+}
+
+/**
+ * Exclusive end of the local calendar day `now` falls in.
+ *
+ * startOfNextLocalDay adds a fixed 24h, which is an hour early on a fall-back
+ * day. Step forward with the existing localDateKey / startOfLocalDay helpers
+ * until the calendar day changes, then take that next local midnight. The
+ * due-today / overdue decision itself is isToday / isOverdueLocal.
+ */
+function exclusiveEndOfLocalDay(now: Date, timeZone: string): Date {
+  const todayKey = localDateKey(now, timeZone);
+  let probe = new Date(startOfLocalDay(now, timeZone).getTime() + 20 * 60 * 60 * 1000);
+  for (let step = 0; step < 12 && localDateKey(probe, timeZone) === todayKey; step++) {
+    probe = new Date(probe.getTime() + 60 * 60 * 1000);
+  }
+  return startOfLocalDay(probe, timeZone);
 }
 
 function contactDisplayName(party: {
@@ -944,7 +952,7 @@ export function appraisalFollowUpAvailableActions(
 
 export async function getGrowTodaySummary(
   brokerageId: number,
-  options?: { includePropertyIntelligenceSignals?: boolean },
+  options?: { includePropertyIntelligenceSignals?: boolean; now?: Date },
 ): Promise<GrowTodaySummary> {
   // AE GROW Priority 5 Remediation — Rule F is entitlement-gated, but this
   // function never resolves grow.propertyIntelligence.read itself. The
@@ -953,10 +961,9 @@ export async function getGrowTodaySummary(
   // cross-cutting concerns" boundary — growToday.ts has never imported an
   // entitlement or auth concept, and still doesn't.
   const includePropertyIntelligenceSignals = options?.includePropertyIntelligenceSignals ?? false;
-  const propertyIntelligenceNow = new Date();
-  // Same UTC day boundary every other dated rule on this surface already uses.
-  const today0 = startOfTodayUtc();
-  const today1 = endOfTodayUtc();
+  const now = options?.now ?? new Date();
+  const { timeZone } = await resolveTimeZone({ brokerageId });
+  const dueBefore = exclusiveEndOfLocalDay(now, timeZone);
   // W2-A (I-4) — WAVE 1: the rule reads, all capped, all ordered. F-1 adds the
   // commitments read to this wave. The activity aggregate stays OUT of it
   // because it is scoped by the party ids these reads return, which is what
@@ -1081,14 +1088,14 @@ export async function getGrowTodaySummary(
         and(
           eq(growCommitments.brokerageId, brokerageId),
           eq(growCommitments.status, "Open"),
-          lte(growCommitments.dueAt, today1),
+          lt(growCommitments.dueAt, dueBefore),
         ),
       )
       // Most overdue first. A future-dated Open commitment is already excluded
       // by the due-date predicate, so a truncation drops the least overdue.
       .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
       .limit(GROW_TODAY_COMMITMENT_ROW_CAP),
-    fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, propertyIntelligenceNow),
+    fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, now),
   ]);
 
   // W2-A — the exact open-opportunity total, carried on every row by the
@@ -1157,12 +1164,12 @@ export async function getGrowTodaySummary(
 
     if (o.nextActionDueAt) {
       type = "opportunity_follow_up";
-      if (o.nextActionDueAt.getTime() < today0.getTime()) {
+      if (isOverdueLocal(o.nextActionDueAt, now, timeZone)) {
         priority = "DoNow";
-        reason = `Follow-up was due ${formatDateUtc(o.nextActionDueAt)}.`;
+        reason = `Follow-up was due ${formatLocalDate(o.nextActionDueAt, timeZone)}.`;
         rankScore = rankOverdueCommitment(daysSince(o.nextActionDueAt), "opportunity");
         followUpsDueCount++;
-      } else if (o.nextActionDueAt.getTime() <= today1.getTime()) {
+      } else if (isToday(o.nextActionDueAt, now, timeZone)) {
         priority = "DoToday";
         reason = "Follow-up is due today.";
         rankScore = rankDueToday("opportunity");
@@ -1242,12 +1249,12 @@ export async function getGrowTodaySummary(
     let priority: GrowTodayPriority;
     let reason: string;
     let rankScore: number;
-    if (ap.followUpAt.getTime() < today0.getTime()) {
+    if (isOverdueLocal(ap.followUpAt, now, timeZone)) {
       priority = "DoNow";
-      reason = `Appraisal follow-up was due ${formatDateUtc(ap.followUpAt)}.`;
+      reason = `Appraisal follow-up was due ${formatLocalDate(ap.followUpAt, timeZone)}.`;
       rankScore = rankOverdueCommitment(daysSince(ap.followUpAt), "appraisal");
       followUpsDueCount++;
-    } else if (ap.followUpAt.getTime() <= today1.getTime()) {
+    } else if (isToday(ap.followUpAt, now, timeZone)) {
       priority = "DoToday";
       reason = "Appraisal follow-up is due today.";
       rankScore = rankDueToday("appraisal");
@@ -1310,10 +1317,11 @@ export async function getGrowTodaySummary(
   // F-1 — Open commitments the agent already made, due today or overdue.
   //
   // The query has already dropped Completed, Cancelled, and anything due
-  // after the end of today (UTC, the same boundary Rules A-E use). What is
+  // on or after the next local midnight in the brokerage zone. What is
   // left is the answer to "what have I already committed to?" on this
   // surface. A future-dated promise stays on the contact record; Today does
-  // not bring it forward.
+  // not bring it forward. An Open commitment due before today's local start
+  // stays overdue and stays listed.
   //
   // Contactability is the opportunity/appraisal treatment, not a new one: the
   // card stays (it is an obligation a person recorded) and outreach is
@@ -1328,17 +1336,18 @@ export async function getGrowTodaySummary(
     let priority: GrowTodayPriority;
     let reason: string;
     let rankScore: number;
-    if (c.dueAt.getTime() < today0.getTime()) {
+    if (isOverdueLocal(c.dueAt, now, timeZone)) {
       priority = "DoNow";
-      reason = `Open commitment was due ${formatDateUtc(c.dueAt)}. Promised: ${c.description}`;
+      reason = `Open commitment was due ${formatLocalDate(c.dueAt, timeZone)}. Promised: ${c.description}`;
       rankScore = rankOverdueCommitment(daysSince(c.dueAt), "opportunity");
       followUpsDueCount++;
-    } else {
-      // The query is lte(dueAt, today1), so every remaining row is due today.
+    } else if (isToday(c.dueAt, now, timeZone)) {
       priority = "DoToday";
       reason = `Open commitment is due today. Promised: ${c.description}`;
       rankScore = rankDueToday("opportunity");
       followUpsDueCount++;
+    } else {
+      continue;
     }
 
     partyIdsWithOpportunityAction.add(c.partyId);
@@ -1453,7 +1462,7 @@ export async function getGrowTodaySummary(
           contactability,
           propertyLabel: s.propertyAddress ?? null,
         },
-        propertyIntelligenceNow,
+        now,
       );
       return { row: s, ranking, contactability, consolidated: [] };
     })

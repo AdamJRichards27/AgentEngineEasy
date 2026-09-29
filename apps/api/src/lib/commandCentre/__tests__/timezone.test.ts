@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_TIME_ZONE,
-  resolveTimeZone,
+  resolveStoredTimeZone,
   startOfLocalDay,
   startOfNextLocalDay,
   localDateKey,
@@ -12,15 +12,26 @@ import {
   isWithinHorizon,
 } from "../timezone.js";
 
-describe("resolveTimeZone", () => {
-  test("falls back to Australia/Brisbane for any actor, since no per-user timezone field exists yet", () => {
-    const a = resolveTimeZone({ id: 1, brokerageId: 1 });
-    const b = resolveTimeZone({ id: 999, brokerageId: 42 });
-    assert.equal(a.timeZone, "Australia/Brisbane");
-    assert.equal(a.timeZone, DEFAULT_TIME_ZONE);
-    assert.equal(a.source, "fallback");
-    assert.equal(b.timeZone, "Australia/Brisbane");
-    assert.equal(b.source, "fallback");
+describe("resolveStoredTimeZone", () => {
+  test("null falls back to Australia/Brisbane", () => {
+    const resolution = resolveStoredTimeZone(null);
+    assert.equal(resolution.timeZone, "Australia/Brisbane");
+    assert.equal(resolution.timeZone, DEFAULT_TIME_ZONE);
+    assert.equal(resolution.source, "fallback");
+  });
+
+  test("a valid IANA zone is used, with source brokerage", () => {
+    const resolution = resolveStoredTimeZone("Pacific/Auckland");
+    assert.equal(resolution.timeZone, "Pacific/Auckland");
+    assert.equal(resolution.source, "brokerage");
+  });
+
+  test("an invalid or blank stored value falls back", () => {
+    for (const stored of ["Not/ARealZone", "", "   "]) {
+      const resolution = resolveStoredTimeZone(stored);
+      assert.equal(resolution.timeZone, DEFAULT_TIME_ZONE);
+      assert.equal(resolution.source, "fallback");
+    }
   });
 });
 
@@ -134,5 +145,42 @@ describe("DST correctness (Build Instructions: the fallback must still work corr
     const summerMidnight = startOfLocalDay(new Date("2026-01-15T04:00:00.000Z"), tz);
     assert.equal(winterMidnight.getUTCHours(), 14); // local midnight = 14:00 UTC the prior day at UTC+10
     assert.equal(summerMidnight.getUTCHours(), 13); // local midnight = 13:00 UTC the prior day at UTC+11
+  });
+
+  test("Australia/Sydney spring-forward (2026-10-04 02:00 -> 03:00) keeps the local day and does not treat the next morning as today", () => {
+    const tz = "Australia/Sydney";
+    // 03:30 AEDT on 4 October, just after the clocks jump.
+    const now = new Date("2026-10-03T16:30:00.000Z");
+    assert.equal(localDateKey(now, tz), "2026-10-04");
+    // Local midnight that morning was still AEST (UTC+10).
+    assert.equal(startOfLocalDay(now, tz).toISOString(), "2026-10-03T14:00:00.000Z");
+    const justAfterLocalMidnight = new Date("2026-10-03T14:01:00.000Z");
+    const justBeforeLocalMidnight = new Date("2026-10-03T13:59:00.000Z");
+    assert.equal(isToday(justAfterLocalMidnight, now, tz), true);
+    assert.equal(isOverdueLocal(justAfterLocalMidnight, now, tz), false);
+    assert.equal(isOverdueLocal(justBeforeLocalMidnight, now, tz), true);
+    // 00:30 on 5 October (AEDT, UTC+11). A fixed +24h from local midnight
+    // would still call this "today"; the local calendar day does not.
+    const firstHalfHourOfNextLocalDay = new Date("2026-10-04T13:30:00.000Z");
+    assert.equal(localDateKey(firstHalfHourOfNextLocalDay, tz), "2026-10-05");
+    assert.equal(isToday(firstHalfHourOfNextLocalDay, now, tz), false);
+    assert.equal(isOverdueLocal(firstHalfHourOfNextLocalDay, now, tz), false);
+  });
+
+  test("Australia/Sydney fall-back (2026-04-05) still counts the 25th hour as today", () => {
+    const tz = "Australia/Sydney";
+    // 02:30 AEST on 5 April, after clocks have gone back from 03:00 AEDT.
+    const now = new Date("2026-04-04T16:30:00.000Z");
+    assert.equal(localDateKey(now, tz), "2026-04-05");
+    // Midnight that morning was still AEDT (UTC+11).
+    assert.equal(startOfLocalDay(now, tz).toISOString(), "2026-04-04T13:00:00.000Z");
+    // 23:30 AEST the same calendar day. A fixed +24h from midnight lands an
+    // hour earlier (23:00) and would drop this instant.
+    const lateOnTheLongDay = new Date("2026-04-05T13:30:00.000Z");
+    assert.equal(localDateKey(lateOnTheLongDay, tz), "2026-04-05");
+    assert.equal(isToday(lateOnTheLongDay, now, tz), true);
+    assert.equal(isOverdueLocal(lateOnTheLongDay, now, tz), false);
+    const justBeforeLocalMidnight = new Date("2026-04-04T12:59:00.000Z");
+    assert.equal(isOverdueLocal(justBeforeLocalMidnight, now, tz), true);
   });
 });

@@ -229,12 +229,10 @@ test("stage 3 defect 2 — a strong signal is NOT stranded behind a dated item i
       opportunityType: "Listing",
       reason: "Dated Do Today fixture.",
     });
-    const noon = new Date();
-    noon.setUTCHours(12, 0, 0, 0);
     const patchRes = await fetch(growUrl(`/opportunities/${datedOppId}`), {
       method: "PATCH",
       headers: { "content-type": "application/json", cookie: fresh.agent.cookie },
-      body: JSON.stringify({ nextActionDueAt: noon.toISOString() }),
+      body: JSON.stringify({ nextActionDueAt: new Date().toISOString() }),
     });
     assert.equal(patchRes.status, 200);
 
