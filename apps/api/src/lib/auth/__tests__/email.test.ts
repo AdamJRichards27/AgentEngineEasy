@@ -193,6 +193,7 @@ test("unset and the sandbox name still log pilot_mode_sandbox_email_link only wh
         PILOT_MODE_SANDBOX_EXTERNAL_SERVICES_ACKNOWLEDGED: "true",
       },
       async () => {
+        __clearSandboxAuthEmailLog();
         const warnings = await captureWarnings(async () => {
           await getAuthEmailProvider().sendInvitation(invitation);
         });
@@ -210,6 +211,7 @@ test("unset and the sandbox name still log pilot_mode_sandbox_email_link only wh
         PILOT_MODE_SANDBOX_EXTERNAL_SERVICES_ACKNOWLEDGED: undefined,
       },
       async () => {
+        __clearSandboxAuthEmailLog();
         const warnings = await captureWarnings(async () => {
           await getAuthEmailProvider().sendInvitation(invitation);
         });
