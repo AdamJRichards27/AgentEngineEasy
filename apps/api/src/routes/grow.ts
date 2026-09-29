@@ -21,6 +21,7 @@ import {
 import { getBillingProvider } from "../lib/billing/gateway.js";
 import { getGrowTodaySummary } from "../lib/growToday.js";
 import { logAudit } from "../lib/audit.js";
+import { linkedPropertyHidden, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
 
 export const growRouter = Router();
 
@@ -69,15 +70,21 @@ growRouter.get("/access", requireAuth, async (req, res) => {
 // trusts a client-supplied brokerageId - always req.authedUser.brokerageId.
 growRouter.get("/overview", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
+  const restrictTo = await restrictedPropertyIdsFor(req.authedUser!);
   const [relationships, activities, opportunities] = await Promise.all([
     db.select().from(growRelationships).where(eq(growRelationships.brokerageId, brokerageId)),
     db.select().from(growActivities).where(eq(growActivities.brokerageId, brokerageId)),
     db.select().from(growOpportunities).where(eq(growOpportunities.brokerageId, brokerageId)),
   ]);
+  // Counts follow the same own-property rule as the lists below. A row with
+  // no property stays in the brokerage-wide count.
+  const visibleRelationships = relationships.filter((row) => !linkedPropertyHidden(row.propertyId, restrictTo));
+  const visibleActivities = activities.filter((row) => !linkedPropertyHidden(row.propertyId, restrictTo));
+  const visibleOpportunities = opportunities.filter((row) => !linkedPropertyHidden(row.propertyId, restrictTo));
   res.json({
-    relationshipCount: relationships.length,
-    activityCount: activities.length,
-    openOpportunityCount: opportunities.filter((o) => o.status === "Open").length,
+    relationshipCount: visibleRelationships.length,
+    activityCount: visibleActivities.length,
+    openOpportunityCount: visibleOpportunities.filter((o) => o.status === "Open").length,
   });
 });
 
@@ -99,10 +106,11 @@ growRouter.get("/overview", requireAuth, requireEntitlement("grow.access"), asyn
 // would 403 the entire route for a user who simply doesn't have Property Intelligence, which is
 // not the behaviour this route wants.
 growRouter.get("/today", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
-  const brokerageId = req.authedUser!.brokerageId;
-  const entitlements = await resolveEntitlements(req.authedUser!);
-  const summary = await getGrowTodaySummary(brokerageId, {
+  const user = req.authedUser!;
+  const entitlements = await resolveEntitlements(user);
+  const summary = await getGrowTodaySummary(user.brokerageId, {
     includePropertyIntelligenceSignals: entitlements.has("grow.propertyIntelligence.read"),
+    restrictToPropertyIds: await restrictedPropertyIdsFor(user),
   });
   res.json(summary);
 });
@@ -114,7 +122,9 @@ growRouter.get("/today", requireAuth, requireEntitlement("grow.access"), async (
 // disappears from the list" bug a naive migration could have introduced. propertyId/
 // propertyAddress simply come back null for such a row.
 growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
-  const brokerageId = req.authedUser!.brokerageId;
+  const user = req.authedUser!;
+  const brokerageId = user.brokerageId;
+  const restrictTo = await restrictedPropertyIdsFor(user);
   const rows = await db
     .select({
       id: growRelationships.id,
@@ -135,7 +145,7 @@ growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"),
     .from(growRelationships)
     .innerJoin(parties, eq(growRelationships.partyId, parties.id))
     .leftJoin(properties, eq(growRelationships.propertyId, properties.id))
-    .where(eq(growRelationships.brokerageId, brokerageId))
+    .where(and(eq(growRelationships.brokerageId, brokerageId), visibleLinkedPropertySql(growRelationships.propertyId, restrictTo)))
     .orderBy(desc(growRelationships.createdAt))
     .limit(200);
   res.json({ relationships: rows });
@@ -310,11 +320,12 @@ growRouter.patch(
 );
 
 growRouter.get("/activities", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
-  const brokerageId = req.authedUser!.brokerageId;
+  const user = req.authedUser!;
+  const restrictTo = await restrictedPropertyIdsFor(user);
   const rows = await db
     .select()
     .from(growActivities)
-    .where(eq(growActivities.brokerageId, brokerageId))
+    .where(and(eq(growActivities.brokerageId, user.brokerageId), visibleLinkedPropertySql(growActivities.propertyId, restrictTo)))
     .orderBy(desc(growActivities.occurredAt))
     .limit(200);
   res.json({ activities: rows });
@@ -393,11 +404,12 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
 });
 
 growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
-  const brokerageId = req.authedUser!.brokerageId;
+  const user = req.authedUser!;
+  const restrictTo = await restrictedPropertyIdsFor(user);
   const rows = await db
     .select()
     .from(growOpportunities)
-    .where(eq(growOpportunities.brokerageId, brokerageId))
+    .where(and(eq(growOpportunities.brokerageId, user.brokerageId), visibleLinkedPropertySql(growOpportunities.propertyId, restrictTo)))
     .orderBy(desc(growOpportunities.createdAt))
     .limit(200);
   res.json({ opportunities: rows });

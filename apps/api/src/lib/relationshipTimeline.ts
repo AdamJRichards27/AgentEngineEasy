@@ -1,4 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { linkedPropertyHidden } from "./propertyVisibility.js";
 import {
   db,
   appraisals,
@@ -216,6 +217,7 @@ export async function getRelationshipTimeline(
   brokerageId: number,
   partyId: number,
   limit = 100,
+  restrictToPropertyIds: number[] | null = null,
 ): Promise<GrowTimelineEvent[]> {
   const [
     party,
@@ -306,6 +308,15 @@ export async function getRelationshipTimeline(
     return [];
   }
 
+  // Own-property scope, applied before any event or address is built. A row
+  // with no property stays. null means brokerage-wide (the historical caller).
+  const relationshipEvents = relationshipRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+  const activityEvents = activityRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+  const opportunityEvents = opportunityRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+  const commitmentEvents = commitmentRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+  const appraisalEvents = appraisalRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+  const signalEvents = signalRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+
   // AE GROW Priority 3, path 2 (part 2/2) — resolve the participant-linked threads to messages,
   // re-checking brokerageId on communicationThreads itself as the defence-in-depth this file's
   // tenant-isolation convention calls for.
@@ -333,7 +344,9 @@ export async function getRelationshipTimeline(
   const communicationMessageById = new Map<number, CommunicationMessage>();
   for (const m of partyAnchoredMessages) communicationMessageById.set(m.id, m);
   for (const m of participantLinkedMessages) communicationMessageById.set(m.id, m);
-  const communicationMessageRows = [...communicationMessageById.values()];
+  const communicationMessageRows = [...communicationMessageById.values()].filter(
+    (row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds),
+  );
 
   events.push({
     id: `party:${party.id}:CONTACT_CREATED`,
@@ -348,13 +361,13 @@ export async function getRelationshipTimeline(
   });
 
   const propertyIds = new Set<number>();
-  for (const r of relationshipRows) if (r.propertyId) propertyIds.add(r.propertyId);
-  for (const a of activityRows) if (a.propertyId) propertyIds.add(a.propertyId);
-  for (const o of opportunityRows) if (o.propertyId) propertyIds.add(o.propertyId);
-  for (const c of commitmentRows) if (c.propertyId) propertyIds.add(c.propertyId);
-  for (const ap of appraisalRows) if (ap.propertyId) propertyIds.add(ap.propertyId);
+  for (const r of relationshipEvents) if (r.propertyId) propertyIds.add(r.propertyId);
+  for (const a of activityEvents) if (a.propertyId) propertyIds.add(a.propertyId);
+  for (const o of opportunityEvents) if (o.propertyId) propertyIds.add(o.propertyId);
+  for (const c of commitmentEvents) if (c.propertyId) propertyIds.add(c.propertyId);
+  for (const ap of appraisalEvents) if (ap.propertyId) propertyIds.add(ap.propertyId);
   for (const m of communicationMessageRows) if (m.propertyId) propertyIds.add(m.propertyId);
-  for (const s of signalRows) if (s.propertyId) propertyIds.add(s.propertyId);
+  for (const s of signalEvents) if (s.propertyId) propertyIds.add(s.propertyId);
 
   // Label lookup for exactly the properties the events above actually reference. This used to
   // be an unfiltered `SELECT id, formatted_address FROM properties` with the id match done in
@@ -376,7 +389,7 @@ export async function getRelationshipTimeline(
     }
   }
 
-  for (const r of relationshipRows) {
+  for (const r of relationshipEvents) {
     const propertyLabel = r.propertyId ? propertyLabelById.get(r.propertyId) ?? null : null;
     events.push({
       id: `relationship:${r.id}:ESTABLISHED`,
@@ -406,7 +419,7 @@ export async function getRelationshipTimeline(
     }
   }
 
-  for (const a of activityRows) {
+  for (const a of activityEvents) {
     const propertyLabel = a.propertyId ? propertyLabelById.get(a.propertyId) ?? null : null;
     events.push({
       id: `activity:${a.id}`,
@@ -421,7 +434,7 @@ export async function getRelationshipTimeline(
     });
   }
 
-  for (const o of opportunityRows) {
+  for (const o of opportunityEvents) {
     const propertyLabel = o.propertyId ? propertyLabelById.get(o.propertyId) ?? null : null;
     events.push({
       id: `opportunity:${o.id}:CREATED`,
@@ -449,7 +462,7 @@ export async function getRelationshipTimeline(
     }
   }
 
-  for (const c of commitmentRows) {
+  for (const c of commitmentEvents) {
     const propertyLabel = c.propertyId ? propertyLabelById.get(c.propertyId) ?? null : null;
     events.push({
       id: `commitment:${c.id}:CREATED`,
@@ -501,7 +514,7 @@ export async function getRelationshipTimeline(
   // AE GROW Priority 4 -- Appraisal Workspace (Sec.16). One appraisal row can surface several
   // events (created, ready, sent, viewed, presented, follow-up, outcome) since each is sourced
   // from its own dedicated timestamp column on the same row -- never a separate log table.
-  for (const ap of appraisalRows) {
+  for (const ap of appraisalEvents) {
     const propertyLabel = ap.propertyId ? propertyLabelById.get(ap.propertyId) ?? null : null;
     events.push({
       id: `appraisal:${ap.id}:CREATED`,
@@ -623,7 +636,7 @@ export async function getRelationshipTimeline(
   // above) — Active/Expired signals produce no event. Each signal reaches at most one of these
   // three terminal states exactly once, so this is always at most one event per row, never a
   // pair.
-  for (const s of signalRows) {
+  for (const s of signalEvents) {
     const propertyLabel = s.propertyId ? propertyLabelById.get(s.propertyId) ?? null : null;
     if (s.status === "Reviewed" && s.reviewedAt) {
       events.push({

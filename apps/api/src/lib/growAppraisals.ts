@@ -14,6 +14,7 @@ import { publishDomainEvent, currentCorrelationId, logger, type AgentEngineEasyE
 import { partyDisplayName as computePartyDisplayName } from "./communications/recipientResolution.js";
 import { logAudit } from "./audit.js";
 import { getOrCreateAppraisal } from "./appraisals.js";
+import { visibleRequiredPropertySql } from "./propertyVisibility.js";
 import {
   noteGrowAppraisalIsolationRejection,
   noteGrowOpportunityIsolationRejection,
@@ -481,6 +482,8 @@ export async function listAppraisalPipeline(input: {
   brokerageId: number;
   filter?: "active" | "follow_up" | "won" | "lost" | "deferred";
   ownerUserId?: number;
+  /** null or omitted: brokerage-wide. An array: only those property ids. */
+  restrictToPropertyIds?: number[] | null;
 }): Promise<AppraisalPipelineRow[]> {
   const rawRows = await db
     .select({
@@ -512,7 +515,12 @@ export async function listAppraisalPipeline(input: {
     // WP1 P1-2: the owner join is tenant-scoped too, so even a pre-existing bad row whose
     // ownerUserId points at another brokerage's user never exposes that user's name.
     .leftJoin(users, and(eq(users.id, appraisals.ownerUserId), eq(users.brokerageId, input.brokerageId)))
-    .where(eq(properties.brokerageId, input.brokerageId))
+    .where(
+      and(
+        eq(properties.brokerageId, input.brokerageId),
+        visibleRequiredPropertySql(appraisals.propertyId, input.restrictToPropertyIds ?? null),
+      ),
+    )
     .orderBy(desc(appraisals.updatedAt));
 
   const rows: AppraisalPipelineRow[] = rawRows.map((r) => {
