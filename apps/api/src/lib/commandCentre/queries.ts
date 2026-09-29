@@ -195,7 +195,7 @@ export async function getCommandCentre(
   opts: GetCommandCentreOptions,
 ): Promise<CommandCentreResponse> {
   const now = opts.now ?? new Date();
-  const { timeZone, source: timeZoneSource } = resolveTimeZone(actor);
+  const { timeZone, source: timeZoneSource } = await resolveTimeZone(actor);
 
   if (opts.restrictToPropertyIds !== null && opts.restrictToPropertyIds.length === 0) {
     return emptyResponse(now, timeZone, timeZoneSource, actor);
