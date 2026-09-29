@@ -1,21 +1,24 @@
 import { Router } from "express";
 import { requireAuth } from "../middlewares/auth.js";
 import { getHomeSummary, getDashboardOverview } from "../lib/homeSummary.js";
+import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 export const homeRouter = Router();
 
 // Phase 8 (ARCHITECTURE.md §10) — the Home screen's single data source.
-// Brokerage-scoped, matching every other list endpoint in this app; see the
-// scoping note on getHomeSummary in lib/homeSummary.ts.
+// Property rows and the counts derived from them use the same own-property
+// rule as Command Centre and Exceptions (lib/propertyVisibility.ts).
+// Brokerage Administrator and Pit Crew stay brokerage-wide.
 //
 // Also carries the Dashboard's other two sections (staging brief: "Needs
 // Attention, Active Properties, Settlements") — one round trip for the
 // whole Dashboard rather than three.
 homeRouter.get("/summary", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  const restrictToPropertyIds = await restrictedPropertyIdsFor(user);
   const [items, overview] = await Promise.all([
-    getHomeSummary(user.brokerageId),
-    getDashboardOverview(user.brokerageId),
+    getHomeSummary(user.brokerageId, restrictToPropertyIds),
+    getDashboardOverview(user.brokerageId, restrictToPropertyIds),
   ]);
   res.json({
     exceptions: items.filter((i) => i.category === "Exception"),

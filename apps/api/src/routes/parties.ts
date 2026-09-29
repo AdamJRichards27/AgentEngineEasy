@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, parties, propertyParties, properties, workflows } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
+import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -167,6 +168,11 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
     .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId)));
   if (!property) {
     await notePartyPropertyIsolationRejection(propertyId, user.brokerageId);
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  if (restrictTo !== null && !restrictTo.includes(property.id)) {
     res.status(404).json({ error: "Not found" });
     return;
   }

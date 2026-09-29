@@ -19,9 +19,10 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { db, properties, riskExceptionScanRuns } from "@aee/db";
-import { eq, and, desc } from "drizzle-orm";
-import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { db, riskExceptionScanRuns } from "@aee/db";
+import { desc } from "drizzle-orm";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import {
   acknowledgeException,
   startRemediation,
@@ -35,6 +36,10 @@ import {
 import { getPropertyExceptions, listBrokerageExceptions, getExceptionDetail, type CrossPropertyExceptionFilters } from "../lib/exceptions/queries.js";
 import { runScheduledScan } from "../lib/exceptions/engine.js";
 
+// Re-exported so Command Centre and its tests keep importing the same helper
+// from this module. The rule itself lives in lib/propertyVisibility.ts.
+export { restrictedPropertyIdsFor };
+
 export const exceptionsRouter = Router();
 
 function actorFrom(user: AuthedUser): ActorRef {
@@ -43,16 +48,6 @@ function actorFrom(user: AuthedUser): ActorRef {
 
 export function canViewFinancials(user: AuthedUser): boolean {
   return BROKERAGE_ADMIN_ROLES.includes(user.role);
-}
-
-/** Agent Engine 2.0 -- Pit Crew Command Centre (Priority 7): Pit Crew now
- * gets whole-tenant visibility here too, same as Brokerage Administrator --
- * the pit_crew_assignments overlay table (lib/pitCrew) is the service-
- * assignment record. Agents remain scoped to properties they are the agent for. */
-export async function restrictedPropertyIdsFor(user: AuthedUser): Promise<number[] | null> {
-  if (BROKERAGE_ADMIN_ROLES.includes(user.role) || PIT_CREW_ROLES.includes(user.role)) return null;
-  const rows = await db.select({ id: properties.id }).from(properties).where(and(eq(properties.brokerageId, user.brokerageId), eq(properties.agentId, user.id)));
-  return rows.map((r) => r.id);
 }
 
 function statusForRiskExceptionError(reason: string): number {
