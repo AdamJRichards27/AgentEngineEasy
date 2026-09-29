@@ -660,6 +660,16 @@ function PreviewStep({ job, onExecuted }: { job: ImportJob; onExecuted: (result:
   );
 }
 
+// execute.ts merge is fill-gap only. Contact gaps are first name, last name,
+// email, mobile, and residential address. Property gaps are suburb, state,
+// and postcode. A field that already has a value is never overwritten.
+function mergeResolutionHelp(kind: "contact" | "property"): string {
+  if (kind === "contact") {
+    return "Merge fills empty first name, last name, email, mobile, and address on the existing contact from this import row. A field that already has a value is never overwritten.";
+  }
+  return "Merge fills empty suburb, state, and postcode on the existing property from this import row. A field that already has a value is never overwritten.";
+}
+
 function DuplicateRow({
   item,
   info,
@@ -715,7 +725,15 @@ function DuplicateRow({
         <button className="btn btn-link btn-small" disabled={pending} onClick={() => onResolve("skip")}>
           Skip
         </button>
+        <button
+          className="btn btn-secondary btn-small"
+          disabled={pending || !candidateId}
+          onClick={() => onResolve("merge", candidateId)}
+        >
+          Merge
+        </button>
       </div>
+      <p className="muted">{mergeResolutionHelp(item.kind)}</p>
     </div>
   );
 }
