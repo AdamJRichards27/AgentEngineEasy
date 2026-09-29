@@ -17,7 +17,8 @@ import {
 } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
-import { requireAuth, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { determineRequiredDocuments, DOCUMENT_RULE_SET_VERSION } from "../lib/documentRules.js";
@@ -115,6 +116,14 @@ async function notePropertyIsolationRejection(propertyId: number, brokerageId: n
   if (elsewhere) {
     incrementCounter("tenant_isolation_rejection_total", { boundary: "property" });
   }
+}
+
+/** True when this caller is an ordinary Agent (or any non-brokerage-wide role)
+ * and the property is not one they are the agent for. Brokerage Administrator
+ * and Pit Crew are not hidden: restrictedPropertyIdsFor returns null for them. */
+async function propertyHiddenFromCaller(user: AuthedUser, propertyId: number): Promise<boolean> {
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  return restrictTo !== null && !restrictTo.includes(propertyId);
 }
 
 async function loadPropertyInBrokerage(propertyId: number, brokerageId: number) {
@@ -227,7 +236,19 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
 
 propertiesRouter.get("/", requireAuth, async (req, res) => {
   const user = req.authedUser!;
-  const rows = await db.select().from(properties).where(eq(properties.brokerageId, user.brokerageId));
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  if (restrictTo !== null && restrictTo.length === 0) {
+    res.json({ properties: [] });
+    return;
+  }
+  const rows = await db
+    .select()
+    .from(properties)
+    .where(
+      restrictTo === null
+        ? eq(properties.brokerageId, user.brokerageId)
+        : and(eq(properties.brokerageId, user.brokerageId), inArray(properties.id, restrictTo)),
+    );
   res.json({ properties: rows });
 });
 
@@ -239,6 +260,14 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
   const user = req.authedUser!;
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  // Same 404 as a property outside this brokerage. The isolation counter
+  // already ran inside loadPropertyInBrokerage only when the row belongs to
+  // another brokerage, so a same-brokerage property owned by someone else
+  // does not increment it.
+  if (await propertyHiddenFromCaller(user, id)) {
     res.status(404).json({ error: "Not found" });
     return;
   }
@@ -254,6 +283,10 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   const user = req.authedUser!;
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (await propertyHiddenFromCaller(user, id)) {
     res.status(404).json({ error: "Not found" });
     return;
   }
@@ -372,6 +405,15 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
   const user = req.authedUser!;
   const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(user.role);
   try {
+    if (await propertyHiddenFromCaller(user, id)) {
+      // Resolve brokerage membership before answering, so a cross-tenant id
+      // still records tenant_isolation_rejection_total once (inside
+      // loadPropertyInBrokerage) and a same-brokerage property owned by
+      // someone else does not. The body matches assertPropertyInBrokerage.
+      await loadPropertyInBrokerage(id, user.brokerageId);
+      res.status(404).json({ error: `Property ${id} not found` });
+      return;
+    }
     const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
     res.json({ timeline });
   } catch (err) {

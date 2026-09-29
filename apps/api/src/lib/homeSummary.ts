@@ -32,10 +32,11 @@ import {
  * menu of modules). This is deliberately NOT a BI dashboard: no counts,
  * charts, or trends — just a flat list of concrete, actionable items
  * derived from live domain state across every non-Closed property in the
- * brokerage, each one linking straight back to the Property Workspace
- * where it's resolved. Scoped by brokerageId only, matching every other
- * list endpoint in this app (GET /properties) — there's no per-agent
- * "mine only" filter anywhere else, so Home doesn't invent one.
+ * caller's scope, each one linking straight back to the Property Workspace
+ * where it's resolved. `restrictToPropertyIds` is the return value of
+ * restrictedPropertyIdsFor: null keeps the brokerage-wide read (Brokerage
+ * Administrator, Pit Crew, and callers such as the AI business context that
+ * omit it); an array limits the read to those property ids.
  *
  * "Exception" = something stuck or requiring a deliberate human decision
  * (a compliance/financial exception, a blocked workflow step, an overdue
@@ -56,8 +57,19 @@ export interface HomeSummaryItem {
   detail?: string;
 }
 
-export async function getHomeSummary(brokerageId: number): Promise<HomeSummaryItem[]> {
-  const propertyRows = await db.select().from(properties).where(eq(properties.brokerageId, brokerageId));
+function propertiesInScope(brokerageId: number, restrictToPropertyIds: number[] | null) {
+  if (restrictToPropertyIds === null) return eq(properties.brokerageId, brokerageId);
+  const scoped = and(eq(properties.brokerageId, brokerageId), inArray(properties.id, restrictToPropertyIds));
+  if (!scoped) throw new Error("property scope was empty");
+  return scoped;
+}
+
+export async function getHomeSummary(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<HomeSummaryItem[]> {
+  if (restrictToPropertyIds !== null && restrictToPropertyIds.length === 0) return [];
+  const propertyRows = await db.select().from(properties).where(propertiesInScope(brokerageId, restrictToPropertyIds));
   // A Closed property has nothing left to action — exclude it up front so
   // none of the checks below need to repeat that condition.
   const activeProperties = propertyRows.filter((p) => p.workflowStage !== "Closed");
@@ -262,14 +274,18 @@ export interface DashboardSettlement {
 
 // The Dashboard's other two sections (staging brief: "Dashboard — Needs
 // Attention, Active Properties, Settlements"). Needs Attention is
-// getHomeSummary()'s Exception items above; these two are simple,
-// unfiltered lists — not exceptions, just "what's currently open" and
-// "what's coming up" — so they're kept separate rather than folded into the
-// exceptions/next-actions aggregation, which is deliberately curated.
+// getHomeSummary()'s Exception items above; these two are simple lists
+// within the same property scope — not exceptions, just "what's currently
+// open" and "what's coming up" — so they're kept separate rather than folded
+// into the exceptions/next-actions aggregation, which is deliberately curated.
 export async function getDashboardOverview(
   brokerageId: number,
+  restrictToPropertyIds: number[] | null = null,
 ): Promise<{ activeProperties: DashboardProperty[]; upcomingSettlements: DashboardSettlement[] }> {
-  const propertyRows = await db.select().from(properties).where(eq(properties.brokerageId, brokerageId));
+  if (restrictToPropertyIds !== null && restrictToPropertyIds.length === 0) {
+    return { activeProperties: [], upcomingSettlements: [] };
+  }
+  const propertyRows = await db.select().from(properties).where(propertiesInScope(brokerageId, restrictToPropertyIds));
   const activeProperties = propertyRows
     .filter((p) => p.workflowStage !== "Closed")
     .sort((a, b) => a.formattedAddress.localeCompare(b.formattedAddress))
