@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
-import { db, properties, brokerages, users } from "@aee/db";
+import { db, properties, brokerages, users, type UserRole } from "@aee/db";
 import { getDashboardOverview } from "../../homeSummary.js";
 import { getTransactionByProperty } from "../../transactions.js";
+import { restrictedPropertyIdsFor } from "../../propertyVisibility.js";
 import { resolveBrokerageTier } from "../entitlements.js";
 import { buildGrowContext } from "./growContext.js";
 import { buildPitCrewContext } from "./pitCrewContext.js";
@@ -120,12 +121,18 @@ export async function buildContext(input: BuildContextInput): Promise<AiContextP
   } else if (input.contextType === "transaction" && input.contextId !== null) {
     transaction = await buildTransactionContext(input.brokerageId, input.contextId);
   } else if (input.contextType === "grow") {
-    grow = await buildGrowContext(input.brokerageId, input.growFocusItemId);
+    const restrictToPropertyIds = await restrictedPropertyIdsFor({
+      id: input.userId,
+      role: input.userRole as UserRole,
+      brokerageId: input.brokerageId,
+    });
+    grow = await buildGrowContext(input.brokerageId, input.growFocusItemId, restrictToPropertyIds);
     if (input.mode === "coach") {
       coach = await buildBusinessCoachContext(input.brokerageId, grow, {
         period: input.period ?? "last7days",
         startDate: input.periodStartDate ?? null,
         endDate: input.periodEndDate ?? null,
+        restrictToPropertyIds,
       });
     }
   }

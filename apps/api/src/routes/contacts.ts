@@ -25,7 +25,7 @@ import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
-import { restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
+import { assertPropertyVisibleForWrite, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -1189,6 +1189,10 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
       res.status(404).json({ error: "Property not found in this brokerage" });
       return;
     }
+    if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
+      res.status(404).json({ error: "Property not found in this brokerage" });
+      return;
+    }
   }
 
   if (opportunityId !== null) {
@@ -1258,6 +1262,14 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     .limit(1);
   if (!existing) {
     await noteGrowCommitmentIsolationRejection(id, user.brokerageId);
+    res.status(404).json({ error: "Commitment not found in this brokerage" });
+    return;
+  }
+  // Checked before the Open-status 409, so a hidden property-linked
+  // commitment (complete or cancel) is a 404 and writes no task_completion
+  // activity. A null property id stays writable. There is no reschedule
+  // status on this route.
+  if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
     res.status(404).json({ error: "Commitment not found in this brokerage" });
     return;
   }

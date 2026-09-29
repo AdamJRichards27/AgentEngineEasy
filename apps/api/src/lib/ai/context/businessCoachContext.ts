@@ -65,6 +65,9 @@ export interface BuildBusinessCoachContextInput {
   // Injectable so this function (and everything it calls) is deterministic
   // and testable without depending on the real wall clock.
   now?: Date;
+  // Caller's restrictedPropertyIdsFor result. Null or omitted is
+  // brokerage-wide (Brokerage Administrator, Pit Crew, and existing callers).
+  restrictToPropertyIds?: number[] | null;
 }
 
 export async function buildBusinessCoachContext(
@@ -73,6 +76,7 @@ export async function buildBusinessCoachContext(
   input: BuildBusinessCoachContextInput,
 ): Promise<BusinessCoachContext> {
   const now = input.now ?? new Date();
+  const restrictToPropertyIds = input.restrictToPropertyIds ?? null;
   // AE GROW Priority 6 Stage C timezone remediation — resolved once, here,
   // and threaded through resolvePeriod so every downstream figure (metrics,
   // response text, the UI's period pill) is computed against the SAME
@@ -100,20 +104,20 @@ export async function buildBusinessCoachContext(
     relationshipRows,
     recentActivityRows,
   ] = await Promise.all([
-    fetchActivityRows(brokerageId, period),
-    fetchActivityRows(brokerageId, previousPeriod),
-    fetchCommitmentsDueInPeriod(brokerageId, period),
-    fetchCommitmentsDueInPeriod(brokerageId, previousPeriod),
-    fetchCurrentlyOverdueCommitments(brokerageId, now),
-    fetchAppraisalsCreatedInPeriod(brokerageId, period),
-    fetchAppraisalsCreatedInPeriod(brokerageId, previousPeriod),
-    fetchStaleAppraisals(brokerageId, now),
-    fetchOpenOpportunities(brokerageId),
-    fetchOpportunitiesCreatedInPeriod(brokerageId, period),
-    fetchOpportunitiesCreatedInPeriod(brokerageId, previousPeriod),
-    fetchPromotedSignalOpportunityIds(brokerageId),
-    fetchActiveRelationships(brokerageId),
-    fetchRecentActivityByParty(brokerageId, recentSince),
+    fetchActivityRows(brokerageId, period, restrictToPropertyIds),
+    fetchActivityRows(brokerageId, previousPeriod, restrictToPropertyIds),
+    fetchCommitmentsDueInPeriod(brokerageId, period, restrictToPropertyIds),
+    fetchCommitmentsDueInPeriod(brokerageId, previousPeriod, restrictToPropertyIds),
+    fetchCurrentlyOverdueCommitments(brokerageId, now, restrictToPropertyIds),
+    fetchAppraisalsCreatedInPeriod(brokerageId, period, restrictToPropertyIds),
+    fetchAppraisalsCreatedInPeriod(brokerageId, previousPeriod, restrictToPropertyIds),
+    fetchStaleAppraisals(brokerageId, now, restrictToPropertyIds),
+    fetchOpenOpportunities(brokerageId, restrictToPropertyIds),
+    fetchOpportunitiesCreatedInPeriod(brokerageId, period, restrictToPropertyIds),
+    fetchOpportunitiesCreatedInPeriod(brokerageId, previousPeriod, restrictToPropertyIds),
+    fetchPromotedSignalOpportunityIds(brokerageId, restrictToPropertyIds),
+    fetchActiveRelationships(brokerageId, restrictToPropertyIds),
+    fetchRecentActivityByParty(brokerageId, recentSince, restrictToPropertyIds),
   ]);
 
   const activity = computeActivityConsistency(activityRows, period);

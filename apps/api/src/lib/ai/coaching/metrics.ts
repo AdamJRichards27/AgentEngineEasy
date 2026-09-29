@@ -15,7 +15,9 @@
 // carries no brokerageId column of its own — via an inner join to
 // `properties.brokerageId`, the same pattern lib/growToday.ts already uses
 // for the exact same table). None of these functions accept a client-
-// supplied tenant filter.
+// supplied tenant filter. An optional restrictToPropertyIds argument is the
+// caller's own restrictedPropertyIdsFor result (null, the default, leaves
+// the brokerage-wide query unchanged) and is not a tenant selector.
 //
 // Bounding: every list is capped by one of the *_ROW_CAP constants below
 // before it reaches a compute function, and every compute function reports
@@ -31,6 +33,7 @@
 // calendar day (period.timeZone), not a bare UTC date slice — see that
 // function's own comment for why.
 import { and, asc, desc, eq, gte, isNotNull, lt, notInArray } from "drizzle-orm";
+import { visibleLinkedPropertySql, visibleRequiredPropertySql } from "../../propertyVisibility.js";
 import {
   db,
   appraisals,
@@ -87,11 +90,20 @@ export interface ActivityRow {
   occurredAt: Date;
 }
 
-export async function fetchActivityRows(brokerageId: number, period: ResolvedPeriod): Promise<ActivityRow[]> {
+export async function fetchActivityRows(
+  brokerageId: number,
+  period: ResolvedPeriod,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<ActivityRow[]> {
   return db
     .select({ id: growActivities.id, partyId: growActivities.partyId, activityType: growActivities.activityType, occurredAt: growActivities.occurredAt })
     .from(growActivities)
-    .where(and(eq(growActivities.brokerageId, brokerageId), gte(growActivities.occurredAt, period.start), lt(growActivities.occurredAt, period.end)))
+    .where(and(
+      eq(growActivities.brokerageId, brokerageId),
+      gte(growActivities.occurredAt, period.start),
+      lt(growActivities.occurredAt, period.end),
+      visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(growActivities.occurredAt))
     .limit(ACTIVITY_ROW_CAP);
 }
@@ -189,11 +201,20 @@ export interface CommitmentRow {
   completedAt: Date | null;
 }
 
-export async function fetchCommitmentsDueInPeriod(brokerageId: number, period: ResolvedPeriod): Promise<CommitmentRow[]> {
+export async function fetchCommitmentsDueInPeriod(
+  brokerageId: number,
+  period: ResolvedPeriod,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<CommitmentRow[]> {
   return db
     .select({ id: growCommitments.id, partyId: growCommitments.partyId, dueAt: growCommitments.dueAt, status: growCommitments.status, completedAt: growCommitments.completedAt })
     .from(growCommitments)
-    .where(and(eq(growCommitments.brokerageId, brokerageId), gte(growCommitments.dueAt, period.start), lt(growCommitments.dueAt, period.end)))
+    .where(and(
+      eq(growCommitments.brokerageId, brokerageId),
+      gte(growCommitments.dueAt, period.start),
+      lt(growCommitments.dueAt, period.end),
+      visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(growCommitments.dueAt))
     .limit(COMMITMENT_ROW_CAP);
 }
@@ -202,11 +223,20 @@ export async function fetchCommitmentsDueInPeriod(brokerageId: number, period: R
 // commitment from before the requested period is still overdue right now,
 // and hiding it because it fell due before the period started would
 // understate what the agent actually needs to act on today.
-export async function fetchCurrentlyOverdueCommitments(brokerageId: number, now: Date): Promise<CommitmentRow[]> {
+export async function fetchCurrentlyOverdueCommitments(
+  brokerageId: number,
+  now: Date,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<CommitmentRow[]> {
   return db
     .select({ id: growCommitments.id, partyId: growCommitments.partyId, dueAt: growCommitments.dueAt, status: growCommitments.status, completedAt: growCommitments.completedAt })
     .from(growCommitments)
-    .where(and(eq(growCommitments.brokerageId, brokerageId), eq(growCommitments.status, "Open"), lt(growCommitments.dueAt, now)))
+    .where(and(
+      eq(growCommitments.brokerageId, brokerageId),
+      eq(growCommitments.status, "Open"),
+      lt(growCommitments.dueAt, now),
+      visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(growCommitments.dueAt))
     .limit(COMMITMENT_ROW_CAP);
 }
@@ -312,12 +342,21 @@ const APPRAISAL_SELECT_COLUMNS = {
 // appraisals carries no brokerageId column of its own — tenant scoping is
 // via an inner join to properties.brokerageId, exactly mirroring
 // growToday.ts's own appraisal query.
-export async function fetchAppraisalsCreatedInPeriod(brokerageId: number, period: ResolvedPeriod): Promise<AppraisalRow[]> {
+export async function fetchAppraisalsCreatedInPeriod(
+  brokerageId: number,
+  period: ResolvedPeriod,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<AppraisalRow[]> {
   return db
     .select(APPRAISAL_SELECT_COLUMNS)
     .from(appraisals)
     .innerJoin(properties, eq(appraisals.propertyId, properties.id))
-    .where(and(eq(properties.brokerageId, brokerageId), gte(appraisals.createdAt, period.start), lt(appraisals.createdAt, period.end)))
+    .where(and(
+      eq(properties.brokerageId, brokerageId),
+      gte(appraisals.createdAt, period.start),
+      lt(appraisals.createdAt, period.end),
+      visibleRequiredPropertySql(appraisals.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(appraisals.createdAt))
     .limit(APPRAISAL_ROW_CAP);
 }
@@ -329,13 +368,22 @@ export async function fetchAppraisalsCreatedInPeriod(brokerageId: number, period
 // filtered afterwards) so a long-closed appraisal — which by definition
 // will never be updated again — can never crowd a genuinely stale, still-
 // open appraisal out of the capped result.
-export async function fetchStaleAppraisals(brokerageId: number, now: Date): Promise<AppraisalRow[]> {
+export async function fetchStaleAppraisals(
+  brokerageId: number,
+  now: Date,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<AppraisalRow[]> {
   const staleThreshold = new Date(now.getTime() - STALE_APPRAISAL_DAYS * 24 * 60 * 60 * 1000);
   return db
     .select(APPRAISAL_SELECT_COLUMNS)
     .from(appraisals)
     .innerJoin(properties, eq(appraisals.propertyId, properties.id))
-    .where(and(eq(properties.brokerageId, brokerageId), lt(appraisals.updatedAt, staleThreshold), notInArray(appraisals.status, [...APPRAISAL_TERMINAL_STATUSES])))
+    .where(and(
+      eq(properties.brokerageId, brokerageId),
+      lt(appraisals.updatedAt, staleThreshold),
+      notInArray(appraisals.status, [...APPRAISAL_TERMINAL_STATUSES]),
+      visibleRequiredPropertySql(appraisals.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(appraisals.updatedAt))
     .limit(APPRAISAL_ROW_CAP);
 }
@@ -427,20 +475,36 @@ const OPPORTUNITY_SELECT_COLUMNS = {
   createdAt: growOpportunities.createdAt,
 } as const;
 
-export async function fetchOpenOpportunities(brokerageId: number): Promise<OpportunityRow[]> {
+export async function fetchOpenOpportunities(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<OpportunityRow[]> {
   return db
     .select(OPPORTUNITY_SELECT_COLUMNS)
     .from(growOpportunities)
-    .where(and(eq(growOpportunities.brokerageId, brokerageId), eq(growOpportunities.status, "Open")))
+    .where(and(
+      eq(growOpportunities.brokerageId, brokerageId),
+      eq(growOpportunities.status, "Open"),
+      visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(growOpportunities.createdAt))
     .limit(OPPORTUNITY_ROW_CAP);
 }
 
-export async function fetchOpportunitiesCreatedInPeriod(brokerageId: number, period: ResolvedPeriod): Promise<OpportunityRow[]> {
+export async function fetchOpportunitiesCreatedInPeriod(
+  brokerageId: number,
+  period: ResolvedPeriod,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<OpportunityRow[]> {
   return db
     .select(OPPORTUNITY_SELECT_COLUMNS)
     .from(growOpportunities)
-    .where(and(eq(growOpportunities.brokerageId, brokerageId), gte(growOpportunities.createdAt, period.start), lt(growOpportunities.createdAt, period.end)))
+    .where(and(
+      eq(growOpportunities.brokerageId, brokerageId),
+      gte(growOpportunities.createdAt, period.start),
+      lt(growOpportunities.createdAt, period.end),
+      visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(asc(growOpportunities.createdAt))
     .limit(OPPORTUNITY_ROW_CAP);
 }
@@ -450,11 +514,18 @@ export async function fetchOpportunitiesCreatedInPeriod(brokerageId: number, per
 // own header comment) — never by the signal engine itself, so this list is
 // never larger than the number of times an agent has actually promoted a
 // signal into an opportunity.
-export async function fetchPromotedSignalOpportunityIds(brokerageId: number): Promise<number[]> {
+export async function fetchPromotedSignalOpportunityIds(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<number[]> {
   const rows = await db
     .select({ promotedOpportunityId: growOpportunitySignals.promotedOpportunityId })
     .from(growOpportunitySignals)
-    .where(and(eq(growOpportunitySignals.brokerageId, brokerageId), isNotNull(growOpportunitySignals.promotedOpportunityId)))
+    .where(and(
+      eq(growOpportunitySignals.brokerageId, brokerageId),
+      isNotNull(growOpportunitySignals.promotedOpportunityId),
+      visibleLinkedPropertySql(growOpportunitySignals.propertyId, restrictToPropertyIds),
+    ))
     .limit(SIGNAL_ROW_CAP);
   const ids: number[] = [];
   for (const row of rows) {
@@ -546,11 +617,18 @@ export interface RelationshipRow {
   isPrimary: boolean;
 }
 
-export async function fetchActiveRelationships(brokerageId: number): Promise<RelationshipRow[]> {
+export async function fetchActiveRelationships(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<RelationshipRow[]> {
   return db
     .select({ id: growRelationships.id, partyId: growRelationships.partyId, relationshipType: growRelationships.relationshipType, isPrimary: growRelationships.isPrimary })
     .from(growRelationships)
-    .where(and(eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")))
+    .where(and(
+      eq(growRelationships.brokerageId, brokerageId),
+      eq(growRelationships.status, "Active"),
+      visibleLinkedPropertySql(growRelationships.propertyId, restrictToPropertyIds),
+    ))
     // id tiebreak for the same reason fetchRecentActivityByParty below needs
     // one: validFrom is routinely identical across rows created by one import,
     // and a partial order is not a deterministic one once the cap bites.
@@ -573,11 +651,19 @@ export async function fetchActiveRelationships(brokerageId: number): Promise<Rel
 // are the ones that most strongly establish recent engagement. id is the
 // tiebreak so activities sharing an occurredAt (bulk imports do this) still
 // produce a total order, not just a stable-looking one.
-export async function fetchRecentActivityByParty(brokerageId: number, since: Date): Promise<Array<{ partyId: number | null; occurredAt: Date }>> {
+export async function fetchRecentActivityByParty(
+  brokerageId: number,
+  since: Date,
+  restrictToPropertyIds: number[] | null = null,
+): Promise<Array<{ partyId: number | null; occurredAt: Date }>> {
   return db
     .select({ partyId: growActivities.partyId, occurredAt: growActivities.occurredAt })
     .from(growActivities)
-    .where(and(eq(growActivities.brokerageId, brokerageId), gte(growActivities.occurredAt, since)))
+    .where(and(
+      eq(growActivities.brokerageId, brokerageId),
+      gte(growActivities.occurredAt, since),
+      visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
+    ))
     .orderBy(desc(growActivities.occurredAt), asc(growActivities.id))
     .limit(ACTIVITY_ROW_CAP);
 }

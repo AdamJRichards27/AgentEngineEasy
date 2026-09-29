@@ -21,7 +21,7 @@ import {
 import { getBillingProvider } from "../lib/billing/gateway.js";
 import { getGrowTodaySummary } from "../lib/growToday.js";
 import { logAudit } from "../lib/audit.js";
-import { linkedPropertyHidden, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
+import { assertPropertyVisibleForWrite, linkedPropertyHidden, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
 
 export const growRouter = Router();
 
@@ -190,6 +190,12 @@ growRouter.post(
         res.status(404).json({ error: "Property not found in this brokerage" });
         return;
       }
+      // Same 404 as a property outside this brokerage. The isolation counter
+      // above runs only when the id belongs to another brokerage.
+      if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
+        res.status(404).json({ error: "Property not found in this brokerage" });
+        return;
+      }
     }
 
     const [inserted] = await db
@@ -278,6 +284,13 @@ growRouter.patch(
       .limit(1);
     if (!existing) {
       await noteGrowRelationshipIsolationRejection(id, user.brokerageId);
+      res.status(404).json({ error: "Relationship not found" });
+      return;
+    }
+    // A relationship tied to a property this caller cannot see is the same
+    // 404 as a relationship that is not in the brokerage. A null property
+    // id stays writable.
+    if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
       res.status(404).json({ error: "Relationship not found" });
       return;
     }
@@ -370,6 +383,10 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
       res.status(404).json({ error: "Property not found in this brokerage" });
       return;
     }
+    if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
+      res.status(404).json({ error: "Property not found in this brokerage" });
+      return;
+    }
   }
   if (opportunityId !== null) {
     const [opportunity] = await db
@@ -436,12 +453,39 @@ growRouter.post(
       return;
     }
 
+    // propertyId used to be stored with no lookup. A supplied id must exist
+    // in this brokerage and be visible, same 404 as the other Grow writes.
+    // A non-number is still ignored (stored as null), as it was before.
+    let propertyId: number | null = null;
+    if (typeof req.body?.propertyId === "number") {
+      const supplied = req.body.propertyId;
+      if (!Number.isInteger(supplied) || supplied <= 0) {
+        res.status(404).json({ error: "Property not found in this brokerage" });
+        return;
+      }
+      const [property] = await db
+        .select({ id: properties.id })
+        .from(properties)
+        .where(and(eq(properties.id, supplied), eq(properties.brokerageId, user.brokerageId)))
+        .limit(1);
+      if (!property) {
+        await noteGrowPropertyIsolationRejection(supplied, user.brokerageId);
+        res.status(404).json({ error: "Property not found in this brokerage" });
+        return;
+      }
+      if (!(await assertPropertyVisibleForWrite(user, supplied))) {
+        res.status(404).json({ error: "Property not found in this brokerage" });
+        return;
+      }
+      propertyId = supplied;
+    }
+
     const [inserted] = await db
       .insert(growOpportunities)
       .values({
         brokerageId: user.brokerageId,
         partyId,
-        propertyId: typeof req.body?.propertyId === "number" ? req.body.propertyId : null,
+        propertyId,
         opportunityType,
         status: "Open",
         stage: "New",
@@ -505,6 +549,10 @@ growRouter.patch(
       .limit(1);
     if (!existing) {
       await noteGrowOpportunityIsolationRejection(id, user.brokerageId);
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+    if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
       res.status(404).json({ error: "Opportunity not found" });
       return;
     }

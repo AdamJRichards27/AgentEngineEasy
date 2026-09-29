@@ -1,6 +1,6 @@
-// Own-property scope shared by Command Centre, Exceptions, Home, and the
-// property list. Extracted from routes/exceptions.ts's restrictedPropertyIdsFor
-// so those surfaces use one rule.
+// Own-property scope shared by Command Centre, Exceptions, Home, the
+// property list, and Grow property-linked reads and writes. Extracted from
+// routes/exceptions.ts's restrictedPropertyIdsFor so those surfaces use one rule.
 //
 // Brokerage Administrator and Pit Crew (BROKERAGE_ADMIN_ROLES / PIT_CREW_ROLES)
 // see the whole brokerage: the function returns null. Every other role,
@@ -56,4 +56,16 @@ export function visibleRequiredPropertySql(propertyId: AnyColumn, restrictTo: nu
   if (restrictTo === null) return undefined;
   if (restrictTo.length === 0) return sql`false`;
   return inArray(propertyId, restrictTo);
+}
+
+/**
+ * Write gate. True when this write may name `propertyId`, or mutate a row
+ * linked to it. A null property id is contact-level and is allowed.
+ * Brokerage Administrator and Pit Crew stay allowed (`propertyHiddenFromCaller`
+ * is false when `restrictedPropertyIdsFor` returns null). Callers answer a
+ * refusal with that route's existing not-found body; this does not respond.
+ */
+export async function assertPropertyVisibleForWrite(user: AuthedUser, propertyId: number | null): Promise<boolean> {
+  if (propertyId === null) return true;
+  return !(await propertyHiddenFromCaller(user, propertyId));
 }
