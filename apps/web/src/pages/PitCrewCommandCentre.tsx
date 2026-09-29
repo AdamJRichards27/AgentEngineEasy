@@ -17,9 +17,13 @@
 // R-F23: the Launch section renders launchCoordination as the workspace
 // sends it. That list can hold LAUNCH_CAMPAIGN exceptions and LAUNCH_ITEM
 // campaign items together. Campaign-item actions stay on the Pit Crew item
-// routes (sourceType LAUNCH_ITEM). This page does not call /launch. Hand-back
-// and escalate stay off LAUNCH_ITEM cards. With no campaign items in the
-// list, the section text is the same as before those labels existed.
+// routes (sourceType LAUNCH_ITEM). This page does not call /launch.
+// Hand back and Escalate render on LAUNCH_ITEM cards under the same
+// conditions as exception cards: the responsibility signal is on and the
+// status is CLAIMED, IN_PROGRESS, or WAITING_ON. Reclaim, acknowledge,
+// resolve, and return use those same Pit Crew routes and send the card's
+// sourceType and id. With no campaign items in the list, the section text
+// is the same as before those labels existed.
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -596,9 +600,10 @@ function PcItemCard({
   const isMine = item.assignedToUserId === currentUserId;
   const actor = { id: currentUserId, role: currentUserRole };
   const responsibilityItem = item.responsibility ? (item as PcResponsibilityWorkItem) : null;
-  // Hand-back and escalate for LAUNCH_ITEM are deferred. EXCEPTION cards keep both.
+  // Same gate for EXCEPTION and LAUNCH_ITEM. Follow-on actions below are
+  // already source-agnostic and post item.sourceType and item.sourceRecordId.
   const showHandBackOrEscalate =
-    responsibilityActionsVisible && isPitCrewActiveActionStatus(item.pcStatus) && item.sourceType !== "LAUNCH_ITEM";
+    responsibilityActionsVisible && isPitCrewActiveActionStatus(item.pcStatus);
   const showReclaim = responsibilityActionsVisible && item.pcStatus === "HANDED_BACK";
   const showAcknowledge = responsibilityItem != null && responsibilityActionsVisible && canAcknowledgeEscalation(responsibilityItem, actor);
   const showResolveOrReturn = responsibilityItem != null && responsibilityActionsVisible && canResolveOrReturnEscalation(responsibilityItem, actor);

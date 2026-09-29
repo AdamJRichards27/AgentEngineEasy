@@ -4,8 +4,13 @@ import { createServer, type Plugin, type ViteDevServer } from "vite";
 
 // R-F23 — the Pit Crew Launch section renders LAUNCH_ITEM rows beside
 // LAUNCH_CAMPAIGN exceptions when the workspace includes them, and stays
-// the same when it does not. Hand-back and escalate stay off campaign items.
-// Actions post to the Pit Crew item routes with sourceType LAUNCH_ITEM.
+// the same when it does not. Actions post to the Pit Crew item routes with
+// sourceType LAUNCH_ITEM. This page does not call /launch.
+// R-F29 — Hand back and Escalate show on a LAUNCH_ITEM card when the
+// responsibility signal is on and the status is CLAIMED, IN_PROGRESS, or
+// WAITING_ON. They stay hidden when the signal is off and on every other
+// status. Reclaim, acknowledge, resolve, and return use the same Pit Crew
+// routes and send that card's sourceType and id.
 
 interface ElementNode {
   type?: unknown;
@@ -33,6 +38,14 @@ function findAll(node: unknown, predicate: (element: ElementNode) => boolean): E
 
 function buttonExact(tree: unknown, label: string): ElementNode | undefined {
   return findAll(tree, (element) => element.type === "button" && textContent(element).trim() === label)[0];
+}
+
+function field(tree: unknown, name: string): ElementNode | undefined {
+  return findAll(tree, (element) => element.props?.name === name)[0];
+}
+
+function formNode(tree: unknown): ElementNode | undefined {
+  return findAll(tree, (element) => element.type === "form")[0];
 }
 
 function tabButton(tree: unknown, label: string): ElementNode | undefined {
@@ -64,6 +77,12 @@ function click(element: ElementNode | undefined): void {
   const onClick = element?.props?.onClick;
   if (typeof onClick !== "function") throw new Error(`missing click handler for ${textContent(element)}`);
   onClick();
+}
+
+function change(element: ElementNode | undefined, value: string): void {
+  const onChange = element?.props?.onChange;
+  if (typeof onChange !== "function") throw new Error("missing change handler");
+  onChange({ target: { value } });
 }
 
 function createHarness() {
@@ -251,7 +270,7 @@ function queries(data: unknown, visible: boolean) {
   };
 }
 
-function install(data: unknown, visible: boolean) {
+function install(data: unknown, visible: boolean, user: { id: number; role: string } = { id: 9, role: "Pit Crew" }) {
   const hooks = createHarness();
   const pending: Promise<unknown>[] = [];
   const invalidated: unknown[] = [];
@@ -260,7 +279,7 @@ function install(data: unknown, visible: boolean) {
     __pcLaunchPending: pending,
     __pcLaunchInvalidated: invalidated,
     __pcLaunchQueries: queries(data, visible),
-    __pcLaunchUser: { id: 9, role: "Pit Crew" },
+    __pcLaunchUser: user,
   });
   const render = () => {
     hooks.beginRender();
@@ -280,6 +299,20 @@ function openLaunch(render: () => unknown): unknown {
   click(tabButton(tree, "Launch"));
   tree = render();
   return tree;
+}
+
+function openTab(render: () => unknown, label: string): unknown {
+  let tree = render();
+  click(tabButton(tree, label.replace(/\s+/g, "")));
+  tree = render();
+  return tree;
+}
+
+async function submit(tree: unknown, pending: Promise<unknown>[]) {
+  const onSubmit = formNode(tree)?.props?.onSubmit;
+  if (typeof onSubmit !== "function") throw new Error("missing form");
+  onSubmit({ preventDefault() {} });
+  await Promise.all(pending);
 }
 
 type FetchCall = { url: string; body: Record<string, unknown> };
@@ -352,8 +385,8 @@ test("the Launch section renders campaign items beside exceptions and labels bot
     const risk = itemCard(tree, "Portal copy missing");
     assert.match(normalized(campaign), /Campaign item · 15 Example St · Launch Campaign/);
     assert.match(normalized(risk), /Exception · 15 Example St · Launch Campaign/);
-    assert.equal(buttonExact(campaign, "Hand back…"), undefined);
-    assert.equal(buttonExact(campaign, "Escalate…"), undefined);
+    assert.ok(buttonExact(campaign, "Hand back…"));
+    assert.ok(buttonExact(campaign, "Escalate…"));
     assert.ok(buttonExact(campaign, "Complete"));
     assert.ok(buttonExact(risk, "Hand back…"));
     assert.ok(buttonExact(risk, "Escalate…"));
@@ -449,6 +482,290 @@ test("with no campaign items the Launch section matches today's output and shows
       clearGlobals();
     }
   } finally {
+    clearGlobals();
+  }
+});
+
+const ACTIVE_LAUNCH_STATUSES = ["CLAIMED", "IN_PROGRESS", "WAITING_ON"] as const;
+const OTHER_LAUNCH_STATUSES = ["UNCLAIMED", "DONE", "HANDED_BACK", "ESCALATED"] as const;
+
+function launchStatusItem(pcStatus: string) {
+  const unassigned = pcStatus === "UNCLAIMED" || pcStatus === "HANDED_BACK";
+  return item({
+    sourceType: "LAUNCH_ITEM",
+    sourceRecordId: `launch-status-${pcStatus}`,
+    title: `Launch status ${pcStatus}`,
+    description: "Photography is still outstanding.",
+    severity: "INFORMATION",
+    category: "LAUNCH_CAMPAIGN",
+    pcStatus,
+    assignedToUserId: unassigned ? null : 9,
+    assignedToName: unassigned ? null : "Pat Crew",
+    version: 3,
+    waitingOnParty: pcStatus === "WAITING_ON" ? "Photographer" : null,
+    completedAt: pcStatus === "DONE" ? "2026-09-28T01:00:00.000Z" : null,
+  });
+}
+
+test("campaign item hand back and escalate follow the exception status gate", async () => {
+  const launchItems = [...ACTIVE_LAUNCH_STATUSES, ...OTHER_LAUNCH_STATUSES].map((pcStatus) => launchStatusItem(pcStatus));
+  const exception = item({
+    sourceRecordId: "exception-still-claimed",
+    title: "Exception still claimed",
+    pcStatus: "CLAIMED",
+    assignedToUserId: 9,
+    assignedToName: "Pat Crew",
+    version: 4,
+  });
+  try {
+    const on = install(workspace({ launchCoordination: [...launchItems, exception] }), true);
+    const onTree = openLaunch(on.render);
+    for (const pcStatus of ACTIVE_LAUNCH_STATUSES) {
+      const card = itemCard(onTree, `Launch status ${pcStatus}`);
+      assert.ok(buttonExact(card, "Hand back…"), `${pcStatus} shows Hand back`);
+      assert.ok(buttonExact(card, "Escalate…"), `${pcStatus} shows Escalate`);
+    }
+    for (const pcStatus of OTHER_LAUNCH_STATUSES) {
+      const card = itemCard(onTree, `Launch status ${pcStatus}`);
+      assert.equal(buttonExact(card, "Hand back…"), undefined, `${pcStatus} hides Hand back`);
+      assert.equal(buttonExact(card, "Escalate…"), undefined, `${pcStatus} hides Escalate`);
+    }
+    assert.ok(buttonExact(itemCard(onTree, "Launch status HANDED_BACK"), "Reclaim"));
+    const risk = itemCard(onTree, "Exception still claimed");
+    assert.ok(buttonExact(risk, "Hand back…"));
+    assert.ok(buttonExact(risk, "Escalate…"));
+    clearGlobals();
+
+    const off = install(workspace({ launchCoordination: launchItems }), false);
+    const offTree = openLaunch(off.render);
+    assert.equal(tabButton(offTree, "Handedback"), undefined);
+    assert.equal(tabButton(offTree, "Escalated"), undefined);
+    for (const pcStatus of [...ACTIVE_LAUNCH_STATUSES, ...OTHER_LAUNCH_STATUSES]) {
+      const card = itemCard(offTree, `Launch status ${pcStatus}`);
+      assert.equal(buttonExact(card, "Hand back…"), undefined, `${pcStatus} hides Hand back when the signal is off`);
+      assert.equal(buttonExact(card, "Escalate…"), undefined, `${pcStatus} hides Escalate when the signal is off`);
+      assert.equal(buttonExact(card, "Reclaim"), undefined);
+      assert.equal(buttonExact(card, "Acknowledge…"), undefined);
+      assert.equal(buttonExact(card, "Resolve…"), undefined);
+      assert.equal(buttonExact(card, "Return…"), undefined);
+    }
+    assert.ok(buttonExact(itemCard(offTree, "Launch status CLAIMED"), "Complete"));
+    assert.ok(buttonExact(itemCard(offTree, "Launch status UNCLAIMED"), "Claim"));
+  } finally {
+    clearGlobals();
+  }
+});
+
+const HANDED_LAUNCH_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const ESCALATED_LAUNCH_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+const launchHandBack = {
+  eventId: 4,
+  kind: "HAND_BACK",
+  reasonCategory: "WORK_COMPLETE",
+  severity: null,
+  note: "Returned the evidence.",
+  closingNote: null,
+  nextAction: "UNIQUE_LAUNCH_HANDED_NEXT_ACTION",
+  originatingUserId: 9,
+  operatorDisplayName: "Pat Crew",
+  recipientUserId: 42,
+  recipientDisplayName: "Alex Agent",
+  recipientRole: null,
+  expectedResponseAt: null,
+  eventStatus: "OPEN",
+};
+
+const launchEscalation = {
+  eventId: 5,
+  kind: "ESCALATION",
+  reasonCategory: "MISSING_AUTHORITY",
+  severity: "AT_RISK",
+  note: "Outside authority.",
+  closingNote: null,
+  nextAction: "UNIQUE_LAUNCH_ESCALATED_NEXT_ACTION",
+  originatingUserId: 9,
+  operatorDisplayName: "Pat Crew",
+  recipientUserId: null,
+  recipientDisplayName: null,
+  recipientRole: "Brokerage Administrator",
+  expectedResponseAt: "2026-10-03T00:00:00.000Z",
+  eventStatus: "OPEN",
+};
+
+function assertPitCrewRoute(call: FetchCall | undefined, sourceRecordId: string, action: string) {
+  assert.equal(call?.url, `/api/pit-crew/items/LAUNCH_ITEM/${sourceRecordId}/${action}`);
+  assert.equal(call?.url.includes("/launch"), false);
+}
+
+test("launch item follow-on actions render and post the card sourceType and id", async () => {
+  const original = globalThis.fetch;
+  const calls = stubFetch();
+  try {
+    const claimed = item({
+      sourceType: "LAUNCH_ITEM",
+      sourceRecordId: LAUNCH_ITEM_ID,
+      title: "Book the photographer",
+      description: "Photography is still outstanding.",
+      severity: "INFORMATION",
+      category: "LAUNCH_CAMPAIGN",
+      pcStatus: "CLAIMED",
+      assignedToUserId: 9,
+      assignedToName: "Pat Crew",
+      version: 2,
+    });
+    const handed = item({
+      sourceType: "LAUNCH_ITEM",
+      sourceRecordId: HANDED_LAUNCH_ID,
+      title: "Handed campaign item",
+      description: "Photography was handed back.",
+      severity: "INFORMATION",
+      category: "LAUNCH_CAMPAIGN",
+      pcStatus: "HANDED_BACK",
+      assignedToUserId: null,
+      assignedToName: null,
+      version: 7,
+      responsibility: launchHandBack,
+    });
+    const escalated = item({
+      sourceType: "LAUNCH_ITEM",
+      sourceRecordId: ESCALATED_LAUNCH_ID,
+      title: "Escalated campaign item",
+      description: "Photography was escalated.",
+      severity: "INFORMATION",
+      category: "LAUNCH_CAMPAIGN",
+      pcStatus: "ESCALATED",
+      assignedToUserId: 9,
+      assignedToName: "Pat Crew",
+      version: 8,
+      responsibility: launchEscalation,
+    });
+
+    const active = install(workspace({ launchCoordination: [claimed], handedBack: [handed], escalated: [escalated] }), true);
+    let tree = openLaunch(active.render);
+    let card = itemCard(tree, "Book the photographer");
+    assert.ok(buttonExact(card, "Hand back…"));
+    assert.ok(buttonExact(card, "Escalate…"));
+    click(buttonExact(card, "Hand back…"));
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    change(field(card, "reasonCategory"), "WORK_COMPLETE");
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    change(field(card, "nextAction"), "Ask the agent to book the photographer.");
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    await submit(card, active.pending);
+    assertPitCrewRoute(calls[0], LAUNCH_ITEM_ID, "hand-back");
+    assert.deepEqual(calls[0]?.body, {
+      propertyId: 15,
+      expectedVersion: 2,
+      reasonCategory: "WORK_COMPLETE",
+      nextAction: "Ask the agent to book the photographer.",
+    });
+
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    click(buttonExact(card, "Escalate…"));
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    change(field(card, "reasonCategory"), "MISSING_INFORMATION");
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    change(field(card, "severity"), "ATTENTION");
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    change(field(card, "note"), "The photographer has not confirmed.");
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    change(field(card, "nextAction"), "Confirm the booking.");
+    tree = active.render();
+    card = itemCard(tree, "Book the photographer");
+    await submit(card, active.pending);
+    assertPitCrewRoute(calls[1], LAUNCH_ITEM_ID, "escalate");
+    assert.deepEqual(calls[1]?.body, {
+      propertyId: 15,
+      expectedVersion: 2,
+      reasonCategory: "MISSING_INFORMATION",
+      severity: "ATTENTION",
+      note: "The photographer has not confirmed.",
+      nextAction: "Confirm the booking.",
+    });
+
+    tree = openTab(active.render, "Handed back");
+    card = itemCard(tree, "Handed campaign item");
+    assert.match(textContent(card), /Next action: UNIQUE_LAUNCH_HANDED_NEXT_ACTION/);
+    assert.ok(buttonExact(card, "Reclaim"));
+    assert.equal(buttonExact(card, "Hand back…"), undefined);
+    assert.equal(buttonExact(card, "Escalate…"), undefined);
+    click(buttonExact(card, "Reclaim"));
+    await Promise.all(active.pending);
+    assertPitCrewRoute(calls[2], HANDED_LAUNCH_ID, "hand-back/reclaim");
+    assert.deepEqual(calls[2]?.body, { propertyId: 15, expectedVersion: 7 });
+
+    tree = openTab(active.render, "Escalated");
+    card = itemCard(tree, "Escalated campaign item");
+    assert.match(textContent(card), /Next action: UNIQUE_LAUNCH_ESCALATED_NEXT_ACTION/);
+    assert.equal(buttonExact(card, "Acknowledge…"), undefined);
+    assert.equal(buttonExact(card, "Resolve…"), undefined);
+    assert.equal(buttonExact(card, "Return…"), undefined);
+    assert.equal(buttonExact(card, "Hand back…"), undefined);
+    clearGlobals();
+
+    const adminView = install(
+      workspace({ handedBack: [handed], escalated: [escalated] }),
+      true,
+      { id: 2, role: "Brokerage Administrator" },
+    );
+    tree = openTab(adminView.render, "Escalated");
+    card = itemCard(tree, "Escalated campaign item");
+    assert.ok(buttonExact(card, "Acknowledge…"));
+    assert.ok(buttonExact(card, "Resolve…"));
+    assert.ok(buttonExact(card, "Return…"));
+    assert.equal(buttonExact(card, "Hand back…"), undefined);
+    assert.equal(buttonExact(card, "Escalate…"), undefined);
+
+    click(buttonExact(card, "Acknowledge…"));
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    change(field(card, "note"), "Seen.");
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    await submit(card, adminView.pending);
+    assertPitCrewRoute(calls[3], ESCALATED_LAUNCH_ID, "escalation/acknowledge");
+    assert.deepEqual(calls[3]?.body, { propertyId: 15, expectedVersion: 8, note: "Seen." });
+
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    click(buttonExact(card, "Resolve…"));
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    change(field(card, "note"), "Booking is confirmed.");
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    await submit(card, adminView.pending);
+    assertPitCrewRoute(calls[4], ESCALATED_LAUNCH_ID, "escalation/resolve");
+    assert.deepEqual(calls[4]?.body, { propertyId: 15, expectedVersion: 8, note: "Booking is confirmed." });
+
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    click(buttonExact(card, "Return…"));
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    change(field(card, "note"), "Still needs the agent.");
+    tree = adminView.render();
+    card = itemCard(tree, "Escalated campaign item");
+    await submit(card, adminView.pending);
+    assertPitCrewRoute(calls[5], ESCALATED_LAUNCH_ID, "escalation/return");
+    assert.deepEqual(calls[5]?.body, { propertyId: 15, expectedVersion: 8, note: "Still needs the agent." });
+
+    assert.equal(calls.length, 6);
+    for (const call of calls) {
+      assert.equal(call.url.includes("/launch"), false);
+      assert.equal(call.url.startsWith("/api/pit-crew/items/LAUNCH_ITEM/"), true);
+    }
+  } finally {
+    globalThis.fetch = original;
     clearGlobals();
   }
 });
