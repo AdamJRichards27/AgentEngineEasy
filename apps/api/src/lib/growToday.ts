@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
 import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import { visibleLinkedPropertySql, visibleRequiredPropertySql } from "./propertyVisibility.js";
 import { isOverdueLocal, isToday, localDateKey, resolveTimeZone, startOfLocalDay } from "./commandCentre/timezone.js";
 import { loadContactabilityFilter } from "./propertyIntelligence/contactability.js";
 import {
@@ -700,6 +701,7 @@ async function fetchPropertyIntelligenceSignalRows(
   brokerageId: number,
   enabled: boolean,
   now: Date,
+  restrictToPropertyIds: number[] | null,
 ): Promise<PropertyIntelligenceSignalRow[]> {
   if (!enabled) return [];
   return db
@@ -748,6 +750,9 @@ async function fetchPropertyIntelligenceSignalRows(
         // MAX_EMERGING_SIGNAL_ACTIONS above for why the Emerging band is
         // ranked down rather than discarded.
         or(isNull(growOpportunitySignals.expiresAt), gt(growOpportunitySignals.expiresAt, now)),
+        // Own-property scope. A signal with no property stays. Undefined
+        // when the caller is brokerage-wide, so this statement is unchanged.
+        visibleLinkedPropertySql(growOpportunitySignals.propertyId, restrictToPropertyIds),
       ),
     )
     // W2-A (I-4) — BOUNDED, AND BOUNDED IN THE RIGHT DIRECTION.
@@ -817,7 +822,11 @@ async function fetchPropertyIntelligenceSignalRows(
  * migration PR): grow_activities (brokerage_id, party_id, occurred_at desc),
  * which turns this into an index-only scan. It is correct without it.
  */
-async function fetchLastActivityByParty(brokerageId: number, partyIds: number[]): Promise<Map<number, Date>> {
+async function fetchLastActivityByParty(
+  brokerageId: number,
+  partyIds: number[],
+  restrictToPropertyIds: number[] | null,
+): Promise<Map<number, Date>> {
   const lastActivityByParty = new Map<number, Date>();
   if (partyIds.length === 0) return lastActivityByParty;
 
@@ -836,6 +845,9 @@ async function fetchLastActivityByParty(brokerageId: number, partyIds: number[])
         eq(growActivities.brokerageId, brokerageId),
         isNotNull(growActivities.partyId),
         sql`${growActivities.partyId} = any(${idArray})`,
+        // An activity on a property the caller cannot see is not their last
+        // contact. Null when the caller is brokerage-wide.
+        visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
       ),
     )
     .groupBy(growActivities.partyId);
@@ -952,7 +964,7 @@ export function appraisalFollowUpAvailableActions(
 
 export async function getGrowTodaySummary(
   brokerageId: number,
-  options?: { includePropertyIntelligenceSignals?: boolean; now?: Date },
+  options?: { includePropertyIntelligenceSignals?: boolean; now?: Date; restrictToPropertyIds?: number[] | null },
 ): Promise<GrowTodaySummary> {
   // AE GROW Priority 5 Remediation — Rule F is entitlement-gated, but this
   // function never resolves grow.propertyIntelligence.read itself. The
@@ -962,6 +974,11 @@ export async function getGrowTodaySummary(
   // entitlement or auth concept, and still doesn't.
   const includePropertyIntelligenceSignals = options?.includePropertyIntelligenceSignals ?? false;
   const now = options?.now ?? new Date();
+  // null (the default) is brokerage-wide: Brokerage Administrator, Pit Crew,
+  // and every existing caller that does not pass a scope. An array is the
+  // caller's own properties from restrictedPropertyIdsFor. This function does
+  // not decide who is brokerage-wide.
+  const restrictToPropertyIds = options?.restrictToPropertyIds ?? null;
   const { timeZone } = await resolveTimeZone({ brokerageId });
   const dueBefore = exclusiveEndOfLocalDay(now, timeZone);
   // W2-A (I-4) — WAVE 1: the rule reads, all capped, all ordered. F-1 adds the
@@ -987,7 +1004,13 @@ export async function getGrowTodaySummary(
       .from(growRelationships)
       .innerJoin(parties, eq(growRelationships.partyId, parties.id))
       .leftJoin(properties, eq(growRelationships.propertyId, properties.id))
-      .where(and(eq(growRelationships.brokerageId, brokerageId), eq(growRelationships.status, "Active")))
+      .where(
+        and(
+          eq(growRelationships.brokerageId, brokerageId),
+          eq(growRelationships.status, "Active"),
+          visibleLinkedPropertySql(growRelationships.propertyId, restrictToPropertyIds),
+        ),
+      )
       // W2-A (I-4) — THE ORDER IS CHOSEN TO MAKE THE CAP HARMLESS TO
       // CORRECTNESS, not merely deterministic. Rule D below reduces these rows
       // to one per party, preferring the primary relationship and then the most
@@ -1031,7 +1054,13 @@ export async function getGrowTodaySummary(
       .from(growOpportunities)
       .innerJoin(parties, eq(growOpportunities.partyId, parties.id))
       .leftJoin(properties, eq(growOpportunities.propertyId, properties.id))
-      .where(and(eq(growOpportunities.brokerageId, brokerageId), eq(growOpportunities.status, "Open")))
+      .where(
+        and(
+          eq(growOpportunities.brokerageId, brokerageId),
+          eq(growOpportunities.status, "Open"),
+          visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+        ),
+      )
       // Dated commitments first, oldest due date leading — Postgres sorts
       // NULLS LAST on ASC, so the "no next action set" rows (which are the
       // least urgent of the three Rule A/B/C outcomes) are the ones a
@@ -1056,7 +1085,13 @@ export async function getGrowTodaySummary(
       .from(appraisals)
       .innerJoin(properties, eq(appraisals.propertyId, properties.id))
       .innerJoin(parties, eq(appraisals.partyId, parties.id))
-      .where(and(eq(properties.brokerageId, brokerageId), eq(appraisals.status, "FOLLOW_UP")))
+      .where(
+        and(
+          eq(properties.brokerageId, brokerageId),
+          eq(appraisals.status, "FOLLOW_UP"),
+          visibleRequiredPropertySql(appraisals.propertyId, restrictToPropertyIds),
+        ),
+      )
       // Most overdue first. Rule E only surfaces an overdue or due-today
       // follow-up, so a future-dated one — which it skips anyway — is exactly
       // what a truncation should drop.
@@ -1089,13 +1124,14 @@ export async function getGrowTodaySummary(
           eq(growCommitments.brokerageId, brokerageId),
           eq(growCommitments.status, "Open"),
           lt(growCommitments.dueAt, dueBefore),
+          visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
         ),
       )
       // Most overdue first. A future-dated Open commitment is already excluded
       // by the due-date predicate, so a truncation drops the least overdue.
       .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
       .limit(GROW_TODAY_COMMITMENT_ROW_CAP),
-    fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, now),
+    fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, now, restrictToPropertyIds),
   ]);
 
   // W2-A — the exact open-opportunity total, carried on every row by the
@@ -1134,7 +1170,7 @@ export async function getGrowTodaySummary(
   // See this file's "READ-TIME CONTACTABILITY (security finding P1-3)" header
   // block for the defect this closes and for the hide/show split below.
   const [lastActivityByParty, contactabilityFilter] = await Promise.all([
-    fetchLastActivityByParty(brokerageId, partyIdsInScope),
+    fetchLastActivityByParty(brokerageId, partyIdsInScope, restrictToPropertyIds),
     loadContactabilityFilter(brokerageId, partyIdsInScope),
   ]);
   const contactabilityOf = (partyId: number | null): SignalContactability =>

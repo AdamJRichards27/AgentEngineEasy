@@ -18,6 +18,7 @@ import {
   promoteSignal,
   recalculateSignalsForProperty,
 } from "../lib/propertyIntelligence/service.js";
+import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 /**
  * AE GROW Priority 5 Remediation — the Property Intelligence API the
@@ -100,6 +101,13 @@ propertyIntelligenceRouter.get("/property/:propertyId", requireAuth, requireRead
   if (propertyId === null) return;
   try {
     const summary = await getPropertyIntelligenceSummary(propertyId, user.brokerageId);
+    // After the brokerage check inside the summary, so a foreign-tenant id
+    // still 404s as "Property not found" and records the isolation rejection.
+    // A same-brokerage property the caller cannot see uses that same 404.
+    if (await propertyHiddenFromCaller(user, propertyId)) {
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
     res.json(summary);
   } catch (err) {
     handlePropertyIntelligenceError(err, res);
@@ -126,6 +134,14 @@ propertyIntelligenceRouter.get("/contact/:partyId", requireAuth, requireRead, as
     // refusing below. See __tests__/contactabilityOutreachPathway.test.ts,
     // which asserts the payload shape field by field.
     const summary = await getContactPropertyIntelligenceSummary(partyId, user.brokerageId);
+    // The contact stays. Property entries (relationship or signal-only) for
+    // a property this caller cannot see are left out. Contact-anchored
+    // signals have no property and stay.
+    const restrictTo = await restrictedPropertyIdsFor(user);
+    if (restrictTo !== null) {
+      const allowed = new Set(restrictTo);
+      summary.properties = summary.properties.filter((entry) => allowed.has(entry.propertyId));
+    }
     res.json(summary);
   } catch (err) {
     handlePropertyIntelligenceError(err, res);
@@ -145,6 +161,13 @@ propertyIntelligenceRouter.get("/property/:propertyId/matches", requireAuth, req
   }
   try {
     const matches = await listMatchesForProperty(propertyId, user.brokerageId, parsed.data.status);
+    // listMatchesForProperty 404s a foreign property (and records the
+    // isolation rejection) before this. A same-brokerage property the
+    // caller cannot see uses that same 404 and returns no matches.
+    if (await propertyHiddenFromCaller(user, propertyId)) {
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
     res.json({ matches });
   } catch (err) {
     handlePropertyIntelligenceError(err, res);
@@ -164,6 +187,10 @@ propertyIntelligenceRouter.get("/property/:propertyId/signals", requireAuth, req
   }
   try {
     const signals = await listSignalsForProperty(propertyId, user.brokerageId, parsed.data.status);
+    if (await propertyHiddenFromCaller(user, propertyId)) {
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
     res.json({ signals });
   } catch (err) {
     handlePropertyIntelligenceError(err, res);

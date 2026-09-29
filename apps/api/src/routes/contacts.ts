@@ -25,6 +25,7 @@ import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
+import { restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -748,7 +749,8 @@ async function buildContactability(brokerageId: number, partyId: number) {
 // deterministic Contact Intelligence Summary — matching the "understand this relationship in
 // seconds" UX goal (§11) rather than a screen that fires off five separate requests.
 contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
-  const brokerageId = req.authedUser!.brokerageId;
+  const user = req.authedUser!;
+  const brokerageId = user.brokerageId;
   const partyId = parsePositiveId(req.params.partyId);
   if (!partyId) {
     res.status(400).json({ error: "Invalid contact id" });
@@ -761,6 +763,11 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
   }
+
+  // The contact stays brokerage-wide. Only property-linked rows, and the
+  // property-derived counts inside the timeline and intelligence summary,
+  // are limited to properties this caller can see.
+  const restrictTo = await restrictedPropertyIdsFor(user);
 
   const [
     householdRows,
@@ -804,27 +811,51 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
         })
         .from(growRelationships)
         .leftJoin(properties, eq(growRelationships.propertyId, properties.id))
-        .where(and(eq(growRelationships.partyId, partyId), eq(growRelationships.brokerageId, brokerageId)))
+        .where(
+          and(
+            eq(growRelationships.partyId, partyId),
+            eq(growRelationships.brokerageId, brokerageId),
+            visibleLinkedPropertySql(growRelationships.propertyId, restrictTo),
+          ),
+        )
         .orderBy(desc(growRelationships.createdAt)),
       db
         .select()
         .from(growOpportunities)
-        .where(and(eq(growOpportunities.partyId, partyId), eq(growOpportunities.brokerageId, brokerageId)))
+        .where(
+          and(
+            eq(growOpportunities.partyId, partyId),
+            eq(growOpportunities.brokerageId, brokerageId),
+            visibleLinkedPropertySql(growOpportunities.propertyId, restrictTo),
+          ),
+        )
         .orderBy(desc(growOpportunities.createdAt)),
       db.select().from(growContactRoles).where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.brokerageId, brokerageId))),
       db
         .select()
         .from(growActivities)
-        .where(and(eq(growActivities.partyId, partyId), eq(growActivities.brokerageId, brokerageId)))
+        .where(
+          and(
+            eq(growActivities.partyId, partyId),
+            eq(growActivities.brokerageId, brokerageId),
+            visibleLinkedPropertySql(growActivities.propertyId, restrictTo),
+          ),
+        )
         .orderBy(desc(growActivities.occurredAt))
         .limit(50),
       db
         .select()
         .from(growCommitments)
-        .where(and(eq(growCommitments.partyId, partyId), eq(growCommitments.brokerageId, brokerageId)))
+        .where(
+          and(
+            eq(growCommitments.partyId, partyId),
+            eq(growCommitments.brokerageId, brokerageId),
+            visibleLinkedPropertySql(growCommitments.propertyId, restrictTo),
+          ),
+        )
         .orderBy(desc(growCommitments.dueAt)),
-      getRelationshipTimeline(brokerageId, partyId, 100),
-      getContactIntelligenceSummary(brokerageId, partyId),
+      getRelationshipTimeline(brokerageId, partyId, 100, restrictTo),
+      getContactIntelligenceSummary(brokerageId, partyId, restrictTo),
       // AE GROW Completion W3-A (A-6). Read-only; see buildContactability().
       // The party has already been proven to belong to this brokerage above.
       buildContactability(brokerageId, partyId),

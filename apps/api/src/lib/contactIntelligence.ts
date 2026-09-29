@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { db, growActivities, growCommitments, growContactRoles, growOpportunities, growRelationships } from "@aee/db";
+import { linkedPropertyHidden } from "./propertyVisibility.js";
 
 // AE GROW Priority 2 — Contact Intelligence Summary (§9).
 //
@@ -36,6 +37,7 @@ const RECENT_ACTIVITY_WINDOW_DAYS = 30;
 export async function getContactIntelligenceSummary(
   brokerageId: number,
   partyId: number,
+  restrictToPropertyIds: number[] | null = null,
 ): Promise<ContactIntelligenceSummary> {
   // brokerageId is part of the SQL predicate, not applied in JS afterwards. Every index on
   // growRelationships/growActivities/growOpportunities/growCommitments LEADS with brokerage_id,
@@ -78,10 +80,21 @@ export async function getContactIntelligenceSummary(
   // before this function runs) and can no longer be returned by the queries above either, but
   // every row is still filtered by brokerageId here before being counted.
   const roles = roleRows.filter((r) => r.brokerageId === brokerageId);
-  const relationships = relationshipRows.filter((r) => r.brokerageId === brokerageId);
-  const activities = activityRows.filter((a) => a.brokerageId === brokerageId);
-  const opportunities = opportunityRows.filter((o) => o.brokerageId === brokerageId);
-  const commitments = commitmentRows.filter((c) => c.brokerageId === brokerageId);
+  // Property-linked rows the caller cannot see are left out of every count
+  // below. A null property id stays, and roles are not property-linked.
+  // null restrictTo is brokerage-wide.
+  const relationships = relationshipRows.filter(
+    (r) => r.brokerageId === brokerageId && !linkedPropertyHidden(r.propertyId, restrictToPropertyIds),
+  );
+  const activities = activityRows.filter(
+    (a) => a.brokerageId === brokerageId && !linkedPropertyHidden(a.propertyId, restrictToPropertyIds),
+  );
+  const opportunities = opportunityRows.filter(
+    (o) => o.brokerageId === brokerageId && !linkedPropertyHidden(o.propertyId, restrictToPropertyIds),
+  );
+  const commitments = commitmentRows.filter(
+    (c) => c.brokerageId === brokerageId && !linkedPropertyHidden(c.propertyId, restrictToPropertyIds),
+  );
 
   const relatedPropertyIds = new Set<number>();
   for (const r of relationships) if (r.propertyId) relatedPropertyIds.add(r.propertyId);

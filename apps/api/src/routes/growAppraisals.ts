@@ -31,6 +31,7 @@ import type { ComparableSaleInput, MarketCompetitionInput } from "../lib/growApp
 import { AiFeatureDisabledError, AiEntitlementError } from "../lib/ai/types.js";
 import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
+import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 export const growAppraisalsRouter = Router();
 
@@ -192,6 +193,7 @@ growAppraisalsRouter.get("/pipeline", requireAuth, requiresGrowAccess, async (re
       brokerageId: user.brokerageId,
       filter: parsed.data.filter,
       ownerUserId: parsed.data.ownerUserId,
+      restrictToPropertyIds: await restrictedPropertyIdsFor(user),
     });
     res.json({ appraisals: rows });
   } catch (err) {
@@ -208,6 +210,13 @@ growAppraisalsRouter.get("/:id", requireAuth, requiresGrowAccess, async (req, re
   if (appraisalId === null) return;
   try {
     const workspace = await getAppraisalWorkspace(appraisalId, user.brokerageId);
+    // Same 404 a cross-tenant appraisal already returns. Checked after the
+    // brokerage join inside getAppraisalWorkspace, so a foreign-tenant id
+    // still records the isolation rejection before this returns.
+    if (await propertyHiddenFromCaller(user, workspace.appraisal.propertyId)) {
+      res.status(404).json({ error: "Appraisal not found" });
+      return;
+    }
     res.json(workspace);
   } catch (err) {
     handleGrowAppraisalError(err, res);

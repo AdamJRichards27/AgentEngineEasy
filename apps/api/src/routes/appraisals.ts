@@ -6,6 +6,7 @@ import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal, finaliseAppraisal } from "../lib/appraisals.js";
 import { noteGrowPropertyIsolationRejection } from "../lib/grow/isolationRejection.js";
+import { propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 
 export const appraisalsRouter = Router();
 
@@ -93,6 +94,12 @@ appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) =
   if (propertyId === null) return;
   const user = req.authedUser!;
   if (!(await assertPropertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  // Same 404 as a property outside this brokerage. The isolation counter
+  // already ran inside assertPropertyInBrokerage only for another brokerage.
+  if (await propertyHiddenFromCaller(user, propertyId)) {
     res.status(404).json({ error: "Not found" });
     return;
   }
