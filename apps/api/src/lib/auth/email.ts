@@ -122,6 +122,42 @@ function logPilotModeLinkIfAcknowledged(template: "invitation" | "password_reset
 }
 
 /**
+ * Implemented auth-email providers. The list is the provider `name`
+ * values this process can actually send with — today only
+ * {@link SANDBOX_AUTH_EMAIL_PROVIDER_NAME}. There is no separate env alias.
+ */
+const KNOWN_AUTH_EMAIL_PROVIDER_NAMES: readonly string[] = [SANDBOX_AUTH_EMAIL_PROVIDER_NAME];
+
+/**
+ * Unset and empty are not a selection. Any other value, including
+ * whitespace, is an explicit provider name.
+ */
+function explicitAuthEmailProviderSelection(): string | undefined {
+  const raw = process.env.AUTH_EMAIL_PROVIDER;
+  if (raw === undefined || raw === "") return undefined;
+  return raw;
+}
+
+function unknownAuthEmailProviderError(value: string): Error {
+  return new Error(
+    `AUTH_EMAIL_PROVIDER="${value}" is not an implemented auth email provider. ` +
+      `Refusing to start. Allowed values: ${KNOWN_AUTH_EMAIL_PROVIDER_NAMES.join(", ")}.`,
+  );
+}
+
+/**
+ * An explicit unknown AUTH_EMAIL_PROVIDER fails closed. Unset and empty
+ * do not.
+ */
+function assertExplicitAuthEmailProviderIsKnown(): void {
+  const selected = explicitAuthEmailProviderSelection();
+  if (selected === undefined) return;
+  if (!KNOWN_AUTH_EMAIL_PROVIDER_NAMES.includes(selected)) {
+    throw unknownAuthEmailProviderError(selected);
+  }
+}
+
+/**
  * Fail-closed selection, mirroring assertSessionSecretConfigured() /
  * assertCorsConfigured() in index.ts. A real, approved email provider is an
  * outstanding external dependency for this pilot (Owner decision: test/
@@ -129,10 +165,16 @@ function logPilotModeLinkIfAcknowledged(template: "invitation" | "password_reset
  * provider) — so production startup must refuse to boot with the sandbox
  * provider silently standing in for it, rather than "working" while
  * silently never delivering a real invitation or reset email to anyone.
+ *
+ * An explicit AUTH_EMAIL_PROVIDER that is not an implemented provider
+ * name throws in every environment,
+ * before this production gate. Unset, empty, and the sandbox provider's
+ * own name keep the acknowledgement gate below — the same gate an unset
+ * provider already had.
  */
 export function assertAuthEmailProviderConfigured(): void {
+  assertExplicitAuthEmailProviderIsKnown();
   if (!isProductionEnvironment()) return;
-  if (process.env.AUTH_EMAIL_PROVIDER && process.env.AUTH_EMAIL_PROVIDER !== "sandbox") return;
 
   // Critical Blocker Remediation, Phase 9 — production-mode pilot
   // deployment readiness. The AE Project Owner has explicitly authorised
@@ -147,7 +189,9 @@ export function assertAuthEmailProviderConfigured(): void {
   // future production boot, pilot or not), a second, separately-named,
   // explicit flag is required, so this state is only ever reachable when
   // an operator has typed this exact acknowledgement — never by omission,
-  // and never merely because AUTH_EMAIL_PROVIDER is unset.
+  // and never merely because AUTH_EMAIL_PROVIDER is unset. The same gate
+  // applies when AUTH_EMAIL_PROVIDER is explicitly the implemented sandbox
+  // name.
   if (process.env.PILOT_MODE_SANDBOX_EXTERNAL_SERVICES_ACKNOWLEDGED === "true") {
     logger.warn("pilot_mode_sandbox_email_active", {
       message:
@@ -173,16 +217,13 @@ export function assertAuthEmailProviderConfigured(): void {
 }
 
 /**
- * Returns the active provider. Only the sandbox provider is implemented in
- * this remediation pass — a real provider integration is out of scope
- * (Owner decision: sandbox/test external services only) and is recorded as
- * an outstanding external dependency in the final gate report. Because
- * assertAuthEmailProviderConfigured() above already refuses to boot in
- * production without AUTH_EMAIL_PROVIDER naming something other than
- * "sandbox", reaching this function's fallback in production is
- * unreachable in practice — this function does not itself re-derive that
- * decision, it only ever returns the one provider that exists.
+ * Returns the active provider. Only the sandbox provider is implemented.
+ * Unset, empty, or AUTH_EMAIL_PROVIDER equal to that provider's name
+ * selects it. An explicit unknown name throws the same configuration
+ * error as assertAuthEmailProviderConfigured() and never falls back to
+ * the sandbox.
  */
 export function getAuthEmailProvider(): AuthEmailProvider {
+  assertExplicitAuthEmailProviderIsKnown();
   return sandboxAuthEmailProvider;
 }
