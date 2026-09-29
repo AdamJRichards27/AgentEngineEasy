@@ -116,6 +116,25 @@ test("apiFetch captures the correlation id on ApiError and puts the reference in
   );
 });
 
+test("apiFetch keeps a positive integer contactId from a 409 body", async () => {
+  await withFetch(
+    async () => jsonResponse(409, { error: "A contact with this email already exists.", contactId: 42 }),
+    async () => {
+      const error = (await apiFetch("/grow/contacts", { method: "POST" }).catch((e) => e)) as ApiError;
+      assert.equal(error.status, 409);
+      assert.equal(error.friendly, "A contact with this email already exists.");
+      assert.equal(error.contactId, 42);
+    },
+  );
+  await withFetch(
+    async () => jsonResponse(409, { error: "Already actioned.", contactId: "42" }),
+    async () => {
+      const error = (await apiFetch("/grow/contacts", { method: "POST" }).catch((e) => e)) as ApiError;
+      assert.equal(error.contactId, undefined);
+    },
+  );
+});
+
 test("apiFetch captures the correlation id on 4xx errors too (message unchanged)", async () => {
   await withFetch(
     async () => jsonResponse(409, { error: "Already actioned.", reason: "WRONG_STATUS" }, { "X-Correlation-Id": UUID }),

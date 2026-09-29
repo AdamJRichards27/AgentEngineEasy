@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq, gt, ilike, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -18,6 +18,7 @@ import {
   GROW_CONSENT_CHANNELS,
   GROW_CONTACT_ROLES,
   GROW_CONTACT_RELATIONSHIP_TYPES,
+  PARTY_TYPES,
   type GrowConsentChannel,
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
@@ -38,6 +39,7 @@ import {
 import { isWithinConsentHours } from "../lib/consentControls.js";
 import { evaluateConsentDecisionReadOnly } from "../lib/consentControlsPersistence.js";
 import { PHONE_CALL_CONSENT_PURPOSE, PHONE_CALL_CONSENT_SCOPE } from "../lib/telephony/eligibility.js";
+import { validateRecord } from "../lib/import/validate.js";
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
 //
@@ -82,6 +84,139 @@ function displayName(party: { firstName: string | null; lastName: string | null;
   if (party.organisationName) return party.organisationName;
   const name = `${party.firstName ?? ""} ${party.lastName ?? ""}`.trim();
   return name.length > 0 ? name : "Unnamed contact";
+}
+
+// G-UAT-2 — POST /grow/contacts. A contact is a parties row and may exist
+// with no property. The identifiability rule is import's CONTACT_UNIDENTIFIABLE
+// (name, email, or phone), not a second definition of "who is a contact".
+
+function readOptionalText(value: unknown): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (value == null) return { ok: true, value: null };
+  if (typeof value !== "string") return { ok: false, error: "Contact fields must be text." };
+  const trimmed = value.trim();
+  if (trimmed.length > CONTACT_FREE_TEXT_MAX) {
+    return { ok: false, error: `Contact fields must be ${CONTACT_FREE_TEXT_MAX} characters or fewer.` };
+  }
+  return { ok: true, value: trimmed.length > 0 ? trimmed : null };
+}
+
+function contactIsUnidentifiable(person: {
+  firstName: string | null;
+  lastName: string | null;
+  organisationName: string | null;
+  email: string | null;
+  mobile: string | null;
+}): boolean {
+  const result = validateRecord({
+    person: {
+      firstName: person.firstName ?? undefined,
+      lastName: person.lastName ?? undefined,
+      company: person.organisationName ?? undefined,
+      email: person.email ?? undefined,
+      mobile: person.mobile ?? undefined,
+    },
+    meta: {
+      sourceRowNumber: 1,
+      originalValues: {},
+      mappingConfidence: "manual",
+      warnings: [],
+    },
+  });
+  return result.issues.some((issue) => issue.code === "CONTACT_UNIDENTIFIABLE");
+}
+
+function splitContactName(name: string): { firstName: string; lastName: string | null } {
+  const collapsed = name.replace(/\s+/g, " ").trim();
+  const space = collapsed.indexOf(" ");
+  if (space === -1) return { firstName: collapsed, lastName: null };
+  return { firstName: collapsed.slice(0, space), lastName: collapsed.slice(space + 1) };
+}
+
+type ParsedContactCreate =
+  | { ok: false; error: string; code?: string }
+  | {
+      ok: true;
+      partyType: (typeof PARTY_TYPES)[number];
+      firstName: string | null;
+      middleName: string | null;
+      lastName: string | null;
+      organisationName: string | null;
+      email: string | null;
+      mobile: string | null;
+    };
+
+function parseContactCreateBody(body: unknown): ParsedContactCreate {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "Expected a contact." };
+  }
+  const record = body as Record<string, unknown>;
+  const textKeys = ["name", "firstName", "middleName", "lastName", "organisationName", "email", "mobile", "phone"] as const;
+  const texts = {} as Record<(typeof textKeys)[number], string | null>;
+  for (const key of textKeys) {
+    const read = readOptionalText(record[key]);
+    if (!read.ok) return { ok: false, error: read.error };
+    texts[key] = read.value;
+  }
+
+  let partyType: (typeof PARTY_TYPES)[number] | null = null;
+  if (record.partyType != null) {
+    if (typeof record.partyType !== "string" || !(PARTY_TYPES as readonly string[]).includes(record.partyType)) {
+      return { ok: false, error: `partyType must be one of: ${PARTY_TYPES.join(", ")}` };
+    }
+    partyType = record.partyType as (typeof PARTY_TYPES)[number];
+  }
+
+  let firstName = texts.firstName;
+  let lastName = texts.lastName;
+  const organisationName = texts.organisationName;
+  if (!firstName && !lastName && !organisationName && texts.name) {
+    const split = splitContactName(texts.name);
+    firstName = split.firstName;
+    lastName = split.lastName;
+  }
+
+  const email = texts.email;
+  const mobile = texts.mobile ?? texts.phone;
+  if (contactIsUnidentifiable({ firstName, lastName, organisationName, email, mobile })) {
+    return {
+      ok: false,
+      error: "A contact needs a name, email, or phone.",
+      code: "CONTACT_UNIDENTIFIABLE",
+    };
+  }
+
+  return {
+    ok: true,
+    partyType: partyType ?? (organisationName ? "Organisation" : "Person"),
+    firstName,
+    middleName: texts.middleName,
+    lastName,
+    organisationName,
+    email,
+    mobile,
+  };
+}
+
+/** Search list item and Contact 360 `contact` identity, for one new party. */
+function createdContactPayload(party: typeof parties.$inferSelect) {
+  return {
+    contact: {
+      id: party.id,
+      displayName: displayName(party),
+      partyType: party.partyType,
+      email: party.email,
+      mobile: party.mobile,
+      roles: [] as string[],
+      relatedPropertyCount: 0,
+      firstName: party.firstName,
+      middleName: party.middleName,
+      lastName: party.lastName,
+      organisationName: party.organisationName,
+      residentialAddress: party.residentialAddress,
+      createdAt: party.createdAt.toISOString(),
+      updatedAt: party.updatedAt.toISOString(),
+    },
+  };
 }
 
 // GET /grow/contacts — list/search, for the Grow Contacts entry point and any "find a contact"
@@ -167,6 +302,61 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
       relatedPropertyCount: propertyCountByParty.get(p.id)?.size ?? 0,
     })),
   });
+});
+
+// POST /grow/contacts — create a contact with no property. Inserts one parties
+// row for the session brokerage. Does not write property_parties, grow_relationships,
+// or grow_activities (import, the other property-less create, does not write an
+// activity either). brokerageId in the body is ignored. A matching email in this
+// brokerage is a 409; phone is not a duplicate key.
+contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+  const user = req.authedUser!;
+  const parsed = parseContactCreateBody(req.body);
+  if (!parsed.ok) {
+    res.status(400).json(parsed.code ? { error: parsed.error, code: parsed.code } : { error: parsed.error });
+    return;
+  }
+
+  if (parsed.email) {
+    const normalizedEmail = parsed.email.toLowerCase();
+    const [existing] = await db
+      .select({ id: parties.id })
+      .from(parties)
+      .where(and(eq(parties.brokerageId, user.brokerageId), sql`lower(btrim(${parties.email})) = ${normalizedEmail}`))
+      .orderBy(asc(parties.id))
+      .limit(1);
+    if (existing) {
+      res.status(409).json({
+        error: "A contact with this email already exists.",
+        contactId: existing.id,
+      });
+      return;
+    }
+  }
+
+  const [party] = await db
+    .insert(parties)
+    .values({
+      brokerageId: user.brokerageId,
+      partyType: parsed.partyType,
+      firstName: parsed.firstName,
+      middleName: parsed.middleName,
+      lastName: parsed.lastName,
+      organisationName: parsed.organisationName,
+      mobile: parsed.mobile,
+      email: parsed.email,
+    })
+    .returning();
+
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_contact_created",
+    recordType: "party",
+    recordId: String(party.id),
+  });
+
+  res.status(201).json(createdContactPayload(party));
 });
 
 /* =====================================================================
