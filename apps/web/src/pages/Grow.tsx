@@ -859,6 +859,21 @@ function useUpdateOpportunityNextAction(opportunityId: number | null, onSaved: (
   });
 }
 
+// PATCH /grow/contacts/commitments/:id is the one write behind Complete (and
+// Contact 360's Cancel). Grow Today reuses this hook so a completion from the
+// commitment card cannot drift from Contact 360. The route only accepts
+// Completed or Cancelled; reschedule is not a status this write can set.
+function useUpdateGrowCommitment(onSaved: () => void) {
+  return useMutation<unknown, unknown, { id: number; status: "Completed" | "Cancelled" }>({
+    mutationFn: (vars) =>
+      apiFetch(`/grow/contacts/commitments/${vars.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: vars.status }),
+      }),
+    onSuccess: onSaved,
+  });
+}
+
 // Owns its own field state, so closing the form is what clears it — the caller
 // no longer has to remember to reset two strings on success. `idPrefix` keeps
 // the label/input association unique when several of these are on screen at
@@ -1148,6 +1163,14 @@ function GrowActionCard({
     invalidateToday();
   });
 
+  // G-UAT-1 — same commitment PATCH Contact 360 uses. The card already
+  // carries commitmentId; completing it drops the row from Today because
+  // Grow Today only reads Open commitments. Cancel and reschedule stay on
+  // Contact 360.
+  const completeCommitment = useUpdateGrowCommitment(() => {
+    invalidateToday();
+  });
+
   // AE GROW Signal Sweep stage 3: every contact-anchored affordance is now
   // additionally gated on the card actually HAVING a contact. A Property
   // Intelligence signal derived from a provider observation is anchored to a
@@ -1183,6 +1206,9 @@ function GrowActionCard({
   const showEmail = canManageContactComms && canOfferChannel(item, "email");
   const showSms = canManageContactComms && canOfferChannel(item, "sms");
   const showAskAE = item.availableActions.some((b) => b.action === "ask_ae");
+  // canAddNote is grow.activities.manage, the same entitlement Contact 360
+  // checks before it offers Complete on an Open commitment.
+  const showCompleteCommitment = canAddNote && item.commitmentId !== null;
 
   const consentNotice = contactabilityNotice(item);
   const kindLabel = actionTypeLabel(item.type);
@@ -1191,11 +1217,13 @@ function GrowActionCard({
   const rankSummary = rankSummaryLine(item);
   const rankLines = rankExplanationLines(item);
 
-  const busy = addNote.isPending || updateNextAction.isPending;
+  const busy = addNote.isPending || updateNextAction.isPending || completeCommitment.isPending;
   const errorMessage: string | null = addNote.isError
     ? growErrorMessage(addNote.error, "Something went wrong. Try again.")
     : updateNextAction.isError
     ? growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")
+    : completeCommitment.isError
+    ? growErrorMessage(completeCommitment.error, "Something went wrong. Try again.")
     : null;
 
   return (
@@ -1260,6 +1288,19 @@ function GrowActionCard({
       {errorMessage && <p className="error-text">{errorMessage}</p>}
 
       <div className="grow-action-card-actions">
+        {showCompleteCommitment && (
+          <button
+            type="button"
+            className="btn btn-link btn-small"
+            disabled={busy}
+            onClick={() => {
+              if (item.commitmentId === null) return;
+              completeCommitment.mutate({ id: item.commitmentId, status: "Completed" });
+            }}
+          >
+            Complete
+          </button>
+        )}
         {showAddNote && (
           <button
             className="btn btn-secondary btn-small"
@@ -2002,14 +2043,7 @@ function GrowContactDetail({
     },
   });
 
-  const updateCommitment = useMutation({
-    mutationFn: (vars: { id: number; status: "Completed" | "Cancelled" }) =>
-      apiFetch(`/grow/contacts/commitments/${vars.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: vars.status }),
-      }),
-    onSuccess: invalidate,
-  });
+  const updateCommitment = useUpdateGrowCommitment(invalidate);
 
   // AE GROW Completion W2-B (G-4) — same region presentation as every other
   // Grow region, so a Contact 360 that failed to load offers Try again rather
@@ -2350,6 +2384,9 @@ function GrowContactDetail({
               </li>
             ))}
           </ul>
+        )}
+        {updateCommitment.isError && (
+          <p className="error-text">{growErrorMessage(updateCommitment.error, "Something went wrong. Try again.")}</p>
         )}
         {canManageActivities && (
           <>
