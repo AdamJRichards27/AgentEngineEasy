@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, inArray, ne } from "drizzle-orm";
+import { eq, and, inArray, ne, ilike, or } from "drizzle-orm";
 import { z } from "zod";
 import {
   db,
@@ -234,21 +234,51 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
   res.status(201).json({ property });
 });
 
+// UAT-S1 — optional property-list search. `properties` has no display-name
+// or reference column; the address columns are formatted_address, suburb,
+// state, and postcode. An empty `q` leaves the query exactly as it was
+// (no extra predicate, no order, no limit). Tenant scope and the #147
+// visibility rule stay in the same WHERE as the search.
+const PROPERTY_LIST_QUERY_MAX = 100;
+
+function propertyListQuery(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw.trim().slice(0, PROPERTY_LIST_QUERY_MAX);
+}
+
+// Postgres ILIKE uses `\` as the default escape. Escape it along with the
+// two wildcards before wrapping the term in `%`, and bind the result as a
+// parameter via drizzle's `ilike` (never string-concatenated SQL).
+function escapeIlikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+function propertyListSearch(q: string) {
+  const pattern = `%${escapeIlikePattern(q)}%`;
+  return or(
+    ilike(properties.formattedAddress, pattern),
+    ilike(properties.suburb, pattern),
+    ilike(properties.state, pattern),
+    ilike(properties.postcode, pattern),
+  );
+}
+
 propertiesRouter.get("/", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  const q = propertyListQuery(req.query.q);
   const restrictTo = await restrictedPropertyIdsFor(user);
   if (restrictTo !== null && restrictTo.length === 0) {
     res.json({ properties: [] });
     return;
   }
+  const scope =
+    restrictTo === null
+      ? eq(properties.brokerageId, user.brokerageId)
+      : and(eq(properties.brokerageId, user.brokerageId), inArray(properties.id, restrictTo));
   const rows = await db
     .select()
     .from(properties)
-    .where(
-      restrictTo === null
-        ? eq(properties.brokerageId, user.brokerageId)
-        : and(eq(properties.brokerageId, user.brokerageId), inArray(properties.id, restrictTo)),
-    );
+    .where(q ? and(scope, propertyListSearch(q)) : scope);
   res.json({ properties: rows });
 });
 
