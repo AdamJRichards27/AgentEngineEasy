@@ -77,6 +77,18 @@ function parsePositiveId(value: unknown): number | null {
   return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
 }
 
+// G-UAT-4 — a reschedule names an instant. POST create still accepts a
+// date-only string ("2027-06-01"); this check is stricter because the
+// picker sends a timestamp and Grow Today buckets on the instant.
+// Timezone is required so the value is one instant, not a local wall time.
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function parseIsoTimestamp(value: unknown): Date | null {
+  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 // AE GROW Pilot Readiness WP1 (P2-1): every contact-intelligence mutation below is audited via
 // logAudit (lib/audit.ts) with ids/enum values only -- never free text (descriptions, notes,
 // cancel reasons), matching routes/grow.ts's own audit conventions.
@@ -1233,10 +1245,18 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
   res.status(201).json({ commitment: inserted });
 });
 
-// PATCH /grow/contacts/commitments/:id — complete or cancel a commitment. Completion also
-// writes a growActivities row (activityType "task_completion", already reserved for exactly
-// this by AE GROW Priority 1/0.5's GROW_ACTIVITY_TYPES) so the Relationship Timeline picks the
-// completion up through the ordinary activity feed without any special-casing.
+// PATCH /grow/contacts/commitments/:id — complete, cancel, or reschedule.
+// Completion writes a growActivities row (activityType "task_completion").
+// A reschedule is a separate body, `{ dueAt }`, never combined with `status`.
+// It writes one growActivities row (activityType "system_event", an existing
+// GROW_ACTIVITY_TYPES value on the text column — not a new enum) in the same
+// transaction. Previous and new due times live in `details`; the acting user
+// is `responsibleUserId` and `details.actingUserId`.
+//
+// dueAt must be a timezone-qualified ISO-8601 timestamp. A past time, and a
+// time before createdAt, are accepted: POST create only checks that the
+// string parses, overdue Open commitments are a normal state, and this route
+// has no existing "must be in the future" comparison to reuse.
 contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
   const user = req.authedUser!;
   const id = parsePositiveId(req.params.id);
@@ -1245,12 +1265,25 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     return;
   }
   const status = req.body?.status;
-  if (status !== "Completed" && status !== "Cancelled") {
+  const hasStatus = status !== undefined;
+  const hasDueAt = req.body?.dueAt !== undefined;
+  // Status changes stay a separate request from a reschedule. This route
+  // has never combined fields, so a body that names both is rejected.
+  if (hasStatus && hasDueAt) {
+    res.status(400).json({ error: "Provide either a status change or a dueAt, not both" });
+    return;
+  }
+  const rescheduleDueAt = hasDueAt ? parseIsoTimestamp(req.body.dueAt) : null;
+  if (hasDueAt && !rescheduleDueAt) {
+    res.status(400).json({ error: "dueAt must be a valid ISO timestamp" });
+    return;
+  }
+  if (!hasDueAt && status !== "Completed" && status !== "Cancelled") {
     res.status(400).json({ error: "status must be Completed or Cancelled" });
     return;
   }
   const cancelReason = req.body?.cancelReason;
-  if (cancelReason !== undefined && cancelReason !== null && (typeof cancelReason !== "string" || cancelReason.length > CONTACT_FREE_TEXT_MAX)) {
+  if (!hasDueAt && cancelReason !== undefined && cancelReason !== null && (typeof cancelReason !== "string" || cancelReason.length > CONTACT_FREE_TEXT_MAX)) {
     res.status(400).json({ error: `cancelReason must be a string of at most ${CONTACT_FREE_TEXT_MAX} characters` });
     return;
   }
@@ -1266,11 +1299,67 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     return;
   }
   // Checked before the Open-status 409, so a hidden property-linked
-  // commitment (complete or cancel) is a 404 and writes no task_completion
-  // activity. A null property id stays writable. There is no reschedule
-  // status on this route.
+  // commitment (complete, cancel, or reschedule) is a 404 and writes no
+  // activity. A null property id stays writable.
   if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
     res.status(404).json({ error: "Commitment not found in this brokerage" });
+    return;
+  }
+  if (rescheduleDueAt) {
+    if (existing.status !== "Open") {
+      res.status(409).json({ error: `Commitment is already ${existing.status}` });
+      return;
+    }
+    const now = new Date();
+    const previousDueAt = new Date(existing.dueAt).toISOString();
+    const newDueAt = rescheduleDueAt.toISOString();
+    const updated = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(growCommitments)
+        .set({ dueAt: rescheduleDueAt, updatedAt: now })
+        .where(and(eq(growCommitments.id, id), eq(growCommitments.brokerageId, user.brokerageId), eq(growCommitments.status, "Open")))
+        .returning();
+      if (!row) return null;
+      await tx.insert(growActivities).values({
+        brokerageId: user.brokerageId,
+        partyId: existing.partyId,
+        propertyId: existing.propertyId,
+        opportunityId: existing.opportunityId,
+        activityType: "system_event",
+        occurredAt: now,
+        summary: `Commitment rescheduled from ${previousDueAt} to ${newDueAt}`,
+        details: {
+          kind: "commitment_rescheduled",
+          commitmentId: existing.id,
+          previousDueAt,
+          newDueAt,
+          actingUserId: user.id,
+        },
+        responsibleUserId: user.id,
+        source: "manual",
+      });
+      return row;
+    });
+    if (!updated) {
+      const [current] = await db
+        .select({ status: growCommitments.status })
+        .from(growCommitments)
+        .where(and(eq(growCommitments.id, id), eq(growCommitments.brokerageId, user.brokerageId)))
+        .limit(1);
+      res.status(409).json({ error: `Commitment is already ${current?.status ?? "closed"}` });
+      return;
+    }
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "grow_commitment_rescheduled",
+      recordType: "grow_commitment",
+      recordId: String(updated.id),
+      propertyId: updated.propertyId,
+      previousValue: JSON.stringify({ dueAt: previousDueAt, status: "Open" }),
+      updatedValue: JSON.stringify({ dueAt: newDueAt, rescheduledByUserId: user.id }),
+    });
+    res.json({ commitment: updated });
     return;
   }
   if (existing.status !== "Open") {
