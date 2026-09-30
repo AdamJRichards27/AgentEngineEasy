@@ -1,4 +1,4 @@
-run = "pnpm install && (pnpm run dev:api &) && bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
+run = "export PATH=\"$HOME/.local/bin:$PATH\"; mkdir -p \"$HOME/.local/bin\" && corepack prepare pnpm@8.15.5 --activate && corepack enable --install-directory \"$HOME/.local/bin\" pnpm && pnpm install && (pnpm run dev:api &) && bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
 entrypoint = "apps/api/src/index.ts"
 modules = ["nodejs-24"]
 [env]
@@ -33,20 +33,30 @@ packages = ["nodejs_24"]
 # deployment serves both — see the runbook §1 for why.
 [deployment]
 deploymentTarget = "autoscale"
-build = ["sh", "-c", "pnpm install --frozen-lockfile && pnpm --filter @aee/web run build && pnpm --filter @aee/api run build"]
+build = ["sh", "-c", "export PATH=\"$HOME/.local/bin:$PATH\"; mkdir -p \"$HOME/.local/bin\" && corepack prepare pnpm@8.15.5 --activate && corepack enable --install-directory \"$HOME/.local/bin\" pnpm && pnpm install --frozen-lockfile && pnpm --filter @aee/web run build && pnpm --filter @aee/api run build"]
 run = ["sh", "-c", "node apps/api/dist/index.mjs"]
 
 [workflows]
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "Dev"
 mode = "parallel"
-author = 48455239
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm dev:api"
+args = "export PATH=\"$HOME/.local/bin:$PATH\"; mkdir -p \"$HOME/.local/bin\" && corepack prepare pnpm@8.15.5 --activate && corepack enable --install-directory \"$HOME/.local/bin\" pnpm && node -v && pnpm -v && { pnpm dev:api & api_pid=$!; pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000 & web_pid=$!; trap 'kill \"$api_pid\" \"$web_pid\" 2>/dev/null || true' EXIT; wait -n \"$api_pid\" \"$web_pid\"; }"
+waitForPort = 5000
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
 
 [[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "bash -lc 'pnpm --filter @aee/web exec vite --host 0.0.0.0 --port 5000'"
+task = "workflow.run"
+args = "Dev"
