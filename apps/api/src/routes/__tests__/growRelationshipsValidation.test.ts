@@ -34,7 +34,7 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 
   A = await createBrokerageWithUsers(baseUrl, `WP1 Grow Rel Validation ${suffix}`);
-  for (const key of ["grow.access", "grow.relationships.manage"]) {
+  for (const key of ["grow.access", "grow.relationships.manage", "grow.properties.link"]) {
     await db.insert(entitlementGrants).values({
       brokerageId: A.brokerageId,
       entitlementKey: key,

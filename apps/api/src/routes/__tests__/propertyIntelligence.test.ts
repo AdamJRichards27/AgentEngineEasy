@@ -83,6 +83,7 @@ before(async () => {
   for (const brokerageId of [A.brokerageId, B.brokerageId]) {
     await grant(brokerageId, "grow.access");
     await grant(brokerageId, "grow.relationships.manage");
+    await grant(brokerageId, "grow.properties.link");
     await grant(brokerageId, "grow.propertyIntelligence.read");
     await grant(brokerageId, "grow.propertyIntelligence.manage");
     // Needed only by the Relationship Timeline integration test below (GET

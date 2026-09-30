@@ -10,7 +10,7 @@ import {
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { resolveEntitlements } from "../lib/entitlements/resolver.js";
+import { explainEntitlementDecision, resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
 import {
   noteGrowOpportunityIsolationRejection,
@@ -194,6 +194,45 @@ growRouter.post(
       // above runs only when the id belongs to another brokerage.
       if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
         res.status(404).json({ error: "Property not found in this brokerage" });
+        return;
+      }
+      // G-UAT-3: naming a property is a link, so it needs grow.properties.link
+      // as well as grow.relationships.manage (already required above). The
+      // catalogue grants both keys together on Grow and the Pro+Grow bundle;
+      // neither key alone is described as governing the link. A relationship
+      // with no propertyId keeps the manage gate only. This check runs after
+      // the existing not-found responses so a hidden or cross-brokerage
+      // property still answers 404 for a caller who holds the link key.
+      const linkDecision = await explainEntitlementDecision(user, "grow.properties.link");
+      if (linkDecision.allowed === false) {
+        res.status(403).json({
+          error: "Not entitled",
+          reason: linkDecision.reason,
+          entitlementKey: "grow.properties.link",
+          upgrade: { action: "grow.checkout", productCode: "grow" },
+        });
+        return;
+      }
+      // No unique index exists. A second row for the same contact, property,
+      // and relationship type in this session's brokerage is a duplicate link.
+      // A different type on the same property is a different link.
+      const [duplicate] = await db
+        .select({ id: growRelationships.id })
+        .from(growRelationships)
+        .where(
+          and(
+            eq(growRelationships.brokerageId, user.brokerageId),
+            eq(growRelationships.partyId, partyId),
+            eq(growRelationships.propertyId, propertyId),
+            eq(growRelationships.relationshipType, relationshipType),
+          ),
+        )
+        .limit(1);
+      if (duplicate) {
+        res.status(409).json({
+          error: "This contact is already linked to that property with this relationship.",
+          relationshipId: duplicate.id,
+        });
         return;
       }
     }

@@ -179,6 +179,10 @@ test("grow.access unlocks the four read routes but grants no write access of its
 
 test("POST /relationships validates required fields, enforces tenant isolation on both party and property, and publishes an audit-accurate RELATIONSHIP_CREATED event", async () => {
   await grant(A.brokerageId, "grow.relationships.manage");
+  // G-UAT-3: a property id on this route also needs grow.properties.link.
+  // The catalogue already grants it with every other Grow key; this fixture
+  // grants keys one at a time, so the property-linked posts below need it too.
+  await grant(A.brokerageId, "grow.properties.link");
 
   const missingRes = await fetch(growUrl("/relationships"), {
     method: "POST",

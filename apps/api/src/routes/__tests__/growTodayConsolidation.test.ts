@@ -55,6 +55,7 @@ before(async () => {
   for (const key of [
     "grow.access",
     "grow.relationships.manage",
+    "grow.properties.link",
     "grow.activities.manage",
     "grow.opportunities.manage",
     "grow.propertyIntelligence.read",

@@ -90,6 +90,7 @@ before(async () => {
       "grow.contacts.manage",
       "grow.activities.manage",
       "grow.relationships.manage",
+      "grow.properties.link",
       "grow.opportunities.manage",
     ]) {
       await grant(brokerageId, key);
