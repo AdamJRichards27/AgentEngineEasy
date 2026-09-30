@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
 import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
 import { visibleLinkedPropertySql, visibleRequiredPropertySql } from "./propertyVisibility.js";
 import { isOverdueLocal, isToday, localDateKey, resolveTimeZone, startOfLocalDay } from "./commandCentre/timezone.js";
@@ -489,6 +489,23 @@ export interface GrowTodaySignalSummary {
   limitations: string[];
 }
 
+/**
+ * G-UAT-7 — Getting started, derived at read time. Each flag is whether a
+ * row the caller can already see exists. Nothing here is stored: no column,
+ * no dismissal, no preference. Contacts are brokerage-wide. A property-linked
+ * row counts only when that property is in the caller's own-property set
+ * (`restrictToPropertyIds`); a null property stays visible. Admin and Pit Crew
+ * pass null and stay brokerage-wide.
+ */
+export interface GrowTodayFirstRun {
+  contact: boolean;
+  propertyLink: boolean;
+  activity: boolean;
+  commitment: boolean;
+  opportunity: boolean;
+  appraisal: boolean;
+}
+
 export interface GrowTodaySummary {
   generatedAt: string;
   // Distinguishes "this brokerage has never used Grow" (purposeful onboarding
@@ -507,6 +524,8 @@ export interface GrowTodaySummary {
   priorityActions: GrowTodayAction[];
   /** Stage 3 — see GrowTodaySignalSummary. */
   signalSummary: GrowTodaySignalSummary;
+  /** G-UAT-7 — see GrowTodayFirstRun. Additive; the fields above are unchanged. */
+  firstRun: GrowTodayFirstRun;
 }
 
 // A relationship/opportunity with no recorded contact in this many days (or
@@ -962,6 +981,100 @@ export function appraisalFollowUpAvailableActions(
   return availableActions;
 }
 
+function firstRunFlag(value: unknown): boolean {
+  return value === true;
+}
+
+/**
+ * G-UAT-7 — one statement, six EXISTS/LIMIT 1 probes. Not derived from the
+ * capped rule reads above: those drop closed opportunities, undated
+ * commitments, non-follow-up appraisals, and anything past a cap, and a
+ * finished step must stay done. This read does not change those queries.
+ */
+async function loadGrowTodayFirstRun(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null,
+): Promise<GrowTodayFirstRun> {
+  const contact = exists(
+    db.select({ id: parties.id }).from(parties).where(eq(parties.brokerageId, brokerageId)).limit(1),
+  );
+  const propertyLink = exists(
+    db
+      .select({ id: growRelationships.id })
+      .from(growRelationships)
+      .where(
+        and(
+          eq(growRelationships.brokerageId, brokerageId),
+          isNotNull(growRelationships.propertyId),
+          visibleLinkedPropertySql(growRelationships.propertyId, restrictToPropertyIds),
+        ),
+      )
+      .limit(1),
+  );
+  const activity = exists(
+    db
+      .select({ id: growActivities.id })
+      .from(growActivities)
+      .where(
+        and(
+          eq(growActivities.brokerageId, brokerageId),
+          visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
+        ),
+      )
+      .limit(1),
+  );
+  const commitment = exists(
+    db
+      .select({ id: growCommitments.id })
+      .from(growCommitments)
+      .where(
+        and(
+          eq(growCommitments.brokerageId, brokerageId),
+          visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+        ),
+      )
+      .limit(1),
+  );
+  const opportunity = exists(
+    db
+      .select({ id: growOpportunities.id })
+      .from(growOpportunities)
+      .where(
+        and(
+          eq(growOpportunities.brokerageId, brokerageId),
+          visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+        ),
+      )
+      .limit(1),
+  );
+  const appraisal = exists(
+    db
+      .select({ id: appraisals.id })
+      .from(appraisals)
+      .innerJoin(properties, eq(appraisals.propertyId, properties.id))
+      .where(
+        and(
+          eq(properties.brokerageId, brokerageId),
+          visibleRequiredPropertySql(appraisals.propertyId, restrictToPropertyIds),
+        ),
+      )
+      .limit(1),
+  );
+
+  const result = await db.execute(
+    sql`select /* first_run_probe */ ${contact} as contact, ${propertyLink} as property_link, ${activity} as activity, ${commitment} as commitment, ${opportunity} as opportunity, ${appraisal} as appraisal`,
+  );
+  const row = (result.rows?.[0] ?? {}) as Record<string, unknown>;
+  return {
+    contact: firstRunFlag(row.contact),
+    propertyLink: firstRunFlag(row.property_link),
+    activity: firstRunFlag(row.activity),
+    commitment: firstRunFlag(row.commitment),
+    opportunity: firstRunFlag(row.opportunity),
+    appraisal: firstRunFlag(row.appraisal),
+  };
+}
+
 export async function getGrowTodaySummary(
   brokerageId: number,
   options?: { includePropertyIntelligenceSignals?: boolean; now?: Date; restrictToPropertyIds?: number[] | null },
@@ -985,7 +1098,7 @@ export async function getGrowTodaySummary(
   // commitments read to this wave. The activity aggregate stays OUT of it
   // because it is scoped by the party ids these reads return, which is what
   // makes it bounded.
-  const [relationshipRows, opportunityRows, appraisalFollowUpRows, commitmentRows, propertyIntelligenceSignalRows] = await Promise.all([
+  const [relationshipRows, opportunityRows, appraisalFollowUpRows, commitmentRows, propertyIntelligenceSignalRows, firstRun] = await Promise.all([
     db
       .select({
         id: growRelationships.id,
@@ -1132,6 +1245,7 @@ export async function getGrowTodaySummary(
       .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
       .limit(GROW_TODAY_COMMITMENT_ROW_CAP),
     fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, now, restrictToPropertyIds),
+    loadGrowTodayFirstRun(brokerageId, restrictToPropertyIds),
   ]);
 
   // W2-A — the exact open-opportunity total, carried on every row by the
@@ -1921,5 +2035,6 @@ export async function getGrowTodaySummary(
     },
     priorityActions,
     signalSummary,
+    firstRun,
   };
 }

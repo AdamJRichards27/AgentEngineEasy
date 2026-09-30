@@ -37,6 +37,7 @@ import {
 } from "../lib/growWorkspace";
 import {
   type GrowTodayAction,
+  type GrowTodayFirstRun,
   type GrowTodaySummary,
   actionTypeLabel,
   canOfferChannel,
@@ -51,6 +52,7 @@ import {
   signalWithholdingNotice,
   unlinkedContactNotice,
 } from "../lib/growToday";
+import { growFirstRunIncomplete, growFirstRunSteps, type GrowFirstRunSection } from "../lib/growFirstRun";
 import { TodaySurfaceCrossLink } from "../components/TodaySurfaceCrossLink";
 import {
   GROW_TODAY_EYEBROW,
@@ -647,6 +649,7 @@ function GrowWorkspace() {
             onViewContact={viewContact}
             onEmailContact={emailContact}
             onSmsContact={smsContact}
+            onOpenSection={selectTab}
           />
         )}
         {/* E-3: the same contact jump and Ask AE tab switch Grow Today already
@@ -701,11 +704,13 @@ export function GrowToday({
   onViewContact,
   onEmailContact,
   onSmsContact,
+  onOpenSection,
 }: {
   onAskAE: () => void;
   onViewContact: (partyId: number) => void;
   onEmailContact: (partyId: number) => void;
   onSmsContact: (partyId: number) => void;
+  onOpenSection?: (section: GrowFirstRunSection) => void;
 }) {
   const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
@@ -787,7 +792,17 @@ export function GrowToday({
             </Link>
           </div>
         </section>
-      ) : data.priorityActions.length === 0 ? (
+      ) : null}
+
+      {data.firstRun && growFirstRunIncomplete(data.firstRun) ? (
+        <GrowFirstRunChecklist
+          flags={data.firstRun}
+          hasEntitlement={hasEntitlement}
+          onOpenSection={onOpenSection ?? (() => {})}
+        />
+      ) : null}
+
+      {!data.hasAnyGrowData ? null : data.priorityActions.length === 0 ? (
         <section className="card">
           <p className="empty-state">You're all caught up — nothing needs your attention right now.</p>
         </section>
@@ -863,6 +878,66 @@ export function GrowToday({
         </>
       )}
     </div>
+  );
+}
+
+// G-UAT-7 — Getting started. Done/not-done is the Today payload's firstRun
+// block. Hide and show is component state only: nothing is written.
+function GrowFirstRunChecklist({
+  flags,
+  hasEntitlement,
+  onOpenSection,
+}: {
+  flags: GrowTodayFirstRun;
+  hasEntitlement: (key: string) => boolean;
+  onOpenSection: (section: GrowFirstRunSection) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const steps = growFirstRunSteps(flags, hasEntitlement);
+  const doneCount = steps.filter((step) => step.done).length;
+
+  return (
+    <section className="card grow-first-run" aria-label="Getting started">
+      <div className="grow-first-run-header">
+        <div>
+          <h2>Getting started</h2>
+          <p className="muted">
+            {doneCount} of {steps.length} done
+          </p>
+        </div>
+        <button type="button" className="btn btn-link btn-small" onClick={() => setCollapsed((value) => !value)}>
+          {collapsed ? "Show checklist" : "Hide checklist"}
+        </button>
+      </div>
+      {collapsed ? null : (
+        <ul className="grow-first-run-list">
+          {steps.map((step) => (
+            <li key={step.id} id={`grow-first-run-${step.id}`} className="grow-first-run-step">
+              <div>
+                <strong>{step.title}</strong>
+                <p className="muted">{step.hint}</p>
+              </div>
+              <span className={`pill grow-first-run-status${step.done ? " pill-success" : ""}`}>{step.done ? "Done" : "Not done"}</span>
+              {!step.done && !step.available ? <span className="muted">Not available</span> : null}
+              {!step.done && step.available ? (
+                <div className="grow-empty-actions">
+                  {step.actionLabel ? (
+                    <button type="button" className="btn btn-secondary btn-small" onClick={() => onOpenSection(step.section)}>
+                      {step.actionLabel}
+                    </button>
+                  ) : null}
+                  {step.importHref ? (
+                    <Link href={step.importHref} className="btn btn-link btn-small">
+                      Import contacts
+                    </Link>
+                  ) : null}
+                </div>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

@@ -135,7 +135,11 @@ async function captureStatements(id: number, options?: { includePropertyIntellig
 test("I-2 — the activity read is a grouped aggregate scoped to the parties in play, not a tenant-wide scan reduced in Node", async () => {
   const statements = await captureStatements(brokerageId);
 
-  const activityStatements = statements.filter((s) => /from\s+"?grow_activities"?/i.test(s));
+  // G-UAT-7's first_run_probe also names grow_activities, inside an EXISTS.
+  // That probe is not the aggregate this test pins.
+  const activityStatements = statements.filter(
+    (s) => /from\s+"?grow_activities"?/i.test(s) && !/first_run_probe/i.test(s),
+  );
   assert.equal(activityStatements.length, 1, "exactly one statement may touch grow_activities");
 
   const [activity] = activityStatements;
@@ -205,16 +209,18 @@ test("the statement count is FIXED — it does not grow with the size of the ten
   // F-1 adds exactly one bounded grow_commitments read to that first wave.
   // UAT-TZ adds one read-only communication_settings select for the brokerage
   // zone. It does not create a settings row.
+  // G-UAT-7 adds one first_run_probe statement: six EXISTS/LIMIT 1 checks in
+  // a single select, so the count stays fixed as the tenant grows.
   assert.equal(
     large.length,
-    8,
-    `expected 8 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
+    9,
+    `expected 9 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
   );
 
   const withSignals = await captureStatements(brokerageId, { includePropertyIntelligenceSignals: true });
   assert.equal(
     withSignals.length,
-    9,
+    10,
     `Rule F adds exactly one statement and no more; got ${withSignals.length}:\n${withSignals.join("\n---\n")}`,
   );
 });
@@ -223,11 +229,18 @@ test("every unbounded tenant read is gone: each rule read carries a limit, and t
   const statements = await captureStatements(brokerageId, { includePropertyIntelligenceSignals: true });
 
   for (const table of ["grow_relationships", "grow_opportunities", "appraisals", "grow_commitments", "grow_opportunity_signals"]) {
-    const matching = statements.filter((s) => new RegExp(`from\\s+"?${table}"?`, "i").test(s));
+    const matching = statements.filter(
+      (s) => new RegExp(`from\\s+"?${table}"?`, "i").test(s) && !/first_run_probe/i.test(s),
+    );
     assert.equal(matching.length, 1, `exactly one statement may read ${table}`);
     assert.match(matching[0], /limit/i, `the ${table} read must be bounded — this was an unbounded tenant read (I-4)`);
     assert.match(matching[0], /order by/i, `...and ordered, so the cap drops the least relevant rows deterministically`);
   }
+
+  const probes = statements.filter((s) => /first_run_probe/i.test(s));
+  assert.equal(probes.length, 1, "the checklist is one existence probe, not one query per row");
+  assert.match(probes[0], /exists/i);
+  assert.match(probes[0], /limit/i);
 
   // Entitlement gating still short-circuits the signal read entirely, at zero
   // DB cost, exactly as before.
