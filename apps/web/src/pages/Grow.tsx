@@ -67,6 +67,18 @@ import {
   SAVE_DUE_FOLLOW_UP_LABEL,
   SET_DUE_FOLLOW_UP_LABEL,
 } from "../lib/growTerms";
+import {
+  APPRAISAL_NEXT_STEP_LABELS,
+  APPRAISAL_OUTCOME_REASONS,
+  LINK_PROPERTY_BEFORE_APPRAISAL,
+  appraisalForProperty,
+  appraisalNextSteps,
+  appraisalOutcomeOptions,
+  appraisalPropertyChoices,
+  appraisalStatusLabel,
+  appraisalsForContact,
+  type GrowAppraisalSummary,
+} from "../lib/growAppraisals";
 
 interface GrowAccess {
   entitled: boolean;
@@ -1144,6 +1156,338 @@ function GrowNoteForm({
   );
 }
 
+// G-UAT-6 — appraisal writes use the existing Grow appraisal routes.
+// grow.access + grow.opportunities.manage, the same keys those routes require.
+// A missing property is an explanation, never a button that would 409.
+function useCanReadAppraisals(): boolean {
+  const { hasEntitlement } = useEntitlements();
+  return hasEntitlement("grow.access");
+}
+
+function useCanManageAppraisals(): boolean {
+  const { hasEntitlement } = useEntitlements();
+  return hasEntitlement("grow.access") && hasEntitlement("grow.opportunities.manage");
+}
+
+function useAppraisalPipeline(enabled: boolean) {
+  return useQuery<{ appraisals: GrowAppraisalSummary[] }>({
+    queryKey: ["grow-appraisals"],
+    queryFn: () => apiFetch("/grow/appraisals/pipeline"),
+    enabled,
+  });
+}
+
+function invalidateAppraisalReads(
+  queryClient: { invalidateQueries: (filter: { queryKey: unknown[] }) => void },
+  partyId: number | null,
+) {
+  if (partyId !== null) queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+  queryClient.invalidateQueries({ queryKey: ["grow-opportunities"] });
+  queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+  queryClient.invalidateQueries({ queryKey: ["grow-appraisals"] });
+}
+
+function appraisalWriteErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status === 404) return "That couldn't be found.";
+  if (error instanceof ApiError && error.status === 400) return apiErrorMessage(error, "Check the details and try again.");
+  if (error instanceof ApiError && error.status === 403) {
+    return apiErrorMessage(error, "You don't have permission to update this appraisal.");
+  }
+  if (error instanceof ApiError && error.status === 409) {
+    return apiErrorMessage(error, "That step isn't available for this appraisal.");
+  }
+  return apiErrorMessage(error, "Couldn't update that appraisal. Try again.");
+}
+
+function GrowAppraisalRecord({
+  appraisal,
+  canWrite,
+  partyId,
+}: {
+  appraisal: GrowAppraisalSummary | null;
+  canWrite: boolean;
+  partyId: number | null;
+}) {
+  const queryClient = useQueryClient();
+  const [showOutcome, setShowOutcome] = useState(false);
+  const [outcome, setOutcome] = useState("WON");
+  const [reason, setReason] = useState("");
+  const [notes, setNotes] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  function saved() {
+    setErrorMessage(null);
+    setShowOutcome(false);
+    setReason("");
+    setNotes("");
+    invalidateAppraisalReads(queryClient, partyId);
+  }
+
+  const changeStatus = useMutation({
+    mutationFn: (toStatus: string) => {
+      if (!appraisal) return Promise.resolve(null);
+      return apiFetch(`/grow/appraisals/${appraisal.id}/status`, {
+        method: "POST",
+        body: JSON.stringify({ toStatus }),
+      });
+    },
+    onSuccess: saved,
+    onError: (error) => setErrorMessage(appraisalWriteErrorMessage(error)),
+  });
+
+  const recordOutcome = useMutation({
+    mutationFn: (body: { outcome: string; outcomeReason?: string; outcomeNotes?: string }) => {
+      if (!appraisal) return Promise.resolve(null);
+      return apiFetch(`/grow/appraisals/${appraisal.id}/outcome`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    onSuccess: saved,
+    onError: (error) => setErrorMessage(appraisalWriteErrorMessage(error)),
+  });
+
+  if (!appraisal) return null;
+
+  const steps = canWrite ? appraisalNextSteps(appraisal.status) : [];
+  const outcomes = canWrite ? appraisalOutcomeOptions(appraisal.status) : [];
+  const busy = changeStatus.isPending || recordOutcome.isPending;
+
+  return (
+    <div className="grow-appraisal-record">
+      <p>
+        {appraisal.propertyAddress} — Status: {appraisalStatusLabel(appraisal.status)}
+        {appraisal.outcome ? ` — Outcome: ${appraisal.outcome}` : " — Outcome: Not recorded"}
+      </p>
+      {errorMessage && (
+        <p className="error-text" role="alert">
+          {errorMessage}
+        </p>
+      )}
+      {steps.map((step) => (
+        <button
+          key={step}
+          type="button"
+          className="btn btn-secondary btn-small"
+          id={`grow-appraisal-${appraisal.id}-status-${step}`}
+          disabled={busy}
+          onClick={() => changeStatus.mutate(step)}
+        >
+          {APPRAISAL_NEXT_STEP_LABELS[step]}
+        </button>
+      ))}
+      {outcomes.length > 0 && (
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          id={`grow-appraisal-${appraisal.id}-record-outcome`}
+          disabled={busy}
+          onClick={() => setShowOutcome((open) => !open)}
+        >
+          {showOutcome ? "Cancel" : "Record outcome"}
+        </button>
+      )}
+      {showOutcome && outcomes.length > 0 && (
+        <form
+          className="stack grow-inline-form"
+          id={`grow-appraisal-${appraisal.id}-outcome-form`}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const trimmedNotes = notes.trim();
+            recordOutcome.mutate({
+              outcome,
+              ...(reason ? { outcomeReason: reason } : {}),
+              ...(trimmedNotes ? { outcomeNotes: trimmedNotes } : {}),
+            });
+          }}
+        >
+          <label htmlFor={`grow-appraisal-${appraisal.id}-outcome`}>Outcome</label>
+          <select
+            id={`grow-appraisal-${appraisal.id}-outcome`}
+            value={outcome}
+            onChange={(event) => setOutcome(event.target.value)}
+          >
+            {outcomes.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+          <label htmlFor={`grow-appraisal-${appraisal.id}-outcome-reason`}>Reason (optional)</label>
+          <select
+            id={`grow-appraisal-${appraisal.id}-outcome-reason`}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+          >
+            <option value="">No reason</option>
+            {APPRAISAL_OUTCOME_REASONS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <label htmlFor={`grow-appraisal-${appraisal.id}-outcome-notes`}>Notes (optional)</label>
+          <textarea
+            id={`grow-appraisal-${appraisal.id}-outcome-notes`}
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            rows={2}
+          />
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
+            Save outcome
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function GrowOpportunityAppraisalActions({
+  opportunityId,
+  partyId,
+  propertyId,
+  appraisal,
+  canWrite,
+}: {
+  opportunityId: number;
+  partyId: number | null;
+  propertyId: number | null;
+  appraisal: GrowAppraisalSummary | null;
+  canWrite: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const start = useMutation({
+    mutationFn: () =>
+      apiFetch("/grow/appraisals/from-opportunity", {
+        method: "POST",
+        body: JSON.stringify({ opportunityId }),
+      }),
+    onSuccess: () => {
+      setErrorMessage(null);
+      invalidateAppraisalReads(queryClient, partyId);
+    },
+    onError: (error) => setErrorMessage(appraisalWriteErrorMessage(error)),
+  });
+
+  return (
+    <div className="grow-opportunity-appraisal">
+      {errorMessage && (
+        <p className="error-text" role="alert">
+          {errorMessage}
+        </p>
+      )}
+      {canWrite && propertyId === null && <p className="muted">{LINK_PROPERTY_BEFORE_APPRAISAL}</p>}
+      {canWrite && propertyId !== null && (
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          id={`grow-opportunity-start-appraisal-${opportunityId}`}
+          disabled={start.isPending}
+          onClick={() => start.mutate()}
+        >
+          Start appraisal
+        </button>
+      )}
+      <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
+    </div>
+  );
+}
+
+// Contact 360 lists this contact's appraisals from GET /grow/appraisals/pipeline,
+// filtered here by partyId. The pipeline is already limited to properties the
+// caller can see. Start posts partyId and one linked property id.
+export function GrowContactAppraisalsSection({
+  partyId,
+  linkedProperties,
+}: {
+  partyId: number;
+  linkedProperties: Array<{ propertyId: number | null; propertyAddress: string | null }>;
+}) {
+  const queryClient = useQueryClient();
+  const canRead = useCanReadAppraisals();
+  const canWrite = useCanManageAppraisals();
+  const pipeline = useAppraisalPipeline(canRead);
+  const [chosenPropertyId, setChosenPropertyId] = useState<number | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const choices = appraisalPropertyChoices(linkedProperties);
+  const propertyId =
+    chosenPropertyId !== null && choices.some((choice) => choice.id === chosenPropertyId)
+      ? chosenPropertyId
+      : (choices[0]?.id ?? null);
+
+  const start = useMutation({
+    mutationFn: (selectedPropertyId: number) =>
+      apiFetch("/grow/appraisals/from-contact", {
+        method: "POST",
+        body: JSON.stringify({ partyId, propertyId: selectedPropertyId }),
+      }),
+    onSuccess: () => {
+      setErrorMessage(null);
+      invalidateAppraisalReads(queryClient, partyId);
+    },
+    onError: (error) => setErrorMessage(appraisalWriteErrorMessage(error)),
+  });
+
+  if (!canRead) return null;
+
+  const rows = appraisalsForContact(pipeline.data?.appraisals ?? [], partyId);
+
+  return (
+    <section className="card">
+      <h2>Appraisals</h2>
+      {pipeline.isError && <p className="error-text">{growErrorMessage(pipeline.error, "Couldn't load appraisals.")}</p>}
+      {canWrite && choices.length === 0 && <p className="muted">{LINK_PROPERTY_BEFORE_APPRAISAL}</p>}
+      {canWrite && choices.length > 0 && (
+        <div className="stack grow-inline-form">
+          <label htmlFor="grow-contact-appraisal-property">Property</label>
+          <select
+            id="grow-contact-appraisal-property"
+            value={propertyId ?? ""}
+            onChange={(event) => {
+              const id = Number(event.target.value);
+              setChosenPropertyId(Number.isInteger(id) && id > 0 ? id : null);
+            }}
+          >
+            {choices.map((choice) => (
+              <option key={choice.id} value={choice.id}>
+                {choice.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn btn-primary btn-small"
+            id="grow-contact-start-appraisal"
+            disabled={propertyId === null || start.isPending}
+            onClick={() => {
+              if (propertyId === null) return;
+              start.mutate(propertyId);
+            }}
+          >
+            Start appraisal
+          </button>
+        </div>
+      )}
+      {errorMessage && (
+        <p className="error-text" role="alert">
+          {errorMessage}
+        </p>
+      )}
+      {rows.length === 0 && <p className="empty-state">No appraisals yet.</p>}
+      {rows.length > 0 && (
+        <ul className="item-list">
+          {rows.map((appraisal) => (
+            <li key={appraisal.id}>
+              <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 // The actions an opportunity ROW offers, shared by the Opportunities tab and
 // Contact 360's opportunities table. View contact, View property, and Create
 // follow-up landed with #56. Add note and Ask AE are the other non-outreach
@@ -1163,6 +1507,7 @@ function GrowOpportunityRowActions({
   opportunityId,
   partyId,
   propertyId,
+  appraisal,
   canManageOpportunities,
   canAddNote,
   canViewContacts,
@@ -1173,6 +1518,7 @@ function GrowOpportunityRowActions({
   opportunityId: number;
   partyId: number | null;
   propertyId: number | null;
+  appraisal: GrowAppraisalSummary | null;
   canManageOpportunities: boolean;
   canAddNote: boolean;
   canViewContacts: boolean;
@@ -1181,6 +1527,7 @@ function GrowOpportunityRowActions({
   onSaved: () => void;
 }) {
   const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
+  const canManageAppraisals = useCanManageAppraisals();
   const updateNextAction = useUpdateOpportunityNextAction(opportunityId, () => {
     setOpenForm(null);
     onSaved();
@@ -1234,6 +1581,13 @@ function GrowOpportunityRowActions({
           Ask AE
         </button>
       )}
+      <GrowOpportunityAppraisalActions
+        opportunityId={opportunityId}
+        partyId={partyId}
+        propertyId={propertyId}
+        appraisal={appraisal}
+        canWrite={canManageAppraisals}
+      />
       {errorMessage && <p className="error-text">{errorMessage}</p>}
       {openForm === "note" && partyId !== null && (
         <GrowNoteForm
@@ -2704,6 +3058,8 @@ function GrowContactDetail({
         <GrowLinkPropertyForm partyId={partyId} onLinked={invalidate} />
       </section>
 
+      <GrowContactAppraisalsSection partyId={partyId} linkedProperties={data.properties} />
+
       {/* AE GROW Priority 5 Remediation — Property Intelligence. Extends this existing Contact
           360 view rather than adding a second contact screen, per the remediation objective's
           own instruction. The panel independently gates itself on grow.propertyIntelligence.read
@@ -3166,6 +3522,9 @@ export function GrowContactOpportunitiesSection({
   const { hasEntitlement } = useEntitlements();
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
   const canAddNote = hasEntitlement("grow.activities.manage");
+  const canReadAppraisals = useCanReadAppraisals();
+  const pipeline = useAppraisalPipeline(canReadAppraisals);
+  const appraisalRows = canReadAppraisals ? (pipeline.data?.appraisals ?? []) : [];
 
   function onSaved() {
     // A follow-up or a note changes what Today and the activity list show.
@@ -3219,6 +3578,7 @@ export function GrowContactOpportunitiesSection({
                     opportunityId={o.id}
                     partyId={partyId}
                     propertyId={o.propertyId}
+                    appraisal={appraisalForProperty(appraisalRows, o.propertyId)}
                     canManageOpportunities={canManageOpportunities}
                     canAddNote={canAddNote}
                     canViewContacts={false}
@@ -3253,11 +3613,14 @@ export function GrowOpportunitiesTab({
   const canManageOpportunities = hasEntitlement("grow.opportunities.manage");
   const canAddNote = hasEntitlement("grow.activities.manage");
   const canViewContacts = hasEntitlement("grow.contacts.read");
+  const canReadAppraisals = useCanReadAppraisals();
 
   const opportunities = useQuery<{ opportunities: GrowOpportunity[] }>({
     queryKey: ["grow-opportunities"],
     queryFn: () => apiFetch("/grow/opportunities"),
   });
+  const pipeline = useAppraisalPipeline(canReadAppraisals);
+  const appraisalRows = canReadAppraisals ? (pipeline.data?.appraisals ?? []) : [];
 
   function onSaved() {
     void opportunities.refetch();
@@ -3310,6 +3673,7 @@ export function GrowOpportunitiesTab({
                     opportunityId={o.id}
                     partyId={o.partyId}
                     propertyId={o.propertyId}
+                    appraisal={appraisalForProperty(appraisalRows, o.propertyId)}
                     canManageOpportunities={canManageOpportunities}
                     canAddNote={canAddNote}
                     canViewContacts={canViewContacts}
