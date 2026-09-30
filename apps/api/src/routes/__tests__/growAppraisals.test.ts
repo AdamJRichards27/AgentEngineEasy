@@ -450,3 +450,46 @@ test("tenant isolation -- brokerage B cannot read, edit, or transition brokerage
   assert.equal(ownGetRes.status, 200);
 });
 
+// G-UAT-6 — the shortest path the Grow UI offers. Agent, own property.
+// 404 for /status on another Agent's property is already asserted in
+// growWriteVisibility.test.ts (hiddenMutations includes POST /status).
+test("an Agent moves their own appraisal DRAFT -> APPOINTMENT_SCHEDULED -> PRESENTED -> WON", async () => {
+  const cookie = A.agent.cookie;
+  const propertyId = await createProperty(cookie, `5 Agent Short Path St ${suffix}`);
+  const partyId = await createParty(cookie, propertyId, { firstName: "Own", lastName: "Vendor" });
+
+  const createRes = await fetch(growUrl("/appraisals/from-contact"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ partyId, propertyId }),
+  });
+  assert.equal(createRes.status, 201, await createRes.clone().text());
+  const { appraisal } = (await createRes.json()) as { appraisal: { id: number; status: string } };
+  assert.equal(appraisal.status, "DRAFT");
+
+  for (const toStatus of ["APPOINTMENT_SCHEDULED", "PRESENTED"]) {
+    const res = await fetch(growUrl(`/appraisals/${appraisal.id}/status`), {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ toStatus }),
+    });
+    assert.equal(res.status, 200, `${toStatus}: ${await res.clone().text()}`);
+    const { appraisal: moved } = (await res.json()) as { appraisal: { status: string } };
+    assert.equal(moved.status, toStatus);
+  }
+
+  const outcomeRes = await fetch(growUrl(`/appraisals/${appraisal.id}/outcome`), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ outcome: "WON", outcomeReason: "relationship", outcomeNotes: "Instructed." }),
+  });
+  assert.equal(outcomeRes.status, 200, await outcomeRes.clone().text());
+  const { appraisal: won } = (await outcomeRes.json()) as {
+    appraisal: { status: string; outcome: string | null; outcomeReason: string | null; outcomeNotes: string | null };
+  };
+  assert.equal(won.status, "WON");
+  assert.equal(won.outcome, "WON");
+  assert.equal(won.outcomeReason, "relationship");
+  assert.equal(won.outcomeNotes, "Instructed.");
+});
+
