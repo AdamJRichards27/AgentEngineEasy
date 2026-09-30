@@ -386,10 +386,9 @@ test("G-UAT-1: Grow Today Complete patches the commitment as Completed and refre
         undefined,
         "Cancel stays on Contact 360",
       );
-      assert.equal(
+      assert.ok(
         button(tree, "Reschedule"),
-        undefined,
-        "reschedule is not a commitment PATCH",
+        "an open commitment card offers Reschedule beside Complete",
       );
       assert.ok(button(tree, "Add note"), "the note action is unchanged");
       assert.ok(button(tree, "View contact"), "view contact is unchanged");
@@ -432,6 +431,11 @@ test("G-UAT-1: Complete is hidden without grow.activities.manage and on a card w
         undefined,
         "the same entitlement Contact 360 requires",
       );
+      assert.equal(
+        button(hidden, "Reschedule"),
+        undefined,
+        "Reschedule uses the same commitment-write key",
+      );
       assert.ok(
         button(hidden, "View contact"),
         "reading the contact is still offered",
@@ -463,6 +467,11 @@ test("G-UAT-1: Complete is hidden without grow.activities.manage and on a card w
         button(other, "Complete"),
         undefined,
         "Complete is keyed off the commitment id",
+      );
+      assert.equal(
+        button(other, "Reschedule"),
+        undefined,
+        "Reschedule is keyed off the commitment id",
       );
       assert.ok(button(other, "Set due follow-up"));
       clearToday();

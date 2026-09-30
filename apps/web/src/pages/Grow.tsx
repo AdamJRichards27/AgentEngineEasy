@@ -887,19 +887,145 @@ function useUpdateOpportunityNextAction(opportunityId: number | null, onSaved: (
   });
 }
 
-// PATCH /grow/contacts/commitments/:id is the one write behind Complete (and
-// Contact 360's Cancel). Grow Today reuses this hook so a completion from the
-// commitment card cannot drift from Contact 360. The route only accepts
-// Completed or Cancelled; reschedule is not a status this write can set.
-function useUpdateGrowCommitment(onSaved: () => void) {
-  return useMutation<unknown, unknown, { id: number; status: "Completed" | "Cancelled" }>({
+// PATCH /grow/contacts/commitments/:id is the one write behind Complete,
+// Cancel, and Reschedule. A status change sends { status }. A reschedule
+// sends { dueAt } alone — the route rejects a body that names both. Grow
+// Today and Contact 360 share this hook so the two surfaces cannot drift.
+type GrowCommitmentPatch =
+  | { id: number; status: "Completed" | "Cancelled" }
+  | { id: number; dueAt: string };
+
+function useUpdateGrowCommitment(onSaved: (vars: GrowCommitmentPatch) => void) {
+  return useMutation<unknown, unknown, GrowCommitmentPatch>({
     mutationFn: (vars) =>
       apiFetch(`/grow/contacts/commitments/${vars.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ status: vars.status }),
+        body: JSON.stringify("dueAt" in vars ? { dueAt: vars.dueAt } : { status: vars.status }),
       }),
-    onSuccess: onSaved,
+    onSuccess: (_result, vars) => {
+      onSaved(vars);
+    },
   });
+}
+
+// Date/time picker for an Open commitment. Shown only by a caller that has
+// already checked grow.activities.manage. 400, 404 and 403 surface through
+// the shared mutation's growErrorMessage, which is the plain sentence
+// apiFetch already stored on the error.
+function GrowRescheduleControl({
+  idPrefix,
+  busy,
+  onSubmit,
+}: {
+  idPrefix: string;
+  busy: boolean;
+  onSubmit: (dueAt: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [dueLocal, setDueLocal] = useState("");
+
+  return (
+    <>
+      <button
+        type="button"
+        className="btn btn-link btn-small"
+        disabled={busy}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {open ? "Close" : "Reschedule"}
+      </button>
+      {open && (
+        <form
+          className="stack grow-inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!dueLocal) return;
+            const dueAt = new Date(dueLocal);
+            if (Number.isNaN(dueAt.getTime())) return;
+            onSubmit(dueAt.toISOString());
+          }}
+        >
+          <label htmlFor={`${idPrefix}-due`}>New due time</label>
+          <input
+            id={`${idPrefix}-due`}
+            type="datetime-local"
+            value={dueLocal}
+            onChange={(e) => setDueLocal(e.target.value)}
+            required
+          />
+          <button className="btn btn-primary btn-small" type="submit" disabled={busy || !dueLocal}>
+            Save new time
+          </button>
+        </form>
+      )}
+    </>
+  );
+}
+
+// Contact 360's commitment list. Exported so the Reschedule action can be
+// exercised on its own; GrowContactDetail mounts this same component.
+export function GrowContactCommitmentsList({
+  commitments,
+  canManageActivities,
+  onChanged,
+}: {
+  commitments: GrowContact360Commitment[];
+  canManageActivities: boolean;
+  onChanged: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const updateCommitment = useUpdateGrowCommitment((vars) => {
+    onChanged();
+    if ("dueAt" in vars) {
+      queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+    }
+  });
+
+  return (
+    <>
+      {commitments.length === 0 && <p className="empty-state">No commitments recorded.</p>}
+      {commitments.length > 0 && (
+        <ul className="item-list">
+          {commitments.map((cm) => (
+            <li key={cm.id}>
+              <span className={`pill ${cm.status === "Open" ? "pill-warning" : cm.status === "Completed" ? "pill-success" : "pill-danger"}`}>
+                {cm.status}
+              </span>{" "}
+              {cm.description} — due {formatWhen(cm.dueAt)}
+              {cm.status === "Open" && canManageActivities && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-link btn-small"
+                    disabled={updateCommitment.isPending}
+                    onClick={() => updateCommitment.mutate({ id: cm.id, status: "Completed" })}
+                  >
+                    Complete
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-link btn-small"
+                    disabled={updateCommitment.isPending}
+                    onClick={() => updateCommitment.mutate({ id: cm.id, status: "Cancelled" })}
+                  >
+                    Cancel
+                  </button>
+                  <GrowRescheduleControl
+                    idPrefix={`grow-contact-commitment-${cm.id}`}
+                    busy={updateCommitment.isPending}
+                    onSubmit={(dueAt) => updateCommitment.mutate({ id: cm.id, dueAt })}
+                  />
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {updateCommitment.isError && (
+        <p className="error-text">{growErrorMessage(updateCommitment.error, "Something went wrong. Try again.")}</p>
+      )}
+    </>
+  );
 }
 
 // Owns its own field state, so closing the form is what clears it — the caller
@@ -1191,10 +1317,10 @@ function GrowActionCard({
     invalidateToday();
   });
 
-  // G-UAT-1 — same commitment PATCH Contact 360 uses. The card already
-  // carries commitmentId; completing it drops the row from Today because
-  // Grow Today only reads Open commitments. Cancel and reschedule stay on
-  // Contact 360.
+  // G-UAT-1 / G-UAT-4 — same commitment PATCH Contact 360 uses. Completing
+  // drops the row from Today because Grow Today only reads Open commitments.
+  // Rescheduling changes dueAt; invalidating Today lets the card leave
+  // Overdue when the new time is no longer due. Cancel stays on Contact 360.
   const completeCommitment = useUpdateGrowCommitment(() => {
     invalidateToday();
   });
@@ -1328,6 +1454,16 @@ function GrowActionCard({
           >
             Complete
           </button>
+        )}
+        {showCompleteCommitment && item.commitmentId !== null && (
+          <GrowRescheduleControl
+            idPrefix={`grow-today-commitment-${item.commitmentId}`}
+            busy={busy}
+            onSubmit={(dueAt) => {
+              if (item.commitmentId === null) return;
+              completeCommitment.mutate({ id: item.commitmentId, dueAt });
+            }}
+          />
         )}
         {showAddNote && (
           <button
@@ -2301,8 +2437,6 @@ function GrowContactDetail({
     },
   });
 
-  const updateCommitment = useUpdateGrowCommitment(invalidate);
-
   // AE GROW Completion W2-B (G-4) — same region presentation as every other
   // Grow region, so a Contact 360 that failed to load offers Try again rather
   // than only "Back to contacts". The back button stays: it is this view's own
@@ -2611,42 +2745,11 @@ function GrowContactDetail({
         {canManageActivities && <GrowPendingCommitmentProposals partyId={partyId} contactName={c.displayName} />}
 
         <h3>Commitments</h3>
-        {data.commitments.length === 0 && <p className="empty-state">No commitments recorded.</p>}
-        {data.commitments.length > 0 && (
-          <ul className="item-list">
-            {data.commitments.map((cm) => (
-              <li key={cm.id}>
-                <span className={`pill ${cm.status === "Open" ? "pill-warning" : cm.status === "Completed" ? "pill-success" : "pill-danger"}`}>
-                  {cm.status}
-                </span>{" "}
-                {cm.description} — due {formatWhen(cm.dueAt)}
-                {cm.status === "Open" && canManageActivities && (
-                  <>
-                    <button
-                      type="button"
-                      className="btn btn-link btn-small"
-                      disabled={updateCommitment.isPending}
-                      onClick={() => updateCommitment.mutate({ id: cm.id, status: "Completed" })}
-                    >
-                      Complete
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-link btn-small"
-                      disabled={updateCommitment.isPending}
-                      onClick={() => updateCommitment.mutate({ id: cm.id, status: "Cancelled" })}
-                    >
-                      Cancel
-                    </button>
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-        {updateCommitment.isError && (
-          <p className="error-text">{growErrorMessage(updateCommitment.error, "Something went wrong. Try again.")}</p>
-        )}
+        <GrowContactCommitmentsList
+          commitments={data.commitments}
+          canManageActivities={canManageActivities}
+          onChanged={invalidate}
+        />
         {canManageActivities && (
           <>
             <button type="button" className="btn btn-secondary btn-small" onClick={() => setShowAddCommitment((v) => !v)}>
