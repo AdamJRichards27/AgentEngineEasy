@@ -424,6 +424,7 @@ test("POST /:partyId/relationships rejects a cross-tenant relatedPartyId; DELETE
 test("Priority 1 integration: a contact<->property relationship created via the existing POST /grow/relationships route (routes/grow.ts) appears in this contact's Contact 360 properties list and intelligence, proving Grow extends the canonical relationship table rather than creating a second one", async () => {
   await grant(A.brokerageId, "grow.access");
   await grant(A.brokerageId, "grow.relationships.manage");
+  await grant(A.brokerageId, "grow.properties.link");
 
   const propertyId = await createProperty(A.agent.cookie, "6 Priority One Integration St");
 

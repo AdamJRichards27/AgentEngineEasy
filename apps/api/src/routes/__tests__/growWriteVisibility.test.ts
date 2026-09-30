@@ -64,6 +64,7 @@ const GROW_KEYS = [
   "grow.contacts.read",
   "grow.contacts.manage",
   "grow.relationships.manage",
+  "grow.properties.link",
   "grow.activities.manage",
   "grow.opportunities.manage",
   "grow.propertyIntelligence.read",
@@ -397,7 +398,7 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
     const ownRelationship = await send("POST", "/grow/relationships", agentA.cookie, {
       partyId: sharedContactId,
       propertyId: propertyAId,
-      relationshipType: "owner",
+      relationshipType: "co_owner",
     });
     assert.equal(ownRelationship.status, 201, await ownRelationship.clone().text());
     const contactRelationship = await send("POST", "/grow/relationships", agentA.cookie, {
@@ -635,7 +636,7 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
     const adminRelationship = await send("POST", "/grow/relationships", admin.cookie, {
       partyId: sharedContactId,
       propertyId: propertyBId,
-      relationshipType: "landlord",
+      relationshipType: "tenant",
     });
     assert.equal(adminRelationship.status, 201, await adminRelationship.clone().text());
     const adminPatch = await send("PATCH", `/grow/relationships/${relationshipBId}`, admin.cookie, { status: "Historical" });

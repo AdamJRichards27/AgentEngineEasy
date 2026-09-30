@@ -41,6 +41,7 @@ const GROW_KEYS = [
   "grow.contacts.read",
   "grow.contacts.manage",
   "grow.relationships.manage",
+  "grow.properties.link",
   "grow.activities.manage",
   "grow.opportunities.manage",
   "grow.propertyIntelligence.read",

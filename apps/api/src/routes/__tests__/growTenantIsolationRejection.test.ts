@@ -47,6 +47,7 @@ const MISSING_ID = 2_147_483_646;
 const ENTITLEMENTS = [
   "grow.access",
   "grow.relationships.manage",
+  "grow.properties.link",
   "grow.activities.manage",
   "grow.opportunities.manage",
   "grow.contacts.read",

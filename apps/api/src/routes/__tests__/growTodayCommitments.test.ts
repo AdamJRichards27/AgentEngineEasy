@@ -48,7 +48,7 @@ before(async () => {
 
   A = await createBrokerageWithUsers(baseUrl, `Grow Today Commitments A ${suffix}`);
   B = await createBrokerageWithUsers(baseUrl, `Grow Today Commitments B ${suffix}`);
-  for (const key of ["grow.access", "grow.relationships.manage", "grow.activities.manage"]) {
+  for (const key of ["grow.access", "grow.relationships.manage", "grow.properties.link", "grow.activities.manage"]) {
     await grant(A.brokerageId, key);
     await grant(B.brokerageId, key);
   }

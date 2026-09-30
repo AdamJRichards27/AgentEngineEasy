@@ -46,6 +46,7 @@ before(async () => {
 
   await grant(A.brokerageId, "grow.access");
   await grant(A.brokerageId, "grow.relationships.manage");
+  await grant(A.brokerageId, "grow.properties.link");
   await grant(A.brokerageId, "grow.activities.manage");
   await grant(A.brokerageId, "grow.opportunities.manage");
   await grant(B.brokerageId, "grow.access");
@@ -346,6 +347,7 @@ test("GET /today never returns another brokerage's contacts, opportunities, or c
   const bPropertyId = await createProperty(B.agent.cookie, "17 Cross Tenant Today Ave");
   const bPartyId = await createParty(B.agent.cookie, bPropertyId, { firstName: "Bianca", lastName: "BrokerageB" });
   await grant(B.brokerageId, "grow.relationships.manage");
+  await grant(B.brokerageId, "grow.properties.link");
   await createRelationship(B.agent.cookie, { partyId: bPartyId, propertyId: bPropertyId, relationshipType: "owner" });
 
   const { body: aBody } = await fetchToday(A.agent.cookie);
