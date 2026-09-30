@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
+import { and, eq } from "drizzle-orm";
+import { db, growOpportunitySignals, properties, propertyExternalIdentifiers } from "@aee/db";
 import { logger } from "@aee/events";
-import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { countActiveSignals, getSweepOpsHealth, runSignalSweep } from "../lib/propertyIntelligence/sweep.js";
 import {
@@ -18,7 +20,7 @@ import {
   promoteSignal,
   recalculateSignalsForProperty,
 } from "../lib/propertyIntelligence/service.js";
-import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
+import { assertPropertyVisibleForWrite, propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 /**
  * AE GROW Priority 5 Remediation — the Property Intelligence API the
@@ -69,6 +71,23 @@ function readIdParam(
 /** What an unrecognised error is allowed to tell a client. */
 const GENERIC_PROPERTY_INTELLIGENCE_ERROR =
   "An unexpected error occurred. Please try again or contact support if the problem persists.";
+
+/** A row already known to be in this brokerage, linked to a property the
+ * caller cannot see. Null property ids (contact-anchored signals) are not
+ * hidden. A missing row is left to the service, which already 404s. */
+async function linkedWriteHidden(user: AuthedUser, propertyId: number | null): Promise<boolean> {
+  return !(await assertPropertyVisibleForWrite(user, propertyId));
+}
+
+async function signalWriteHidden(user: AuthedUser, signalId: number): Promise<boolean> {
+  const [row] = await db
+    .select({ propertyId: growOpportunitySignals.propertyId })
+    .from(growOpportunitySignals)
+    .where(and(eq(growOpportunitySignals.id, signalId), eq(growOpportunitySignals.brokerageId, user.brokerageId)))
+    .limit(1);
+  if (!row) return false;
+  return linkedWriteHidden(user, row.propertyId);
+}
 
 function handlePropertyIntelligenceError(err: unknown, res: import("express").Response): void {
   if (err instanceof PropertyIntelligenceAccessError) {
@@ -205,6 +224,15 @@ propertyIntelligenceRouter.post("/matches/:identifierId/confirm", requireAuth, r
   const user = req.authedUser!;
   const identifierId = readIdParam(res, req.params.identifierId, "match");
   if (identifierId === null) return;
+  const [matchRow] = await db
+    .select({ propertyId: propertyExternalIdentifiers.propertyId })
+    .from(propertyExternalIdentifiers)
+    .where(and(eq(propertyExternalIdentifiers.id, identifierId), eq(propertyExternalIdentifiers.brokerageId, user.brokerageId)))
+    .limit(1);
+  if (matchRow && (await linkedWriteHidden(user, matchRow.propertyId))) {
+    res.status(404).json({ error: "Match not found" });
+    return;
+  }
   try {
     const match = await confirmMatch({ identifierId, brokerageId: user.brokerageId, userId: user.id });
     res.json({ match });
@@ -224,6 +252,15 @@ propertyIntelligenceRouter.post("/matches/:identifierId/reject", requireAuth, re
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  const [matchRow] = await db
+    .select({ propertyId: propertyExternalIdentifiers.propertyId })
+    .from(propertyExternalIdentifiers)
+    .where(and(eq(propertyExternalIdentifiers.id, identifierId), eq(propertyExternalIdentifiers.brokerageId, user.brokerageId)))
+    .limit(1);
+  if (matchRow && (await linkedWriteHidden(user, matchRow.propertyId))) {
+    res.status(404).json({ error: "Match not found" });
+    return;
+  }
   try {
     const match = await rejectMatch({ identifierId, brokerageId: user.brokerageId, userId: user.id, rejectedReason: parsed.data.rejectedReason });
     res.json({ match });
@@ -240,6 +277,10 @@ propertyIntelligenceRouter.post("/signals/:signalId/review", requireAuth, requir
   const user = req.authedUser!;
   const signalId = readIdParam(res, req.params.signalId, "signal");
   if (signalId === null) return;
+  if (await signalWriteHidden(user, signalId)) {
+    res.status(404).json({ error: "Signal not found" });
+    return;
+  }
   try {
     const signal = await reviewSignal({ signalId, brokerageId: user.brokerageId, userId: user.id });
     res.json({ signal });
@@ -259,6 +300,10 @@ propertyIntelligenceRouter.post("/signals/:signalId/dismiss", requireAuth, requi
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await signalWriteHidden(user, signalId)) {
+    res.status(404).json({ error: "Signal not found" });
+    return;
+  }
   try {
     const signal = await dismissSignal({ signalId, brokerageId: user.brokerageId, userId: user.id, dismissedReason: parsed.data.dismissedReason });
     res.json({ signal });
@@ -271,6 +316,10 @@ propertyIntelligenceRouter.post("/signals/:signalId/promote", requireAuth, requi
   const user = req.authedUser!;
   const signalId = readIdParam(res, req.params.signalId, "signal");
   if (signalId === null) return;
+  if (await signalWriteHidden(user, signalId)) {
+    res.status(404).json({ error: "Signal not found" });
+    return;
+  }
   try {
     const result = await promoteSignal({ signalId, brokerageId: user.brokerageId, userId: user.id });
     res.json(result);
@@ -289,6 +338,20 @@ propertyIntelligenceRouter.post("/property/:propertyId/recalculate", requireAuth
   const user = req.authedUser!;
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
+  // A property outside this brokerage is left to recalculate, which already
+  // 404s. A same-brokerage property the caller cannot see is that same 404
+  // and is not recalculated.
+  if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
+    const [property] = await db
+      .select({ id: properties.id })
+      .from(properties)
+      .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId)))
+      .limit(1);
+    if (property) {
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
+  }
   try {
     const signals = await recalculateSignalsForProperty(propertyId, user.brokerageId);
     res.json({ signals });

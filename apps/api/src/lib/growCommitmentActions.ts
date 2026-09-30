@@ -27,7 +27,8 @@
 // route.
 
 import { and, eq } from "drizzle-orm";
-import { db, growCommitments, growOpportunities, parties, properties, type GrowCommitment } from "@aee/db";
+import { db, growCommitments, growOpportunities, parties, properties, users, type GrowCommitment, type UserRole } from "@aee/db";
+import { assertPropertyVisibleForWrite } from "./propertyVisibility.js";
 
 export class GrowCommitmentValidationError extends Error {
   constructor(message: string) {
@@ -83,6 +84,24 @@ export async function createApprovedGrowCommitment(input: CreateApprovedGrowComm
       .where(and(eq(properties.id, input.propertyId), eq(properties.brokerageId, input.brokerageId)))
       .limit(1);
     if (!property) {
+      throw new GrowCommitmentValidationError("Property not found in this brokerage.");
+    }
+    // Same message as a property outside this brokerage. The acting user is
+    // createdBy (the human who executes an Ask AE proposal, or the caller of
+    // this function). A null property id never reaches this branch.
+    const [actor] = await db
+      .select({ id: users.id, role: users.role, brokerageId: users.brokerageId })
+      .from(users)
+      .where(eq(users.id, input.createdBy))
+      .limit(1);
+    if (
+      !actor ||
+      actor.brokerageId !== input.brokerageId ||
+      !(await assertPropertyVisibleForWrite(
+        { id: actor.id, role: actor.role as UserRole, brokerageId: input.brokerageId },
+        property.id,
+      ))
+    ) {
       throw new GrowCommitmentValidationError("Property not found in this brokerage.");
     }
     propertyId = property.id;

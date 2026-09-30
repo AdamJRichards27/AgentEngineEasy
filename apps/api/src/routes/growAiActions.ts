@@ -3,6 +3,7 @@ import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { listAwaitingApprovalForUser } from "../lib/ai/actionRequests.js";
 import { callReviewProvenanceForRequests } from "../lib/growCallReviewLinks.js";
+import { linkedPropertyHidden, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 // AE GROW Priority 6 Stage D — AI-Proposed, Human-Approved Follow-Up
 // Actions.
@@ -52,9 +53,18 @@ growAiActionsRouter.get(
       authedUser.brokerageId,
       authedUser.id,
     );
-    const requests = partyId === null
+    const partyScoped = partyId === null
       ? allRequests
       : allRequests.filter((r) => (r.inputPayload as { partyId?: unknown } | null)?.partyId === partyId);
+    // A proposal that names a property this caller cannot see is left out.
+    // Contact-level proposals (no property id) stay. Execution of
+    // CREATE_GROW_COMMITMENT repeats the check in createApprovedGrowCommitment.
+    const restrictTo = await restrictedPropertyIdsFor(authedUser);
+    const requests = partyScoped.filter((r) => {
+      const propertyId = (r.inputPayload as { propertyId?: unknown } | null)?.propertyId;
+      if (typeof propertyId !== "number") return true;
+      return !linkedPropertyHidden(propertyId, restrictTo);
+    });
 
     // Every field returned here is either the request's own governance
     // metadata (id, status, timestamps) or a field already defined and

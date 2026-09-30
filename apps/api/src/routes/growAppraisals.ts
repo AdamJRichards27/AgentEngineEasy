@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
+import { and, eq } from "drizzle-orm";
+import { db, growOpportunities, properties } from "@aee/db";
 import { logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   AppraisalAccessError,
@@ -31,7 +33,7 @@ import type { ComparableSaleInput, MarketCompetitionInput } from "../lib/growApp
 import { AiFeatureDisabledError, AiEntitlementError } from "../lib/ai/types.js";
 import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
-import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
+import { assertPropertyVisibleForWrite, propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 export const growAppraisalsRouter = Router();
 
@@ -122,6 +124,27 @@ const requiresRunAccess = requireEntitlement("run.access");
 const requiresGrowAccess = requireEntitlement("grow.access");
 const requiresGrowManage = requireEntitlement("grow.opportunities.manage");
 
+/**
+ * True when this response has already been sent. A missing appraisal is left
+ * to the mutation, which already 404s and records isolation. A same-brokerage
+ * appraisal on a property the caller cannot see is that same 404, before any
+ * write. Appraisal property ids are required, so there is no contact-level row.
+ */
+async function appraisalWriteBlocked(user: AuthedUser, appraisalId: number, res: import("express").Response): Promise<boolean> {
+  try {
+    const workspace = await getAppraisalWorkspace(appraisalId, user.brokerageId);
+    if (!(await assertPropertyVisibleForWrite(user, workspace.appraisal.propertyId))) {
+      res.status(404).json({ error: "Appraisal not found" });
+      return true;
+    }
+    return false;
+  } catch (err) {
+    if (err instanceof AppraisalAccessError) return false;
+    handleGrowAppraisalError(err, res);
+    return true;
+  }
+}
+
 /* ---------------------------------------------------------------------
  * Sec 7/8 -- Create from Contact 360 or from a Grow Opportunity.
  * -----------------------------------------------------------------*/
@@ -135,6 +158,18 @@ growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requ
   const parsed = createFromContactSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const [property] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, parsed.data.propertyId), eq(properties.brokerageId, user.brokerageId)))
+    .limit(1);
+  // A property outside this brokerage keeps the existing create path (and its
+  // isolation note). A same-brokerage property the caller cannot see is 404
+  // before an appraisal is created or reused.
+  if (property && !(await assertPropertyVisibleForWrite(user, parsed.data.propertyId))) {
+    res.status(404).json({ error: "Property not found" });
     return;
   }
   try {
@@ -159,6 +194,18 @@ growAppraisalsRouter.post("/from-opportunity", requireAuth, requiresGrowAccess, 
   const parsed = createFromOpportunitySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  const [opportunity] = await db
+    .select({ propertyId: growOpportunities.propertyId })
+    .from(growOpportunities)
+    .where(and(eq(growOpportunities.id, parsed.data.opportunityId), eq(growOpportunities.brokerageId, user.brokerageId)))
+    .limit(1);
+  // Missing opportunities keep the existing 404 and isolation note. An
+  // opportunity with no property stays on the existing 409. One tied to a
+  // property the caller cannot see is the same 404 as a missing opportunity.
+  if (opportunity && !(await assertPropertyVisibleForWrite(user, opportunity.propertyId))) {
+    res.status(404).json({ error: "Opportunity not found" });
     return;
   }
   try {
@@ -248,6 +295,7 @@ growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrow
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const appraisal = await updateAppraisalWorkspace({
       appraisalId,
@@ -275,6 +323,7 @@ growAppraisalsRouter.post("/:id/status", requireAuth, requiresGrowAccess, requir
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const appraisal = await transitionAppraisalStatus({
       appraisalId,
@@ -306,6 +355,7 @@ growAppraisalsRouter.post("/:id/outcome", requireAuth, requiresGrowAccess, requi
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const appraisal = await recordAppraisalOutcome({
       appraisalId,
@@ -338,6 +388,7 @@ growAppraisalsRouter.post("/:id/follow-up", requireAuth, requiresGrowAccess, req
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const appraisal = await scheduleAppraisalFollowUp({
       appraisalId,
@@ -369,6 +420,7 @@ growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requires
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const result = await sendAppraisal({
       appraisalId,
@@ -390,6 +442,7 @@ growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requires
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const result = await generateMarketPositionDraft({
       appraisalId,
@@ -410,6 +463,7 @@ growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGro
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const result = await generateAppraisalPresentation({
       appraisalId,
@@ -430,6 +484,7 @@ growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresGrowAccess, r
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const result = await prepareAppraisalRunHandoff({
       appraisalId,
@@ -475,6 +530,7 @@ growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAcce
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const row = await addComparableSale(appraisalId, user.brokerageId, {
       ...parsed.data,
@@ -497,6 +553,7 @@ growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, require
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const row = await updateComparableSale(appraisalId, user.brokerageId, saleId, {
       ...parsed.data,
@@ -514,6 +571,7 @@ growAppraisalsRouter.delete("/:id/comparable-sales/:saleId", requireAuth, requir
   if (appraisalId === null) return;
   const saleId = readIdParam(res, req.params.saleId, "comparable sale");
   if (saleId === null) return;
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     await deleteComparableSale(appraisalId, user.brokerageId, saleId);
     res.status(204).send();
@@ -545,6 +603,7 @@ growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAc
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const row = await addMarketCompetitionItem(appraisalId, user.brokerageId, parsed.data as MarketCompetitionInput);
     res.status(201).json({ marketCompetition: row });
@@ -564,6 +623,7 @@ growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requi
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     const row = await updateMarketCompetitionItem(appraisalId, user.brokerageId, itemId, parsed.data as Partial<MarketCompetitionInput>);
     res.json({ marketCompetition: row });
@@ -578,6 +638,7 @@ growAppraisalsRouter.delete("/:id/market-competition/:itemId", requireAuth, requ
   if (appraisalId === null) return;
   const itemId = readIdParam(res, req.params.itemId, "market competition entry");
   if (itemId === null) return;
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
   try {
     await deleteMarketCompetitionItem(appraisalId, user.brokerageId, itemId);
     res.status(204).send();

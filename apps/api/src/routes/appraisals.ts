@@ -6,7 +6,7 @@ import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal, finaliseAppraisal } from "../lib/appraisals.js";
 import { noteGrowPropertyIsolationRejection } from "../lib/grow/isolationRejection.js";
-import { propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
+import { assertPropertyVisibleForWrite, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 
 export const appraisalsRouter = Router();
 
@@ -117,6 +117,10 @@ appraisalsRouter.post("/by-property/:propertyId/start", requireAuth, async (req,
     res.status(404).json({ error: "Not found" });
     return;
   }
+  if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   try {
     const result = await getOrCreateAppraisal({ propertyId, userId: user.id, brokerageId: user.brokerageId });
     res.status(result.created ? 201 : 200).json({ appraisal: result.appraisal });
@@ -144,6 +148,10 @@ appraisalsRouter.post("/by-property/:propertyId", requireAuth, async (req, res) 
     res.status(404).json({ error: "Not found" });
     return;
   }
+  if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   try {
     const appraisal = await updateAppraisal({
       propertyId,
@@ -164,6 +172,10 @@ appraisalsRouter.post("/by-property/:propertyId/finalise", requireAuth, async (r
   if (propertyId === null) return;
   const user = req.authedUser!;
   if (!(await assertPropertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (!(await assertPropertyVisibleForWrite(user, propertyId))) {
     res.status(404).json({ error: "Not found" });
     return;
   }
