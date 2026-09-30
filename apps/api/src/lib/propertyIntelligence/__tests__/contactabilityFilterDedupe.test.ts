@@ -318,8 +318,11 @@ test("I-16 — Grow Today evaluates an overlapping party once across the concate
   ]);
 
   const statements = await capture(() => getGrowTodaySummary(todayId));
-  const dncr = bindsFor(statements, "grow_contact_dncr_statuses");
-  const activity = bindsFor(statements, "grow_activities");
+  // G-UAT-7's existence probe also names grow_activities. It is not the
+  // party-scoped aggregate this assertion measures.
+  const ruleStatements = statements.filter((statement) => !/first_run_probe/i.test(statement.query));
+  const dncr = bindsFor(ruleStatements, "grow_contact_dncr_statuses");
+  const activity = bindsFor(ruleStatements, "grow_activities");
   assert.equal(dncr.length, 1);
   assert.equal(activity.length, 1);
   assert.deepEqual([...dncr[0]].sort((a, b) => a - b), [...expected].sort((a, b) => a - b));

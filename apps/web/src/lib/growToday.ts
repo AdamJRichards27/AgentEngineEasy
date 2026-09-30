@@ -166,6 +166,20 @@ export interface GrowTodaySignalSummary {
   limitations?: string[];
 }
 
+/**
+ * G-UAT-7 — mirrors GrowTodayFirstRun. The API always sends it. Optional
+ * here so an older Today payload still renders: a missing block hides the
+ * checklist rather than throwing.
+ */
+export interface GrowTodayFirstRun {
+  contact: boolean;
+  propertyLink: boolean;
+  activity: boolean;
+  commitment: boolean;
+  opportunity: boolean;
+  appraisal: boolean;
+}
+
 export interface GrowTodaySummary {
   generatedAt: string;
   hasAnyGrowData: boolean;
@@ -177,6 +191,7 @@ export interface GrowTodaySummary {
   };
   priorityActions: GrowTodayAction[];
   signalSummary: GrowTodaySignalSummary;
+  firstRun?: GrowTodayFirstRun;
 }
 
 /**
