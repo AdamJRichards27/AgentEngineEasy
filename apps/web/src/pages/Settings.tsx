@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
+import OwnNameForm from "../components/OwnNameForm";
 
 interface CatalogueProduct {
   productId: number;
@@ -68,13 +69,25 @@ export default function Settings() {
     onSuccess: invalidateBilling,
   });
 
+  const needsName = !user?.firstName?.trim() || !user?.lastName?.trim();
+
   return (
     <div>
       <h1>Settings</h1>
-      <section className="card">
-        <h2>Account</h2>
+      <section className="card" id="profile">
+        <h2>{needsName ? "Complete your profile" : "Your name"}</h2>
+        <p className="muted">
+          {needsName
+            ? "Add your first and last name. This is the name your brokerage and Pit Crew see."
+            : "This is the name your brokerage and Pit Crew see."}
+        </p>
+        <OwnNameForm
+          key={`${user?.id ?? "signed-out"}:${user?.firstName ?? ""}:${user?.lastName ?? ""}`}
+          initialFirstName={user?.firstName ?? ""}
+          initialLastName={user?.lastName ?? ""}
+        />
         <p>
-          {user?.firstName} {user?.lastName} · {user?.email}
+          {user?.email}
         </p>
         <p className="muted">
           {user?.brokerageName} · {user?.role}

@@ -12,7 +12,14 @@
  * Usage (documented in full in docs/REPLIT_PILOT_DEPLOYMENT_RUNBOOK.md):
  *
  *   pnpm --filter @aee/api run bootstrap-admin -- \
- *     --email admin@youragency.com.au --brokerage "Your Agency"
+ *     --email admin@youragency.com.au --brokerage "Your Agency" \
+ *     [--first-name Ada --last-name Admin]
+ *
+ * Optional --first-name and --last-name store the administrator's name.
+ * Omitting both leaves the name blank so the sign-in UI can collect it.
+ * This command does not record legal acceptance — the administrator
+ * accepts the current Terms of Use and Privacy Policy on the sign-in
+ * screen. It never auto-accepts those documents.
  *
  * Deliberately NOT run as part of ordinary `npm start`/boot (it lives in
  * scripts/, is not imported by index.ts, and requires explicit flags to do
@@ -25,13 +32,16 @@ import { createInterface } from "node:readline";
 import { db, users, brokerages } from "@aee/db";
 import { eq } from "drizzle-orm";
 import { hashPassword, passwordPolicyViolation } from "../lib/auth/password.js";
+import { normalizePersonName } from "../lib/auth/personName.js";
 import { logAudit } from "../lib/audit.js";
 
-function parseArgs(argv: string[]): { email?: string; brokerage?: string } {
-  const out: { email?: string; brokerage?: string } = {};
+function parseArgs(argv: string[]): { email?: string; brokerage?: string; firstName?: string; lastName?: string } {
+  const out: { email?: string; brokerage?: string; firstName?: string; lastName?: string } = {};
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--email") out.email = argv[++i];
     else if (argv[i] === "--brokerage") out.brokerage = argv[++i];
+    else if (argv[i] === "--first-name") out.firstName = argv[++i];
+    else if (argv[i] === "--last-name") out.lastName = argv[++i];
   }
   return out;
 }
@@ -60,14 +70,29 @@ async function readSecret(prompt: string): Promise<string> {
 }
 
 async function main() {
-  const { email, brokerage } = parseArgs(process.argv.slice(2));
+  const { email, brokerage, firstName: rawFirstName, lastName: rawLastName } = parseArgs(process.argv.slice(2));
   if (!email || !brokerage) {
     console.error(
-      "Usage: pnpm --filter @aee/api run bootstrap-admin -- --email <email> --brokerage <name>\n" +
-        "Both flags are required. This command refuses to run without them — it never runs implicitly.",
+      "Usage: pnpm --filter @aee/api run bootstrap-admin -- --email <email> --brokerage <name> [--first-name <name> --last-name <name>]\n" +
+        "--email and --brokerage are required. This command refuses to run without them — it never runs implicitly.\n" +
+        "Names are optional. Pass both --first-name and --last-name, or neither. This command does not accept legal terms.",
     );
     process.exitCode = 1;
     return;
+  }
+  let firstName = "";
+  let lastName = "";
+  if (rawFirstName !== undefined || rawLastName !== undefined) {
+    const parsedFirst = normalizePersonName(rawFirstName, "First name");
+    const parsedLast = normalizePersonName(rawLastName, "Last name");
+    if (!parsedFirst.ok || !parsedLast.ok) {
+      const errors = [parsedFirst, parsedLast].flatMap((result) => (result.ok ? [] : [result.error]));
+      console.error(`Refusing: ${errors.join(" ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    firstName = parsedFirst.value;
+    lastName = parsedLast.value;
   }
   const normalizedEmail = email.toLowerCase();
 
@@ -120,8 +145,8 @@ async function main() {
     .values({
       authProviderId: `bootstrap:${normalizedEmail}`,
       email: normalizedEmail,
-      firstName: "",
-      lastName: "",
+      firstName,
+      lastName,
       role: "Brokerage Administrator",
       brokerageId: brokerageRow.id,
       passwordHash,

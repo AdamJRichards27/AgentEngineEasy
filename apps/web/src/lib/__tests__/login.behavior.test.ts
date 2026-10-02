@@ -429,4 +429,184 @@ describe("UAT-T1 Login", { concurrency: 1 }, () => {
     const child = loginRouteChild(App()) as ElementNode;
     assert.equal(kind(child), "Login");
   });
+
+  test("a 428 shows the legal acceptance screen and accepting records consent then signs in", async () => {
+    resetInteraction();
+    const email = "ada@harbour.test";
+    const password = "correct-horse-battery";
+    const stored: string[] = [];
+    const storage = {
+      setItem: (key: string) => {
+        stored.push(key);
+      },
+      getItem: () => null,
+      removeItem: () => {},
+      clear: () => {},
+      length: 0,
+      key: () => null,
+    };
+    Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
+    Object.defineProperty(globalThis, "sessionStorage", { value: storage, configurable: true });
+    g.__uatLoginNextSession = sessionFor("Brokerage Administrator", ["run.access"]);
+    g.__uatLoginQueries['["legal-versions"]'] = {
+      isLoading: false,
+      isError: false,
+      data: { termsVersion: "terms-2026-01", privacyVersion: "privacy-2026-01" },
+      error: null,
+    };
+    g.__uatLoginQueries['["legal-terms"]'] = {
+      isLoading: false,
+      isError: false,
+      data: { version: "terms-2026-01", content: "Terms body for the pilot." },
+      error: null,
+    };
+    g.__uatLoginQueries['["legal-privacy"]'] = {
+      isLoading: false,
+      isError: false,
+      data: { version: "privacy-2026-01", content: "Privacy body for the pilot." },
+      error: null,
+    };
+    let loginAttempts = 0;
+    g.__uatLoginApiFetch = (path, options) => {
+      if (path === "/auth/login") {
+        loginAttempts += 1;
+        if (loginAttempts === 1) return Promise.reject(new g.__uatLoginApiError(428, "You must accept the current Terms of Use and Privacy Policy before signing in."));
+        return Promise.resolve({ user: { id: 1, role: "Brokerage Administrator" } });
+      }
+      if (path === "/legal/acceptance") return Promise.resolve(undefined);
+      return Promise.resolve({});
+    };
+
+    let tree = renderLogin();
+    change(labeledInput(tree, "Email"), email);
+    tree = renderLogin();
+    change(labeledInput(tree, "Password"), password);
+    tree = renderLogin();
+    click(button(tree, "Sign in"));
+    await Promise.all(g.__uatLoginPending);
+
+    tree = renderLogin();
+    const page = textContent(tree);
+    assert.match(page, /Terms of Use/);
+    assert.match(page, /Privacy Policy/);
+    assert.match(page, /terms-2026-01/);
+    assert.match(page, /privacy-2026-01/);
+    assert.match(page, /Terms body for the pilot/);
+    assert.match(page, /Privacy body for the pilot/);
+    assert.equal(button(tree, "Accept and sign in")?.props?.disabled, true);
+    assert.equal(g.__uatLoginCompleteSignIn, 0);
+
+    const boxes = findAll(tree, (element) => element.type === "input" && element.props?.type === "checkbox");
+    assert.equal(boxes.length, 2);
+    const toggle = boxes[0]?.props?.onChange;
+    if (typeof toggle !== "function") throw new Error("missing terms checkbox");
+    toggle({ target: { checked: true } });
+    tree = renderLogin();
+    const togglePrivacy = findAll(tree, (element) => element.type === "input" && element.props?.type === "checkbox")[1]?.props?.onChange;
+    if (typeof togglePrivacy !== "function") throw new Error("missing privacy checkbox");
+    togglePrivacy({ target: { checked: true } });
+    tree = renderLogin();
+    assert.equal(button(tree, "Accept and sign in")?.props?.disabled, false);
+    click(button(tree, "Accept and sign in"));
+    await Promise.all(g.__uatLoginPending);
+
+    assert.deepEqual(
+      g.__uatLoginWrites.map((write) => write.path),
+      ["/auth/login", "/legal/acceptance", "/auth/login"],
+    );
+    assert.equal(g.__uatLoginWrites[1]?.options?.method, "POST");
+    assert.deepEqual(JSON.parse(g.__uatLoginWrites[1]?.options?.body ?? ""), {
+      email,
+      password,
+      acceptedTerms: true,
+      acceptedPrivacyPolicy: true,
+    });
+    assert.equal(g.__uatLoginWrites[2]?.options?.method, "POST");
+    assert.deepEqual(JSON.parse(g.__uatLoginWrites[2]?.options?.body ?? ""), { email, password });
+    assert.equal(g.__uatLoginCompleteSignIn, 1);
+    assert.deepEqual(stored, []);
+    assert.equal(textContent(renderLogin()).includes("You stayed signed out"), false);
+  });
+
+  test("declining legal acceptance stays signed out and does not record consent", async () => {
+    resetInteraction();
+    g.__uatLoginApiFetch = (path) => {
+      if (path === "/auth/login") return Promise.reject(new g.__uatLoginApiError(428, "You must accept the current Terms of Use and Privacy Policy before signing in."));
+      return Promise.resolve(undefined);
+    };
+    let tree = renderLogin();
+    change(labeledInput(tree, "Email"), "ada@harbour.test");
+    tree = renderLogin();
+    change(labeledInput(tree, "Password"), "correct-horse-battery");
+    tree = renderLogin();
+    click(button(tree, "Sign in"));
+    await Promise.all(g.__uatLoginPending);
+
+    tree = renderLogin();
+    click(button(tree, "Decline"));
+    tree = renderLogin();
+    assert.match(textContent(tree), /You stayed signed out/);
+    assert.equal(button(tree, "Accept and sign in"), undefined);
+    assert.equal(labeledInput(tree, "Password")?.props?.value, "");
+    assert.deepEqual(
+      g.__uatLoginWrites.map((write) => write.path),
+      ["/auth/login"],
+    );
+    assert.equal(g.__uatLoginCompleteSignIn, 0);
+    assert.equal(g.__uatLoginSession.isSignedIn, false);
+  });
+
+  test("a failed legal acceptance keeps the user signed out", async () => {
+    resetInteraction();
+    g.__uatLoginQueries['["legal-versions"]'] = {
+      isLoading: false,
+      isError: false,
+      data: { termsVersion: "terms-2026-01", privacyVersion: "privacy-2026-01" },
+      error: null,
+    };
+    g.__uatLoginQueries['["legal-terms"]'] = {
+      isLoading: false,
+      isError: false,
+      data: { version: "terms-2026-01", content: "Terms body for the pilot." },
+      error: null,
+    };
+    g.__uatLoginQueries['["legal-privacy"]'] = {
+      isLoading: false,
+      isError: false,
+      data: { version: "privacy-2026-01", content: "Privacy body for the pilot." },
+      error: null,
+    };
+    g.__uatLoginApiFetch = (path) => {
+      if (path === "/legal/acceptance") return Promise.reject(new g.__uatLoginApiError(503, "Approved legal documents are not configured."));
+      if (path === "/auth/login") return Promise.reject(new g.__uatLoginApiError(428, "You must accept the current Terms of Use and Privacy Policy before signing in."));
+      return Promise.resolve(undefined);
+    };
+
+    let tree = renderLogin();
+    change(labeledInput(tree, "Email"), "ada@harbour.test");
+    tree = renderLogin();
+    change(labeledInput(tree, "Password"), "correct-horse-battery");
+    tree = renderLogin();
+    click(button(tree, "Sign in"));
+    await Promise.all(g.__uatLoginPending);
+    tree = renderLogin();
+    const boxes = findAll(tree, (element) => element.type === "input" && element.props?.type === "checkbox");
+    (boxes[0]?.props?.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+    tree = renderLogin();
+    const privacy = findAll(tree, (element) => element.type === "input" && element.props?.type === "checkbox")[1];
+    (privacy?.props?.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+    tree = renderLogin();
+    click(button(tree, "Accept and sign in"));
+    await Promise.all(g.__uatLoginPending);
+    tree = renderLogin();
+
+    assert.match(textContent(tree), /Approved legal documents are not configured\./);
+    assert.deepEqual(
+      g.__uatLoginWrites.map((write) => write.path),
+      ["/auth/login", "/legal/acceptance"],
+    );
+    assert.equal(g.__uatLoginCompleteSignIn, 0);
+    assert.equal(g.__uatLoginSession.isSignedIn, false);
+    assert.equal(button(tree, "Accept and sign in") === undefined, false);
+  });
 });

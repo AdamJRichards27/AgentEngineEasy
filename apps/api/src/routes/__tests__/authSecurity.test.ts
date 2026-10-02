@@ -212,7 +212,7 @@ test("accepting an invitation with a weak password is rejected", async () => {
   const res = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: "short", acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: "short", firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   assert.equal(res.status, 400);
 });
@@ -224,7 +224,7 @@ test("accepting a valid invitation creates the user with the invitation's role/t
   const res = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true, role: "Brokerage Administrator", brokerageId: 999999 }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true, role: "Brokerage Administrator", brokerageId: 999999 }),
   });
   assert.equal(res.status, 201);
   const body = (await res.json()) as { user: { role: string; brokerageId: number; email: string } };
@@ -250,7 +250,7 @@ test("accepting an invitation without agreeing to the Terms of Use / Privacy Pol
   const missingBoth = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person" }),
   });
   assert.equal(missingBoth.status, 400);
 
@@ -258,7 +258,7 @@ test("accepting an invitation without agreeing to the Terms of Use / Privacy Pol
   const missingPrivacyOnly = await fetch(`${baseUrl}/api/auth/invitations/${plaintext2}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true }),
   });
   assert.equal(missingPrivacyOnly.status, 400);
 });
@@ -269,13 +269,13 @@ test("an accepted invitation token cannot be used again (single-use)", async () 
   const first = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   assert.equal(first.status, 201);
   const second = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   assert.equal(second.status, 400);
 });
@@ -288,7 +288,7 @@ test("an expired invitation token cannot be accepted", async () => {
   const res = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   assert.equal(res.status, 400);
 });
@@ -301,7 +301,7 @@ test("a revoked invitation token cannot be accepted", async () => {
   const res = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   assert.equal(res.status, 400);
 });
@@ -343,7 +343,7 @@ test("login with correct credentials succeeds and the session works", async () =
   await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
@@ -363,7 +363,7 @@ test("login returns the identical generic error for an unknown email, a wrong pa
   await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   await db.update(users).set({ isActive: false }).where(eq(users.email, email));
 
@@ -397,7 +397,7 @@ test("repeated failed logins lock the account, and a correct password is rejecte
   await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
 
   for (let i = 0; i < 5; i++) {
@@ -448,7 +448,7 @@ test("a valid password-reset token changes the password and revokes existing ses
   const acceptRes = await fetch(`${baseUrl}/api/auth/invitations/${inviteToken}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   const oldCookie = cookieFrom(acceptRes);
   const meBeforeReset = await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie: oldCookie } });
@@ -522,7 +522,7 @@ test("change-password requires the correct current password, enforces the policy
   const acceptRes = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   const cookie = cookieFrom(acceptRes);
 
@@ -575,7 +575,7 @@ test("disabling a user revokes their session immediately and they can no longer 
   const acceptRes = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   const targetCookie = cookieFrom(acceptRes);
   const [target] = await db.select().from(users).where(eq(users.email, email));
@@ -648,7 +648,7 @@ test("administrator succession atomically transfers authority, revokes both sess
   const accepted = await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   const targetCookie = cookieFrom(accepted);
   const [targetBefore] = await db.select().from(users).where(eq(users.email, targetEmail));
@@ -726,7 +726,7 @@ test("disabling one of multiple administrators preserves an active administrator
   await fetch(`${baseUrl}/api/auth/invitations/${plaintext}/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password: STRONG_PASSWORD, acceptedTerms: true, acceptedPrivacyPolicy: true }),
+    body: JSON.stringify({ password: STRONG_PASSWORD, firstName: "Invited", lastName: "Person", acceptedTerms: true, acceptedPrivacyPolicy: true }),
   });
   const [secondAdmin] = await db.select().from(users).where(eq(users.email, secondEmail));
   const firstDisable = await fetch(`${baseUrl}/api/auth/admin/users/${secondAdmin.id}/disable`, {

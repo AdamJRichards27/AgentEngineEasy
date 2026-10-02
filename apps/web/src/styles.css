@@ -877,6 +877,21 @@ details.section > *:not(summary) {
   max-width: 380px;
 }
 
+.auth-card-legal {
+  max-width: 40rem;
+}
+
+.legal-document {
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  font-size: 0.85rem;
+  background: var(--color-bg);
+}
+
 .auth-logo {
   display: flex;
   align-items: center;
