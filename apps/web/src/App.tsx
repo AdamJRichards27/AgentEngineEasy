@@ -199,6 +199,15 @@ function SidebarLayout({
       </nav>
       <div className="app-content">
         <main>
+          {(!user?.firstName?.trim() || !user?.lastName?.trim()) && (
+            <section className="card" role="status">
+              <h2>Complete your profile</h2>
+              <p>Add your first and last name so your brokerage can see who you are.</p>
+              <Link href="/settings" className="btn btn-primary btn-small">
+                Add your name
+              </Link>
+            </section>
+          )}
           {/* AE GROW Pilot Readiness WP5 — a page that fails to render shows a
               contained fallback here (sidebar stays usable); navigating away
               resets it. */}

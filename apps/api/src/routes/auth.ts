@@ -11,6 +11,7 @@ import { hashPassword, verifyPassword, passwordPolicyViolation } from "../lib/au
 import { generateToken, hashToken } from "../lib/auth/tokens.js";
 import { getAuthEmailProvider } from "../lib/auth/email.js";
 import { getActiveLegalVersions } from "../lib/auth/legalVersions.js";
+import { normalizePersonName } from "../lib/auth/personName.js";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 
@@ -187,6 +188,75 @@ authRouter.get("/me", requireAuth, async (req, res) => {
   const [b] = row.brokerageId ? await db.select().from(brokerages).where(eq(brokerages.id, row.brokerageId)) : [];
   const entitlements = await resolveEntitlements(authed);
   res.json({ user: userView(row, b?.name), entitlements: Array.from(entitlements) });
+});
+
+const updateOwnNameSchema = z
+  .object({
+    firstName: z.string({ required_error: "First name is required.", invalid_type_error: "First name is required." }),
+    lastName: z.string({ required_error: "Last name is required.", invalid_type_error: "Last name is required." }),
+  })
+  .strict();
+
+// UAT-OB1 — a signed-in user updates their OWN first and last name.
+// There is no user id in the path or a trusted id in the body: the only
+// row written is req.authedUser.id. Unknown keys (userId, email, role,
+// brokerageId) are rejected so this route cannot target or reshape
+// another account. Names use the same trim / blank / length rules as
+// invitation accept. The audit row follows the other user-account
+// changes in this file (logAudit, recordType "user", previous/updated
+// values).
+authRouter.patch("/profile", requireAuth, async (req, res) => {
+  const parsed = updateOwnNameSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const unrecognized = parsed.error.issues.some((issue) => issue.code === "unrecognized_keys");
+    res.status(400).json({
+      error: unrecognized
+        ? "You can only update your own first and last name."
+        : (parsed.error.issues[0]?.message ?? "Enter your first and last name."),
+    });
+    return;
+  }
+  const firstName = normalizePersonName(parsed.data.firstName, "First name");
+  if (!firstName.ok) {
+    res.status(400).json({ error: firstName.error });
+    return;
+  }
+  const lastName = normalizePersonName(parsed.data.lastName, "Last name");
+  if (!lastName.ok) {
+    res.status(400).json({ error: lastName.error });
+    return;
+  }
+
+  const authed = req.authedUser!;
+  const [existing] = await db.select().from(users).where(eq(users.id, authed.id));
+  if (!existing || existing.id !== authed.id) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const [updated] = await db
+    .update(users)
+    .set({ firstName: firstName.value, lastName: lastName.value, updatedAt: new Date() })
+    .where(eq(users.id, authed.id))
+    .returning();
+  if (!updated || updated.id !== authed.id) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  await logAudit({
+    brokerageId: updated.brokerageId ?? undefined,
+    userId: updated.id,
+    userEmail: updated.email,
+    action: "user_name_updated",
+    recordType: "user",
+    recordId: String(updated.id),
+    previousValue: JSON.stringify({ firstName: existing.firstName, lastName: existing.lastName }),
+    updatedValue: JSON.stringify({ firstName: updated.firstName, lastName: updated.lastName }),
+  });
+
+  const [brokerage] = updated.brokerageId ? await db.select().from(brokerages).where(eq(brokerages.id, updated.brokerageId)) : [];
+  res.json({ user: userView(updated, brokerage?.name) });
 });
 
 // Foundation Remediation - server-side session revocation: this session
@@ -403,6 +473,11 @@ authRouter.get("/invitations/:token/status", async (req, res) => {
 
 const acceptInvitationSchema = z.object({
   password: z.string(),
+  // UAT-OB1: invitation accept must capture the person's own name. Extra
+  // keys (role, brokerageId, userId) stay stripped, never trusted — role
+  // and tenant still come only from the invitation row below.
+  firstName: z.string({ required_error: "First name is required.", invalid_type_error: "First name is required." }),
+  lastName: z.string({ required_error: "Last name is required.", invalid_type_error: "Last name is required." }),
   // Critical Blocker Remediation, Phase 8: acceptance of the current
   // Terms of Use / Privacy Policy is mandatory to create an account — both
   // documents are still marked DRAFT — LEGAL REVIEW REQUIRED (see
@@ -417,7 +492,17 @@ const acceptInvitationSchema = z.object({
 authRouter.post("/invitations/:token/accept", async (req, res) => {
   const parsed = acceptInvitationSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "A password is required, and you must accept the Terms of Use and Privacy Policy." });
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "A password, your name, and acceptance of the Terms of Use and Privacy Policy are required." });
+    return;
+  }
+  const firstName = normalizePersonName(parsed.data.firstName, "First name");
+  if (!firstName.ok) {
+    res.status(400).json({ error: firstName.error });
+    return;
+  }
+  const lastName = normalizePersonName(parsed.data.lastName, "Last name");
+  if (!lastName.ok) {
+    res.status(400).json({ error: lastName.error });
     return;
   }
   const invitation = await findLiveInvitationByPlaintextToken(req.params.token);
@@ -458,8 +543,8 @@ authRouter.post("/invitations/:token/accept", async (req, res) => {
     .values({
       authProviderId: `invite:${invitation.email}`,
       email: invitation.email,
-      firstName: "",
-      lastName: "",
+      firstName: firstName.value,
+      lastName: lastName.value,
       role: invitation.role,
       brokerageId: invitation.brokerageId,
       passwordHash,

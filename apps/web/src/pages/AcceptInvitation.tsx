@@ -14,8 +14,9 @@ import { useCompleteSignIn, type SessionUser } from "../lib/session";
 // GET /auth/invitations/:token/status deliberately reveals only one of two
 // opaque states ("valid" / "invalid_or_expired") — never who was invited or
 // why a token is dead — so this page must not try to be more specific than
-// that either. POST /auth/invitations/:token/accept requires both
-// acceptedTerms and acceptedPrivacyPolicy to be exactly `true`. The linked
+// that either. POST /auth/invitations/:token/accept requires a first name,
+// a last name, and both acceptedTerms and acceptedPrivacyPolicy to be
+// exactly `true`. Names are trimmed; blank names are rejected. The linked
 // server endpoints return the exact active content whose SHA-256 identity is
 // recorded on acceptance; production cannot expose these unless approved,
 // hash-verified artifacts are configured.
@@ -25,6 +26,8 @@ export default function AcceptInvitation({ params }: { params: { token: string }
   const completeSignIn = useCompleteSignIn();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [acceptedPrivacyPolicy, setAcceptedPrivacyPolicy] = useState(false);
 
@@ -43,7 +46,13 @@ export default function AcceptInvitation({ params }: { params: { token: string }
     mutationFn: () =>
       apiFetch<{ user: SessionUser }>(`/auth/invitations/${token}/accept`, {
         method: "POST",
-        body: JSON.stringify({ password, acceptedTerms, acceptedPrivacyPolicy }),
+        body: JSON.stringify({
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          password,
+          acceptedTerms,
+          acceptedPrivacyPolicy,
+        }),
       }),
     onSuccess: async () => {
       await completeSignIn();
@@ -52,7 +61,12 @@ export default function AcceptInvitation({ params }: { params: { token: string }
   });
 
   const passwordsMatch = password.length > 0 && password === confirmPassword;
-  const canSubmit = passwordsMatch && acceptedTerms && acceptedPrivacyPolicy && !accept.isPending;
+  const trimmedFirst = firstName.trim();
+  const trimmedLast = lastName.trim();
+  const NAME_MAX = 80;
+  const namesOk =
+    trimmedFirst.length > 0 && trimmedLast.length > 0 && trimmedFirst.length <= NAME_MAX && trimmedLast.length <= NAME_MAX;
+  const canSubmit = passwordsMatch && namesOk && acceptedTerms && acceptedPrivacyPolicy && !accept.isPending;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -83,7 +97,18 @@ export default function AcceptInvitation({ params }: { params: { token: string }
           <p className="muted">Your account is ready — taking you in…</p>
         ) : (
           <div className="stack">
-            <p className="muted">Set a password to finish creating your account.</p>
+            <p className="muted">Add your name and set a password to finish creating your account.</p>
+            <label>
+              First name
+              <input type="text" autoComplete="given-name" value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+            </label>
+            <label>
+              Last name
+              <input type="text" autoComplete="family-name" value={lastName} onChange={(e) => setLastName(e.target.value)} />
+            </label>
+            {(trimmedFirst.length > NAME_MAX || trimmedLast.length > NAME_MAX) && (
+              <p className="error-text">First and last name must be {NAME_MAX} characters or fewer.</p>
+            )}
             <label>
               Password
               <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />

@@ -1,8 +1,8 @@
 // UAT-T1 — Accept Invitation behaviour.
 //
-// A valid invitation posts the password and both consent flags to
-// POST /auth/invitations/:token/accept. The confirm-password field and the
-// legal version strings stay on the page; they are not in the body.
+// A valid invitation posts the trimmed name, the password, and both consent
+// flags to POST /auth/invitations/:token/accept. The confirm-password field
+// and the legal version strings stay on the page; they are not in the body.
 // Success calls useCompleteSignIn() and then setLocation("/"). This page
 // does not call resolveLandingRoute.
 
@@ -54,6 +54,14 @@ function button(tree: unknown, label: string): ElementNode | undefined {
 
 function inputs(tree: unknown): ElementNode[] {
   return findAll(tree, (element) => element.type === "input");
+}
+
+function textInputs(tree: unknown): ElementNode[] {
+  return inputs(tree).filter((element) => element.props?.type === "text");
+}
+
+function passwordInputs(tree: unknown): ElementNode[] {
+  return inputs(tree).filter((element) => element.props?.type === "password");
 }
 
 function changeValue(element: ElementNode | undefined, value: string): void {
@@ -266,11 +274,18 @@ function render(): unknown {
   return Page({ params: { token: TOKEN } });
 }
 
+function fillNames(tree: unknown, first: string, last: string): unknown {
+  changeValue(textInputs(tree)[0], first);
+  let next = render();
+  changeValue(textInputs(next)[1], last);
+  return render();
+}
+
 function fillPasswords(tree: unknown, password: string, confirm: string): unknown {
-  const fields = inputs(tree);
+  const fields = passwordInputs(tree);
   changeValue(fields[0], password);
   let next = render();
-  changeValue(inputs(next)[1], confirm);
+  changeValue(passwordInputs(next)[1], confirm);
   return render();
 }
 
@@ -319,7 +334,8 @@ describe("UAT-T1 Accept Invitation", { concurrency: 1 }, () => {
   test("posts the password and both consent flags, then finishes sign-in on /", async () => {
     resetInteraction();
     const password = "a-long-enough-password";
-    let tree = fillPasswords(render(), password, password);
+    let tree = fillNames(render(), "  Ada  ", "  Lovelace  ");
+    tree = fillPasswords(tree, password, password);
     const boxes = inputs(tree).filter((element) => element.props?.type === "checkbox");
     assert.equal(boxes.length, 2);
     changeChecked(boxes[0], true);
@@ -338,6 +354,8 @@ describe("UAT-T1 Accept Invitation", { concurrency: 1 }, () => {
     assert.equal(g.__uatAcceptWrites[0]?.path, `/auth/invitations/${TOKEN}/accept`);
     assert.equal(g.__uatAcceptWrites[0]?.options?.method, "POST");
     assert.deepEqual(JSON.parse(g.__uatAcceptWrites[0]?.options?.body ?? ""), {
+      firstName: "Ada",
+      lastName: "Lovelace",
       password,
       acceptedTerms: true,
       acceptedPrivacyPolicy: true,
@@ -362,6 +380,13 @@ describe("UAT-T1 Accept Invitation", { concurrency: 1 }, () => {
     assert.equal(button(tree, "Create account")?.props?.disabled, true);
     click(button(tree, "Create account"));
     assert.deepEqual(g.__uatAcceptWrites, []);
+    changeChecked(inputs(tree).filter((element) => element.props?.type === "checkbox")[1], true);
+    tree = render();
+    assert.equal(button(tree, "Create account")?.props?.disabled, true, "blank names keep submit disabled");
+    click(button(tree, "Create account"));
+    assert.deepEqual(g.__uatAcceptWrites, []);
+    tree = fillNames(tree, "Ada", "Lovelace");
+    assert.equal(button(tree, "Create account")?.props?.disabled, false);
     assert.deepEqual(g.__uatAcceptNavigations, []);
     assert.equal(g.__uatAcceptCompleteSignIn, 0);
   });
@@ -387,7 +412,8 @@ describe("UAT-T1 Accept Invitation", { concurrency: 1 }, () => {
     const ApiError = g.__uatAcceptApiError;
     g.__uatAcceptApiFetch = () => Promise.reject(new ApiError(400, "This invitation link is invalid or has expired."));
 
-    let tree = fillPasswords(render(), "a-long-enough-password", "a-long-enough-password");
+    let tree = fillNames(render(), "Ada", "Lovelace");
+    tree = fillPasswords(tree, "a-long-enough-password", "a-long-enough-password");
     const boxes = inputs(tree).filter((element) => element.props?.type === "checkbox");
     changeChecked(boxes[0], true);
     tree = render();
