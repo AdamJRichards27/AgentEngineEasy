@@ -75,6 +75,9 @@ export interface ActivePropertySummary {
   nextAction: string | null;
   riskIndicator: "CRITICAL" | "AT_RISK" | "ATTENTION" | null;
   responsibility: "AGENT" | "PIT_CREW" | "SHARED";
+  // Listing agent already stored on the property. Display only.
+  responsibleAgentId: number;
+  responsibleAgentName: string;
 }
 
 export interface CommandCentreSummary {
@@ -183,10 +186,18 @@ export function riskIndicatorPillClass(risk: "CRITICAL" | "AT_RISK" | "ATTENTION
   return "pill pill-success";
 }
 
-export function responsibilityLabel(responsibility: "AGENT" | "PIT_CREW" | "SHARED"): string {
+export function responsibilityLabel(
+  responsibility: ActivePropertySummary["responsibility"],
+  viewerId: number,
+  property: Pick<ActivePropertySummary, "responsibleAgentId" | "responsibleAgentName">,
+): string {
   switch (responsibility) {
     case "AGENT":
-      return "You";
+      // "You" is the viewer. A brokerage-wide reader (administrator or Pit
+      // Crew) otherwise sees the listing agent's name. An agent's own list
+      // only contains properties they are responsible for, so those stay "You".
+      if (property.responsibleAgentId === viewerId) return "You";
+      return property.responsibleAgentName.trim() || "Agent";
     case "PIT_CREW":
       return "Pit Crew";
     case "SHARED":

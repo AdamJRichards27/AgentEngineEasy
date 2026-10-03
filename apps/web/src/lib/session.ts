@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { apiFetch, ApiError, setSessionExpiredHandler } from "./api";
 import { createSessionEndedNotice, createSessionExpiryCoordinator } from "./sessionExpiry";
 import { classifySessionProbe, type SessionProbeState } from "./sessionProbe";
@@ -41,10 +42,13 @@ interface SessionResponse {
 // connectivity state with a retry instead of a sign-in form nobody can use.
 // See lib/sessionProbe.ts for the classification rules.
 export function useSession() {
-  const query = useQuery<SessionResponse, ApiError, SessionUser>({
+  const query = useQuery<SessionResponse | null, ApiError, SessionUser | null>({
     queryKey: ["session"],
     queryFn: () => apiFetch<SessionResponse>("/auth/me"),
-    select: (data) => data.user,
+    // null is the explicit signed-out cache value written by logout (TanStack
+    // Query v5 ignores setQueryData(undefined)). A missing payload is the
+    // same "no user" result as a 401.
+    select: (data) => data?.user ?? null,
     retry: false,
   });
   const probe: SessionProbeState = classifySessionProbe({
@@ -75,10 +79,10 @@ export function useSession() {
 // returns; this is a UX/navigation signal only — the same "UX nicety, not the security boundary"
 // posture App.tsx already documents for its existing canSeePitCrew/canSeeFinancial checks.
 export function useEntitlements() {
-  const query = useQuery<SessionResponse, ApiError, string[]>({
+  const query = useQuery<SessionResponse | null, ApiError, string[]>({
     queryKey: ["session"],
     queryFn: () => apiFetch<SessionResponse>("/auth/me"),
-    select: (data) => data.entitlements,
+    select: (data) => data?.entitlements ?? [],
     retry: false,
   });
   const entitlements = query.data ?? [];
@@ -89,14 +93,43 @@ export function useEntitlements() {
   };
 }
 
+type LogoutNavigate = (to: string, options?: { replace?: boolean }) => void;
+
+// UAT D1 — Sign out must leave the signed-in screen immediately.
+//
+// setQueryData(undefined) is a no-op in TanStack Query v5, and clear()
+// drops cache entries without publishing a new result to a mounted
+// useSession observer, so isSignedIn stayed true and App never redirected.
+// Writing null updates that observer (selects above treat it as no user).
+// replace: true removes the signed-in URL from history so Back does not
+// return to it. Other cached queries (contacts, opportunities, …) are
+// removed so the previous agent's data cannot remain on screen.
+export async function logoutAndClearSession(queryClient: QueryClient, navigate: LogoutNavigate): Promise<void> {
+  sessionEndedNotice.set(false);
+  await queryClient.cancelQueries();
+  try {
+    await apiFetch("/auth/logout", { method: "POST" });
+  } catch {
+    // The cookie may already be gone. Still leave the signed-in screen.
+  }
+  queryClient.setQueryData(["session"], null);
+  queryClient.removeQueries({
+    predicate: (query) => query.queryKey[0] !== "session",
+  });
+  navigate("/login", { replace: true });
+}
+
 export function useLogout() {
   const queryClient = useQueryClient();
-  return async () => {
-    sessionEndedNotice.set(false);
-    await apiFetch("/auth/logout", { method: "POST" }).catch(() => undefined);
-    queryClient.setQueryData(["session"], undefined);
-    queryClient.clear();
-  };
+  const [, navigate] = useLocation();
+  return () => logoutAndClearSession(queryClient, navigate);
+}
+
+// A page restored from the back-forward cache keeps the DOM from before
+// Sign out, including the previous agent's name. Reloading re-runs the
+// session probe; with the cookie gone that lands on the sign-in page.
+export function reloadPageRestoredFromCache(event: { persisted: boolean }, reload: () => void): void {
+  if (event.persisted) reload();
 }
 
 // AE GROW Pilot Readiness WP5 — session expiry. One app-wide notice, set when

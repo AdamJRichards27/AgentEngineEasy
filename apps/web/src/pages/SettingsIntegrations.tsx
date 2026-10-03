@@ -24,6 +24,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "../lib/session";
 import { apiFetch, ApiError, apiErrorMessage } from "../lib/api";
+import { GrowTableScroll } from "../components/GrowTableScroll";
 import {
   approvalStatusLabel,
   approvalStatusPillClass,
@@ -717,6 +718,7 @@ function ActivityTab() {
       {activity.isError && <p className="error-text">{activity.error instanceof ApiError ? activity.error.friendly : "Couldn't load activity."}</p>}
       {activity.data && activity.data.length === 0 && <p className="empty-state">No activity yet.</p>}
       {activity.data && activity.data.length > 0 && (
+        <GrowTableScroll>
         <table className="grow-table">
           <thead>
             <tr>
@@ -743,6 +745,7 @@ function ActivityTab() {
             ))}
           </tbody>
         </table>
+        </GrowTableScroll>
       )}
     </section>
   );

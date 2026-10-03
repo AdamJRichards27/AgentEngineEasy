@@ -286,6 +286,10 @@ test("submitting New contact posts name, email and phone, then offers Contact 36
         invalidated.some((key) => Array.isArray(key) && key.length === 1 && key[0] === "grow-contacts"),
         "contact search is invalidated",
       );
+      assert.ok(
+        invalidated.some((key) => Array.isArray(key) && key.length === 1 && key[0] === "grow-today"),
+        "Getting started (grow-today) is invalidated after creating a contact",
+      );
 
       const done = render(hooks, GrowNewContactForm, (id) => opened.push(id));
       assert.match(textContent(done), /Contact created/);

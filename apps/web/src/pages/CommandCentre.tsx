@@ -110,7 +110,7 @@ export default function CommandCentre() {
             emptyText="Nothing on the horizon yet."
           />
 
-          <ActivePropertiesSection properties={data.activeProperties} />
+          <ActivePropertiesSection properties={data.activeProperties} viewerId={data.agent.id} />
 
           <CollapsibleActionSection
             title="Pit Crew Activity"
@@ -230,7 +230,13 @@ function ActionRow({ item, mode }: { item: ActionItem; mode?: ActionRowMode }) {
   );
 }
 
-function ActivePropertiesSection({ properties }: { properties: ActivePropertySummary[] }) {
+function ActivePropertiesSection({
+  properties,
+  viewerId,
+}: {
+  properties: ActivePropertySummary[];
+  viewerId: number;
+}) {
   return (
     <details className="section" open={properties.length > 0}>
       <summary>
@@ -255,7 +261,7 @@ function ActivePropertiesSection({ properties }: { properties: ActivePropertySum
                   </>
                 ) : null}
                 {" · "}
-                {responsibilityLabel(p.responsibility)}
+                {responsibilityLabel(p.responsibility, viewerId, p)}
                 {p.nextAction ? ` · next: ${p.nextAction}` : null}
               </div>
             </li>

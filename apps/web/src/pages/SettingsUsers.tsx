@@ -16,6 +16,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "../lib/session";
 import { apiFetch, apiErrorMessage } from "../lib/api";
+import { GrowTableScroll } from "../components/GrowTableScroll";
 
 const TABS = [
   { key: "team", label: "Team" },
@@ -212,6 +213,7 @@ function TeamTab({ currentUserId }: { currentUserId: number }) {
         {members.isLoading && <p className="muted">Loading…</p>}
         {members.isError && <p className="error-text">{apiErrorMessage(members.error, "Couldn't load team members. Try again.")}</p>}
         {members.data && members.data.length > 0 && (
+          <GrowTableScroll>
           <table className="grow-table">
             <thead>
               <tr>
@@ -250,6 +252,7 @@ function TeamTab({ currentUserId }: { currentUserId: number }) {
               ))}
             </tbody>
           </table>
+          </GrowTableScroll>
         )}
         {(disable.isError || enable.isError) && (
           <p className="error-text">{apiErrorMessage(disable.error ?? enable.error, "Couldn't update that team member. Try again.")}</p>

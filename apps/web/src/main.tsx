@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { installSessionExpiryHandling } from "./lib/session";
+import { installSessionExpiryHandling, reloadPageRestoredFromCache } from "./lib/session";
 import "./styles.css";
 
 // retry: false — an unauthenticated 401 (very common: it's how we detect
@@ -44,6 +44,12 @@ const queryClient = new QueryClient({
 // AE GROW Pilot Readiness WP5 — a 401 from any authenticated call returns the
 // whole app to sign-in with a "your session has ended" message (lib/session.ts).
 installSessionExpiryHandling(queryClient);
+
+// UAT D1 — Back after a full navigation can restore the signed-in document
+// from the back-forward cache. Reload so the session probe runs again.
+window.addEventListener("pageshow", (event) => {
+  reloadPageRestoredFromCache(event, () => window.location.reload());
+});
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

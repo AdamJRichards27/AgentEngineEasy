@@ -75,6 +75,10 @@ export interface ActivePropertySummary {
   nextAction: string | null;
   riskIndicator: "CRITICAL" | "AT_RISK" | "ATTENTION" | null;
   responsibility: "AGENT" | "PIT_CREW" | "SHARED";
+  // Listing agent already stored on the property. Used only to label a row
+  // the caller can already see. It does not change which properties load.
+  responsibleAgentId: number;
+  responsibleAgentName: string;
 }
 
 export interface CommandCentreSummary {

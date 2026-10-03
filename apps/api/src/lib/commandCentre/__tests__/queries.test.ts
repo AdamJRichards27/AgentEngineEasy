@@ -140,6 +140,31 @@ describe("getCommandCentre -- scoping, dedup, and cross-tenant isolation", () =>
     assert.ok(found, "expected the brokerage administrator to see every agent's items");
   });
 
+  test("D9: an administrator's active property names the listing agent, and a peer agent still cannot see it", async () => {
+    const admin = await actorAndOptsFor(A.admin, now);
+    const adminResult = await getCommandCentre(admin.actor, admin.opts);
+    const seenByAdmin = adminResult.activeProperties.find((p) => p.propertyId === propertyId);
+    assert.ok(seenByAdmin, "expected the administrator to see the agent's active property");
+    assert.equal(seenByAdmin.responsibleAgentId, A.agent.user.id);
+    assert.equal(seenByAdmin.responsibleAgentName, "Agent User");
+    assert.notEqual(seenByAdmin.responsibleAgentId, admin.actor.id);
+
+    const owner = await actorAndOptsFor(A.agent, now);
+    const ownerResult = await getCommandCentre(owner.actor, owner.opts);
+    const seenByOwner = ownerResult.activeProperties.find((p) => p.propertyId === propertyId);
+    assert.ok(seenByOwner);
+    assert.equal(seenByOwner.responsibleAgentId, owner.actor.id);
+    assert.equal(seenByOwner.responsibleAgentName, "Agent User");
+
+    const peer = await actorAndOptsFor(agent2, now);
+    const peerResult = await getCommandCentre(peer.actor, peer.opts);
+    assert.equal(
+      peerResult.activeProperties.some((p) => p.propertyId === propertyId),
+      false,
+      "a peer agent must not gain this property from the name lookup",
+    );
+  });
+
   test("an administrator of a different brokerage never sees it, regardless of role", async () => {
     const { actor, opts } = await actorAndOptsFor(B.admin, now);
     const result = await getCommandCentre(actor, opts);

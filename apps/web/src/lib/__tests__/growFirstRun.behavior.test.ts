@@ -371,6 +371,8 @@ test("G-UAT-7: the checklist sits with the empty state, and import is offered on
       });
       assert.equal(textContent(tree).includes("Let's find your next opportunity"), true);
       assert.equal(textContent(tree).includes("Getting started"), true);
+      assert.match(textContent(step(tree, "activity")), /choose Add note on the row/);
+      assert.equal(textContent(step(tree, "activity")).includes("Open a contact, then choose Add note"), false);
       const importLinks = findAll(tree, (element) => element.type === "a" && element.props?.href === "/grow/import");
       assert.equal(importLinks.length, 2, "the existing empty-state import link stays, and the contact step adds its own");
       assert.ok(importLinks.some((link) => textContent(link).includes("Import contacts & properties")));
