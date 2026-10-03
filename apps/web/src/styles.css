@@ -911,18 +911,32 @@ details.section > *:not(summary) {
 }
 
 /* Critical Blocker Remediation, Phase 8 — mandatory Terms of Use / Privacy
-   Policy acceptance checkboxes on the accept-invitation screen. */
+   Policy acceptance checkboxes. The global input rule sets width: 100% and
+   padding, which (with flex-shrink: 0) consumes the whole row and leaves the
+   label in a few-dozen-pixel column past the card edge. Keep the control at
+   its intrinsic size and let the label fill the remaining row, wrapping
+   inside the card. */
 .checkbox-row {
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
+  max-width: 100%;
+  min-width: 0;
   font-size: 0.85rem;
   color: var(--color-text);
 }
 
 .checkbox-row input[type="checkbox"] {
-  margin-top: 0.2rem;
-  flex-shrink: 0;
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.checkbox-row > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .cost-summary {
