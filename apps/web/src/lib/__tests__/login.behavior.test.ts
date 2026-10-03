@@ -8,6 +8,7 @@
 // authenticated shell.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { after, before, describe } from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { resolveLandingRoute } from "../productNav";
@@ -64,6 +65,14 @@ function button(tree: unknown, label: string): ElementNode | undefined {
 function labeledInput(tree: unknown, label: string): ElementNode | undefined {
   const labels = findAll(tree, (element) => element.type === "label" && textContent(element).includes(label));
   return findAll(labels[0], (element) => element.type === "input")[0];
+}
+
+function assertCheckboxRow(row: ElementNode | undefined, label: RegExp): void {
+  assert.ok(row, "missing checkbox row");
+  assert.equal(row.props?.className, "checkbox-row");
+  const boxes = findAll(row, (element) => element.type === "input" && element.props?.type === "checkbox");
+  assert.equal(boxes.length, 1, "the wrapping label must contain its checkbox");
+  assert.match(textContent(row), label);
 }
 
 function change(element: ElementNode | undefined, value: string): void {
@@ -493,6 +502,10 @@ describe("UAT-T1 Login", { concurrency: 1 }, () => {
     assert.match(page, /privacy-2026-01/);
     assert.match(page, /Terms body for the pilot/);
     assert.match(page, /Privacy body for the pilot/);
+    const rows = findAll(tree, (element) => element.type === "label" && element.props?.className === "checkbox-row");
+    assert.equal(rows.length, 2);
+    assertCheckboxRow(rows[0], /I have read and agree to the Terms of Use/);
+    assertCheckboxRow(rows[1], /I have read and agree to the Privacy Policy/);
     assert.equal(button(tree, "Accept and sign in")?.props?.disabled, true);
     assert.equal(g.__uatLoginCompleteSignIn, 0);
 
@@ -608,5 +621,13 @@ describe("UAT-T1 Login", { concurrency: 1 }, () => {
     assert.equal(g.__uatLoginCompleteSignIn, 0);
     assert.equal(g.__uatLoginSession.isSignedIn, false);
     assert.equal(button(tree, "Accept and sign in") === undefined, false);
+  });
+
+  test("checkbox rows opt out of the full-width input rule", () => {
+    const css = readFileSync(new URL("../../styles.css", import.meta.url), "utf8");
+    const rule = css.match(/\.checkbox-row input\[type="checkbox"\]\s*\{([^}]+)\}/);
+    assert.ok(rule, "missing .checkbox-row checkbox rule");
+    assert.match(rule[1] ?? "", /width:\s*auto/);
+    assert.match(rule[1] ?? "", /padding:\s*0/);
   });
 });

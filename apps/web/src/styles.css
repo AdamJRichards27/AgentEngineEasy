@@ -910,8 +910,10 @@ details.section > *:not(summary) {
   color: var(--color-primary);
 }
 
-/* Critical Blocker Remediation, Phase 8 — mandatory Terms of Use / Privacy
-   Policy acceptance checkboxes on the accept-invitation screen. */
+/* Terms of Use / Privacy Policy acceptance rows (sign-in legal gate and
+   accept-invitation). The generic input rule sets width: 100% and
+   display: block; without width: auto the checkbox fills the row and the
+   label collapses into a one-word column off the card. */
 .checkbox-row {
   display: flex;
   align-items: flex-start;
@@ -921,8 +923,15 @@ details.section > *:not(summary) {
 }
 
 .checkbox-row input[type="checkbox"] {
-  margin-top: 0.2rem;
-  flex-shrink: 0;
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.checkbox-row > span {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .cost-summary {
