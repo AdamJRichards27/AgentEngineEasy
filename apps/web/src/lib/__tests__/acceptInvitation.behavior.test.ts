@@ -56,6 +56,14 @@ function inputs(tree: unknown): ElementNode[] {
   return findAll(tree, (element) => element.type === "input");
 }
 
+function assertCheckboxRow(row: ElementNode | undefined, label: RegExp): void {
+  assert.ok(row, "missing checkbox row");
+  assert.equal(row.props?.className, "checkbox-row");
+  const boxes = findAll(row, (element) => element.type === "input" && element.props?.type === "checkbox");
+  assert.equal(boxes.length, 1, "the wrapping label must contain its checkbox");
+  assert.match(textContent(row), label);
+}
+
 function textInputs(tree: unknown): ElementNode[] {
   return inputs(tree).filter((element) => element.props?.type === "text");
 }
@@ -336,6 +344,10 @@ describe("UAT-T1 Accept Invitation", { concurrency: 1 }, () => {
     const password = "a-long-enough-password";
     let tree = fillNames(render(), "  Ada  ", "  Lovelace  ");
     tree = fillPasswords(tree, password, password);
+    const rows = findAll(tree, (element) => element.type === "label" && element.props?.className === "checkbox-row");
+    assert.equal(rows.length, 2);
+    assertCheckboxRow(rows[0], /I have read and agree to the Terms of Use/);
+    assertCheckboxRow(rows[1], /I have read and agree to the Privacy Policy/);
     const boxes = inputs(tree).filter((element) => element.props?.type === "checkbox");
     assert.equal(boxes.length, 2);
     changeChecked(boxes[0], true);
