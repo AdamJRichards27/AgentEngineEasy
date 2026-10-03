@@ -1,8 +1,8 @@
 // UAT Round 1 web defects: sign-out leaves the signed-in screen (D1),
 // Grow tables widen the page (D4), phone tap targets (D7), the
-// checklist's Add note hint (D8), and Active Properties saying "You"
-// for every owner (D9). D5 is locked in the contact and link-property
-// behavior tests.
+// checklist's Add note hint (D8), Active Properties saying "You"
+// for every owner (D9), and stat tiles widening a 320px page (D10).
+// D5 is locked in the contact and link-property behavior tests.
 
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -151,19 +151,64 @@ test("D4: every grow-table sits in a scroll container that cannot widen the page
   assert.ok(tables.length >= 5, "expected the Grow tables to still be present");
 });
 
+function phoneBlocks(css: string): Array<{ index: number; rules: string }> {
+  return [...css.matchAll(/@media \(max-width: 899px\) \{([\s\S]*?)\n\}/g)].map((match) => ({
+    index: match.index ?? -1,
+    rules: match[1],
+  }));
+}
+
 test("D7: phone widths give nav, Sign out, and small buttons a 44px target without changing desktop", () => {
   const css = readFileSync(new URL("styles.css", webSrc), "utf8");
-  const block = css.match(/@media \(max-width: 899px\) \{([\s\S]*?)\n\}/);
-  assert.ok(block, "phone tap-target media query is missing");
-  const rules = block[1];
-  assert.match(rules, /\.app-sidebar-link/);
-  assert.match(rules, /\.app-sidebar-signout/);
-  assert.match(rules, /\.btn-small/);
-  assert.match(rules, /min-height:\s*44px/);
-  assert.match(rules, /min-width:\s*44px/);
+  const phones = phoneBlocks(css);
+  const nav = phones.find((block) => block.rules.includes(".app-sidebar-link") && block.rules.includes(".app-sidebar-signout"));
+  assert.ok(nav, "phone tap-target media query is missing");
+  assert.match(nav.rules, /min-height:\s*44px/);
+  assert.match(nav.rules, /min-width:\s*44px/);
+
+  // .btn-small { min-height: 32px } is one class. The first phone block used
+  // the same specificity and came first, so the 32px rule won. The 44px
+  // override has to be more specific (.btn.btn-small) and later in the file.
+  const baseSmall = css.match(/\.btn-small\s*\{[^}]*\}/);
+  assert.ok(baseSmall);
+  assert.match(baseSmall[0], /min-height:\s*32px/);
+  assert.equal(/min-height:\s*44px/.test(baseSmall[0]), false);
+  const baseAt = css.indexOf(baseSmall[0]);
+  const controls = phones.filter((block) => /\.btn\.btn-small[^{]*\{[^}]*min-height:\s*44px/.test(block.rules));
+  assert.equal(controls.length, 1);
+  assert.ok(controls[0].index > baseAt, "44px small-button rule must come after the 32px rule");
+  assert.match(controls[0].rules, /\.btn\.btn-small[^{]*\{[^}]*min-width:\s*44px/);
+  const afterControls = css.slice(controls[0].index + controls[0].rules.length);
+  assert.equal(/\.btn-small[^{]*\{[^}]*min-height:\s*32px/.test(afterControls), false);
+
+  assert.match(controls[0].rules, /\.pc-tab[^{]*\{[^}]*min-height:\s*44px/);
+  assert.match(controls[0].rules, /\.grow-contact-roles button\.pill[^{]*\{[^}]*min-height:\s*44px/);
+  assert.equal(/(^|[}\n])\s*\.pill[^{]*\{[^}]*min-height:\s*44px/.test(controls[0].rules), false);
+
+  const linkRules = controls[0].rules.match(/a:not\(\.btn\):not\(\.app-sidebar-link\):not\(\.stat-tile\)(?:::after)?[^{]*\{[^}]*\}/g);
+  assert.ok(linkRules && linkRules.length >= 2, "inline links need a hit area that is separate from the text");
+  assert.ok(linkRules.some((rule) => /::after/.test(rule) && /height:\s*44px/.test(rule)));
+  for (const rule of linkRules) {
+    assert.equal(/\b(font-size|color|text-decoration|font-weight|padding)\s*:/.test(rule), false);
+  }
+
   const desktop = css.match(/@media \(min-width: 900px\) \{([\s\S]*?)\n\}/);
   assert.ok(desktop);
-  assert.equal(desktop[1].includes("min-height: 44px"), false);
+  assert.equal(desktop[1].includes("44px"), false);
+});
+
+test("D10: stat tiles shrink to the page and long labels can break", () => {
+  const css = readFileSync(new URL("styles.css", webSrc), "utf8");
+  assert.match(css, /\.stat-tiles\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(css, /\.stat-tiles\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /\.stat-tile\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /\.stat-tile-label\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /\.stat-tile-label\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(css, /\.stat-tile-value\s*\{[^}]*flex-shrink:\s*0/);
+  const wide = [...css.matchAll(/@media \(min-width: 640px\) \{([\s\S]*?)\n\}/g)].map((match) => match[1]);
+  assert.ok(wide.some((rules) => /\.stat-tiles\s*\{[^}]*repeat\(4,\s*minmax\(0,\s*1fr\)\)/.test(rules)));
+  assert.equal(css.includes("repeat(2, 1fr)"), false);
+  assert.equal(css.includes("repeat(4, 1fr)"), false);
 });
 
 test("D8: the Add note checklist step points at the opportunity row", () => {
