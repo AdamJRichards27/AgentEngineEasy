@@ -78,7 +78,9 @@ export default function App() {
   const logout = useLogout();
 
   return (
-    <Switch>
+    <div className="app-root">
+      <div className="staging-banner">Staging Environment — Test Data Only</div>
+      <Switch>
       <Route path="/login">
         {isSignedIn ? <Redirect to={resolveLandingRoute({ role: user?.role, entitlements })} /> : <Login />}
       </Route>
@@ -97,17 +99,15 @@ export default function App() {
         ) : probe === "api-unreachable" ? (
           <ApiUnreachable onRetry={retryProbe} />
         ) : !isSignedIn ? (
-          <Redirect to="/login" />
+          <Redirect to="/login" replace />
         ) : (
-          <div className="app-root">
-            <div className="staging-banner">Staging Environment — Test Data Only</div>
-            <div className="app-shell">
-              <SidebarLayout user={user} entitlements={entitlements} onSignOut={() => logout()} />
-            </div>
+          <div className="app-shell">
+            <SidebarLayout user={user ?? undefined} entitlements={entitlements} onSignOut={() => void logout()} />
           </div>
         )}
       </Route>
-    </Switch>
+      </Switch>
+    </div>
   );
 }
 

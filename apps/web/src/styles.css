@@ -212,9 +212,11 @@
 }
 
 html,
-body {
+body,
+#root {
   margin: 0;
   padding: 0;
+  max-width: 100%;
 }
 
 body {
@@ -299,6 +301,8 @@ a {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .app-shell {
@@ -306,6 +310,15 @@ a {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Default min-width: auto would grow this flex item to the table's
+     min-content width and make the whole page wider than the phone. */
+  min-width: 0;
+}
+
+.app-root > .app-loading {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
 }
 
 /* Sidebar (desktop) / top bar (mobile) navigation */
@@ -447,6 +460,31 @@ main {
   }
 }
 
+/* UAT D7 — below the desktop sidebar, nav links, Sign out, and small
+   buttons are at least 44px in both directions. Desktop (900px and up)
+   keeps the compact sidebar. */
+@media (max-width: 899px) {
+  .app-sidebar-link,
+  .app-sidebar-signout,
+  .btn-small {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .app-sidebar-link {
+    padding-top: 0.65rem;
+    padding-bottom: 0.65rem;
+  }
+
+  .app-sidebar-signout {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 0.55rem 0.85rem;
+  }
+}
+
 @media (min-width: 900px) {
   .app-shell {
     flex-direction: row;
@@ -486,6 +524,8 @@ section.card {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   padding: 1.25rem;
   margin-bottom: 1rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .primary-action {
@@ -860,12 +900,15 @@ details.section > *:not(summary) {
 /* Auth screen */
 
 .auth-screen {
-  min-height: 100vh;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1.5rem;
   background: var(--color-sidebar-bg);
+  overflow: auto;
 }
 
 .auth-card {
@@ -1215,8 +1258,18 @@ details.section > *:not(summary) {
   font-style: italic;
 }
 
-.grow-table {
+.grow-table-scroll {
+  display: block;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.grow-table {
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   margin-top: 0.5rem;
 }

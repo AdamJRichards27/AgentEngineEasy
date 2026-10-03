@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "../lib/api";
 import { useEntitlements } from "../lib/session";
 import { CONTACT_ANCHORED_SECTION_BLURB, unusableSignalNotice } from "../lib/contactAnchoredSignals";
+import { GrowTableScroll } from "./GrowTableScroll";
 
 // AE GROW Priority 5 Remediation — Property Intelligence. The reusable panel Contact 360
 // (Grow.tsx) and the Property Workspace (PropertyWorkspace.tsx) both embed, rather than either
@@ -458,6 +459,7 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
         {data.currentObservations.length > 0 && (
           <>
             <h3>Provider observations</h3>
+            <GrowTableScroll>
             <table className="grow-table">
               <thead>
                 <tr>
@@ -476,6 +478,7 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
                 ))}
               </tbody>
             </table>
+            </GrowTableScroll>
           </>
         )}
       </section>

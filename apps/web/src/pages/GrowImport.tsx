@@ -5,6 +5,7 @@ import { apiFetch, ApiError, apiErrorMessage } from "../lib/api";
 // AE GROW Completion W2-B (G-4) — the shared loading/failed/empty region
 // presentation every other Grow region already uses.
 import { GrowDataRegionStatus } from "../components/GrowDataRegion";
+import { GrowTableScroll } from "../components/GrowTableScroll";
 
 // AE GROW Completion W2-B (G-5) — the one way this page turns a failure into a
 // sentence. Every `(mutation.error as ApiError).friendly` on this page used to
@@ -357,6 +358,7 @@ function ImportHistory({
           onRetry={() => void jobs.refetch()}
         />
         {jobs.data && jobs.data.jobs.length > 0 && (
+          <GrowTableScroll>
           <table className="grow-table">
             <thead>
               <tr>
@@ -388,6 +390,7 @@ function ImportHistory({
                 ))}
             </tbody>
           </table>
+          </GrowTableScroll>
         )}
       </section>
     </div>
@@ -497,6 +500,7 @@ function MappingStep({
         We matched what we could recognise. Check each row and fix anything before continuing -- nothing is
         guessed silently.
       </p>
+      <GrowTableScroll>
       <table className="grow-table">
         <thead>
           <tr>
@@ -528,6 +532,7 @@ function MappingStep({
           ))}
         </tbody>
       </table>
+      </GrowTableScroll>
       <div className="stack">
         <button className="btn btn-primary" disabled={submit.isPending} onClick={() => submit.mutate()}>
           {submit.isPending ? "Validating…" : "Validate & continue"}

@@ -333,6 +333,14 @@ test("submitting Link property posts the property and Future seller, then refetc
         invalidated.some((key) => Array.isArray(key) && key[0] === "grow-contact" && key[1] === 44),
         "Contact 360 is refetched",
       );
+      assert.ok(
+        invalidated.some((key) => Array.isArray(key) && key.length === 1 && key[0] === "grow-relationships"),
+        "the Relationships card is invalidated",
+      );
+      assert.ok(
+        invalidated.some((key) => Array.isArray(key) && key.length === 1 && key[0] === "grow-today"),
+        "Getting started (grow-today) is invalidated after linking a property",
+      );
       assert.equal(linked, 1);
     });
   } finally {

@@ -69,6 +69,7 @@ import {
   SAVE_DUE_FOLLOW_UP_LABEL,
   SET_DUE_FOLLOW_UP_LABEL,
 } from "../lib/growTerms";
+import { GrowTableScroll } from "../components/GrowTableScroll";
 import {
   APPRAISAL_NEXT_STEP_LABELS,
   APPRAISAL_OUTCOME_REASONS,
@@ -2081,6 +2082,9 @@ export function GrowNewContactForm({ onOpenContact }: { onOpenContact: (partyId:
       }),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["grow-contacts"] });
+      // Getting started reads firstRun from grow-today. Without this the
+      // checklist stays "0 of 6" until a reload (UAT D5).
+      void queryClient.invalidateQueries({ queryKey: ["grow-today"] });
       setNotice({ kind: "created", contactId: result.contact.id });
       setName("");
       setEmail("");
@@ -2207,6 +2211,7 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
           onRetry={() => void contacts.refetch()}
         />
         {contacts.data && contacts.data.contacts.length > 0 && (
+          <GrowTableScroll>
           <table className="grow-table">
             <thead>
               <tr>
@@ -2233,6 +2238,7 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
               ))}
             </tbody>
           </table>
+          </GrowTableScroll>
         )}
       </section>
 
@@ -2247,6 +2253,7 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
           onRetry={() => void relationships.refetch()}
         />
         {relationships.data && relationships.data.relationships.length > 0 && (
+          <GrowTableScroll>
           <table className="grow-table">
             <thead>
               <tr>
@@ -2275,6 +2282,7 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
               ))}
             </tbody>
           </table>
+          </GrowTableScroll>
         )}
       </section>
 
@@ -2670,6 +2678,11 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+      queryClient.invalidateQueries({ queryKey: ["grow-contacts"] });
+      // The Relationships card and the checklist's property step stay on
+      // screen (or remount within staleTime) unless these are invalidated (UAT D5).
+      queryClient.invalidateQueries({ queryKey: ["grow-relationships"] });
+      queryClient.invalidateQueries({ queryKey: ["grow-today"] });
       onLinked();
       setOpen(false);
       setSearch("");
@@ -2868,6 +2881,7 @@ function GrowContactDetail({
       setCommitmentPropertyId("");
       setCommitmentOpportunityId("");
       invalidate();
+      queryClient.invalidateQueries({ queryKey: ["grow-today"] });
     },
   });
 
@@ -3094,6 +3108,7 @@ function GrowContactDetail({
         <p className="muted">Reuses AE's canonical properties — Grow does not keep a second property record.</p>
         {data.properties.length === 0 && <p className="empty-state">No property relationships recorded.</p>}
         {data.properties.length > 0 && (
+          <GrowTableScroll>
           <table className="grow-table">
             <thead>
               <tr>
@@ -3129,6 +3144,7 @@ function GrowContactDetail({
               ))}
             </tbody>
           </table>
+          </GrowTableScroll>
         )}
         <GrowLinkPropertyForm partyId={partyId} onLinked={invalidate} />
       </section>
@@ -3619,6 +3635,7 @@ export function GrowContactOpportunitiesSection({
       />
       {opportunities.length === 0 && <p className="empty-state">No opportunities yet.</p>}
       {opportunities.length > 0 && (
+        <GrowTableScroll>
         <table className="grow-table">
           <thead>
             <tr>
@@ -3666,6 +3683,7 @@ export function GrowContactOpportunitiesSection({
             ))}
           </tbody>
         </table>
+        </GrowTableScroll>
       )}
     </section>
   );
@@ -3717,6 +3735,7 @@ export function GrowOpportunitiesTab({
         onRetry={() => void opportunities.refetch()}
       />
       {opportunities.data && opportunities.data.opportunities.length > 0 && (
+        <GrowTableScroll>
         <table className="grow-table">
           <thead>
             <tr>
@@ -3761,6 +3780,7 @@ export function GrowOpportunitiesTab({
             ))}
           </tbody>
         </table>
+        </GrowTableScroll>
       )}
     </section>
   );

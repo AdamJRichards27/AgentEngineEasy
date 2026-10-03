@@ -77,10 +77,10 @@ export function growFirstRunSteps(
     {
       id: "activity",
       title: "Log an activity or conversation",
-      hint: "Open a contact, then choose Add note.",
+      hint: "On the Opportunities tab, or on a contact's opportunities, choose Add note on the row.",
       done: flags.activity,
       actionLabel: canRecord ? "Add note" : null,
-      section: "contacts",
+      section: "opportunities",
       importHref: null,
       available: canRecord,
     },

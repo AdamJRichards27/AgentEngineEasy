@@ -20,6 +20,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
   properties,
+  users,
   campaignItems,
   launchPlans,
   vendorApprovals,
@@ -427,7 +428,12 @@ export async function getCommandCentre(
     .filter((i) => i.accountableOwnerType === "PIT_CREW" || i.performingParty === "Pit Crew")
     .slice(0, MAX_ITEMS_PER_SECTION);
 
-  const activeProperties = buildActivePropertySummaries(propertyRows, deduped);
+  const agentNames = await loadResponsibleAgentNames(
+    actor.brokerageId,
+    propertyRows.map((p) => p.agentId),
+    chunkSize,
+  );
+  const activeProperties = buildActivePropertySummaries(propertyRows, deduped, agentNames);
 
   const summary: CommandCentreSummary = {
     critical: deduped.filter((i) => i.severity === "CRITICAL").length,
@@ -885,9 +891,25 @@ const STAGE_GROUPS: Record<string, string> = {
   Settlement: "Settlement",
 };
 
+async function loadResponsibleAgentNames(
+  brokerageId: number,
+  agentIds: readonly number[],
+  chunkSize: number,
+): Promise<Map<number, string>> {
+  const ids = [...new Set(agentIds)];
+  const rows = await selectInChunks(ids, chunkSize, (chunk) =>
+    db
+      .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+      .from(users)
+      .where(and(eq(users.brokerageId, brokerageId), inArray(users.id, chunk))),
+  );
+  return new Map(rows.map((row) => [row.id, `${row.firstName} ${row.lastName}`.trim()]));
+}
+
 function buildActivePropertySummaries(
   propertyRows: Property[],
   deduped: ActionItem[],
+  agentNames: ReadonlyMap<number, string>,
 ): ActivePropertySummary[] {
   const itemsByProperty = new Map<number, ActionItem[]>();
   for (const item of deduped) {
@@ -918,6 +940,8 @@ function buildActivePropertySummaries(
       nextAction: nextAction ? nextAction.recommendedAction : null,
       riskIndicator: (risk?.severity as ActivePropertySummary["riskIndicator"]) ?? null,
       responsibility: hasPitCrewWork ? (nextAction ? "SHARED" : "PIT_CREW") : "AGENT",
+      responsibleAgentId: p.agentId,
+      responsibleAgentName: agentNames.get(p.agentId) ?? "",
     });
   }
   return summaries;
