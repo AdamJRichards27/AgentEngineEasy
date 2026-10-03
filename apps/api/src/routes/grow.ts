@@ -20,6 +20,7 @@ import {
 } from "../lib/grow/isolationRejection.js";
 import { getBillingProvider } from "../lib/billing/gateway.js";
 import { getGrowTodaySummary } from "../lib/growToday.js";
+import { presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
 import { logAudit } from "../lib/audit.js";
 import { assertPropertyVisibleForWrite, linkedPropertyHidden, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
 
@@ -380,7 +381,8 @@ growRouter.get("/activities", requireAuth, requireEntitlement("grow.access"), as
     .where(and(eq(growActivities.brokerageId, user.brokerageId), visibleLinkedPropertySql(growActivities.propertyId, restrictTo)))
     .orderBy(desc(growActivities.occurredAt))
     .limit(200);
-  res.json({ activities: rows });
+  const activities = await presentStoredActivitySummaries(rows, user.brokerageId);
+  res.json({ activities });
 });
 
 growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {

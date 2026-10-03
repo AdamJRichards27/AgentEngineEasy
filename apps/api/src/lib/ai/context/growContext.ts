@@ -3,6 +3,7 @@ import { db, growActivities, growCommitments, growOpportunities, growRelationshi
 import { resolveEntitlements } from "../../entitlements/resolver.js";
 import type { EntitlementActor } from "../../entitlements/types.js";
 import { getGrowTodaySummary, type GrowTodayAction } from "../../growToday.js";
+import { presentStoredActivitySummaries } from "../../commitmentRescheduleSummary.js";
 import { visibleLinkedPropertySql } from "../../propertyVisibility.js";
 import type {
   GrowContext,
@@ -232,14 +233,17 @@ async function computeRecentActivity(brokerageId: number, restrictToPropertyIds:
     )
     .orderBy(desc(growActivities.occurredAt))
     .limit(RECENT_ACTIVITY_LIMIT);
-  return rows.map((row) => ({
-    id: row.id,
-    partyId: row.partyId,
-    propertyId: row.propertyId,
-    activityType: row.activityType,
-    occurredAt: row.occurredAt.toISOString(),
-    summary: row.summary,
-  }));
+  return presentStoredActivitySummaries(
+    rows.map((row) => ({
+      id: row.id,
+      partyId: row.partyId,
+      propertyId: row.propertyId,
+      activityType: row.activityType,
+      occurredAt: row.occurredAt.toISOString(),
+      summary: row.summary,
+    })),
+    brokerageId,
+  );
 }
 
 /**

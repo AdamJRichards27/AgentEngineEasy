@@ -6,7 +6,24 @@ import { apiFetch, apiErrorMessage } from "../lib/api";
 interface AddressCandidate {
   placeId: string;
   formattedAddress: string;
+  suburb?: string;
   state?: string;
+  postcode?: string;
+}
+
+function addressPartsFromCandidate(candidate: AddressCandidate): { suburb?: string; state?: string; postcode?: string } {
+  const part = (value: string | undefined) => {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+  };
+  const suburb = part(candidate.suburb);
+  const state = part(candidate.state);
+  const postcode = part(candidate.postcode);
+  return {
+    ...(suburb ? { suburb } : {}),
+    ...(state ? { state } : {}),
+    ...(postcode ? { postcode } : {}),
+  };
 }
 
 interface SellerDraft {
@@ -49,8 +66,14 @@ export default function StartProperty() {
   const requestIdRef = useRef(0);
 
   const createProperty = useMutation({
-    mutationFn: (input: { formattedAddress: string; placeId?: string; isManualAddress?: boolean }) =>
-      apiFetch<{ property: { id: number } }>("/properties", { method: "POST", body: JSON.stringify(input) }),
+    mutationFn: (input: {
+      formattedAddress: string;
+      placeId?: string;
+      suburb?: string;
+      state?: string;
+      postcode?: string;
+      isManualAddress?: boolean;
+    }) => apiFetch<{ property: { id: number } }>("/properties", { method: "POST", body: JSON.stringify(input) }),
     onSuccess: (data) => setPropertyId(data.property.id),
   });
 
@@ -118,7 +141,11 @@ export default function StartProperty() {
   const selectCandidate = (c: AddressCandidate) => {
     setShowDropdown(false);
     setQuery(c.formattedAddress);
-    createProperty.mutate({ formattedAddress: c.formattedAddress, placeId: c.placeId });
+    createProperty.mutate({
+      formattedAddress: c.formattedAddress,
+      placeId: c.placeId,
+      ...addressPartsFromCandidate(c),
+    });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

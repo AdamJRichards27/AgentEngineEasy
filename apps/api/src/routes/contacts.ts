@@ -24,6 +24,8 @@ import {
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
+import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
+import { resolveTimeZone } from "../lib/commandCentre/timezone.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
 import { assertPropertyVisibleForWrite, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
@@ -894,6 +896,18 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
   const assignedAgentUserId =
     propertyRelRows.find((r) => r.createdBy !== null)?.createdBy ?? opportunityRows[0]?.ownerUserId ?? null;
 
+  const activities = await presentStoredActivitySummaries(
+    activityRows.map((a) => ({
+      id: a.id,
+      activityType: a.activityType,
+      occurredAt: a.occurredAt.toISOString(),
+      summary: a.summary,
+      propertyId: a.propertyId,
+      opportunityId: a.opportunityId,
+    })),
+    user.brokerageId,
+  );
+
   res.json({
     contact: {
       id: party.id,
@@ -944,14 +958,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
       recommendedNextAction: o.recommendedNextAction,
       propertyId: o.propertyId,
     })),
-    activities: activityRows.map((a) => ({
-      id: a.id,
-      activityType: a.activityType,
-      occurredAt: a.occurredAt.toISOString(),
-      summary: a.summary,
-      propertyId: a.propertyId,
-      opportunityId: a.opportunityId,
-    })),
+    activities,
     commitments: commitmentRows.map((c) => ({
       id: c.id,
       description: c.description,
@@ -1257,6 +1264,10 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
 // time before createdAt, are accepted: POST create only checks that the
 // string parses, overdue Open commitments are a normal state, and this route
 // has no existing "must be in the future" comparison to reuse.
+//
+// The activity summary is the sentence people read, so it uses the
+// brokerage's configured time zone (the same resolution Grow Today uses),
+// not UTC. details and the audit row keep the ISO instants.
 contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
   const user = req.authedUser!;
   const id = parsePositiveId(req.params.id);
@@ -1313,6 +1324,8 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     const now = new Date();
     const previousDueAt = new Date(existing.dueAt).toISOString();
     const newDueAt = rescheduleDueAt.toISOString();
+    const { timeZone } = await resolveTimeZone(user);
+    const summary = commitmentRescheduleSummary(new Date(existing.dueAt), rescheduleDueAt, timeZone);
     const updated = await db.transaction(async (tx) => {
       const [row] = await tx
         .update(growCommitments)
@@ -1327,7 +1340,7 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
         opportunityId: existing.opportunityId,
         activityType: "system_event",
         occurredAt: now,
-        summary: `Commitment rescheduled from ${previousDueAt} to ${newDueAt}`,
+        summary,
         details: {
           kind: "commitment_rescheduled",
           commitmentId: existing.id,

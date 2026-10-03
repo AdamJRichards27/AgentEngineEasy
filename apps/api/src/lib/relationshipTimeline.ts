@@ -1,4 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { presentStoredActivitySummaries } from "./commitmentRescheduleSummary.js";
 import { linkedPropertyHidden } from "./propertyVisibility.js";
 import {
   db,
@@ -679,5 +680,5 @@ export async function getRelationshipTimeline(
 
   events.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
 
-  return events.slice(0, limit);
+  return presentStoredActivitySummaries(events.slice(0, limit), brokerageId);
 }

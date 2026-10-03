@@ -6,8 +6,9 @@ import { before, after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, entitlementGrants, growActivities, growCommitments, users } from "@aee/db";
+import { db, communicationSettings, entitlementGrants, growActivities, growCommitments, users } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { commitmentRescheduleSummary } from "../../lib/commitmentRescheduleSummary.js";
 import { DEFAULT_TIME_ZONE, startOfNextLocalDay } from "../../lib/commandCentre/timezone.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "./testSupport.js";
 
@@ -193,7 +194,11 @@ describe("G-UAT-4 commitment reschedule", { concurrency: 1 }, () => {
     assert.equal(new Date(details.previousDueAt).getTime(), new Date(created.dueAt).getTime());
     assert.equal(new Date(details.newDueAt).getTime(), new Date(next).getTime());
     assert.equal(details.actingUserId, agentA.user.id);
-    assert.match(row.summary, /Commitment rescheduled from/);
+    assert.equal(
+      row.summary,
+      commitmentRescheduleSummary(new Date(created.dueAt), new Date(next), DEFAULT_TIME_ZONE),
+    );
+    assert.doesNotMatch(row.summary, /\d{4}-\d{2}-\d{2}T/, "the history sentence is not a UTC timestamp");
 
     const completions = await db
       .select({ id: growActivities.id })
@@ -402,6 +407,78 @@ describe("G-UAT-4 commitment reschedule", { concurrency: 1 }, () => {
       );
     } finally {
       await cleanupBrokerages([fresh.brokerageId]);
+    }
+  });
+
+  test("history uses the brokerage time zone, and an older UTC sentence is shown in that zone without rewriting the row", async () => {
+    await db.delete(communicationSettings).where(eq(communicationSettings.brokerageId, brokerageId));
+    await db.insert(communicationSettings).values({ brokerageId, timeZone: "America/New_York" });
+    try {
+      const previous = "2026-10-03T00:00:00.000Z";
+      const next = "2026-10-04T23:00:00.000Z";
+      const expected = "Commitment rescheduled from 2 Oct 2026, 8:00 pm to 4 Oct 2026, 7:00 pm";
+      assert.equal(commitmentRescheduleSummary(new Date(previous), new Date(next), "America/New_York"), expected);
+      assert.notEqual(
+        expected,
+        commitmentRescheduleSummary(new Date(previous), new Date(next), "Australia/Brisbane"),
+      );
+
+      const created = await createCommitment(agentA.cookie, {
+        description: "UAT reschedule zone",
+        dueAt: previous,
+        propertyId: propertyAId,
+      });
+      const res = await patch(created.id, agentA.cookie, { dueAt: next });
+      assert.equal(res.status, 200, await res.clone().text());
+      const [written] = await rescheduleRows(created.id);
+      assert.ok(written);
+      assert.equal(written.summary, expected);
+      const writtenDetails = written.details as { previousDueAt: string; newDueAt: string };
+      assert.equal(new Date(writtenDetails.previousDueAt).toISOString(), previous);
+      assert.equal(new Date(writtenDetails.newDueAt).toISOString(), next);
+
+      const legacy = `Commitment rescheduled from ${previous} to ${next}`;
+      const [legacyRow] = await db
+        .insert(growActivities)
+        .values({
+          brokerageId,
+          partyId,
+          activityType: "system_event",
+          occurredAt: new Date("2026-10-03T01:00:00.000Z"),
+          summary: legacy,
+          details: { kind: "commitment_rescheduled", previousDueAt: previous, newDueAt: next },
+          responsibleUserId: agentA.user.id,
+          source: "manual",
+        })
+        .returning({ id: growActivities.id });
+
+      const contact = await send("GET", `/grow/contacts/${partyId}`, agentA.cookie);
+      assert.equal(contact.status, 200, await contact.clone().text());
+      const contactBody = (await contact.json()) as {
+        activities: Array<{ summary: string }>;
+        timeline: Array<{ summary: string }>;
+      };
+      const shown = [...contactBody.activities, ...contactBody.timeline].filter((row) => row.summary === expected);
+      assert.ok(shown.length >= 2, "the new entry and the stored UTC entry both read in the brokerage zone");
+      for (const row of [...contactBody.activities, ...contactBody.timeline]) {
+        assert.doesNotMatch(row.summary, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      }
+
+      const list = await send("GET", "/grow/activities", agentA.cookie);
+      assert.equal(list.status, 200, await list.clone().text());
+      const listBody = (await list.json()) as { activities: Array<{ summary: string }> };
+      assert.ok(listBody.activities.some((row) => row.summary === expected));
+      for (const row of listBody.activities) {
+        assert.doesNotMatch(row.summary, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      }
+
+      const [storedLegacy] = await db
+        .select({ summary: growActivities.summary })
+        .from(growActivities)
+        .where(eq(growActivities.id, legacyRow!.id));
+      assert.equal(storedLegacy?.summary, legacy, "the existing row is not rewritten in the database");
+    } finally {
+      await db.delete(communicationSettings).where(eq(communicationSettings.brokerageId, brokerageId));
     }
   });
 });

@@ -166,6 +166,12 @@ const startPropertySchema = z.object({
   isManualAddress: z.boolean().optional().default(false),
 });
 
+function nonBlank(value: string | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 propertiesRouter.post("/", requireAuth, async (req, res) => {
   const parsed = startPropertySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -184,6 +190,32 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
     ownershipData = await propertyDataProvider.lookupOwnership(parsed.data.placeId);
   }
 
+  // A Places suggestion's description is one line ("120 Given Terrace,
+  // Paddington QLD, Australia") and does not include the postcode. The
+  // client sends whatever components the search already resolved; any that
+  // are still missing are filled from Place Details. Explicit values win, so
+  // a hand-entered suburb/state/postcode is kept. A failed lookup does not
+  // block creating the property.
+  let suburb = nonBlank(parsed.data.suburb);
+  let state = nonBlank(parsed.data.state);
+  let postcode = nonBlank(parsed.data.postcode);
+  const placeId = nonBlank(parsed.data.placeId);
+  if (placeId && (!suburb || !state || !postcode)) {
+    try {
+      const resolved = await propertyDataProvider.resolveAddress(placeId);
+      if (resolved) {
+        suburb = suburb ?? nonBlank(resolved.suburb);
+        state = state ?? nonBlank(resolved.state);
+        postcode = postcode ?? nonBlank(resolved.postcode);
+      }
+    } catch (err) {
+      logger.warn("property_address_parts_unresolved", {
+        correlationId: currentCorrelationId(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const [property] = await db
     .insert(properties)
     .values({
@@ -191,9 +223,9 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
       agentId: user.id,
       formattedAddress: parsed.data.formattedAddress,
       placeId: parsed.data.placeId,
-      suburb: parsed.data.suburb,
-      state: parsed.data.state,
-      postcode: parsed.data.postcode,
+      suburb,
+      state,
+      postcode,
       isManualAddress: parsed.data.isManualAddress,
       ownershipData,
     })
