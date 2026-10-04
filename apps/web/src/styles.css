@@ -460,13 +460,14 @@ main {
   }
 }
 
-/* UAT D7 — below the desktop sidebar, nav links, Sign out, and small
-   buttons are at least 44px in both directions. Desktop (900px and up)
-   keeps the compact sidebar. */
+/* UAT D7 — below the desktop sidebar, nav links and Sign out are at
+   least 44px in both directions. Small buttons, Grow tabs, role pills,
+   and inline text links are overridden at the end of this file: their
+   base rules are declared later, at the same specificity, so a 44px
+   rule here would lose. Desktop (900px and up) keeps the compact sidebar. */
 @media (max-width: 899px) {
   .app-sidebar-link,
-  .app-sidebar-signout,
-  .btn-small {
+  .app-sidebar-signout {
     min-height: 44px;
     min-width: 44px;
   }
@@ -553,16 +554,22 @@ section.card {
 
 /* Stat tiles — Dashboard summary row */
 
+/* UAT D10 — 1fr is minmax(auto, 1fr), so a long one-word label
+   (Opportunities, Commitments) becomes the column's minimum and the
+   page grows past a 320px screen. minmax(0, 1fr) lets the track shrink;
+   the label then wraps or breaks inside the tile. */
 .stat-tiles {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.75rem;
   margin-bottom: 1rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (min-width: 640px) {
   .stat-tiles {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
@@ -578,6 +585,11 @@ section.card {
   gap: 0.75rem;
   text-decoration: none;
   color: inherit;
+  min-width: 0;
+}
+
+.stat-tile > * {
+  min-width: 0;
 }
 
 .stat-tile-label {
@@ -587,12 +599,15 @@ section.card {
   letter-spacing: 0.04em;
   color: var(--color-text-muted);
   margin-bottom: 0.35rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .stat-tile-value {
   font-size: 1.6rem;
   font-weight: 700;
   color: var(--color-text);
+  flex-shrink: 0;
 }
 
 .stat-tile-icon {
@@ -1722,4 +1737,45 @@ ul.pc-item-list li {
   border-radius: var(--radius-sm);
   padding: 0.5rem 0.75rem;
   font-size: 0.9rem;
+}
+
+/* UAT D7 — phone tap targets for controls whose base rules are declared
+   above this block. .btn-small's min-height: 32px is a single class, same
+   specificity as the first phone block, and it comes later, so the 32px
+   value was the one that applied. .btn.btn-small is more specific, and
+   this block is also later, so 44px wins on phones only. Desktop, including
+   the compact sidebar at 900px and up, does not match this query.
+
+   Inline text links stay inline: the extra box is an empty hit area, so
+   the text's size, colour, and underline do not change. Status pills are
+   spans and are not included — only the role buttons are controls. */
+@media (max-width: 899px) {
+  .btn.btn-small {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .pc-tab {
+    min-height: 44px;
+  }
+
+  .grow-contact-roles button.pill {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  a:not(.btn):not(.app-sidebar-link):not(.stat-tile) {
+    position: relative;
+  }
+
+  a:not(.btn):not(.app-sidebar-link):not(.stat-tile)::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 44px;
+    transform: translateY(-50%);
+  }
 }
