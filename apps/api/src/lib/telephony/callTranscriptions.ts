@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import {
   auditLogs,
   db,
@@ -38,6 +38,7 @@ import {
   getCallRecordingContent,
 } from "./recordingStorage.js";
 import { LIVE_RECORDING_APPROVAL_ENV } from "./recordingGates.js";
+import { captureRetentionAudit, processingRetentionAudit } from "./liveNotesRetention.js";
 import {
   CALL_TRANSCRIPTION_MAX_RETRIES,
   boundedCallTranscriptionTimeout,
@@ -572,12 +573,45 @@ async function assertCurrentAttemptAuthorization(
   }
 }
 
-async function findArtifact(input: InitiateCallTranscriptionInput): Promise<GrowCallTranscription> {
-  const [artifact] = await db.select().from(growCallTranscriptions).where(and(
-    eq(growCallTranscriptions.callSessionId, input.callSessionId),
-    eq(growCallTranscriptions.recordingReference, input.recordingReference),
+function transcriptionIdentityWhere(input: InitiateCallTranscriptionInput, contentSha256: string | null) {
+  const byReference = eq(growCallTranscriptions.recordingReference, input.recordingReference);
+  return and(
     eq(growCallTranscriptions.brokerageId, input.brokerageId),
-  )).limit(1);
+    eq(growCallTranscriptions.callSessionId, input.callSessionId),
+    contentSha256
+      ? or(byReference, eq(growCallTranscriptions.recordingContentSha256, contentSha256))
+      : byReference,
+  );
+}
+
+/**
+ * Tenant-scoped hash of the recording the caller named. A finished row no
+ * longer stores the version id, so a repeat request is matched on this hash.
+ * A version outside this call returns null and is rejected by validateSource.
+ */
+async function loadRecordingContentSha256(input: InitiateCallTranscriptionInput): Promise<string | null> {
+  const [version] = await db.select({
+    contentSha256: documentObjectVersions.contentSha256,
+  }).from(documentObjectVersions)
+    .innerJoin(documents, eq(documentObjectVersions.documentId, documents.id))
+    .where(and(
+      eq(documentObjectVersions.id, input.recordingReference),
+      eq(documentObjectVersions.brokerageId, input.brokerageId),
+      eq(documents.brokerageId, input.brokerageId),
+      eq(documents.logicalOwnerType, "telephony-call"),
+      eq(documents.logicalOwnerId, input.callSessionId),
+    )).limit(1);
+  return version?.contentSha256 ?? null;
+}
+
+async function findArtifact(
+  input: InitiateCallTranscriptionInput,
+  contentSha256: string | null,
+): Promise<GrowCallTranscription> {
+  const [artifact] = await db.select().from(growCallTranscriptions)
+    .where(transcriptionIdentityWhere(input, contentSha256))
+    .orderBy(sql`${growCallTranscriptions.recordingReference} desc nulls last`, desc(growCallTranscriptions.id))
+    .limit(1);
   if (!artifact) throw new CallTranscriptionError("PROVIDER_FAILED", "The transcription artifact could not be loaded.");
   return artifact;
 }
@@ -701,14 +735,14 @@ export async function initiateCallTranscription(
     throw error;
   }
 
+  const contentSha256 = await loadRecordingContentSha256(input);
   const existingForKey = await db.select({
     row: growCallTranscriptions,
     updatedAtToken: transcriptionUpdatedAtToken,
-  }).from(growCallTranscriptions).where(and(
-    eq(growCallTranscriptions.brokerageId, input.brokerageId),
-    eq(growCallTranscriptions.callSessionId, input.callSessionId),
-    eq(growCallTranscriptions.recordingReference, input.recordingReference),
-  )).limit(1);
+  }).from(growCallTranscriptions)
+    .where(transcriptionIdentityWhere(input, contentSha256))
+    .orderBy(sql`${growCallTranscriptions.recordingReference} desc nulls last`, desc(growCallTranscriptions.id))
+    .limit(1);
   let existingSnapshot = existingForKey[0];
   let existing = existingSnapshot?.row;
 
@@ -746,7 +780,7 @@ export async function initiateCallTranscription(
       }
       return updated;
     });
-    return failed ?? findArtifact(input);
+    return failed ?? findArtifact(input, contentSha256);
   };
 
   // A replay of a terminal artifact never revalidates or submits again.
@@ -779,12 +813,22 @@ export async function initiateCallTranscription(
     }
     throw error;
   }
+  const recordingVersion = source.recording.version;
+  if (!recordingVersion) {
+    throw new CallTranscriptionError("RECORDING_UNAVAILABLE", "The recording is unavailable for transcription.");
+  }
   const insertion = await db.transaction(async (tx) => {
     const [created] = await tx.insert(growCallTranscriptions).values({
       brokerageId: input.brokerageId,
       callSessionId: input.callSessionId,
       partyId: source.session.partyId,
       recordingReference: input.recordingReference,
+      recordingContentSha256: recordingVersion.contentSha256,
+      retentionAudit: captureRetentionAudit({
+        consentReference: source.recording.metadata.recordingConsentIdAtCapture,
+        audioDurationSeconds: source.recording.metadata.durationSeconds,
+        recordingByteCount: source.recording.bytes.length,
+      }),
       processingState: "PENDING",
     }).onConflictDoNothing({
       target: [growCallTranscriptions.callSessionId, growCallTranscriptions.recordingReference],
@@ -808,11 +852,10 @@ export async function initiateCallTranscription(
     const [existing] = await tx.select({
       row: growCallTranscriptions,
       updatedAtToken: transcriptionUpdatedAtToken,
-    }).from(growCallTranscriptions).where(and(
-      eq(growCallTranscriptions.brokerageId, input.brokerageId),
-      eq(growCallTranscriptions.callSessionId, input.callSessionId),
-      eq(growCallTranscriptions.recordingReference, input.recordingReference),
-    )).limit(1);
+    }).from(growCallTranscriptions)
+      .where(transcriptionIdentityWhere(input, recordingVersion.contentSha256))
+      .orderBy(sql`${growCallTranscriptions.recordingReference} desc nulls last`, desc(growCallTranscriptions.id))
+      .limit(1);
     if (!existing) throw new CallTranscriptionError("CALL_NOT_FOUND", new GrowCallSessionNotFoundError().message);
     return { snapshot: existing, created: false };
   });
@@ -843,7 +886,7 @@ export async function initiateCallTranscription(
     }).from(growCallTranscriptions).where(eq(growCallTranscriptions.id, updated.id));
     return { row: updated, updatedAtToken: updatedToken!.updatedAtToken };
   });
-  if (!claimed) return findArtifact(input);
+  if (!claimed) return findArtifact(input, contentSha256);
 
   let claim = claimed;
   const config = loadVoiceTranscriptionConfig();
@@ -956,12 +999,25 @@ export async function initiateCallTranscription(
         });
         const [updated] = await tx.update(growCallTranscriptions).set({
           processingState: "AWAITING_AGENT_REVIEW",
+          // Interim transcript only. Save and discard clear it in the same
+          // transaction as the review decision.
           transcript,
           draftSummary: drafts.draftSummary,
           draftKeyPoints: drafts.draftKeyPoints,
           draftCommitments: drafts.draftCommitments,
           draftFollowups: drafts.draftFollowups,
           transcriptionProviderReference: result!.provider,
+          retentionAudit: processingRetentionAudit(claim.row.retentionAudit, {
+            providerId: result!.provider,
+            audioDurationSeconds: result!.durationSeconds,
+            transcript,
+            structuredOutputCounts: {
+              summary: drafts.draftSummary ? 1 : 0,
+              keyPoints: drafts.draftKeyPoints?.length ?? 0,
+              commitments: drafts.draftCommitments?.length ?? 0,
+              followups: drafts.draftFollowups?.length ?? 0,
+            },
+          }),
           failureReason: null,
           lastError: null,
           updatedAt: new Date(),
@@ -983,7 +1039,7 @@ export async function initiateCallTranscription(
         }
         return updated;
       });
-      return completed ?? findArtifact(input);
+      return completed ?? findArtifact(input, contentSha256);
     } catch (error) {
       reason = durableFailureReason(error);
     }
@@ -1036,7 +1092,7 @@ export async function initiateCallTranscription(
       }).from(growCallTranscriptions).where(eq(growCallTranscriptions.id, updated.id));
       return { row: updated, updatedAtToken: updatedToken!.updatedAtToken };
     });
-    if (!rescheduled) return findArtifact(input);
+    if (!rescheduled) return findArtifact(input, contentSha256);
     claim = rescheduled;
     const delay = callTranscriptionRetryDelayMs(claim.row.retryCount ?? 0);
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));

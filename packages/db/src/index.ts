@@ -207,3 +207,9 @@ export const EXPECTED_MIGRATIONS: Readonly<{ count: number; latestTag: string; l
 })();
 
 export * from "./schema/index";
+export {
+  LIVE_NOTES_CONTENT_PURGE_SQL,
+  LIVE_NOTES_PURGE_DRY_RUN_SQL,
+  LIVE_NOTES_PURGE_MIGRATION_ID,
+  LIVE_NOTES_RECORDING_SHA_BACKFILL_SQL,
+} from "./liveNotesRetentionPurge";

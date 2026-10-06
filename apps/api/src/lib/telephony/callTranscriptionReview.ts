@@ -27,6 +27,15 @@ import { logger } from "@aee/events";
 import { summarizeErrorCause } from "../errorCause.js";
 import { type ConsentTransaction, writeAuditInTransaction } from "../consentControlsPersistence.js";
 import { shouldFailCallTranscriptionAuditForTests } from "./callTranscriptions.js";
+import {
+  approvedStructuredOutputCounts,
+  FORWARD_REVIEW_DISCARD_PURGE_ID,
+  FORWARD_REVIEW_SAVE_PURGE_ID,
+  intentionallyClearedRecording,
+  projectCallTranscriptionForClient,
+  reviewPurgeRetentionAudit,
+  stripTranscriptText,
+} from "./liveNotesRetention.js";
 
 const MAX_REVIEW_ITEMS = 500;
 const MAX_ITEM_ID_LENGTH = 256;
@@ -230,12 +239,20 @@ async function loadReviewRow(
     await noteGrowPartyIsolationRejection(row.partyId, brokerageId);
     throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription contact is not in this brokerage.");
   }
+  if (intentionallyClearedRecording(row)) {
+    if (readOnly) return projectCallTranscriptionForClient(row);
+    if (row.processingState === "APPROVED" || row.processingState === "PARTIALLY_APPROVED" ||
+        row.processingState === "DISCARDED" || row.processingState === "DELETED" ||
+        row.processingState === "DELETION_SCHEDULED") {
+      throw new CallTranscriptionReviewError("TERMINAL", "This transcription is already terminal.");
+    }
+  }
   const unavailable = await sourceLedgerStatus(db, row);
   if (unavailable) {
     if (readOnly) return unavailableReadProjection(row, unavailable);
     throw new CallTranscriptionReviewError("STALE", "The transcription recording source is no longer available.");
   }
-  return row;
+  return readOnly ? projectCallTranscriptionForClient(row) : row;
 }
 
 type ReviewDecisionCounts = {
@@ -294,7 +311,9 @@ async function strictReviewAuditInTransaction(
         processingState: input.updated.processingState,
         ...(input.decisionCounts ? { decisionCounts: input.decisionCounts } : {}),
       }),
-      providerReference: `call:${input.updated.callSessionId}:recording:${input.updated.recordingReference}`,
+      providerReference: input.updated.recordingContentSha256
+        ? `call:${input.updated.callSessionId}:sha:${input.updated.recordingContentSha256}`
+        : `call:${input.updated.callSessionId}:recording:cleared`,
     }, { strict: true, write: (audit) => writeAuditInTransaction(tx, audit) });
   } catch (err) {
     // WP2a: log the underlying cause (ids only — never transcript text)
@@ -332,6 +351,7 @@ async function sourceLedgerStatus(
   row: Pick<GrowCallTranscription, "brokerageId" | "callSessionId" | "recordingReference">,
   lock = false,
 ): Promise<SourceUnavailableReason | null> {
+  if (row.recordingReference == null) return "RECORDING_UNAVAILABLE";
   const query = executor.select({
     objectStatus: documentObjectVersions.objectStatus,
     deletedAt: documentObjectVersions.deletedAt,
@@ -390,6 +410,36 @@ function unavailableReadProjection(
   };
 }
 
+async function retentionFacts(
+  tx: ConsentTransaction,
+  row: GrowCallTranscription,
+): Promise<{ sha: string | null; byteCount: number | null; consentReference: number | null }> {
+  let sha = row.recordingContentSha256;
+  let byteCount = row.retentionAudit?.recordingByteCount ?? null;
+  if (row.recordingReference != null) {
+    const [version] = await tx.select({
+      contentSha256: documentObjectVersions.contentSha256,
+      byteSize: documentObjectVersions.byteSize,
+    }).from(documentObjectVersions).where(and(
+      eq(documentObjectVersions.id, row.recordingReference),
+      eq(documentObjectVersions.brokerageId, row.brokerageId),
+    )).limit(1);
+    sha = sha ?? version?.contentSha256 ?? null;
+    byteCount = byteCount ?? version?.byteSize ?? null;
+  }
+  let consentReference = row.retentionAudit?.consentReference ?? null;
+  if (consentReference == null) {
+    const [session] = await tx.select({
+      recordingConsentId: growCallSessions.recordingConsentId,
+    }).from(growCallSessions).where(and(
+      eq(growCallSessions.id, row.callSessionId),
+      eq(growCallSessions.brokerageId, row.brokerageId),
+    )).limit(1);
+    consentReference = session?.recordingConsentId ?? null;
+  }
+  return { sha, byteCount, consentReference };
+}
+
 export async function saveCallTranscriptionReview(input: {
   brokerageId: number;
   callSessionId: number;
@@ -429,12 +479,28 @@ export async function saveCallTranscriptionReview(input: {
     }));
     const processingState = reviewState.some((item) => item.decision === "REJECTED")
       ? "PARTIALLY_APPROVED" as const : "APPROVED" as const;
+    const facts = await retentionFacts(tx, locked);
+    const purgedAt = new Date(reviewedAt);
     const [updated] = await tx.update(growCallTranscriptions).set({
-      reviewState,
+      reviewState: stripTranscriptText(reviewState),
       processingState,
       approvedBy: input.actor.userId,
-      approvedAt: new Date(reviewedAt),
-      updatedAt: new Date(reviewedAt),
+      approvedAt: purgedAt,
+      updatedAt: purgedAt,
+      transcript: null,
+      recordingReference: null,
+      recordingContentSha256: facts.sha,
+      retentionAudit: reviewPurgeRetentionAudit(locked.retentionAudit, {
+        purgeMigrationId: FORWARD_REVIEW_SAVE_PURGE_ID,
+        humanReviewRecorded: true,
+        consentReference: facts.consentReference,
+        recordingByteCount: facts.byteCount,
+        transcript: locked.transcript,
+        structuredOutputCounts: approvedStructuredOutputCounts(reviewState),
+        reviewedByUserId: input.actor.userId,
+        reviewedAt,
+        purgedAt: purgedAt.toISOString(),
+      }),
     }).where(and(
       eq(growCallTranscriptions.id, locked.id),
       eq(growCallTranscriptions.processingState, "AWAITING_AGENT_REVIEW"),
@@ -481,7 +547,32 @@ export async function discardCallTranscription(input: {
     }
     await assertSourceLedger(tx, locked, true);
     assertMutable(locked);
-    const [updated] = await tx.update(growCallTranscriptions).set({ processingState: "DISCARDED", updatedAt: new Date() })
+    const facts = await retentionFacts(tx, locked);
+    const purgedAt = new Date();
+    const [updated] = await tx.update(growCallTranscriptions).set({
+      processingState: "DISCARDED",
+      transcript: null,
+      recordingReference: null,
+      recordingContentSha256: facts.sha,
+      reviewState: stripTranscriptText(locked.reviewState ?? []),
+      retentionAudit: reviewPurgeRetentionAudit(locked.retentionAudit, {
+        purgeMigrationId: FORWARD_REVIEW_DISCARD_PURGE_ID,
+        humanReviewRecorded: true,
+        consentReference: facts.consentReference,
+        recordingByteCount: facts.byteCount,
+        transcript: locked.transcript,
+        structuredOutputCounts: {
+          summary: locked.draftSummary ? 1 : 0,
+          keyPoints: locked.draftKeyPoints?.length ?? 0,
+          commitments: locked.draftCommitments?.length ?? 0,
+          followups: locked.draftFollowups?.length ?? 0,
+        },
+        reviewedByUserId: input.actor.userId,
+        reviewedAt: purgedAt.toISOString(),
+        purgedAt: purgedAt.toISOString(),
+      }),
+      updatedAt: purgedAt,
+    })
       .where(and(
         eq(growCallTranscriptions.id, locked.id),
         eq(growCallTranscriptions.processingState, "AWAITING_AGENT_REVIEW"),
@@ -528,10 +619,14 @@ export async function listCallTranscriptionsForContact(input: {
     try {
       assertCallSessionActorAuthorized(candidate.session, input.actor.userId, input.actor.role);
       if (candidate.session.partyId !== candidate.transcription.partyId) continue;
+      if (intentionallyClearedRecording(candidate.transcription)) {
+        visible.push(projectCallTranscriptionForClient(candidate.transcription));
+        continue;
+      }
       const unavailable = await sourceLedgerStatus(db, candidate.transcription);
-      visible.push(unavailable
+      visible.push(projectCallTranscriptionForClient(unavailable
         ? unavailableReadProjection(candidate.transcription, unavailable)
-        : candidate.transcription);
+        : candidate.transcription));
     } catch (error) {
       if (error instanceof GrowCallSessionAuthorizationError) continue;
       throw error;

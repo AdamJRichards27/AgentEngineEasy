@@ -9,6 +9,14 @@ interface ElementNode {
   };
 }
 
+function textareaValues(node: unknown): string[] {
+  if (Array.isArray(node)) return node.flatMap(textareaValues);
+  if (!node || typeof node !== "object") return [];
+  const element = node as ElementNode & { type?: unknown; props?: { value?: unknown; children?: unknown } };
+  const own = element.type === "textarea" && typeof element.props?.value === "string" ? [element.props.value] : [];
+  return own.concat(textareaValues(element.props?.children));
+}
+
 function textContent(node: unknown): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(textContent).join("");
@@ -182,6 +190,9 @@ test("item decisions stay local until Save, while Save and Discard call only the
     tree = render();
     findButtons(tree, "Reject")[1]!.props!.onClick!();
     tree = render();
+    assert.match(textContent(tree), /This transcript is only here for review/);
+    assert.ok(textareaValues(tree).includes("Provider transcript"));
+    assert.doesNotMatch(textContent(tree), /remains unchanged/);
     assert.equal(writes.length, 0, "per-item decisions must not persist");
 
     findButtons(tree, "Save review")[0]!.props!.onClick!();

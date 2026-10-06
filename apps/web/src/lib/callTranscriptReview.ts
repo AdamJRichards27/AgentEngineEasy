@@ -6,6 +6,11 @@ export type TranscriptDisplayState =
   | "Recording unavailable"
   | "Discarded";
 
+/** The full transcript is shown only while the review step is still open. */
+export function showsInterimCallTranscript(processingState: string): boolean {
+  return processingState === "AWAITING_AGENT_REVIEW";
+}
+
 export function transcriptionStatusLabel(state: string, failureReason?: string | null): TranscriptDisplayState {
   if (state === "PENDING" || state === "MEDIA_PROCESSING" || state === "TRANSCRIBING") return "Processing call";
   if (state === "AWAITING_AGENT_REVIEW") return "Needs review";

@@ -4,6 +4,7 @@ import { ApiError, apiFetch } from "../lib/api";
 import {
   createReviewItems,
   serializeReviewItems,
+  showsInterimCallTranscript,
   transcriptionStatusLabel,
   validateReviewItems,
   type LocalReviewItem,
@@ -98,13 +99,13 @@ export function GrowContactTranscriptPanel({
   }, [partyId]);
 
   const selected = list.data?.transcriptions.find((row) => row.id === selectedId) ?? null;
-  const reviewable = selected?.processingState === "AWAITING_AGENT_REVIEW";
+  const reviewable = selected ? showsInterimCallTranscript(selected.processingState) : false;
   const saved = selected?.processingState === "APPROVED" || selected?.processingState === "PARTIALLY_APPROVED";
 
   useEffect(() => {
     if (selected && initializedId.current !== selected.id) {
       initializedId.current = selected.id;
-      setTranscript(selected.transcript ?? "");
+      setTranscript(showsInterimCallTranscript(selected.processingState) ? (selected.transcript ?? "") : "");
       setItems(
         createReviewItems(
           selected.draftSummary,
@@ -201,7 +202,7 @@ export function GrowContactTranscriptPanel({
         <div className="grow-transcript-review">
           <p className="grow-review-advisory">AI draft only — review each item before saving. Nothing is saved or actioned until you choose Save review.</p>
           <label>Transcript<textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} disabled={pending} /></label>
-          <p className="muted">Save accepts the reviewed transcript. The original transcript remains unchanged.</p>
+          <p className="muted">This transcript is only here for review. Saving or discarding removes it. The notes you accept are what get kept.</p>
           {(["SUMMARY", "KEY_POINT", "COMMITMENT", "FOLLOWUP"] as ReviewItemType[]).map((type) => (
             <div className="grow-review-group" key={type}>
               <div className="grow-review-group-title"><strong>{reviewGroupTitle(type)}</strong>
@@ -230,7 +231,7 @@ export function GrowContactTranscriptPanel({
         </div>
       )}
       {selected && !reviewable && (
-        <p className="muted">This transcript is {transcriptionStatusLabel(selected.processingState, selected.failureReason).toLowerCase()}.</p>
+        <p className="muted">This call is {transcriptionStatusLabel(selected.processingState, selected.failureReason).toLowerCase()}. The conversation is not kept after review.</p>
       )}
       {/* Stage F4.3: governed follow-ups from a saved review only. Nothing is
           proposed until the agent selects items, confirms each due date, and

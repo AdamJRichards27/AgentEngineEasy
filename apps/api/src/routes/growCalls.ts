@@ -74,6 +74,7 @@ import {
   saveCallTranscriptionReview,
 } from "../lib/telephony/callTranscriptionReview.js";
 import { persistApprovedCallSummaryActivity } from "../lib/telephony/callTranscriptionTimeline.js";
+import { projectCallTranscriptionForClient } from "../lib/telephony/liveNotesRetention.js";
 
 export const growCallsRouter = Router();
 
@@ -494,7 +495,9 @@ growCallsRouter.post("/:id/transcription", requireEntitlement("grow.calling.tran
         brokerageId: authedUser.brokerageId,
       },
     });
-    res.status(transcription.processingState === "PENDING" ? 202 : 200).json({ transcription });
+    res.status(transcription.processingState === "PENDING" ? 202 : 200).json({
+      transcription: projectCallTranscriptionForClient(transcription),
+    });
   } catch (error) {
     if (error instanceof CallTranscriptionError) {
       const status = error.code === "CALL_NOT_FOUND" ? 404
@@ -533,7 +536,7 @@ growCallsRouter.get("/contacts/:partyId/transcriptions", requireEntitlement("gro
       partyId,
       actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
     });
-    res.json({ transcriptions });
+    res.json({ transcriptions: transcriptions.map(projectCallTranscriptionForClient) });
   } catch (error) {
     if (error instanceof CallTranscriptionReviewError) {
       res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
@@ -558,7 +561,9 @@ growCallsRouter.get("/:id/transcription/:transcriptionId", requireEntitlement("g
       transcriptionId,
       actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
     });
-    res.json({ transcription });
+    res.json({
+      transcription: transcription ? projectCallTranscriptionForClient(transcription) : transcription,
+    });
   } catch (error) {
     if (error instanceof CallTranscriptionReviewError) {
       res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
@@ -586,7 +591,7 @@ growCallsRouter.post("/:id/transcription/:transcriptionId/review", requireEntitl
     }, persistApprovedCallSummaryActivity);
     // Part F: explicit Save has atomically committed approval plus one passive
     // Timeline snapshot. Discard and background processing never use this hook.
-    res.json({ transcription });
+    res.json({ transcription: projectCallTranscriptionForClient(transcription) });
   } catch (error) {
     if (error instanceof CallTranscriptionReviewError) {
       res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
@@ -612,7 +617,7 @@ growCallsRouter.post("/:id/transcription/:transcriptionId/discard", requireEntit
       actor: { userId: authedUser.id, role: authedUser.role, brokerageId: authedUser.brokerageId },
       body: req.body,
     });
-    res.json({ transcription });
+    res.json({ transcription: projectCallTranscriptionForClient(transcription) });
   } catch (error) {
     if (error instanceof CallTranscriptionReviewError) {
       res.status(transcriptionReviewErrorStatus(error)).json({ error: error.message, code: error.code });
