@@ -38,6 +38,10 @@ function button(tree: unknown, label: string): ElementNode | undefined {
   return findAll(tree, (element) => element.type === "button" && textContent(element).trim() === label)[0];
 }
 
+function optionValues(tree: unknown): string[] {
+  return findAll(tree, (element) => element.type === "option").map((element) => String(element.props?.value));
+}
+
 function byId(tree: unknown, id: string): ElementNode | undefined {
   return findAll(tree, (element) => element.props?.id === id)[0];
 }
@@ -411,7 +415,7 @@ test("Start appraisal from a contact posts partyId and the chosen propertyId", a
   }
 });
 
-test("Contact 360 lists only that contact's appraisals, with status and outcome", async () => {
+test("Contact 360 keeps this contact's appraisal editable and shows another contact's row as read-only", async () => {
   const { hooks } = install(MANAGE, async () => ({}), [
     appraisal(),
     appraisal({ id: 9, partyId: 99, propertyAddress: "Other contact", status: "WON", outcome: "WON" }),
@@ -427,8 +431,14 @@ test("Contact 360 lists only that contact's appraisals, with status and outcome"
       assert.match(text, /77 Appraisal St/);
       assert.match(text, /Status: Draft/);
       assert.match(text, /Outcome: Not recorded/);
-      assert.doesNotMatch(text, /Other contact/);
+      assert.match(text, /Other contact/);
+      assert.match(text, /Status: Won/);
+      assert.match(text, /Outcome: WON/);
+      assert.match(text, /This appraisal belongs to another contact/);
+      assert.equal(button(tree, "Start appraisal"), undefined);
       assert.equal(button(tree, "Appointment scheduled") !== undefined, true);
+      assert.equal(byId(tree, "grow-appraisal-9-record-outcome"), undefined);
+      assert.equal(byId(tree, "grow-appraisal-9-status-APPOINTMENT_SCHEDULED"), undefined);
       assertNoLongPath(tree);
     });
   } finally {
@@ -694,6 +704,115 @@ test("Start appraisal from an opportunity posts opportunityId, and 409 is shown 
   }
 });
 
+test("Start stays hidden when the property already has an appraisal, including another contact's and a finished one", async () => {
+  await withVite(async (vite) => {
+    const page = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+      GrowOpportunitiesTab: OpportunitiesTab;
+      GrowContactOpportunitiesSection: ContactOpportunities;
+      GrowContactAppraisalsSection: ContactSection;
+    };
+
+    const otherContact = install(MANAGE, async () => ({}), [
+      appraisal({ partyId: 99, status: "PRESENTED", propertyAddress: "Lou's property" }),
+    ]);
+    try {
+      otherContact.hooks.beginRender();
+      const tab = page.GrowOpportunitiesTab({ onViewContact: () => {} });
+      const tabText = textContent(tab);
+      assert.equal(byId(tab, "grow-opportunity-start-appraisal-41"), undefined);
+      assert.match(tabText, /Lou's property/);
+      assert.match(tabText, /Status: Presented/);
+      assert.match(tabText, /This appraisal belongs to another contact/);
+      assert.equal(button(tab, "Record outcome"), undefined);
+      assert.equal(button(tab, "Appointment scheduled"), undefined);
+
+      otherContact.hooks.beginRender();
+      const contactOpp = page.GrowContactOpportunitiesSection({
+        partyId: 12,
+        opportunities: [
+          {
+            id: 41,
+            opportunityType: "Appraisal",
+            status: "Open",
+            stage: "Qualified",
+            reason: "Enquired",
+            nextActionDueAt: null,
+            recommendedNextAction: null,
+            propertyId: 77,
+          },
+        ],
+        onChanged: () => {},
+      });
+      assert.equal(byId(contactOpp, "grow-opportunity-start-appraisal-41"), undefined);
+      assert.match(textContent(contactOpp), /This appraisal belongs to another contact/);
+      assert.equal(button(contactOpp, "Record outcome"), undefined);
+    } finally {
+      clearGlobals();
+    }
+
+    const closedCases = [
+      { status: "LOST", outcome: "LOST", isFinalised: false, statusLabel: /Status: Lost/, outcomeLabel: /Outcome: LOST/ },
+      { status: "WON", outcome: "WON", isFinalised: false, statusLabel: /Status: Won/, outcomeLabel: /Outcome: WON/ },
+      { status: "DEFERRED", outcome: "DEFERRED", isFinalised: false, statusLabel: /Status: Deferred/, outcomeLabel: /Outcome: DEFERRED/ },
+      { status: "ARCHIVED", outcome: null, isFinalised: false, statusLabel: /Status: Archived/, outcomeLabel: /Outcome: Not recorded/ },
+      { status: "DRAFT", outcome: null, isFinalised: true, statusLabel: /Status: Draft/, outcomeLabel: /Outcome: Not recorded/ },
+    ];
+    for (const item of closedCases) {
+      const closed = install(MANAGE, async () => ({}), [
+        appraisal({ status: item.status, outcome: item.outcome, isFinalised: item.isFinalised }),
+      ]);
+      try {
+        closed.hooks.beginRender();
+        const tab = page.GrowOpportunitiesTab({ onViewContact: () => {} });
+        const text = textContent(tab);
+        assert.equal(byId(tab, "grow-opportunity-start-appraisal-41"), undefined, item.status);
+        assert.match(text, item.statusLabel, item.status);
+        assert.match(text, item.outcomeLabel, item.status);
+        assert.match(text, /This appraisal is finished and cannot be changed/, item.status);
+        assert.equal(button(tab, "Appointment scheduled"), undefined, item.status);
+        assert.equal(button(tab, "Record outcome"), undefined, item.status);
+        assert.doesNotMatch(text, /belongs to another contact/, item.status);
+
+        closed.hooks.beginRender();
+        const contact = page.GrowContactAppraisalsSection({ partyId: 12, linkedProperties: LINKED });
+        assert.equal(button(contact, "Start appraisal"), undefined, item.status);
+        assert.equal(byId(contact, "grow-contact-appraisal-property"), undefined, item.status);
+        assert.match(textContent(contact), /This appraisal is finished and cannot be changed/, item.status);
+        assert.equal(button(contact, "Appointment scheduled"), undefined, item.status);
+        assert.equal(button(contact, "Record outcome"), undefined, item.status);
+      } finally {
+        clearGlobals();
+      }
+    }
+
+    const partial = install(MANAGE, async () => ({ appraisal: { id: 9 } }), [
+      appraisal({ partyId: 99, status: "DRAFT", propertyAddress: "77 Appraisal St" }),
+    ]);
+    try {
+      const render = () => {
+        partial.hooks.beginRender();
+        return page.GrowContactAppraisalsSection({
+          partyId: 12,
+          linkedProperties: [
+            { propertyId: 77, propertyAddress: "77 Appraisal St" },
+            { propertyId: 88, propertyAddress: "88 Other St" },
+          ],
+        });
+      };
+      let tree = render();
+      assert.deepEqual(optionValues(tree), ["88"]);
+      assert.equal(byId(tree, "grow-contact-appraisal-property")!.props!.value, 88);
+      assert.match(textContent(tree), /This appraisal belongs to another contact/);
+      assert.equal(button(tree, "Appointment scheduled"), undefined);
+      (button(tree, "Start appraisal")!.props!.onClick as () => void)();
+      await Promise.all(partial.pending);
+      assert.deepEqual(JSON.parse(partial.calls[0].options!.body!), { partyId: 12, propertyId: 88 });
+    } finally {
+      clearGlobals();
+    }
+  });
+});
+
 test("an opportunity with no property explains that, and a started appraisal offers the next step", async () => {
   const { hooks, calls, pending, invalidated } = install(MANAGE, async () => ({ appraisal: { id: 8 } }), [
     appraisal({ status: "DRAFT" }),
@@ -736,8 +855,10 @@ test("an opportunity with no property explains that, and a started appraisal off
       const tree = render();
       assert.equal(byId(tree, "grow-opportunity-start-appraisal-42"), undefined);
       assert.match(textContent(tree), /Link a property to start an appraisal/);
-      assert.ok(byId(tree, "grow-opportunity-start-appraisal-41"));
+      assert.equal(byId(tree, "grow-opportunity-start-appraisal-41"), undefined);
       assert.ok(button(tree, "Appointment scheduled"));
+      assert.doesNotMatch(textContent(tree), /belongs to another contact/);
+      assert.doesNotMatch(textContent(tree), /cannot be changed/);
       assert.equal(button(tree, "Record outcome"), undefined);
       (byId(tree, "grow-appraisal-8-status-APPOINTMENT_SCHEDULED")!.props!.onClick as () => void)();
       await Promise.all(pending);

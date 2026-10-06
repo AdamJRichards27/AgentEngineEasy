@@ -78,8 +78,11 @@ import {
   appraisalNextSteps,
   appraisalOutcomeOptions,
   appraisalPropertyChoices,
+  appraisalReadOnlyReason,
+  appraisalStartPropertyChoices,
   appraisalStatusLabel,
   appraisalsForContact,
+  otherContactAppraisalsForProperties,
   type GrowAppraisalSummary,
 } from "../lib/growAppraisals";
 
@@ -1325,8 +1328,10 @@ function GrowAppraisalRecord({
 
   if (!appraisal) return null;
 
-  const steps = canWrite ? appraisalNextSteps(appraisal.status) : [];
-  const outcomes = canWrite ? appraisalOutcomeOptions(appraisal.status) : [];
+  const readOnlyReason = appraisalReadOnlyReason(appraisal, partyId);
+  const editable = canWrite && readOnlyReason == null;
+  const steps = editable ? appraisalNextSteps(appraisal.status) : [];
+  const outcomes = editable ? appraisalOutcomeOptions(appraisal.status) : [];
   const busy = changeStatus.isPending || recordOutcome.isPending;
 
   return (
@@ -1335,6 +1340,7 @@ function GrowAppraisalRecord({
         {appraisal.propertyAddress} — Status: {appraisalStatusLabel(appraisal.status)}
         {appraisal.outcome ? ` — Outcome: ${appraisal.outcome}` : " — Outcome: Not recorded"}
       </p>
+      {readOnlyReason && <p className="muted">{readOnlyReason}</p>}
       {errorMessage && (
         <p className="error-text" role="alert">
           {errorMessage}
@@ -1454,7 +1460,7 @@ function GrowOpportunityAppraisalActions({
         </p>
       )}
       {canWrite && propertyId === null && <p className="muted">{LINK_PROPERTY_BEFORE_APPRAISAL}</p>}
-      {canWrite && propertyId !== null && (
+      {canWrite && propertyId !== null && appraisal == null && (
         <button
           type="button"
           className="btn btn-secondary btn-small"
@@ -1487,10 +1493,12 @@ export function GrowContactAppraisalsSection({
   const [chosenPropertyId, setChosenPropertyId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const choices = appraisalPropertyChoices(linkedProperties);
+  const pipelineRows = pipeline.data?.appraisals ?? [];
+  const startChoices = appraisalStartPropertyChoices(choices, pipelineRows);
   const propertyId =
-    chosenPropertyId !== null && choices.some((choice) => choice.id === chosenPropertyId)
+    chosenPropertyId !== null && startChoices.some((choice) => choice.id === chosenPropertyId)
       ? chosenPropertyId
-      : (choices[0]?.id ?? null);
+      : (startChoices[0]?.id ?? null);
 
   const start = useMutation({
     mutationFn: (selectedPropertyId: number) =>
@@ -1507,14 +1515,19 @@ export function GrowContactAppraisalsSection({
 
   if (!canRead) return null;
 
-  const rows = appraisalsForContact(pipeline.data?.appraisals ?? [], partyId);
+  const rows = appraisalsForContact(pipelineRows, partyId);
+  const otherRows = otherContactAppraisalsForProperties(
+    pipelineRows,
+    partyId,
+    choices.map((choice) => choice.id),
+  );
 
   return (
     <section className="card">
       <h2>Appraisals</h2>
       {pipeline.isError && <p className="error-text">{growErrorMessage(pipeline.error, "Couldn't load appraisals.")}</p>}
       {canWrite && choices.length === 0 && <p className="muted">{LINK_PROPERTY_BEFORE_APPRAISAL}</p>}
-      {canWrite && choices.length > 0 && (
+      {canWrite && startChoices.length > 0 && (
         <div className="stack grow-inline-form">
           <label htmlFor="grow-contact-appraisal-property">Property</label>
           <select
@@ -1525,7 +1538,7 @@ export function GrowContactAppraisalsSection({
               setChosenPropertyId(Number.isInteger(id) && id > 0 ? id : null);
             }}
           >
-            {choices.map((choice) => (
+            {startChoices.map((choice) => (
               <option key={choice.id} value={choice.id}>
                 {choice.label}
               </option>
@@ -1550,10 +1563,15 @@ export function GrowContactAppraisalsSection({
           {errorMessage}
         </p>
       )}
-      {rows.length === 0 && <p className="empty-state">No appraisals yet.</p>}
-      {rows.length > 0 && (
+      {rows.length === 0 && otherRows.length === 0 && <p className="empty-state">No appraisals yet.</p>}
+      {(rows.length > 0 || otherRows.length > 0) && (
         <ul className="item-list">
           {rows.map((appraisal) => (
+            <li key={appraisal.id}>
+              <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
+            </li>
+          ))}
+          {otherRows.map((appraisal) => (
             <li key={appraisal.id}>
               <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
             </li>
@@ -3670,7 +3688,7 @@ export function GrowContactOpportunitiesSection({
                     opportunityId={o.id}
                     partyId={partyId}
                     propertyId={o.propertyId}
-                    appraisal={appraisalForProperty(appraisalRows, o.propertyId)}
+                    appraisal={appraisalForProperty(appraisalRows, o.propertyId, partyId)}
                     canManageOpportunities={canManageOpportunities}
                     canAddNote={canAddNote}
                     canViewContacts={false}
@@ -3767,7 +3785,7 @@ export function GrowOpportunitiesTab({
                     opportunityId={o.id}
                     partyId={o.partyId}
                     propertyId={o.propertyId}
-                    appraisal={appraisalForProperty(appraisalRows, o.propertyId)}
+                    appraisal={appraisalForProperty(appraisalRows, o.propertyId, o.partyId)}
                     canManageOpportunities={canManageOpportunities}
                     canAddNote={canAddNote}
                     canViewContacts={canViewContacts}

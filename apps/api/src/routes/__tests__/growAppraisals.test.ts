@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, entitlementGrants } from "@aee/db";
+import { db, appraisals, entitlementGrants, growOpportunities } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -491,5 +491,371 @@ test("an Agent moves their own appraisal DRAFT -> APPOINTMENT_SCHEDULED -> PRESE
   assert.equal(won.outcome, "WON");
   assert.equal(won.outcomeReason, "relationship");
   assert.equal(won.outcomeNotes, "Instructed.");
+});
+
+// Slice A — one appraisal per property. Create-from-contact and
+// create-from-opportunity must not rewrite a finished row, and must not
+// move an open row onto a different contact or a different opportunity.
+async function appraisalRow(id: number) {
+  const [row] = await db.select().from(appraisals).where(eq(appraisals.id, id));
+  if (!row) throw new Error(`appraisal ${id} missing`);
+  return row;
+}
+
+async function opportunityRow(id: number) {
+  const [row] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, id));
+  if (!row) throw new Error(`opportunity ${id} missing`);
+  return row;
+}
+
+function frozen(row: unknown) {
+  return JSON.parse(JSON.stringify(row)) as unknown;
+}
+
+async function postGrow(cookie: string, path: string, body: unknown) {
+  return fetch(growUrl(path), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify(body),
+  });
+}
+
+async function assertCreateRejected(input: {
+  cookie: string;
+  path: string;
+  body: unknown;
+  appraisalId: number;
+  opportunityIds: number[];
+  message: RegExp;
+}) {
+  const appraisalBefore = frozen(await appraisalRow(input.appraisalId));
+  const opportunitiesBefore = await Promise.all(input.opportunityIds.map(async (id) => frozen(await opportunityRow(id))));
+  const res = await postGrow(input.cookie, input.path, input.body);
+  const text = await res.text();
+  assert.equal(res.status, 409, text);
+  const payload = JSON.parse(text) as { error: string };
+  assert.match(payload.error, input.message);
+  assert.deepEqual(frozen(await appraisalRow(input.appraisalId)), appraisalBefore);
+  for (let index = 0; index < input.opportunityIds.length; index++) {
+    assert.deepEqual(frozen(await opportunityRow(input.opportunityIds[index])), opportunitiesBefore[index]);
+  }
+}
+
+async function recordOutcome(cookie: string, appraisalId: number, outcome: "WON" | "LOST" | "DEFERRED") {
+  for (const toStatus of ["APPOINTMENT_SCHEDULED", "PRESENTED"]) {
+    const res = await postGrow(cookie, `/appraisals/${appraisalId}/status`, { toStatus });
+    assert.equal(res.status, 200, `${toStatus}: ${await res.text()}`);
+  }
+  const outcomeRes = await postGrow(cookie, `/appraisals/${appraisalId}/outcome`, { outcome, outcomeReason: "relationship" });
+  assert.equal(outcomeRes.status, 200, await outcomeRes.text());
+}
+
+test("create-from-contact and create-from-opportunity do not relink a terminal, finalised, or other-contact appraisal", async () => {
+  const cookie = A.admin.cookie;
+
+  for (const outcome of ["WON", "LOST", "DEFERRED"] as const) {
+    const propertyId = await createProperty(cookie, `${outcome} Relink St ${suffix}`);
+    const louId = await createParty(cookie, propertyId, { firstName: "Lou", lastName: outcome });
+    const moId = await createParty(cookie, propertyId, { firstName: "Mo", lastName: outcome, role: "Buyer" });
+    const louOpportunityId = await createOpportunity(cookie, {
+      partyId: louId,
+      propertyId,
+      opportunityType: "Appraisal",
+      reason: `${outcome} original opportunity`,
+    });
+    const created = await postGrow(cookie, "/appraisals/from-opportunity", { opportunityId: louOpportunityId });
+    assert.equal(created.status, 201, await created.clone().text());
+    const appraisalId = ((await created.json()) as { appraisal: { id: number } }).appraisal.id;
+    await recordOutcome(cookie, appraisalId, outcome);
+
+    const moOpportunityId = await createOpportunity(cookie, {
+      partyId: moId,
+      propertyId,
+      opportunityType: "Appraisal",
+      reason: `${outcome} second opportunity`,
+    });
+    const louAgainId = await createOpportunity(cookie, {
+      partyId: louId,
+      propertyId,
+      opportunityType: "Appraisal",
+      reason: `${outcome} same contact again`,
+    });
+    const message = new RegExp(`already has a ${outcome.toLowerCase()} appraisal`);
+    for (const attempt of [
+      { path: "/appraisals/from-contact", body: { partyId: moId, propertyId } },
+      { path: "/appraisals/from-opportunity", body: { opportunityId: moOpportunityId } },
+      { path: "/appraisals/from-contact", body: { partyId: louId, propertyId } },
+      { path: "/appraisals/from-opportunity", body: { opportunityId: louAgainId } },
+      { path: "/appraisals/from-opportunity", body: { opportunityId: louOpportunityId } },
+    ]) {
+      await assertCreateRejected({
+        cookie,
+        path: attempt.path,
+        body: attempt.body,
+        appraisalId,
+        opportunityIds: [louOpportunityId, moOpportunityId, louAgainId],
+        message,
+      });
+    }
+    const row = await appraisalRow(appraisalId);
+    assert.equal(row.partyId, louId);
+    assert.equal(row.opportunityId, louOpportunityId);
+    assert.equal(row.status, outcome);
+    assert.equal(row.outcome, outcome);
+  }
+
+  const archivedPropertyId = await createProperty(cookie, `ARCHIVED Relink St ${suffix}`);
+  const archivedLou = await createParty(cookie, archivedPropertyId, { firstName: "Lou", lastName: "Archived" });
+  const archivedMo = await createParty(cookie, archivedPropertyId, { firstName: "Mo", lastName: "Archived", role: "Buyer" });
+  const archivedOpportunityId = await createOpportunity(cookie, {
+    partyId: archivedLou,
+    propertyId: archivedPropertyId,
+    opportunityType: "Appraisal",
+    reason: "Archived original",
+  });
+  const archivedCreate = await postGrow(cookie, "/appraisals/from-opportunity", { opportunityId: archivedOpportunityId });
+  assert.equal(archivedCreate.status, 201, await archivedCreate.clone().text());
+  const archivedId = ((await archivedCreate.json()) as { appraisal: { id: number } }).appraisal.id;
+  const archiveRes = await postGrow(cookie, `/appraisals/${archivedId}/status`, { toStatus: "ARCHIVED" });
+  assert.equal(archiveRes.status, 200, await archiveRes.text());
+  const moArchivedOpportunityId = await createOpportunity(cookie, {
+    partyId: archivedMo,
+    propertyId: archivedPropertyId,
+    opportunityType: "Appraisal",
+    reason: "Archived second",
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-contact",
+    body: { partyId: archivedMo, propertyId: archivedPropertyId },
+    appraisalId: archivedId,
+    opportunityIds: [archivedOpportunityId, moArchivedOpportunityId],
+    message: /already has an archived appraisal/,
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-opportunity",
+    body: { opportunityId: moArchivedOpportunityId },
+    appraisalId: archivedId,
+    opportunityIds: [archivedOpportunityId, moArchivedOpportunityId],
+    message: /already has an archived appraisal/,
+  });
+
+  const openPropertyId = await createProperty(cookie, `Open Other Contact St ${suffix}`);
+  const openLou = await createParty(cookie, openPropertyId, { firstName: "Lou", lastName: "Open" });
+  const openMo = await createParty(cookie, openPropertyId, { firstName: "Mo", lastName: "Open", role: "Buyer" });
+  const openLouOpportunityId = await createOpportunity(cookie, {
+    partyId: openLou,
+    propertyId: openPropertyId,
+    opportunityType: "Appraisal",
+    reason: "Open original",
+  });
+  const openCreate = await postGrow(cookie, "/appraisals/from-contact", { partyId: openLou, propertyId: openPropertyId });
+  assert.equal(openCreate.status, 201, await openCreate.clone().text());
+  const openId = ((await openCreate.json()) as { appraisal: { id: number; status: string } }).appraisal.id;
+  assert.equal(((await appraisalRow(openId)).status), "DRAFT");
+  const openMoOpportunityId = await createOpportunity(cookie, {
+    partyId: openMo,
+    propertyId: openPropertyId,
+    opportunityType: "Appraisal",
+    reason: "Open second contact",
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-contact",
+    body: { partyId: openMo, propertyId: openPropertyId },
+    appraisalId: openId,
+    opportunityIds: [openLouOpportunityId, openMoOpportunityId],
+    message: /another contact/,
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-opportunity",
+    body: { opportunityId: openMoOpportunityId },
+    appraisalId: openId,
+    opportunityIds: [openLouOpportunityId, openMoOpportunityId],
+    message: /another contact/,
+  });
+  const openRow = await appraisalRow(openId);
+  assert.equal(openRow.partyId, openLou);
+  assert.equal(openRow.opportunityId, null);
+  assert.equal(openRow.status, "DRAFT");
+  assert.equal((await opportunityRow(openMoOpportunityId)).stage, "New");
+  assert.equal((await opportunityRow(openMoOpportunityId)).convertedAppraisalId, null);
+
+  const finalisedPropertyId = await createProperty(cookie, `Finalised Relink St ${suffix}`);
+  const finalisedLou = await createParty(cookie, finalisedPropertyId, { firstName: "Lou", lastName: "Final" });
+  const finalisedMo = await createParty(cookie, finalisedPropertyId, { firstName: "Mo", lastName: "Final", role: "Buyer" });
+  const finalisedCreate = await postGrow(cookie, "/appraisals/from-contact", {
+    partyId: finalisedLou,
+    propertyId: finalisedPropertyId,
+  });
+  assert.equal(finalisedCreate.status, 201, await finalisedCreate.clone().text());
+  const finalisedId = ((await finalisedCreate.json()) as { appraisal: { id: number } }).appraisal.id;
+  const priceRes = await fetch(growUrl(`/appraisals/${finalisedId}`), {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ priceRangeLow: "500000", priceRangeHigh: "550000" }),
+  });
+  assert.equal(priceRes.status, 200, await priceRes.text());
+  const finaliseRes = await fetch(`${baseUrl}/api/appraisals/by-property/${finalisedPropertyId}/finalise`, {
+    method: "POST",
+    headers: { cookie },
+  });
+  assert.equal(finaliseRes.status, 200, await finaliseRes.text());
+  const finalisedOpportunityId = await createOpportunity(cookie, {
+    partyId: finalisedMo,
+    propertyId: finalisedPropertyId,
+    opportunityType: "Appraisal",
+    reason: "Finalised second contact",
+  });
+  const louFinalisedOpportunityId = await createOpportunity(cookie, {
+    partyId: finalisedLou,
+    propertyId: finalisedPropertyId,
+    opportunityType: "Appraisal",
+    reason: "Finalised same contact",
+  });
+  for (const attempt of [
+    { path: "/appraisals/from-contact", body: { partyId: finalisedMo, propertyId: finalisedPropertyId } },
+    { path: "/appraisals/from-opportunity", body: { opportunityId: finalisedOpportunityId } },
+    { path: "/appraisals/from-contact", body: { partyId: finalisedLou, propertyId: finalisedPropertyId } },
+    { path: "/appraisals/from-opportunity", body: { opportunityId: louFinalisedOpportunityId } },
+  ]) {
+    await assertCreateRejected({
+      cookie,
+      path: attempt.path,
+      body: attempt.body,
+      appraisalId: finalisedId,
+      opportunityIds: [finalisedOpportunityId, louFinalisedOpportunityId],
+      message: /finalised appraisal/,
+    });
+  }
+  const finalisedRow = await appraisalRow(finalisedId);
+  assert.equal(finalisedRow.isFinalised, true);
+  assert.equal(finalisedRow.status, "DRAFT");
+  assert.equal(finalisedRow.partyId, finalisedLou);
+  const pipelineRes = await fetch(growUrl("/appraisals/pipeline"), { headers: { cookie } });
+  assert.equal(pipelineRes.status, 200);
+  const pipeline = (await pipelineRes.json()) as { appraisals: Array<{ id: number; isFinalised: boolean }> };
+  assert.equal(pipeline.appraisals.find((row) => row.id === finalisedId)?.isFinalised, true);
+  assert.equal(pipeline.appraisals.find((row) => row.id === openId)?.isFinalised, false);
+});
+
+test("an open appraisal can be claimed once, and is not moved to another opportunity", async () => {
+  const cookie = A.admin.cookie;
+  const propertyId = await createProperty(cookie, `Open Same Contact St ${suffix}`);
+  const louId = await createParty(cookie, propertyId, { firstName: "Lou", lastName: "Same" });
+  const startRes = await fetch(`${baseUrl}/api/appraisals/by-property/${propertyId}/start`, {
+    method: "POST",
+    headers: { cookie },
+  });
+  const startText = await startRes.text();
+  assert.equal(startRes.status, 201, startText);
+  const unlinkedId = (JSON.parse(startText) as { appraisal: { id: number; partyId: number | null } }).appraisal.id;
+  assert.equal((await appraisalRow(unlinkedId)).partyId, null);
+
+  const claim = await postGrow(cookie, "/appraisals/from-contact", { partyId: louId, propertyId });
+  assert.equal(claim.status, 201, await claim.text());
+  const claimed = await appraisalRow(unlinkedId);
+  assert.equal(claimed.partyId, louId);
+  assert.equal(claimed.status, "DRAFT");
+  assert.equal(claimed.opportunityId, null);
+
+  const repeatBefore = frozen(claimed);
+  const repeat = await postGrow(cookie, "/appraisals/from-contact", { partyId: louId, propertyId });
+  const repeatText = await repeat.text();
+  assert.equal(repeat.status, 201, repeatText);
+  const repeated = JSON.parse(repeatText) as { appraisal: { id: number } };
+  assert.equal(repeated.appraisal.id, unlinkedId);
+  assert.deepEqual(frozen(await appraisalRow(unlinkedId)), repeatBefore);
+
+  const firstOpportunityId = await createOpportunity(cookie, {
+    partyId: louId,
+    propertyId,
+    opportunityType: "Appraisal",
+    reason: "First opportunity link",
+  });
+  const link = await postGrow(cookie, "/appraisals/from-opportunity", { opportunityId: firstOpportunityId });
+  assert.equal(link.status, 201, await link.text());
+  const linked = await appraisalRow(unlinkedId);
+  assert.equal(linked.partyId, louId);
+  assert.equal(linked.opportunityId, firstOpportunityId);
+  assert.equal(linked.status, "DRAFT");
+  const linkedOpportunity = await opportunityRow(firstOpportunityId);
+  assert.equal(linkedOpportunity.stage, "AppraisalBooked");
+  assert.equal(linkedOpportunity.convertedAppraisalId, unlinkedId);
+
+  const linkedAppraisalBefore = frozen(linked);
+  const linkedOpportunityBefore = frozen(linkedOpportunity);
+  const linkAgain = await postGrow(cookie, "/appraisals/from-opportunity", { opportunityId: firstOpportunityId });
+  assert.equal(linkAgain.status, 201, await linkAgain.text());
+  assert.deepEqual(frozen(await appraisalRow(unlinkedId)), linkedAppraisalBefore);
+  assert.deepEqual(frozen(await opportunityRow(firstOpportunityId)), linkedOpportunityBefore);
+
+  const secondOpportunityId = await createOpportunity(cookie, {
+    partyId: louId,
+    propertyId,
+    opportunityType: "Appraisal",
+    reason: "Second opportunity must not take the appraisal",
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-opportunity",
+    body: { opportunityId: secondOpportunityId },
+    appraisalId: unlinkedId,
+    opportunityIds: [firstOpportunityId, secondOpportunityId],
+    message: /another opportunity/,
+  });
+  assert.equal((await appraisalRow(unlinkedId)).opportunityId, firstOpportunityId);
+  assert.equal((await opportunityRow(secondOpportunityId)).stage, "New");
+  assert.equal((await opportunityRow(secondOpportunityId)).convertedAppraisalId, null);
+
+  const barePropertyId = await createProperty(cookie, `Finalised Unlinked St ${suffix}`);
+  const barePartyId = await createParty(cookie, barePropertyId, { firstName: "Lou", lastName: "Bare" });
+  const bareStart = await fetch(`${baseUrl}/api/appraisals/by-property/${barePropertyId}/start`, {
+    method: "POST",
+    headers: { cookie },
+  });
+  const bareStartText = await bareStart.text();
+  assert.equal(bareStart.status, 201, bareStartText);
+  const bareId = (JSON.parse(bareStartText) as { appraisal: { id: number } }).appraisal.id;
+  const barePrice = await fetch(`${baseUrl}/api/appraisals/by-property/${barePropertyId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ priceRangeLow: "400000", priceRangeHigh: "450000" }),
+  });
+  assert.equal(barePrice.status, 200, await barePrice.text());
+  const bareFinalise = await fetch(`${baseUrl}/api/appraisals/by-property/${barePropertyId}/finalise`, {
+    method: "POST",
+    headers: { cookie },
+  });
+  assert.equal(bareFinalise.status, 200, await bareFinalise.text());
+  const bareOpportunityId = await createOpportunity(cookie, {
+    partyId: barePartyId,
+    propertyId: barePropertyId,
+    opportunityType: "Appraisal",
+    reason: "Must not claim a finalised property-page appraisal",
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-contact",
+    body: { partyId: barePartyId, propertyId: barePropertyId },
+    appraisalId: bareId,
+    opportunityIds: [bareOpportunityId],
+    message: /finalised appraisal/,
+  });
+  await assertCreateRejected({
+    cookie,
+    path: "/appraisals/from-opportunity",
+    body: { opportunityId: bareOpportunityId },
+    appraisalId: bareId,
+    opportunityIds: [bareOpportunityId],
+    message: /finalised appraisal/,
+  });
+  const bareRow = await appraisalRow(bareId);
+  assert.equal(bareRow.partyId, null);
+  assert.equal(bareRow.opportunityId, null);
+  assert.equal(bareRow.isFinalised, true);
+  assert.equal(bareRow.status, "DRAFT");
 });
 
