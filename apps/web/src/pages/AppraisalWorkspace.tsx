@@ -3,6 +3,7 @@ import { Link, useParams } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../lib/api";
 import { useEntitlements } from "../lib/session";
+import { SAVE_DUE_FOLLOW_UP_LABEL } from "../lib/growTerms";
 import {
   APPRAISAL_NEXT_STEP_LABELS,
   APPRAISAL_OUTCOME_REASONS,
@@ -565,7 +566,7 @@ export default function AppraisalWorkspace() {
             }}
           >
             <label htmlFor="appraisal-follow-up-at">
-              Follow-up
+              Due follow-up
               <input
                 id="appraisal-follow-up-at"
                 type="datetime-local"
@@ -583,7 +584,7 @@ export default function AppraisalWorkspace() {
               />
             </label>
             <button className="btn btn-secondary btn-small" type="submit" disabled={busy}>
-              Save follow-up
+              {SAVE_DUE_FOLLOW_UP_LABEL}
             </button>
           </form>
         </section>
