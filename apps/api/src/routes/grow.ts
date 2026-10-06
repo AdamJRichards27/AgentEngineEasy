@@ -22,7 +22,15 @@ import { getBillingProvider } from "../lib/billing/gateway.js";
 import { getGrowTodaySummary } from "../lib/growToday.js";
 import { presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
 import { logAudit } from "../lib/audit.js";
-import { assertPropertyVisibleForWrite, linkedPropertyHidden, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
+import {
+  assertOwnedOrPropertyVisibleForWrite,
+  assertPropertyVisibleForWrite,
+  linkedPropertyHidden,
+  ownedOrLinkedHidden,
+  restrictedPropertyIdsFor,
+  visibleLinkedPropertySql,
+  visibleOwnedOrLinkedPropertySql,
+} from "../lib/propertyVisibility.js";
 
 export const growRouter = Router();
 
@@ -77,11 +85,15 @@ growRouter.get("/overview", requireAuth, requireEntitlement("grow.access"), asyn
     db.select().from(growActivities).where(eq(growActivities.brokerageId, brokerageId)),
     db.select().from(growOpportunities).where(eq(growOpportunities.brokerageId, brokerageId)),
   ]);
-  // Counts follow the same own-property rule as the lists below. A row with
-  // no property stays in the brokerage-wide count.
+  // Counts follow the same own-property rule as the lists below. A relationship
+  // or activity with no property stays in the brokerage-wide count. An
+  // unlinked opportunity counts for an Agent only when they own it.
+  const user = req.authedUser!;
   const visibleRelationships = relationships.filter((row) => !linkedPropertyHidden(row.propertyId, restrictTo));
   const visibleActivities = activities.filter((row) => !linkedPropertyHidden(row.propertyId, restrictTo));
-  const visibleOpportunities = opportunities.filter((row) => !linkedPropertyHidden(row.propertyId, restrictTo));
+  const visibleOpportunities = opportunities.filter(
+    (row) => !ownedOrLinkedHidden(row.propertyId, row.ownerUserId, restrictTo, user.id),
+  );
   res.json({
     relationshipCount: visibleRelationships.length,
     activityCount: visibleActivities.length,
@@ -112,6 +124,7 @@ growRouter.get("/today", requireAuth, requireEntitlement("grow.access"), async (
   const summary = await getGrowTodaySummary(user.brokerageId, {
     includePropertyIntelligenceSignals: entitlements.has("grow.propertyIntelligence.read"),
     restrictToPropertyIds: await restrictedPropertyIdsFor(user),
+    callerUserId: user.id,
   });
   res.json(summary);
 });
@@ -467,7 +480,12 @@ growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"),
   const rows = await db
     .select()
     .from(growOpportunities)
-    .where(and(eq(growOpportunities.brokerageId, user.brokerageId), visibleLinkedPropertySql(growOpportunities.propertyId, restrictTo)))
+    .where(
+      and(
+        eq(growOpportunities.brokerageId, user.brokerageId),
+        visibleOwnedOrLinkedPropertySql(growOpportunities.propertyId, growOpportunities.ownerUserId, restrictTo, user.id),
+      ),
+    )
     .orderBy(desc(growOpportunities.createdAt))
     .limit(200);
   res.json({ opportunities: rows });
@@ -593,7 +611,7 @@ growRouter.patch(
       res.status(404).json({ error: "Opportunity not found" });
       return;
     }
-    if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
+    if (!(await assertOwnedOrPropertyVisibleForWrite(user, existing.propertyId, existing.ownerUserId))) {
       res.status(404).json({ error: "Opportunity not found" });
       return;
     }

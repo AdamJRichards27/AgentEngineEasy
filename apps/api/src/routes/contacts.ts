@@ -27,7 +27,13 @@ import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
 import { resolveTimeZone } from "../lib/commandCentre/timezone.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
-import { assertPropertyVisibleForWrite, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
+import {
+  assertOwnedOrPropertyVisibleForWrite,
+  assertPropertyVisibleForWrite,
+  restrictedPropertyIdsFor,
+  visibleLinkedPropertySql,
+  visibleOwnedOrLinkedPropertySql,
+} from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -778,9 +784,11 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     return;
   }
 
-  // The contact stays brokerage-wide. Only property-linked rows, and the
-  // property-derived counts inside the timeline and intelligence summary,
-  // are limited to properties this caller can see.
+  // The contact stays brokerage-wide. Property-linked rows are limited to
+  // properties this caller can see. An unlinked commitment or opportunity
+  // is limited to its owner when the caller is an Agent. Admin and Pit Crew
+  // stay brokerage-wide, including those counts on the timeline and the
+  // intelligence summary.
   const restrictTo = await restrictedPropertyIdsFor(user);
 
   const [
@@ -840,7 +848,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
           and(
             eq(growOpportunities.partyId, partyId),
             eq(growOpportunities.brokerageId, brokerageId),
-            visibleLinkedPropertySql(growOpportunities.propertyId, restrictTo),
+            visibleOwnedOrLinkedPropertySql(growOpportunities.propertyId, growOpportunities.ownerUserId, restrictTo, user.id),
           ),
         )
         .orderBy(desc(growOpportunities.createdAt)),
@@ -864,12 +872,12 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
           and(
             eq(growCommitments.partyId, partyId),
             eq(growCommitments.brokerageId, brokerageId),
-            visibleLinkedPropertySql(growCommitments.propertyId, restrictTo),
+            visibleOwnedOrLinkedPropertySql(growCommitments.propertyId, growCommitments.createdBy, restrictTo, user.id),
           ),
         )
         .orderBy(desc(growCommitments.dueAt)),
-      getRelationshipTimeline(brokerageId, partyId, 100, restrictTo),
-      getContactIntelligenceSummary(brokerageId, partyId, restrictTo),
+      getRelationshipTimeline(brokerageId, partyId, 100, restrictTo, user.id),
+      getContactIntelligenceSummary(brokerageId, partyId, restrictTo, user.id),
       // AE GROW Completion W3-A (A-6). Read-only; see buildContactability().
       // The party has already been proven to belong to this brokerage above.
       buildContactability(brokerageId, partyId),
@@ -1309,10 +1317,11 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     res.status(404).json({ error: "Commitment not found in this brokerage" });
     return;
   }
-  // Checked before the Open-status 409, so a hidden property-linked
-  // commitment (complete, cancel, or reschedule) is a 404 and writes no
-  // activity. A null property id stays writable.
-  if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
+  // Checked before the Open-status 409, so a hidden commitment (complete,
+  // cancel, or reschedule) is a 404 and writes no activity. Property-linked
+  // rows follow the own-property rule. An unlinked row is writable by its
+  // owner, and by Brokerage Administrator and Pit Crew.
+  if (!(await assertOwnedOrPropertyVisibleForWrite(user, existing.propertyId, existing.createdBy))) {
     res.status(404).json({ error: "Commitment not found in this brokerage" });
     return;
   }

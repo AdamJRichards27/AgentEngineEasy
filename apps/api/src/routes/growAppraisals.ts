@@ -33,7 +33,12 @@ import type { ComparableSaleInput, MarketCompetitionInput } from "../lib/growApp
 import { AiFeatureDisabledError, AiEntitlementError } from "../lib/ai/types.js";
 import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
-import { assertPropertyVisibleForWrite, propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
+import {
+  assertOwnedOrPropertyVisibleForWrite,
+  assertPropertyVisibleForWrite,
+  propertyHiddenFromCaller,
+  restrictedPropertyIdsFor,
+} from "../lib/propertyVisibility.js";
 
 export const growAppraisalsRouter = Router();
 
@@ -197,14 +202,16 @@ growAppraisalsRouter.post("/from-opportunity", requireAuth, requiresGrowAccess, 
     return;
   }
   const [opportunity] = await db
-    .select({ propertyId: growOpportunities.propertyId })
+    .select({ propertyId: growOpportunities.propertyId, ownerUserId: growOpportunities.ownerUserId })
     .from(growOpportunities)
     .where(and(eq(growOpportunities.id, parsed.data.opportunityId), eq(growOpportunities.brokerageId, user.brokerageId)))
     .limit(1);
   // Missing opportunities keep the existing 404 and isolation note. An
-  // opportunity with no property stays on the existing 409. One tied to a
-  // property the caller cannot see is the same 404 as a missing opportunity.
-  if (opportunity && !(await assertPropertyVisibleForWrite(user, opportunity.propertyId))) {
+  // opportunity the caller owns that has no property stays on the existing
+  // 409. One they cannot see — another agent's unlinked opportunity, or one
+  // tied to a property outside their own-property set — is the same 404 as
+  // a missing opportunity.
+  if (opportunity && !(await assertOwnedOrPropertyVisibleForWrite(user, opportunity.propertyId, opportunity.ownerUserId))) {
     res.status(404).json({ error: "Opportunity not found" });
     return;
   }

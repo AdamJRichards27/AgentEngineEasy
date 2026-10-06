@@ -1,8 +1,10 @@
 // UAT-V2 — an Agent sees only their own property-linked Grow rows.
 // Brokerage Administrator and Pit Crew stay brokerage-wide. A contact with
-// no property, and a contact-only row, stay visible to every Grow user in
-// the brokerage. A property the caller cannot see is the same 404 a
-// cross-tenant read already returns.
+// no property stays visible to every Grow user in the brokerage, as do
+// contact-only relationships and activities. An unlinked commitment or
+// opportunity is visible to the Agent who owns it, and to Admin and Pit
+// Crew, not to another Agent. A property the caller cannot see is the same
+// 404 a cross-tenant read already returns.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -312,7 +314,7 @@ test("an Agent does not see another Agent's property-linked Grow rows, and still
   );
 });
 
-test("an Agent with no properties still sees the shared contact and contact-only rows", async () => {
+test("an Agent with no properties still sees the shared contact and contact-only relationships and activities", async () => {
   const listed = await getRaw(`/grow/contacts?search=Contact${suffix}`, agentWithNone.cookie);
   assert.equal(listed.status, 200);
   const contacts = ((await listed.json()) as { contacts: Array<{ id: number }> }).contacts;
@@ -321,15 +323,23 @@ test("an Agent with no properties still sees the shared contact and contact-only
   const view = await contact360(agentWithNone.cookie);
   assert.equal(view.contact.id, sharedContactId);
   assert.deepEqual(propertyIds(view.properties), [null]);
-  assert.deepEqual(propertyIds(view.opportunities), [null]);
+  assert.deepEqual(propertyIds(view.opportunities), []);
   assert.deepEqual(propertyIds(view.activities), [null]);
-  assert.deepEqual(propertyIds(view.commitments), [null]);
+  assert.deepEqual(propertyIds(view.commitments), []);
   assert.equal(view.intelligence.relatedPropertyCount, 0);
+  assert.equal(view.intelligence.activeOpportunityCount, 0);
 
   const today = await getRaw("/grow/today", agentWithNone.cookie);
-  const todayBody = (await today.json()) as { priorityActions: Array<{ propertyId: number | null }> };
+  const todayBody = (await today.json()) as {
+    priorityActions: Array<{ propertyId: number | null; type: string }>;
+    counts: { openOpportunities: number };
+    firstRun: { commitment: boolean; opportunity: boolean };
+  };
   assert.ok(todayBody.priorityActions.every((card) => card.propertyId === null));
-  assert.ok(todayBody.priorityActions.length > 0);
+  assert.ok(!todayBody.priorityActions.some((card) => card.type === "commitment" || card.type.startsWith("opportunity")));
+  assert.equal(todayBody.counts.openOpportunities, 0);
+  assert.equal(todayBody.firstRun.commitment, false);
+  assert.equal(todayBody.firstRun.opportunity, false);
 });
 
 test("Brokerage Administrator and Pit Crew still see every property-linked Grow row", async () => {
