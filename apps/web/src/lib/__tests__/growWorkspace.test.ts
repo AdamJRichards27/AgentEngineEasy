@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyGrowNavigation,
+  canonicalGrowContactHref,
   contactsEmptyMessage,
+  growComposeChannelFromSearch,
+  growContactIdFromPath,
+  growContactPath,
   growDataRegionError,
   growDataRegionState,
+  growNavigationMode,
   growTabClickState,
+  growTabHref,
   growTabLabel,
+  growWorkspaceEntryState,
   GROW_TABS,
+  isGrowContactPath,
+  type GrowHistory,
   type GrowWorkspaceNavState,
 } from "../growWorkspace";
 
@@ -86,4 +96,52 @@ test("tab labels", () => {
   assert.equal(growTabLabel("performance"), "Performance");
   assert.equal(growTabLabel("askAE"), "Ask AE");
   assert.equal(GROW_TABS.length, 6);
+});
+
+test("Contact 360 has its own address, and older ?contact= links point at the same contact", () => {
+  assert.equal(growContactPath(18207), "/grow/contacts/18207");
+  assert.equal(growContactPath(12, "EMAIL"), "/grow/contacts/12?compose=email");
+  assert.equal(growContactPath(12, "SMS"), "/grow/contacts/12?compose=sms");
+  assert.equal(growContactIdFromPath("/grow/contacts/18207"), 18207);
+  assert.equal(growContactIdFromPath("/grow/contacts/18207?compose=email"), 18207);
+  assert.equal(growContactIdFromPath("/grow"), null);
+  assert.equal(growContactIdFromPath("/grow/contacts/nope"), null);
+  assert.equal(growContactIdFromPath("/grow/contacts/0"), null);
+  assert.equal(isGrowContactPath("/grow/contacts/nope"), true);
+  assert.equal(isGrowContactPath("/grow/import"), false);
+
+  assert.deepEqual(growWorkspaceEntryState("?tab=contacts&contact=12"), { tab: "contacts", contactPartyId: 12 });
+  assert.deepEqual(growWorkspaceEntryState("?tab=contacts"), { tab: "contacts", contactPartyId: null });
+  assert.deepEqual(growWorkspaceEntryState(""), { tab: "today", contactPartyId: null });
+  assert.deepEqual(growWorkspaceEntryState("?contact=0"), { tab: "today", contactPartyId: null });
+  assert.equal(canonicalGrowContactHref("/grow", "?tab=contacts&contact=12"), "/grow/contacts/12");
+  assert.equal(canonicalGrowContactHref("/grow/contacts/12", ""), null);
+  assert.equal(canonicalGrowContactHref("/grow", "?tab=opportunities"), null);
+
+  assert.equal(growComposeChannelFromSearch("?compose=email"), "EMAIL");
+  assert.equal(growComposeChannelFromSearch("?compose=SMS"), "SMS");
+  assert.equal(growComposeChannelFromSearch(""), null);
+  assert.equal(growTabHref("today"), "/grow");
+  assert.equal(growTabHref("contacts"), "/grow?tab=contacts");
+  assert.equal(growTabHref("opportunities"), "/grow?tab=opportunities");
+});
+
+test("opening a contact pushes a history entry; switching tabs replaces it unless Contact 360 is open", () => {
+  const urls: string[] = ["/grow?tab=contacts"];
+  const history: GrowHistory = {
+    state: null,
+    pushState(_state, _title, url) {
+      urls.push(String(url));
+    },
+    replaceState(_state, _title, url) {
+      urls[urls.length - 1] = String(url);
+    },
+  };
+
+  assert.equal(growNavigationMode("/grow"), "replace");
+  assert.equal(growNavigationMode("/grow/contacts/12"), "push");
+  applyGrowNavigation(history, "/grow?tab=opportunities", "replace");
+  applyGrowNavigation(history, growContactPath(12), "push");
+  applyGrowNavigation(history, growTabHref("contacts"), "push");
+  assert.deepEqual(urls, ["/grow?tab=opportunities", "/grow/contacts/12", "/grow?tab=contacts"]);
 });

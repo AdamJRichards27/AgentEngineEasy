@@ -10,7 +10,7 @@
 // AE GROW Completion W2-B: a message is no longer necessarily property-first
 // (Priority 3 made propertyId nullable), so the "every row links through to its
 // property" rule above now has a second case — a contact-first row links into
-// Contact 360 instead. See HubRow at the bottom of this file.
+// Contact 360 (/grow/contacts/:id) instead. See HubRow at the bottom of this file.
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -27,6 +27,7 @@ import {
   fetchCommunicationsHub,
   type RecentCommunicationRow,
 } from "../lib/communications";
+import { growContactPath } from "../lib/growWorkspace";
 
 type HubFilter = "all" | "needs-attention";
 
@@ -115,7 +116,7 @@ function StatTile({ label, value }: { label: string; value: number | string }) {
 // wrong — there is nowhere honest to send it.
 export function hubRowDestination(row: RecentCommunicationRow): string | null {
   if (row.message.propertyId !== null) return `/properties/${row.message.propertyId}`;
-  if (row.message.partyId !== null) return `/grow?tab=contacts&contact=${row.message.partyId}`;
+  if (row.message.partyId !== null) return growContactPath(row.message.partyId);
   return null;
 }
 

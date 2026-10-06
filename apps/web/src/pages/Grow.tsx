@@ -29,9 +29,18 @@ import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 // outcome into one plain sentence for the agent; see that module's header.
 import { describeRecordingRefusal } from "../lib/callRecording";
 import {
+  applyGrowNavigation,
+  canonicalGrowContactHref,
   contactsEmptyMessage,
-  growTabClickState,
+  growComposeChannelFromSearch,
+  growContactIdFromPath,
+  growContactPath,
+  growNavigationMode,
+  growTabHref,
   growTabLabel,
+  growWorkspaceEntryState,
+  isGrowContactPath,
+  queueCanonicalGrowContactRedirect,
   GROW_TABS,
   type GrowTab,
 } from "../lib/growWorkspace";
@@ -537,76 +546,66 @@ export default function Grow() {
   return <GrowWorkspace />;
 }
 
-// AE GROW Completion W2-B (E-6/E-7) — deep links into this workspace.
-//
-// Contact 360 is not a wouter route: it is a view inside the Contacts tab (see
-// App.tsx's route table, which mounts /grow and /grow/import only). So the two
-// surfaces that legitimately need to send an agent *to a specific contact* —
-// the Communications Hub's contact-first rows, and the import results screen —
-// pass it in the query string instead of inventing a route. Only the search
-// string is read; the path still matches /grow exactly as before, and an absent
-// or unparseable parameter leaves the workspace on its normal Today landing.
-export function growWorkspaceEntryState(search: string): { tab: GrowTab; contactPartyId: number | null } {
-  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const rawContact = params.get("contact");
-  const contactId = rawContact !== null && /^[1-9][0-9]*$/.test(rawContact) ? Number(rawContact) : null;
-  const rawTab = params.get("tab");
-  const tab = GROW_TABS.find((t) => t.key === rawTab)?.key ?? (contactId !== null ? "contacts" : "today");
-  // A contact can only be opened on the tab that renders it.
-  return contactId !== null ? { tab: "contacts", contactPartyId: contactId } : { tab, contactPartyId: null };
+// Re-exported so existing callers that load this module (the deep-link tests)
+// keep finding it here. The rules live in lib/growWorkspace.ts.
+export { growWorkspaceEntryState };
+
+// Contact 360 is /grow/contacts/:id (App.tsx). The workspace reads that path
+// on every render, so a refresh or a pasted link opens the same contact, and
+// pushing the path is what makes the browser Back button return to the Grow
+// view the agent was on. Older ?contact= links are rewritten to the path.
+function currentGrowPath(): string {
+  return typeof window === "undefined" ? "/grow" : window.location.pathname;
 }
 
 function GrowWorkspace() {
   const search = useSearch();
-  // Read once, on mount: this is an entry point, not a controlled route. Every
-  // in-workspace navigation below owns the state from then on.
-  const [entry] = useState(() => growWorkspaceEntryState(search));
-  const [tab, setTab] = useState<GrowTab>(entry.tab);
-  // AE GROW Priority 2 §12 — Priority 1 integration. The only state this priority adds at the
-  // workspace level: which contact (if any) the Contacts tab should open straight into a
-  // Contact 360 detail view for, rather than its default list. Lifted up here (rather than kept
-  // local to GrowContactsTab) purely so GrowToday's "View Contact" button can jump both the tab
-  // AND the selected contact in one click — Priority 1's own tab/state model is otherwise
-  // untouched.
-  const [contactPartyId, setContactPartyId] = useState<number | null>(entry.contactPartyId);
-  // AE GROW Priority 3 §2/§4 — the channel (if any) a Grow Today Email/SMS action button asked
-  // Contact 360 to jump straight into composing. Lifted up here for the same reason
-  // contactPartyId is: GrowToday's own buttons live several components away from
-  // ContactCommunicationsSection, which is what actually consumes this. Consumed exactly once by
-  // that component's quick-start effect and cleared straight back to null via
-  // onComposeHandled below, so it never re-fires on its own re-render.
-  const [pendingComposeChannel, setPendingComposeChannel] = useState<"EMAIL" | "SMS" | null>(null);
+  const path = currentGrowPath();
+  const routedContactId = growContactIdFromPath(path);
+  const invalidContactPath = isGrowContactPath(path) && routedContactId === null;
+  const entry = growWorkspaceEntryState(search);
+  // A legacy ?contact= link still names a contact until the address bar is
+  // rewritten. An invalid /grow/contacts/:id does not fall through to it.
+  const legacyContactId = invalidContactPath || routedContactId !== null ? null : entry.contactPartyId;
+  const contactPartyId = routedContactId ?? legacyContactId;
+  const tab: GrowTab = contactPartyId !== null || invalidContactPath ? "contacts" : entry.tab;
+  // Email/SMS from Grow Today open the composer via ?compose=, which survives
+  // the route change. Contact 360 clears it once the composer has started.
+  const pendingComposeChannel = contactPartyId !== null ? growComposeChannelFromSearch(search) : null;
 
-  function viewContact(partyId: number) {
-    setContactPartyId(partyId);
-    setTab("contacts");
+  const legacyHref = canonicalGrowContactHref(path, search);
+  if (legacyHref !== null) queueCanonicalGrowContactRedirect(legacyHref);
+
+  function openContact(partyId: number, compose?: "EMAIL" | "SMS") {
+    applyGrowNavigation(window.history, growContactPath(partyId, compose), "push");
   }
 
-  // AE GROW Priority 3 §4 — Grow Today's Email/SMS action buttons: same navigation as
-  // viewContact above, plus telling Contact 360's communications section which channel to open
-  // straight into a composer for, rather than requiring a second click once there.
+  function viewContact(partyId: number) {
+    openContact(partyId);
+  }
+
   function emailContact(partyId: number) {
-    setContactPartyId(partyId);
-    setPendingComposeChannel("EMAIL");
-    setTab("contacts");
+    openContact(partyId, "EMAIL");
   }
 
   function smsContact(partyId: number) {
-    setContactPartyId(partyId);
-    setPendingComposeChannel("SMS");
-    setTab("contacts");
+    openContact(partyId, "SMS");
   }
 
-  // AE GROW Pilot Readiness WP6b (P3-e) — clicking a tab in the bar below goes
-  // to that tab's own landing view. For Contacts that is the contact list, so
-  // the click also closes any open Contact 360 (previously it set `tab` to the
-  // tab that was already active and appeared to do nothing). The jump-straight
-  // -to-a-contact paths above are untouched. See lib/growWorkspace.ts.
+  function backToContacts() {
+    applyGrowNavigation(window.history, growTabHref("contacts"), "push");
+  }
+
+  // Clicking a tab goes to that tab's own landing view. From Contact 360 that
+  // is a new history entry, so Back returns to the contact. From another tab
+  // it replaces the current Grow address, so tab clicks do not pile up.
   function selectTab(next: GrowTab) {
-    const state = growTabClickState(next, { tab, contactPartyId, pendingComposeChannel });
-    setTab(state.tab);
-    setContactPartyId(state.contactPartyId);
-    setPendingComposeChannel(state.pendingComposeChannel);
+    applyGrowNavigation(window.history, growTabHref(next), growNavigationMode(currentGrowPath()));
+  }
+
+  function onComposeHandled() {
+    if (contactPartyId === null || pendingComposeChannel === null) return;
+    applyGrowNavigation(window.history, growContactPath(contactPartyId), "replace");
   }
 
   // Re-uses the "grow-access" query the outer Grow() component already fetched (react-query
@@ -646,7 +645,7 @@ function GrowWorkspace() {
       <ErrorBoundary label={`the ${growTabLabel(tab)} tab`} resetKey={tab}>
         {tab === "today" && (
           <GrowToday
-            onAskAE={() => setTab("askAE")}
+            onAskAE={() => selectTab("askAE")}
             onViewContact={viewContact}
             onEmailContact={emailContact}
             onSmsContact={smsContact}
@@ -656,14 +655,15 @@ function GrowWorkspace() {
         {/* E-3: the same contact jump and Ask AE tab switch Grow Today already
             uses. Not a second navigation mechanism. */}
         {tab === "opportunities" && (
-          <GrowOpportunitiesTab onViewContact={viewContact} onAskAE={() => setTab("askAE")} />
+          <GrowOpportunitiesTab onViewContact={viewContact} onAskAE={() => selectTab("askAE")} />
         )}
-        {tab === "contacts" && (
+        {tab === "contacts" && invalidContactPath && <GrowMissingContact onBack={backToContacts} />}
+        {tab === "contacts" && !invalidContactPath && (
           <GrowContactsTab
             selectedPartyId={contactPartyId}
-            onSelectPartyId={setContactPartyId}
+            onBack={backToContacts}
             pendingComposeChannel={pendingComposeChannel}
-            onComposeHandled={() => setPendingComposeChannel(null)}
+            onComposeHandled={onComposeHandled}
           />
         )}
         {tab === "nurture" && (
@@ -2022,12 +2022,12 @@ function GrowBusinessCoachTab() {
 // GrowWorkspace.viewContact.
 function GrowContactsTab({
   selectedPartyId,
-  onSelectPartyId,
+  onBack,
   pendingComposeChannel,
   onComposeHandled,
 }: {
   selectedPartyId: number | null;
-  onSelectPartyId: (partyId: number | null) => void;
+  onBack: () => void;
   // AE GROW Priority 3 §4 — threaded straight through to GrowContactDetail's own
   // ContactCommunicationsSection; see GrowWorkspace.pendingComposeChannel.
   pendingComposeChannel: "EMAIL" | "SMS" | null;
@@ -2040,19 +2040,34 @@ function GrowContactsTab({
     <ErrorBoundary
       label={selectedPartyId !== null ? "Contact 360" : "contacts"}
       resetKey={selectedPartyId}
-      secondaryAction={selectedPartyId !== null ? { label: "Back to contacts", onClick: () => onSelectPartyId(null) } : undefined}
+      secondaryAction={selectedPartyId !== null ? { label: "Back to contacts", onClick: onBack } : undefined}
     >
       {selectedPartyId !== null ? (
         <GrowContactDetail
           partyId={selectedPartyId}
-          onBack={() => onSelectPartyId(null)}
+          onBack={onBack}
           pendingComposeChannel={pendingComposeChannel}
           onComposeHandled={onComposeHandled}
         />
       ) : (
-        <GrowContactList onSelectPartyId={onSelectPartyId} />
+        <GrowContactList />
       )}
     </ErrorBoundary>
+  );
+}
+
+// A /grow/contacts/:id that is not a contact id. A real id the agent cannot
+// see is handled by Contact 360's own request (404, same sentence).
+function GrowMissingContact({ onBack }: { onBack: () => void }) {
+  return (
+    <div>
+      <button type="button" className="btn btn-link btn-small" onClick={onBack}>
+        &larr; Back to contacts
+      </button>
+      <p className="error-text" role="alert">
+        That couldn't be found — it may have been removed.
+      </p>
+    </div>
   );
 }
 
@@ -2064,7 +2079,7 @@ type NewContactNotice =
 // G-UAT-2 — New contact on the Contacts tab. Creates a party with no property
 // (POST /grow/contacts). Property linking stays a separate action. Hidden
 // without grow.contacts.manage, the same key the route enforces.
-export function GrowNewContactForm({ onOpenContact }: { onOpenContact: (partyId: number) => void }) {
+export function GrowNewContactForm() {
   const { hasEntitlement } = useEntitlements();
   const canCreateContact = hasEntitlement("grow.contacts.manage");
   const [open, setOpen] = useState(false);
@@ -2131,17 +2146,17 @@ export function GrowNewContactForm({ onOpenContact }: { onOpenContact: (partyId:
       {notice?.kind === "created" && (
         <p>
           Contact created.{" "}
-          <button type="button" className="btn btn-link btn-small" onClick={() => onOpenContact(notice.contactId)}>
+          <Link href={growContactPath(notice.contactId)} className="btn btn-link btn-small">
             View Contact 360
-          </button>
+          </Link>
         </p>
       )}
       {notice?.kind === "duplicate" && (
         <p role="alert">
           This contact already exists.{" "}
-          <button type="button" className="btn btn-link btn-small" onClick={() => onOpenContact(notice.contactId)}>
+          <Link href={growContactPath(notice.contactId)} className="btn btn-link btn-small">
             View Contact 360
-          </button>
+          </Link>
         </p>
       )}
       {notice?.kind === "error" && (
@@ -2153,7 +2168,7 @@ export function GrowNewContactForm({ onOpenContact }: { onOpenContact: (partyId:
   );
 }
 
-function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: number) => void }) {
+export function GrowContactList() {
   const [search, setSearch] = useState("");
   const [committedSearch, setCommittedSearch] = useState("");
 
@@ -2180,7 +2195,7 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
       <section className="card">
         <h2>Contacts</h2>
         <p className="muted">Search AE's canonical contacts. Open one to see Contact 360 — everything Grow knows about that relationship.</p>
-        <GrowNewContactForm onOpenContact={onSelectPartyId} />
+        <GrowNewContactForm />
         <form
           className="grow-inline-form-row"
           onSubmit={(e) => {
@@ -2230,9 +2245,9 @@ function GrowContactList({ onSelectPartyId }: { onSelectPartyId: (partyId: numbe
                   <td>{c.roles.length > 0 ? c.roles.join(", ") : "–"}</td>
                   <td>{c.relatedPropertyCount}</td>
                   <td>
-                    <button type="button" className="btn btn-link btn-small" onClick={() => onSelectPartyId(c.id)}>
+                    <Link href={growContactPath(c.id)} className="btn btn-link btn-small">
                       View Contact 360 &rarr;
-                    </button>
+                    </Link>
                   </td>
                 </tr>
               ))}

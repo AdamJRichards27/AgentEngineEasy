@@ -85,3 +85,13 @@ export function resolveLandingRoute(ctx: NavContext): "/grow" | "/" {
   if (ctx.role === "Pit Crew") return "/";
   return hasEntitlement(ctx, "grow.access") ? "/grow" : "/";
 }
+
+/**
+ * Grow stays highlighted on Contact 360 (/grow/contacts/:id). Other links
+ * stay exact, including /grow/import, which is its own page.
+ */
+export function navLinkIsActive(location: string, linkPath: string): boolean {
+  const path = location.split("?")[0].split("#")[0];
+  if (path === linkPath) return true;
+  return linkPath === "/grow" && /^\/grow\/contacts\/[^/]+$/.test(path);
+}

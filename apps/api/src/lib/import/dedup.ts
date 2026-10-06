@@ -16,6 +16,7 @@
 // for that query, never this module.
 
 import type { ImportMatchType } from "@aee/db";
+import { contactPhoneMatchKey } from "../contactPhoneMatch.js";
 import type { NormalisedImportRecord } from "./neutralFormat";
 import { normaliseAddressForMatching } from "./normalise";
 
@@ -59,7 +60,12 @@ function scoreContact(record: NormalisedImportRecord, candidate: ContactCandidat
   const emailMatch = Boolean(recordEmail && candidateEmail && recordEmail === candidateEmail);
   if (emailMatch) matchedOn.push("email");
 
-  const mobileMatch = Boolean(p.mobile && candidate.mobile && p.mobile === candidate.mobile);
+  // Same normalised key as manual contact creation, so "0400 000 103" already
+  // on file matches an imported "+61400000103". Scoring is unchanged: a
+  // phone match is still "probable" unless email agrees.
+  const recordMobile = contactPhoneMatchKey(p.mobile);
+  const candidateMobile = contactPhoneMatchKey(candidate.mobile);
+  const mobileMatch = Boolean(recordMobile && candidateMobile && recordMobile === candidateMobile);
   if (mobileMatch) matchedOn.push("mobile");
 
   const recordName = fullName(p) || (p.company ?? "").trim().toLowerCase();

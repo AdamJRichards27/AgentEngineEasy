@@ -37,6 +37,10 @@ function button(tree: unknown, label: string): ElementNode | undefined {
   return findAll(tree, (element) => element.type === "button" && textContent(element).trim() === label)[0];
 }
 
+function linkTo(tree: unknown, label: string): ElementNode | undefined {
+  return findAll(tree, (element) => element.type === "a" && textContent(element).includes(label))[0];
+}
+
 function field(tree: unknown, id: string): ElementNode | undefined {
   return findAll(tree, (element) => element.props?.id === id)[0];
 }
@@ -119,7 +123,15 @@ const mocks: Plugin = {
         export const useQueryClient = () => ({
           invalidateQueries: (filter) => globalThis.__guat2Invalidated.push(filter && filter.queryKey),
         });
-        export const useQuery = () => ({ isLoading: false, isError: false, data: undefined });
+        export const useQuery = (options) => {
+          const key = options && options.queryKey && options.queryKey[0];
+          if (key === "grow-contacts" && globalThis.__guat2Contacts) {
+            return { isLoading: false, isError: false, data: { contacts: globalThis.__guat2Contacts }, refetch() {} };
+          }
+          if (key === "grow-relationships") return { isLoading: false, isError: false, data: { relationships: [] }, refetch() {} };
+          if (key === "grow-activities") return { isLoading: false, isError: false, data: { activities: [] }, refetch() {} };
+          return { isLoading: false, isError: false, data: undefined, refetch() {} };
+        };
         export const useMutation = (options) => {
           const index = globalThis.__guat2MutationCursor++;
           globalThis.__guat2Mutations[index] = options;
@@ -240,24 +252,24 @@ function clearGlobals() {
   }
 }
 
-type FormComponent = (props: { onOpenContact: (partyId: number) => void }) => unknown;
+type FormComponent = () => unknown;
 
-function render(hooks: ReturnType<typeof createHarness>, Form: FormComponent, onOpenContact: (partyId: number) => void) {
+function render(hooks: ReturnType<typeof createHarness>, Form: FormComponent) {
   (globalThis as { __guat2MutationCursor: number }).__guat2MutationCursor = 0;
   hooks.beginRender();
-  return Form({ onOpenContact });
+  return Form();
 }
 
-function openAndFill(hooks: ReturnType<typeof createHarness>, Form: FormComponent, onOpenContact: (partyId: number) => void) {
-  const closed = render(hooks, Form, onOpenContact);
+function openAndFill(hooks: ReturnType<typeof createHarness>, Form: FormComponent) {
+  const closed = render(hooks, Form);
   const openButton = button(closed, "New contact");
   assert.ok(openButton, "an entitled user sees New contact");
   openButton.props!.onClick!();
-  const formTree = render(hooks, Form, onOpenContact);
+  const formTree = render(hooks, Form);
   field(formTree, "new-contact-name")!.props!.onChange!({ target: { value: "Ada Lovelace" } });
   field(formTree, "new-contact-email")!.props!.onChange!({ target: { value: "ada@example.com" } });
   field(formTree, "new-contact-phone")!.props!.onChange!({ target: { value: "0400111222" } });
-  const filled = render(hooks, Form, onOpenContact);
+  const filled = render(hooks, Form);
   assert.equal(field(filled, "new-contact-property"), undefined, "the form does not link a property");
   assert.equal(button(filled, "Link property"), undefined);
   return filled;
@@ -265,11 +277,10 @@ function openAndFill(hooks: ReturnType<typeof createHarness>, Form: FormComponen
 
 test("submitting New contact posts name, email and phone, then offers Contact 360", async () => {
   const { hooks, calls, invalidated, pending } = install(["grow.contacts.manage"], async () => ({ contact: { id: 17 } }));
-  const opened: number[] = [];
   try {
     await withVite(async (vite) => {
       const { GrowNewContactForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowNewContactForm: FormComponent };
-      const filled = openAndFill(hooks, GrowNewContactForm, (id) => opened.push(id));
+      const filled = openAndFill(hooks, GrowNewContactForm);
       const form = findAll(filled, (element) => element.type === "form")[0];
       form.props!.onSubmit!({ preventDefault() {} });
       await Promise.all(pending);
@@ -291,12 +302,11 @@ test("submitting New contact posts name, email and phone, then offers Contact 36
         "Getting started (grow-today) is invalidated after creating a contact",
       );
 
-      const done = render(hooks, GrowNewContactForm, (id) => opened.push(id));
+      const done = render(hooks, GrowNewContactForm);
       assert.match(textContent(done), /Contact created/);
-      const view = button(done, "View Contact 360");
+      const view = linkTo(done, "View Contact 360");
       assert.ok(view, "success offers Contact 360");
-      view.props!.onClick!();
-      assert.deepEqual(opened, [17]);
+      assert.equal(view.props!.href, "/grow/contacts/17");
     });
   } finally {
     clearGlobals();
@@ -310,12 +320,13 @@ test("a failed create shows the error and does not offer Contact 360", async () 
   try {
     await withVite(async (vite) => {
       const { GrowNewContactForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowNewContactForm: FormComponent };
-      const filled = openAndFill(hooks, GrowNewContactForm, () => {});
+      const filled = openAndFill(hooks, GrowNewContactForm);
       findAll(filled, (element) => element.type === "form")[0].props!.onSubmit!({ preventDefault() {} });
       await Promise.all(pending);
-      const done = render(hooks, GrowNewContactForm, () => {});
+      const done = render(hooks, GrowNewContactForm);
       assert.match(textContent(done), /A contact needs a name, email, or phone/);
       assert.equal(button(done, "View Contact 360"), undefined);
+      assert.equal(linkTo(done, "View Contact 360"), undefined);
       assert.equal(calls.length, 1);
       assert.equal(invalidated.length, 0);
     });
@@ -326,23 +337,50 @@ test("a failed create shows the error and does not offer Contact 360", async () 
 
 test("a 409 says the contact already exists and links to it", async () => {
   const { hooks, pending } = install(["grow.contacts.manage"], async () => {
-    throw new FakeApiError(409, "A contact with this email already exists.", 42);
+    throw new FakeApiError(409, "A contact with this phone number already exists.", 42);
   });
-  const opened: number[] = [];
   try {
     await withVite(async (vite) => {
       const { GrowNewContactForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowNewContactForm: FormComponent };
-      const filled = openAndFill(hooks, GrowNewContactForm, (id) => opened.push(id));
+      const filled = openAndFill(hooks, GrowNewContactForm);
       findAll(filled, (element) => element.type === "form")[0].props!.onSubmit!({ preventDefault() {} });
       await Promise.all(pending);
-      const done = render(hooks, GrowNewContactForm, (id) => opened.push(id));
+      const done = render(hooks, GrowNewContactForm);
       assert.match(textContent(done), /already exists/);
-      const view = button(done, "View Contact 360");
+      const view = linkTo(done, "View Contact 360");
       assert.ok(view, "the duplicate links to the existing contact");
-      view.props!.onClick!();
-      assert.deepEqual(opened, [42]);
+      assert.equal(view.props!.href, "/grow/contacts/42");
     });
   } finally {
+    clearGlobals();
+  }
+});
+
+test("the contact list's View Contact 360 link goes to that contact's address", async () => {
+  const { hooks } = install(["grow.contacts.manage"], async () => ({ contact: { id: 1 } }));
+  (globalThis as { __guat2Contacts?: unknown }).__guat2Contacts = [
+    {
+      id: 18207,
+      displayName: "UAT1-Sam Seller",
+      partyType: "Person",
+      email: "sam@example.test",
+      mobile: "+61400000103",
+      roles: [],
+      relatedPropertyCount: 1,
+    },
+  ];
+  try {
+    await withVite(async (vite) => {
+      const { GrowContactList } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowContactList: () => unknown };
+      hooks.beginRender();
+      const tree = GrowContactList();
+      const view = linkTo(tree, "View Contact 360");
+      assert.ok(view, "the row offers Contact 360");
+      assert.equal(view.props!.href, "/grow/contacts/18207");
+      assert.match(textContent(tree), /UAT1-Sam Seller/);
+    });
+  } finally {
+    delete (globalThis as { __guat2Contacts?: unknown }).__guat2Contacts;
     clearGlobals();
   }
 });
@@ -352,7 +390,7 @@ test("New contact is hidden without grow.contacts.manage", async () => {
   try {
     await withVite(async (vite) => {
       const { GrowNewContactForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowNewContactForm: FormComponent };
-      const tree = render(hooks, GrowNewContactForm, () => {});
+      const tree = render(hooks, GrowNewContactForm);
       assert.equal(tree, null);
       assert.equal(button(tree, "New contact"), undefined);
       assert.equal(field(tree, "new-contact-name"), undefined);

@@ -171,7 +171,7 @@ test("E-6: a contact-first row links to Contact 360 and names the contact; /prop
         threadSubject: "Checking in",
         partyDisplayName: "Jo Citizen",
       };
-      assert.equal(hubRowDestination(contactFirst), "/grow?tab=contacts&contact=12", "a contact-first row opens Contact 360");
+      assert.equal(hubRowDestination(contactFirst), "/grow/contacts/12", "a contact-first row opens Contact 360");
       assert.doesNotMatch(String(hubRowDestination(contactFirst)), /null/);
       assert.equal(hubRowContextLabel(contactFirst), "Jo Citizen", "the row says who it was to");
 
@@ -216,7 +216,7 @@ test("E-6: the rendered Hub never emits a /properties/null href", async () => {
       const tree = mod.default();
       const hrefs = links(tree);
       assert.ok(hrefs.includes("/properties/77"));
-      assert.ok(hrefs.includes("/grow?tab=contacts&contact=12"));
+      assert.ok(hrefs.includes("/grow/contacts/12"));
       assert.equal(hrefs.filter((h) => h.includes("null")).length, 0, "no /properties/null is reachable");
       assert.match(textContent(tree), /Jo Citizen/);
     });

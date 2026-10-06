@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildProductNavLinks, hasEntitlement, resolveLandingRoute } from "../productNav";
+import { buildProductNavLinks, hasEntitlement, navLinkIsActive, resolveLandingRoute } from "../productNav";
 
 // AE GROW Priority 0.5 — Workstream 2/10: pure-logic tests for the central Grow-first
 // navigation/landing definition. No React, no network — matches the task's own Workstream 10
@@ -67,4 +67,13 @@ test("resolveLandingRoute: Pit Crew never lands in Grow, even when Grow-entitled
 test("resolveLandingRoute: Brokerage Administrator follows the same entitlement rule as any other non-Pit-Crew role", () => {
   assert.equal(resolveLandingRoute({ role: "Brokerage Administrator", entitlements: ["grow.access"] }), "/grow");
   assert.equal(resolveLandingRoute({ role: "Brokerage Administrator", entitlements: ["run.access"] }), "/");
+});
+
+test("Grow stays highlighted on Contact 360 and not on other pages", () => {
+  assert.equal(navLinkIsActive("/grow", "/grow"), true);
+  assert.equal(navLinkIsActive("/grow/contacts/18207", "/grow"), true);
+  assert.equal(navLinkIsActive("/grow/contacts/18207", "/properties"), false);
+  assert.equal(navLinkIsActive("/grow/import", "/grow"), false);
+  assert.equal(navLinkIsActive("/properties/12", "/properties"), false);
+  assert.equal(navLinkIsActive("/properties/12", "/grow"), false);
 });
