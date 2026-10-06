@@ -472,6 +472,7 @@ export interface AppraisalPipelineRow {
   appointmentAt: Date | null;
   presentationAt: Date | null;
   followUpAt: Date | null;
+  isFinalised: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -506,6 +507,7 @@ export async function listAppraisalPipeline(input: {
       appointmentAt: appraisals.appointmentAt,
       presentationAt: appraisals.presentationAt,
       followUpAt: appraisals.followUpAt,
+      isFinalised: appraisals.isFinalised,
       createdAt: appraisals.createdAt,
       updatedAt: appraisals.updatedAt,
     })

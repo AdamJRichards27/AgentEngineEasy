@@ -242,7 +242,7 @@ function clearGlobals() {
   }
 }
 
-test("E-2: an appraisal follow-up card links View appraisal and View property to /properties/{id}", async () => {
+test("E-2: an appraisal follow-up card links View appraisal to the workspace and View property to /properties/{id}", async () => {
   const hooks = installGlobals(appraisalCard(), ["grow.contacts.read"]);
   try {
     await withVite(async (vite) => {
@@ -258,8 +258,8 @@ test("E-2: an appraisal follow-up card links View appraisal and View property to
       });
 
       const viewAppraisal = linkByLabel(tree, "View appraisal");
-      assert.ok(viewAppraisal, "the card shows View appraisal when view_appraisal is present and propertyId is set");
-      assert.equal(viewAppraisal.props?.href, "/properties/77");
+      assert.ok(viewAppraisal, "the card shows View appraisal when view_appraisal is present");
+      assert.equal(viewAppraisal.props?.href, "/grow/appraisals/9");
       assert.equal(viewAppraisal.props?.className, "btn btn-link btn-small");
 
       const viewProperty = linkByLabel(tree, "View property");
@@ -269,7 +269,7 @@ test("E-2: an appraisal follow-up card links View appraisal and View property to
 
       assert.deepEqual(
         hrefs(tree).filter((href) => href.startsWith("/properties/")),
-        ["/properties/77", "/properties/77"],
+        ["/properties/77"],
       );
       assert.equal(hrefs(tree).some((href) => href.includes("null")), false);
     });
@@ -301,16 +301,16 @@ test("E-2: View property is omitted when the API does not include it", async () 
         onSmsContact: () => {},
       });
 
-      assert.equal(linkByLabel(tree, "View appraisal")?.props?.href, "/properties/77");
+      assert.equal(linkByLabel(tree, "View appraisal")?.props?.href, "/grow/appraisals/9");
       assert.equal(linkByLabel(tree, "View property"), undefined, "propertyId alone does not invent View property");
       assert.deepEqual(
         hrefs(tree).filter((href) => href.startsWith("/properties/")),
-        ["/properties/77"],
+        [],
       );
       assert.deepEqual(
         hrefs(tree).filter((href) => href !== RUN_COMMAND_CENTRE_PATH),
-        ["/properties/77"],
-        "the only non-property link on this card is the Command Centre cross-link",
+        ["/grow/appraisals/9"],
+        "View appraisal opens the workspace; View property is not invented",
       );
     });
   } finally {
@@ -348,14 +348,14 @@ test("E-2: a view_appraisal card with no property does not link to /properties/n
       };
 
       const tree = render();
-      assert.equal(linkByLabel(tree, "View appraisal"), undefined, "no property means no View appraisal link");
+      assert.equal(linkByLabel(tree, "View appraisal")?.props?.href, "/grow/appraisals/9");
       assert.equal(linkByLabel(tree, "View property"), undefined);
       assert.deepEqual(
         hrefs(tree).filter((href) => href.startsWith("/properties/") || href.includes("null")),
         [],
         "no /properties/null and no other property link",
       );
-      assert.deepEqual(hrefs(tree), [RUN_COMMAND_CENTRE_PATH]);
+      assert.ok(hrefs(tree).includes("/grow/appraisals/9"));
       assert.equal(textContent(tree).includes("/properties/null"), false);
 
       const viewContact = button(tree, "View contact");
@@ -367,12 +367,12 @@ test("E-2: a view_appraisal card with no property does not link to /properties/n
       hooks.reset();
       const withoutContactRead = render();
       assert.equal(button(withoutContactRead, "View contact"), undefined, "without contact read, the dead action stays hidden");
-      assert.equal(linkByLabel(withoutContactRead, "View appraisal"), undefined);
+      assert.equal(linkByLabel(withoutContactRead, "View appraisal")?.props?.href, "/grow/appraisals/9");
       assert.deepEqual(
         hrefs(withoutContactRead).filter((href) => href.startsWith("/properties/") || href.includes("null")),
         [],
       );
-      assert.deepEqual(hrefs(withoutContactRead), [RUN_COMMAND_CENTRE_PATH]);
+      assert.ok(hrefs(withoutContactRead).includes("/grow/appraisals/9"));
     });
   } finally {
     clearGlobals();

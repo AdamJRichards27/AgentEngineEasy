@@ -99,6 +99,16 @@ export function appraisalStatusLabel(status: string): string {
       return "Lost";
     case "DEFERRED":
       return "Deferred";
+    case "PREPARING":
+      return "Preparing";
+    case "READY":
+      return "Ready";
+    case "SENT":
+      return "Sent";
+    case "VIEWED":
+      return "Viewed";
+    case "ARCHIVED":
+      return "Archived";
     default:
       return status;
   }

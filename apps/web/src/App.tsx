@@ -17,6 +17,8 @@ const StartProperty = lazy(() => import("./pages/StartProperty"));
 const PropertyWorkspace = lazy(() => import("./pages/PropertyWorkspace"));
 const CommandCentre = lazy(() => import("./pages/CommandCentre"));
 const Grow = lazy(() => import("./pages/Grow"));
+const GrowAppraisals = lazy(() => import("./pages/GrowAppraisals"));
+const AppraisalWorkspace = lazy(() => import("./pages/AppraisalWorkspace"));
 const GrowImport = lazy(() => import("./pages/GrowImport"));
 const Exceptions = lazy(() => import("./pages/Exceptions"));
 const PitCrewCommandCentre = lazy(() => import("./pages/PitCrewCommandCentre"));
@@ -223,6 +225,8 @@ function SidebarLayout({
                 <Route path="/communications" component={CommunicationsHub} />
                 <Route path="/financial" component={FinancialOperations} />
                 <Route path="/pit-crew" component={PitCrewCommandCentre} />
+                <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
+                <Route path="/grow/appraisals" component={GrowAppraisals} />
                 <Route path="/grow" component={Grow} />
                 <Route path="/grow/import" component={GrowImport} />
                 <Route path="/settings" component={Settings} />

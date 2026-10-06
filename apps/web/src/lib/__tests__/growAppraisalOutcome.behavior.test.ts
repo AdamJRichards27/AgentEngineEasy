@@ -38,12 +38,12 @@ function button(tree: unknown, label: string): ElementNode | undefined {
   return findAll(tree, (element) => element.type === "button" && textContent(element).trim() === label)[0];
 }
 
-function byId(tree: unknown, id: string): ElementNode | undefined {
-  return findAll(tree, (element) => element.props?.id === id)[0];
+function linkByLabel(tree: unknown, label: string): ElementNode | undefined {
+  return findAll(tree, (element) => element.type === "a" && textContent(element).trim() === label)[0];
 }
 
-function formElement(tree: unknown): ElementNode | undefined {
-  return findAll(tree, (element) => element.type === "form")[0];
+function byId(tree: unknown, id: string): ElementNode | undefined {
+  return findAll(tree, (element) => element.props?.id === id)[0];
 }
 
 class FakeApiError extends Error {
@@ -428,7 +428,9 @@ test("Contact 360 lists only that contact's appraisals, with status and outcome"
       assert.match(text, /Status: Draft/);
       assert.match(text, /Outcome: Not recorded/);
       assert.doesNotMatch(text, /Other contact/);
-      assert.equal(button(tree, "Appointment scheduled") !== undefined, true);
+      assert.equal(button(tree, "Appointment scheduled"), undefined);
+      assert.equal(button(tree, "Record outcome"), undefined);
+      assert.equal(linkByLabel(tree, "Open appraisal")?.props?.href, "/grow/appraisals/8");
       assertNoLongPath(tree);
     });
   } finally {
@@ -436,141 +438,35 @@ test("Contact 360 lists only that contact's appraisals, with status and outcome"
   }
 });
 
-test("status steps are offered only from the status that allows them, and post toStatus", async () => {
-  const cases: Array<{ status: string; shown: string[]; hidden: string[]; post?: { id: string; toStatus: string } }> = [
-    {
-      status: "DRAFT",
-      shown: ["Appointment scheduled"],
-      hidden: ["Presented", "Needs follow-up", "Record outcome"],
-      post: { id: "grow-appraisal-8-status-APPOINTMENT_SCHEDULED", toStatus: "APPOINTMENT_SCHEDULED" },
-    },
-    {
-      status: "APPOINTMENT_SCHEDULED",
-      shown: ["Presented", "Needs follow-up"],
-      hidden: ["Appointment scheduled", "Record outcome"],
-      post: { id: "grow-appraisal-8-status-PRESENTED", toStatus: "PRESENTED" },
-    },
-    {
-      status: "PRESENTED",
-      shown: ["Record outcome"],
-      hidden: ["Appointment scheduled", "Presented", "Needs follow-up"],
-    },
-    {
-      status: "FOLLOW_UP",
-      shown: ["Record outcome"],
-      hidden: ["Appointment scheduled", "Presented", "Needs follow-up"],
-    },
-  ];
-
+test("Contact 360 and an opportunity row link to the appraisal workspace instead of editing in place", async () => {
+  const cases = ["DRAFT", "APPOINTMENT_SCHEDULED", "PRESENTED", "FOLLOW_UP", "WON"];
   await withVite(async (vite) => {
-    const { GrowContactAppraisalsSection } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+    const page = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
       GrowContactAppraisalsSection: ContactSection;
+      GrowOpportunitiesTab: OpportunitiesTab;
     };
-    for (const item of cases) {
-      const { hooks, calls, invalidated, pending } = install(MANAGE, async () => ({ appraisal: { id: 8 } }), [
-        appraisal({ status: item.status }),
-      ]);
+    for (const status of cases) {
+      const { hooks } = install(MANAGE, async () => ({}), [appraisal({ status, outcome: status === "WON" ? "WON" : null })]);
       try {
-        const render = () => {
-          hooks.beginRender();
-          return GrowContactAppraisalsSection({ partyId: 12, linkedProperties: LINKED });
-        };
-        const tree = render();
-        assertNoLongPath(tree);
-        for (const label of item.shown) assert.ok(button(tree, label), `${item.status} shows ${label}`);
-        for (const label of item.hidden) assert.equal(button(tree, label), undefined, `${item.status} hides ${label}`);
-        if (item.post) {
-          (byId(tree, item.post.id)!.props!.onClick as () => void)();
-          await Promise.all(pending);
-          assert.equal(calls[0].path, "/grow/appraisals/8/status");
-          assert.equal(calls[0].options?.method, "POST");
-          assert.deepEqual(JSON.parse(calls[0].options!.body!), { toStatus: item.post.toStatus });
-          assertRefetched(invalidated, 12);
-        }
+        hooks.beginRender();
+        const contact = page.GrowContactAppraisalsSection({ partyId: 12, linkedProperties: LINKED });
+        assert.equal(linkByLabel(contact, "Open appraisal")?.props?.href, "/grow/appraisals/8", status);
+        assert.equal(button(contact, "Appointment scheduled"), undefined, status);
+        assert.equal(button(contact, "Presented"), undefined, status);
+        assert.equal(button(contact, "Needs follow-up"), undefined, status);
+        assert.equal(button(contact, "Record outcome"), undefined, status);
+        assert.equal(byId(contact, "grow-appraisal-8-outcome-form"), undefined, status);
+        assertNoLongPath(contact);
+
+        hooks.beginRender();
+        const tab = page.GrowOpportunitiesTab({ onViewContact: () => {} });
+        assert.equal(linkByLabel(tab, "Open appraisal")?.props?.href, "/grow/appraisals/8", status);
+        assert.equal(button(tab, "Record outcome"), undefined, status);
       } finally {
         clearGlobals();
       }
     }
-
-    const followUp = install(MANAGE, async () => ({ appraisal: { id: 8 } }), [appraisal({ status: "APPOINTMENT_SCHEDULED" })]);
-    try {
-      followUp.hooks.beginRender();
-      const tree = GrowContactAppraisalsSection({ partyId: 12, linkedProperties: LINKED });
-      (byId(tree, "grow-appraisal-8-status-FOLLOW_UP")!.props!.onClick as () => void)();
-      await Promise.all(followUp.pending);
-      assert.deepEqual(JSON.parse(followUp.calls[0].options!.body!), { toStatus: "FOLLOW_UP" });
-      assertRefetched(followUp.invalidated, 12);
-    } finally {
-      clearGlobals();
-    }
   });
-});
-
-test("Record outcome posts WON, LOST and DEFERRED with reason and notes, then refetches", async () => {
-  const { hooks, calls, invalidated, pending } = install(MANAGE, async () => ({ appraisal: { id: 8, status: "WON" } }), [
-    appraisal({ status: "PRESENTED" }),
-  ]);
-  try {
-    await withVite(async (vite) => {
-      const { GrowContactAppraisalsSection } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
-        GrowContactAppraisalsSection: ContactSection;
-      };
-      const render = () => {
-        hooks.beginRender();
-        return GrowContactAppraisalsSection({ partyId: 12, linkedProperties: LINKED });
-      };
-      for (const outcome of ["WON", "LOST", "DEFERRED"]) {
-        let tree = render();
-        (button(tree, "Record outcome")!.props!.onClick as () => void)();
-        tree = render();
-        (byId(tree, "grow-appraisal-8-outcome")!.props!.onChange as (event: { target: { value: string } }) => void)({
-          target: { value: outcome },
-        });
-        tree = render();
-        (byId(tree, "grow-appraisal-8-outcome-reason")!.props!.onChange as (event: { target: { value: string } }) => void)({
-          target: { value: "relationship" },
-        });
-        tree = render();
-        (byId(tree, "grow-appraisal-8-outcome-notes")!.props!.onChange as (event: { target: { value: string } }) => void)({
-          target: { value: `Notes for ${outcome}` },
-        });
-        tree = render();
-        await (formElement(tree)!.props!.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault() {} });
-        await Promise.all(pending);
-      }
-      assert.equal(calls.length, 3);
-      for (const [index, outcome] of ["WON", "LOST", "DEFERRED"].entries()) {
-        assert.equal(calls[index].path, "/grow/appraisals/8/outcome");
-        assert.equal(calls[index].options?.method, "POST");
-        assert.deepEqual(JSON.parse(calls[index].options!.body!), {
-          outcome,
-          outcomeReason: "relationship",
-          outcomeNotes: `Notes for ${outcome}`,
-        });
-      }
-      assertRefetched(invalidated, 12);
-    });
-  } finally {
-    clearGlobals();
-  }
-});
-
-test("FOLLOW_UP also offers Record outcome", async () => {
-  const { hooks } = install(MANAGE, async () => ({}), [appraisal({ status: "FOLLOW_UP" })]);
-  try {
-    await withVite(async (vite) => {
-      const { GrowContactAppraisalsSection } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
-        GrowContactAppraisalsSection: ContactSection;
-      };
-      hooks.beginRender();
-      const tree = GrowContactAppraisalsSection({ partyId: 12, linkedProperties: LINKED });
-      assert.ok(button(tree, "Record outcome"));
-      assert.equal(button(tree, "Appointment scheduled"), undefined);
-      assert.equal(button(tree, "Presented"), undefined);
-    });
-  } finally {
-    clearGlobals();
-  }
 });
 
 test("400, 403, 404 and 409 from starting an appraisal show a plain message", async () => {
@@ -694,7 +590,7 @@ test("Start appraisal from an opportunity posts opportunityId, and 409 is shown 
   }
 });
 
-test("an opportunity with no property explains that, and a started appraisal offers the next step", async () => {
+test("an opportunity with no property explains that, and a started appraisal links to the workspace", async () => {
   const { hooks, calls, pending, invalidated } = install(MANAGE, async () => ({ appraisal: { id: 8 } }), [
     appraisal({ status: "DRAFT" }),
   ]);
@@ -737,13 +633,12 @@ test("an opportunity with no property explains that, and a started appraisal off
       assert.equal(byId(tree, "grow-opportunity-start-appraisal-42"), undefined);
       assert.match(textContent(tree), /Link a property to start an appraisal/);
       assert.ok(byId(tree, "grow-opportunity-start-appraisal-41"));
-      assert.ok(button(tree, "Appointment scheduled"));
+      assert.equal(linkByLabel(tree, "Open appraisal")?.props?.href, "/grow/appraisals/8");
+      assert.equal(button(tree, "Appointment scheduled"), undefined);
       assert.equal(button(tree, "Record outcome"), undefined);
-      (byId(tree, "grow-appraisal-8-status-APPOINTMENT_SCHEDULED")!.props!.onClick as () => void)();
-      await Promise.all(pending);
-      assert.equal(calls[0].path, "/grow/appraisals/8/status");
-      assert.deepEqual(JSON.parse(calls[0].options!.body!), { toStatus: "APPOINTMENT_SCHEDULED" });
-      assertRefetched(invalidated, 12);
+      assert.equal(calls.length, 0);
+      assert.equal(pending.length, 0);
+      assert.equal(invalidated.length, 0);
     });
   } finally {
     clearGlobals();

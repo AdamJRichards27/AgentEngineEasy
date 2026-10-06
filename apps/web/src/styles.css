@@ -1353,6 +1353,7 @@ details.section > *:not(summary) {
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .pc-tab.active {
@@ -1737,6 +1738,43 @@ ul.pc-item-list li {
   border-radius: var(--radius-sm);
   padding: 0.5rem 0.75rem;
   font-size: 0.9rem;
+}
+
+/* Grow appraisals — filters wrap at 320px. Inputs already span the label. */
+.appraisal-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.appraisal-filters label {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.appraisal-filters input,
+.appraisal-filters select {
+  min-height: 44px;
+}
+
+.appraisal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.appraisal-pipeline-row h2,
+.appraisal-workspace h1,
+.appraisal-pipeline h1 {
+  overflow-wrap: anywhere;
+}
+
+.appraisal-pipeline-row h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.35rem;
 }
 
 /* UAT D7 — phone tap targets for controls whose base rules are declared
