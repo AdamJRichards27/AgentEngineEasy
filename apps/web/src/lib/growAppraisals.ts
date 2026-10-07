@@ -64,6 +64,29 @@ export interface GrowAppraisalSummary {
   propertyId: number;
   propertyAddress: string;
   partyId: number | null;
+  /** Run finalise sets this without changing Grow status. Absent means not finalised. */
+  isFinalised?: boolean;
+}
+
+const CLOSED_APPRAISAL_STATUSES = new Set(["WON", "LOST", "DEFERRED", "ARCHIVED"]);
+
+export const APPRAISAL_OTHER_CONTACT = "This appraisal belongs to another contact.";
+export const APPRAISAL_FINISHED = "This appraisal is finished and cannot be changed.";
+export const APPRAISAL_ALREADY_ON_PROPERTY = "This property already has an appraisal.";
+
+export function appraisalIsClosed(appraisal: { status: string; isFinalised?: boolean }): boolean {
+  return appraisal.isFinalised === true || CLOSED_APPRAISAL_STATUSES.has(appraisal.status);
+}
+
+/** Null when this contact may edit the row. Another contact's appraisal,
+ * a finished one, and one that is not linked to a contact are read-only. */
+export function appraisalReadOnlyReason(appraisal: GrowAppraisalSummary, viewerPartyId: number | null): string | null {
+  if (appraisal.partyId != null && viewerPartyId != null && appraisal.partyId !== viewerPartyId) {
+    return APPRAISAL_OTHER_CONTACT;
+  }
+  if (appraisalIsClosed(appraisal)) return APPRAISAL_FINISHED;
+  if (appraisal.partyId == null || viewerPartyId == null) return APPRAISAL_ALREADY_ON_PROPERTY;
+  return null;
 }
 
 export interface AppraisalPropertyChoice {
@@ -99,6 +122,8 @@ export function appraisalStatusLabel(status: string): string {
       return "Lost";
     case "DEFERRED":
       return "Deferred";
+    case "ARCHIVED":
+      return "Archived";
     default:
       return status;
   }
@@ -108,9 +133,37 @@ export function appraisalsForContact(rows: GrowAppraisalSummary[], partyId: numb
   return rows.filter((row) => row.partyId === partyId);
 }
 
-export function appraisalForProperty(rows: GrowAppraisalSummary[], propertyId: number | null): GrowAppraisalSummary | null {
+export function appraisalForProperty(
+  rows: GrowAppraisalSummary[],
+  propertyId: number | null,
+  viewerPartyId?: number | null,
+): GrowAppraisalSummary | null {
   if (propertyId === null) return null;
-  return rows.find((row) => row.propertyId === propertyId) ?? null;
+  const matches = rows.filter((row) => row.propertyId === propertyId);
+  if (viewerPartyId != null) {
+    const own = matches.find((row) => row.partyId === viewerPartyId);
+    if (own) return own;
+  }
+  return matches[0] ?? null;
+}
+
+/** Appraisals on these properties that are not this contact's own row.
+ * Includes a property-page appraisal that has no contact yet. */
+export function otherContactAppraisalsForProperties(
+  rows: GrowAppraisalSummary[],
+  partyId: number,
+  propertyIds: readonly number[],
+): GrowAppraisalSummary[] {
+  const ids = new Set(propertyIds);
+  return rows.filter((row) => ids.has(row.propertyId) && row.partyId !== partyId);
+}
+
+export function appraisalStartPropertyChoices(
+  choices: AppraisalPropertyChoice[],
+  rows: GrowAppraisalSummary[],
+): AppraisalPropertyChoice[] {
+  const taken = new Set(rows.map((row) => row.propertyId));
+  return choices.filter((choice) => !taken.has(choice.id));
 }
 
 export function appraisalPropertyChoices(
