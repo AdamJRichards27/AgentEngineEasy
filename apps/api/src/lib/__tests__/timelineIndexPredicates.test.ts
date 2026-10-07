@@ -105,7 +105,58 @@ test("I-15 — schema indexes match the timeline predicates and are not duplicat
   );
 });
 
+/**
+ * pg_indexes.indexdef quotes identifiers only when required. Migration 0028
+ * writes them quoted; Postgres reports these names unquoted, for example
+ * `USING btree (property_id, action)`. Accept either form and flexible
+ * whitespace. 0028 defines both timeline indexes as plain btree indexes:
+ * the named columns, in that order, and no partial-index WHERE.
+ */
+function assertTimelineIndexDef(indexdef: string, table: string, columns: readonly string[]): void {
+  const def = indexdef.trim();
+  const match = def.match(
+    /\bON\s+((?:"?[A-Za-z_][\w]*"?\.)?"?[A-Za-z_][\w]*"?)\s+USING\s+btree\s*\(([^)]*)\)(?:\s+WHERE\s+([\s\S]+))?\s*$/i,
+  );
+  assert.ok(match, `indexdef is not a btree definition: ${def}`);
+  const tableName = match[1].split(".").pop()!.replaceAll('"', "");
+  assert.equal(tableName, table, def);
+  const parsedColumns = match[2].split(",").map((raw) => {
+    const token = raw.trim();
+    const ident = token.match(/^("?)([A-Za-z_][\w]*)\1$/);
+    assert.ok(ident, `0028 column list has no sort qualifier; got ${JSON.stringify(token)} in ${def}`);
+    return ident[2];
+  });
+  assert.deepEqual(parsedColumns, columns, def);
+  assert.equal(match[3], undefined, `0028 defines ${table} with no partial-index WHERE`);
+}
+
 test("I-15 — a migrated database has both timeline indexes", async (t) => {
+  // The form CI actually returns from pg_indexes, plus the quoted form 0028 writes.
+  assertTimelineIndexDef(
+    "CREATE INDEX audit_logs_property_action_idx ON public.audit_logs USING btree (property_id, action)",
+    "audit_logs",
+    ["property_id", "action"],
+  );
+  assertTimelineIndexDef(
+    "CREATE INDEX domain_events_property_brokerage_event_type_idx ON public.domain_events USING btree (property_id, brokerage_id, event_type)",
+    "domain_events",
+    ["property_id", "brokerage_id", "event_type"],
+  );
+  assertTimelineIndexDef(
+    'CREATE INDEX "audit_logs_property_action_idx" ON "public"."audit_logs" USING btree ( "property_id" , "action" )',
+    "audit_logs",
+    ["property_id", "action"],
+  );
+  assert.throws(
+    () =>
+      assertTimelineIndexDef(
+        "CREATE INDEX audit_logs_property_action_idx ON public.audit_logs USING btree (property_id, action) WHERE (action = 'party_added')",
+        "audit_logs",
+        ["property_id", "action"],
+      ),
+    /no partial-index WHERE/,
+  );
+
   if (!process.env.DATABASE_URL) {
     t.skip("DATABASE_URL is not set. CI applies migrations before this suite; this check does not migrate.");
     return;
@@ -113,14 +164,18 @@ test("I-15 — a migrated database has both timeline indexes", async (t) => {
   const { db } = await import("@aee/db");
   const { sql } = await import("drizzle-orm");
   const result = await db.execute(sql`
-    select indexname, indexdef
+    select tablename, indexname, indexdef
     from pg_indexes
     where schemaname = 'public'
       and indexname in (${DOMAIN_INDEX}, ${AUDIT_INDEX})
     order by indexname`);
-  const rows = result.rows as Array<{ indexname: string; indexdef: string }>;
-  const byName = new Map(rows.map((row) => [row.indexname, row.indexdef.replace(/\s+/g, "")]));
+  const rows = result.rows as Array<{ tablename: string; indexname: string; indexdef: string }>;
+  const byName = new Map(rows.map((row) => [row.indexname, row]));
   assert.equal(byName.size, 2, "migration 0028 must already be applied; this test does not create indexes");
-  assert.match(byName.get(AUDIT_INDEX) ?? "", /\("property_id","action"\)/);
-  assert.match(byName.get(DOMAIN_INDEX) ?? "", /\("property_id","brokerage_id","event_type"\)/);
+  const audit = byName.get(AUDIT_INDEX);
+  const domain = byName.get(DOMAIN_INDEX);
+  assert.equal(audit?.tablename, "audit_logs");
+  assert.equal(domain?.tablename, "domain_events");
+  assertTimelineIndexDef(audit?.indexdef ?? "", "audit_logs", ["property_id", "action"]);
+  assertTimelineIndexDef(domain?.indexdef ?? "", "domain_events", ["property_id", "brokerage_id", "event_type"]);
 });
