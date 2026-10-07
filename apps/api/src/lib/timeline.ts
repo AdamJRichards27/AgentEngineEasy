@@ -490,7 +490,9 @@ export async function getPropertyTimeline(
   const auditParties = [...auditPartyRows, ...extraPartyRows];
   // I-15 code-path: label assembly resolves each related row by id. Building
   // these once keeps the pass linear in timeline rows + related rows.
-  // domain_events / audit_logs indexes are a separate W1-D migration.
+  // The reads above are indexed by migration 0028:
+  // domain_events_property_brokerage_event_type_idx (property_id, brokerage_id, event_type)
+  // and audit_logs_property_action_idx (property_id, action). Do not add a second copy.
   const eventPartiesById = indexById(eventPartyRows);
   const auditPartiesById = indexById(auditParties);
   const amlById = indexById(amlRows);
