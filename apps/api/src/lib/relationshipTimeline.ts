@@ -263,13 +263,18 @@ export async function getRelationshipTimeline(
       .select()
       .from(growCommitments)
       .where(and(eq(growCommitments.partyId, partyId), eq(growCommitments.brokerageId, brokerageId))),
-    // `appraisals` deliberately keeps its bare partyId predicate: unlike every other table above
-    // it carries NO brokerage_id column at all (packages/db/src/schema/appraisal.ts) — it is
-    // tenant-scoped transitively through propertyId -> properties.brokerageId — so there is no
-    // brokerage column here to push down to. Its indexes are all propertyId-leading, so this
-    // lookup remains the one unbounded scan on this path and still needs an appraisals(party_id)
-    // index; that index is reported for Wave 1's single batched migration, not added here.
-    db.select().from(appraisals).where(eq(appraisals.partyId, partyId)),
+    // `appraisals` has no brokerage_id column (packages/db/src/schema/appraisal.ts). Tenancy
+    // is the associated property. Inner-join `properties` and require that property's
+    // brokerage_id to be the caller's, so a party_id match whose property sits in another
+    // brokerage cannot emit that appraisal's id, property id, opportunity id, address, price,
+    // or status event. No new column: the predicate is the parent row that already carries
+    // brokerage_id. appraisals_party_idx still serves the party_id predicate.
+    db
+      .select({ appraisal: appraisals })
+      .from(appraisals)
+      .innerJoin(properties, eq(properties.id, appraisals.propertyId))
+      .where(and(eq(appraisals.partyId, partyId), eq(properties.brokerageId, brokerageId)))
+      .then((rows) => rows.map((row) => row.appraisal)),
     // AE GROW Priority 5 Remediation — Property Intelligence. brokerageId is filtered directly
     // here (the column is right there on this table), same reasoning as the
     // communicationMessages query below, in addition to the party.brokerageId guard every
@@ -298,10 +303,11 @@ export async function getRelationshipTimeline(
 
   const events: GrowTimelineEvent[] = [];
 
-  // Tenant isolation: the party itself is the gate. Most source queries above now also carry
-  // brokerageId in SQL, but `appraisals` (no brokerage_id column) and
-  // communicationParticipants (no brokerage_id column) are still looked up by partyId alone,
-  // and a partyId collision across brokerages, while not actually possible, is still not
+  // Tenant isolation: the party itself is the gate. Source queries above carry brokerageId
+  // in SQL where the table has that column. `appraisals` has none, so the query above
+  // inner-joins properties and requires properties.brokerage_id. communicationParticipants
+  // still has no brokerage_id and is looked up by partyId alone; its threads are re-checked
+  // below. A partyId collision across brokerages, while not actually possible, is still not
   // something this function trusts on its own — so nothing is trusted until the party itself is
   // confirmed to belong to the caller's brokerage. Callers MUST check this themselves before
   // calling, but as a second line of defence this function refuses to produce any events for a
