@@ -50,6 +50,104 @@ export function growTabClickState(next: GrowTab, current: GrowWorkspaceNavState)
   return { tab: next, contactPartyId: null, pendingComposeChannel: null };
 }
 
+// Contact 360's own address. Opening a contact pushes this path so the
+// browser Back button returns to the Grow view that was open before it.
+// Old links still use ?contact=; canonicalGrowContactHref turns those into
+// this path without adding a history entry.
+
+const GROW_CONTACT_PATH = /^\/grow\/contacts\/([^/]+)$/;
+
+export function growTabHref(tab: GrowTab): string {
+  return tab === "today" ? "/grow" : `/grow?tab=${tab}`;
+}
+
+export function growContactPath(partyId: number, compose?: "EMAIL" | "SMS" | null): string {
+  const path = `/grow/contacts/${partyId}`;
+  if (compose === "EMAIL") return `${path}?compose=email`;
+  if (compose === "SMS") return `${path}?compose=sms`;
+  return path;
+}
+
+export function growContactPathSegment(path: string): string | null {
+  const bare = path.split("?")[0].split("#")[0];
+  const match = GROW_CONTACT_PATH.exec(bare);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+/** Positive integer id, or null when the path is not a contact or the id is not a real one. */
+export function growContactIdFromPath(path: string): number | null {
+  const segment = growContactPathSegment(path);
+  if (segment === null || !/^[1-9][0-9]*$/.test(segment)) return null;
+  const id = Number(segment);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
+export function isGrowContactPath(path: string): boolean {
+  return growContactPathSegment(path) !== null;
+}
+
+/**
+ * Where /grow?tab=&contact= should open. A contact id forces the Contacts
+ * tab, because that is the only tab that renders Contact 360. Junk values
+ * leave the workspace on Today.
+ */
+export function growWorkspaceEntryState(search: string): { tab: GrowTab; contactPartyId: number | null } {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const rawContact = params.get("contact");
+  const contactId = rawContact !== null && /^[1-9][0-9]*$/.test(rawContact) ? Number(rawContact) : null;
+  const rawTab = params.get("tab");
+  const tab = GROW_TABS.find((t) => t.key === rawTab)?.key ?? (contactId !== null ? "contacts" : "today");
+  return contactId !== null ? { tab: "contacts", contactPartyId: contactId } : { tab, contactPartyId: null };
+}
+
+/** Href to replace a legacy ?contact= link with, or null when the URL is already canonical. */
+export function canonicalGrowContactHref(path: string, search: string): string | null {
+  if (isGrowContactPath(path)) return null;
+  const contactId = growWorkspaceEntryState(search).contactPartyId;
+  return contactId === null ? null : growContactPath(contactId);
+}
+
+export function growComposeChannelFromSearch(search: string): "EMAIL" | "SMS" | null {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const raw = params.get("compose")?.toLowerCase();
+  if (raw === "email") return "EMAIL";
+  if (raw === "sms") return "SMS";
+  return null;
+}
+
+export interface GrowHistory {
+  readonly state: unknown;
+  pushState: (state: unknown, title: string, url?: string | null) => void;
+  replaceState: (state: unknown, title: string, url?: string | null) => void;
+}
+
+/** Push when leaving Contact 360 so Back returns to it; replace when only the tab changes. */
+export function growNavigationMode(pathname: string): "push" | "replace" {
+  return isGrowContactPath(pathname) ? "push" : "replace";
+}
+
+export function applyGrowNavigation(history: GrowHistory, href: string, mode: "push" | "replace"): void {
+  const state = history.state;
+  if (mode === "replace") history.replaceState(state, "", href);
+  else history.pushState(state, "", href);
+}
+
+// One queued rewrite at a time, so a render that still sees the old query
+// string does not schedule the replacement on every pass.
+let queuedCanonicalHref: string | null = null;
+
+export function queueCanonicalGrowContactRedirect(href: string): void {
+  if (typeof window === "undefined") return;
+  if (queuedCanonicalHref === href) return;
+  queuedCanonicalHref = href;
+  queueMicrotask(() => {
+    queuedCanonicalHref = null;
+    if (growContactIdFromPath(window.location.pathname) !== null) return;
+    if (canonicalGrowContactHref(window.location.pathname, window.location.search) !== href) return;
+    applyGrowNavigation(window.history, href, "replace");
+  });
+}
+
 // ── Data regions (WP6b D6) ──────────────────────────────────────────────
 
 export type GrowDataRegionState = "loading" | "error" | "empty" | "ready";
