@@ -14,7 +14,9 @@ simultaneously.* A reviewer and an implementer may look at the same files; two i
 what remains to be built, see [`AE_GROW_COMPLETION_ROADMAP.md`](./AE_GROW_COMPLETION_ROADMAP.md).
 Run lane status lives in [`AE_RUN_COMPLETION_ROADMAP.md`](./AE_RUN_COMPLETION_ROADMAP.md).
 
-Current staging: `a0d01f988c7b323102bcfe311a4c756bf3246b0e` (2026-09-26, C-10 #107 merged). I-18 is this claim and is not yet a staging landing.
+**Wave name.** Remaining Grow build work is the **Grow Completion Program**. Do not rename or reuse Priority 2. Historical Grow Priority 2 (Contact Intelligence) is **COMPLETE** via [#30](https://github.com/AdamJRichards27/AgentEngineEasy/pull/30) and [`AE_GROW_PRIORITY_2_CONTACT_INTELLIGENCE_REPORT.md`](./AE_GROW_PRIORITY_2_CONTACT_INTELLIGENCE_REPORT.md). Historical Grow Priority 1 (Daily Command Centre, [#29](https://github.com/AdamJRichards27/AgentEngineEasy/pull/29)) is not reopened. Grow Priority 1 command-experience completion work (#164–#168) is **COMPLETE**; Owner closed it in Command Centre. Do not reopen those completed priorities to absorb newer work.
+
+Current staging: `5ee41952199ea877f0cabc5ce8e6e718050c5c34` (2026-10-07, [#167](https://github.com/AdamJRichards27/AgentEngineEasy/pull/167) Grow Appraisals list and Appraisal Workspace). Post-merge CI [37559800941](https://github.com/AdamJRichards27/AgentEngineEasy/actions/runs/37559800941) SUCCESS. **E-1 is closed** against that landing and is not an open Owner-gated claim. This docs record is PR **#169** (`cursor/close-e1-appraisal-workspace-2125`) and is not yet a staging landing. The earlier current-tip sentence (`a0d01f98`, C-10 #107, and “I-18 is this claim and is not yet a staging landing”) is a historical register note. This docs slice does not re-grade I-18.
 
 ---
 
@@ -55,6 +57,8 @@ for a read-only task even where the credential permits more.
 | **Performance / Coach** | *none — read-only* | Discovery agent | `lib/ai/coaching/**` (read only until a claim is recorded) | DISCOVERY — **unblocked** after #55 merged | Implementation still **gated** on Owner decisions **#4** and **#5**, plus a file claim in this register before any edit. C-9 released `recentActivityQueryShape.test.ts` with #89. | — | — |
 
 ### Known ownership — released and still open
+
+- **E-1** (Grow Appraisal Workspace web client) is **closed** by [#167](https://github.com/AdamJRichards27/AgentEngineEasy/pull/167) on staging tip `5ee41952199ea877f0cabc5ce8e6e718050c5c34`. Post-merge CI [37559800941](https://github.com/AdamJRichards27/AgentEngineEasy/actions/runs/37559800941) SUCCESS. Routes: `/grow/appraisals` and `/grow/appraisals/:id`. That PR added no new API route and no migration. Do not open another E-1 implementation slice. Owner decision #3 (RUN and Grow appraisals as one row; roadmap §4 W3-E) is not closed by this note. Historical rows below that list E-1 inside “Owner-gated items … were not touched” record what those earlier slices excluded. They are not a current open claim on E-1. This closure sits in the **Grow Completion Program**. It does not reopen historical Priority 1 or Priority 2.
 
 Consolidation gate `234871a` released the domains below. The previous Active collision claims are obsolete.
 
