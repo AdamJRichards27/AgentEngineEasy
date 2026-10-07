@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, exists, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
 import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
-import { visibleLinkedPropertySql, visibleRequiredPropertySql } from "./propertyVisibility.js";
+import { visibleLinkedPropertySql, visibleOwnedOrLinkedPropertySql, visibleRequiredPropertySql } from "./propertyVisibility.js";
 import { isOverdueLocal, isToday, localDateKey, resolveTimeZone, startOfLocalDay } from "./commandCentre/timezone.js";
 import { loadContactabilityFilter } from "./propertyIntelligence/contactability.js";
 import {
@@ -494,8 +494,10 @@ export interface GrowTodaySignalSummary {
  * row the caller can already see exists. Nothing here is stored: no column,
  * no dismissal, no preference. Contacts are brokerage-wide. A property-linked
  * row counts only when that property is in the caller's own-property set
- * (`restrictToPropertyIds`); a null property stays visible. Admin and Pit Crew
- * pass null and stay brokerage-wide.
+ * (`restrictToPropertyIds`). An unlinked commitment or opportunity counts
+ * for an Agent only when they own it (`callerUserId`); relationships and
+ * activities with no property stay visible. Admin and Pit Crew pass a null
+ * property set and stay brokerage-wide.
  */
 export interface GrowTodayFirstRun {
   contact: boolean;
@@ -994,6 +996,7 @@ function firstRunFlag(value: unknown): boolean {
 async function loadGrowTodayFirstRun(
   brokerageId: number,
   restrictToPropertyIds: number[] | null,
+  callerUserId: number | null,
 ): Promise<GrowTodayFirstRun> {
   const contact = exists(
     db.select({ id: parties.id }).from(parties).where(eq(parties.brokerageId, brokerageId)).limit(1),
@@ -1030,7 +1033,12 @@ async function loadGrowTodayFirstRun(
       .where(
         and(
           eq(growCommitments.brokerageId, brokerageId),
-          visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+          visibleOwnedOrLinkedPropertySql(
+            growCommitments.propertyId,
+            growCommitments.createdBy,
+            restrictToPropertyIds,
+            callerUserId,
+          ),
         ),
       )
       .limit(1),
@@ -1042,7 +1050,12 @@ async function loadGrowTodayFirstRun(
       .where(
         and(
           eq(growOpportunities.brokerageId, brokerageId),
-          visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+          visibleOwnedOrLinkedPropertySql(
+            growOpportunities.propertyId,
+            growOpportunities.ownerUserId,
+            restrictToPropertyIds,
+            callerUserId,
+          ),
         ),
       )
       .limit(1),
@@ -1077,7 +1090,18 @@ async function loadGrowTodayFirstRun(
 
 export async function getGrowTodaySummary(
   brokerageId: number,
-  options?: { includePropertyIntelligenceSignals?: boolean; now?: Date; restrictToPropertyIds?: number[] | null },
+  options?: {
+    includePropertyIntelligenceSignals?: boolean;
+    now?: Date;
+    restrictToPropertyIds?: number[] | null;
+    /**
+     * Used only when `restrictToPropertyIds` is an array. Unlinked
+     * commitments and opportunities then belong to this user. Ignored for
+     * a brokerage-wide caller. Omitted with a property scope hides those
+     * unlinked rows.
+     */
+    callerUserId?: number | null;
+  },
 ): Promise<GrowTodaySummary> {
   // AE GROW Priority 5 Remediation — Rule F is entitlement-gated, but this
   // function never resolves grow.propertyIntelligence.read itself. The
@@ -1090,8 +1114,10 @@ export async function getGrowTodaySummary(
   // null (the default) is brokerage-wide: Brokerage Administrator, Pit Crew,
   // and every existing caller that does not pass a scope. An array is the
   // caller's own properties from restrictedPropertyIdsFor. This function does
-  // not decide who is brokerage-wide.
+  // not decide who is brokerage-wide. callerUserId narrows unlinked
+  // commitments and opportunities for that array; it is not a tenant selector.
   const restrictToPropertyIds = options?.restrictToPropertyIds ?? null;
+  const callerUserId = options?.callerUserId ?? null;
   const { timeZone } = await resolveTimeZone({ brokerageId });
   const dueBefore = exclusiveEndOfLocalDay(now, timeZone);
   // W2-A (I-4) — WAVE 1: the rule reads, all capped, all ordered. F-1 adds the
@@ -1171,7 +1197,12 @@ export async function getGrowTodaySummary(
         and(
           eq(growOpportunities.brokerageId, brokerageId),
           eq(growOpportunities.status, "Open"),
-          visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+          visibleOwnedOrLinkedPropertySql(
+            growOpportunities.propertyId,
+            growOpportunities.ownerUserId,
+            restrictToPropertyIds,
+            callerUserId,
+          ),
         ),
       )
       // Dated commitments first, oldest due date leading — Postgres sorts
@@ -1237,7 +1268,12 @@ export async function getGrowTodaySummary(
           eq(growCommitments.brokerageId, brokerageId),
           eq(growCommitments.status, "Open"),
           lt(growCommitments.dueAt, dueBefore),
-          visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+          visibleOwnedOrLinkedPropertySql(
+            growCommitments.propertyId,
+            growCommitments.createdBy,
+            restrictToPropertyIds,
+            callerUserId,
+          ),
         ),
       )
       // Most overdue first. A future-dated Open commitment is already excluded
@@ -1245,7 +1281,7 @@ export async function getGrowTodaySummary(
       .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
       .limit(GROW_TODAY_COMMITMENT_ROW_CAP),
     fetchPropertyIntelligenceSignalRows(brokerageId, includePropertyIntelligenceSignals, now, restrictToPropertyIds),
-    loadGrowTodayFirstRun(brokerageId, restrictToPropertyIds),
+    loadGrowTodayFirstRun(brokerageId, restrictToPropertyIds, callerUserId),
   ]);
 
   // W2-A — the exact open-opportunity total, carried on every row by the

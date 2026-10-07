@@ -4,7 +4,7 @@ import { resolveEntitlements } from "../../entitlements/resolver.js";
 import type { EntitlementActor } from "../../entitlements/types.js";
 import { getGrowTodaySummary, type GrowTodayAction } from "../../growToday.js";
 import { presentStoredActivitySummaries } from "../../commitmentRescheduleSummary.js";
-import { visibleLinkedPropertySql } from "../../propertyVisibility.js";
+import { visibleLinkedPropertySql, visibleOwnedOrLinkedPropertySql } from "../../propertyVisibility.js";
 import type {
   GrowContext,
   GrowDueCommitmentView,
@@ -122,6 +122,7 @@ async function computeRelationshipBreakdown(
 async function computeOpportunityPipeline(
   brokerageId: number,
   restrictToPropertyIds: number[] | null,
+  callerUserId: number | null,
 ): Promise<GrowOpportunityStageSummary[]> {
   const rows = await db
     .select({ stage: growOpportunities.stage, count: count() })
@@ -130,7 +131,12 @@ async function computeOpportunityPipeline(
       and(
         eq(growOpportunities.brokerageId, brokerageId),
         eq(growOpportunities.status, "Open"),
-        visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+        visibleOwnedOrLinkedPropertySql(
+          growOpportunities.propertyId,
+          growOpportunities.ownerUserId,
+          restrictToPropertyIds,
+          callerUserId,
+        ),
       ),
     )
     .groupBy(growOpportunities.stage);
@@ -171,7 +177,11 @@ function contactDisplayName(party: {
 // another tenant's name. The property join does the same for the address:
 // a property id that is not in this brokerage contributes a null label,
 // never the other tenant's address. Email and mobile are not selected.
-async function computeDueCommitments(brokerageId: number, restrictToPropertyIds: number[] | null): Promise<GrowDueCommitmentView[]> {
+async function computeDueCommitments(
+  brokerageId: number,
+  restrictToPropertyIds: number[] | null,
+  callerUserId: number | null,
+): Promise<GrowDueCommitmentView[]> {
   const rows = await db
     .select({
       id: growCommitments.id,
@@ -193,7 +203,12 @@ async function computeDueCommitments(brokerageId: number, restrictToPropertyIds:
         eq(growCommitments.brokerageId, brokerageId),
         eq(growCommitments.status, "Open"),
         lte(growCommitments.dueAt, endOfTodayUtc()),
-        visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+        visibleOwnedOrLinkedPropertySql(
+          growCommitments.propertyId,
+          growCommitments.createdBy,
+          restrictToPropertyIds,
+          callerUserId,
+        ),
       ),
     )
     .orderBy(asc(growCommitments.dueAt), asc(growCommitments.id))
@@ -256,22 +271,26 @@ async function computeRecentActivity(brokerageId: number, restrictToPropertyIds:
  * @param restrictToPropertyIds The caller's `restrictedPropertyIdsFor` result.
  *   Null (the default) is brokerage-wide: Brokerage Administrator, Pit Crew,
  *   and existing callers that do not pass a scope. An array keeps contact-level
- *   rows and drops another agent's property-linked rows, the same filter Grow
- *   Today already applies.
+ *   relationships and activities, drops another agent's property-linked rows,
+ *   and (with `callerUserId`) keeps unlinked commitments and opportunities
+ *   only when that user owns them. The same filter Grow Today already applies.
+ * @param callerUserId Owner of unlinked commitments and opportunities when
+ *   `restrictToPropertyIds` is an array. Ignored when that set is null.
  */
 export async function buildGrowContext(
   brokerageId: number,
   focusItemId: string | null,
   restrictToPropertyIds: number[] | null = null,
+  callerUserId: number | null = null,
 ): Promise<GrowContext> {
   const includePropertyIntelligenceSignals = await brokerageHasEntitlement(brokerageId, "grow.propertyIntelligence.read");
 
   const [todaySummary, relationshipBreakdown, opportunityPipeline, recentActivity, dueCommitments] = await Promise.all([
-    getGrowTodaySummary(brokerageId, { includePropertyIntelligenceSignals, restrictToPropertyIds }),
+    getGrowTodaySummary(brokerageId, { includePropertyIntelligenceSignals, restrictToPropertyIds, callerUserId }),
     computeRelationshipBreakdown(brokerageId, restrictToPropertyIds),
-    computeOpportunityPipeline(brokerageId, restrictToPropertyIds),
+    computeOpportunityPipeline(brokerageId, restrictToPropertyIds, callerUserId),
     computeRecentActivity(brokerageId, restrictToPropertyIds),
-    computeDueCommitments(brokerageId, restrictToPropertyIds),
+    computeDueCommitments(brokerageId, restrictToPropertyIds, callerUserId),
   ]);
 
   const allItems = todaySummary.priorityActions.map(toItemView);

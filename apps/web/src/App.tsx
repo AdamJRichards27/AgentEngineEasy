@@ -5,7 +5,7 @@ import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
-import { buildProductNavLinks, resolveLandingRoute } from "./lib/productNav";
+import { buildProductNavLinks, navLinkIsActive, resolveLandingRoute } from "./lib/productNav";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // I-18 — each authenticated page is its own chunk. Pre-session pages stay
@@ -173,7 +173,7 @@ function SidebarLayout({
               <Link
                 key={l.path}
                 href={l.path}
-                className={`app-sidebar-link${location === l.path ? " active" : ""}`}
+                className={`app-sidebar-link${navLinkIsActive(location, l.path) ? " active" : ""}`}
               >
                 {l.label}
               </Link>
@@ -228,6 +228,7 @@ function SidebarLayout({
                 <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
                 <Route path="/grow/appraisals" component={GrowAppraisals} />
                 <Route path="/grow" component={Grow} />
+                <Route path="/grow/contacts/:id" component={Grow} />
                 <Route path="/grow/import" component={GrowImport} />
                 <Route path="/settings" component={Settings} />
                 <Route path="/settings/integrations" component={SettingsIntegrations} />

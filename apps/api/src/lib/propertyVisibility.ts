@@ -59,6 +59,59 @@ export function visibleRequiredPropertySql(propertyId: AnyColumn, restrictTo: nu
 }
 
 /**
+ * Commitments and opportunities.
+ *
+ * A property-linked row keeps the own-property rule above. A row with no
+ * property stays brokerage-wide for Brokerage Administrator and Pit Crew
+ * (`restrictTo === null`). An Agent sees that unlinked row only when
+ * `ownerId` is `callerUserId` (commitment `createdBy`, opportunity
+ * `ownerUserId`). A property-scoped caller with no `callerUserId` sees no
+ * unlinked rows: there is no owner to match. `callerUserId` is ignored
+ * when `restrictTo` is null.
+ */
+export function visibleOwnedOrLinkedPropertySql(
+  propertyId: AnyColumn,
+  ownerId: AnyColumn,
+  restrictTo: number[] | null,
+  callerUserId: number | null,
+): SQL | undefined {
+  if (restrictTo === null) return undefined;
+  const ownedUnlinked =
+    callerUserId === null ? sql`false` : and(isNull(propertyId), eq(ownerId, callerUserId));
+  if (restrictTo.length === 0) return ownedUnlinked;
+  if (callerUserId === null) return inArray(propertyId, restrictTo);
+  return or(ownedUnlinked, inArray(propertyId, restrictTo));
+}
+
+/** In-memory twin of `visibleOwnedOrLinkedPropertySql`. */
+export function ownedOrLinkedHidden(
+  propertyId: number | null,
+  ownerId: number | null,
+  restrictTo: number[] | null,
+  callerUserId: number | null,
+): boolean {
+  if (restrictTo === null) return false;
+  if (propertyId === null) return ownerId === null || ownerId !== callerUserId;
+  return !restrictTo.includes(propertyId);
+}
+
+/**
+ * Write gate for a commitment or opportunity. True when this caller may
+ * mutate the row. Property-linked rows use the own-property rule. An
+ * unlinked row is writable by its owner, and by Brokerage Administrator
+ * and Pit Crew. Callers answer a refusal with that route's existing
+ * not-found body; this does not respond.
+ */
+export async function assertOwnedOrPropertyVisibleForWrite(
+  user: AuthedUser,
+  propertyId: number | null,
+  ownerId: number | null,
+): Promise<boolean> {
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  return !ownedOrLinkedHidden(propertyId, ownerId, restrictTo, user.id);
+}
+
+/**
  * Write gate. True when this write may name `propertyId`, or mutate a row
  * linked to it. A null property id is contact-level and is allowed.
  * Brokerage Administrator and Pit Crew stay allowed (`propertyHiddenFromCaller`

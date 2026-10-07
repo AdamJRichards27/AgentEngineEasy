@@ -201,7 +201,7 @@ test("POST /grow/contacts creates a property-less party in the caller's brokerag
 
 test("POST /grow/contacts returns 409 when the email already exists, ignoring case and surrounding whitespace", async () => {
   const email = `Dup.${suffix}@Example.com`;
-  const created = await postContact(A.agent.cookie, { name: "Existing Person", email });
+  const created = await postContact(A.agent.cookie, { name: "Existing Person", email, phone: "0499888777" });
   assert.equal(created.status, 201, await created.clone().text());
   const createdBody = (await created.json()) as { contact: { id: number } };
 
@@ -226,15 +226,107 @@ test("POST /grow/contacts returns 409 when the email already exists, ignoring ca
   assert.equal(paddedBody.contactId, padded.id);
 
   const phoneOnly = await postContact(A.agent.cookie, { name: "Same Phone", phone: "0499888777", email: `other-phone-${suffix}@example.com` });
-  assert.equal(phoneOnly.status, 201, "phone is not a duplicate key");
-  const phoneBody = (await phoneOnly.json()) as { contact: { id: number } };
-  assert.notEqual(phoneBody.contact.id, createdBody.contact.id);
+  assert.equal(phoneOnly.status, 409, "the same phone is a duplicate even when the email is different");
+  const phoneBody = (await phoneOnly.json()) as { error: string; contactId: number };
+  assert.match(phoneBody.error, /phone number already exists/);
+  assert.equal(phoneBody.contactId, createdBody.contact.id);
 
   const otherBrokerage = await postContact(B.agent.cookie, { name: "Other Brokerage", email });
   assert.equal(otherBrokerage.status, 201, "the same email in another brokerage is not a duplicate");
   const otherBody = (await otherBrokerage.json()) as { contact: { id: number } };
   const [otherRow] = await db.select().from(parties).where(eq(parties.id, otherBody.contact.id));
   assert.equal(otherRow.brokerageId, B.brokerageId);
+});
+
+test("POST /grow/contacts returns 409 when the phone matches, including Australian formats import already stores", async () => {
+  const digits = suffix.replace(/\D/g, "").slice(-6).padStart(6, "0");
+  const local = `0400${digits}`;
+  const spaced = `0400 ${digits.slice(0, 3)} ${digits.slice(3)}`;
+  const international = `+61400${digits}`;
+
+  const [stored] = await db
+    .insert(parties)
+    .values({
+      brokerageId: A.brokerageId,
+      partyType: "Person",
+      firstName: "Ivy",
+      lastName: "Imported",
+      mobile: international,
+      email: `ivy-imported-${suffix}@example.test`,
+    })
+    .returning({ id: parties.id });
+
+  for (const phone of [spaced, local, `  ${international}  `, `(0400) ${digits.slice(0, 3)} ${digits.slice(3)}`]) {
+    const again = await postContact(A.agent.cookie, {
+      name: "Dee Again",
+      phone,
+      email: `dee-${phone.replace(/\D/g, "")}-${suffix}@example.test`,
+    });
+    assert.equal(again.status, 409, phone);
+    const body = (await again.json()) as { error: string; contactId: number };
+    assert.match(body.error, /phone number already exists/);
+    assert.equal(body.contactId, stored.id, "the oldest contact with that number is the one named");
+  }
+
+  const different = await postContact(A.agent.cookie, {
+    name: "Different Number",
+    phone: `0401${digits}`,
+    email: `different-${suffix}@example.test`,
+  });
+  assert.equal(different.status, 201, "a different number is not a duplicate");
+
+  const nameless = await postContact(A.agent.cookie, { name: "No Phone One" });
+  const namelessAgain = await postContact(A.agent.cookie, { name: "No Phone Two" });
+  assert.equal(nameless.status, 201);
+  assert.equal(namelessAgain.status, 201, "two contacts with no phone are not duplicates of each other");
+
+  const otherBrokerage = await postContact(B.agent.cookie, { name: "Other Office Dee", phone: spaced });
+  assert.equal(otherBrokerage.status, 201, "the same phone in another brokerage is not a duplicate");
+});
+
+test("GET /grow/contacts finds a contact by full name without losing partial or single-name search", async () => {
+  const created = await postContact(A.agent.cookie, {
+    firstName: "UAT1-Sam",
+    lastName: "Seller",
+    email: `UAT1-Sam.${suffix}@Example.test`,
+    phone: `0412${suffix.replace(/\D/g, "").slice(-6).padStart(6, "0")}`,
+  });
+  assert.equal(created.status, 201, await created.clone().text());
+  const body = (await created.json()) as { contact: { id: number } };
+
+  const organisation = await postContact(A.agent.cookie, {
+    partyType: "Organisation",
+    organisationName: "UAT1 Harbour Realty",
+    email: `harbour-${suffix}@example.test`,
+  });
+  assert.equal(organisation.status, 201, await organisation.clone().text());
+  const organisationBody = (await organisation.json()) as { contact: { id: number } };
+
+  async function idsFor(search: string) {
+    const res = await fetch(contactsUrl(`/?search=${encodeURIComponent(search)}`), { headers: { cookie: A.agent.cookie } });
+    assert.equal(res.status, 200, search);
+    const payload = (await res.json()) as { contacts: Array<{ id: number }> };
+    return payload.contacts.map((contact) => contact.id);
+  }
+
+  for (const search of ["UAT1-Sam Seller", "uat1-sam seller", "UAT1-Sam  Seller", "Sam Seller"]) {
+    const ids = await idsFor(search);
+    assert.ok(ids.includes(body.contact.id), `full-name search ${JSON.stringify(search)} should find the contact`);
+  }
+
+  assert.ok((await idsFor("UAT1-Sam")).includes(body.contact.id), "the first name on its own still matches");
+  assert.ok((await idsFor("Seller")).includes(body.contact.id), "the last name on its own still matches");
+  assert.ok((await idsFor("seller")).includes(body.contact.id), "a single name is case-insensitive");
+  assert.ok((await idsFor(`uat1-sam.${suffix}`)).includes(body.contact.id), "part of the email still matches");
+  assert.ok(!(await idsFor("UAT1-Nobody")).includes(body.contact.id));
+
+  assert.ok((await idsFor("UAT1 Harbour Realty")).includes(organisationBody.contact.id), "an organisation name still matches");
+  assert.ok((await idsFor("Harbour")).includes(organisationBody.contact.id));
+
+  const foreign = await fetch(contactsUrl(`/?search=${encodeURIComponent("UAT1-Sam Seller")}`), { headers: { cookie: B.agent.cookie } });
+  const foreignBody = (await foreign.json()) as { contacts: Array<{ id: number }> };
+  assert.equal(foreign.status, 200);
+  assert.ok(!foreignBody.contacts.some((contact) => contact.id === body.contact.id));
 });
 
 test("a caller cannot create a contact into another brokerage or read that contact back", async () => {

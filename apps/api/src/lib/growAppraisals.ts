@@ -28,8 +28,18 @@ import {
  * duplicates appraisals.ts's own creation/finalise/publish logic -- every
  * Grow entry point below calls getOrCreateAppraisal() first (so the RUN
  * side keeps its one canonical row and its own APPRAISAL_CREATED
- * publish/audit), then layers the Grow workspace fields on top with a
- * direct update.
+ * publish/audit), then layers the Grow workspace fields on top.
+ *
+ * Create-from-contact and create-from-opportunity never rewrite an
+ * existing row. A WON, LOST, DEFERRED, ARCHIVED, or finalised appraisal
+ * is left untouched and the call fails with AppraisalTransitionError
+ * (HTTP 409). An open appraisal is not moved to a different contact or
+ * a different opportunity. The only write on an existing open row is
+ * filling a link that is still empty: a property-page appraisal with no
+ * contact can be claimed by the first contact, and an appraisal that
+ * already belongs to this contact but has no opportunity yet can record
+ * that opportunity as its origin. A repeat call that is already linked
+ * returns the same row and writes nothing.
  */
 
 export class AppraisalAccessError extends Error {}
@@ -54,6 +64,51 @@ const ALLOWED_STATUS_TRANSITIONS: Record<string, string[]> = {
 };
 
 const OUTCOME_STATUSES = new Set(["WON", "LOST", "DEFERRED"]);
+
+/** Create paths treat these as finished. DEFERRED can still move to
+ * FOLLOW_UP through the status endpoint; that is a deliberate edit, not
+ * a reason to let "start appraisal" claim the row again. */
+const CLOSED_APPRAISAL_STATUSES = new Set(["WON", "LOST", "DEFERRED", "ARCHIVED"]);
+
+const OTHER_CONTACT_UNCHANGED =
+  "This property already has an appraisal for another contact. It was not changed.";
+const OTHER_OPPORTUNITY_UNCHANGED =
+  "This property already has an appraisal linked to another opportunity. It was not changed.";
+
+function unchangedClosedAppraisalMessage(appraisal: Pick<Appraisal, "status" | "isFinalised">): string | null {
+  if (CLOSED_APPRAISAL_STATUSES.has(appraisal.status)) {
+    const article = appraisal.status === "ARCHIVED" ? "an" : "a";
+    return `This property already has ${article} ${appraisal.status.toLowerCase()} appraisal. It was not changed.`;
+  }
+  if (appraisal.isFinalised) {
+    return "This property already has a finalised appraisal. It was not changed.";
+  }
+  return null;
+}
+
+/** Fills only links that are still empty. Never changes status, outcome,
+ * party, or opportunity once those are set, and skips the write entirely
+ * when there is nothing to fill. */
+async function fillEmptyAppraisalLinks(
+  base: Appraisal,
+  links: {
+    partyId?: number | null;
+    opportunityId?: number | null;
+    ownerUserId?: number | null;
+    createdByUserId?: number | null;
+  },
+): Promise<{ appraisal: Appraisal; wrote: boolean }> {
+  const patch: Record<string, unknown> = {};
+  if (base.partyId == null && links.partyId != null) patch.partyId = links.partyId;
+  if (base.opportunityId == null && links.opportunityId != null) patch.opportunityId = links.opportunityId;
+  if (base.ownerUserId == null && links.ownerUserId != null) patch.ownerUserId = links.ownerUserId;
+  if (base.createdByUserId == null && links.createdByUserId != null) patch.createdByUserId = links.createdByUserId;
+  if (Object.keys(patch).length === 0) return { appraisal: base, wrote: false };
+
+  patch.updatedAt = new Date();
+  const [updated] = await db.update(appraisals).set(patch).where(eq(appraisals.id, base.id)).returning();
+  return { appraisal: updated, wrote: true };
+}
 
 async function publishAppraisalEvent(eventType: AgentEngineEasyEventType, appraisal: Appraisal, brokerageId: number, userId: number, extra: Record<string, unknown> = {}) {
   try {
@@ -127,31 +182,35 @@ export async function createAppraisalFromContact(input: {
     throw new AppraisalAccessError("Contact not found");
   }
 
-  const { appraisal: base } = await getOrCreateAppraisal({
+  const { appraisal: base, created } = await getOrCreateAppraisal({
     propertyId: input.propertyId,
     userId: input.userId,
     brokerageId: input.brokerageId,
   });
 
-  const [updated] = await db
-    .update(appraisals)
-    .set({
-      partyId: input.partyId,
-      ownerUserId: base.ownerUserId ?? input.userId,
-      createdByUserId: base.createdByUserId ?? input.userId,
-      status: base.status ?? "DRAFT",
-      updatedAt: new Date(),
-    })
-    .where(eq(appraisals.id, base.id))
-    .returning();
+  if (!created) {
+    const closed = unchangedClosedAppraisalMessage(base);
+    if (closed) throw new AppraisalTransitionError(closed);
+    if (base.partyId != null && base.partyId !== input.partyId) {
+      throw new AppraisalTransitionError(OTHER_CONTACT_UNCHANGED);
+    }
+  }
 
-  await logAudit({
-    userId: input.userId,
-    action: "appraisal_workspace_linked_to_contact",
-    recordType: "appraisal",
-    recordId: String(updated.id),
-    propertyId: input.propertyId,
+  const { appraisal: updated, wrote } = await fillEmptyAppraisalLinks(base, {
+    partyId: input.partyId,
+    ownerUserId: input.userId,
+    createdByUserId: input.userId,
   });
+
+  if (wrote) {
+    await logAudit({
+      userId: input.userId,
+      action: "appraisal_workspace_linked_to_contact",
+      recordType: "appraisal",
+      recordId: String(updated.id),
+      propertyId: input.propertyId,
+    });
+  }
 
   return updated;
 }
@@ -175,41 +234,51 @@ export async function createAppraisalFromOpportunity(input: {
     throw new AppraisalTransitionError("Opportunity has no linked property yet -- link or create a property before starting an appraisal");
   }
 
-  const { appraisal: base } = await getOrCreateAppraisal({
+  const { appraisal: base, created } = await getOrCreateAppraisal({
     propertyId: opportunity.propertyId,
     userId: input.userId,
     brokerageId: input.brokerageId,
   });
 
-  const [updated] = await db
-    .update(appraisals)
-    .set({
-      partyId: opportunity.partyId,
-      opportunityId: opportunity.id,
-      ownerUserId: base.ownerUserId ?? opportunity.ownerUserId ?? input.userId,
-      createdByUserId: base.createdByUserId ?? input.userId,
-      status: base.status ?? "DRAFT",
-      updatedAt: new Date(),
-    })
-    .where(eq(appraisals.id, base.id))
-    .returning();
+  if (!created) {
+    const closed = unchangedClosedAppraisalMessage(base);
+    if (closed) throw new AppraisalTransitionError(closed);
+    if (base.partyId != null && base.partyId !== opportunity.partyId) {
+      throw new AppraisalTransitionError(OTHER_CONTACT_UNCHANGED);
+    }
+    if (base.opportunityId != null && base.opportunityId !== opportunity.id) {
+      throw new AppraisalTransitionError(OTHER_OPPORTUNITY_UNCHANGED);
+    }
+  }
 
-  await db
-    .update(growOpportunities)
-    .set({ stage: "AppraisalBooked", convertedAppraisalId: updated.id, updatedAt: new Date() })
-    .where(eq(growOpportunities.id, opportunity.id));
-
-  await logAudit({
-    userId: input.userId,
-    action: "appraisal_workspace_created_from_opportunity",
-    recordType: "appraisal",
-    recordId: String(updated.id),
-    propertyId: opportunity.propertyId,
-  });
-  await publishAppraisalEvent("OPPORTUNITY_STAGE_CHANGED", updated, input.brokerageId, input.userId, {
+  const linkingOpportunity = base.opportunityId == null;
+  const { appraisal: updated, wrote } = await fillEmptyAppraisalLinks(base, {
+    partyId: opportunity.partyId,
     opportunityId: opportunity.id,
-    stage: "AppraisalBooked",
+    ownerUserId: opportunity.ownerUserId ?? input.userId,
+    createdByUserId: input.userId,
   });
+
+  if (linkingOpportunity) {
+    await db
+      .update(growOpportunities)
+      .set({ stage: "AppraisalBooked", convertedAppraisalId: updated.id, updatedAt: new Date() })
+      .where(eq(growOpportunities.id, opportunity.id));
+    await publishAppraisalEvent("OPPORTUNITY_STAGE_CHANGED", updated, input.brokerageId, input.userId, {
+      opportunityId: opportunity.id,
+      stage: "AppraisalBooked",
+    });
+  }
+
+  if (wrote) {
+    await logAudit({
+      userId: input.userId,
+      action: "appraisal_workspace_created_from_opportunity",
+      recordType: "appraisal",
+      recordId: String(updated.id),
+      propertyId: opportunity.propertyId,
+    });
+  }
 
   return updated;
 }

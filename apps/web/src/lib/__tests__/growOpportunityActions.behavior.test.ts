@@ -615,7 +615,7 @@ test("E-6/E-7: /grow deep-link parameters open the right tab and contact, and ju
         growWorkspaceEntryState: (search: string) => { tab: string; contactPartyId: number | null };
       };
 
-      // What the Communications Hub's contact-first rows link to.
+      // Older ?contact= links still name the contact. The address bar is rewritten to /grow/contacts/:id.
       assert.deepEqual(growWorkspaceEntryState("?tab=contacts&contact=12"), { tab: "contacts", contactPartyId: 12 });
       assert.deepEqual(growWorkspaceEntryState("tab=contacts&contact=12"), { tab: "contacts", contactPartyId: 12 });
       // A contact alone still lands on the only tab that can render it.

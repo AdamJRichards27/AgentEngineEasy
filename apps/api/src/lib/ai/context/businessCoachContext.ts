@@ -68,6 +68,9 @@ export interface BuildBusinessCoachContextInput {
   // Caller's restrictedPropertyIdsFor result. Null or omitted is
   // brokerage-wide (Brokerage Administrator, Pit Crew, and existing callers).
   restrictToPropertyIds?: number[] | null;
+  // Owner of unlinked commitments and opportunities when restrictToPropertyIds
+  // is an array. Ignored for a brokerage-wide caller.
+  callerUserId?: number | null;
 }
 
 export async function buildBusinessCoachContext(
@@ -77,6 +80,7 @@ export async function buildBusinessCoachContext(
 ): Promise<BusinessCoachContext> {
   const now = input.now ?? new Date();
   const restrictToPropertyIds = input.restrictToPropertyIds ?? null;
+  const callerUserId = input.callerUserId ?? null;
   // AE GROW Priority 6 Stage C timezone remediation — resolved once, here,
   // and threaded through resolvePeriod so every downstream figure (metrics,
   // response text, the UI's period pill) is computed against the SAME
@@ -106,15 +110,15 @@ export async function buildBusinessCoachContext(
   ] = await Promise.all([
     fetchActivityRows(brokerageId, period, restrictToPropertyIds),
     fetchActivityRows(brokerageId, previousPeriod, restrictToPropertyIds),
-    fetchCommitmentsDueInPeriod(brokerageId, period, restrictToPropertyIds),
-    fetchCommitmentsDueInPeriod(brokerageId, previousPeriod, restrictToPropertyIds),
-    fetchCurrentlyOverdueCommitments(brokerageId, now, restrictToPropertyIds),
+    fetchCommitmentsDueInPeriod(brokerageId, period, restrictToPropertyIds, callerUserId),
+    fetchCommitmentsDueInPeriod(brokerageId, previousPeriod, restrictToPropertyIds, callerUserId),
+    fetchCurrentlyOverdueCommitments(brokerageId, now, restrictToPropertyIds, callerUserId),
     fetchAppraisalsCreatedInPeriod(brokerageId, period, restrictToPropertyIds),
     fetchAppraisalsCreatedInPeriod(brokerageId, previousPeriod, restrictToPropertyIds),
     fetchStaleAppraisals(brokerageId, now, restrictToPropertyIds),
-    fetchOpenOpportunities(brokerageId, restrictToPropertyIds),
-    fetchOpportunitiesCreatedInPeriod(brokerageId, period, restrictToPropertyIds),
-    fetchOpportunitiesCreatedInPeriod(brokerageId, previousPeriod, restrictToPropertyIds),
+    fetchOpenOpportunities(brokerageId, restrictToPropertyIds, callerUserId),
+    fetchOpportunitiesCreatedInPeriod(brokerageId, period, restrictToPropertyIds, callerUserId),
+    fetchOpportunitiesCreatedInPeriod(brokerageId, previousPeriod, restrictToPropertyIds, callerUserId),
     fetchPromotedSignalOpportunityIds(brokerageId, restrictToPropertyIds),
     fetchActiveRelationships(brokerageId, restrictToPropertyIds),
     fetchRecentActivityByParty(brokerageId, recentSince, restrictToPropertyIds),

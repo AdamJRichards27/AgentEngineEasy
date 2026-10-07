@@ -27,7 +27,13 @@ import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
 import { resolveTimeZone } from "../lib/commandCentre/timezone.js";
 import { getContactIntelligenceSummary } from "../lib/contactIntelligence.js";
-import { assertPropertyVisibleForWrite, restrictedPropertyIdsFor, visibleLinkedPropertySql } from "../lib/propertyVisibility.js";
+import {
+  assertOwnedOrPropertyVisibleForWrite,
+  assertPropertyVisibleForWrite,
+  restrictedPropertyIdsFor,
+  visibleLinkedPropertySql,
+  visibleOwnedOrLinkedPropertySql,
+} from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -43,6 +49,7 @@ import { isWithinConsentHours } from "../lib/consentControls.js";
 import { evaluateConsentDecisionReadOnly } from "../lib/consentControlsPersistence.js";
 import { PHONE_CALL_CONSENT_PURPOSE, PHONE_CALL_CONSENT_SCOPE } from "../lib/telephony/eligibility.js";
 import { validateRecord } from "../lib/import/validate.js";
+import { contactPhoneMatchKey, contactPhoneMatchKeySql } from "../lib/contactPhoneMatch.js";
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
 //
@@ -245,12 +252,18 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
   const conditions = [eq(parties.brokerageId, brokerageId)];
   if (search.length > 0) {
     const pattern = `%${search}%`;
+    // "UAT1-Sam Seller" matches neither first name nor last name on its own.
+    // Also match the same first + last string the contact list displays.
+    // Internal whitespace is collapsed so a double space still finds them.
+    // Single-field matches (a partial name, one name, an email) are unchanged.
+    const fullNamePattern = `%${search.replace(/\s+/g, " ")}%`;
     conditions.push(
       or(
         ilike(parties.firstName, pattern),
         ilike(parties.lastName, pattern),
         ilike(parties.organisationName, pattern),
         ilike(parties.email, pattern),
+        sql`regexp_replace(concat_ws(' ', btrim(${parties.firstName}), btrim(${parties.lastName})), '[[:space:]]+', ' ', 'g') ILIKE ${fullNamePattern}`,
       )!,
     );
   }
@@ -322,8 +335,10 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
 // POST /grow/contacts — create a contact with no property. Inserts one parties
 // row for the session brokerage. Does not write property_parties, grow_relationships,
 // or grow_activities (import, the other property-less create, does not write an
-// activity either). brokerageId in the body is ignored. A matching email in this
-// brokerage is a 409; phone is not a duplicate key.
+// activity either). brokerageId in the body is ignored. A matching email or a
+// matching normalised phone in this brokerage is a 409 with that contact's id,
+// the same response the new-contact form already turns into "This contact
+// already exists." The phone is stored as typed; only the comparison is normalised.
 contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
   const parsed = parseContactCreateBody(req.body);
@@ -346,6 +361,25 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
         contactId: existing.id,
       });
       return;
+    }
+  }
+
+  if (parsed.mobile) {
+    const phoneKey = contactPhoneMatchKey(parsed.mobile);
+    if (phoneKey) {
+      const [existingPhone] = await db
+        .select({ id: parties.id })
+        .from(parties)
+        .where(and(eq(parties.brokerageId, user.brokerageId), sql`${contactPhoneMatchKeySql(parties.mobile)} = ${phoneKey}`))
+        .orderBy(asc(parties.id))
+        .limit(1);
+      if (existingPhone) {
+        res.status(409).json({
+          error: "A contact with this phone number already exists.",
+          contactId: existingPhone.id,
+        });
+        return;
+      }
     }
   }
 
@@ -778,9 +812,11 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     return;
   }
 
-  // The contact stays brokerage-wide. Only property-linked rows, and the
-  // property-derived counts inside the timeline and intelligence summary,
-  // are limited to properties this caller can see.
+  // The contact stays brokerage-wide. Property-linked rows are limited to
+  // properties this caller can see. An unlinked commitment or opportunity
+  // is limited to its owner when the caller is an Agent. Admin and Pit Crew
+  // stay brokerage-wide, including those counts on the timeline and the
+  // intelligence summary.
   const restrictTo = await restrictedPropertyIdsFor(user);
 
   const [
@@ -840,7 +876,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
           and(
             eq(growOpportunities.partyId, partyId),
             eq(growOpportunities.brokerageId, brokerageId),
-            visibleLinkedPropertySql(growOpportunities.propertyId, restrictTo),
+            visibleOwnedOrLinkedPropertySql(growOpportunities.propertyId, growOpportunities.ownerUserId, restrictTo, user.id),
           ),
         )
         .orderBy(desc(growOpportunities.createdAt)),
@@ -864,12 +900,12 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
           and(
             eq(growCommitments.partyId, partyId),
             eq(growCommitments.brokerageId, brokerageId),
-            visibleLinkedPropertySql(growCommitments.propertyId, restrictTo),
+            visibleOwnedOrLinkedPropertySql(growCommitments.propertyId, growCommitments.createdBy, restrictTo, user.id),
           ),
         )
         .orderBy(desc(growCommitments.dueAt)),
-      getRelationshipTimeline(brokerageId, partyId, 100, restrictTo),
-      getContactIntelligenceSummary(brokerageId, partyId, restrictTo),
+      getRelationshipTimeline(brokerageId, partyId, 100, restrictTo, user.id),
+      getContactIntelligenceSummary(brokerageId, partyId, restrictTo, user.id),
       // AE GROW Completion W3-A (A-6). Read-only; see buildContactability().
       // The party has already been proven to belong to this brokerage above.
       buildContactability(brokerageId, partyId),
@@ -1309,10 +1345,11 @@ contactsRouter.patch("/commitments/:id", requireAuth, requireEntitlement("grow.a
     res.status(404).json({ error: "Commitment not found in this brokerage" });
     return;
   }
-  // Checked before the Open-status 409, so a hidden property-linked
-  // commitment (complete, cancel, or reschedule) is a 404 and writes no
-  // activity. A null property id stays writable.
-  if (!(await assertPropertyVisibleForWrite(user, existing.propertyId))) {
+  // Checked before the Open-status 409, so a hidden commitment (complete,
+  // cancel, or reschedule) is a 404 and writes no activity. Property-linked
+  // rows follow the own-property rule. An unlinked row is writable by its
+  // owner, and by Brokerage Administrator and Pit Crew.
+  if (!(await assertOwnedOrPropertyVisibleForWrite(user, existing.propertyId, existing.createdBy))) {
     res.status(404).json({ error: "Commitment not found in this brokerage" });
     return;
   }
