@@ -11,7 +11,11 @@ import assert from "node:assert/strict";
 import {
   AI_DAILY_LIMIT_PER_BROKERAGE_ENV,
   AI_DAILY_LIMIT_PER_USER_ENV,
+  AI_DAILY_TOKEN_LIMIT_PER_BROKERAGE_ENV,
+  AI_DAILY_TOKEN_LIMIT_PER_USER_ENV,
   AiUsageLimitsNotConfiguredError,
+  VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE_ENV,
+  VOICE_DAILY_AUDIO_SECONDS_PER_USER_ENV,
   aiUsageLimitsConfigurationError,
   assertAiUsageLimitsConfigured,
   getEffectiveAiUsageLimits,
@@ -183,4 +187,61 @@ test("an unusable value that is not yet enforced is warned about at boot instead
   assert.ok(warnings.length > 0);
   assert.equal(warnings[0]?.event, "ai_daily_limit_value_unusable");
   assert.equal(warnings[0]?.detail.raw, "20.5");
+});
+
+test("token and audio-second ceilings are unset by default and are not part of the live-provider boot gate", () => {
+  const bare = resolveAiUsageLimits("GROW", {});
+  assert.equal(bare.perUserTokens.limit, null);
+  assert.equal(bare.perUserTokens.configured, false);
+  assert.equal(bare.perUserTokens.provisionalFallback, false);
+  assert.equal(bare.perBrokerageTokens.limit, null);
+  assert.equal(bare.perUserAudioSeconds.limit, null);
+  assert.equal(bare.perBrokerageAudioSeconds.limit, null);
+  assert.equal(bare.perBrokerage.provisionalFallback, true, "request brokerage fallback is unchanged");
+
+  const live = {
+    ...LIVE,
+    [AI_DAILY_LIMIT_PER_USER_ENV]: "25",
+    [AI_DAILY_LIMIT_PER_BROKERAGE_ENV]: "500",
+  };
+  const limits = resolveAiUsageLimits("GROW", live);
+  assert.equal(limits.perUserTokens.limit, null);
+  assert.equal(limits.perBrokerageAudioSeconds.limit, null);
+  assert.equal(aiUsageLimitsConfigurationError(limits), null);
+  assert.doesNotThrow(() => assertAiUsageLimitsConfigured(live));
+});
+
+test("token and audio-second ceilings follow the same per-tier override rules and stay off when unset or disabled", () => {
+  const env = {
+    [AI_DAILY_TOKEN_LIMIT_PER_USER_ENV]: "1000",
+    [tierLimitEnvVar("user", "PRO", "tokens")]: "50",
+    [AI_DAILY_TOKEN_LIMIT_PER_BROKERAGE_ENV]: "off",
+    [VOICE_DAILY_AUDIO_SECONDS_PER_USER_ENV]: "600",
+    [tierLimitEnvVar("brokerage", "GROW", "audio_seconds")]: "1200",
+  };
+  const pro = resolveAiUsageLimits("PRO", env);
+  assert.equal(pro.perUserTokens.limit, 50);
+  assert.equal(pro.perUserTokens.source, tierLimitEnvVar("user", "PRO", "tokens"));
+  assert.equal(pro.perBrokerageTokens.limit, null);
+  assert.equal(pro.perBrokerageTokens.configured, true);
+  assert.equal(pro.perUserAudioSeconds.limit, 600);
+  assert.equal(pro.perBrokerageAudioSeconds.limit, null, "a GROW audio override must not apply to PRO");
+
+  const grow = resolveAiUsageLimits("GROW", env);
+  assert.equal(grow.perUserTokens.limit, 1000, "the scope default applies where no tier override exists");
+  assert.equal(grow.perBrokerageAudioSeconds.limit, 1200);
+  assert.equal(grow.perBrokerageAudioSeconds.source, tierLimitEnvVar("brokerage", "GROW", "audio_seconds"));
+});
+
+test("an invalid token or audio-second ceiling fails closed only when enforcement is on", () => {
+  const enforced = resolveAiUsageLimits("GROW", { ...ENFORCED, [AI_DAILY_TOKEN_LIMIT_PER_USER_ENV]: "nope" });
+  const error = aiUsageLimitsConfigurationError(enforced);
+  assert.ok(error instanceof AiUsageLimitsNotConfiguredError);
+  assert.ok(error.missing.includes(AI_DAILY_TOKEN_LIMIT_PER_USER_ENV));
+
+  const audio = resolveAiUsageLimits("GROW", { ...ENFORCED, [VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE_ENV]: "0" });
+  assert.ok(aiUsageLimitsConfigurationError(audio)?.missing.includes(VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE_ENV));
+
+  const notEnforced = resolveAiUsageLimits("GROW", { [AI_DAILY_TOKEN_LIMIT_PER_USER_ENV]: "nope" });
+  assert.equal(aiUsageLimitsConfigurationError(notEnforced), null);
 });

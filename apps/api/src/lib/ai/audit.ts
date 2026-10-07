@@ -1,6 +1,7 @@
+import { eq } from "drizzle-orm";
 import { db, aiInteractions, aiUsage } from "@aee/db";
 import type { AiRole, ResponseKind, RiskLevel } from "./types.js";
-import { logger } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
 
 export interface LogAiInteractionInput {
   requestId: string;
@@ -33,7 +34,8 @@ export interface LogAiUsageInput {
 // orchestrator - including requests blocked before any provider call is made, so
 // a denied AI request is exactly as visible in the audit trail as a successful
 // one. Mirrors lib/audit.ts's logAudit(): fire-and-forget, a logging failure
-// must never break the response the user is waiting on.
+// must never break the response the user is waiting on. The failure is not
+// silent: it is a structured error log plus ai_interaction_log_failure_total.
 export async function logAiInteraction(input: LogAiInteractionInput): Promise<number | null> {
   try {
     const [row] = await db
@@ -56,8 +58,44 @@ export async function logAiInteraction(input: LogAiInteractionInput): Promise<nu
       .returning({ id: aiInteractions.id });
     return row === undefined ? null : row.id;
   } catch (err) {
-    logger.error("log_ai_interaction_failed", { requestId: input.requestId, brokerageId: input.brokerageId, userId: input.userId, error: err });
+    logger.error("log_ai_interaction_failed", {
+      requestId: input.requestId,
+      brokerageId: input.brokerageId,
+      userId: input.userId,
+      status: input.status,
+      error: err,
+    });
+    incrementCounter("ai_interaction_log_failure_total", { operation: "insert" });
     return null;
+  }
+}
+
+export interface UpdateAiInteractionInput {
+  status: LogAiInteractionInput["status"];
+  responseKind?: ResponseKind;
+  errorMessage?: string;
+}
+
+/**
+ * Updates the row logAiInteraction inserted before the provider call.
+ * Same best-effort contract: a failure is logged and counted, and does not
+ * throw, so a finished answer is still returned.
+ */
+export async function updateAiInteraction(id: number, patch: UpdateAiInteractionInput): Promise<boolean> {
+  const values: { status: string; responseKind?: string; errorMessage?: string } = { status: patch.status };
+  if (patch.responseKind !== undefined) values.responseKind = patch.responseKind;
+  if (patch.errorMessage !== undefined) values.errorMessage = patch.errorMessage;
+  try {
+    await db.update(aiInteractions).set(values).where(eq(aiInteractions.id, id));
+    return true;
+  } catch (err) {
+    logger.error("log_ai_interaction_update_failed", {
+      interactionId: id,
+      status: patch.status,
+      error: err,
+    });
+    incrementCounter("ai_interaction_log_failure_total", { operation: "update" });
+    return false;
   }
 }
 
