@@ -1,7 +1,8 @@
 import { and, count, countDistinct, eq, inArray, sql } from "drizzle-orm";
-import { db, aiInteractions, aiUsage } from "@aee/db";
+import { db, aiInteractions, aiUsage, auditLogs } from "@aee/db";
 import { resolveBrokerageTier } from "./entitlements.js";
 import { getEffectiveAiUsageLimits, type ResolvedAiUsageLimits } from "./usageLimits.js";
+import { AI_VOICE_TRANSCRIBED_ACTION } from "./voice/voiceMeter.js";
 import type { SubscriptionTier } from "./types.js";
 
 /**
@@ -38,22 +39,18 @@ import type { SubscriptionTier } from "./types.js";
  * brokerage/user (which the in-memory rate limiters already bound further). No table was added
  * for any of this: both scopes are answered from the ai_interactions rows that already exist.
  *
- * The window is wider than "check-then-act" alone suggests, and W2-C could not narrow it from
- * here because the fix belongs in files this slice does not own. The check runs at
- * orchestrator.ts:626, but the row that makes the request countable is not written until
- * orchestrator.ts:805-818 — AFTER the provider round trip — so every concurrent request is
- * uncounted for the whole duration of the provider call, not for a few milliseconds. Worse,
- * audit.ts:58-61 swallows an insert failure and returns null, at which point logAiUsage() is
- * skipped too and a request that has already cost real money is never metered at all, silently.
- * Narrowing this means writing the interaction row BEFORE the provider call and updating it
- * after (orchestrator.ts), and surfacing rather than swallowing the insert failure (audit.ts);
- * both are reported to the Project Owner rather than attempted here.
+ * The countable ai_interactions row is inserted immediately before the provider call and
+ * updated with the outcome afterwards (orchestrator.ts). A logging failure still does not
+ * fail the user's answer; it is a structured error plus ai_interaction_log_failure_total
+ * (lib/ai/audit.ts), and the orchestrator logs ai_interaction_unmetered when the pre-call
+ * insert returns null.
  *
- * Voice transcription (routes/aiVoice.ts) writes NO durable per-request record (by design — see
- * that route's own header comment), so voice requests are not themselves counted; the voice
- * route instead refuses to transcribe once the user's or the brokerage's durable Ask/Coach count
- * for today has reached its limit (a transcript is only ever useful as input to an Ask/Coach
- * request, which would itself be refused).
+ * Voice transcription does not write an ai_interactions row and does not increment these
+ * request counts. It is still refused when the request ceiling is already reached (the
+ * transcript's only use is an Ask/Coach request that would itself be refused). Its own
+ * durable meter is an audit_logs row, action AI_VOICE_TRANSCRIBED, summed by
+ * sumVoiceAudioSecondsToday. Optional token ceilings and optional voice audio-second
+ * ceilings are enforced below only when configured and only when isDailyAiCapEnforced().
  */
 
 export const COUNTED_AI_INTERACTION_STATUSES = ["success", "error"] as const;
@@ -61,21 +58,33 @@ export const COUNTED_AI_INTERACTION_STATUSES = ["success", "error"] as const;
 /** Which limit a refusal was for. */
 export type AiUsageLimitScopeName = "user" | "brokerage";
 
+/** What the ceiling counts. Request messages stay exactly as they were before C-10. */
+export type AiUsageLimitUnit = "requests" | "tokens" | "audio_seconds";
+
+function dailyCapMessage(tier: SubscriptionTier, limit: number, scope: AiUsageLimitScopeName, unit: AiUsageLimitUnit): string {
+  if (unit === "requests") {
+    return scope === "user"
+      ? `You have reached your daily limit of ${limit} AI requests. The limit resets at 00:00 UTC.`
+      : `Your brokerage has reached its daily limit of ${limit} AI requests on the ${tier} plan. The limit resets at 00:00 UTC.`;
+  }
+  const noun = unit === "tokens" ? "AI tokens" : "voice audio seconds";
+  return scope === "user"
+    ? `You have reached your daily limit of ${limit} ${noun}. The limit resets at 00:00 UTC.`
+    : `Your brokerage has reached its daily limit of ${limit} ${noun} on the ${tier} plan. The limit resets at 00:00 UTC.`;
+}
+
 export class AiDailyCapExceededError extends Error {
   readonly tier: SubscriptionTier;
   readonly limit: number;
   readonly scope: AiUsageLimitScopeName;
-  constructor(tier: SubscriptionTier, limit: number, scope: AiUsageLimitScopeName = "brokerage") {
-    super(
-      scope === "user"
-        ? `You have reached your daily limit of ${limit} AI requests. The limit resets at 00:00 UTC.`
-        : `Your brokerage has reached its daily limit of ${limit} AI requests on the ${tier} plan. ` +
-          "The limit resets at 00:00 UTC.",
-    );
+  readonly unit: AiUsageLimitUnit;
+  constructor(tier: SubscriptionTier, limit: number, scope: AiUsageLimitScopeName = "brokerage", unit: AiUsageLimitUnit = "requests") {
+    super(dailyCapMessage(tier, limit, scope, unit));
     this.name = "AiDailyCapExceededError";
     this.tier = tier;
     this.limit = limit;
     this.scope = scope;
+    this.unit = unit;
   }
 }
 
@@ -140,11 +149,9 @@ export async function countUserAiRequestsToday(brokerageId: number, userId: numb
 // only question the platform could answer about AI consumption was "how many
 // requests?" — under which one Business Coach call carrying a 14-query JSON
 // context costs exactly as much as a one-word question. Everything below is
-// READ-ONLY reporting. It deliberately changes nothing about enforcement:
-// assertDailyAiLimitsNotReached() still counts requests and only requests.
-// Whether a ceiling should be denominated in tokens or dollars, and at what
-// number, is a commercial decision the Project Owner has reserved for pilot
-// evidence — the point of this code is to produce that evidence.
+// READ-ONLY reporting of tokens and estimated cost. Request ceilings are
+// unchanged. Optional token ceilings (usageLimits.ts) read this same sum.
+// Estimated cost stays telemetry: there is no dollar ceiling.
 //
 // Cost caveat, stated wherever the number is: estimatedCostUsd is whatever the
 // provider adapter estimated at call time (providers/anthropicProvider.ts
@@ -320,11 +327,56 @@ export async function sumAiTokenUsageToday(brokerageId: number, userId?: number)
 
 export { isDailyAiCapEnforced } from "./usageLimits.js";
 
+export interface VoiceAudioSecondsToday {
+  /** Sum of persisted audioSeconds for this brokerage since 00:00 UTC today. */
+  brokerage: number;
+  /** The same, narrowed to one user. null when no user was asked about. */
+  user: number | null;
+}
+
+/**
+ * Durable voice seconds for the UTC day, from audit_logs rows written by
+ * recordVoiceTranscriptionMeter. Tenant scoping matches countAiRequestsToday:
+ * userId is applied in addition to brokerageId, so another brokerage's user
+ * id contributes zero. Rows without audioSeconds (failures) add zero.
+ * The (brokerage_id, created_at) index serves the range; action is filtered
+ * on that brokerage-day set. No new index.
+ */
+export async function sumVoiceAudioSecondsToday(brokerageId: number, userId?: number): Promise<VoiceAudioSecondsToday> {
+  const seconds = sql`(coalesce(nullif(${auditLogs.updatedValue}::json->>'audioSeconds', '')::numeric, 0))`;
+  const [row] = await db
+    .select({
+      brokerageSeconds: sql<string>`coalesce(sum(${seconds}), 0)`,
+      userSeconds:
+        userId === undefined
+          ? sql<string>`0`
+          : sql<string>`coalesce(sum(${seconds}) filter (where ${auditLogs.userId} = ${userId}), 0)`,
+    })
+    .from(auditLogs)
+    .where(
+      and(
+        eq(auditLogs.brokerageId, brokerageId),
+        eq(auditLogs.action, AI_VOICE_TRANSCRIBED_ACTION),
+        sql`${auditLogs.createdAt} >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`,
+      ),
+    );
+  return {
+    brokerage: toNumber(row?.brokerageSeconds),
+    user: userId === undefined ? null : toNumber(row?.userSeconds),
+  };
+}
+
 export interface AssertDailyAiLimitsInput {
   brokerageId: number;
   userId: number;
   /** May be passed when the caller already resolved it; otherwise it is resolved here. */
   tier?: SubscriptionTier;
+  /**
+   * "chat" (default) checks request ceilings and optional token ceilings.
+   * "voice" checks those and the optional audio-seconds ceilings. Voice
+   * still does not increment the request count.
+   */
+  surface?: "chat" | "voice";
 }
 
 /**
@@ -340,19 +392,51 @@ export interface AssertDailyAiLimitsInput {
  */
 export async function assertDailyAiLimitsNotReached(input: AssertDailyAiLimitsInput): Promise<void> {
   const tier = input.tier ?? (await resolveBrokerageTier(input.brokerageId));
-  // Throws when a live provider is approved while either limit is unconfigured; a no-op in the
-  // pilot's mock-provider default, where nothing is enforced (see usageLimits.ts).
+  // Throws when a live provider is approved while either REQUEST limit is unconfigured; a no-op
+  // in the pilot's mock-provider default, where nothing is enforced (see usageLimits.ts).
   const limits = getEffectiveAiUsageLimits(tier);
   if (!limits.enforced) return;
-  if (limits.perUser.limit === null && limits.perBrokerage.limit === null) return;
 
-  const counts = await countAiRequestsToday(input.brokerageId, limits.perUser.limit === null ? undefined : input.userId);
+  const checkRequests = limits.perUser.limit !== null || limits.perBrokerage.limit !== null;
+  const checkTokens = limits.perUserTokens.limit !== null || limits.perBrokerageTokens.limit !== null;
+  const checkAudio =
+    input.surface === "voice" &&
+    (limits.perUserAudioSeconds.limit !== null || limits.perBrokerageAudioSeconds.limit !== null);
+  if (!checkRequests && !checkTokens && !checkAudio) return;
 
-  if (limits.perUser.limit !== null && (counts.user ?? 0) >= limits.perUser.limit) {
-    throw new AiDailyCapExceededError(tier, limits.perUser.limit, "user");
+  // Request ceilings run to completion before any optional ceiling, so a request-cap refusal
+  // is the same error it was before token or audio ceilings existed.
+  if (checkRequests) {
+    const counts = await countAiRequestsToday(input.brokerageId, limits.perUser.limit === null ? undefined : input.userId);
+    if (limits.perUser.limit !== null && (counts.user ?? 0) >= limits.perUser.limit) {
+      throw new AiDailyCapExceededError(tier, limits.perUser.limit, "user", "requests");
+    }
+    if (limits.perBrokerage.limit !== null && counts.brokerage >= limits.perBrokerage.limit) {
+      throw new AiDailyCapExceededError(tier, limits.perBrokerage.limit, "brokerage", "requests");
+    }
   }
-  if (limits.perBrokerage.limit !== null && counts.brokerage >= limits.perBrokerage.limit) {
-    throw new AiDailyCapExceededError(tier, limits.perBrokerage.limit, "brokerage");
+
+  if (checkTokens) {
+    const tokens = await sumAiTokenUsageToday(input.brokerageId, limits.perUserTokens.limit === null ? undefined : input.userId);
+    if (limits.perUserTokens.limit !== null && (tokens.user?.totalTokens ?? 0) >= limits.perUserTokens.limit) {
+      throw new AiDailyCapExceededError(tier, limits.perUserTokens.limit, "user", "tokens");
+    }
+    if (limits.perBrokerageTokens.limit !== null && tokens.brokerage.totalTokens >= limits.perBrokerageTokens.limit) {
+      throw new AiDailyCapExceededError(tier, limits.perBrokerageTokens.limit, "brokerage", "tokens");
+    }
+  }
+
+  if (checkAudio) {
+    const audio = await sumVoiceAudioSecondsToday(
+      input.brokerageId,
+      limits.perUserAudioSeconds.limit === null ? undefined : input.userId,
+    );
+    if (limits.perUserAudioSeconds.limit !== null && (audio.user ?? 0) >= limits.perUserAudioSeconds.limit) {
+      throw new AiDailyCapExceededError(tier, limits.perUserAudioSeconds.limit, "user", "audio_seconds");
+    }
+    if (limits.perBrokerageAudioSeconds.limit !== null && audio.brokerage >= limits.perBrokerageAudioSeconds.limit) {
+      throw new AiDailyCapExceededError(tier, limits.perBrokerageAudioSeconds.limit, "brokerage", "audio_seconds");
+    }
   }
 }
 

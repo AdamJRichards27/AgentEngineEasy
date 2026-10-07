@@ -215,8 +215,16 @@ export const METRIC_DEFINITIONS = {
     },
   },
   voice_transcription_audio_seconds_total: {
-    help: "Sum of provider-reported audio durationSeconds on successful voice transcriptions. This is the speech-to-text spend meter. No per-request table. Not recorded on failure, and not recorded when the provider reports no duration.",
+    help: "Sum of provider-reported audio durationSeconds on successful voice transcriptions. Process-level speech-to-text meter. Durable per-request metadata is an audit_logs row (AI_VOICE_TRANSCRIBED), not a dedicated table, and stores no audio or transcript. Not recorded on failure, and not recorded when the provider reports no duration.",
     labels: { provider: ["mock", "deepgram", "other"] },
+  },
+  voice_meter_write_failure_total: {
+    help: "A durable voice-meter insert into audit_logs failed after a transcription that reached the provider. The transcription response is still returned. This counter is the observable signal for that best-effort failure.",
+    labels: {},
+  },
+  ai_interaction_log_failure_total: {
+    help: "logAiInteraction insert or updateAiInteraction update failed. The user response is still returned. operation is insert or update.",
+    labels: { operation: ["insert", "update"] },
   },
   // R-F6 — Pit Crew WAITING_ON detection sweep. Scheduled path only
   // (runScheduledWaitingOnSweep in lib/pitCrew/waitingOnSweepBootstrap.ts),

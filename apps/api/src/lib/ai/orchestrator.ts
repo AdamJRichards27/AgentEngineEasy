@@ -8,7 +8,7 @@ import { generateWithGateway, loadAiGatewayConfig } from "./gateway.js";
 import { getPrompt } from "./prompts.js";
 import { isRoleEnabled } from "./featureFlags.js";
 import { isRoleEntitled } from "./entitlements.js";
-import { logAiInteraction, logAiUsage } from "./audit.js";
+import { logAiInteraction, logAiUsage, updateAiInteraction } from "./audit.js";
 import { assertGrowRateLimit, GrowRateLimitError } from "./growRateLimiter.js";
 import { assertDailyAiLimitsNotReached, AiDailyCapExceededError } from "./dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "./usageLimits.js";
@@ -712,6 +712,33 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
     JSON.stringify(contextPayload, null, 2),
   ].join("\n");
 
+  // Countable before the provider round trip. Status starts as "success" (a
+  // counted status) and is updated to "error" if the provider throws, so a
+  // concurrent ceiling check can see the in-flight request. A null id means
+  // the insert failed; that failure is already on ai_interaction_log_failure_total,
+  // and this log is the call-site signal. The answer is still attempted.
+  let auditedInteractionId = await logAiInteraction({
+    requestId,
+    brokerageId: input.brokerageId,
+    userId: input.userId,
+    aiRole: role,
+    contextType: input.contextType ?? undefined,
+    contextId: input.contextId ?? undefined,
+    promptKey: prompt.key,
+    promptVersion: prompt.version,
+    question: input.question,
+    riskLevel: 0,
+    status: "success",
+  });
+  if (auditedInteractionId === null) {
+    logger.error("ai_interaction_unmetered", {
+      requestId,
+      brokerageId: input.brokerageId,
+      userId: input.userId,
+      phase: "before_provider",
+    });
+  }
+
   let generation;
   try {
     generation = await generateWithGateway(
@@ -727,20 +754,24 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : "AI provider call failed";
-    await logAiInteraction({
-      requestId,
-      brokerageId: input.brokerageId,
-      userId: input.userId,
-      aiRole: role,
-      contextType: input.contextType ?? undefined,
-      contextId: input.contextId ?? undefined,
-      promptKey: prompt.key,
-      promptVersion: prompt.version,
-      question: input.question,
-      riskLevel: 0,
-      status: "error",
-      errorMessage: message,
-    });
+    if (auditedInteractionId !== null) {
+      await updateAiInteraction(auditedInteractionId, { status: "error", errorMessage: message });
+    } else {
+      await logAiInteraction({
+        requestId,
+        brokerageId: input.brokerageId,
+        userId: input.userId,
+        aiRole: role,
+        contextType: input.contextType ?? undefined,
+        contextId: input.contextId ?? undefined,
+        promptKey: prompt.key,
+        promptVersion: prompt.version,
+        question: input.question,
+        riskLevel: 0,
+        status: "error",
+        errorMessage: message,
+      });
+    }
     throw err;
   }
 
@@ -802,21 +833,26 @@ export async function askCopilot(input: AskCopilotInput): Promise<AskCopilotResu
 
   const responseKindForAudit = response.kind;
 
-  const interactionId = await logAiInteraction({
-    requestId,
-    brokerageId: input.brokerageId,
-    userId: input.userId,
-    aiRole: role,
-    contextType: input.contextType ?? undefined,
-    contextId: input.contextId ?? undefined,
-    promptKey: prompt.key,
-    promptVersion: prompt.version,
-    question: input.question,
-    responseKind: responseKindForAudit,
-    riskLevel: 0,
-    status: "success",
-  });
+  if (auditedInteractionId !== null) {
+    await updateAiInteraction(auditedInteractionId, { status: "success", responseKind: responseKindForAudit });
+  } else {
+    auditedInteractionId = await logAiInteraction({
+      requestId,
+      brokerageId: input.brokerageId,
+      userId: input.userId,
+      aiRole: role,
+      contextType: input.contextType ?? undefined,
+      contextId: input.contextId ?? undefined,
+      promptKey: prompt.key,
+      promptVersion: prompt.version,
+      question: input.question,
+      responseKind: responseKindForAudit,
+      riskLevel: 0,
+      status: "success",
+    });
+  }
 
+  const interactionId = auditedInteractionId;
   if (interactionId !== null) {
     await logAiUsage({
       interactionId,

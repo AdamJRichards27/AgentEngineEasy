@@ -124,7 +124,7 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
     // (lib/ai/dailyUsage.ts), enforced inside askCopilot() before any provider call.
     // `scope` says which of the two independent limits was reached ("user" or "brokerage").
     if (err instanceof AiDailyCapExceededError) {
-      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier, scope: err.scope });
+      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier, scope: err.scope, unit: err.unit });
       return;
     }
     // Live activation without configuration — an operator fault, not a client error and not a

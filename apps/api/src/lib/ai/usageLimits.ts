@@ -26,6 +26,16 @@ import type { SubscriptionTier } from "./types.js";
  * A request is refused if it would exceed EITHER (see dailyUsage.ts, which does the counting
  * and the refusing; this module never queries anything).
  *
+ * C-10 adds two OPTIONAL ceilings, unset by default, with no provisional fallback and no
+ * effect on the live-provider boot gate (a live provider still requires the two request
+ * limits above, and nothing else):
+ *
+ *   - TOKENS        — AI_DAILY_TOKEN_LIMIT_PER_{USER,BROKERAGE}[_TIER], a positive integer
+ *                     of total tokens per UTC day. Unset means no token ceiling.
+ *   - AUDIO SECONDS — VOICE_DAILY_AUDIO_SECONDS_PER_{USER,BROKERAGE}[_TIER], a positive
+ *                     integer of provider-reported voice seconds per UTC day. Unset means
+ *                     no audio-seconds ceiling. There is no dollar ceiling.
+ *
  * Configuration (environment variables, same style as every other operator knob in this app —
  * a scope-wide default plus optional per-tier overrides):
  *
@@ -53,14 +63,34 @@ import type { SubscriptionTier } from "./types.js";
 
 export const AI_DAILY_LIMIT_PER_USER_ENV = "AI_DAILY_LIMIT_PER_USER";
 export const AI_DAILY_LIMIT_PER_BROKERAGE_ENV = "AI_DAILY_LIMIT_PER_BROKERAGE";
-
-/** The env var carrying a tier-specific override for a scope, e.g. AI_DAILY_LIMIT_PER_USER_GROW. */
-export function tierLimitEnvVar(scope: AiUsageLimitScope, tier: SubscriptionTier): string {
-  const base = scope === "user" ? AI_DAILY_LIMIT_PER_USER_ENV : AI_DAILY_LIMIT_PER_BROKERAGE_ENV;
-  return `${base}_${tier}`;
-}
+export const AI_DAILY_TOKEN_LIMIT_PER_USER_ENV = "AI_DAILY_TOKEN_LIMIT_PER_USER";
+export const AI_DAILY_TOKEN_LIMIT_PER_BROKERAGE_ENV = "AI_DAILY_TOKEN_LIMIT_PER_BROKERAGE";
+export const VOICE_DAILY_AUDIO_SECONDS_PER_USER_ENV = "VOICE_DAILY_AUDIO_SECONDS_PER_USER";
+export const VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE_ENV = "VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE";
 
 export type AiUsageLimitScope = "user" | "brokerage";
+
+/** requests = the existing AI request ceilings. tokens and audio_seconds are optional C-10 ceilings. */
+export type AiUsageLimitKind = "requests" | "tokens" | "audio_seconds";
+
+/** The scope-wide env var for a ceiling kind, e.g. AI_DAILY_TOKEN_LIMIT_PER_USER. */
+export function limitEnvVar(kind: AiUsageLimitKind, scope: AiUsageLimitScope): string {
+  if (kind === "tokens") {
+    return scope === "user" ? AI_DAILY_TOKEN_LIMIT_PER_USER_ENV : AI_DAILY_TOKEN_LIMIT_PER_BROKERAGE_ENV;
+  }
+  if (kind === "audio_seconds") {
+    return scope === "user" ? VOICE_DAILY_AUDIO_SECONDS_PER_USER_ENV : VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE_ENV;
+  }
+  return scope === "user" ? AI_DAILY_LIMIT_PER_USER_ENV : AI_DAILY_LIMIT_PER_BROKERAGE_ENV;
+}
+
+/**
+ * The env var carrying a tier-specific override for a scope, e.g. AI_DAILY_LIMIT_PER_USER_GROW.
+ * `kind` defaults to the request ceilings so existing callers keep that name.
+ */
+export function tierLimitEnvVar(scope: AiUsageLimitScope, tier: SubscriptionTier, kind: AiUsageLimitKind = "requests"): string {
+  return `${limitEnvVar(kind, scope)}_${tier}`;
+}
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -92,6 +122,12 @@ export interface ResolvedAiUsageLimits {
   liveProviderApproved: boolean;
   perUser: ResolvedAiUsageLimit;
   perBrokerage: ResolvedAiUsageLimit;
+  /** Optional. Unset resolves to no limit — never a provisional fallback. */
+  perUserTokens: ResolvedAiUsageLimit;
+  perBrokerageTokens: ResolvedAiUsageLimit;
+  /** Optional voice ceiling. Unset resolves to no limit. Not applied to text AI requests. */
+  perUserAudioSeconds: ResolvedAiUsageLimit;
+  perBrokerageAudioSeconds: ResolvedAiUsageLimit;
   /** Environment variables set to something this module could not use. Never silently ignored. */
   invalid: InvalidAiUsageLimitSetting[];
 }
@@ -124,13 +160,14 @@ export function parseAiUsageLimitValue(raw: string | undefined): ParsedLimit {
 }
 
 function resolveScope(
+  kind: AiUsageLimitKind,
   scope: AiUsageLimitScope,
   tier: SubscriptionTier,
   env: EnvSource,
   invalid: InvalidAiUsageLimitSetting[],
 ): ResolvedAiUsageLimit {
-  const tierVar = tierLimitEnvVar(scope, tier);
-  const defaultVar = scope === "user" ? AI_DAILY_LIMIT_PER_USER_ENV : AI_DAILY_LIMIT_PER_BROKERAGE_ENV;
+  const tierVar = tierLimitEnvVar(scope, tier, kind);
+  const defaultVar = limitEnvVar(kind, scope);
 
   // Most specific first: a per-tier override always wins over the scope-wide default.
   for (const name of [tierVar, defaultVar]) {
@@ -148,9 +185,10 @@ function resolveScope(
     };
   }
 
-  if (scope === "brokerage") {
-    // The only fallback default in this module, and only for the safety ceiling: the
-    // provisional per-tier number. Never treated as "configured".
+  if (kind === "requests" && scope === "brokerage") {
+    // The only fallback default in this module, and only for the request safety ceiling:
+    // the provisional per-tier number. Token and audio-second ceilings have no fallback —
+    // unset means no extra limit. Never treated as "configured".
     return {
       limit: TIER_CAPABILITIES[tier].maxAiRequestsPerDay,
       source: null,
@@ -199,14 +237,22 @@ function isLiveAiProviderApprovedIn(env: EnvSource): boolean {
 /** Pure, unit-testable resolution. Never reads the database and never throws. */
 export function resolveAiUsageLimits(tier: SubscriptionTier, env: EnvSource = process.env): ResolvedAiUsageLimits {
   const invalid: InvalidAiUsageLimitSetting[] = [];
-  const perUser = resolveScope("user", tier, env, invalid);
-  const perBrokerage = resolveScope("brokerage", tier, env, invalid);
+  const perUser = resolveScope("requests", "user", tier, env, invalid);
+  const perBrokerage = resolveScope("requests", "brokerage", tier, env, invalid);
+  const perUserTokens = resolveScope("tokens", "user", tier, env, invalid);
+  const perBrokerageTokens = resolveScope("tokens", "brokerage", tier, env, invalid);
+  const perUserAudioSeconds = resolveScope("audio_seconds", "user", tier, env, invalid);
+  const perBrokerageAudioSeconds = resolveScope("audio_seconds", "brokerage", tier, env, invalid);
   return {
     tier,
     enforced: isDailyAiCapEnforced(env),
     liveProviderApproved: isLiveAiProviderApprovedIn(env),
     perUser,
     perBrokerage,
+    perUserTokens,
+    perBrokerageTokens,
+    perUserAudioSeconds,
+    perBrokerageAudioSeconds,
     invalid,
   };
 }
@@ -241,6 +287,8 @@ function describeConfigurationFault(limits: ResolvedAiUsageLimits): { missing: s
   // Live activation must be explicit: an approved live provider must never run on the
   // provisional per-tier numbers, and must never run with an accidentally-absent per-user
   // allowance. Either may still be turned off — but only by saying so.
+  // Token and audio-second ceilings are deliberately NOT part of this gate. Unset means
+  // no extra limit, including once a live provider is approved.
   if (limits.liveProviderApproved) {
     if (!limits.perUser.configured) {
       missing.push(AI_DAILY_LIMIT_PER_USER_ENV);
@@ -267,7 +315,11 @@ const OPERATOR_GUIDANCE =
   `Set ${AI_DAILY_LIMIT_PER_USER_ENV} and ${AI_DAILY_LIMIT_PER_BROKERAGE_ENV} (or their per-tier ` +
   `overrides ${AI_DAILY_LIMIT_PER_USER_ENV}_STARTER/_GROW/_PRO and ` +
   `${AI_DAILY_LIMIT_PER_BROKERAGE_ENV}_STARTER/_GROW/_PRO) to a positive integer, or to "off" to run ` +
-  "that scope without a limit.";
+  "that scope without a limit. Optional token ceilings " +
+  `(${AI_DAILY_TOKEN_LIMIT_PER_USER_ENV} / ${AI_DAILY_TOKEN_LIMIT_PER_BROKERAGE_ENV}) and voice ` +
+  `audio-second ceilings (${VOICE_DAILY_AUDIO_SECONDS_PER_USER_ENV} / ` +
+  `${VOICE_DAILY_AUDIO_SECONDS_PER_BROKERAGE_ENV}), including the same _STARTER/_GROW/_PRO ` +
+  "overrides, use those value rules and stay unset when no extra limit is wanted. There is no dollar ceiling.";
 
 /**
  * Returns the fault to fail closed on, or null when this configuration is usable.

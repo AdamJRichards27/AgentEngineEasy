@@ -27,6 +27,7 @@ import {
 import { loadVoiceTranscriptionConfig, buildVoiceTranscriptionProvider } from "../lib/ai/voice/gateway.js";
 import { assertTranscriptSizeIsSane, TranscriptionProviderError } from "../lib/ai/voice/types.js";
 import type { TranscriptionProvider, TranscriptionResponse } from "../lib/ai/voice/types.js";
+import { recordVoiceTranscriptionMeter } from "../lib/ai/voice/voiceMeter.js";
 
 // AE GROW Priority 6 Stage E — Voice as Input.
 //
@@ -37,8 +38,11 @@ import type { TranscriptionProvider, TranscriptionResponse } from "../lib/ai/voi
 // populate the existing Ask AE / Business Coach question textbox, exactly
 // as if the agent had typed it. This route never calls POST /api/ai/ask
 // itself, never persists the audio or the transcript anywhere, and never
-// creates a Stage D proposal on its own — every one of those still
-// requires the human to review the populated (fully editable) text and
+// creates a Stage D proposal on its own. A provider call does write one
+// audit_logs metering row (action AI_VOICE_TRANSCRIBED): brokerage, user,
+// provider, outcome, audio seconds, latency, and a correlation id — never
+// audio and never the transcript. Asking, saving, and Stage D proposals
+// still require the human to review the populated (fully editable) text and
 // press the existing Ask/Send button, unchanged from today. Voice is
 // additive input only; it does not touch Stage D governance in any way.
 //
@@ -116,6 +120,7 @@ type VoiceTranscriptionOutcome = "success" | "provider_error" | "rejected_after_
 // mock | deepgram | other. Audio seconds are the STT meter and are added
 // only on success when the provider reported a duration. No brokerage, user,
 // model, or correlation id is a label, and this function writes no row.
+// The durable row is recordReachedProvider -> recordVoiceTranscriptionMeter.
 function recordVoiceTranscription(
   providerName: string,
   outcome: VoiceTranscriptionOutcome,
@@ -127,6 +132,26 @@ function recordVoiceTranscription(
   if (outcome === "success" && audioSeconds !== null && Number.isFinite(audioSeconds) && audioSeconds >= 0) {
     incrementCounter("voice_transcription_audio_seconds_total", { provider: providerName }, audioSeconds);
   }
+}
+
+async function recordReachedProvider(
+  authedUser: { brokerageId: number; id: number },
+  correlationId: string,
+  providerName: string,
+  outcome: VoiceTranscriptionOutcome,
+  latencyMs: number,
+  audioSeconds: number | null,
+): Promise<void> {
+  recordVoiceTranscription(providerName, outcome, latencyMs, audioSeconds);
+  await recordVoiceTranscriptionMeter({
+    brokerageId: authedUser.brokerageId,
+    userId: authedUser.id,
+    provider: providerName,
+    outcome,
+    audioSeconds,
+    latencyMs,
+    correlationId,
+  });
 }
 
 function mapVoiceUploadError(res: Response, error: VoiceUploadValidationError): void {
@@ -234,23 +259,25 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
   }
 
   // AE GROW Pilot Readiness WP1 (P1-3) — durable daily AI limits
-  // (lib/ai/dailyUsage.ts). Voice still writes no durable per-request row of
-  // its own (unchanged by the post-merge configurable-limits pass — adding one
-  // would be a schema/product change, and the transcript is not itself an AI
-  // request against a model provider), so it is not itself counted; it is
-  // refused (before upload validation or any provider call) once the caller's
-  // OWN or their brokerage's durable Ask/Coach count for today has reached its
-  // limit, since the transcript's only use is as input to an Ask/Coach request
-  // that would itself be refused. The per-user scope is the one behavioural
-  // addition here: it falls straight out of passing the authenticated user id
-  // that this route already has, and without it a user at their personal limit
-  // would still be able to spend transcription budget on a question the very
-  // next call would refuse.
+  // (lib/ai/dailyUsage.ts). Voice does not write an ai_interactions row and
+  // does not increment the AI request count. It is still refused, before
+  // upload validation or any provider call, once the caller's own or their
+  // brokerage's durable Ask/Coach count for today has reached its limit,
+  // since the transcript's only use is as input to an Ask/Coach request that
+  // would itself be refused. Optional token ceilings share that gate.
+  // Optional audio-second ceilings apply only on this surface (surface: "voice").
+  // Entitlement gating stays grow.ai.use, checked above — not
+  // grow.calling.transcription, which is the consented-call-recording capability.
   try {
-    await assertDailyAiLimitsNotReached({ brokerageId: authedUser.brokerageId, userId: authedUser.id, tier });
+    await assertDailyAiLimitsNotReached({
+      brokerageId: authedUser.brokerageId,
+      userId: authedUser.id,
+      tier,
+      surface: "voice",
+    });
   } catch (err) {
     if (err instanceof AiDailyCapExceededError) {
-      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier, scope: err.scope });
+      res.status(429).json({ error: err.message, limit: err.limit, tier: err.tier, scope: err.scope, unit: err.unit });
       return;
     }
     // An operator configuration fault (a live provider approved with no configured allowance),
@@ -338,7 +365,7 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
     } catch (err) {
       const outcome: VoiceTranscriptionOutcome =
         err instanceof TranscriptionProviderError && err.code === "empty_transcript" ? "empty_transcript" : "provider_error";
-      recordVoiceTranscription(provider.name, outcome, Date.now() - providerStartedAt, null);
+      await recordReachedProvider(authedUser, correlationId, provider.name, outcome, Date.now() - providerStartedAt, null);
       if (err instanceof TranscriptionProviderError) {
         mapTranscriptionProviderError(res, err);
         return;
@@ -353,7 +380,7 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
       assertProviderReportedDurationWithinLimit(result.durationSeconds);
       assertTranscriptSizeIsSane(result.transcript, result.provider);
     } catch (err) {
-      recordVoiceTranscription(provider.name, "rejected_after_provider", Date.now() - providerStartedAt, null);
+      await recordReachedProvider(authedUser, correlationId, provider.name, "rejected_after_provider", Date.now() - providerStartedAt, null);
       if (err instanceof VoiceUploadValidationError) {
         mapVoiceUploadError(res, err);
         return;
@@ -367,12 +394,12 @@ aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), asyn
 
     const trimmedTranscript = result.transcript.trim();
     if (trimmedTranscript.length === 0) {
-      recordVoiceTranscription(provider.name, "empty_transcript", Date.now() - providerStartedAt, null);
+      await recordReachedProvider(authedUser, correlationId, provider.name, "empty_transcript", Date.now() - providerStartedAt, null);
       res.status(422).json({ error: "No speech was detected in that recording. Try again, or type your question instead." });
       return;
     }
     const transcript = trimmedTranscript.slice(0, MAX_RETURNED_TRANSCRIPT_LENGTH);
-    recordVoiceTranscription(provider.name, "success", Date.now() - providerStartedAt, result.durationSeconds);
+    await recordReachedProvider(authedUser, correlationId, provider.name, "success", Date.now() - providerStartedAt, result.durationSeconds);
 
     // Privacy-safe operational metadata only — provider name, byte count,
     // duration, latency, a correlation id, brokerage/user ids. Never the
