@@ -239,6 +239,13 @@
       "when": 1790500320594,
       "tag": "0033_pit_crew_responsibility_closing_note",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791330872933,
+      "tag": "0034_ae_live_notes_content_purge",
+      "breakpoints": true
     }
   ]
 }

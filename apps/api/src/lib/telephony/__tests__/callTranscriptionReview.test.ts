@@ -128,7 +128,11 @@ test("full approval, partial mixed decisions, manual items, transcript edits, an
   assert.equal(saved.processingState, "APPROVED");
   assert.equal(saved.approvedBy, ownerId);
   assert.ok(saved.approvedAt);
-  assert.equal(saved.transcript, "Original machine transcript.");
+  assert.equal(saved.transcript, null);
+  assert.equal(saved.recordingReference, null);
+  assert.equal(saved.reviewState.find((item) => item.itemType === "TRANSCRIPT")?.decision, "APPROVED");
+  assert.equal(saved.reviewState.find((item) => item.itemType === "TRANSCRIPT")?.editedText, null);
+  assert.doesNotMatch(JSON.stringify(saved), /Edited transcript|Original machine transcript/);
 
   const mixed = await createFixture();
   const mixedSaved = await saveCallTranscriptionReview({
@@ -159,7 +163,7 @@ test("full approval, partial mixed decisions, manual items, transcript edits, an
   assert.equal(allRejectedSaved.processingState, "PARTIALLY_APPROVED");
 });
 
-test("save is atomic, preserves raw transcript/drafts, writes only the review columns plus updatedAt, and discard only changes processing state and updatedAt", async () => {
+test("save clears the transcript and recording reference in the same write that keeps structured drafts, and discard does the same without dropping drafts", async () => {
   const fixture = await createFixture();
   const before = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixture.transcription.id));
   const saved = await saveCallTranscriptionReview({
@@ -172,11 +176,17 @@ test("save is atomic, preserves raw transcript/drafts, writes only the review co
       { itemType: "FOLLOWUP", itemId: "fu-1", decision: "APPROVED" },
     ]),
   });
-  assert.equal(saved.transcript, before[0]!.transcript);
+  assert.equal(before[0]!.transcript, "Original machine transcript.");
+  assert.equal(saved.transcript, null);
+  assert.equal(saved.recordingReference, null);
+  assert.equal(saved.recordingContentSha256, fixture.version.contentSha256);
+  assert.equal(saved.retentionAudit?.purgeMigrationId, "forward-review-save");
+  assert.equal(saved.reviewState.find((item) => item.itemType === "TRANSCRIPT")?.editedText, null);
   assert.deepEqual(saved.draftKeyPoints, before[0]!.draftKeyPoints);
   assert.deepEqual(saved.draftCommitments, before[0]!.draftCommitments);
   assert.deepEqual(saved.draftFollowups, before[0]!.draftFollowups);
   assert.equal(saved.draftSummary, before[0]!.draftSummary);
+  assert.equal(saved.approvedBy, ownerId);
   const discardedFixture = await createFixture();
   const discardBefore = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, discardedFixture.transcription.id));
   const discarded = await discardCallTranscription({
@@ -186,8 +196,11 @@ test("save is atomic, preserves raw transcript/drafts, writes only the review co
   assert.equal(discarded.processingState, "DISCARDED");
   assert.deepEqual(discarded.reviewState, discardBefore[0]!.reviewState);
   assert.equal(discarded.approvedBy, discardBefore[0]!.approvedBy);
-  assert.equal(discarded.transcript, discardBefore[0]!.transcript);
+  assert.equal(discarded.transcript, null);
+  assert.equal(discarded.recordingReference, null);
+  assert.equal(discarded.retentionAudit?.purgeMigrationId, "forward-review-discard");
   assert.deepEqual(discarded.draftKeyPoints, discardBefore[0]!.draftKeyPoints);
+  assert.equal(discarded.draftSummary, discardBefore[0]!.draftSummary);
 });
 
 test("rejects pending/duplicate/unknown/forged metadata/incomplete/invalid reviews and terminal replay", async () => {
@@ -339,7 +352,10 @@ test("save and discard each write exactly one strict audit row with ids, states,
   assert.equal(saveAudit.userId, ownerId);
   assert.equal(saveAudit.brokerageId, brokerageId);
   assert.equal(saveAudit.previousValue, "AWAITING_AGENT_REVIEW");
-  assert.equal(saveAudit.providerReference, `call:${saved.session.id}:recording:${saved.version.id}`);
+  assert.equal(saveAudit.providerReference, `call:${saved.session.id}:sha:${saved.version.contentSha256}`);
+  assert.equal(savedRow.transcript, null);
+  assert.equal(savedRow.recordingReference, null);
+  assert.doesNotMatch(JSON.stringify(savedRow.reviewState), /Sensitive edited transcript/);
   assert.ok(saveAudit.createdAt);
   assert.deepEqual(JSON.parse(saveAudit.updatedValue!), {
     transcriptionId: saved.transcription.id,

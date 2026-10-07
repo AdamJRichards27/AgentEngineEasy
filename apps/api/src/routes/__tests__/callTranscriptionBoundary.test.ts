@@ -436,12 +436,16 @@ test("the full recording → transcript → draft → partial Save → Timeline 
   const createdBody = await expectJson<{
     transcription: {
       id: number; processingState: string;
+      transcript: string | null;
+      recordingReference: number | null;
       draftKeyPoints: Array<{ id: string }>;
       draftCommitments: Array<{ id: string }>;
       draftFollowups: Array<{ id: string }>;
     };
   }>(created);
   assert.equal(createdBody.transcription.processingState, "AWAITING_AGENT_REVIEW");
+  assert.equal(createdBody.transcription.transcript, "Synthetic boundary transcript.");
+  assert.equal(createdBody.transcription.recordingReference, fixture.recordingReference);
   assert.equal(providerCalls, 1);
   assert.equal(draftCalls, 1);
   assertNoBoundaryWrites(before, await boundaryCounts());
@@ -463,13 +467,37 @@ test("the full recording → transcript → draft → partial Save → Timeline 
     headers: { "content-type": "application/json", cookie: actor.cookie },
     body: JSON.stringify({ reviewState }),
   });
-  const savedBody = await expectJson<{ transcription: { processingState: string } }>(saved);
+  const savedBody = await expectJson<{
+    transcription: { id: number; processingState: string; transcript: string | null; recordingReference: number | null };
+  }>(saved);
   assert.equal(savedBody.transcription.processingState, "PARTIALLY_APPROVED");
+  assert.equal(savedBody.transcription.transcript, null);
+  assert.equal(savedBody.transcription.recordingReference, null);
+  assert.doesNotMatch(JSON.stringify(savedBody), /Synthetic boundary transcript|Human transcript/);
+  const [finished] = await db.select().from(growCallTranscriptions)
+    .where(eq(growCallTranscriptions.id, createdBody.transcription.id));
+  assert.equal(finished?.transcript, null);
+  assert.equal(finished?.recordingReference, null);
+  assert.equal(finished?.recordingContentSha256?.length, 64);
+  assert.equal(finished?.retentionAudit?.purgeMigrationId, "forward-review-save");
+  assert.equal(finished?.retentionAudit?.providerId, "mock");
+  const [recordingStillStored] = await db.select().from(documentObjectVersions)
+    .where(eq(documentObjectVersions.id, fixture.recordingReference));
+  assert.equal(recordingStillStored?.objectStatus, "Active");
   assertNoBoundaryWrites(before, await boundaryCounts());
   forbiddenCalls.assertUntouched();
   const timelineAfter = await db.select({ id: growActivities.id }).from(growActivities)
     .where(and(eq(growActivities.brokerageId, brokerageId), eq(growActivities.activityType, "call_summary")));
   assert.equal(timelineAfter.length, 1, "Save must write exactly one passive Timeline activity");
+  const [savedActivity] = await db.select().from(growActivities).where(eq(growActivities.id, timelineAfter[0]!.id));
+  assert.doesNotMatch(JSON.stringify(savedActivity), /Synthetic boundary transcript|Human transcript/);
+  const replay = await startTranscription(fixture);
+  const replayBody = await expectJson<{ transcription: { id: number; transcript: string | null } }>(replay);
+  assert.equal(replayBody.transcription.id, createdBody.transcription.id);
+  assert.equal(replayBody.transcription.transcript, null);
+  const sessionRows = await db.select().from(growCallTranscriptions)
+    .where(eq(growCallTranscriptions.callSessionId, fixture.sessionId));
+  assert.equal(sessionRows.length, 1);
 });
 
 test("discard and reconciliation are terminal F3 operations with no F4 side effects", async () => {

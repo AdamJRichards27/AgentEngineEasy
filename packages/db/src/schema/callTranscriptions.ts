@@ -47,6 +47,51 @@ export const callTranscriptionItemReviewSchema = z.object({
 });
 export type CallTranscriptionItemReview = z.infer<typeof callTranscriptionItemReviewSchema>;
 
+/**
+ * Audit metadata for a live-notes row. Never conversation content, never an
+ * object-storage key, and never the recording version id.
+ *
+ * Lifecycle (structured-output-only):
+ * 1. While a call is PENDING, MEDIA_PROCESSING, or TRANSCRIBING, the recording
+ *    version id is stored so the mock provider can read the audio. No transcript
+ *    is stored yet. Consent, entitlement, and the recording ledger are checked
+ *    on every attempt. Live providers stay off.
+ * 2. AWAITING_AGENT_REVIEW is the only state that stores the transcript. It
+ *    exists so a person can review it. The recording version id stays for this
+ *    window so the existing source-ledger check can still refuse a decision if
+ *    the recording is no longer this tenant's active source.
+ * 3. Save and discard finish the review in one transaction. Save writes the
+ *    approved notes (summary, key points, commitments, follow-ups) and then
+ *    clears the transcript and the recording version id. Discard clears the
+ *    same conversation content and keeps any structured drafts already on the
+ *    row. The parent row, consent rows, and approval columns stay.
+ * 4. After that, reads do not return the transcript. Object-storage files are
+ *    not deleted here.
+ */
+export type LiveNotesRetentionAudit = {
+  schemaVersion?: 1;
+  captureRecorded?: boolean;
+  processingRecorded?: boolean;
+  humanReviewRecorded?: boolean;
+  consentReference?: number | null;
+  providerId?: string | null;
+  audioDurationSeconds?: number | null;
+  recordingByteCount?: number | null;
+  transcriptCharCount?: number | null;
+  transcriptSha256?: string | null;
+  structuredOutputCounts?: {
+    summary: number;
+    keyPoints: number;
+    commitments: number;
+    followups: number;
+  } | null;
+  purgedAt?: string | null;
+  /** Historical migration id, or forward-review-save / forward-review-discard. */
+  purgeMigrationId?: string | null;
+  reviewedByUserId?: number | null;
+  reviewedAt?: string | null;
+};
+
 export const growCallTranscriptions = pgTable(
   "grow_call_transcriptions",
   {
@@ -54,9 +99,15 @@ export const growCallTranscriptions = pgTable(
     brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
     callSessionId: integer("call_session_id").notNull().references(() => growCallSessions.id),
     partyId: integer("party_id").notNull().references(() => parties.id),
-    // Canonical immutable F2 recording version; no duplicated document row,
-    // recording bytes, object key, or retention policy.
-    recordingReference: integer("recording_reference").notNull().references(() => documentObjectVersions.id),
+    // Recording version id. Required while processing and during human review.
+    // Cleared in the same transaction that finishes review. Nullable so a
+    // finished row does not keep a pointer at the audio. The document and
+    // object-storage bytes are not deleted by that clear.
+    recordingReference: integer("recording_reference").references(() => documentObjectVersions.id),
+    // Hash of the recording bytes. Kept after the version id is cleared so a
+    // repeat request can find the finished row without storing the audio pointer.
+    recordingContentSha256: text("recording_content_sha256"),
+    retentionAudit: jsonb("retention_audit").$type<LiveNotesRetentionAudit>().notNull().default(sql`'{}'::jsonb`),
     processingState: text("processing_state", { enum: GROW_CALL_TRANSCRIPTION_PROCESSING_STATES })
       .notNull()
       .default("PENDING"),

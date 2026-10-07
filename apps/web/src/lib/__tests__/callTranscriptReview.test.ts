@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createReviewItems,
   serializeReviewItems,
+  showsInterimCallTranscript,
   transcriptionStatusLabel,
   validateReviewItems,
 } from "../callTranscriptReview";
@@ -14,6 +15,11 @@ test("maps processing states without suggesting review", () => {
 });
 
 test("maps review, saved, discarded and failure states to agent labels", () => {
+  assert.equal(showsInterimCallTranscript("AWAITING_AGENT_REVIEW"), true);
+  assert.equal(showsInterimCallTranscript("APPROVED"), false);
+  assert.equal(showsInterimCallTranscript("PARTIALLY_APPROVED"), false);
+  assert.equal(showsInterimCallTranscript("DISCARDED"), false);
+  assert.equal(showsInterimCallTranscript("FAILED"), false);
   assert.equal(transcriptionStatusLabel("AWAITING_AGENT_REVIEW"), "Needs review");
   assert.equal(transcriptionStatusLabel("APPROVED"), "Saved to contact");
   assert.equal(transcriptionStatusLabel("PARTIALLY_APPROVED"), "Saved to contact");

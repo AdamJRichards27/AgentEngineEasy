@@ -204,7 +204,9 @@ test("HTTP read/save contract is authenticated, entitled, owner-scoped, and retu
   });
   const savedText = await saved.text();
   assert.equal(saved.status, 200, savedText);
-  const savedBody = JSON.parse(savedText) as { transcription: { processingState: string; approvedBy: number } };
+  const savedBody = JSON.parse(savedText) as {
+    transcription: { processingState: string; approvedBy: number; transcript: string | null; recordingReference: number | null };
+  };
   assert.equal(savedBody.transcription.processingState, "APPROVED");
   assert.equal(savedBody.transcription.approvedBy, A.agent.user.id);
   const activities = await activitiesFor(fixtureId);
@@ -234,6 +236,39 @@ test("HTTP read/save contract is authenticated, entitled, owner-scoped, and retu
   });
   assert.match(activity.summary, /Route summary/);
   assert.match(activity.summary, /Route commitment/);
+  assert.doesNotMatch(savedText, /Route human transcript|Route machine transcript/);
+  assert.equal(savedBody.transcription.transcript, null);
+  assert.equal(savedBody.transcription.recordingReference, null);
+  const [stored] = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixtureId));
+  assert.equal(stored?.transcript, null);
+  assert.equal(stored?.recordingReference, null);
+  assert.equal(stored?.draftSummary, "Route machine summary.");
+  assert.equal(stored?.approvedBy, A.agent.user.id);
+  const reread = await fetch(url(`/${fixtureSessionId}/transcription/${fixtureId}`), {
+    headers: { cookie: A.agent.cookie },
+  });
+  const rereadText = await reread.text();
+  assert.equal(reread.status, 200, rereadText);
+  assert.doesNotMatch(rereadText, /Route human transcript|Route machine transcript/);
+});
+
+test("the interim transcript is returned only while review is open, and skipping transcript approval saves nothing", async () => {
+  const fixture = await createFixture();
+  const open = await fetch(url(`/${fixture.sessionId}/transcription/${fixture.transcriptionId}`), {
+    headers: { cookie: A.agent.cookie },
+  });
+  const openText = await open.text();
+  assert.equal(open.status, 200, openText);
+  assert.match(openText, /Route machine transcript/);
+  const rejected = await saveReview([
+    { itemType: "SUMMARY", itemId: "summary", decision: "APPROVED", editedText: "Notes only" },
+  ], fixture.sessionId, fixture.transcriptionId);
+  assert.equal(rejected.status, 400);
+  const [row] = await db.select().from(growCallTranscriptions).where(eq(growCallTranscriptions.id, fixture.transcriptionId));
+  assert.equal(row?.transcript, "Route machine transcript.");
+  assert.equal(row?.recordingReference, fixture.versionId);
+  assert.equal(row?.processingState, "AWAITING_AGENT_REVIEW");
+  assert.equal(row?.approvedBy, null);
 });
 
 test("HTTP discard uses the standardized no-review path and rejects client metadata", async () => {
@@ -510,8 +545,10 @@ test("approved Timeline snapshot remains independently deletable from recording,
   assert.deepEqual(await activitiesFor(fixture.transcriptionId), [beforeActivity]);
   const [afterRecordingDeletion] = await db.select().from(growCallTranscriptions)
     .where(eq(growCallTranscriptions.id, fixture.transcriptionId));
-  assert.equal(afterRecordingDeletion!.transcript, "Route machine transcript.");
+  assert.equal(afterRecordingDeletion!.transcript, null);
+  assert.equal(afterRecordingDeletion!.recordingReference, null);
   assert.equal(afterRecordingDeletion!.draftSummary, "Route machine summary.");
+  assert.doesNotMatch(JSON.stringify(beforeActivity), /Route machine transcript/);
 
   // Redact only the provider transcript; AI candidates still exist and the
   // approved passive snapshot remains byte-for-byte unchanged.
