@@ -126,13 +126,14 @@ export async function buildContext(input: BuildContextInput): Promise<AiContextP
       role: input.userRole as UserRole,
       brokerageId: input.brokerageId,
     });
-    grow = await buildGrowContext(input.brokerageId, input.growFocusItemId, restrictToPropertyIds);
+    grow = await buildGrowContext(input.brokerageId, input.growFocusItemId, restrictToPropertyIds, input.userId);
     if (input.mode === "coach") {
       coach = await buildBusinessCoachContext(input.brokerageId, grow, {
         period: input.period ?? "last7days",
         startDate: input.periodStartDate ?? null,
         endDate: input.periodEndDate ?? null,
         restrictToPropertyIds,
+        callerUserId: input.userId,
       });
     }
   }

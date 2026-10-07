@@ -33,7 +33,7 @@
 // calendar day (period.timeZone), not a bare UTC date slice — see that
 // function's own comment for why.
 import { and, asc, desc, eq, gte, isNotNull, lt, notInArray } from "drizzle-orm";
-import { visibleLinkedPropertySql, visibleRequiredPropertySql } from "../../propertyVisibility.js";
+import { visibleLinkedPropertySql, visibleOwnedOrLinkedPropertySql, visibleRequiredPropertySql } from "../../propertyVisibility.js";
 import {
   db,
   appraisals,
@@ -205,6 +205,7 @@ export async function fetchCommitmentsDueInPeriod(
   brokerageId: number,
   period: ResolvedPeriod,
   restrictToPropertyIds: number[] | null = null,
+  callerUserId: number | null = null,
 ): Promise<CommitmentRow[]> {
   return db
     .select({ id: growCommitments.id, partyId: growCommitments.partyId, dueAt: growCommitments.dueAt, status: growCommitments.status, completedAt: growCommitments.completedAt })
@@ -213,7 +214,7 @@ export async function fetchCommitmentsDueInPeriod(
       eq(growCommitments.brokerageId, brokerageId),
       gte(growCommitments.dueAt, period.start),
       lt(growCommitments.dueAt, period.end),
-      visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+      visibleOwnedOrLinkedPropertySql(growCommitments.propertyId, growCommitments.createdBy, restrictToPropertyIds, callerUserId),
     ))
     .orderBy(asc(growCommitments.dueAt))
     .limit(COMMITMENT_ROW_CAP);
@@ -227,6 +228,7 @@ export async function fetchCurrentlyOverdueCommitments(
   brokerageId: number,
   now: Date,
   restrictToPropertyIds: number[] | null = null,
+  callerUserId: number | null = null,
 ): Promise<CommitmentRow[]> {
   return db
     .select({ id: growCommitments.id, partyId: growCommitments.partyId, dueAt: growCommitments.dueAt, status: growCommitments.status, completedAt: growCommitments.completedAt })
@@ -235,7 +237,7 @@ export async function fetchCurrentlyOverdueCommitments(
       eq(growCommitments.brokerageId, brokerageId),
       eq(growCommitments.status, "Open"),
       lt(growCommitments.dueAt, now),
-      visibleLinkedPropertySql(growCommitments.propertyId, restrictToPropertyIds),
+      visibleOwnedOrLinkedPropertySql(growCommitments.propertyId, growCommitments.createdBy, restrictToPropertyIds, callerUserId),
     ))
     .orderBy(asc(growCommitments.dueAt))
     .limit(COMMITMENT_ROW_CAP);
@@ -478,6 +480,7 @@ const OPPORTUNITY_SELECT_COLUMNS = {
 export async function fetchOpenOpportunities(
   brokerageId: number,
   restrictToPropertyIds: number[] | null = null,
+  callerUserId: number | null = null,
 ): Promise<OpportunityRow[]> {
   return db
     .select(OPPORTUNITY_SELECT_COLUMNS)
@@ -485,7 +488,7 @@ export async function fetchOpenOpportunities(
     .where(and(
       eq(growOpportunities.brokerageId, brokerageId),
       eq(growOpportunities.status, "Open"),
-      visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+      visibleOwnedOrLinkedPropertySql(growOpportunities.propertyId, growOpportunities.ownerUserId, restrictToPropertyIds, callerUserId),
     ))
     .orderBy(asc(growOpportunities.createdAt))
     .limit(OPPORTUNITY_ROW_CAP);
@@ -495,6 +498,7 @@ export async function fetchOpportunitiesCreatedInPeriod(
   brokerageId: number,
   period: ResolvedPeriod,
   restrictToPropertyIds: number[] | null = null,
+  callerUserId: number | null = null,
 ): Promise<OpportunityRow[]> {
   return db
     .select(OPPORTUNITY_SELECT_COLUMNS)
@@ -503,7 +507,7 @@ export async function fetchOpportunitiesCreatedInPeriod(
       eq(growOpportunities.brokerageId, brokerageId),
       gte(growOpportunities.createdAt, period.start),
       lt(growOpportunities.createdAt, period.end),
-      visibleLinkedPropertySql(growOpportunities.propertyId, restrictToPropertyIds),
+      visibleOwnedOrLinkedPropertySql(growOpportunities.propertyId, growOpportunities.ownerUserId, restrictToPropertyIds, callerUserId),
     ))
     .orderBy(asc(growOpportunities.createdAt))
     .limit(OPPORTUNITY_ROW_CAP);

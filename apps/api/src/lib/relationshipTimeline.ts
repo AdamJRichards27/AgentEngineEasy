@@ -1,6 +1,6 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { presentStoredActivitySummaries } from "./commitmentRescheduleSummary.js";
-import { linkedPropertyHidden } from "./propertyVisibility.js";
+import { linkedPropertyHidden, ownedOrLinkedHidden } from "./propertyVisibility.js";
 import {
   db,
   appraisals,
@@ -219,6 +219,7 @@ export async function getRelationshipTimeline(
   partyId: number,
   limit = 100,
   restrictToPropertyIds: number[] | null = null,
+  callerUserId: number | null = null,
 ): Promise<GrowTimelineEvent[]> {
   const [
     party,
@@ -309,12 +310,18 @@ export async function getRelationshipTimeline(
     return [];
   }
 
-  // Own-property scope, applied before any event or address is built. A row
-  // with no property stays. null means brokerage-wide (the historical caller).
+  // Own-property scope, applied before any event or address is built. A
+  // relationship or activity with no property stays. An unlinked commitment
+  // or opportunity stays only for its owner when the caller is property-scoped.
+  // null restrictTo means brokerage-wide (Admin, Pit Crew, historical callers).
   const relationshipEvents = relationshipRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
   const activityEvents = activityRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
-  const opportunityEvents = opportunityRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
-  const commitmentEvents = commitmentRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
+  const opportunityEvents = opportunityRows.filter(
+    (row) => !ownedOrLinkedHidden(row.propertyId, row.ownerUserId, restrictToPropertyIds, callerUserId),
+  );
+  const commitmentEvents = commitmentRows.filter(
+    (row) => !ownedOrLinkedHidden(row.propertyId, row.createdBy, restrictToPropertyIds, callerUserId),
+  );
   const appraisalEvents = appraisalRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
   const signalEvents = signalRows.filter((row) => !linkedPropertyHidden(row.propertyId, restrictToPropertyIds));
 

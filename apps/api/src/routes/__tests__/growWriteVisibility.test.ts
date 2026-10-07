@@ -332,8 +332,8 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
     assert.ok(restrictA?.includes(propertyAId));
     assert.ok(!restrictA?.includes(propertyBId));
 
-    const ctxA = await buildGrowContext(brokerageId, null, restrictA);
-    const ctxAdmin = await buildGrowContext(brokerageId, null, restrictAdmin);
+    const ctxA = await buildGrowContext(brokerageId, null, restrictA, agentA.user.id);
+    const ctxAdmin = await buildGrowContext(brokerageId, null, restrictAdmin, admin.user.id);
 
     const propertyIdsOf = (rows: Array<{ propertyId: number | null }>) => rows.map((row) => row.propertyId);
     assert.ok(!propertyIdsOf(ctxA.todayItems).includes(propertyBId));
@@ -365,6 +365,7 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
     const coachA = await buildBusinessCoachContext(brokerageId, ctxA, {
       period: "last7days",
       restrictToPropertyIds: restrictA,
+      callerUserId: agentA.user.id,
     });
     const coachAdmin = await buildBusinessCoachContext(brokerageId, ctxAdmin, {
       period: "last7days",
