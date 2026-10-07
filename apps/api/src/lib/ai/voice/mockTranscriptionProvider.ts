@@ -4,15 +4,14 @@ import { TranscriptionProviderError } from "./types.js";
 // AE GROW Priority 6 Stage E — the default provider until a real Deepgram
 // configuration is intentionally supplied (see gateway.ts's fail-closed
 // selection). Deterministic, offline, free, and makes no network call of
-// any kind — safe to run in this build, in every test, and in CI. Mirrors
-// apps/api/src/lib/ai/providers/mockProvider.ts's own MockAiProvider
-// exactly: it does not call a real speech model, it reflects a safe,
-// non-sensitive property of the input (byte length and detected MIME type
-// — never the audio's own content, which this provider never inspects
-// beyond checking it is non-empty) back inside a plausible-looking
-// transcript, so the rest of the pipeline (validation, entitlement, rate
-// limiting, the web UI's transcript-ready state) is fully exercisable
-// end-to-end without a live provider or any network I/O.
+// any kind — safe to run in this build, in every test, and in CI. It does
+// not call a real speech model. The transcript names only a non-sensitive
+// property of the input (byte length and detected MIME type — never the
+// audio's own content, which this provider never inspects beyond checking
+// it is non-empty), so the rest of the pipeline (validation, entitlement,
+// rate limiting, the web UI's transcript-ready state) is fully exercisable
+// end-to-end without a live provider or any network I/O. The text mock
+// (providers/mockProvider.ts) does not copy its request into its narrative.
 export class MockTranscriptionProvider implements TranscriptionProvider {
   readonly name = "mock";
 
