@@ -79,13 +79,10 @@ import {
   SET_DUE_FOLLOW_UP_LABEL,
 } from "../lib/growTerms";
 import { GrowTableScroll } from "../components/GrowTableScroll";
+import { appraisalWorkspacePath } from "../lib/appraisalUi";
 import {
-  APPRAISAL_NEXT_STEP_LABELS,
-  APPRAISAL_OUTCOME_REASONS,
   LINK_PROPERTY_BEFORE_APPRAISAL,
   appraisalForProperty,
-  appraisalNextSteps,
-  appraisalOutcomeOptions,
   appraisalPropertyChoices,
   appraisalReadOnlyReason,
   appraisalStartPropertyChoices,
@@ -630,17 +627,26 @@ function GrowWorkspace() {
       )}
 
       <nav className="pc-tabs grow-tabs" aria-label="Grow sections">
-        {GROW_TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            className={`pc-tab${tab === t.key ? " active" : ""}`}
-            aria-current={tab === t.key ? "page" : undefined}
-            onClick={() => selectTab(t.key)}
-          >
-            {t.label}
-          </button>
-        ))}
+        {GROW_TABS.flatMap((t) => {
+          const tabButton = (
+            <button
+              key={t.key}
+              type="button"
+              className={`pc-tab${tab === t.key ? " active" : ""}`}
+              aria-current={tab === t.key ? "page" : undefined}
+              onClick={() => selectTab(t.key)}
+            >
+              {t.label}
+            </button>
+          );
+          if (t.key !== "opportunities") return [tabButton];
+          return [
+            tabButton,
+            <Link key="appraisals" href="/grow/appraisals" className="pc-tab">
+              Appraisals
+            </Link>,
+          ];
+        })}
       </nav>
 
       {/* AE GROW Pilot Readiness WP5 — one failing tab shows a contained
@@ -1280,59 +1286,13 @@ function appraisalWriteErrorMessage(error: unknown): string {
 
 function GrowAppraisalRecord({
   appraisal,
-  canWrite,
-  partyId,
+  partyId = null,
 }: {
   appraisal: GrowAppraisalSummary | null;
-  canWrite: boolean;
-  partyId: number | null;
+  partyId?: number | null;
 }) {
-  const queryClient = useQueryClient();
-  const [showOutcome, setShowOutcome] = useState(false);
-  const [outcome, setOutcome] = useState("WON");
-  const [reason, setReason] = useState("");
-  const [notes, setNotes] = useState("");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  function saved() {
-    setErrorMessage(null);
-    setShowOutcome(false);
-    setReason("");
-    setNotes("");
-    invalidateAppraisalReads(queryClient, partyId);
-  }
-
-  const changeStatus = useMutation({
-    mutationFn: (toStatus: string) => {
-      if (!appraisal) return Promise.resolve(null);
-      return apiFetch(`/grow/appraisals/${appraisal.id}/status`, {
-        method: "POST",
-        body: JSON.stringify({ toStatus }),
-      });
-    },
-    onSuccess: saved,
-    onError: (error) => setErrorMessage(appraisalWriteErrorMessage(error)),
-  });
-
-  const recordOutcome = useMutation({
-    mutationFn: (body: { outcome: string; outcomeReason?: string; outcomeNotes?: string }) => {
-      if (!appraisal) return Promise.resolve(null);
-      return apiFetch(`/grow/appraisals/${appraisal.id}/outcome`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-    },
-    onSuccess: saved,
-    onError: (error) => setErrorMessage(appraisalWriteErrorMessage(error)),
-  });
-
   if (!appraisal) return null;
-
   const readOnlyReason = appraisalReadOnlyReason(appraisal, partyId);
-  const editable = canWrite && readOnlyReason == null;
-  const steps = editable ? appraisalNextSteps(appraisal.status) : [];
-  const outcomes = editable ? appraisalOutcomeOptions(appraisal.status) : [];
-  const busy = changeStatus.isPending || recordOutcome.isPending;
 
   return (
     <div className="grow-appraisal-record">
@@ -1341,85 +1301,9 @@ function GrowAppraisalRecord({
         {appraisal.outcome ? ` — Outcome: ${appraisal.outcome}` : " — Outcome: Not recorded"}
       </p>
       {readOnlyReason && <p className="muted">{readOnlyReason}</p>}
-      {errorMessage && (
-        <p className="error-text" role="alert">
-          {errorMessage}
-        </p>
-      )}
-      {steps.map((step) => (
-        <button
-          key={step}
-          type="button"
-          className="btn btn-secondary btn-small"
-          id={`grow-appraisal-${appraisal.id}-status-${step}`}
-          disabled={busy}
-          onClick={() => changeStatus.mutate(step)}
-        >
-          {APPRAISAL_NEXT_STEP_LABELS[step]}
-        </button>
-      ))}
-      {outcomes.length > 0 && (
-        <button
-          type="button"
-          className="btn btn-secondary btn-small"
-          id={`grow-appraisal-${appraisal.id}-record-outcome`}
-          disabled={busy}
-          onClick={() => setShowOutcome((open) => !open)}
-        >
-          {showOutcome ? "Cancel" : "Record outcome"}
-        </button>
-      )}
-      {showOutcome && outcomes.length > 0 && (
-        <form
-          className="stack grow-inline-form"
-          id={`grow-appraisal-${appraisal.id}-outcome-form`}
-          onSubmit={(event) => {
-            event.preventDefault();
-            const trimmedNotes = notes.trim();
-            recordOutcome.mutate({
-              outcome,
-              ...(reason ? { outcomeReason: reason } : {}),
-              ...(trimmedNotes ? { outcomeNotes: trimmedNotes } : {}),
-            });
-          }}
-        >
-          <label htmlFor={`grow-appraisal-${appraisal.id}-outcome`}>Outcome</label>
-          <select
-            id={`grow-appraisal-${appraisal.id}-outcome`}
-            value={outcome}
-            onChange={(event) => setOutcome(event.target.value)}
-          >
-            {outcomes.map((value) => (
-              <option key={value} value={value}>
-                {value}
-              </option>
-            ))}
-          </select>
-          <label htmlFor={`grow-appraisal-${appraisal.id}-outcome-reason`}>Reason (optional)</label>
-          <select
-            id={`grow-appraisal-${appraisal.id}-outcome-reason`}
-            value={reason}
-            onChange={(event) => setReason(event.target.value)}
-          >
-            <option value="">No reason</option>
-            {APPRAISAL_OUTCOME_REASONS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <label htmlFor={`grow-appraisal-${appraisal.id}-outcome-notes`}>Notes (optional)</label>
-          <textarea
-            id={`grow-appraisal-${appraisal.id}-outcome-notes`}
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-            rows={2}
-          />
-          <button className="btn btn-primary btn-small" type="submit" disabled={busy}>
-            Save outcome
-          </button>
-        </form>
-      )}
+      <Link href={appraisalWorkspacePath(appraisal.id)} className="btn btn-link btn-small" id={`grow-appraisal-${appraisal.id}-open`}>
+        Open appraisal
+      </Link>
     </div>
   );
 }
@@ -1471,7 +1355,7 @@ function GrowOpportunityAppraisalActions({
           Start appraisal
         </button>
       )}
-      <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
+      <GrowAppraisalRecord appraisal={appraisal} partyId={partyId} />
     </div>
   );
 }
@@ -1568,12 +1452,12 @@ export function GrowContactAppraisalsSection({
         <ul className="item-list">
           {rows.map((appraisal) => (
             <li key={appraisal.id}>
-              <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
+              <GrowAppraisalRecord appraisal={appraisal} partyId={partyId} />
             </li>
           ))}
           {otherRows.map((appraisal) => (
             <li key={appraisal.id}>
-              <GrowAppraisalRecord appraisal={appraisal} canWrite={canWrite} partyId={partyId} />
+              <GrowAppraisalRecord appraisal={appraisal} partyId={partyId} />
             </li>
           ))}
         </ul>
@@ -1789,17 +1673,13 @@ function GrowActionCard({
   const showUpdateNextAction =
     canManageOpportunities && item.opportunityId !== null && item.availableActions.some((b) => b.action === "update_next_action");
   const showViewProperty = item.propertyId !== null && item.availableActions.some((b) => b.action === "view_property");
-  // E-2: Rule E's primary action is view_appraisal. The API has emitted it,
-  // and the web type has carried it, but this card used to ignore the button
-  // entirely. The destination is the existing Property Workspace
-  // (/properties/:id), which already hosts AppraisalSection — not a new Grow
-  // appraisal route. The link is shown only when that property id is actually
-  // present. A view_appraisal action with a null propertyId is not rendered
-  // as /properties/null; View contact below remains the fallback when the
-  // card has a person and the agent can read contacts. With neither a
-  // property nor that read, the action stays hidden.
-  const showViewAppraisal =
-    item.propertyId !== null && item.availableActions.some((b) => b.action === "view_appraisal");
+  // E-2: Rule E's primary action is view_appraisal. It opens the Appraisal
+  // Workspace at /grow/appraisals/:id. A card with no appraisal id does not
+  // invent a link. View property stays on /properties/:id.
+  const viewAppraisal = item.availableActions.find(
+    (b): b is { action: "view_appraisal"; appraisalId: number } => b.action === "view_appraisal",
+  );
+  const showViewAppraisal = viewAppraisal !== undefined && viewAppraisal.appraisalId > 0;
   const showViewContact = canViewContacts && linkedContact;
   // AE GROW Priority 3 §4: gated on both the grow.contacts.manage entitlement (see
   // canManageContactComms above) and the contact actually having that channel on file.
@@ -1936,8 +1816,8 @@ function GrowActionCard({
             {SET_DUE_FOLLOW_UP_LABEL}
           </button>
         )}
-        {showViewAppraisal && item.propertyId !== null && (
-          <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
+        {showViewAppraisal && viewAppraisal && (
+          <Link href={appraisalWorkspacePath(viewAppraisal.appraisalId)} className="btn btn-link btn-small">
             View appraisal
           </Link>
         )}

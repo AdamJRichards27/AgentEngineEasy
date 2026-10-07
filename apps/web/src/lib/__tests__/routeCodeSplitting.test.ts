@@ -18,6 +18,8 @@ const AUTHENTICATED_PAGES = [
   "FinancialOperations",
   "PitCrewCommandCentre",
   "Grow",
+  "GrowAppraisals",
+  "AppraisalWorkspace",
   "GrowImport",
   "Settings",
   "SettingsIntegrations",

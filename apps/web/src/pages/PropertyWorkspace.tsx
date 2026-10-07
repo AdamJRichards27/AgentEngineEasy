@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AskAgentEngine } from "../components/AskAgentEngine";
+import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import {
   type PropertyExceptionsResponse,
@@ -499,15 +500,6 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   // unstarted appraisal shows as null and never blocks anything else.
   const startAppraisal = useMutation({
     mutationFn: () => apiFetch(`/appraisals/by-property/${propertyId}/start`, { method: "POST" }),
-    onSuccess: invalidate,
-  });
-  const saveAppraisal = useMutation({
-    mutationFn: (input: Record<string, unknown>) =>
-      apiFetch(`/appraisals/by-property/${propertyId}`, { method: "POST", body: JSON.stringify(input) }),
-    onSuccess: invalidate,
-  });
-  const finaliseAppraisalMut = useMutation({
-    mutationFn: () => apiFetch(`/appraisals/by-property/${propertyId}/finalise`, { method: "POST" }),
     onSuccess: invalidate,
   });
 
@@ -1138,13 +1130,10 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           additive valuation capture, never a blocker to any other stage. */}
       <details className="section">
         <summary>Appraisal</summary>
-        <AppraisalSection
+        <PropertyAppraisalSummary
           appraisal={data.appraisal}
           onStart={() => startAppraisal.mutate()}
-          onSave={(input) => saveAppraisal.mutate(input)}
-          onFinalise={() => finaliseAppraisalMut.mutate()}
-          saveError={saveAppraisal.isError ? apiErrorMessage(saveAppraisal.error, "Couldn't save this appraisal. Try again.") : null}
-          finaliseError={finaliseAppraisalMut.isError ? apiErrorMessage(finaliseAppraisalMut.error, "Couldn't finalise this appraisal. Try again.") : null}
+          startError={startAppraisal.isError ? apiErrorMessage(startAppraisal.error, "Couldn't start this appraisal. Try again.") : null}
         />
       </details>
 
@@ -2085,83 +2074,6 @@ function LegalRepresentativesForm({
           Save
         </button>
       </div>
-    </div>
-  );
-}
-
-// Stage A (#114) — appraisal capture. priceRangeLow/High are numeric
-// strings server-side; this form treats them as plain decimal text rather
-// than cents, matching that convention.
-function AppraisalSection({
-  appraisal,
-  onStart,
-  onSave,
-  onFinalise,
-  saveError,
-  finaliseError,
-}: {
-  appraisal: AppraisalBlock | null;
-  onStart: () => void;
-  onSave: (input: Record<string, unknown>) => void;
-  onFinalise: () => void;
-  saveError: string | null;
-  finaliseError: string | null;
-}) {
-  const [priceRangeLow, setPriceRangeLow] = useState(appraisal?.priceRangeLow ?? "");
-  const [priceRangeHigh, setPriceRangeHigh] = useState(appraisal?.priceRangeHigh ?? "");
-  const [notes, setNotes] = useState(
-    typeof appraisal?.comparableSales === "string" ? (appraisal.comparableSales as string) : "",
-  );
-
-  if (!appraisal) {
-    return (
-      <div>
-        <p className="muted">No appraisal started yet.</p>
-        <button className="btn btn-secondary" onClick={onStart}>
-          Start Appraisal
-        </button>
-      </div>
-    );
-  }
-
-  const submit = () => {
-    onSave({ priceRangeLow: priceRangeLow || undefined, priceRangeHigh: priceRangeHigh || undefined, comparableSales: notes || undefined });
-  };
-
-  return (
-    <div className="stack">
-      {appraisal.isFinalised ? (
-        <p>
-          <span className="pill pill-success">Finalised</span> {priceRangeLow && priceRangeHigh ? `${priceRangeLow} – ${priceRangeHigh}` : ""}
-        </p>
-      ) : (
-        <>
-          <div className="inline-form">
-            <label>
-              Price range low ($)
-              <input value={priceRangeLow} onChange={(e) => setPriceRangeLow(e.target.value)} />
-            </label>
-            <label>
-              Price range high ($)
-              <input value={priceRangeHigh} onChange={(e) => setPriceRangeHigh(e.target.value)} />
-            </label>
-          </div>
-          <label>
-            Comparable sales / notes
-            <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Free-text comparable sales notes" />
-          </label>
-          <div className="inline-form">
-            <button className="btn btn-secondary" onClick={submit}>
-              Save
-            </button>
-            <button className="btn btn-primary" onClick={onFinalise} disabled={!priceRangeLow || !priceRangeHigh}>
-              Finalise Appraisal
-            </button>
-          </div>
-          {saveError && <p className="error-text">{saveError}</p>}
-          {finaliseError && <p className="error-text">{finaliseError}</p>}
-        </>
-      )}
     </div>
   );
 }
