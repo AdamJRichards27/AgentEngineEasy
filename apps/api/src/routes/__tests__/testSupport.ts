@@ -22,6 +22,8 @@ import {
   transactions,
   transactionConditions,
   appraisals,
+  appraisalComparableSales,
+  appraisalMarketCompetition,
   automationTasks,
   automationAttentionItems,
   auditLogs,
@@ -723,6 +725,15 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(launchPlans).where(inArray(launchPlans.propertyId, propertyIds));
 
     // Stage A (#114) — appraisals.propertyId -> properties.id, non-cascading.
+    // Comparable sales and market competition reference appraisals.id with
+    // ON DELETE no action (migration 0016). Clear them first or the appraisal
+    // delete fails and the test process never reaches server.close().
+    const appraisalRows = await db.select({ id: appraisals.id }).from(appraisals).where(inArray(appraisals.propertyId, propertyIds));
+    const appraisalIds = appraisalRows.map((row) => row.id);
+    if (appraisalIds.length > 0) {
+      await db.delete(appraisalComparableSales).where(inArray(appraisalComparableSales.appraisalId, appraisalIds));
+      await db.delete(appraisalMarketCompetition).where(inArray(appraisalMarketCompetition.appraisalId, appraisalIds));
+    }
     await db.delete(appraisals).where(inArray(appraisals.propertyId, propertyIds));
 
     // Stage E (#118) — transaction_conditions.transaction_id ->

@@ -5,6 +5,7 @@ import { db, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal, finaliseAppraisal } from "../lib/appraisals.js";
+import { AppraisalLifecycleClosedError, AppraisalPricingLockedError } from "../lib/appraisalFinaliseGuard.js";
 import { noteGrowPropertyIsolationRejection } from "../lib/grow/isolationRejection.js";
 import { assertPropertyVisibleForWrite, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 
@@ -45,9 +46,13 @@ const DRIVER_TEXT = /failed query|\bselect\b[\s\S]*\bfrom\b|\bparams:\s/i;
 /**
  * True only for a plain `new Error("...")` — the shape lib/appraisals.ts
  * uses for its operator-authored, caller-facing messages ("Property 12 not
- * found", "Appraisal for property 12 is already finalised and cannot be
- * edited.", "A price range is required before an appraisal can be
+ * found", "A price range is required before an appraisal can be
  * finalised."), which are deliberately kept with this router's existing 400.
+ *
+ * A finalised pricing write and a write against a closed lifecycle are
+ * not in that 400 set. enforceAppraisalPricingRule throws
+ * AppraisalPricingLockedError / AppraisalLifecycleClosedError, and this
+ * handler answers those with 409 and a stable code.
  *
  * Every driver/ORM/system error is a SUBCLASS of Error and therefore fails
  * this prototype-identity test: drizzle's DrizzleQueryError (whose message is
@@ -69,6 +74,10 @@ function isOperatorAuthoredError(err: unknown): err is Error {
  * Mirrors handleGrowAppraisalError / handlePropertyIntelligenceError.
  */
 function handleAppraisalError(err: unknown, res: Response): void {
+  if (err instanceof AppraisalPricingLockedError || err instanceof AppraisalLifecycleClosedError) {
+    res.status(409).json({ error: err.message, code: err.code });
+    return;
+  }
   if (isOperatorAuthoredError(err)) {
     res.status(400).json({ error: err.message });
     return;

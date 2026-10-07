@@ -10,6 +10,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { AppraisalPricingLockedError } from "../appraisalFinaliseGuard.js";
 import { getOrCreateAppraisal, updateAppraisal, finaliseAppraisal, getAppraisalByProperty } from "../appraisals.js";
 import { createBrokerageWithUsers, cleanupBrokerages, getDomainEventsForProperty, type DevLoginResult } from "../../routes/__tests__/testSupport.js";
 
@@ -108,7 +109,12 @@ test("updateAppraisal saves price range and comparable sales, and refuses furthe
         brokerageId: A.brokerageId,
         priceRangeLow: "999999",
       }),
-    /already finalised/i,
+    (err: unknown) => {
+      assert.ok(err instanceof AppraisalPricingLockedError);
+      assert.equal(err.code, "APPRAISAL_PRICING_LOCKED");
+      assert.match(err.message, /already finalised/i);
+      return true;
+    },
   );
 });
 

@@ -64,10 +64,18 @@ export function appraisalIsTerminal(row: { status: string }): boolean {
   return TERMINAL_STATUSES.has(row.status);
 }
 
-/** Finished and finalised appraisals stay readable and accept no further edits. */
-export function appraisalReadOnlyMessage(row: { status: string; isFinalised?: boolean }): string | null {
-  if (appraisalIsFinalised(row)) return "This appraisal is finalised and cannot be changed.";
+/**
+ * Whole-workspace lock. A terminal outcome closes the opportunity.
+ * Finalising does not — it only freezes pricing. See appraisalPricingLockedMessage.
+ */
+export function appraisalReadOnlyMessage(row: { status: string }): string | null {
   if (appraisalIsTerminal(row)) return "This appraisal is finished and cannot be changed.";
+  return null;
+}
+
+/** Pricing is frozen once finalised, including while the lifecycle is still open. */
+export function appraisalPricingLockedMessage(row: { isFinalised?: boolean }): string | null {
+  if (appraisalIsFinalised(row)) return "Pricing is finalised and cannot be changed.";
   return null;
 }
 

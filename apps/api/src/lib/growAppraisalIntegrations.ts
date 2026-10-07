@@ -22,6 +22,7 @@ import {
   noteGrowComparableSaleIsolationRejection,
   noteGrowMarketCompetitionIsolationRejection,
 } from "./grow/isolationRejection.js";
+import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import {
   assertAppraisalInBrokerage,
   getAppraisalWorkspace,
@@ -508,6 +509,7 @@ export async function addComparableSale(
   input: ComparableSaleInput,
 ): Promise<AppraisalComparableSale> {
   const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  enforceAppraisalPricingRule(appraisal);
   const [row] = await db
     .insert(appraisalComparableSales)
     .values({ ...input, appraisalId: appraisal.id })
@@ -521,7 +523,8 @@ export async function updateComparableSale(
   saleId: number,
   input: Partial<ComparableSaleInput>,
 ): Promise<AppraisalComparableSale> {
-  await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  enforceAppraisalPricingRule(appraisal);
   const [row] = await db
     .update(appraisalComparableSales)
     .set({ ...input, updatedAt: new Date() })
@@ -535,7 +538,8 @@ export async function updateComparableSale(
 }
 
 export async function deleteComparableSale(appraisalId: number, brokerageId: number, saleId: number): Promise<void> {
-  await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  enforceAppraisalPricingRule(appraisal);
   await db
     .delete(appraisalComparableSales)
     .where(and(eq(appraisalComparableSales.id, saleId), eq(appraisalComparableSales.appraisalId, appraisalId)));
@@ -547,6 +551,7 @@ export async function addMarketCompetitionItem(
   input: MarketCompetitionInput,
 ): Promise<AppraisalMarketCompetition> {
   const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  enforceAppraisalPricingRule(appraisal);
   const [row] = await db
     .insert(appraisalMarketCompetition)
     .values({ ...input, appraisalId: appraisal.id })
@@ -560,7 +565,8 @@ export async function updateMarketCompetitionItem(
   itemId: number,
   input: Partial<MarketCompetitionInput>,
 ): Promise<AppraisalMarketCompetition> {
-  await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  enforceAppraisalPricingRule(appraisal);
   const [row] = await db
     .update(appraisalMarketCompetition)
     .set({ ...input, updatedAt: new Date() })
@@ -574,7 +580,8 @@ export async function updateMarketCompetitionItem(
 }
 
 export async function deleteMarketCompetitionItem(appraisalId: number, brokerageId: number, itemId: number): Promise<void> {
-  await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
+  enforceAppraisalPricingRule(appraisal);
   await db
     .delete(appraisalMarketCompetition)
     .where(and(eq(appraisalMarketCompetition.id, itemId), eq(appraisalMarketCompetition.appraisalId, appraisalId)));

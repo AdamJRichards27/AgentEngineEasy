@@ -4,6 +4,7 @@ import { db, appraisals, properties } from "@aee/db";
 import type { Appraisal } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
+import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import { noteGrowPropertyIsolationRejection } from "./grow/isolationRejection.js";
 
 /**
@@ -91,9 +92,10 @@ export async function updateAppraisal(input: {
   comparableSales?: unknown;
 }): Promise<Appraisal> {
   const { appraisal } = await getOrCreateAppraisal(input);
-  if (appraisal.isFinalised) {
-    throw new Error(`Appraisal for property ${input.propertyId} is already finalised and cannot be edited.`);
-  }
+  // Same rule Grow uses. Finalised pricing is locked, and a closed
+  // lifecycle (WON / LOST / DEFERRED / ARCHIVED) is not editable here
+  // either. A DRAFT that is not finalised still saves, which is Stage A.
+  enforceAppraisalPricingRule(appraisal);
 
   const [updated] = await db
     .update(appraisals)
