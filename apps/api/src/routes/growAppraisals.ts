@@ -5,6 +5,7 @@ import { db, growOpportunities, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { AppraisalLifecycleClosedError, AppraisalPricingLockedError } from "../lib/appraisalFinaliseGuard.js";
 import {
   AppraisalAccessError,
   AppraisalTransitionError,
@@ -83,6 +84,10 @@ const GENERIC_APPRAISAL_ERROR = "An unexpected error occurred. Please try again 
 function handleGrowAppraisalError(err: unknown, res: import("express").Response): void {
   if (err instanceof AppraisalAccessError) {
     res.status(404).json({ error: err.message });
+    return;
+  }
+  if (err instanceof AppraisalPricingLockedError || err instanceof AppraisalLifecycleClosedError) {
+    res.status(409).json({ error: err.message, code: err.code });
     return;
   }
   if (err instanceof AppraisalTransitionError) {

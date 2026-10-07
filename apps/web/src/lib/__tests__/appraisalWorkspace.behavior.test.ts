@@ -453,6 +453,8 @@ test("the workspace shows the record, posts the next step and outcome, and locks
       assert.match(text, /6 Oct 2026/);
       assert.doesNotMatch(text, /Offer received/);
       assert.equal(byId(tree, "appraisal-readonly"), undefined);
+      assert.equal(byId(tree, "appraisal-pricing-locked"), undefined);
+      assert.ok(byId(tree, "appraisal-price-low"));
       assert.ok(button(tree, "Appointment scheduled"));
       assert.equal(button(tree, "Record outcome"), undefined);
 
@@ -517,7 +519,6 @@ test("the workspace shows the record, posts the next step and outcome, and locks
     { status: "LOST", outcome: "LOST", isFinalised: false, message: /finished and cannot be changed/ },
     { status: "DEFERRED", outcome: "DEFERRED", isFinalised: false, message: /finished and cannot be changed/ },
     { status: "ARCHIVED", outcome: null, isFinalised: false, message: /finished and cannot be changed/ },
-    { status: "DRAFT", outcome: null, isFinalised: true, message: /finalised and cannot be changed/ },
   ]) {
     const closed = install({
       workspace: {
@@ -544,6 +545,67 @@ test("the workspace shows the record, posts the next step and outcome, and locks
     } finally {
       clearGlobals();
     }
+  }
+});
+
+test("a finalised follow-up locks pricing and keeps outcome, follow-up, and send available", async () => {
+  const finalised = install({
+    workspace: {
+      appraisal: appraisalRecord({
+        status: "FOLLOW_UP",
+        isFinalised: true,
+        finalisedSnapshot: { priceRangeLow: "700000.00", priceRangeHigh: "750000.00", finalisedAt: "2026-10-06T02:00:00.000Z" },
+      }),
+      comparableSales: [{ id: 3, address: "1 Comp St", salePrice: "690000.00", saleDate: null, bedrooms: null, bathrooms: null, carSpaces: null, notes: null }],
+      marketCompetition: [{ id: 4, address: "2 Rival St", askingPriceDisplay: "$710,000", status: "Active", daysOnMarket: 12, notes: null }],
+    },
+  });
+  try {
+    await withVite(async (vite) => {
+      const { default: AppraisalWorkspace } = (await vite.ssrLoadModule("/src/pages/AppraisalWorkspace.tsx")) as {
+        default: () => unknown;
+      };
+      const render = () => {
+        finalised.hooks.beginRender();
+        return AppraisalWorkspace();
+      };
+      let tree = render();
+      const text = textContent(tree);
+      assert.match(text, /Pricing is finalised and cannot be changed/);
+      assert.equal(byId(tree, "appraisal-readonly"), undefined);
+      assert.ok(byId(tree, "appraisal-pricing-locked"));
+      assert.equal(byId(tree, "appraisal-price-low"), undefined);
+      assert.equal(byId(tree, "appraisal-price-high"), undefined);
+      assert.equal(byId(tree, "appraisal-pricing-commentary"), undefined);
+      assert.equal(byId(tree, "appraisal-commission-rate"), undefined);
+      assert.equal(byId(tree, "appraisal-comparable-address"), undefined);
+      assert.equal(byId(tree, "appraisal-competition-address"), undefined);
+      assert.equal(byId(tree, "appraisal-comparable-remove-3"), undefined);
+      assert.equal(button(tree, "Finalise appraisal"), undefined);
+      assert.ok(button(tree, "Record outcome"));
+      assert.ok(byId(tree, "appraisal-follow-up-form"));
+      assert.ok(button(tree, "Send appraisal"));
+      assert.ok(byId(tree, "appraisal-selling-strategy"));
+      assert.ok(button(tree, "Save details"));
+
+      (byId(tree, "appraisal-selling-strategy")!.props!.onChange as (event: { target: { value: string } }) => void)({
+        target: { value: "Private treaty" },
+      });
+      tree = render();
+      (button(tree, "Save details")!.props!.onClick as () => void)();
+      await Promise.all(finalised.pending);
+      assert.equal(finalised.calls[0].path, "/grow/appraisals/8");
+      assert.equal(finalised.calls[0].options?.method, "PATCH");
+      const body = JSON.parse(finalised.calls[0].options!.body!) as Record<string, unknown>;
+      assert.equal(body.sellingStrategy, "Private treaty");
+      assert.equal("priceRangeLow" in body, false);
+      assert.equal("priceRangeHigh" in body, false);
+      assert.equal("pricingCommentary" in body, false);
+      assert.equal("commissionRatePercent" in body, false);
+      assert.equal("commissionProposal" in body, false);
+    });
+  } finally {
+    clearGlobals();
   }
 });
 

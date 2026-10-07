@@ -14,6 +14,12 @@ import { publishDomainEvent, currentCorrelationId, logger, type AgentEngineEasyE
 import { partyDisplayName as computePartyDisplayName } from "./communications/recipientResolution.js";
 import { logAudit } from "./audit.js";
 import { getOrCreateAppraisal } from "./appraisals.js";
+import {
+  APPRAISAL_LIFECYCLE_CLOSED_STATUSES,
+  AppraisalLifecycleClosedError,
+  appraisalLifecycleClosed,
+  enforceAppraisalPricingRule,
+} from "./appraisalFinaliseGuard.js";
 import { visibleRequiredPropertySql } from "./propertyVisibility.js";
 import {
   noteGrowAppraisalIsolationRejection,
@@ -68,7 +74,7 @@ const OUTCOME_STATUSES = new Set(["WON", "LOST", "DEFERRED"]);
 /** Create paths treat these as finished. DEFERRED can still move to
  * FOLLOW_UP through the status endpoint; that is a deliberate edit, not
  * a reason to let "start appraisal" claim the row again. */
-const CLOSED_APPRAISAL_STATUSES = new Set(["WON", "LOST", "DEFERRED", "ARCHIVED"]);
+const CLOSED_APPRAISAL_STATUSES = new Set<string>(APPRAISAL_LIFECYCLE_CLOSED_STATUSES);
 
 const OTHER_CONTACT_UNCHANGED =
   "This property already has an appraisal for another contact. It was not changed.";
@@ -307,9 +313,17 @@ export interface UpdateAppraisalWorkspaceInput {
  * -- no reason to fragment this into one endpoint per section). */
 export async function updateAppraisalWorkspace(input: UpdateAppraisalWorkspaceInput): Promise<Appraisal> {
   const existing = await assertAppraisalInBrokerage(input.appraisalId, input.brokerageId);
-  if (OUTCOME_STATUSES.has(existing.status) || existing.status === "ARCHIVED") {
-    throw new AppraisalTransitionError(`Appraisal is ${existing.status} and is no longer editable`);
-  }
+  // Pricing fields on a finalised row are refused. A closed lifecycle
+  // refuses the whole patch. Narrative fields on an open, finalised row
+  // are still written.
+  enforceAppraisalPricingRule(existing, {
+    priceRangeLow: input.priceRangeLow,
+    priceRangeHigh: input.priceRangeHigh,
+    priceRangeCurrency: input.priceRangeCurrency,
+    pricingCommentary: input.pricingCommentary,
+    commissionRatePercent: input.commissionRatePercent,
+    commissionProposal: input.commissionProposal,
+  });
   if (
     input.priceRangeLow != null &&
     input.priceRangeHigh != null &&
@@ -498,8 +512,11 @@ export async function scheduleAppraisalFollowUp(input: {
   followUpNotes?: string | null;
 }): Promise<Appraisal> {
   const existing = await assertAppraisalInBrokerage(input.appraisalId, input.brokerageId);
-  if (OUTCOME_STATUSES.has(existing.status) || existing.status === "ARCHIVED") {
-    throw new AppraisalTransitionError(`Appraisal is ${existing.status}; cannot schedule a follow-up`);
+  if (appraisalLifecycleClosed(existing.status)) {
+    throw new AppraisalLifecycleClosedError(
+      existing.status,
+      `Appraisal is ${existing.status}; cannot schedule a follow-up`,
+    );
   }
   const nextStatus = ALLOWED_STATUS_TRANSITIONS[existing.status]?.includes("FOLLOW_UP") ? "FOLLOW_UP" : existing.status;
 

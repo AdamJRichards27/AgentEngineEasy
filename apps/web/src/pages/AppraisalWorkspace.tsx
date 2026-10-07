@@ -20,6 +20,7 @@ import {
   appraisalHistory,
   appraisalNextStepSummary,
   appraisalOutcomeReasonLabel,
+  appraisalPricingLockedMessage,
   appraisalReadOnlyMessage,
   formatAppraisalDateTime,
   formatAppraisalMoney,
@@ -363,7 +364,9 @@ export default function AppraisalWorkspace() {
       ? null
       : (opportunities.data?.opportunities.find((row) => row.id === appraisal.opportunityId) ?? null);
   const readOnlyMessage = appraisalReadOnlyMessage(appraisal);
+  const pricingLockedMessage = appraisalPricingLockedMessage(appraisal);
   const canEdit = canWrite && readOnlyMessage === null;
+  const canEditPricing = canEdit && pricingLockedMessage === null;
   const steps = canEdit ? appraisalNextSteps(appraisal.status) : [];
   const outcomes = canEdit ? appraisalOutcomeOptions(appraisal.status) : [];
   const draft = details ?? detailDraft(appraisal);
@@ -392,6 +395,16 @@ export default function AppraisalWorkspace() {
   }
 
   function submitDetails() {
+    const narrative = {
+      marketPositionNarrative: blankToNull(draft.marketPositionNarrative),
+      sellingStrategy: blankToNull(draft.sellingStrategy),
+      marketingProposal: blankToNull(draft.marketingProposal),
+      recommendedNextSteps: blankToNull(draft.recommendedNextSteps),
+    };
+    if (!canEditPricing) {
+      saveDetails.mutate(narrative);
+      return;
+    }
     const lowValue = blankToNull(draft.priceRangeLow);
     const highValue = blankToNull(draft.priceRangeHigh);
     if ((lowValue === null) !== (highValue === null)) {
@@ -402,12 +415,9 @@ export default function AppraisalWorkspace() {
       priceRangeLow: lowValue,
       priceRangeHigh: highValue,
       pricingCommentary: blankToNull(draft.pricingCommentary),
-      marketPositionNarrative: blankToNull(draft.marketPositionNarrative),
-      sellingStrategy: blankToNull(draft.sellingStrategy),
-      marketingProposal: blankToNull(draft.marketingProposal),
       commissionRatePercent: blankToNull(draft.commissionRatePercent),
       commissionProposal: blankToNull(draft.commissionProposal),
-      recommendedNextSteps: blankToNull(draft.recommendedNextSteps),
+      ...narrative,
     });
   }
 
@@ -594,23 +604,35 @@ export default function AppraisalWorkspace() {
         <h2>Price and proposal</h2>
         {canEdit ? (
           <div className="stack">
-            <label htmlFor="appraisal-price-low">
-              Price range low
-              <input id="appraisal-price-low" value={draft.priceRangeLow} onChange={(event) => updateDetail("priceRangeLow", event.target.value)} />
-            </label>
-            <label htmlFor="appraisal-price-high">
-              Price range high
-              <input id="appraisal-price-high" value={draft.priceRangeHigh} onChange={(event) => updateDetail("priceRangeHigh", event.target.value)} />
-            </label>
-            <label htmlFor="appraisal-pricing-commentary">
-              Pricing commentary
-              <textarea
-                id="appraisal-pricing-commentary"
-                value={draft.pricingCommentary}
-                rows={3}
-                onChange={(event) => updateDetail("pricingCommentary", event.target.value)}
-              />
-            </label>
+            {canEditPricing ? (
+              <>
+                <label htmlFor="appraisal-price-low">
+                  Price range low
+                  <input id="appraisal-price-low" value={draft.priceRangeLow} onChange={(event) => updateDetail("priceRangeLow", event.target.value)} />
+                </label>
+                <label htmlFor="appraisal-price-high">
+                  Price range high
+                  <input id="appraisal-price-high" value={draft.priceRangeHigh} onChange={(event) => updateDetail("priceRangeHigh", event.target.value)} />
+                </label>
+                <label htmlFor="appraisal-pricing-commentary">
+                  Pricing commentary
+                  <textarea
+                    id="appraisal-pricing-commentary"
+                    value={draft.pricingCommentary}
+                    rows={3}
+                    onChange={(event) => updateDetail("pricingCommentary", event.target.value)}
+                  />
+                </label>
+              </>
+            ) : (
+              <div className="stack">
+                <p id="appraisal-pricing-locked" className="muted">
+                  {pricingLockedMessage}
+                </p>
+                <p>{priceLabel ?? "No price range"}</p>
+                {appraisal.pricingCommentary && <p>{appraisal.pricingCommentary}</p>}
+              </div>
+            )}
             <label htmlFor="appraisal-market-position">
               Market position
               <textarea
@@ -638,23 +660,32 @@ export default function AppraisalWorkspace() {
                 onChange={(event) => updateDetail("marketingProposal", event.target.value)}
               />
             </label>
-            <label htmlFor="appraisal-commission-rate">
-              Commission rate (%)
-              <input
-                id="appraisal-commission-rate"
-                value={draft.commissionRatePercent}
-                onChange={(event) => updateDetail("commissionRatePercent", event.target.value)}
-              />
-            </label>
-            <label htmlFor="appraisal-commission">
-              Fee proposal
-              <textarea
-                id="appraisal-commission"
-                value={draft.commissionProposal}
-                rows={2}
-                onChange={(event) => updateDetail("commissionProposal", event.target.value)}
-              />
-            </label>
+            {canEditPricing ? (
+              <>
+                <label htmlFor="appraisal-commission-rate">
+                  Commission rate (%)
+                  <input
+                    id="appraisal-commission-rate"
+                    value={draft.commissionRatePercent}
+                    onChange={(event) => updateDetail("commissionRatePercent", event.target.value)}
+                  />
+                </label>
+                <label htmlFor="appraisal-commission">
+                  Fee proposal
+                  <textarea
+                    id="appraisal-commission"
+                    value={draft.commissionProposal}
+                    rows={2}
+                    onChange={(event) => updateDetail("commissionProposal", event.target.value)}
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                {appraisal.commissionRatePercent && <p>Commission rate: {appraisal.commissionRatePercent}%</p>}
+                {appraisal.commissionProposal && <p>{appraisal.commissionProposal}</p>}
+              </>
+            )}
             <label htmlFor="appraisal-recommended-steps">
               Recommended next steps
               <textarea
@@ -693,7 +724,7 @@ export default function AppraisalWorkspace() {
                   {formatAppraisalMoney(sale.salePrice) ? ` — ${formatAppraisalMoney(sale.salePrice)}` : ""}
                   {sale.notes ? ` — ${sale.notes}` : ""}
                 </p>
-                {canEdit && (
+                {canEditPricing && (
                   <button
                     type="button"
                     className="btn btn-secondary btn-small"
@@ -708,7 +739,7 @@ export default function AppraisalWorkspace() {
             ))}
           </ul>
         )}
-        {canEdit && (
+        {canEditPricing && (
           <form
             className="stack grow-inline-form"
             onSubmit={(event) => {
@@ -762,7 +793,7 @@ export default function AppraisalWorkspace() {
                   {item.askingPriceDisplay ? ` — ${item.askingPriceDisplay}` : ""}
                   {item.status ? ` — ${item.status}` : ""}
                 </p>
-                {canEdit && (
+                {canEditPricing && (
                   <button
                     type="button"
                     className="btn btn-secondary btn-small"
@@ -776,7 +807,7 @@ export default function AppraisalWorkspace() {
             ))}
           </ul>
         )}
-        {canEdit && (
+        {canEditPricing && (
           <form
             className="stack grow-inline-form"
             onSubmit={(event) => {
@@ -849,15 +880,17 @@ export default function AppraisalWorkspace() {
             >
               Create presentation
             </button>
-            <button
-              type="button"
-              className="btn btn-primary btn-small"
-              id="appraisal-finalise"
-              disabled={busy || !appraisal.priceRangeLow || !appraisal.priceRangeHigh}
-              onClick={() => finalise.mutate()}
-            >
-              Finalise appraisal
-            </button>
+            {canEditPricing && (
+              <button
+                type="button"
+                className="btn btn-primary btn-small"
+                id="appraisal-finalise"
+                disabled={busy || !appraisal.priceRangeLow || !appraisal.priceRangeHigh}
+                onClick={() => finalise.mutate()}
+              >
+                Finalise appraisal
+              </button>
+            )}
           </div>
           {sendOpen && (
             <form

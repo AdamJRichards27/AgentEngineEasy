@@ -5,6 +5,7 @@ import {
   appraisalMatchesSearch,
   appraisalMatchesStage,
   appraisalOwnerChoices,
+  appraisalPricingLockedMessage,
   appraisalReadOnlyMessage,
   appraisalWorkspacePath,
   canFilterAppraisalsByOwner,
@@ -75,11 +76,19 @@ test("owner choices and the owner filter stay inside the rows the caller can alr
   );
 });
 
-test("terminal and finalised appraisals are read-only, and dates are Brisbane-local", () => {
+test("terminal appraisals lock the workspace, finalised appraisals lock pricing only, and dates are Brisbane-local", () => {
   assert.equal(appraisalReadOnlyMessage(rows[0]), null);
   assert.match(appraisalReadOnlyMessage(rows[1]) ?? "", /finished and cannot be changed/);
   assert.match(appraisalReadOnlyMessage(rows[4]) ?? "", /finished and cannot be changed/);
-  assert.match(appraisalReadOnlyMessage(rows[5]) ?? "", /finalised and cannot be changed/);
+  assert.equal(appraisalReadOnlyMessage(rows[5]), null);
+  assert.equal(appraisalPricingLockedMessage(rows[0]), null);
+  assert.equal(appraisalPricingLockedMessage(rows[1]), null);
+  assert.match(appraisalPricingLockedMessage(rows[5]) ?? "", /Pricing is finalised and cannot be changed/);
+  assert.match(
+    appraisalReadOnlyMessage({ status: "WON" }) ?? "",
+    /finished and cannot be changed/,
+  );
+  assert.match(appraisalPricingLockedMessage({ isFinalised: true }) ?? "", /Pricing is finalised/);
   assert.equal(formatAppraisalDate("2026-10-06T00:00:00.000Z"), "6 Oct 2026");
   assert.match(formatAppraisalDateTime("2026-10-06T00:00:00.000Z") ?? "", /6 Oct 2026/);
   assert.match(formatAppraisalDateTime("2026-10-06T00:00:00.000Z") ?? "", /10:00/);
