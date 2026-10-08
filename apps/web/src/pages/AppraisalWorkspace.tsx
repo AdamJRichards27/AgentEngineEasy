@@ -182,9 +182,11 @@ export default function AppraisalWorkspace() {
     queryFn: () => apiFetch("/grow/appraisals/pipeline"),
     enabled: canRead && appraisalId !== null,
   });
+  const linkedOpportunityId = workspace.data?.appraisal.opportunityId ?? null;
   const opportunities = useQuery<{ opportunities: OpportunityRow[] }>({
-    queryKey: ["grow-opportunities"],
-    queryFn: () => apiFetch("/grow/opportunities"),
+    queryKey: ["grow-opportunities", linkedOpportunityId],
+    queryFn: () =>
+      apiFetch(linkedOpportunityId === null ? "/grow/opportunities" : `/grow/opportunities?id=${linkedOpportunityId}`),
     enabled: canRead && appraisalId !== null,
   });
   const propertyId = workspace.data?.appraisal.propertyId ?? null;

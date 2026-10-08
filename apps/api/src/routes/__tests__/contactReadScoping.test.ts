@@ -18,13 +18,14 @@
 //       tables is brokerage_id-leading, so a bare `party_id =` predicate had no usable index
 //       and Postgres sequentially scanned each table in full.
 //
-//  I-6  routes/contacts.ts — the list endpoint computed `partyIds` for the 200 contacts it was
+//  I-6  routes/contacts.ts — the list endpoint computed `partyIds` for the page it was
 //       about to render and then never used it, reading every role row and every relationship
 //       row in the brokerage to decorate them.
 //
-//  I-7  routes/contacts.ts — `.limit(200)` ran BEFORE the role filter, so `?role=` searched
-//       only the 200 most recently created contacts. Correctness, not performance: past 200
-//       parties, a contact holding the role silently vanished from the picker.
+//  I-7  routes/contacts.ts — the role filter used to run in JS after `.limit(200)`, so
+//       `?role=` searched only the newest page. Correctness, not performance: a contact
+//       holding the role silently vanished from the picker. The filter is a SQL predicate
+//       on the whole brokerage, and the list is now keyset-paged (default 50).
 //
 // Two independent kinds of evidence are used, because neither alone is sufficient. The
 // statement observer (setDbQueryObserver, packages/db/src/index.ts — the same test-only seam
@@ -442,10 +443,12 @@ test("I-6: enrichment values are unchanged — roles and related-property counts
   );
 });
 
-test("I-7: a role filter finds a matching contact that is not among the 200 most recently created parties", async () => {
+test("I-7: a role filter finds a matching contact that is not on the first page", async () => {
   // The bug: `.limit(200)` ran before the role filter, so `?role=` only ever searched the
-  // newest 200 contacts. Once a brokerage held more than 200 parties, a contact holding the
+  // newest page. Once a brokerage held more parties than that page, a contact holding the
   // role just stopped being returned — no error, no indication anything had been cut.
+  // The list is now keyset-paged (default 50). The role predicate still has to match the
+  // whole brokerage, not whichever page was loaded.
   //
   // `parties` rows are inserted directly rather than through POST /api/parties: 210 HTTP
   // round-trips (each with its own property linkage and ownership side effects) would take
@@ -472,8 +475,8 @@ test("I-7: a role filter finds a matching contact that is not among the 200 most
     role: "Landlord",
   });
 
-  // 210 newer parties, none of them a Landlord: more than the 200-row window, so the buried
-  // contact is pushed out of it entirely.
+  // 210 newer parties, none of them a Landlord: more than one page, so the buried
+  // contact is outside the default page.
   const fillerIds = await db
     .insert(parties)
     .values(
@@ -490,15 +493,16 @@ test("I-7: a role filter finds a matching contact that is not among the 200 most
     .returning({ id: parties.id });
 
   try {
-    // Precondition: the buried contact really is outside the unfiltered 200-row window, so the
+    // Precondition: the buried contact really is outside the default page, so the
     // test would have failed before the fix rather than passing for an unrelated reason.
     const unfiltered = await fetch(`${baseUrl}/api/grow/contacts`, { headers: { cookie: A.agent.cookie } });
     assert.equal(unfiltered.status, 200);
-    const { contacts: page } = (await unfiltered.json()) as { contacts: Array<{ id: number }> };
-    assert.equal(page.length, 200, "the unfiltered list is capped at 200");
+    const { contacts: page, total } = (await unfiltered.json()) as { contacts: Array<{ id: number }>; total: number };
+    assert.equal(page.length, 50, "the unfiltered list defaults to one page of 50");
+    assert.ok(total > page.length, "the exact count includes contacts past the first page");
     assert.ok(
       !page.some((c) => c.id === buried.id),
-      "precondition: the buried contact must fall outside the newest 200, otherwise this test proves nothing",
+      "precondition: the buried contact must fall outside the first page, otherwise this test proves nothing",
     );
 
     const res = await fetch(`${baseUrl}/api/grow/contacts?role=Landlord`, { headers: { cookie: A.agent.cookie } });
@@ -507,7 +511,7 @@ test("I-7: a role filter finds a matching contact that is not among the 200 most
     assert.deepEqual(
       contacts.map((c) => c.id),
       [buried.id],
-      "the role filter must search the whole brokerage, not just the newest 200 parties",
+      "the role filter must search the whole brokerage, not just the first page",
     );
     assert.deepEqual(contacts[0].roles, ["Landlord"]);
 

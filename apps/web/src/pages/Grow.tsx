@@ -79,6 +79,8 @@ import {
   SET_DUE_FOLLOW_UP_LABEL,
 } from "../lib/growTerms";
 import { GrowTableScroll } from "../components/GrowTableScroll";
+import { GrowVirtualTable, GrowVirtualTimeline, memoRow, useGrowCursorPages } from "../components/GrowVirtualList";
+import { growListPath } from "../lib/growListQuery";
 import { appraisalWorkspacePath } from "../lib/appraisalUi";
 import {
   LINK_PROPERTY_BEFORE_APPRAISAL,
@@ -220,6 +222,73 @@ interface GrowContactListItem {
   roles: string[];
   relatedPropertyCount: number;
 }
+
+type GrowContactListPage = {
+  contacts: GrowContactListItem[];
+  nextCursor?: string | null;
+  total?: number;
+};
+
+type GrowRelationshipListPage = {
+  relationships: GrowRelationship[];
+  nextCursor?: string | null;
+  total?: number;
+};
+
+type GrowActivityListPage = {
+  activities: GrowActivity[];
+  nextCursor?: string | null;
+  total?: number;
+};
+
+type GrowOpportunityListPage = {
+  opportunities: GrowOpportunity[];
+  nextCursor?: string | null;
+  total?: number;
+};
+
+const GrowContactCells = memoRow(function GrowContactCells({ contact }: { contact: GrowContactListItem }) {
+  return (
+    <>
+      <td>{contact.displayName}</td>
+      <td>{contact.partyType}</td>
+      <td>{contact.roles.length > 0 ? contact.roles.join(", ") : "–"}</td>
+      <td>{contact.relatedPropertyCount}</td>
+      <td>
+        <Link href={growContactPath(contact.id)} className="btn btn-link btn-small">
+          View Contact 360 &rarr;
+        </Link>
+      </td>
+    </>
+  );
+});
+
+const GrowRelationshipCells = memoRow(function GrowRelationshipCells({ relationship }: { relationship: GrowRelationship }) {
+  const person = relationship.partyOrganisationName ?? `${relationship.partyFirstName ?? ""} ${relationship.partyLastName ?? ""}`.trim();
+  return (
+    <>
+      <td>{person}</td>
+      <td>{relationship.propertyAddress}</td>
+      <td>{relationship.relationshipType}</td>
+      <td>{relationship.role ?? "–"}</td>
+      <td>
+        <span className={`pill ${relationship.status === "Active" ? "pill-success" : relationship.status === "PendingReview" ? "pill-warning" : ""}`}>
+          {relationship.status}
+        </span>
+      </td>
+    </>
+  );
+});
+
+const GrowActivityItem = memoRow(function GrowActivityItem({ activity }: { activity: GrowActivity }) {
+  return (
+    <>
+      <span className="when">{new Date(activity.occurredAt).toLocaleString()}</span>
+      <div className="eyebrow">{growActivityTypeLabel(activity.activityType)}</div>
+      <p style={activity.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{activity.summary}</p>
+    </>
+  );
+});
 
 interface GrowContact360HouseholdRelationship {
   id: number;
@@ -2070,22 +2139,61 @@ export function GrowContactList() {
   const [search, setSearch] = useState("");
   const [committedSearch, setCommittedSearch] = useState("");
 
-  const contacts = useQuery<{ contacts: GrowContactListItem[] }>({
+  const contacts = useQuery<GrowContactListPage>({
     queryKey: ["grow-contacts", committedSearch],
-    queryFn: () => apiFetch(`/grow/contacts${committedSearch ? `?search=${encodeURIComponent(committedSearch)}` : ""}`),
+    queryFn: () => apiFetch(growListPath("/grow/contacts", { search: committedSearch })),
+  });
+  const contactPages = useGrowCursorPages({
+    resetKey: committedSearch,
+    page: contacts.data
+      ? { items: contacts.data.contacts, nextCursor: contacts.data.nextCursor, total: contacts.data.total }
+      : undefined,
+    getId: (contact) => contact.id,
+    fetchPage: (cursor) =>
+      apiFetch<GrowContactListPage>(growListPath("/grow/contacts", { search: committedSearch, cursor })).then((page) => ({
+        items: page.contacts,
+        nextCursor: page.nextCursor,
+        total: page.total,
+      })),
   });
 
   // Kept unchanged from Priority 1 (GET /grow/relationships, GET /grow/activities) — a
   // brokerage-wide "every property relationship" / "everything that happened recently" view is
   // still useful alongside the new per-contact Contact 360 below, and nothing about Contact 360
-  // required removing it.
-  const relationships = useQuery<{ relationships: GrowRelationship[] }>({
+  // required removing it. Both lists are paged the same way as contacts.
+  const relationships = useQuery<GrowRelationshipListPage>({
     queryKey: ["grow-relationships"],
     queryFn: () => apiFetch("/grow/relationships"),
   });
-  const activities = useQuery<{ activities: GrowActivity[] }>({
+  const relationshipPages = useGrowCursorPages({
+    resetKey: "relationships",
+    page: relationships.data
+      ? { items: relationships.data.relationships, nextCursor: relationships.data.nextCursor, total: relationships.data.total }
+      : undefined,
+    getId: (relationship) => relationship.id,
+    fetchPage: (cursor) =>
+      apiFetch<GrowRelationshipListPage>(growListPath("/grow/relationships", { cursor })).then((page) => ({
+        items: page.relationships,
+        nextCursor: page.nextCursor,
+        total: page.total,
+      })),
+  });
+  const activities = useQuery<GrowActivityListPage>({
     queryKey: ["grow-activities"],
     queryFn: () => apiFetch("/grow/activities"),
+  });
+  const activityPages = useGrowCursorPages({
+    resetKey: "activities",
+    page: activities.data
+      ? { items: activities.data.activities, nextCursor: activities.data.nextCursor, total: activities.data.total }
+      : undefined,
+    getId: (activity) => activity.id,
+    fetchPage: (cursor) =>
+      apiFetch<GrowActivityListPage>(growListPath("/grow/activities", { cursor })).then((page) => ({
+        items: page.activities,
+        nextCursor: page.nextCursor,
+        total: page.total,
+      })),
   });
 
   return (
@@ -2118,15 +2226,26 @@ export function GrowContactList() {
             "nothing matched that search" vs "no contacts at all" empty state. */}
         <GrowDataRegionStatus
           query={contacts}
-          itemCount={contacts.data?.contacts.length}
+          itemCount={contacts.data ? contactPages.items.length : undefined}
           errorFallback="Couldn't load contacts."
           emptyMessage={contactsEmptyMessage(committedSearch)}
           onRetry={() => void contacts.refetch()}
         />
-        {contacts.data && contacts.data.contacts.length > 0 && (
-          <GrowTableScroll>
-          <table className="grow-table">
-            <thead>
+        {contacts.data && contactPages.items.length > 0 && (
+          <GrowVirtualTable
+            label="Contacts"
+            singular="contact"
+            plural="contacts"
+            colSpan={5}
+            items={contactPages.items}
+            total={contactPages.total}
+            getKey={(contact) => contact.id}
+            renderCells={(contact) => <GrowContactCells contact={contact} />}
+            hasMore={contactPages.hasMore}
+            loadingMore={contactPages.loadingMore}
+            moreError={contactPages.moreError}
+            onLoadMore={contactPages.loadMore}
+            head={
               <tr>
                 <th>Name</th>
                 <th>Type</th>
@@ -2134,24 +2253,8 @@ export function GrowContactList() {
                 <th>Properties</th>
                 <th></th>
               </tr>
-            </thead>
-            <tbody>
-              {contacts.data.contacts.map((c) => (
-                <tr key={c.id}>
-                  <td>{c.displayName}</td>
-                  <td>{c.partyType}</td>
-                  <td>{c.roles.length > 0 ? c.roles.join(", ") : "–"}</td>
-                  <td>{c.relatedPropertyCount}</td>
-                  <td>
-                    <Link href={growContactPath(c.id)} className="btn btn-link btn-small">
-                      View Contact 360 &rarr;
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </GrowTableScroll>
+            }
+          />
         )}
       </section>
 
@@ -2160,15 +2263,26 @@ export function GrowContactList() {
         <p className="muted">Every person linked to a property, with why the link exists - never just an owner field.</p>
         <GrowDataRegionStatus
           query={relationships}
-          itemCount={relationships.data?.relationships.length}
+          itemCount={relationships.data ? relationshipPages.items.length : undefined}
           errorFallback="Couldn't load relationships."
           emptyMessage="No relationships yet."
           onRetry={() => void relationships.refetch()}
         />
-        {relationships.data && relationships.data.relationships.length > 0 && (
-          <GrowTableScroll>
-          <table className="grow-table">
-            <thead>
+        {relationships.data && relationshipPages.items.length > 0 && (
+          <GrowVirtualTable
+            label="Relationships"
+            singular="relationship"
+            plural="relationships"
+            colSpan={5}
+            items={relationshipPages.items}
+            total={relationshipPages.total}
+            getKey={(relationship) => relationship.id}
+            renderCells={(relationship) => <GrowRelationshipCells relationship={relationship} />}
+            hasMore={relationshipPages.hasMore}
+            loadingMore={relationshipPages.loadingMore}
+            moreError={relationshipPages.moreError}
+            onLoadMore={relationshipPages.loadMore}
+            head={
               <tr>
                 <th>Person</th>
                 <th>Property</th>
@@ -2176,26 +2290,8 @@ export function GrowContactList() {
                 <th>Role</th>
                 <th>Status</th>
               </tr>
-            </thead>
-            <tbody>
-              {relationships.data.relationships.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.partyOrganisationName ?? `${r.partyFirstName ?? ""} ${r.partyLastName ?? ""}`.trim()}</td>
-                  <td>{r.propertyAddress}</td>
-                  <td>{r.relationshipType}</td>
-                  <td>{r.role ?? "–"}</td>
-                  <td>
-                    <span
-                      className={`pill ${r.status === "Active" ? "pill-success" : r.status === "PendingReview" ? "pill-warning" : ""}`}
-                    >
-                      {r.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </GrowTableScroll>
+            }
+          />
         )}
       </section>
 
@@ -2203,21 +2299,25 @@ export function GrowContactList() {
         <h2>Recent activity</h2>
         <GrowDataRegionStatus
           query={activities}
-          itemCount={activities.data?.activities.length}
+          itemCount={activities.data ? activityPages.items.length : undefined}
           errorFallback="Couldn't load recent activity."
           emptyMessage="No activity logged yet."
           onRetry={() => void activities.refetch()}
         />
-        {activities.data && activities.data.activities.length > 0 && (
-          <ul className="timeline">
-            {activities.data.activities.map((a) => (
-              <li key={a.id}>
-                <span className="when">{new Date(a.occurredAt).toLocaleString()}</span>
-                <div className="eyebrow">{growActivityTypeLabel(a.activityType)}</div>
-                <p style={a.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{a.summary}</p>
-              </li>
-            ))}
-          </ul>
+        {activities.data && activityPages.items.length > 0 && (
+          <GrowVirtualTimeline
+            label="Recent activity"
+            singular="activity"
+            plural="activities"
+            items={activityPages.items}
+            total={activityPages.total}
+            getKey={(activity) => activity.id}
+            renderItem={(activity) => <GrowActivityItem activity={activity} />}
+            hasMore={activityPages.hasMore}
+            loadingMore={activityPages.loadingMore}
+            moreError={activityPages.moreError}
+            onLoadMore={activityPages.loadMore}
+          />
         )}
       </section>
     </div>
@@ -2741,8 +2841,9 @@ function GrowContactDetail({
   const [relationshipNote, setRelationshipNote] = useState("");
 
   const searchRelated = useMutation({
-    mutationFn: (query: string) => apiFetch<{ contacts: GrowContactListItem[] }>(`/grow/contacts?search=${encodeURIComponent(query)}`),
-    onSuccess: (result) => setRelatedResults(result.contacts.filter((c) => c.id !== partyId)),
+    mutationFn: (query: string) =>
+      apiFetch<GrowContactListPage>(growListPath("/grow/contacts", { search: query, excludePartyId: partyId })),
+    onSuccess: (result) => setRelatedResults(result.contacts),
   });
 
   const addRelationship = useMutation({
@@ -3607,6 +3708,57 @@ export function GrowContactOpportunitiesSection({
 // Today already had. Add note and Ask AE are the remaining non-outreach actions
 // on Today's opportunity card, wired through the same handlers. The existing
 // next action stays visible so creating one changes the row.
+const GrowOpportunityCells = memoRow(function GrowOpportunityCells({
+  opportunity,
+  appraisal,
+  canManageOpportunities,
+  canAddNote,
+  canViewContacts,
+  onViewContact,
+  onAskAE,
+  onSaved,
+}: {
+  opportunity: GrowOpportunity;
+  appraisal: GrowAppraisalSummary | null;
+  canManageOpportunities: boolean;
+  canAddNote: boolean;
+  canViewContacts: boolean;
+  onViewContact: (partyId: number) => void;
+  onAskAE: (() => void) | null;
+  onSaved: () => void;
+}) {
+  return (
+    <>
+      <td>{opportunity.opportunityType}</td>
+      <td>{opportunity.stage}</td>
+      <td>
+        <span className={`pill ${opportunity.status === "Open" ? "pill-success" : opportunity.status === "Lost" ? "pill-danger" : ""}`}>
+          {opportunity.status}
+        </span>
+      </td>
+      <td>{opportunity.reason ?? "–"}</td>
+      <td>
+        {opportunity.recommendedNextAction ?? "–"}
+        {opportunity.nextActionDueAt ? ` (due ${formatWhen(opportunity.nextActionDueAt)})` : ""}
+      </td>
+      <td>
+        <GrowOpportunityRowActions
+          opportunityId={opportunity.id}
+          partyId={opportunity.partyId}
+          propertyId={opportunity.propertyId}
+          appraisal={appraisal}
+          canManageOpportunities={canManageOpportunities}
+          canAddNote={canAddNote}
+          canViewContacts={canViewContacts}
+          onViewContact={onViewContact}
+          onAskAE={onAskAE}
+          onSaved={onSaved}
+        />
+      </td>
+    </>
+  );
+});
+
 export function GrowOpportunitiesTab({
   onViewContact,
   onAskAE,
@@ -3621,9 +3773,22 @@ export function GrowOpportunitiesTab({
   const canViewContacts = hasEntitlement("grow.contacts.read");
   const canReadAppraisals = useCanReadAppraisals();
 
-  const opportunities = useQuery<{ opportunities: GrowOpportunity[] }>({
+  const opportunities = useQuery<GrowOpportunityListPage>({
     queryKey: ["grow-opportunities"],
     queryFn: () => apiFetch("/grow/opportunities"),
+  });
+  const opportunityPages = useGrowCursorPages({
+    resetKey: "opportunities",
+    page: opportunities.data
+      ? { items: opportunities.data.opportunities, nextCursor: opportunities.data.nextCursor, total: opportunities.data.total }
+      : undefined,
+    getId: (opportunity) => opportunity.id,
+    fetchPage: (cursor) =>
+      apiFetch<GrowOpportunityListPage>(growListPath("/grow/opportunities", { cursor })).then((page) => ({
+        items: page.opportunities,
+        nextCursor: page.nextCursor,
+        total: page.total,
+      })),
   });
   const pipeline = useAppraisalPipeline(canReadAppraisals);
   const appraisalRows = canReadAppraisals ? (pipeline.data?.appraisals ?? []) : [];
@@ -3642,15 +3807,26 @@ export function GrowOpportunitiesTab({
       {/* AE GROW Pilot Readiness WP6b (D6) — see GrowContactList above. */}
       <GrowDataRegionStatus
         query={opportunities}
-        itemCount={opportunities.data?.opportunities.length}
+        itemCount={opportunities.data ? opportunityPages.items.length : undefined}
         errorFallback="Couldn't load opportunities."
         emptyMessage="No opportunities yet."
         onRetry={() => void opportunities.refetch()}
       />
-      {opportunities.data && opportunities.data.opportunities.length > 0 && (
-        <GrowTableScroll>
-        <table className="grow-table">
-          <thead>
+      {opportunities.data && opportunityPages.items.length > 0 && (
+        <GrowVirtualTable
+          label="Opportunities"
+          singular="opportunity"
+          plural="opportunities"
+          colSpan={6}
+          estimate={120}
+          items={opportunityPages.items}
+          total={opportunityPages.total}
+          getKey={(opportunity) => opportunity.id}
+          hasMore={opportunityPages.hasMore}
+          loadingMore={opportunityPages.loadingMore}
+          moreError={opportunityPages.moreError}
+          onLoadMore={opportunityPages.loadMore}
+          head={
             <tr>
               <th>Type</th>
               <th>Stage</th>
@@ -3659,41 +3835,20 @@ export function GrowOpportunitiesTab({
               <th>Next action</th>
               <th></th>
             </tr>
-          </thead>
-          <tbody>
-            {opportunities.data.opportunities.map((o) => (
-              <tr key={o.id}>
-                <td>{o.opportunityType}</td>
-                <td>{o.stage}</td>
-                <td>
-                  <span className={`pill ${o.status === "Open" ? "pill-success" : o.status === "Lost" ? "pill-danger" : ""}`}>
-                    {o.status}
-                  </span>
-                </td>
-                <td>{o.reason ?? "–"}</td>
-                <td>
-                  {o.recommendedNextAction ?? "–"}
-                  {o.nextActionDueAt ? ` (due ${formatWhen(o.nextActionDueAt)})` : ""}
-                </td>
-                <td>
-                  <GrowOpportunityRowActions
-                    opportunityId={o.id}
-                    partyId={o.partyId}
-                    propertyId={o.propertyId}
-                    appraisal={appraisalForProperty(appraisalRows, o.propertyId, o.partyId)}
-                    canManageOpportunities={canManageOpportunities}
-                    canAddNote={canAddNote}
-                    canViewContacts={canViewContacts}
-                    onViewContact={onViewContact}
-                    onAskAE={onAskAE ?? null}
-                    onSaved={onSaved}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </GrowTableScroll>
+          }
+          renderCells={(opportunity) => (
+            <GrowOpportunityCells
+              opportunity={opportunity}
+              appraisal={appraisalForProperty(appraisalRows, opportunity.propertyId, opportunity.partyId)}
+              canManageOpportunities={canManageOpportunities}
+              canAddNote={canAddNote}
+              canViewContacts={canViewContacts}
+              onViewContact={onViewContact}
+              onAskAE={onAskAE ?? null}
+              onSaved={onSaved}
+            />
+          )}
+        />
       )}
     </section>
   );
