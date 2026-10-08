@@ -18,6 +18,11 @@
 // supplied tenant filter. An optional restrictToPropertyIds argument is the
 // caller's own restrictedPropertyIdsFor result (null, the default, leaves
 // the brokerage-wide query unchanged) and is not a tenant selector.
+// fetchActivityRows also reads qualifying communication_messages (C-6).
+// That query filters communication_threads.brokerage_id,
+// communication_messages.brokerage_id, and parties.brokerage_id —
+// communication_participants has no brokerage column, so the party join
+// is what scopes the participant. See lib/qualifyingCommunications.ts.
 //
 // Bounding: every list is capped by one of the *_ROW_CAP constants below
 // before it reaches a compute function, and every compute function reports
@@ -45,6 +50,7 @@ import {
   properties,
 } from "@aee/db";
 import { resolvePreviousComparablePeriod, toPeriodView, type PeriodView, type ResolvedPeriod } from "./period.js";
+import { fetchQualifyingCommunicationActivityRows } from "../../qualifyingCommunications.js";
 import { localDateKey } from "./timezone.js";
 import type { GrowContext } from "../types.js";
 
@@ -95,17 +101,35 @@ export async function fetchActivityRows(
   period: ResolvedPeriod,
   restrictToPropertyIds: number[] | null = null,
 ): Promise<ActivityRow[]> {
-  return db
-    .select({ id: growActivities.id, partyId: growActivities.partyId, activityType: growActivities.activityType, occurredAt: growActivities.occurredAt })
-    .from(growActivities)
-    .where(and(
-      eq(growActivities.brokerageId, brokerageId),
-      gte(growActivities.occurredAt, period.start),
-      lt(growActivities.occurredAt, period.end),
-      visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
-    ))
-    .orderBy(asc(growActivities.occurredAt))
-    .limit(ACTIVITY_ROW_CAP);
+  // C-6 — qualifying Hub messages are activities for this count. Each side
+  // is capped, then the merge keeps the earliest ACTIVITY_ROW_CAP of the
+  // union (both sides are already oldest-first, so the earliest `cap` of
+  // the union is exactly the earliest `cap` overall). No grow_activities
+  // write. See lib/qualifyingCommunications.ts for what qualifies.
+  const [logged, communicated] = await Promise.all([
+    db
+      .select({ id: growActivities.id, partyId: growActivities.partyId, activityType: growActivities.activityType, occurredAt: growActivities.occurredAt })
+      .from(growActivities)
+      .where(and(
+        eq(growActivities.brokerageId, brokerageId),
+        gte(growActivities.occurredAt, period.start),
+        lt(growActivities.occurredAt, period.end),
+        visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
+      ))
+      .orderBy(asc(growActivities.occurredAt))
+      .limit(ACTIVITY_ROW_CAP),
+    fetchQualifyingCommunicationActivityRows(
+      brokerageId,
+      period.start,
+      period.end,
+      restrictToPropertyIds,
+      ACTIVITY_ROW_CAP,
+    ),
+  ]);
+  if (communicated.length === 0) return logged;
+  return [...logged, ...communicated]
+    .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id - b.id)
+    .slice(0, ACTIVITY_ROW_CAP);
 }
 
 export interface ActivityConsistencyMetric {
@@ -122,7 +146,11 @@ export interface ActivityConsistencyMetric {
 }
 
 // Definition: totalActivities = every growActivities row recorded in the
-// period (brokerageId-scoped). activeDays = distinct LOCAL calendar days
+// period (brokerageId-scoped) plus every qualifying Comms Hub message whose
+// contact moment falls in the period (lib/qualifyingCommunications.ts:
+// sent/delivered outbound or received inbound email, SMS, and call records
+// linked through communication_participants). The two are not deduped.
+// activeDays = distinct LOCAL calendar days
 // (in the period's resolved timezone, coaching/timezone.ts) within the
 // period that have at least one such row. activeDayRate = activeDays /
 // totalDaysInPeriod. longestGapDays = the longest run of consecutive
