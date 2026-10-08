@@ -1282,6 +1282,40 @@ details.section > *:not(summary) {
   -webkit-overflow-scrolling: touch;
 }
 
+.grow-virtual-viewport {
+  max-height: 32rem;
+  overflow: auto;
+  outline: none;
+}
+
+.grow-virtual-viewport:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.grow-virtual-viewport .grow-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface);
+  z-index: 1;
+}
+
+.grow-virtual-spacer,
+.grow-virtual-spacer::before {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  content: none;
+}
+
+.grow-list-count {
+  margin: 0.5rem 0;
+}
+
+.grow-load-more {
+  margin-top: 0.75rem;
+}
+
 .grow-table {
   width: max-content;
   min-width: 100%;

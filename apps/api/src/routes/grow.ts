@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ilike, or, sql, type SQL } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -31,6 +31,14 @@ import {
   visibleLinkedPropertySql,
   visibleOwnedOrLinkedPropertySql,
 } from "../lib/propertyVisibility.js";
+import {
+  descendingKeysetBefore,
+  parseOptionalPositiveId,
+  readGrowListPageQuery,
+  readSearchQuery,
+  sliceGrowListPage,
+  sortAtSql,
+} from "../lib/growListPage.js";
 
 export const growRouter = Router();
 
@@ -54,6 +62,34 @@ function parsePositiveId(value: unknown): number | null {
 // "PendingReview" is also what the import pipeline writes, lib/import/execute.ts).
 const GROW_RELATIONSHIP_STATUSES = ["Active", "Historical", "PendingReview"] as const;
 const GROW_RELATIONSHIP_ROLE_MAX = 200;
+
+/**
+ * Predicates for GET /grow/opportunities. Brokerage and own-property visibility
+ * are always included. `id` and `search` are optional and apply to the page
+ * and the exact count together.
+ *
+ * C-5a adds opportunity type as one more optional equality on
+ * `growOpportunities.opportunityType` in this function. Do not filter type
+ * in the browser over a loaded page.
+ */
+function opportunityListConditions(
+  brokerageId: number,
+  restrictTo: number[] | null,
+  callerUserId: number,
+  filters: { id?: number; search?: string },
+): SQL[] {
+  const conditions: SQL[] = [eq(growOpportunities.brokerageId, brokerageId)];
+  const visibility = visibleOwnedOrLinkedPropertySql(
+    growOpportunities.propertyId,
+    growOpportunities.ownerUserId,
+    restrictTo,
+    callerUserId,
+  );
+  if (visibility) conditions.push(visibility);
+  if (filters.id !== undefined) conditions.push(eq(growOpportunities.id, filters.id));
+  if (filters.search && filters.search.length > 0) conditions.push(ilike(growOpportunities.reason, `%${filters.search}%`));
+  return conditions;
+}
 
 // Every route below is authenticated first. Beyond that, /access is intentionally the ONLY
 // route that does not also requireEntitlement("grow.access") - it exists so the frontend can
@@ -138,31 +174,78 @@ growRouter.get("/today", requireAuth, requireEntitlement("grow.access"), async (
 growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
   const user = req.authedUser!;
   const brokerageId = user.brokerageId;
+  const pageQuery = readGrowListPageQuery(req.query);
+  if (!pageQuery.ok) {
+    res.status(400).json({ error: pageQuery.error });
+    return;
+  }
+  const search = readSearchQuery(req.query.search);
   const restrictTo = await restrictedPropertyIdsFor(user);
-  const rows = await db
-    .select({
-      id: growRelationships.id,
-      relationshipType: growRelationships.relationshipType,
-      role: growRelationships.role,
-      status: growRelationships.status,
-      isPrimary: growRelationships.isPrimary,
-      confidenceScore: growRelationships.confidenceScore,
-      validFrom: growRelationships.validFrom,
-      validTo: growRelationships.validTo,
-      partyId: growRelationships.partyId,
-      partyFirstName: parties.firstName,
-      partyLastName: parties.lastName,
-      partyOrganisationName: parties.organisationName,
-      propertyId: growRelationships.propertyId,
-      propertyAddress: properties.formattedAddress,
-    })
-    .from(growRelationships)
-    .innerJoin(parties, eq(growRelationships.partyId, parties.id))
-    .leftJoin(properties, eq(growRelationships.propertyId, properties.id))
-    .where(and(eq(growRelationships.brokerageId, brokerageId), visibleLinkedPropertySql(growRelationships.propertyId, restrictTo)))
-    .orderBy(desc(growRelationships.createdAt))
-    .limit(200);
-  res.json({ relationships: rows });
+  const conditions: SQL[] = [eq(growRelationships.brokerageId, brokerageId)];
+  const visibility = visibleLinkedPropertySql(growRelationships.propertyId, restrictTo);
+  if (visibility) conditions.push(visibility);
+  if (search.length > 0) {
+    const pattern = `%${search}%`;
+    conditions.push(
+      or(
+        ilike(parties.firstName, pattern),
+        ilike(parties.lastName, pattern),
+        ilike(parties.organisationName, pattern),
+        ilike(properties.formattedAddress, pattern),
+      )!,
+    );
+  }
+  const filtered = and(...conditions);
+  const { limit, cursor } = pageQuery.page;
+  const pageWhere = cursor
+    ? and(filtered, descendingKeysetBefore(growRelationships.createdAt, growRelationships.id, cursor))
+    : filtered;
+  // The party join is tenant-scoped. A relationship row in this brokerage that
+  // points at another brokerage's party is a bad row and must not be listed
+  // or counted. The property join is the same: a foreign property contributes
+  // no address.
+  const partyJoin = and(eq(growRelationships.partyId, parties.id), eq(parties.brokerageId, brokerageId));
+  const propertyJoin = and(eq(growRelationships.propertyId, properties.id), eq(properties.brokerageId, brokerageId));
+  const relationshipSelect = {
+    id: growRelationships.id,
+    relationshipType: growRelationships.relationshipType,
+    role: growRelationships.role,
+    status: growRelationships.status,
+    isPrimary: growRelationships.isPrimary,
+    confidenceScore: growRelationships.confidenceScore,
+    validFrom: growRelationships.validFrom,
+    validTo: growRelationships.validTo,
+    partyId: growRelationships.partyId,
+    partyFirstName: parties.firstName,
+    partyLastName: parties.lastName,
+    partyOrganisationName: parties.organisationName,
+    propertyId: growRelationships.propertyId,
+    propertyAddress: properties.formattedAddress,
+    sortAt: sortAtSql(growRelationships.createdAt),
+  };
+  const [fetched, counted] = await Promise.all([
+    db
+      .select(relationshipSelect)
+      .from(growRelationships)
+      .innerJoin(parties, partyJoin)
+      .leftJoin(properties, propertyJoin)
+      .where(pageWhere)
+      .orderBy(desc(growRelationships.createdAt), desc(growRelationships.id))
+      .limit(limit + 1),
+    db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(growRelationships)
+      .innerJoin(parties, partyJoin)
+      .leftJoin(properties, propertyJoin)
+      .where(filtered),
+  ]);
+  const page = sliceGrowListPage(fetched, limit);
+  res.json({
+    relationships: page.rows.map(({ sortAt: _sortAt, ...row }) => row),
+    nextCursor: page.nextCursor,
+    total: Number(counted[0]?.total ?? 0),
+    limit,
+  });
 });
 
 growRouter.post(
@@ -387,15 +470,45 @@ growRouter.patch(
 
 growRouter.get("/activities", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
   const user = req.authedUser!;
+  const pageQuery = readGrowListPageQuery(req.query);
+  if (!pageQuery.ok) {
+    res.status(400).json({ error: pageQuery.error });
+    return;
+  }
+  const search = readSearchQuery(req.query.search);
   const restrictTo = await restrictedPropertyIdsFor(user);
-  const rows = await db
-    .select()
-    .from(growActivities)
-    .where(and(eq(growActivities.brokerageId, user.brokerageId), visibleLinkedPropertySql(growActivities.propertyId, restrictTo)))
-    .orderBy(desc(growActivities.occurredAt))
-    .limit(200);
-  const activities = await presentStoredActivitySummaries(rows, user.brokerageId);
-  res.json({ activities });
+  const conditions: SQL[] = [eq(growActivities.brokerageId, user.brokerageId)];
+  const visibility = visibleLinkedPropertySql(growActivities.propertyId, restrictTo);
+  if (visibility) conditions.push(visibility);
+  if (search.length > 0) conditions.push(ilike(growActivities.summary, `%${search}%`));
+  const filtered = and(...conditions);
+  const { limit, cursor } = pageQuery.page;
+  const pageWhere = cursor
+    ? and(filtered, descendingKeysetBefore(growActivities.occurredAt, growActivities.id, cursor))
+    : filtered;
+  const [fetched, counted] = await Promise.all([
+    db
+      .select({ row: growActivities, sortAt: sortAtSql(growActivities.occurredAt) })
+      .from(growActivities)
+      .where(pageWhere)
+      .orderBy(desc(growActivities.occurredAt), desc(growActivities.id))
+      .limit(limit + 1),
+    db.select({ total: sql<number>`count(*)::int` }).from(growActivities).where(filtered),
+  ]);
+  const page = sliceGrowListPage(
+    fetched.map((entry) => ({ ...entry.row, sortAt: entry.sortAt })),
+    limit,
+  );
+  const activities = await presentStoredActivitySummaries(
+    page.rows.map(({ sortAt: _sortAt, ...row }) => row),
+    user.brokerageId,
+  );
+  res.json({
+    activities,
+    nextCursor: page.nextCursor,
+    total: Number(counted[0]?.total ?? 0),
+    limit,
+  });
 });
 
 growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
@@ -476,19 +589,49 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
 
 growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"), async (req, res) => {
   const user = req.authedUser!;
+  const pageQuery = readGrowListPageQuery(req.query);
+  if (!pageQuery.ok) {
+    res.status(400).json({ error: pageQuery.error });
+    return;
+  }
+  // Optional filters share one list so a later opportunity-type filter (C-5a)
+  // is another predicate here, applied to both the page and the exact count.
+  // Type is intentionally not read yet.
+  const idFilter = parseOptionalPositiveId(req.query.id);
+  if (!idFilter.ok) {
+    res.status(400).json({ error: "id must be a positive integer" });
+    return;
+  }
+  const search = readSearchQuery(req.query.search);
   const restrictTo = await restrictedPropertyIdsFor(user);
-  const rows = await db
-    .select()
-    .from(growOpportunities)
-    .where(
-      and(
-        eq(growOpportunities.brokerageId, user.brokerageId),
-        visibleOwnedOrLinkedPropertySql(growOpportunities.propertyId, growOpportunities.ownerUserId, restrictTo, user.id),
-      ),
-    )
-    .orderBy(desc(growOpportunities.createdAt))
-    .limit(200);
-  res.json({ opportunities: rows });
+  const conditions = opportunityListConditions(user.brokerageId, restrictTo, user.id, {
+    id: idFilter.id ?? undefined,
+    search,
+  });
+  const filtered = and(...conditions);
+  const { limit, cursor } = pageQuery.page;
+  const pageWhere = cursor
+    ? and(filtered, descendingKeysetBefore(growOpportunities.createdAt, growOpportunities.id, cursor))
+    : filtered;
+  const [fetched, counted] = await Promise.all([
+    db
+      .select({ row: growOpportunities, sortAt: sortAtSql(growOpportunities.createdAt) })
+      .from(growOpportunities)
+      .where(pageWhere)
+      .orderBy(desc(growOpportunities.createdAt), desc(growOpportunities.id))
+      .limit(limit + 1),
+    db.select({ total: sql<number>`count(*)::int` }).from(growOpportunities).where(filtered),
+  ]);
+  const page = sliceGrowListPage(
+    fetched.map((entry) => ({ ...entry.row, sortAt: entry.sortAt })),
+    limit,
+  );
+  res.json({
+    opportunities: page.rows.map(({ sortAt: _sortAt, ...row }) => row),
+    nextCursor: page.nextCursor,
+    total: Number(counted[0]?.total ?? 0),
+    limit,
+  });
 });
 
 growRouter.post(
