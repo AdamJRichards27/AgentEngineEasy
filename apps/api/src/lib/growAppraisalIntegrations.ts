@@ -43,6 +43,7 @@ import {
   addParticipantFromParty,
   partyDisplayName as computePartyDisplayName,
 } from "./communications/recipientResolution.js";
+import { assertMessageMayLeave } from "./communications/outboundConsent.js";
 import { askCopilot } from "./ai/orchestrator.js";
 import { ingestDocumentVersion } from "./documentStorage.js";
 
@@ -125,6 +126,10 @@ export async function sendAppraisal(input: SendAppraisalInput): Promise<SendAppr
     recipientParticipantId: participant.id,
     createdByUserId: input.userId,
   });
+
+  // GP-4: an appraisal send is an A-8 email/SMS, including when the body was
+  // drafted by the copilot. Refuse before approval or queueing.
+  await assertMessageMayLeave(message, input.userId);
 
   let status: "sent" | "pending_approval";
   if (requiresApproval(message)) {
