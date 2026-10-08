@@ -156,6 +156,10 @@ export interface GrowDataRegionQuery {
   isLoading: boolean;
   isError: boolean;
   error?: unknown;
+  /** True while a refetch or a new filter is in flight. */
+  isFetching?: boolean;
+  /** True when `data` is still the previous filter's result. */
+  isPlaceholderData?: boolean;
 }
 
 /**
@@ -167,6 +171,9 @@ export interface GrowDataRegionQuery {
 export function growDataRegionState(query: GrowDataRegionQuery, itemCount: number | null | undefined): GrowDataRegionState {
   if (query.isError) return "error";
   if (query.isLoading || itemCount === null || itemCount === undefined) return "loading";
+  // A filter that has not produced rows yet must not keep the previous
+  // "nothing matched …" sentence above the next result.
+  if ((query.isFetching || query.isPlaceholderData) && itemCount === 0) return "loading";
   return itemCount === 0 ? "empty" : "ready";
 }
 
@@ -204,8 +211,13 @@ export function growDataRegionError(error: unknown, fallback: string): GrowDataR
 // "No contacts found." was shown both for a brokerage with no contacts at all
 // and for a search that matched nothing — two different situations with two
 // different next steps.
-export function contactsEmptyMessage(search: string): string {
+export function contactsEmptyMessage(search: string, role?: string): string {
   const term = search.trim();
+  const roleName = typeof role === "string" ? role.trim() : "";
+  if (term.length > 0 && roleName.length > 0) {
+    return `No contacts match “${term}” with the ${roleName} role. Try a different name, organisation, email, or role.`;
+  }
+  if (roleName.length > 0) return `No contacts with the ${roleName} role.`;
   return term.length > 0
     ? `No contacts match “${term}”. Try a different name, organisation, or email.`
     : "No contacts yet — import contacts and properties to get started.";

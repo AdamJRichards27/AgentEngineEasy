@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@aee/db": "workspace:*",
+    "@aee/domain": "workspace:*",
     "@aee/events": "workspace:*",
     "@aee/integration-aml": "workspace:*",
     "@aee/integration-billing": "workspace:*",

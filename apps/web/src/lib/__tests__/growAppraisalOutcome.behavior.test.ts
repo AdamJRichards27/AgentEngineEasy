@@ -69,6 +69,10 @@ function createHarness() {
     beginRender() {
       stateCursor = 0;
     },
+    reset() {
+      state.length = 0;
+      stateCursor = 0;
+    },
     useState(initial: unknown) {
       const index = stateCursor++;
       if (!(index in state)) state[index] = typeof initial === "function" ? (initial as () => unknown)() : initial;
@@ -469,6 +473,7 @@ test("Contact 360 and an opportunity row link to the appraisal workspace instead
         assert.equal(byId(contact, "grow-appraisal-8-outcome-form"), undefined, status);
         assertNoLongPath(contact);
 
+        hooks.reset();
         hooks.beginRender();
         const tab = page.GrowOpportunitiesTab({ onViewContact: () => {} });
         assert.equal(linkByLabel(tab, "Open appraisal")?.props?.href, "/grow/appraisals/8", status);
@@ -624,6 +629,9 @@ test("Start stays hidden when the property already has an appraisal, including a
       assert.equal(button(tab, "Record outcome"), undefined);
       assert.equal(button(tab, "Appointment scheduled"), undefined);
 
+      // The tab now keeps its own type-filter state. The contact section is a
+      // different component, so it must not reuse the tab's hook slots.
+      otherContact.hooks.reset();
       otherContact.hooks.beginRender();
       const contactOpp = page.GrowContactOpportunitiesSection({
         partyId: 12,

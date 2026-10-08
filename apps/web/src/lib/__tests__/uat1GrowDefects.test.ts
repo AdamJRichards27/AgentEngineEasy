@@ -145,7 +145,7 @@ test("D4: every grow-table sits in a scroll container that cannot widen the page
   for (const source of sourceFiles(webSrc)) {
     const matches = source.match(/<table className="grow-table">/g);
     if (matches) tables.push(...matches);
-    const stripped = source.replace(/<GrowTableScroll>\s*<table className="grow-table">/g, "");
+    const stripped = source.replace(/<GrowTableScroll(?:\s[^>]*)?>\s*<table className="grow-table">/g, "");
     assert.equal(stripped.includes('<table className="grow-table">'), false, "a grow-table is missing GrowTableScroll");
   }
   assert.ok(tables.length >= 5, "expected the Grow tables to still be present");

@@ -50,6 +50,14 @@ import { evaluateConsentDecisionReadOnly } from "../lib/consentControlsPersisten
 import { PHONE_CALL_CONSENT_PURPOSE, PHONE_CALL_CONSENT_SCOPE } from "../lib/telephony/eligibility.js";
 import { validateRecord } from "../lib/import/validate.js";
 import { contactPhoneMatchKey, contactPhoneMatchKeySql } from "../lib/contactPhoneMatch.js";
+import {
+  descendingKeysetBefore,
+  parseOptionalPositiveId,
+  readGrowListPageQuery,
+  readSearchQuery,
+  sliceGrowListPage,
+  sortAtSql,
+} from "../lib/growListPage.js";
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline.
 //
@@ -246,10 +254,21 @@ function createdContactPayload(party: typeof parties.$inferSelect) {
 // brokerageId is never trusted (matches every other Grow route in routes/grow.ts).
 contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
-  const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const pageQuery = readGrowListPageQuery(req.query);
+  if (!pageQuery.ok) {
+    res.status(400).json({ error: pageQuery.error });
+    return;
+  }
+  const excludeParty = parseOptionalPositiveId(req.query.excludePartyId);
+  if (!excludeParty.ok) {
+    res.status(400).json({ error: "excludePartyId must be a positive integer" });
+    return;
+  }
+  const search = readSearchQuery(req.query.search);
   const role = typeof req.query.role === "string" ? req.query.role : undefined;
 
   const conditions = [eq(parties.brokerageId, brokerageId)];
+  if (excludeParty.id !== null) conditions.push(sql`${parties.id} <> ${excludeParty.id}`);
   if (search.length > 0) {
     const pattern = `%${search}%`;
     // "UAT1-Sam Seller" matches neither first name nor last name on its own.
@@ -268,13 +287,10 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
     );
   }
 
-  // The role filter is a SQL predicate, applied BEFORE the limit. It used to run in JS over the
-  // already-limited 200 rows, which made `?role=` search only the 200 most recently created
-  // contacts in the brokerage: once a brokerage held more than 200 parties, a contact holding
-  // that role simply stopped appearing in the picker, with no error and no indication that
-  // anything had been cut. `limit(200)` now caps the contacts that actually match, which is what
-  // it was always meant to mean. The subquery is covered by grow_contact_roles' own
-  // (brokerage_id, party_id) and (party_id, role) indexes.
+  // The role filter is a SQL predicate on the filtered set, not on one page of it. It used to
+  // run in JS over the already-limited 200 newest parties, so a contact holding the role
+  // disappeared once the brokerage grew past that window. The subquery is covered by
+  // grow_contact_roles' own (brokerage_id, party_id) and (party_id, role) indexes.
   if (role) {
     conditions.push(
       inArray(
@@ -287,13 +303,28 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
     );
   }
 
-  const partyRows = await db.select().from(parties).where(and(...conditions)).orderBy(desc(parties.createdAt)).limit(200);
+  const filtered = and(...conditions);
+  const { limit, cursor } = pageQuery.page;
+  const pageWhere = cursor ? and(filtered, descendingKeysetBefore(parties.createdAt, parties.id, cursor)) : filtered;
+  const [fetched, counted] = await Promise.all([
+    db
+      .select({ row: parties, sortAt: sortAtSql(parties.createdAt) })
+      .from(parties)
+      .where(pageWhere)
+      .orderBy(desc(parties.createdAt), desc(parties.id))
+      .limit(limit + 1),
+    db.select({ total: sql<number>`count(*)::int` }).from(parties).where(filtered),
+  ]);
+  const page = sliceGrowListPage(
+    fetched.map((entry) => ({ ...entry.row, sortAt: entry.sortAt })),
+    limit,
+  );
+  const partyRows = page.rows;
 
-  // Enrichment is restricted to the parties actually being rendered. Both of these queries used
-  // to read every role row and every relationship row in the brokerage (~25k relationship rows at
-  // realistic size) to decorate at most 200 displayed contacts — `partyIds` was computed here and
-  // then never used. Both tables are indexed (brokerage_id, party_id), so adding the party
-  // predicate keeps the same index and just bounds how much of it is walked.
+  // Enrichment is restricted to the parties on this page. Both of these queries used to read
+  // every role row and every relationship row in the brokerage to decorate the list. Both
+  // tables are indexed (brokerage_id, party_id), so the party predicate keeps that index and
+  // bounds how much of it is walked. The lookahead row used to detect a next page is not enriched.
   const partyIds = partyRows.map((p) => p.id);
   const [roleRows, relationshipCountRows] = partyIds.length > 0
     ? await Promise.all([
@@ -329,6 +360,9 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
       roles: rolesByParty.get(p.id) ?? [],
       relatedPropertyCount: propertyCountByParty.get(p.id)?.size ?? 0,
     })),
+    nextCursor: page.nextCursor,
+    total: Number(counted[0]?.total ?? 0),
+    limit,
   });
 });
 
