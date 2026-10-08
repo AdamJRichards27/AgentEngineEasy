@@ -37,6 +37,11 @@ test("a data region's state is total: loading, error, empty, or ready", () => {
   assert.equal(growDataRegionState({ isLoading: true, isError: true }, undefined), "error", "a failure outranks a refetch");
   assert.equal(growDataRegionState(loaded, 0), "empty");
   assert.equal(growDataRegionState(loaded, 3), "ready");
+  // A later search must not keep the previous empty sentence while its
+  // request is still in flight, or once that request has rows.
+  assert.equal(growDataRegionState({ ...loaded, isFetching: true }, 0), "loading");
+  assert.equal(growDataRegionState({ ...loaded, isPlaceholderData: true }, 0), "loading");
+  assert.equal(growDataRegionState({ ...loaded, isFetching: true }, 38), "ready");
   // Settled but nothing arrived at all (e.g. a disabled query): still not a
   // claim that there is no data.
   assert.equal(growDataRegionState(loaded, undefined), "loading");
@@ -71,6 +76,9 @@ test("empty contacts distinguishes 'nothing matched that search' from 'no contac
   assert.match(contactsEmptyMessage("   "), /No contacts yet/);
   assert.match(contactsEmptyMessage("Smith"), /No contacts match “Smith”/);
   assert.doesNotMatch(contactsEmptyMessage("Smith"), /No contacts yet/);
+  assert.match(contactsEmptyMessage("UAT1", "Buyer"), /No contacts match “UAT1” with the Buyer role/);
+  assert.match(contactsEmptyMessage("", "Seller"), /No contacts with the Seller role/);
+  assert.doesNotMatch(contactsEmptyMessage("", "Seller"), /No contacts match/);
 });
 
 test("clicking the Contacts tab returns to the contact list; other tabs only switch tab", () => {

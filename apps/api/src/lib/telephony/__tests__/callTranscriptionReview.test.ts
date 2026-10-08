@@ -9,6 +9,7 @@ import {
   documents,
   entitlementGrants,
   growActivities,
+  growCallRecordingConsents,
   growCallSessions,
   growCallTranscriptions,
   parties,
@@ -25,6 +26,7 @@ import {
 } from "../callTranscriptionReview.js";
 import { setCallTranscriptionAuditFailureForTests } from "../callTranscriptions.js";
 import { persistApprovedCallSummaryActivity } from "../callTranscriptionTimeline.js";
+import { withdrawRecordingConsent } from "../consent.js";
 
 let brokerageId: number;
 let foreignBrokerageId: number;
@@ -47,15 +49,21 @@ async function createFixture(options: {
   commitments?: Array<{ id: string; text: string }>;
   followups?: Array<{ id: string; text: string }>;
   processingState?: "AWAITING_AGENT_REVIEW" | "APPROVED" | "PARTIALLY_APPROVED";
+  sessionStatus?: "CONNECTED" | "COMPLETED";
 } = {}) {
   fixtureNumber += 1;
   const [party] = await db.insert(parties).values({
     brokerageId, firstName: "Review", lastName: `Fixture ${fixtureNumber}`,
   }).returning();
+  const [consent] = await db.insert(growCallRecordingConsents).values({
+    brokerageId, partyId: party!.id, scope: "PER_CALL", status: "ACTIVE", source: "VERBAL_ON_CALL",
+    jurisdiction: "AU", capturedByUserId: ownerId,
+  }).returning();
   const [session] = await db.insert(growCallSessions).values({
     brokerageId, partyId: party!.id, initiatedByUserId: ownerId,
     destinationRaw: "+61400111222", destinationNormalized: "+61400111222",
-    destinationCountry: "AU", provider: "synthetic", status: "CONNECTED",
+    destinationCountry: "AU", provider: "synthetic", status: options.sessionStatus ?? "CONNECTED",
+    recordingRequested: true, recordingConsentId: consent!.id,
   }).returning();
   const key = `review-test-${brokerageId}-${fixtureNumber}`;
   const [document] = await db.insert(documents).values({
@@ -79,7 +87,23 @@ async function createFixture(options: {
     draftCommitments: options.commitments ?? [{ id: "com-1", text: "Machine commitment." }],
     draftFollowups: options.followups ?? [{ id: "fu-1", text: "Machine follow-up." }],
   }).returning();
-  return { party: party!, session: session!, document: document!, version: version!, transcription: transcription! };
+  return { party: party!, consent: consent!, session: session!, document: document!, version: version!, transcription: transcription! };
+}
+
+const approvableReview = () => review([
+  transcriptReview(),
+  { itemType: "SUMMARY", itemId: "summary", decision: "APPROVED" },
+  { itemType: "KEY_POINT", itemId: "kp-1", decision: "APPROVED" },
+  { itemType: "COMMITMENT", itemId: "com-1", decision: "APPROVED" },
+  { itemType: "FOLLOWUP", itemId: "fu-1", decision: "APPROVED" },
+]);
+
+async function persistedTranscription(id: number) {
+  const [row] = await db.select().from(growCallTranscriptions).where(and(
+    eq(growCallTranscriptions.id, id),
+    eq(growCallTranscriptions.brokerageId, brokerageId),
+  ));
+  return row!;
 }
 
 before(async () => {
@@ -435,4 +459,175 @@ test("a strict review audit outage rolls back save (including its Timeline snaps
   }, persistApprovedCallSummaryActivity);
   assert.equal((await callSummaryActivities(recovered.transcription.id)).length, 1);
   assert.equal((await reviewAudits(recovered.transcription.id)).length, 1);
+});
+
+const isReviewCode = (code: CallTranscriptionReviewError["code"]) => (error: unknown) =>
+  error instanceof CallTranscriptionReviewError && error.code === code;
+
+test("save still works while recording consent is in place", async () => {
+  const fixture = await createFixture({ sessionStatus: "COMPLETED" });
+  const saved = await saveCallTranscriptionReview({
+    brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(),
+    body: approvableReview(),
+  });
+  assert.equal(saved.processingState, "APPROVED");
+  assert.equal(saved.approvedBy, ownerId);
+  const [consent] = await db.select().from(growCallRecordingConsents).where(and(
+    eq(growCallRecordingConsents.id, fixture.consent.id),
+    eq(growCallRecordingConsents.brokerageId, brokerageId),
+  ));
+  assert.equal(consent?.status, "ACTIVE");
+  assert.equal(consent?.withdrawnAt, null);
+});
+
+test("save is refused after consent withdrawal and writes nothing", async () => {
+  const fixture = await createFixture({ sessionStatus: "COMPLETED" });
+  const before = await persistedTranscription(fixture.transcription.id);
+  await withdrawRecordingConsent({
+    brokerageId, consentId: fixture.consent.id, withdrawnByUserId: ownerId, withdrawalReason: "Contact withdrew.",
+  });
+  const [consent] = await db.select().from(growCallRecordingConsents).where(eq(growCallRecordingConsents.id, fixture.consent.id));
+  assert.equal(consent?.status, "WITHDRAWN");
+  const [session] = await db.select().from(growCallSessions).where(eq(growCallSessions.id, fixture.session.id));
+  assert.equal(session?.recordingConsentId, fixture.consent.id, "a completed call keeps its capture consent id");
+  await assert.rejects(
+    saveCallTranscriptionReview({
+      brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(),
+      body: approvableReview(),
+    }),
+    isReviewCode("CONSENT_WITHDRAWN"),
+  );
+  assert.deepEqual(await persistedTranscription(fixture.transcription.id), before);
+  assert.equal((await reviewAudits(fixture.transcription.id)).length, 0);
+  assert.equal((await callSummaryActivities(fixture.transcription.id)).length, 0);
+});
+
+test("discard still works after consent withdrawal", async () => {
+  const fixture = await createFixture({ sessionStatus: "COMPLETED" });
+  await withdrawRecordingConsent({
+    brokerageId, consentId: fixture.consent.id, withdrawnByUserId: ownerId, withdrawalReason: "Contact withdrew.",
+  });
+  const discarded = await discardCallTranscription({
+    brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(), body: {},
+  });
+  assert.equal(discarded.processingState, "DISCARDED");
+  assert.equal(discarded.transcript, null);
+  assert.equal((await reviewAudits(fixture.transcription.id)).length, 1);
+  assert.equal((await reviewAudits(fixture.transcription.id))[0]?.action, "grow_call_transcription_discarded");
+});
+
+test("a previously saved review is unchanged after consent withdrawal", async () => {
+  const fixture = await createFixture({ sessionStatus: "COMPLETED" });
+  await saveCallTranscriptionReview({
+    brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(),
+    body: approvableReview(),
+  }, persistApprovedCallSummaryActivity);
+  const saved = await persistedTranscription(fixture.transcription.id);
+  assert.equal(saved.processingState, "APPROVED");
+  await withdrawRecordingConsent({
+    brokerageId, consentId: fixture.consent.id, withdrawnByUserId: ownerId, withdrawalReason: "Contact withdrew.",
+  });
+  assert.deepEqual(await persistedTranscription(fixture.transcription.id), saved);
+  await assert.rejects(
+    saveCallTranscriptionReview({
+      brokerageId, callSessionId: fixture.session.id, transcriptionId: fixture.transcription.id, actor: actor(),
+      body: approvableReview(),
+    }),
+    isReviewCode("TERMINAL"),
+  );
+  assert.deepEqual(await persistedTranscription(fixture.transcription.id), saved);
+  assert.equal((await callSummaryActivities(fixture.transcription.id)).length, 1);
+});
+
+test("a foreign-brokerage consent row cannot satisfy or block the save-time check", async () => {
+  const blocked = await createFixture({ sessionStatus: "COMPLETED" });
+  const [foreignActive] = await db.insert(growCallRecordingConsents).values({
+    brokerageId: foreignBrokerageId,
+    partyId: blocked.party.id,
+    scope: "PER_CALL",
+    status: "ACTIVE",
+    source: "VERBAL_ON_CALL",
+    jurisdiction: "AU",
+    capturedByUserId: foreignOwnerId,
+  }).returning();
+  await db.update(growCallSessions).set({ recordingConsentId: foreignActive!.id }).where(and(
+    eq(growCallSessions.id, blocked.session.id),
+    eq(growCallSessions.brokerageId, brokerageId),
+  ));
+  const beforeBlocked = await persistedTranscription(blocked.transcription.id);
+  await assert.rejects(
+    saveCallTranscriptionReview({
+      brokerageId, callSessionId: blocked.session.id, transcriptionId: blocked.transcription.id, actor: actor(),
+      body: approvableReview(),
+    }),
+    isReviewCode("CONSENT_WITHDRAWN"),
+  );
+  assert.deepEqual(await persistedTranscription(blocked.transcription.id), beforeBlocked);
+  const [foreignAfterDeny] = await db.select().from(growCallRecordingConsents).where(eq(growCallRecordingConsents.id, foreignActive!.id));
+  assert.equal(foreignAfterDeny?.status, "ACTIVE");
+  assert.equal(foreignAfterDeny?.brokerageId, foreignBrokerageId);
+
+  const allowed = await createFixture({ sessionStatus: "COMPLETED" });
+  const [foreignWithdrawn] = await db.insert(growCallRecordingConsents).values({
+    brokerageId: foreignBrokerageId,
+    partyId: allowed.party.id,
+    scope: "PER_CALL",
+    status: "WITHDRAWN",
+    source: "VERBAL_ON_CALL",
+    jurisdiction: "AU",
+    capturedByUserId: foreignOwnerId,
+    withdrawnAt: new Date(),
+    withdrawnByUserId: foreignOwnerId,
+    withdrawalReason: "Foreign withdrawal must not block this brokerage.",
+  }).returning();
+  const saved = await saveCallTranscriptionReview({
+    brokerageId, callSessionId: allowed.session.id, transcriptionId: allowed.transcription.id, actor: actor(),
+    body: approvableReview(),
+  });
+  assert.equal(saved.processingState, "APPROVED");
+  const [foreignStillWithdrawn] = await db.select().from(growCallRecordingConsents).where(eq(growCallRecordingConsents.id, foreignWithdrawn!.id));
+  assert.equal(foreignStillWithdrawn?.status, "WITHDRAWN");
+  assert.equal(foreignStillWithdrawn?.brokerageId, foreignBrokerageId);
+  const [localConsent] = await db.select().from(growCallRecordingConsents).where(and(
+    eq(growCallRecordingConsents.id, allowed.consent.id),
+    eq(growCallRecordingConsents.brokerageId, brokerageId),
+  ));
+  assert.equal(localConsent?.status, "ACTIVE");
+
+  // The capture reference wins over the session pointer. A foreign id stored
+  // there cannot satisfy the check, and a foreign session pointer cannot block
+  // a local capture consent.
+  const foreignCapture = await createFixture({ sessionStatus: "COMPLETED" });
+  await db.update(growCallTranscriptions).set({
+    retentionAudit: { schemaVersion: 1, consentReference: foreignActive!.id },
+  }).where(and(
+    eq(growCallTranscriptions.id, foreignCapture.transcription.id),
+    eq(growCallTranscriptions.brokerageId, brokerageId),
+  ));
+  const beforeForeignCapture = await persistedTranscription(foreignCapture.transcription.id);
+  await assert.rejects(
+    saveCallTranscriptionReview({
+      brokerageId, callSessionId: foreignCapture.session.id, transcriptionId: foreignCapture.transcription.id, actor: actor(),
+      body: approvableReview(),
+    }),
+    isReviewCode("CONSENT_WITHDRAWN"),
+  );
+  assert.deepEqual(await persistedTranscription(foreignCapture.transcription.id), beforeForeignCapture);
+
+  const localCapture = await createFixture({ sessionStatus: "COMPLETED" });
+  await db.update(growCallTranscriptions).set({
+    retentionAudit: { schemaVersion: 1, consentReference: localCapture.consent.id },
+  }).where(and(
+    eq(growCallTranscriptions.id, localCapture.transcription.id),
+    eq(growCallTranscriptions.brokerageId, brokerageId),
+  ));
+  await db.update(growCallSessions).set({ recordingConsentId: foreignWithdrawn!.id }).where(and(
+    eq(growCallSessions.id, localCapture.session.id),
+    eq(growCallSessions.brokerageId, brokerageId),
+  ));
+  const savedDespiteForeignPointer = await saveCallTranscriptionReview({
+    brokerageId, callSessionId: localCapture.session.id, transcriptionId: localCapture.transcription.id, actor: actor(),
+    body: approvableReview(),
+  });
+  assert.equal(savedDespiteForeignPointer.processingState, "APPROVED");
 });

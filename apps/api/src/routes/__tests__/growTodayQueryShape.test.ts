@@ -153,6 +153,27 @@ test("I-2 — the activity read is a grouped aggregate scoped to the parties in 
   assert.match(activity, /brokerage_id/i, "tenant scoping is never optional");
 });
 
+test("C-6 — qualifying Hub messages are one grouped aggregate, tenant-scoped through the thread and the party", async () => {
+  const statements = await captureStatements(brokerageId);
+  const comms = statements.filter((s) => /from\s+"?communication_messages"?/i.test(s));
+  assert.equal(comms.length, 1, "exactly one statement may touch communication_messages");
+
+  const [query] = comms;
+  assert.match(query, /max\(/i, "last contact from the Hub is a database aggregate");
+  assert.match(query, /group by/i, "one row per party, not one row per message");
+  assert.match(query, /communication_participants/i, "the contact link is the participant row");
+  assert.match(query, /communication_threads/i, "participants have no brokerage_id, so the thread is the parent");
+  assert.match(query, /"parties"/i);
+  assert.match(
+    query,
+    /"communication_threads"\."brokerage_id"/i,
+    "A3: filter the thread's brokerage, not only the message's",
+  );
+  assert.match(query, /"parties"\."brokerage_id"/i, "A3: filter the party's brokerage");
+  assert.match(query, /"communication_messages"\."brokerage_id"/i);
+  assert.match(query, /party_id"?\s*=\s*any/i, "scoped to the parties already in play");
+});
+
 test("I-2 — the aggregate returns one row per contact, not one row per activity", async () => {
   // The claim being measured: the old implementation shipped
   // CONTACT_COUNT * ACTIVITIES_PER_CONTACT rows to Node to produce a map of
@@ -211,16 +232,19 @@ test("the statement count is FIXED — it does not grow with the size of the ten
   // zone. It does not create a settings row.
   // G-UAT-7 adds one first_run_probe statement: six EXISTS/LIMIT 1 checks in
   // a single select, so the count stays fixed as the tenant grows.
+  // C-6 adds one grouped aggregate over qualifying communication_messages,
+  // scoped to the same party ids as the activity aggregate. It does not
+  // grow with the number of messages.
   assert.equal(
     large.length,
-    9,
-    `expected 9 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
+    10,
+    `expected 10 statements without Property Intelligence; got ${large.length}:\n${large.join("\n---\n")}`,
   );
 
   const withSignals = await captureStatements(brokerageId, { includePropertyIntelligenceSignals: true });
   assert.equal(
     withSignals.length,
-    10,
+    11,
     `Rule F adds exactly one statement and no more; got ${withSignals.length}:\n${withSignals.join("\n---\n")}`,
   );
 });
