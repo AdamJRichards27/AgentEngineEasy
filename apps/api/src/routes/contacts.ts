@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, desc, eq, gt, ilike, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -49,6 +49,7 @@ import { isWithinConsentHours } from "../lib/consentControls.js";
 import { evaluateConsentDecisionReadOnly } from "../lib/consentControlsPersistence.js";
 import { PHONE_CALL_CONSENT_PURPOSE, PHONE_CALL_CONSENT_SCOPE } from "../lib/telephony/eligibility.js";
 import { validateRecord } from "../lib/import/validate.js";
+import { normaliseEmail } from "../lib/import/normalise.js";
 import { contactPhoneMatchKey, contactPhoneMatchKeySql } from "../lib/contactPhoneMatch.js";
 import {
   descendingKeysetBefore,
@@ -249,6 +250,175 @@ function createdContactPayload(party: typeof parties.$inferSelect) {
   };
 }
 
+/** Contact 360's `contact` object. Edit returns this, without inventing roles. */
+function contactIdentityPayload(party: typeof parties.$inferSelect) {
+  return {
+    contact: {
+      id: party.id,
+      partyType: party.partyType,
+      firstName: party.firstName,
+      middleName: party.middleName,
+      lastName: party.lastName,
+      organisationName: party.organisationName,
+      displayName: displayName(party),
+      email: party.email,
+      mobile: party.mobile,
+      residentialAddress: party.residentialAddress,
+      createdAt: party.createdAt.toISOString(),
+      updatedAt: party.updatedAt.toISOString(),
+    },
+  };
+}
+
+// FU-2 duplicate rules, shared by create and edit. Email matches
+// normaliseEmail (trim + lowercase) against lower(btrim(stored)). Phone
+// matches contactPhoneMatchKey, the same AU/NZ key import already stores.
+// The query is brokerage-scoped and selects id only. A cross-brokerage row
+// is not a duplicate and is never named. Contact 360 shows every party in
+// the caller's brokerage, so a same-brokerage id is one they can open;
+// anything else is omitted so the 409 cannot carry a hidden contact.
+
+type ContactDuplicateKind = "email" | "phone";
+
+function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
+  const error =
+    kind === "email"
+      ? "A contact with this email already exists."
+      : "A contact with this phone number already exists.";
+  return contactId === null ? { error } : { error, contactId };
+}
+
+async function contactIdentityVisible(brokerageId: number, partyId: number): Promise<boolean> {
+  const [row] = await db
+    .select({ id: parties.id })
+    .from(parties)
+    .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)))
+    .limit(1);
+  return row !== undefined;
+}
+
+/** Null when nothing conflicts. contactId is set only when Contact 360 would return that party. */
+async function findDuplicateContact(
+  brokerageId: number,
+  kind: ContactDuplicateKind,
+  value: string,
+  excludePartyId: number | null,
+): Promise<{ contactId: number | null } | null> {
+  const scope = [eq(parties.brokerageId, brokerageId)];
+  if (excludePartyId !== null) scope.push(ne(parties.id, excludePartyId));
+
+  if (kind === "email") {
+    const emailKey = normaliseEmail(value).value;
+    if (!emailKey) return null;
+    const [existing] = await db
+      .select({ id: parties.id })
+      .from(parties)
+      .where(and(...scope, sql`lower(btrim(${parties.email})) = ${emailKey}`))
+      .orderBy(asc(parties.id))
+      .limit(1);
+    if (!existing) return null;
+    const visible = await contactIdentityVisible(brokerageId, existing.id);
+    return { contactId: visible ? existing.id : null };
+  }
+
+  const phoneKey = contactPhoneMatchKey(value);
+  if (!phoneKey) return null;
+  const [existing] = await db
+    .select({ id: parties.id })
+    .from(parties)
+    .where(and(...scope, sql`${contactPhoneMatchKeySql(parties.mobile)} = ${phoneKey}`))
+    .orderBy(asc(parties.id))
+    .limit(1);
+  if (!existing) return null;
+  const visible = await contactIdentityVisible(brokerageId, existing.id);
+  return { contactId: visible ? existing.id : null };
+}
+
+const CONTACT_PATCH_KEYS = [
+  "name",
+  "firstName",
+  "middleName",
+  "lastName",
+  "organisationName",
+  "email",
+  "mobile",
+  "phone",
+  "residentialAddress",
+] as const;
+
+type ContactPatchKey = (typeof CONTACT_PATCH_KEYS)[number];
+
+const CONTACT_EDIT_COLUMNS = [
+  "firstName",
+  "middleName",
+  "lastName",
+  "organisationName",
+  "email",
+  "mobile",
+  "residentialAddress",
+] as const;
+
+type ContactEditColumn = (typeof CONTACT_EDIT_COLUMNS)[number];
+
+type ContactEditValues = Record<ContactEditColumn, string | null>;
+
+function parseContactPatchBody(
+  body: unknown,
+): { ok: false; error: string } | { ok: true; values: Partial<Record<ContactPatchKey, string | null>> } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "Expected a contact." };
+  }
+  const record = body as Record<string, unknown>;
+  const values: Partial<Record<ContactPatchKey, string | null>> = {};
+  for (const key of CONTACT_PATCH_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const read = readOptionalText(record[key]);
+    if (!read.ok) return { ok: false, error: read.error };
+    values[key] = read.value;
+  }
+  return { ok: true, values };
+}
+
+function patchHas(values: Partial<Record<ContactPatchKey, string | null>>, key: ContactPatchKey): boolean {
+  return Object.prototype.hasOwnProperty.call(values, key);
+}
+
+/** Merge a partial edit onto the stored party. Omitted keys stay. `phone` is the create alias for `mobile`. */
+function applyContactPatch(party: typeof parties.$inferSelect, values: Partial<Record<ContactPatchKey, string | null>>): ContactEditValues {
+  let firstName = patchHas(values, "firstName") ? values.firstName! : party.firstName;
+  let lastName = patchHas(values, "lastName") ? values.lastName! : party.lastName;
+  const organisationName = patchHas(values, "organisationName") ? values.organisationName! : party.organisationName;
+  const namePartsProvided = patchHas(values, "firstName") || patchHas(values, "lastName") || patchHas(values, "organisationName");
+  if (!namePartsProvided && patchHas(values, "name")) {
+    if (values.name) {
+      const split = splitContactName(values.name);
+      firstName = split.firstName;
+      lastName = split.lastName;
+    } else {
+      firstName = null;
+      lastName = null;
+    }
+  }
+
+  let mobile = party.mobile;
+  if (patchHas(values, "mobile")) mobile = values.mobile!;
+  else if (patchHas(values, "phone")) mobile = values.phone!;
+
+  return {
+    firstName,
+    middleName: patchHas(values, "middleName") ? values.middleName! : party.middleName,
+    lastName,
+    organisationName,
+    email: patchHas(values, "email") ? values.email! : party.email,
+    mobile,
+    residentialAddress: patchHas(values, "residentialAddress") ? values.residentialAddress! : party.residentialAddress,
+  };
+}
+
+function changedContactFields(before: ContactEditValues, after: ContactEditValues): ContactEditColumn[] {
+  return CONTACT_EDIT_COLUMNS.filter((key) => before[key] !== after[key]);
+}
+
 // GET /grow/contacts — list/search, for the Grow Contacts entry point and any "find a contact"
 // picker elsewhere in Grow. Always scoped to the caller's own brokerage; a client-supplied
 // brokerageId is never trusted (matches every other Grow route in routes/grow.ts).
@@ -382,38 +552,18 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
   }
 
   if (parsed.email) {
-    const normalizedEmail = parsed.email.toLowerCase();
-    const [existing] = await db
-      .select({ id: parties.id })
-      .from(parties)
-      .where(and(eq(parties.brokerageId, user.brokerageId), sql`lower(btrim(${parties.email})) = ${normalizedEmail}`))
-      .orderBy(asc(parties.id))
-      .limit(1);
-    if (existing) {
-      res.status(409).json({
-        error: "A contact with this email already exists.",
-        contactId: existing.id,
-      });
+    const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", parsed.email, null);
+    if (emailDuplicate) {
+      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
       return;
     }
   }
 
   if (parsed.mobile) {
-    const phoneKey = contactPhoneMatchKey(parsed.mobile);
-    if (phoneKey) {
-      const [existingPhone] = await db
-        .select({ id: parties.id })
-        .from(parties)
-        .where(and(eq(parties.brokerageId, user.brokerageId), sql`${contactPhoneMatchKeySql(parties.mobile)} = ${phoneKey}`))
-        .orderBy(asc(parties.id))
-        .limit(1);
-      if (existingPhone) {
-        res.status(409).json({
-          error: "A contact with this phone number already exists.",
-          contactId: existingPhone.id,
-        });
-        return;
-      }
+    const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", parsed.mobile, null);
+    if (phoneDuplicate) {
+      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
+      return;
     }
   }
 
@@ -440,6 +590,111 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
   });
 
   res.status(201).json(createdContactPayload(party));
+});
+
+// PATCH /grow/contacts/:partyId — correct a contact's name, organisation,
+// email, mobile, or address. There is no separate edit entitlement;
+// grow.contacts.manage is the key that already governs contact creation.
+// Columns that do not exist (a second phone, a structured address) are not
+// added. partyType, brokerageId, and entityDetails are not editable.
+//
+// Validation reuses creation: readOptionalText, splitContactName, and
+// contactIsUnidentifiable. Email and phone duplicates reuse findDuplicateContact
+// (FU-2) and run only when that match key changes, excluding this party.
+// A conflict is the same 409 shape as creation and names a contact only when
+// Contact 360 would show them.
+//
+// Legacy communication consent is keyed by destination, not by party. This
+// route does not copy, move, or rewrite consent, DNC, or suppression rows.
+// A new email or phone therefore has no consent row and marketing fails closed.
+// The audit row lists changed column names only — never the values.
+contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+  const user = req.authedUser!;
+  const partyId = parsePositiveId(req.params.partyId);
+  if (!partyId) {
+    res.status(400).json({ error: "Invalid contact id" });
+    return;
+  }
+
+  const [party] = await db
+    .select()
+    .from(parties)
+    .where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId)))
+    .limit(1);
+  if (!party) {
+    await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
+    res.status(404).json({ error: "Contact not found in this brokerage" });
+    return;
+  }
+
+  const parsed = parseContactPatchBody(req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+
+  const before: ContactEditValues = {
+    firstName: party.firstName,
+    middleName: party.middleName,
+    lastName: party.lastName,
+    organisationName: party.organisationName,
+    email: party.email,
+    mobile: party.mobile,
+    residentialAddress: party.residentialAddress,
+  };
+  const next = applyContactPatch(party, parsed.values);
+  if (contactIsUnidentifiable(next)) {
+    res.status(400).json({
+      error: "A contact needs a name, email, or phone.",
+      code: "CONTACT_UNIDENTIFIABLE",
+    });
+    return;
+  }
+
+  const emailKeyChanged = normaliseEmail(before.email).value !== normaliseEmail(next.email).value;
+  if (emailKeyChanged && next.email) {
+    const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", next.email, party.id);
+    if (emailDuplicate) {
+      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
+      return;
+    }
+  }
+
+  const phoneKeyChanged = contactPhoneMatchKey(before.mobile) !== contactPhoneMatchKey(next.mobile);
+  if (phoneKeyChanged && next.mobile) {
+    const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", next.mobile, party.id);
+    if (phoneDuplicate) {
+      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
+      return;
+    }
+  }
+
+  const changed = changedContactFields(before, next);
+  if (changed.length === 0) {
+    res.json(contactIdentityPayload(party));
+    return;
+  }
+
+  const [updated] = await db
+    .update(parties)
+    .set({ ...next, updatedAt: new Date() })
+    .where(and(eq(parties.id, party.id), eq(parties.brokerageId, user.brokerageId)))
+    .returning();
+  if (!updated) {
+    res.status(404).json({ error: "Contact not found in this brokerage" });
+    return;
+  }
+
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "grow_contact_updated",
+    recordType: "party",
+    recordId: String(updated.id),
+    updatedValue: JSON.stringify({ fields: changed }),
+  });
+
+  res.json(contactIdentityPayload(updated));
 });
 
 /* =====================================================================

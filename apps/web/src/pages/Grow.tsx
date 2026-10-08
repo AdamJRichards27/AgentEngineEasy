@@ -19,6 +19,7 @@ import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptP
 // already Grow Today, Contact 360 and the call panel at once;
 // that extraction is the explicit mitigation recorded in the roadmap.
 import { GrowContactConsentPanel } from "../components/GrowContactConsentPanel";
+import { GrowContactEditForm } from "../components/GrowContactEditForm";
 import type { GrowContactability } from "../lib/contactability";
 import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -3050,6 +3051,7 @@ function GrowContactDetail({
           {c.email ?? "No email on file"}
           {c.mobile ? ` · ${c.mobile}` : ""}
         </p>
+        <GrowContactEditForm partyId={partyId} contact={c} canEdit={canManageContacts} />
         <div className="grow-contact-roles">
           {GROW_CONTACT_ROLES.map((role) => {
             const active = data.roles.includes(role);
