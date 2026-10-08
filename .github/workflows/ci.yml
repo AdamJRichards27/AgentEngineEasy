@@ -120,6 +120,10 @@ jobs:
         env:
           NODE_ENV: test
           ALLOW_DEV_AUTH: "true"
+          # Runs apps/api/src/routes/__tests__/platformOwnerAccess.test.ts
+          # against this job's aee_ci database. Without it the file skips
+          # unless DATABASE_URL uses port 55439.
+          AEE_ISOLATED_OWNER_TEST: "1"
         run: pnpm --filter @aee/api run test
 
       - name: Web automated test suite

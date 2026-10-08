@@ -103,10 +103,12 @@ export async function loadSession(req: Request, res: Response, next: NextFunctio
   if (row && row.isActive && row.brokerageId && row.sessionEpoch === verified.epoch) {
     req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
     try {
-      if (!await applyPlatformOwnerContext(req, res)) return;
+      // A missing platform_owners table is handled inside
+      // applyPlatformOwnerContext: normal users continue, and only the
+      // owner privilege surface fails closed. This catch remains for a
+      // confirmed owner whose mandatory audit write failed.
+      if (!await applyPlatformOwnerContext(req, res, verified.iat)) return;
     } catch {
-      // Never fall back to a brokerage identity if Owner permission/context
-      // lookup or its mandatory audit fails.
       res.status(503).json({ error: "Your access could not be verified. Please retry." });
       return;
     }

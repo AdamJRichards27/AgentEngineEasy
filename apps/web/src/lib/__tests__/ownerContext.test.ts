@@ -112,5 +112,6 @@ test("owner guard prevents operational page mounting without context and keeps o
   assert.match(app, /user\?\.platformOwner && <OwnerContextBanner user=\{user\}/);
   const owner = readFileSync(new URL("../owner.ts", import.meta.url), "utf8");
   assert.match(owner, /window\.location\.assign\(brokerageId === null \? "\/owner" : "\/settings\/users"\)/);
+  assert.match(owner, /currentPassword/);
   assert.match(owner, /retry: false/);
 });

@@ -121,6 +121,23 @@ export async function checkMigrationStatus(): Promise<MigrationStatus> {
 
 let untrackedMigrationsWarned = false;
 
+/** Relations migration 0035 is supposed to have created. Missing names are reported, never thrown. */
+export async function missingPlatformOwnerTables(): Promise<string[]> {
+  const result = await db.execute(sql`
+    select to_regclass('public.platform_owners') as platform_owners,
+           to_regclass('public.platform_owner_audit') as platform_owner_audit
+  `);
+  const row = (result.rows?.[0] ?? {}) as { platform_owners?: unknown; platform_owner_audit?: unknown };
+  const missing: string[] = [];
+  if (row.platform_owners == null) missing.push("platform_owners");
+  if (row.platform_owner_audit == null) missing.push("platform_owner_audit");
+  return missing;
+}
+
+export function platformOwnerTablesDegradedReason(missing: readonly string[]): string {
+  return `platform owner tables missing: ${missing.join(", ")}`;
+}
+
 /** Test hook: re-arms the once-per-process untracked-migrations warning. */
 export function __resetUntrackedMigrationsWarningForTesting(): void {
   untrackedMigrationsWarned = false;
@@ -146,6 +163,16 @@ export async function checkReadiness(): Promise<ReadinessResult> {
     return { status: "unavailable", durationMs, reasons: ["database unreachable"] };
   }
   const databaseDurationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+  let platformOwnerDegradedReason: string | null = null;
+  try {
+    const missingOwnerTables = await missingPlatformOwnerTables();
+    if (missingOwnerTables.length > 0) platformOwnerDegradedReason = platformOwnerTablesDegradedReason(missingOwnerTables);
+  } catch (err) {
+    // A failure to read the catalog must not turn every readiness probe into
+    // an outage, and must not affect sign-in. Name it as degraded instead.
+    logger.error("platform_owner_table_check_failed", { error: err instanceof Error ? err.message : String(err) });
+    platformOwnerDegradedReason = "platform owner table check failed";
+  }
   let migrations: MigrationStatus;
   try {
     migrations = await checkMigrationStatus();
@@ -196,6 +223,7 @@ export async function checkReadiness(): Promise<ReadinessResult> {
         migrations.untracked
           ? `database migrations untracked: drizzle.__drizzle_migrations is missing or empty (0 of ${migrations.expected} recorded; production requires db:migrate)`
           : `database migrations not fully applied (${migrations.applied} of ${migrations.expected} recorded)`,
+        ...(platformOwnerDegradedReason ? [platformOwnerDegradedReason] : []),
       ],
     };
   }
@@ -236,6 +264,10 @@ export async function checkReadiness(): Promise<ReadinessResult> {
   if (storageDurationMs > DEGRADED_LATENCY_MS) {
     status = "degraded";
     reasons.push(`document storage check took ${storageDurationMs.toFixed(1)}ms (> ${DEGRADED_LATENCY_MS}ms threshold)`);
+  }
+  if (platformOwnerDegradedReason) {
+    status = "degraded";
+    reasons.push(platformOwnerDegradedReason);
   }
   if (status === "degraded") {
     logger.warn("readiness_check_degraded", {

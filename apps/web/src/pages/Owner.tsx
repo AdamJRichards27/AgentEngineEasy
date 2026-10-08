@@ -17,6 +17,7 @@ export default function Owner() {
   const context = useOwnerContext();
   const [filter, setFilter] = useState("");
   const [name, setName] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState("");
   const busy = create.isPending || rename.isPending || context.isPending;
@@ -38,7 +39,7 @@ export default function Owner() {
       <div className="primary-action">
         <p className="eyebrow">Platform administration</p>
         <h2>Platform Owner</h2>
-        <p className="muted">Manage brokerages and select one to manage its team and invitations. Switching reloads the app to clear the previous brokerage's data.</p>
+        <p className="muted">Manage brokerages and select one to manage its team and invitations. Switching reloads the app to clear the previous brokerage's data. Enter your current password before selecting a brokerage.</p>
         <p className="muted">Owner access does not bypass product plans. New brokerages can manage users and invitations, but subscribed features need the usual billing activation.</p>
       </div>
       {status.isLoading && <Loading />}
@@ -64,6 +65,11 @@ export default function Owner() {
         </section>
         <section className="card owner-directory">
           <h2>Brokerages{brokerages.data ? ` (${brokerages.data.brokerages.length})` : ""}</h2>
+          <label className="owner-filter">
+            <span>Current password</span>
+            <input type="password" autoComplete="current-password" value={currentPassword}
+              onChange={(event) => setCurrentPassword(event.target.value)} disabled={busy} />
+          </label>
           <label className="owner-filter">
             <span>Filter brokerages</span>
             <input type="search" placeholder="Search by name" value={filter}
@@ -92,9 +98,9 @@ export default function Owner() {
                     onClick={() => { setEditingId(brokerage.id); setEditingName(brokerage.name); rename.reset(); }}>
                     Rename
                   </button>
-                  <button type="button" className="btn btn-primary btn-small" disabled={busy}
-                    onClick={() => context.mutate(brokerage.id)}>
-                    {context.isPending && context.variables === brokerage.id ? "Selecting…" : brokerage.id === selectedId ? "Manage users" : "Select brokerage"}
+                  <button type="button" className="btn btn-primary btn-small" disabled={busy || !currentPassword}
+                    onClick={() => context.mutate({ brokerageId: brokerage.id, currentPassword })}>
+                    {context.isPending && context.variables?.brokerageId === brokerage.id ? "Selecting…" : brokerage.id === selectedId ? "Manage users" : "Select brokerage"}
                   </button>
                 </div>
               </div>

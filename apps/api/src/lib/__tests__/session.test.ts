@@ -15,19 +15,27 @@ process.env.SESSION_SECRET =
 const { createSessionToken, verifySessionToken, assertSessionSecretConfigured } = await import("../session.js");
 
 test("a freshly created session token verifies to the same user id", () => {
+  const before = Date.now();
   const token = createSessionToken(42);
   const verified = verifySessionToken(token);
+  const after = Date.now();
   // Foundation Remediation - server-side session revocation: createSessionToken's
   // epoch parameter defaults to 0 (matching the users.sessionEpoch column's
   // own default), so a caller that doesn't pass one still gets back a
-  // well-formed { uid, epoch } pair.
-  assert.deepEqual(verified, { uid: 42, epoch: 0 });
+  // well-formed { uid, epoch, iat } pair.
+  assert.equal(verified?.uid, 42);
+  assert.equal(verified?.epoch, 0);
+  assert.ok(verified && verified.iat >= before && verified.iat <= after);
 });
 
 test("a session token embeds the epoch it was signed with, and verifySessionToken returns it", () => {
+  const before = Date.now();
   const token = createSessionToken(42, 7);
   const verified = verifySessionToken(token);
-  assert.deepEqual(verified, { uid: 42, epoch: 7 });
+  const after = Date.now();
+  assert.equal(verified?.uid, 42);
+  assert.equal(verified?.epoch, 7);
+  assert.ok(verified && verified.iat >= before && verified.iat <= after);
 });
 
 test("verifySessionToken defaults epoch to 0 for a legacy token payload with no epoch field", async () => {
@@ -36,10 +44,11 @@ test("verifySessionToken defaults epoch to 0 for a legacy token payload with no 
   // absent epoch the same as the sessionEpoch column's own default of 0,
   // rather than being rejected outright.
   const { createHmac } = await import("node:crypto");
-  const payload = Buffer.from(JSON.stringify({ uid: 42, iat: Date.now() })).toString("base64url");
+  const iat = Date.now();
+  const payload = Buffer.from(JSON.stringify({ uid: 42, iat })).toString("base64url");
   const signature = createHmac("sha256", process.env.SESSION_SECRET!).update(payload).digest("base64url");
   const verified = verifySessionToken(`${payload}.${signature}`);
-  assert.deepEqual(verified, { uid: 42, epoch: 0 });
+  assert.deepEqual(verified, { uid: 42, epoch: 0, iat });
 });
 
 test("verifySessionToken rejects a missing token", () => {

@@ -248,6 +248,10 @@ export const METRIC_DEFINITIONS = {
     help: "WAITING_ON items classified by the scheduled detection path only (runScheduledWaitingOnSweep, not POST /pit-crew/ops/waiting-on/sweep). surfaced is a new or materially changed sighting. deduped is an unchanged sighting suppressed by the fingerprint. Incremented by the per-brokerage counts. This path never returns, reassigns, or contacts anyone.",
     labels: { outcome: ["surfaced", "deduped"] },
   },
+  platform_owner_guard_total: {
+    help: "Platform Owner privilege checks that failed closed. tables_missing means platform_owners was absent so nobody is an owner. audit_unavailable means a confirmed owner was refused because the mandatory audit write failed. write_denied means a cross-brokerage write was outside the allowlist. session_expired means an owner session exceeded the 12 hour absolute cap. No user, brokerage, or path labels.",
+    labels: { event: ["tables_missing", "audit_unavailable", "write_denied", "session_expired"] },
+  },
 } as const satisfies Record<string, MetricDefinition>;
 
 export type MetricName = keyof typeof METRIC_DEFINITIONS;

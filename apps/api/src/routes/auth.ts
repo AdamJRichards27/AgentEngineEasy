@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { eq, sql, and, gt, isNull, desc, count } from "drizzle-orm";
 import { z } from "zod";
 import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs, entitlementGrants, USER_ROLES } from "@aee/db";
@@ -14,9 +14,41 @@ import { getActiveLegalVersions } from "../lib/auth/legalVersions.js";
 import { normalizePersonName } from "../lib/auth/personName.js";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
-import { isPlatformOwner, setOwnerContextCookie } from "../lib/platformOwner.js";
+import {
+  gatePlatformOwnerInvitation,
+  invalidatePendingInvitationsFromRevokedOwners,
+  isPlatformOwner,
+  platformOwnerAdminGuard,
+  platformOwnerInvitationActor,
+  recordPlatformOwnerInvitation,
+  setOwnerContextCookie,
+} from "../lib/platformOwner.js";
 
 export const authRouter = Router();
+
+const OWNER_TARGET_PROTECTED = {
+  error: "Platform Owner accounts cannot be deactivated, have their role changed, have their password reset, or have their sessions revoked through brokerage administration.",
+  code: "OWNER_TARGET_PROTECTED",
+};
+
+/** True when the response has already been sent. A user outside this brokerage is left for the route's own 404. */
+async function rejectPlatformOwnerTarget(res: Response, brokerageId: number, targetUserId: number): Promise<boolean> {
+  const [visible] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, targetUserId), eq(users.brokerageId, brokerageId)));
+  if (!visible) return false;
+  const guard = await platformOwnerAdminGuard(visible.id);
+  if (guard === "protected") {
+    res.status(403).json(OWNER_TARGET_PROTECTED);
+    return true;
+  }
+  if (guard === "unavailable") {
+    res.status(503).json({ error: "Your access could not be verified. Please retry." });
+    return true;
+  }
+  return false;
+}
 
 function userView(row: typeof users.$inferSelect, brokerageName?: string | null) {
   return {
@@ -108,7 +140,14 @@ authRouter.post("/dev-login", async (req, res) => {
 
   const [existing] = await db.select().from(users).where(eq(users.email, email.toLowerCase()));
   if (existing) {
-    if (await isPlatformOwner(existing.id)) {
+    let ownerAccount = false;
+    try {
+      ownerAccount = await isPlatformOwner(existing.id);
+    } catch {
+      res.status(503).json({ error: "Your access could not be verified. Please retry." });
+      return;
+    }
+    if (ownerAccount) {
       res.status(403).json({ error: "Platform Owners must sign in with their password." });
       return;
     }
@@ -391,6 +430,22 @@ authRouter.post("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMI
     })
     .returning();
 
+  if (req.platformOwner) {
+    try {
+      await recordPlatformOwnerInvitation({
+        ownerUserId: admin.id,
+        brokerageId: admin.brokerageId,
+        invitationId: created.id,
+        role,
+        method: req.method,
+      });
+    } catch {
+      await db.update(invitations).set({ revokedAt: new Date() }).where(eq(invitations.id, created.id));
+      res.status(503).json({ error: "The invitation could not be audited. It was not issued." });
+      return;
+    }
+  }
+
   const [brokerage] = await db.select().from(brokerages).where(eq(brokerages.id, admin.brokerageId));
   const acceptUrl = `${frontendBaseUrl()}/accept-invitation/${plaintext}`;
   await getAuthEmailProvider().sendInvitation({
@@ -405,6 +460,13 @@ authRouter.post("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMI
     action: "invitation_created",
     recordType: "invitation",
     recordId: String(created.id),
+    ...(req.platformOwner
+      ? {
+          brokerageId: admin.brokerageId,
+          updatedValue: "platform_owner=true",
+          providerReference: `actor:${admin.id}`,
+        }
+      : {}),
   });
 
   // Never returns the token or acceptUrl — those exist only in the email
@@ -417,6 +479,7 @@ authRouter.post("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMI
 // see and manage what they've sent without ever exposing a token.
 authRouter.get("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const admin = req.authedUser!;
+  await invalidatePendingInvitationsFromRevokedOwners(admin.brokerageId);
   const page = Math.max(1, Number(req.query.page) || 1);
   const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
 
@@ -474,7 +537,10 @@ async function findLiveInvitationByPlaintextToken(plaintextToken: string) {
     .select()
     .from(invitations)
     .where(and(eq(invitations.tokenHash, hash), isNull(invitations.acceptedAt), isNull(invitations.revokedAt), gt(invitations.expiresAt, new Date())));
-  return invitation ?? null;
+  if (!invitation) return null;
+  const gate = await gatePlatformOwnerInvitation(invitation.id);
+  if (gate !== "allow") return null;
+  return invitation;
 }
 
 // Public, but reveals nothing about WHO was invited or WHY a token is
@@ -574,6 +640,18 @@ authRouter.post("/invitations/:token/accept", async (req, res) => {
 
   await logAudit({ userId: created.id, userEmail: created.email, action: "invitation_accepted", recordType: "invitation", recordId: String(invitation.id) });
   await logAudit({ userId: created.id, userEmail: created.email, action: "user_signed_up", recordType: "user", recordId: String(created.id) });
+  const invitingOwner = await platformOwnerInvitationActor(invitation.id);
+  if (invitingOwner) {
+    await logAudit({
+      brokerageId: invitation.brokerageId,
+      userId: invitingOwner.ownerUserId,
+      action: "platform_owner_admin_provisioned",
+      recordType: "user",
+      recordId: String(created.id),
+      updatedValue: "platform_owner=true",
+      providerReference: `invitation:${invitation.id};actor:${invitingOwner.ownerUserId}`,
+    });
+  }
 
   setSessionCookie(res, created.id, created.sessionEpoch);
   const [brokerage] = await db.select().from(brokerages).where(eq(brokerages.id, created.brokerageId!));
@@ -724,6 +802,18 @@ authRouter.post("/password-reset/confirm", async (req, res) => {
     return;
   }
 
+  if (req.platformOwner && req.authedUser && tokenRow.userId !== req.authedUser.id) {
+    const guard = await platformOwnerAdminGuard(tokenRow.userId);
+    if (guard === "protected") {
+      res.status(403).json(OWNER_TARGET_PROTECTED);
+      return;
+    }
+    if (guard === "unavailable") {
+      res.status(503).json({ error: "Your access could not be verified. Please retry." });
+      return;
+    }
+  }
+
   const passwordHash = await hashPassword(parsed.data.password);
   const [updated] = await db
     .update(users)
@@ -823,6 +913,7 @@ authRouter.post("/admin/users/:id/disable", requireAuth, requireRole(...BROKERAG
     res.status(400).json({ error: "You cannot disable your own account." });
     return;
   }
+  if (await rejectPlatformOwnerTarget(res, admin.brokerageId, id)) return;
   const updated = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(${admin.brokerageId})`);
     const [target] = await tx.select().from(users).where(and(eq(users.id, id), eq(users.brokerageId, admin.brokerageId)));
@@ -870,6 +961,7 @@ authRouter.post("/admin/succession", requireAuth, requireRole(...BROKERAGE_ADMIN
     res.status(400).json({ error: "You cannot transfer administrator authority to yourself." });
     return;
   }
+  if (await rejectPlatformOwnerTarget(res, admin.brokerageId, parsed.data.targetUserId)) return;
 
   const outcome = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(${admin.brokerageId})`);
@@ -989,6 +1081,7 @@ authRouter.post("/admin/users/:id/enable", requireAuth, requireRole(...BROKERAGE
     res.status(400).json({ error: "Invalid user id." });
     return;
   }
+  if (await rejectPlatformOwnerTarget(res, admin.brokerageId, id)) return;
   const [updated] = await db
     .update(users)
     .set({ isActive: true })
