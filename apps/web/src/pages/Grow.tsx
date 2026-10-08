@@ -86,9 +86,11 @@ import { growListPath, listSearchEmptyMessage } from "../lib/growListQuery";
 import {
   GROW_OPPORTUNITY_LIST_TYPE_FILTER_LABELS,
   GROW_OPPORTUNITY_LIST_TYPE_FILTERS,
+  GROW_OPPORTUNITY_MANUAL_STAGES,
   GROW_OPPORTUNITY_TYPES,
   parseGrowOpportunityListTypeFilter,
   type GrowOpportunityListTypeFilter,
+  type GrowOpportunityManualStage,
 } from "@aee/domain";
 import { appraisalWorkspacePath } from "../lib/appraisalUi";
 import {
@@ -154,6 +156,8 @@ interface GrowOpportunity {
   propertyId: number | null;
   recommendedNextAction: string | null;
   nextActionDueAt: string | null;
+  /** Same-brokerage contact name from GET /grow/opportunities. Null when the party join misses. */
+  contactName?: string | null;
 }
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline, frontend types.
@@ -1062,6 +1066,26 @@ function useUpdateOpportunityNextAction(opportunityId: number | null, onSaved: (
   });
 }
 
+type GrowOpportunityLifecycleInput =
+  | { stage: GrowOpportunityManualStage }
+  | { status: "Lost"; lostReason: string }
+  | { status: "Closed" };
+
+function useUpdateOpportunityLifecycle(opportunityId: number, onSaved: () => void) {
+  return useMutation<unknown, unknown, GrowOpportunityLifecycleInput>({
+    mutationFn: (body) =>
+      apiFetch(`/grow/opportunities/${opportunityId}/lifecycle`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: onSaved,
+  });
+}
+
+function opportunityLifecycleOpen(status: string, stage: string): boolean {
+  return status === "Open" && stage !== "Lost" && stage !== "Converted";
+}
+
 // PATCH /grow/contacts/commitments/:id is the one write behind Complete,
 // Cancel, and Reschedule. A status change sends { status }. A reschedule
 // sends { dueAt } alone — the route rejects a body that names both. Grow
@@ -1558,6 +1582,8 @@ function GrowOpportunityRowActions({
   opportunityId,
   partyId,
   propertyId,
+  stage,
+  status,
   appraisal,
   canManageOpportunities,
   canAddNote,
@@ -1569,6 +1595,8 @@ function GrowOpportunityRowActions({
   opportunityId: number;
   partyId: number | null;
   propertyId: number | null;
+  stage: string;
+  status: string;
   appraisal: GrowAppraisalSummary | null;
   canManageOpportunities: boolean;
   canAddNote: boolean;
@@ -1577,7 +1605,8 @@ function GrowOpportunityRowActions({
   onAskAE: (() => void) | null;
   onSaved: () => void;
 }) {
-  const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
+  const [openForm, setOpenForm] = useState<"note" | "nextAction" | "lost" | null>(null);
+  const [lostReason, setLostReason] = useState("");
   const canManageAppraisals = useCanManageAppraisals();
   const updateNextAction = useUpdateOpportunityNextAction(opportunityId, () => {
     setOpenForm(null);
@@ -1587,13 +1616,27 @@ function GrowOpportunityRowActions({
     setOpenForm(null);
     onSaved();
   });
-  const busy = addNote.isPending || updateNextAction.isPending;
+  const updateLifecycle = useUpdateOpportunityLifecycle(opportunityId, () => {
+    setOpenForm(null);
+    setLostReason("");
+    onSaved();
+  });
+  const busy = addNote.isPending || updateNextAction.isPending || updateLifecycle.isPending;
   const showAddNote = canAddNote && partyId !== null;
+  const showLifecycle = canManageOpportunities && opportunityLifecycleOpen(status, stage);
+  const stageChoices = (GROW_OPPORTUNITY_MANUAL_STAGES as readonly string[]).includes(stage)
+    ? [...GROW_OPPORTUNITY_MANUAL_STAGES]
+    : [stage, ...GROW_OPPORTUNITY_MANUAL_STAGES];
+  const stageFieldId = `grow-opportunity-stage-${opportunityId}`;
+  const lostReasonFieldId = `grow-opportunity-lost-reason-${opportunityId}`;
+  const trimmedLostReason = lostReason.trim();
   const errorMessage = addNote.isError
     ? growErrorMessage(addNote.error, "Something went wrong. Try again.")
     : updateNextAction.isError
       ? growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")
-      : null;
+      : updateLifecycle.isError
+        ? growErrorMessage(updateLifecycle.error, "Something went wrong. Try again.")
+        : null;
 
   return (
     <div className="grow-action-card-actions">
@@ -1639,7 +1682,73 @@ function GrowOpportunityRowActions({
         appraisal={appraisal}
         canWrite={canManageAppraisals}
       />
-      {errorMessage && <p className="error-text">{errorMessage}</p>}
+      {showLifecycle && (
+        <div className="grow-opportunity-lifecycle">
+          <label htmlFor={stageFieldId}>Change stage</label>
+          <select
+            id={stageFieldId}
+            value={stage}
+            disabled={busy}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (!(GROW_OPPORTUNITY_MANUAL_STAGES as readonly string[]).includes(next) || next === stage) return;
+              updateLifecycle.mutate({ stage: next as GrowOpportunityManualStage });
+            }}
+          >
+            {stageChoices.map((choice) => (
+              <option
+                key={choice}
+                value={choice}
+                disabled={!(GROW_OPPORTUNITY_MANUAL_STAGES as readonly string[]).includes(choice)}
+              >
+                {choice}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn btn-secondary btn-small"
+            disabled={busy}
+            onClick={() => setOpenForm(openForm === "lost" ? null : "lost")}
+          >
+            {openForm === "lost" ? "Cancel" : "Mark lost"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary btn-small"
+            id={`grow-opportunity-close-${opportunityId}`}
+            disabled={busy}
+            aria-label="Close opportunity"
+            onClick={() => updateLifecycle.mutate({ status: "Closed" })}
+          >
+            Close
+          </button>
+          {openForm === "lost" && (
+            <form
+              className="stack grow-inline-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!trimmedLostReason) return;
+                updateLifecycle.mutate({ status: "Lost", lostReason: trimmedLostReason });
+              }}
+            >
+              <label htmlFor={lostReasonFieldId}>Lost reason</label>
+              <input
+                id={lostReasonFieldId}
+                type="text"
+                value={lostReason}
+                required
+                aria-required="true"
+                onChange={(event) => setLostReason(event.target.value)}
+              />
+              <button type="submit" className="btn btn-primary btn-small" disabled={busy || trimmedLostReason.length === 0}>
+                Mark lost
+              </button>
+            </form>
+          )}
+        </div>
+      )}
+      {errorMessage && <p className="error-text" role="alert">{errorMessage}</p>}
       {openForm === "note" && partyId !== null && (
         <GrowNoteForm
           idPrefix={`grow-opportunity-note-${opportunityId}`}
@@ -3799,6 +3908,8 @@ export function GrowContactOpportunitiesSection({
                     opportunityId={o.id}
                     partyId={partyId}
                     propertyId={o.propertyId}
+                    stage={o.stage}
+                    status={o.status}
                     appraisal={appraisalForProperty(appraisalRows, o.propertyId, partyId)}
                     canManageOpportunities={canManageOpportunities}
                     canAddNote={canAddNote}
@@ -3842,8 +3953,18 @@ const GrowOpportunityCells = memoRow(function GrowOpportunityCells({
   onAskAE: (() => void) | null;
   onSaved: () => void;
 }) {
+  const contactName = opportunity.contactName?.trim() ? opportunity.contactName.trim() : null;
   return (
     <>
+      <td>
+        {contactName && canViewContacts ? (
+          <Link href={growContactPath(opportunity.partyId)} className="btn btn-link btn-small">
+            {contactName}
+          </Link>
+        ) : (
+          (contactName ?? "–")
+        )}
+      </td>
       <td>{opportunity.opportunityType}</td>
       <td>{opportunity.stage}</td>
       <td>
@@ -3856,11 +3977,13 @@ const GrowOpportunityCells = memoRow(function GrowOpportunityCells({
         {opportunity.recommendedNextAction ?? "–"}
         {opportunity.nextActionDueAt ? ` (due ${formatWhen(opportunity.nextActionDueAt)})` : ""}
       </td>
-      <td>
+      <td className="grow-opportunity-actions-cell">
         <GrowOpportunityRowActions
           opportunityId={opportunity.id}
           partyId={opportunity.partyId}
           propertyId={opportunity.propertyId}
+          stage={opportunity.stage}
+          status={opportunity.status}
           appraisal={appraisal}
           canManageOpportunities={canManageOpportunities}
           canAddNote={canAddNote}
@@ -3888,6 +4011,7 @@ export function GrowOpportunitiesTab({
   const canViewContacts = hasEntitlement("grow.contacts.read");
   const canReadAppraisals = useCanReadAppraisals();
   const [typeFilter, setTypeFilter] = useState<GrowOpportunityListTypeFilter>("all");
+  const [listVersion, setListVersion] = useState(0);
   const opportunitySearch = useDebouncedListSearch();
   // An empty search keeps the key C-5a already asserts: ["grow-opportunities", type].
   // A search is appended so the two filters refetch together.
@@ -3900,7 +4024,7 @@ export function GrowOpportunitiesTab({
     queryFn: () => apiFetch(growListPath("/grow/opportunities", { search: opportunitySearch.query, type: typeFilter })),
   });
   const opportunityPages = useGrowCursorPages({
-    resetKey: `${typeFilter}\0${opportunitySearch.query}`,
+    resetKey: `${typeFilter}\0${opportunitySearch.query}\0${listVersion}`,
     page: opportunities.data
       ? { items: opportunities.data.opportunities, nextCursor: opportunities.data.nextCursor, total: opportunities.data.total }
       : undefined,
@@ -3920,6 +4044,7 @@ export function GrowOpportunitiesTab({
   const opportunityState = growDataRegionState(opportunities, opportunityCount);
 
   function onSaved() {
+    setListVersion((version) => version + 1);
     void opportunities.refetch();
     queryClient.invalidateQueries({ queryKey: ["grow-today"] });
     queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
@@ -3950,7 +4075,7 @@ export function GrowOpportunitiesTab({
       <GrowListSearch
         id="grow-opportunities-search"
         label="Search opportunities"
-        placeholder="Search by reason"
+        placeholder="Search by contact or reason"
         text={opportunitySearch.text}
         onText={opportunitySearch.setText}
         onCommit={opportunitySearch.commit}
@@ -3969,9 +4094,9 @@ export function GrowOpportunitiesTab({
           label="Opportunities"
           singular="opportunity"
           plural="opportunities"
-          colSpan={6}
-          estimate={120}
-          resetKey={`${typeFilter}\0${opportunitySearch.query}`}
+          colSpan={7}
+          estimate={160}
+          resetKey={`${typeFilter}\0${opportunitySearch.query}\0${listVersion}`}
           items={opportunityPages.items}
           total={opportunityPages.total}
           getKey={(opportunity) => opportunity.id}
@@ -3981,12 +4106,13 @@ export function GrowOpportunitiesTab({
           onLoadMore={opportunityPages.loadMore}
           head={
             <tr>
+              <th>Contact</th>
               <th>Type</th>
               <th>Stage</th>
               <th>Status</th>
               <th>Reason</th>
               <th>Next action</th>
-              <th></th>
+              <th className="grow-opportunity-actions-cell"></th>
             </tr>
           }
           renderCells={(opportunity) => (

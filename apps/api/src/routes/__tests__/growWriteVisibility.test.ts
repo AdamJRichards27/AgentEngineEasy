@@ -214,7 +214,7 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
     opportunityBId = ((await opportunityB.json()) as { opportunity: { id: number } }).opportunity.id;
     const contactOpportunity = await send("POST", "/grow/opportunities", agentA.cookie, {
       partyId: sharedContactId,
-      opportunityType: "General",
+      opportunityType: "Other",
       reason: "Contact-only opportunity",
     });
     assert.equal(contactOpportunity.status, 201, await contactOpportunity.clone().text());
@@ -465,7 +465,7 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
     assert.equal(ownOpportunity.status, 201, await ownOpportunity.clone().text());
     const contactOpportunity = await send("POST", "/grow/opportunities", agentA.cookie, {
       partyId: sharedContactId,
-      opportunityType: "General",
+      opportunityType: "Other",
       reason: "Another contact-only opportunity",
     });
     assert.equal(contactOpportunity.status, 201, await contactOpportunity.clone().text());

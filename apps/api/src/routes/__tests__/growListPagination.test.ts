@@ -436,9 +436,10 @@ test("relationships, activities and opportunities page on (sort key, id) and cou
   assert.deepEqual(collection(uniqueActivity.body, "activities").map((row) => row.id), [uniqueActivityId]);
 
   const opportunityWalk = await walk<{ id: number }>("/grow/opportunities", "opportunities", A.admin.cookie, 2, { search: keysetName });
-  const namedOpportunities = opportunities.filter((row) => row.id !== uniqueOpportunityId);
-  assert.equal(opportunityWalk.total, namedOpportunities.length);
-  assert.deepEqual(opportunityWalk.ids, byRecency(namedOpportunities));
+  // Search matches the reason and the tenant-scoped contact name. Every seeded
+  // opportunity shares the keyset contact, so the unique-reason row is included.
+  assert.equal(opportunityWalk.total, opportunities.length);
+  assert.deepEqual(opportunityWalk.ids, byRecency(opportunities));
   const uniqueOpportunity = await getList<{ id: number }>("/grow/opportunities", A.admin.cookie, {
     search: `Unique opportunity ${suffix}`,
   });
