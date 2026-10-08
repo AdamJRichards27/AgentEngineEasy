@@ -29,6 +29,7 @@ import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 // AE GROW Pilot Readiness WP8 (D11) — turns the server's fail-closed recording
 // outcome into one plain sentence for the agent; see that module's header.
 import { describeRecordingRefusal } from "../lib/callRecording";
+import { growCallingSurfaces } from "../lib/growCalling";
 import {
   applyGrowNavigation,
   canonicalGrowContactHref,
@@ -3224,7 +3225,7 @@ function linkPropertyErrorMessage(error: unknown): string {
 // summary, household relationships, properties, the Relationship Timeline, notes/activities/
 // commitments, and opportunities — matching the "understand this relationship in seconds" UX
 // goal rather than a screen that fires off five separate requests or a generic CRM record view.
-function GrowContactDetail({
+export function GrowContactDetail({
   partyId,
   onBack,
   pendingComposeChannel,
@@ -3238,9 +3239,21 @@ function GrowContactDetail({
   onComposeHandled: () => void;
 }) {
   const queryClient = useQueryClient();
-  const { hasEntitlement } = useEntitlements();
+  const { hasEntitlement, isLoading: entitlementsLoading } = useEntitlements();
   const canManageContacts = hasEntitlement("grow.contacts.manage");
   const canManageActivities = hasEntitlement("grow.activities.manage");
+  // GP-5 — the workspace already loads this. Optional calling/provider flags
+  // hide the cards; a missing flag does not. Entitlements still decide.
+  const access = useQuery<GrowAccess & { callingEnabled?: boolean; providerEnabled?: boolean }>({
+    queryKey: ["grow-access"],
+    queryFn: () => apiFetch("/grow/access"),
+  });
+  const callingSurfaces = growCallingSurfaces({
+    entitlementsKnown: entitlementsLoading !== true && access.isLoading !== true,
+    hasEntitlement,
+    callingEnabled: access.data?.callingEnabled,
+    providerEnabled: access.data?.providerEnabled,
+  });
 
   const detail = useQuery<GrowContact360>({
     queryKey: ["grow-contact", partyId],
@@ -3398,17 +3411,19 @@ function GrowContactDetail({
           panel adds no second round trip. */}
       <GrowContactConsentPanel partyId={partyId} contactability={data.contactability} onChanged={invalidate} />
 
-      <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />
-      <GrowContactTranscriptPanel
-        partyId={partyId}
-        contactName={c.displayName}
-        onReviewSaved={() => {
-          // The API writes the approved call-summary activity atomically with Save.
-          // Refresh only read models here; the browser never persists the activity.
-          queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
-          queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
-        }}
-      />
+      {callingSurfaces.call && <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />}
+      {callingSurfaces.transcripts && (
+        <GrowContactTranscriptPanel
+          partyId={partyId}
+          contactName={c.displayName}
+          onReviewSaved={() => {
+            // The API writes the approved call-summary activity atomically with Save.
+            // Refresh only read models here; the browser never persists the activity.
+            queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+            queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
+          }}
+        />
+      )}
 
       <div className="stat-tiles">
         <StatTile label="Related Properties" value={data.intelligence.relatedPropertyCount} />

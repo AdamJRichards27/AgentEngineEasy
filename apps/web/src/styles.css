@@ -1672,6 +1672,30 @@ ul.pc-item-list li {
   width: 100%;
 }
 
+/* GP-5 — list search sits inside a column flex label, and the row rule
+   `flex: 1 1 220px` was applying on that vertical axis, so the field
+   rendered about 220px tall. Reset the basis and keep one compact height
+   on desktop and at 375px. The contacts search is a direct row child;
+   the same height keeps the toolbars aligned. */
+.grow-inline-form-row .grow-list-filter input,
+.grow-inline-form-row .grow-list-filter select,
+.grow-inline-form-row > input[type="search"] {
+  box-sizing: border-box;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  max-height: 2.5rem;
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
+  appearance: none;
+}
+
+.grow-inline-form-row .grow-list-filter input,
+.grow-inline-form-row .grow-list-filter select {
+  flex: 0 0 auto;
+  width: 100%;
+  margin-top: 0.3rem;
+}
+
 .grow-contact-roles {
   display: flex;
   flex-wrap: wrap;
