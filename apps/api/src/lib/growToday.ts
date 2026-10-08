@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, exists, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
 import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import { fetchLastQualifyingContactByParty } from "./qualifyingCommunications.js";
 import { visibleLinkedPropertySql, visibleOwnedOrLinkedPropertySql, visibleRequiredPropertySql } from "./propertyVisibility.js";
 import { isOverdueLocal, isToday, localDateKey, resolveTimeZone, startOfLocalDay } from "./commandCentre/timezone.js";
 import { loadContactabilityFilter } from "./propertyIntelligence/contactability.js";
@@ -28,11 +29,13 @@ import {
 // header comment already pre-scoped it: a flat, deterministic list of
 // concrete actionable items, never a BI dashboard of counts/charts/trends —
 // see that file's comment for the boundary this function was built to
-// respect. Reads only Grow's own domain tables (growRelationships,
+// respect. Reads Grow's own domain tables (growRelationships,
 // growActivities, growOpportunities) plus canonical parties/properties for
-// display labels — RUN's workflow/transaction/financial tables are never
-// touched here, and never will be; that is RUN's Command Centre's job
-// (apps/api/src/lib/commandCentre), not Grow's.
+// display labels. C-6 also reads qualifying Comms Hub messages for
+// last-contact recency (lib/qualifyingCommunications.ts) — read-side only,
+// no grow_activities dual-write. RUN's workflow/transaction/financial
+// tables are never touched here, and never will be; that is RUN's Command
+// Centre's job (apps/api/src/lib/commandCentre), not Grow's.
 //
 // Every rule below is DETERMINISTIC — plain date/threshold comparisons on
 // data an agent (or the existing Grow import/entry flows) already entered.
@@ -842,6 +845,12 @@ async function fetchPropertyIntelligenceSignalRows(
  * THE INDEX THIS WANTS (not added here — index work is batched into its own
  * migration PR): grow_activities (brokerage_id, party_id, occurred_at desc),
  * which turns this into an index-only scan. It is correct without it.
+ *
+ * C-6 — the map also includes qualifying Hub messages (sent/delivered
+ * outbound email, SMS, and calls, and received inbound). That is a second
+ * grouped aggregate, scoped to the same party ids, defined in
+ * lib/qualifyingCommunications.ts. The later of the two timestamps is the
+ * last contact. Nothing is written to grow_activities.
  */
 async function fetchLastActivityByParty(
   brokerageId: number,
@@ -858,26 +867,35 @@ async function fetchLastActivityByParty(
   // ids are already integer-filtered by the caller.
   const idArray = sql`array(select jsonb_array_elements_text(${JSON.stringify(partyIds)}::jsonb)::int)`;
 
-  const rows = await db
-    .select({ partyId: growActivities.partyId, lastOccurredAt: max(growActivities.occurredAt) })
-    .from(growActivities)
-    .where(
-      and(
-        eq(growActivities.brokerageId, brokerageId),
-        isNotNull(growActivities.partyId),
-        sql`${growActivities.partyId} = any(${idArray})`,
-        // An activity on a property the caller cannot see is not their last
-        // contact. Null when the caller is brokerage-wide.
-        visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
-      ),
-    )
-    .groupBy(growActivities.partyId);
+  const [rows, qualifyingContacts] = await Promise.all([
+    db
+      .select({ partyId: growActivities.partyId, lastOccurredAt: max(growActivities.occurredAt) })
+      .from(growActivities)
+      .where(
+        and(
+          eq(growActivities.brokerageId, brokerageId),
+          isNotNull(growActivities.partyId),
+          sql`${growActivities.partyId} = any(${idArray})`,
+          // An activity on a property the caller cannot see is not their last
+          // contact. Null when the caller is brokerage-wide.
+          visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
+        ),
+      )
+      .groupBy(growActivities.partyId),
+    fetchLastQualifyingContactByParty(brokerageId, partyIds, restrictToPropertyIds),
+  ]);
 
   for (const row of rows) {
     // drizzle's max() reuses the column's own driver mapper, so occurredAt
     // decodes here exactly as it did when this loop read raw rows.
     if (row.partyId === null || row.lastOccurredAt === null) continue;
     lastActivityByParty.set(row.partyId, row.lastOccurredAt);
+  }
+  for (const [partyId, contactedAt] of qualifyingContacts) {
+    const recorded = lastActivityByParty.get(partyId);
+    if (!recorded || contactedAt.getTime() > recorded.getTime()) {
+      lastActivityByParty.set(partyId, contactedAt);
+    }
   }
   return lastActivityByParty;
 }
@@ -1319,6 +1337,10 @@ export async function getGrowTodaySummary(
   // the same as before this change (four + one aggregate + contactability's
   // two), with one extra round-trip wave bought in exchange for the activity
   // read no longer being tenant-wide.
+  //
+  // C-6 — fetchLastActivityByParty issues a second grouped aggregate for
+  // qualifying Hub messages, still scoped to partyIdsInScope. The shape
+  // test pins that extra statement.
   //
   // Stage 3 — CONSENT / CONTACTABILITY, APPLIED AT READ TIME TO EVERY RULE.
   // See this file's "READ-TIME CONTACTABILITY (security finding P1-3)" header
