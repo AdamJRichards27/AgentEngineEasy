@@ -673,6 +673,127 @@ test("a won appraisal can be handed to Run, and a missing appraisal stays not fo
   }
 });
 
+const OLD_MOCK_NARRATIVE =
+  "Mock AI Provider. No real model call was made. Set AI_PROVIDER=anthropic and ANTHROPIC_API_KEY in Replit Secrets.";
+
+function renderedStrings(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (!node || typeof node !== "object") return "";
+  if (Array.isArray(node)) return node.map(renderedStrings).join("\n");
+  const props = (node as ElementNode).props ?? {};
+  return Object.values(props)
+    .map((value) => (typeof value === "string" || typeof value === "number" ? String(value) : renderedStrings(value)))
+    .join("\n");
+}
+
+test("a successful listing hand-off names Run and the property, and a failure stays inline", async () => {
+  const won = install({
+    workspace: {
+      appraisal: appraisalRecord({ status: "WON", outcome: "WON" }),
+      comparableSales: [],
+      marketCompetition: [],
+    },
+  });
+  try {
+    await withVite(async (vite) => {
+      const { default: AppraisalWorkspace } = (await vite.ssrLoadModule("/src/pages/AppraisalWorkspace.tsx")) as {
+        default: () => unknown;
+      };
+      (globalThis as { __awApiFetch: (path: string, options?: { method?: string }) => Promise<unknown> }).__awApiFetch = () =>
+        Promise.resolve({ propertyId: 77, sellerLinkCreated: true });
+      const render = () => {
+        won.hooks.beginRender();
+        return AppraisalWorkspace();
+      };
+      let tree = render();
+      (button(tree, "Hand off to Run")!.props!.onClick as () => void)();
+      await Promise.all(won.pending);
+      tree = render();
+      const confirmation = byId(tree, "appraisal-run-handoff-confirmation");
+      assert.equal(confirmation?.props?.role, "status");
+      assert.match(textContent(confirmation), /Handed this appraisal to Run for 77 Appraisal St/);
+      assert.match(textContent(confirmation), /recorded as the seller/);
+      assert.equal(
+        findAll(confirmation, (element) => element.type === "a")[0]?.props?.href,
+        "/properties/77",
+      );
+      assert.equal(byId(tree, "appraisal-run-handoff-error"), undefined);
+      assert.ok(button(tree, "Hand off to Run"), "the workspace stays on the page");
+    });
+  } finally {
+    clearGlobals();
+  }
+
+  const failed = install({
+    workspace: {
+      appraisal: appraisalRecord({ status: "WON", outcome: "WON" }),
+      comparableSales: [],
+      marketCompetition: [],
+    },
+  });
+  try {
+    await withVite(async (vite) => {
+      const { default: AppraisalWorkspace } = (await vite.ssrLoadModule("/src/pages/AppraisalWorkspace.tsx")) as {
+        default: () => unknown;
+      };
+      (globalThis as { __awApiFetch: () => Promise<unknown> }).__awApiFetch = () =>
+        Promise.reject(new FakeApiError(400, "Only a won appraisal can be handed to Run."));
+      const render = () => {
+        failed.hooks.beginRender();
+        return AppraisalWorkspace();
+      };
+      let tree = render();
+      (button(tree, "Hand off to Run")!.props!.onClick as () => void)();
+      await Promise.all(failed.pending);
+      tree = render();
+      const error = byId(tree, "appraisal-run-handoff-error");
+      assert.equal(error?.props?.role, "alert");
+      assert.match(textContent(error), /Only a won appraisal can be handed to Run/);
+      assert.equal(byId(tree, "appraisal-run-handoff-confirmation"), undefined);
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("a saved or drafted mock narrative is labelled for the reader and drops the operator instruction", async () => {
+  const saved = install({
+    workspace: {
+      appraisal: appraisalRecord({ marketPositionNarrative: OLD_MOCK_NARRATIVE }),
+      comparableSales: [],
+      marketCompetition: [],
+    },
+  });
+  try {
+    await withVite(async (vite) => {
+      const { default: AppraisalWorkspace } = (await vite.ssrLoadModule("/src/pages/AppraisalWorkspace.tsx")) as {
+        default: () => unknown;
+      };
+      const render = () => {
+        saved.hooks.beginRender();
+        return AppraisalWorkspace();
+      };
+      let tree = render();
+      assert.equal(textContent(byId(tree, "appraisal-demo-ai")), "Demo AI: sample text, not generated from your data.");
+      assert.equal(byId(tree, "appraisal-market-position")?.props?.value, "Demo AI: sample text, not generated from your data.");
+      assert.doesNotMatch(renderedStrings(tree), /AI_PROVIDER/);
+
+      (globalThis as { __awApiFetch: () => Promise<unknown> }).__awApiFetch = () =>
+        Promise.resolve({ draftNarrative: `Kept observation about the street.\n\n${OLD_MOCK_NARRATIVE}` });
+      (byId(tree, "appraisal-market-position-generate")!.props!.onClick as () => void)();
+      await Promise.all(saved.pending);
+      tree = render();
+      const visible = String(byId(tree, "appraisal-market-position")?.props?.value);
+      assert.match(visible, /Demo AI: sample text, not generated from your data/);
+      assert.match(visible, /Kept observation about the street/);
+      assert.doesNotMatch(visible, /AI_PROVIDER/);
+      assert.doesNotMatch(renderedStrings(tree), /AI_PROVIDER/);
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
 test("the property page links an existing appraisal to the workspace and still starts one when there is none", async () => {
   install({});
   try {

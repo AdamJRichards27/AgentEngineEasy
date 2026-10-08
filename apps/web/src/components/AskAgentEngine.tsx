@@ -11,6 +11,7 @@ import { ASK_DUE_FOLLOW_UPS_QUESTION } from "../lib/growTerms";
 // AE GROW Pilot Readiness WP6b (P3-b) — the feature-flag gate below, extracted
 // so "a disabled Grow tab still says something" is unit-testable.
 import { aiSurfaceAvailability, aiSurfaceUnavailableCopy } from "../lib/aiCapability";
+import { userVisibleAiText } from "../lib/demoAi";
 // AE GROW Priority 6 Stage E — Voice as Input. The recording lifecycle
 // itself (permission/MIME/duration/error handling, the state machine) is
 // extracted into lib/voiceRecording.ts so it can be unit tested without a
@@ -686,8 +687,8 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
             >
               {KIND_LABEL[result.response.kind] ?? result.response.kind}
             </div>
-            <p>{result.response.summary}</p>
-            {result.response.disclaimer !== undefined && <p className="muted">{result.response.disclaimer}</p>}
+            <p>{userVisibleAiText(result.response.summary)}</p>
+            {result.response.disclaimer !== undefined && <p className="muted">{userVisibleAiText(result.response.disclaimer)}</p>}
             {/* AE GROW Priority 6 Stage B — Response Contract rendering. Every
                 field below is undefined for a non-Grow (RUN Copilot) response,
                 so none of this renders outside contextType="grow". */}
@@ -751,7 +752,7 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
                 )}
               </h3>
             )}
-            <p>{result.response.summary}</p>
+            <p>{userVisibleAiText(result.response.summary)}</p>
             {result.response.performanceSummary !== undefined && (
               <section className="ai-coach-section">
                 <h4>Performance snapshot</h4>

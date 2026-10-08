@@ -110,8 +110,8 @@ function gatewayConfig(provider: string, fallbackProvider: string): AiGatewayCon
 function assertSafeNarrative(text: string, request: AiProviderRequest): void {
   assert.equal(typeof text, "string");
   assert.ok(text.length > 40, "the mock narrative is a user-facing sentence");
-  assert.match(text, /Mock AI Provider/);
-  assert.match(text, /No real model call was made/);
+  assert.equal(text, "Demo AI: sample text, not generated from your data.");
+  assert.doesNotMatch(text, /AI_PROVIDER|ANTHROPIC_API_KEY|Replit Secrets/);
   assert.doesNotMatch(text, /[{}"]/, "the narrative is not request JSON");
   for (const sentinel of SENTINELS) {
     if (request.systemPrompt.includes(sentinel) || request.userPrompt.includes(sentinel)) {
