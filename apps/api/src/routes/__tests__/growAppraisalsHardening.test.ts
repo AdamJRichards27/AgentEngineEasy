@@ -4,7 +4,7 @@ import type { Server } from "node:http";
 import { createHash } from "node:crypto";
 import type { ObjectStorageProvider } from "@aee/integration-object-storage";
 import { and, eq } from "drizzle-orm";
-import { db, appraisals, entitlementGrants } from "@aee/db";
+import { db, appraisals, entitlementGrants, growOpportunities, parties, propertyParties } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { setDocumentStorageProviderForTests } from "../../lib/documentStorage.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "./testSupport.js";
@@ -341,4 +341,361 @@ test("typed, expected errors keep their own messages and statuses", async () => 
   const badTransition = await call("POST", `/appraisals/${appraisalId}/status`, GROW.admin.cookie, { toStatus: "WON" });
   assert.equal(badTransition.status, 409, await badTransition.clone().text());
   assert.match(((await badTransition.json()) as { error: string }).error, /recordOutcome/);
+});
+
+/* ---------------------------------------------------------------------
+ * E-9 A2 — bad-row tenancy on appraisal party/opportunity joins and writes.
+ *
+ * Each test seeds the bad row directly (a party_id or opportunity_id that
+ * points into another brokerage), the same way the WP1 P1-2 owner test
+ * above seeds a foreign ownerUserId. Same-brokerage behaviour is asserted
+ * in the same test so the new predicate is shown not to drop a real contact.
+ * -----------------------------------------------------------------*/
+
+let e9Seq = 0;
+
+function e9Tag() {
+  e9Seq += 1;
+  return `${suffix}-${e9Seq}`;
+}
+
+function frozen(row: unknown) {
+  return JSON.parse(JSON.stringify(row)) as Record<string, unknown>;
+}
+
+async function insertForeignParty(tag: string) {
+  const firstName = "Quillon";
+  const lastName = `Foreignparty${tag}`;
+  const email = `e9-foreign-${tag}@example.com`;
+  const mobile = `+6149${tag.replace(/\D/g, "").slice(-8)}`;
+  const [row] = await db
+    .insert(parties)
+    .values({
+      brokerageId: FOREIGN.user.brokerageId,
+      partyType: "Person",
+      firstName,
+      lastName,
+      email,
+      mobile,
+    })
+    .returning();
+  return { id: row.id, firstName, lastName, email, mobile, displayName: `${firstName} ${lastName}` };
+}
+
+async function insertForeignOpportunity(partyId: number) {
+  const [row] = await db
+    .insert(growOpportunities)
+    .values({
+      brokerageId: FOREIGN.user.brokerageId,
+      partyId,
+      opportunityType: "Appraisal",
+      status: "Open",
+      stage: "Qualified",
+      source: "manual",
+      reason: "E-9 A2 foreign opportunity fixture",
+    })
+    .returning();
+  return row;
+}
+
+async function createNamedParty(
+  cookie: string,
+  propertyId: number,
+  input: { firstName: string; lastName: string; email: string; mobile: string; role?: string },
+): Promise<number> {
+  const res = await fetch(`${baseUrl}/api/parties`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({
+      propertyId,
+      role: input.role ?? "Seller",
+      firstName: input.firstName,
+      lastName: input.lastName,
+      email: input.email,
+      mobile: input.mobile,
+    }),
+  });
+  if (res.status !== 201) throw new Error(`create named party failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as { party: { id: number } }).party.id;
+}
+
+async function moveToPresented(cookie: string, appraisalId: number) {
+  for (const toStatus of ["APPOINTMENT_SCHEDULED", "PRESENTED"]) {
+    const res = await call("POST", `/appraisals/${appraisalId}/status`, cookie, { toStatus });
+    assert.equal(res.status, 200, `${toStatus}: ${await res.text()}`);
+  }
+}
+
+function newStorageText(before: Set<string>): string {
+  const newKeys = [...storage.objects.keys()].filter((key) => !before.has(key));
+  assert.ok(newKeys.length > 0, "the presentation must have been written to storage");
+  return newKeys.map((key) => storage.objects.get(key)!.toString("utf-8")).join("\n");
+}
+
+test("E-9 A2: Rule E hides a foreign party's name, email and mobile, and still shows the same-brokerage contact", async () => {
+  const tag = e9Tag();
+  const cookie = GROW.admin.cookie;
+  const ownFirst = "Samira";
+  const ownLast = `Sameparty${tag}`;
+  const ownEmail = `e9-same-${tag}@example.com`;
+  const ownMobile = `+6148${tag.replace(/\D/g, "").slice(-8)}`;
+
+  const ownPropertyId = await createProperty(cookie, `8 Rule E Own St ${tag}`);
+  const ownPartyId = await createNamedParty(cookie, ownPropertyId, {
+    firstName: ownFirst,
+    lastName: ownLast,
+    email: ownEmail,
+    mobile: ownMobile,
+  });
+  const ownCreated = await call("POST", "/appraisals/from-contact", cookie, { partyId: ownPartyId, propertyId: ownPropertyId });
+  assert.equal(ownCreated.status, 201, await ownCreated.clone().text());
+  const ownAppraisalId = ((await ownCreated.json()) as { appraisal: { id: number } }).appraisal.id;
+  const scheduled = await call("POST", `/appraisals/${ownAppraisalId}/status`, cookie, { toStatus: "APPOINTMENT_SCHEDULED" });
+  assert.equal(scheduled.status, 200, await scheduled.text());
+  const followUp = await call("POST", `/appraisals/${ownAppraisalId}/follow-up`, cookie, {
+    followUpAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    followUpNotes: "Call the vendor.",
+  });
+  assert.equal(followUp.status, 200, await followUp.text());
+
+  const foreign = await insertForeignParty(tag);
+  const { appraisalId: badAppraisalId } = await createAppraisal(cookie, `8 Rule E Bad St ${tag}`);
+  await db
+    .update(appraisals)
+    .set({
+      partyId: foreign.id,
+      status: "FOLLOW_UP",
+      followUpAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+      followUpNotes: "Do not surface this.",
+    })
+    .where(eq(appraisals.id, badAppraisalId));
+
+  const today = await call("GET", "/today", cookie);
+  assert.equal(today.status, 200, await today.clone().text());
+  const body = (await today.json()) as {
+    priorityActions: Array<{
+      id: string;
+      appraisalId: number | null;
+      partyId: number | null;
+      contactName: string | null;
+      contactEmail: string | null;
+      contactMobile: string | null;
+      availableActions: Array<{ action: string; partyId?: number }>;
+    }>;
+  };
+  const text = JSON.stringify(body);
+
+  const ownCard = body.priorityActions.find((action) => action.id === `appraisal:${ownAppraisalId}:followup`);
+  assert.ok(ownCard, "a same-brokerage overdue appraisal follow-up still appears");
+  assert.equal(ownCard.contactName, `${ownFirst} ${ownLast}`);
+  assert.equal(ownCard.contactEmail, ownEmail);
+  assert.equal(ownCard.contactMobile, ownMobile);
+  assert.equal(ownCard.partyId, ownPartyId);
+  assert.ok(ownCard.availableActions.some((action) => action.action === "email" && action.partyId === ownPartyId));
+  assert.ok(ownCard.availableActions.some((action) => action.action === "sms" && action.partyId === ownPartyId));
+
+  assert.equal(
+    body.priorityActions.some((action) => action.appraisalId === badAppraisalId || action.partyId === foreign.id),
+    false,
+    "a foreign party must not produce a Today card",
+  );
+  assert.equal(text.includes(foreign.displayName), false);
+  assert.equal(text.includes(foreign.lastName), false);
+  assert.equal(text.includes(foreign.email), false);
+  assert.equal(text.includes(foreign.mobile), false);
+  assert.equal(text.includes(foreign.firstName), false);
+});
+
+test("E-9 A2: run handoff refuses a foreign party and still links a same-brokerage seller", async () => {
+  const tag = e9Tag();
+  const cookie = GROW.admin.cookie;
+
+  const ownPropertyId = await createProperty(cookie, `9 Handoff Own St ${tag}`);
+  const ownPartyId = await createNamedParty(cookie, ownPropertyId, {
+    firstName: "Helena",
+    lastName: `Handoff${tag}`,
+    email: `e9-handoff-${tag}@example.com`,
+    mobile: `+6147${tag.replace(/\D/g, "").slice(-8)}`,
+    role: "Buyer",
+  });
+  const ownCreated = await call("POST", "/appraisals/from-contact", cookie, { partyId: ownPartyId, propertyId: ownPropertyId });
+  assert.equal(ownCreated.status, 201, await ownCreated.clone().text());
+  const ownAppraisalId = ((await ownCreated.json()) as { appraisal: { id: number } }).appraisal.id;
+  await moveToPresented(cookie, ownAppraisalId);
+  const ownWon = await call("POST", `/appraisals/${ownAppraisalId}/outcome`, cookie, { outcome: "WON", outcomeReason: "relationship" });
+  assert.equal(ownWon.status, 200, await ownWon.text());
+  const ownHandoff = await call("POST", `/appraisals/${ownAppraisalId}/run-handoff`, cookie, {});
+  assert.equal(ownHandoff.status, 200, await ownHandoff.clone().text());
+  const ownBody = (await ownHandoff.json()) as { propertyId: number; sellerLinkCreated: boolean };
+  assert.equal(ownBody.propertyId, ownPropertyId);
+  assert.equal(ownBody.sellerLinkCreated, true);
+  const ownLinks = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, ownPropertyId));
+  assert.ok(ownLinks.some((link) => link.partyId === ownPartyId && link.role === "Seller"));
+
+  const foreign = await insertForeignParty(tag);
+  const { appraisalId, propertyId } = await createAppraisal(cookie, `9 Handoff Bad St ${tag}`);
+  await moveToPresented(cookie, appraisalId);
+  const won = await call("POST", `/appraisals/${appraisalId}/outcome`, cookie, { outcome: "WON", outcomeReason: "relationship" });
+  assert.equal(won.status, 200, await won.text());
+  await db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId));
+  const linksBefore = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
+
+  const handoff = await call("POST", `/appraisals/${appraisalId}/run-handoff`, cookie, {});
+  assert.equal(handoff.status, 404);
+  assert.equal(((await handoff.json()) as { error: string }).error, "Contact not found");
+
+  const linksAfter = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
+  assert.deepEqual(
+    linksAfter.map((link) => ({ partyId: link.partyId, role: link.role })).sort((a, b) => a.partyId - b.partyId),
+    linksBefore.map((link) => ({ partyId: link.partyId, role: link.role })).sort((a, b) => a.partyId - b.partyId),
+  );
+  assert.equal(
+    linksAfter.some((link) => link.partyId === foreign.id),
+    false,
+  );
+});
+
+test("E-9 A2: presentation generation keeps a same-brokerage contact name and omits a foreign one", async () => {
+  const tag = e9Tag();
+  const cookie = GROW.admin.cookie;
+  const ownFirst = "Petra";
+  const ownLast = `Present${tag}`;
+  const propertyId = await createProperty(cookie, `10 Presentation St ${tag}`);
+  const partyId = await createNamedParty(cookie, propertyId, {
+    firstName: ownFirst,
+    lastName: ownLast,
+    email: `e9-present-${tag}@example.com`,
+    mobile: `+6146${tag.replace(/\D/g, "").slice(-8)}`,
+  });
+  const created = await call("POST", "/appraisals/from-contact", cookie, { partyId, propertyId });
+  assert.equal(created.status, 201, await created.clone().text());
+  const appraisalId = ((await created.json()) as { appraisal: { id: number } }).appraisal.id;
+
+  const beforeOwn = new Set(storage.objects.keys());
+  const ownPresentation = await call("POST", `/appraisals/${appraisalId}/presentation/generate`, cookie, {});
+  assert.equal(ownPresentation.status, 200, await ownPresentation.clone().text());
+  const ownRendered = newStorageText(beforeOwn);
+  assert.ok(ownRendered.includes(`Prepared for: ${ownFirst} ${ownLast}`));
+
+  const foreign = await insertForeignParty(tag);
+  await db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId));
+  const beforeForeign = new Set(storage.objects.keys());
+  const foreignPresentation = await call("POST", `/appraisals/${appraisalId}/presentation/generate`, cookie, {});
+  assert.equal(foreignPresentation.status, 200, await foreignPresentation.clone().text());
+  const foreignRendered = newStorageText(beforeForeign);
+  assert.ok(foreignRendered.includes("Prepared for: Valued client"));
+  assert.equal(foreignRendered.includes(foreign.displayName), false);
+  assert.equal(foreignRendered.includes(foreign.lastName), false);
+  assert.equal(foreignRendered.includes(foreign.email), false);
+  assert.equal(foreignRendered.includes(foreign.mobile), false);
+  assert.equal(foreignRendered.includes(foreign.firstName), false);
+});
+
+test("E-9 A2: pipeline keeps the appraisal row when party_id is foreign, with no foreign name, and still names a same-brokerage contact", async () => {
+  const tag = e9Tag();
+  const cookie = GROW.admin.cookie;
+  const ownFirst = "Nia";
+  const ownLast = `Pipeline${tag}`;
+  const propertyId = await createProperty(cookie, `11 Pipeline St ${tag}`);
+  const partyId = await createNamedParty(cookie, propertyId, {
+    firstName: ownFirst,
+    lastName: ownLast,
+    email: `e9-pipeline-${tag}@example.com`,
+    mobile: `+6145${tag.replace(/\D/g, "").slice(-8)}`,
+  });
+  const created = await call("POST", "/appraisals/from-contact", cookie, { partyId, propertyId });
+  assert.equal(created.status, 201, await created.clone().text());
+  const appraisalId = ((await created.json()) as { appraisal: { id: number } }).appraisal.id;
+
+  const before = await call("GET", "/appraisals/pipeline", cookie);
+  assert.equal(before.status, 200);
+  const beforeBody = (await before.json()) as { appraisals: Array<{ id: number; partyDisplayName: string | null }> };
+  const beforeRow = beforeBody.appraisals.find((row) => row.id === appraisalId);
+  assert.ok(beforeRow);
+  assert.equal(beforeRow.partyDisplayName, `${ownFirst} ${ownLast}`);
+
+  const foreign = await insertForeignParty(tag);
+  await db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId));
+
+  const after = await call("GET", "/appraisals/pipeline", cookie);
+  assert.equal(after.status, 200);
+  const text = await after.text();
+  const afterBody = JSON.parse(text) as { appraisals: Array<{ id: number; partyDisplayName: string | null }> };
+  const afterRow = afterBody.appraisals.find((row) => row.id === appraisalId);
+  assert.ok(afterRow, "the appraisal row itself still lists");
+  assert.equal(afterRow.partyDisplayName, null);
+  assert.equal(text.includes(foreign.displayName), false);
+  assert.equal(text.includes(foreign.lastName), false);
+  assert.equal(text.includes(foreign.email), false);
+  assert.equal(text.includes(foreign.mobile), false);
+  assert.equal(text.includes(foreign.firstName), false);
+});
+
+test("E-9 A2: outcome recording updates a same-brokerage opportunity and never writes a foreign one", async () => {
+  const tag = e9Tag();
+  const cookie = GROW.admin.cookie;
+
+  async function opportunityFromContact(label: string, firstName: string) {
+    const propertyId = await createProperty(cookie, `${label} ${tag}`);
+    const partyId = await createNamedParty(cookie, propertyId, {
+      firstName,
+      lastName: `Outcome${tag}`,
+      email: `e9-${label.replace(/\s+/g, "-").toLowerCase()}-${tag}@example.com`,
+      mobile: `+6144${tag.replace(/\D/g, "").slice(-8)}`,
+    });
+    const opportunityRes = await call("POST", "/opportunities", cookie, {
+      partyId,
+      propertyId,
+      opportunityType: "Appraisal",
+      reason: `${label} same-brokerage opportunity`,
+    });
+    assert.equal(opportunityRes.status, 201, await opportunityRes.clone().text());
+    const opportunityId = ((await opportunityRes.json()) as { opportunity: { id: number } }).opportunity.id;
+    const created = await call("POST", "/appraisals/from-opportunity", cookie, { opportunityId });
+    assert.equal(created.status, 201, await created.clone().text());
+    const appraisalId = ((await created.json()) as { appraisal: { id: number } }).appraisal.id;
+    return { appraisalId, opportunityId };
+  }
+
+  const won = await opportunityFromContact("12 Outcome Won", "Willa");
+  await moveToPresented(cookie, won.appraisalId);
+  const wonRes = await call("POST", `/appraisals/${won.appraisalId}/outcome`, cookie, { outcome: "WON", outcomeReason: "relationship" });
+  assert.equal(wonRes.status, 200, await wonRes.text());
+  const [wonOpportunity] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, won.opportunityId));
+  assert.equal(wonOpportunity.stage, "Converted");
+  assert.equal(wonOpportunity.status, "Converted");
+  assert.ok(wonOpportunity.closedAt);
+
+  const lost = await opportunityFromContact("12 Outcome Lost", "Lina");
+  await moveToPresented(cookie, lost.appraisalId);
+  const lostRes = await call("POST", `/appraisals/${lost.appraisalId}/outcome`, cookie, { outcome: "LOST", outcomeReason: "relationship" });
+  assert.equal(lostRes.status, 200, await lostRes.text());
+  const [lostOpportunity] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, lost.opportunityId));
+  assert.equal(lostOpportunity.status, "Lost");
+  assert.equal(lostOpportunity.lostReason, "relationship");
+  assert.ok(lostOpportunity.closedAt);
+  assert.equal(lostOpportunity.stage, "AppraisalBooked");
+
+  const foreignParty = await insertForeignParty(tag);
+  const foreignOpportunity = await insertForeignOpportunity(foreignParty.id);
+  const foreignBefore = frozen(foreignOpportunity);
+
+  const { appraisalId: badWonId } = await createAppraisal(cookie, `12 Outcome Bad Won ${tag}`);
+  await db.update(appraisals).set({ opportunityId: foreignOpportunity.id }).where(eq(appraisals.id, badWonId));
+  await moveToPresented(cookie, badWonId);
+  const badWon = await call("POST", `/appraisals/${badWonId}/outcome`, cookie, { outcome: "WON", outcomeReason: "relationship" });
+  assert.equal(badWon.status, 200, await badWon.text());
+  const [afterWon] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, foreignOpportunity.id));
+  assert.deepEqual(frozen(afterWon), foreignBefore);
+
+  const { appraisalId: badLostId } = await createAppraisal(cookie, `12 Outcome Bad Lost ${tag}`);
+  await db.update(appraisals).set({ opportunityId: foreignOpportunity.id }).where(eq(appraisals.id, badLostId));
+  await moveToPresented(cookie, badLostId);
+  const badLost = await call("POST", `/appraisals/${badLostId}/outcome`, cookie, { outcome: "LOST", outcomeReason: "fee_commission" });
+  assert.equal(badLost.status, 200, await badLost.text());
+  const [afterLost] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, foreignOpportunity.id));
+  assert.deepEqual(frozen(afterLost), foreignBefore);
+  assert.equal(afterLost.brokerageId, FOREIGN.user.brokerageId);
+  assert.equal(afterLost.status, "Open");
+  assert.equal(afterLost.stage, "Qualified");
 });

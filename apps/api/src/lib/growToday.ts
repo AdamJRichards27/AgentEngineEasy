@@ -1228,7 +1228,11 @@ export async function getGrowTodaySummary(
       })
       .from(appraisals)
       .innerJoin(properties, eq(appraisals.propertyId, properties.id))
-      .innerJoin(parties, eq(appraisals.partyId, parties.id))
+      // E-9 A2: the tenant id is in the join, same as the signal party join
+      // above. A bad appraisals.party_id that points at another brokerage
+      // never contributes that party's name, email, or mobile, and never
+      // becomes an email or SMS action.
+      .innerJoin(parties, and(eq(appraisals.partyId, parties.id), eq(parties.brokerageId, brokerageId)))
       .where(
         and(
           eq(properties.brokerageId, brokerageId),
