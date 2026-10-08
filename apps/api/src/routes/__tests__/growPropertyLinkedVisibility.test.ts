@@ -213,7 +213,7 @@ before(async () => {
   assert.equal(contactOnlyActivity.status, 201, await contactOnlyActivity.clone().text());
   const contactOnlyOpportunity = await postRaw("/grow/opportunities", agentA.cookie, {
     partyId: sharedContactId,
-    opportunityType: "General",
+    opportunityType: "Other",
     reason: "Contact-only opportunity",
   });
   assert.equal(contactOnlyOpportunity.status, 201, await contactOnlyOpportunity.clone().text());
