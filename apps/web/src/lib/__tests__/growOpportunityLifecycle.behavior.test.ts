@@ -429,3 +429,71 @@ test("lifecycle actions are hidden without grow.opportunities.manage, and the na
   }
 });
 
+test("a lost opportunity shows its lost reason in the status cell and keeps its own reason", async () => {
+  const { hooks } = installGlobals(MANAGE);
+  const pages = (globalThis as { __gp1Pages: { all: { opportunities: unknown[] }; seller_side: { opportunities: unknown[] } } }).__gp1Pages;
+  pages.all = {
+    opportunities: [
+      opportunity({ status: "Lost", stage: "Lost", lostReason: "UAT check", reason: "Seller might list" }),
+      opportunity({ id: 42, contactName: "Bea Manager", opportunityType: "PropertyManagement", stage: "New", reason: "Lease review" }),
+    ],
+    nextCursor: null,
+    total: 2,
+  };
+  try {
+    await withVite(async (vite) => {
+      const { GrowOpportunitiesTab } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        GrowOpportunitiesTab: (props: { onViewContact: (partyId: number) => void }) => unknown;
+      };
+      const tree = (() => {
+        hooks.beginRender();
+        return GrowOpportunitiesTab({ onViewContact: () => {} });
+      })();
+      assert.match(textContent(tree), /Lost: UAT check/);
+      assert.match(textContent(tree), /Seller might list/);
+      assert.match(textContent(tree), /Lease review/);
+      assert.doesNotMatch(textContent(tree), /Lost: Lease review/);
+      const statusCells = findAll(tree, (element) => element.type === "span" && String(element.props?.className ?? "").includes("pill"));
+      assert.equal(textContent(statusCells[0]), "Lost: UAT check");
+      assert.equal(textContent(statusCells[1]), "Open");
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("Contact 360's opportunity row shows the lost reason beside the opportunity's own reason", async () => {
+  const { hooks } = installGlobals(MANAGE);
+  try {
+    await withVite(async (vite) => {
+      const { GrowContactOpportunitiesSection } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        GrowContactOpportunitiesSection: (props: Record<string, unknown>) => unknown;
+      };
+      const tree = (() => {
+        hooks.beginRender();
+        return GrowContactOpportunitiesSection({
+          partyId: 12,
+          opportunities: [
+            {
+              id: 41,
+              opportunityType: "Other",
+              status: "Lost",
+              stage: "Lost",
+              reason: "Seller might list",
+              lostReason: "UAT check",
+              nextActionDueAt: null,
+              recommendedNextAction: null,
+              propertyId: null,
+            },
+          ],
+          onChanged: () => {},
+        });
+      })();
+      assert.match(textContent(tree), /Lost: UAT check/);
+      assert.match(textContent(tree), /Seller might list/);
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+

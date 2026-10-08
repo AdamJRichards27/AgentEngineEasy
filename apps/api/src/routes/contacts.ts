@@ -1279,6 +1279,7 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
       status: o.status,
       stage: o.stage,
       reason: o.reason,
+      lostReason: o.lostReason,
       nextActionDueAt: o.nextActionDueAt ? o.nextActionDueAt.toISOString() : null,
       recommendedNextAction: o.recommendedNextAction,
       propertyId: o.propertyId,
