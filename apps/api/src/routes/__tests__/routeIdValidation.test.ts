@@ -137,6 +137,7 @@ test("smoke-run defects: the exact endpoints that returned 500 now return 400", 
     { method: "POST", path: "/api/communications/messages/{id}/cancel", body: { expectedVersion: 1 } },
     { method: "GET", path: "/api/properties/{id}" },
     { method: "PATCH", path: "/api/grow/opportunities/{id}", body: { recommendedNextAction: "Call" } },
+    { method: "PATCH", path: "/api/grow/opportunities/{id}/lifecycle", body: { stage: "Contacted" } },
   ]);
 });
 
@@ -319,6 +320,7 @@ test("a well-formed but unknown id still resolves normally, never 400", async ()
     { route: { method: "GET", path: "/api/communications/threads/{id}" }, expected: [404] },
     { route: { method: "GET", path: "/api/communications/messages/{id}" }, expected: [404] },
     { route: { method: "PATCH", path: "/api/grow/opportunities/{id}", body: { recommendedNextAction: "Call" } }, expected: [404] },
+    { route: { method: "PATCH", path: "/api/grow/opportunities/{id}/lifecycle", body: { stage: "Contacted" } }, expected: [404] },
   ];
   for (const { route, expected } of cases) {
     const res = await call(route, unknownButValid);

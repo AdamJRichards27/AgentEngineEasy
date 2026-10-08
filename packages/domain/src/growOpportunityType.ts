@@ -14,6 +14,10 @@
 export const GROW_OPPORTUNITY_TYPES = ["Listing", "Appraisal", "PropertyManagement", "Other"] as const;
 export type GrowOpportunityType = (typeof GROW_OPPORTUNITY_TYPES)[number];
 
+export function isGrowOpportunityType(value: unknown): value is GrowOpportunityType {
+  return typeof value === "string" && (GROW_OPPORTUNITY_TYPES as readonly string[]).includes(value);
+}
+
 export const GROW_OPPORTUNITY_LIST_TYPE_FILTERS = ["all", "seller_side", "property_management", "other"] as const;
 export type GrowOpportunityListTypeFilter = (typeof GROW_OPPORTUNITY_LIST_TYPE_FILTERS)[number];
 
