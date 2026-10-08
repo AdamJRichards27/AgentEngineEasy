@@ -6,6 +6,7 @@ interface ElementNode {
   props?: {
     children?: unknown;
     onClick?: () => void;
+    disabled?: boolean;
   };
 }
 
@@ -60,6 +61,7 @@ test("item decisions stay local until Save, while Save and Discard call only the
       stateCursor = 0;
       refCursor = 0;
       effectCursor = 0;
+      (globalThis as typeof globalThis & { __reviewMutationCursor: number }).__reviewMutationCursor = 0;
     },
     useState(initial: unknown) {
       const index = stateCursor++;
@@ -122,13 +124,18 @@ test("item decisions stay local until Save, while Save and Discard call only the
         return `
           export const useQueryClient = () => ({ setQueryData() {} });
           export const useQuery = () => globalThis.__reviewQuery;
-          export const useMutation = (options) => ({
-            isPending: false,
-            isError: false,
-            mutate(input) {
-              globalThis.__reviewPending.push(Promise.resolve(options.mutationFn(input)));
-            },
-          });
+          export const useMutation = (options) => {
+            const slot = globalThis.__reviewMutationCursor++;
+            const error = slot === 0 ? globalThis.__reviewSaveError : null;
+            return {
+              isPending: false,
+              isError: Boolean(error),
+              error,
+              mutate(input) {
+                globalThis.__reviewPending.push(Promise.resolve(options.mutationFn(input)));
+              },
+            };
+          };
         `;
       }
       if (id === "\0review-test-wouter") {
@@ -148,6 +155,8 @@ test("item decisions stay local until Save, while Save and Discard call only the
     __reviewHooks: hooks,
     __reviewQuery: { data: { transcriptions: [fixture] }, isLoading: false, isError: false },
     __reviewPending: pending,
+    __reviewSaveError: null,
+    __reviewMutationCursor: 0,
     __reviewApiFetch: (path: string, options?: { method?: string; body?: string }) => {
       writes.push({ path, options });
       return Promise.resolve({ transcription: fixture });
@@ -214,11 +223,23 @@ test("item decisions stay local until Save, while Save and Discard call only the
     assert.equal(writes.length, 2);
     assert.equal(writes[1]!.path, "/grow/calls/81/transcription/71/discard");
     assert.deepEqual(JSON.parse(writes[1]!.options!.body!), {});
+
+    (globalThis as typeof globalThis & { __reviewSaveError: { code: string; friendly: string } | null }).__reviewSaveError = {
+      code: "CONSENT_WITHDRAWN",
+      friendly: "Recording consent has been withdrawn; no new transcription or AI processing is permitted.",
+    };
+    tree = render();
+    assert.match(textContent(tree), /this review can’t be saved/);
+    assert.match(textContent(tree), /You can still discard the transcript/);
+    assert.equal(findButtons(tree, "Discard transcript")[0]!.props!.disabled, false);
+    assert.equal(findButtons(tree, "Save review")[0]!.props!.disabled, false);
   } finally {
     await vite.close();
     delete (globalThis as Record<string, unknown>).__reviewHooks;
     delete (globalThis as Record<string, unknown>).__reviewQuery;
     delete (globalThis as Record<string, unknown>).__reviewPending;
+    delete (globalThis as Record<string, unknown>).__reviewSaveError;
+    delete (globalThis as Record<string, unknown>).__reviewMutationCursor;
     delete (globalThis as Record<string, unknown>).__reviewApiFetch;
   }
 });

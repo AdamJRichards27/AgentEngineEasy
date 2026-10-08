@@ -414,13 +414,40 @@ async function assertPersistedF2Evidence(input: InitiateCallTranscriptionInput, 
   await reject(input, enabledAudits.length === 0 ? "F2_EVIDENCE_MISSING" : "F2_EVIDENCE_INVALID", "The recording is not supported by complete persisted F2 confirmation evidence.");
 }
 
-function isRecordingConsentWithdrawn(consent: {
+export function isRecordingConsentWithdrawn(consent: {
   status: string;
   withdrawnAt: Date | null;
 } | undefined): boolean {
   // Deny by default: only a present, never-withdrawn consent row permits new
   // processing. Withdrawal never deletes the recording, transcript, or evidence.
   return !consent || consent.status === "WITHDRAWN" || consent.withdrawnAt !== null;
+}
+
+export const RECORDING_CONSENT_WITHDRAWN_MESSAGE =
+  "Recording consent has been withdrawn; no new transcription or AI processing is permitted.";
+
+/**
+ * Brokerage- and party-scoped read of one capture consent. A row owned by
+ * another brokerage is not returned, so it cannot satisfy or block the
+ * caller. `lock` holds the row so a concurrent withdrawal cannot commit
+ * after this read and before the caller's write.
+ */
+export async function readRecordingConsentWithdrawalState(
+  executor: typeof db | ConsentTransaction,
+  input: { brokerageId: number; partyId: number; consentId: number | null },
+  lock = false,
+): Promise<{ status: string; withdrawnAt: Date | null } | undefined> {
+  if (!validId(input.consentId) || !validId(input.brokerageId) || !validId(input.partyId)) return undefined;
+  const query = executor.select({
+    status: growCallRecordingConsents.status,
+    withdrawnAt: growCallRecordingConsents.withdrawnAt,
+  }).from(growCallRecordingConsents).where(and(
+    eq(growCallRecordingConsents.id, input.consentId),
+    eq(growCallRecordingConsents.brokerageId, input.brokerageId),
+    eq(growCallRecordingConsents.partyId, input.partyId),
+  )).limit(1);
+  const [consent] = lock ? await query.for("update") : await query;
+  return consent;
 }
 
 /**
@@ -433,18 +460,13 @@ async function assertRecordingConsentNotWithdrawn(
   consentId: number | null,
   partyId: number,
 ): Promise<void> {
-  const [consent] = validId(consentId)
-    ? await db.select({
-      status: growCallRecordingConsents.status,
-      withdrawnAt: growCallRecordingConsents.withdrawnAt,
-    }).from(growCallRecordingConsents).where(and(
-      eq(growCallRecordingConsents.id, consentId),
-      eq(growCallRecordingConsents.brokerageId, input.brokerageId),
-      eq(growCallRecordingConsents.partyId, partyId),
-    )).limit(1)
-    : [];
+  const consent = await readRecordingConsentWithdrawalState(db, {
+    brokerageId: input.brokerageId,
+    partyId,
+    consentId,
+  });
   if (isRecordingConsentWithdrawn(consent)) {
-    await reject(input, "CONSENT_WITHDRAWN", "Recording consent has been withdrawn; no new transcription or AI processing is permitted.");
+    await reject(input, "CONSENT_WITHDRAWN", RECORDING_CONSENT_WITHDRAWN_MESSAGE);
   }
 }
 
@@ -629,21 +651,13 @@ async function lockActiveRecordingForCommit(
 ): Promise<void> {
   // Lock the capture consent as well, so a withdrawal that commits while AI
   // drafting was in flight can never be overtaken by this transcript commit.
-  const [currentConsent] = validId(consent.consentId)
-    ? await tx.select({
-      status: growCallRecordingConsents.status,
-      withdrawnAt: growCallRecordingConsents.withdrawnAt,
-    }).from(growCallRecordingConsents).where(and(
-      eq(growCallRecordingConsents.id, consent.consentId),
-      eq(growCallRecordingConsents.brokerageId, input.brokerageId),
-      eq(growCallRecordingConsents.partyId, consent.partyId),
-    )).for("update")
-    : [];
+  const currentConsent = await readRecordingConsentWithdrawalState(tx, {
+    brokerageId: input.brokerageId,
+    partyId: consent.partyId,
+    consentId: consent.consentId,
+  }, true);
   if (isRecordingConsentWithdrawn(currentConsent)) {
-    throw new CallTranscriptionError(
-      "CONSENT_WITHDRAWN",
-      "Recording consent has been withdrawn; no new transcription or AI processing is permitted.",
-    );
+    throw new CallTranscriptionError("CONSENT_WITHDRAWN", RECORDING_CONSENT_WITHDRAWN_MESSAGE);
   }
 
   const [source] = await tx.select({

@@ -102,7 +102,7 @@ async function createFixture(options: {
     destinationRaw: "+61400111222", destinationNormalized: "+61400111222",
     destinationCountry: "AU", provider: "synthetic", status: "COMPLETED",
     recordingRequested: true, recordingStatus: "PERMITTED_NOT_CAPTURED",
-    recordingConsentId: options.withConsent === false ? null : consent!.id,
+    recordingConsentId: consent!.id,
     endedAt: new Date(),
   }).returning();
   const key = `f4-followup-${brokerageId}-${fixtureNumber}`;
@@ -145,6 +145,16 @@ async function createFixture(options: {
     await discardCallTranscription({
       brokerageId, callSessionId: session!.id, transcriptionId: transcription!.id, actor, body: {},
     });
+  }
+  // Save now requires the capture consent. A fixture that models "no resolvable
+  // consent" still saves while consent is in place, then drops the pointer so
+  // later proposal checks fail closed without rewriting the saved review.
+  if (options.withConsent === false) {
+    await db.update(growCallSessions).set({ recordingConsentId: null }).where(and(
+      eq(growCallSessions.id, session!.id),
+      eq(growCallSessions.brokerageId, brokerageId),
+    ));
+    session!.recordingConsentId = null;
   }
   return { party: party!, consent: consent!, session: session!, transcription: transcription! };
 }

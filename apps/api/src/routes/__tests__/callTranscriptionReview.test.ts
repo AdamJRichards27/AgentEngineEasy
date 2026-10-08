@@ -8,6 +8,7 @@ import {
   documents,
   entitlementGrants,
   growActivities,
+  growCallRecordingConsents,
   growCallSessions,
   growCallTranscriptions,
   parties,
@@ -84,10 +85,15 @@ async function createFixture(): Promise<{ transcriptionId: number; sessionId: nu
     brokerageId, firstName: "Route", lastName: "Review", mobile: "+61400123456",
   }).returning();
   fixturePartyId = party!.id;
+  const [consent] = await db.insert(growCallRecordingConsents).values({
+    brokerageId, partyId: party!.id, scope: "PER_CALL", status: "ACTIVE", source: "VERBAL_ON_CALL",
+    jurisdiction: "AU", capturedByUserId: A.agent.user.id,
+  }).returning();
   const [session] = await db.insert(growCallSessions).values({
     brokerageId, partyId: party!.id, initiatedByUserId: A.agent.user.id,
     destinationRaw: "+61400123456", destinationNormalized: "+61400123456",
     destinationCountry: "AU", provider: "synthetic", status: "CONNECTED",
+    recordingRequested: true, recordingConsentId: consent!.id,
   }).returning();
   fixtureSessionId = session!.id;
   const storageKey = `route-review-${fixtureSessionId}`;
