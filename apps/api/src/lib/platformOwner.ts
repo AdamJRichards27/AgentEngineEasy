@@ -129,9 +129,21 @@ export async function platformOwnerAdminGuard(targetUserId: number): Promise<"al
   return "allow";
 }
 
+/**
+ * The request path as the owner guards compare it. Express routing is
+ * case-insensitive and tolerates repeated slashes, so `/api/auth//Admin/...`
+ * reaches the same handler as `/api/auth/admin/...`. The guards normalise the
+ * same way (lower case, collapsed slashes, no trailing slash, no query, and
+ * no scheme or host from an absolute-form request target) so a
+ * path variant cannot be classified as a different surface than the handler
+ * it is routed to.
+ */
 export function requestPathname(req: Request): string {
   const raw = req.originalUrl || req.url || req.path || "";
-  const path = raw.split("?")[0] ?? "";
+  const path = (raw.split("?")[0] ?? "")
+    .replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "")
+    .replace(/\/{2,}/g, "/")
+    .toLowerCase();
   if (path.length > 1 && path.endsWith("/")) return path.replace(/\/+$/, "");
   return path || "/";
 }

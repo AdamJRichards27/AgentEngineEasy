@@ -20,6 +20,7 @@ import { loadSession, requireAuth } from "../../middlewares/auth.js";
 import { platformOwnerRouter } from "../platformOwner.js";
 import { authRouter } from "../auth.js";
 import { createSessionToken } from "../../lib/session.js";
+import { createOwnerContextToken } from "../../lib/ownerContextToken.js";
 import { hashPassword } from "../../lib/auth/password.js";
 import { generateToken } from "../../lib/auth/tokens.js";
 import {
@@ -131,10 +132,12 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     app.use("/api/auth", authRouter);
     app.all("/api/scope-probe", requireAuth, (req, res) => res.json(req.authedUser));
     for (const path of deniedWrites) {
-      app.post(path, requireAuth, (_req, res) => {
-        writes.push(path);
-        res.status(200).json({ wrote: true });
-      });
+      for (const method of ["post", "put", "patch", "delete"] as const) {
+        app[method](path, requireAuth, (req, res) => {
+          writes.push(req.method === "POST" ? path : `${req.method} ${path}`);
+          res.status(200).json({ wrote: true });
+        });
+      }
     }
     app.get("/api/payments/refund", requireAuth, (_req, res) => res.status(200).json({ read: true }));
     app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -267,6 +270,16 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
       const body = await res.json() as { code?: string };
       assert.equal(body.code, "OWNER_ACTION_NOT_PERMITTED", path);
     }
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      for (const path of ["/api/payments/refund", "/api/integrations/config", "/api/communications/admin"]) {
+        const res = await call(path.slice("/api".length), scoped, method, {}, { "X-AEE-Owner-Brokerage": String(tenantAId) });
+        assert.equal(res.status, 403, `${method} ${path}`);
+        assert.equal((await res.json() as { code?: string }).code, "OWNER_ACTION_NOT_PERMITTED", `${method} ${path}`);
+      }
+    }
+    // Express routes case-insensitively, so a case variant must be denied too.
+    const caseVariant = await call("/Payments/Refund", scoped, "POST", {}, { "X-AEE-Owner-Brokerage": String(tenantAId) });
+    assert.equal(caseVariant.status, 403);
     assert.deepEqual(writes, []);
     const read = await call("/payments/refund", scoped);
     assert.equal(read.status, 200);
@@ -298,6 +311,45 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     const adminDisable = await call(`/auth/admin/users/${memberId}/disable`, adminCookie, "POST", {});
     assert.equal(adminDisable.status, 204, await adminDisable.clone().text());
     await db.update(users).set({ isActive: true, sessionEpoch: 0 }).where(eq(users.id, memberId));
+  });
+
+  test("F2 path variants of allowed admin routes cannot skip the selected-brokerage header check", async () => {
+    const scoped = await selectBrokerage(tenantAId);
+    for (const variant of [`/auth/Admin/users/${memberId}/disable`, `/auth//admin/users/${memberId}/disable`, `/AUTH/ADMIN/USERS/${memberId}/DISABLE/`]) {
+      const res = await call(variant, scoped, "POST", {});
+      assert.equal(res.status, 409, `${variant}: ${await res.clone().text()}`);
+      assert.equal((await res.json() as { code?: string }).code, "OWNER_CONTEXT_CHANGED", variant);
+    }
+    const [member] = await db.select().from(users).where(eq(users.id, memberId));
+    assert.equal(member?.isActive, true);
+    assert.equal(member?.sessionEpoch, 0);
+  });
+
+  test("F3 an owner invitation whose owner-audit row cannot be written is revoked and not issued", async () => {
+    const scoped = await selectBrokerage(tenantAId);
+    const target = db as unknown as { insert: (table: unknown) => unknown };
+    const originalInsert = target.insert;
+    // Let the per-request audit pass, then fail only the invitation owner-audit insert.
+    __setPlatformOwnerAuditInsertForTests(async () => {});
+    target.insert = (table: unknown) => {
+      if (table === platformOwnerAudit) {
+        return { values: async () => { throw Object.assign(new Error("audit unavailable"), { code: "57P01" }); } };
+      }
+      return originalInsert.call(db, table);
+    };
+    const email = `audit-fail-invite-${suffix}@example.invalid`;
+    try {
+      const res = await call("/auth/admin/invitations", scoped, "POST", { email, role: "Brokerage Administrator" }, { "X-AEE-Owner-Brokerage": String(tenantAId) });
+      assert.equal(res.status, 503, await res.clone().text());
+    } finally {
+      target.insert = originalInsert;
+      __resetPlatformOwnerTestHooks();
+    }
+    const rows = await db.select().from(invitations).where(and(eq(invitations.email, email), eq(invitations.brokerageId, tenantAId)));
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0]!.revokedAt, "invitation must be revoked");
+    const issued = await db.select().from(auditLogs).where(and(eq(auditLogs.recordType, "invitation"), eq(auditLogs.recordId, String(rows[0]!.id)), eq(auditLogs.action, "invitation_created")));
+    assert.equal(issued.length, 0);
   });
 
   test("F3 a revoked owner's pending invitation is invalidated and attribution stays visible", async () => {
@@ -404,6 +456,11 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     const agentRes = await call("/scope-probe", staleAgent);
     assert.equal(agentRes.status, 200);
     assert.equal((await agentRes.json() as { id: number }).id, agentId);
+    const staleToken = sessionAt(ownerId, 0, Date.now() - 12 * 60 * 60 * 1000 - 60_000);
+    const staleContext = createOwnerContextToken(tenantAId, staleToken, process.env.SESSION_SECRET!);
+    const staleInTenant = await call("/scope-probe", `aee_session=${staleToken}; aee_owner_context=${staleContext}`);
+    assert.equal(staleInTenant.status, 401);
+    assert.equal((await staleInTenant.json() as { code?: string }).code, "OWNER_SESSION_EXPIRED");
     const oldButValid = `aee_session=${sessionAt(agentId, 0, Date.now() - 20 * 24 * 60 * 60 * 1000)}`;
     assert.equal((await call("/scope-probe", oldButValid)).status, 200);
   });
