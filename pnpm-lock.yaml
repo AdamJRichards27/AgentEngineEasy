@@ -25,6 +25,9 @@ importers:
       '@aee/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@aee/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@aee/events':
         specifier: workspace:*
         version: link:../../packages/events
@@ -107,6 +110,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@aee/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@tanstack/react-query':
         specifier: ^5.90.0
         version: 5.101.4(react@19.2.8)

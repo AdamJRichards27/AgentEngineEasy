@@ -3,6 +3,8 @@ export function growListPath(
   path: string,
   params: {
     search?: string;
+    /** Omit or pass `all` to leave the opportunities list unfiltered. */
+    type?: string;
     role?: string;
     cursor?: string | null;
     excludePartyId?: number;
@@ -11,6 +13,7 @@ export function growListPath(
 ): string {
   const query = new URLSearchParams();
   if (params.search) query.set("search", params.search);
+  if (params.type && params.type !== "all") query.set("type", params.type);
   if (params.role) query.set("role", params.role);
   if (params.cursor) query.set("cursor", params.cursor);
   if (params.excludePartyId !== undefined) query.set("excludePartyId", String(params.excludePartyId));

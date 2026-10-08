@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq, ilike, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
 import {
   db,
   growActivities,
@@ -8,6 +8,13 @@ import {
   parties,
   properties,
 } from "@aee/db";
+import {
+  CLASSIFIED_OPPORTUNITY_TYPES,
+  PROPERTY_MANAGEMENT_OPPORTUNITY_TYPE,
+  SELLER_SIDE_OPPORTUNITY_TYPES,
+  parseGrowOpportunityListTypeFilter,
+  type GrowOpportunityListTypeFilter,
+} from "@aee/domain";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision, resolveEntitlements } from "../lib/entitlements/resolver.js";
@@ -65,18 +72,20 @@ const GROW_RELATIONSHIP_ROLE_MAX = 200;
 
 /**
  * Predicates for GET /grow/opportunities. Brokerage and own-property visibility
- * are always included. `id` and `search` are optional and apply to the page
- * and the exact count together.
+ * are always included. `id`, `search`, and `type` are optional and apply to
+ * the page and the exact count together.
  *
- * C-5a adds opportunity type as one more optional equality on
- * `growOpportunities.opportunityType` in this function. Do not filter type
- * in the browser over a loaded page.
+ * `type` is a group, not a raw opportunity_type equality. Seller-side is
+ * Listing and Appraisal. Property Management is PropertyManagement and is not
+ * seller-side. Other is everything else, including the stored value Other,
+ * unknown strings, and NULL (NOT IN alone would drop NULL). `all` adds no
+ * type predicate. Do not filter type in the browser over a loaded page.
  */
 function opportunityListConditions(
   brokerageId: number,
   restrictTo: number[] | null,
   callerUserId: number,
-  filters: { id?: number; search?: string },
+  filters: { id?: number; search?: string; type?: GrowOpportunityListTypeFilter },
 ): SQL[] {
   const conditions: SQL[] = [eq(growOpportunities.brokerageId, brokerageId)];
   const visibility = visibleOwnedOrLinkedPropertySql(
@@ -88,6 +97,19 @@ function opportunityListConditions(
   if (visibility) conditions.push(visibility);
   if (filters.id !== undefined) conditions.push(eq(growOpportunities.id, filters.id));
   if (filters.search && filters.search.length > 0) conditions.push(ilike(growOpportunities.reason, `%${filters.search}%`));
+  const type = filters.type ?? "all";
+  if (type === "seller_side") {
+    conditions.push(inArray(growOpportunities.opportunityType, [...SELLER_SIDE_OPPORTUNITY_TYPES]));
+  } else if (type === "property_management") {
+    conditions.push(eq(growOpportunities.opportunityType, PROPERTY_MANAGEMENT_OPPORTUNITY_TYPE));
+  } else if (type === "other") {
+    conditions.push(
+      or(
+        isNull(growOpportunities.opportunityType),
+        notInArray(growOpportunities.opportunityType, [...CLASSIFIED_OPPORTUNITY_TYPES]),
+      )!,
+    );
+  }
   return conditions;
 }
 
@@ -594,12 +616,16 @@ growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"),
     res.status(400).json({ error: pageQuery.error });
     return;
   }
-  // Optional filters share one list so a later opportunity-type filter (C-5a)
-  // is another predicate here, applied to both the page and the exact count.
-  // Type is intentionally not read yet.
+  // id, search, and type share one predicate list so the page and the exact
+  // count stay in agreement, including under the keyset cursor.
   const idFilter = parseOptionalPositiveId(req.query.id);
   if (!idFilter.ok) {
     res.status(400).json({ error: "id must be a positive integer" });
+    return;
+  }
+  const typeFilter = parseGrowOpportunityListTypeFilter(req.query.type);
+  if (!typeFilter.ok) {
+    res.status(400).json({ error: typeFilter.error });
     return;
   }
   const search = readSearchQuery(req.query.search);
@@ -607,6 +633,7 @@ growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"),
   const conditions = opportunityListConditions(user.brokerageId, restrictTo, user.id, {
     id: idFilter.id ?? undefined,
     search,
+    type: typeFilter.filter,
   });
   const filtered = and(...conditions);
   const { limit, cursor } = pageQuery.page;

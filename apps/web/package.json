@@ -10,6 +10,7 @@
     "test": "tsx --test src/lib/__tests__/*.test.ts"
   },
   "dependencies": {
+    "@aee/domain": "workspace:*",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "wouter": "^3.3.5",

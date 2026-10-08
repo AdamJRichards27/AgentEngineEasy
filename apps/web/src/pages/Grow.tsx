@@ -81,6 +81,13 @@ import {
 import { GrowTableScroll } from "../components/GrowTableScroll";
 import { GrowVirtualTable, GrowVirtualTimeline, memoRow, useGrowCursorPages } from "../components/GrowVirtualList";
 import { growListPath } from "../lib/growListQuery";
+import {
+  GROW_OPPORTUNITY_LIST_TYPE_FILTER_LABELS,
+  GROW_OPPORTUNITY_LIST_TYPE_FILTERS,
+  GROW_OPPORTUNITY_TYPES,
+  parseGrowOpportunityListTypeFilter,
+  type GrowOpportunityListTypeFilter,
+} from "@aee/domain";
 import { appraisalWorkspacePath } from "../lib/appraisalUi";
 import {
   LINK_PROPERTY_BEFORE_APPRAISAL,
@@ -202,11 +209,6 @@ const GROW_PROPERTY_RELATIONSHIP_OPTIONS = [
   ["related_party", "Related party"],
   ["unknown_pending_review", "Unknown, pending review"],
 ] as const;
-
-// Hand-mirror of the opportunity_type comment in packages/db/src/schema/grow.ts.
-// The column is text, not a Postgres enum: Listing | Appraisal | PropertyManagement | Other.
-// POST /grow/opportunities stores the string it is given, so the form only offers these.
-const GROW_OPPORTUNITY_TYPES = ["Listing", "Appraisal", "PropertyManagement", "Other"] as const;
 
 interface LinkableProperty {
   id: number;
@@ -3772,19 +3774,20 @@ export function GrowOpportunitiesTab({
   const canAddNote = hasEntitlement("grow.activities.manage");
   const canViewContacts = hasEntitlement("grow.contacts.read");
   const canReadAppraisals = useCanReadAppraisals();
+  const [typeFilter, setTypeFilter] = useState<GrowOpportunityListTypeFilter>("all");
 
   const opportunities = useQuery<GrowOpportunityListPage>({
-    queryKey: ["grow-opportunities"],
-    queryFn: () => apiFetch("/grow/opportunities"),
+    queryKey: ["grow-opportunities", typeFilter],
+    queryFn: () => apiFetch(growListPath("/grow/opportunities", { type: typeFilter })),
   });
   const opportunityPages = useGrowCursorPages({
-    resetKey: "opportunities",
+    resetKey: typeFilter,
     page: opportunities.data
       ? { items: opportunities.data.opportunities, nextCursor: opportunities.data.nextCursor, total: opportunities.data.total }
       : undefined,
     getId: (opportunity) => opportunity.id,
     fetchPage: (cursor) =>
-      apiFetch<GrowOpportunityListPage>(growListPath("/grow/opportunities", { cursor })).then((page) => ({
+      apiFetch<GrowOpportunityListPage>(growListPath("/grow/opportunities", { type: typeFilter, cursor })).then((page) => ({
         items: page.opportunities,
         nextCursor: page.nextCursor,
         total: page.total,
@@ -3804,6 +3807,23 @@ export function GrowOpportunitiesTab({
       <h2>Opportunities</h2>
       <p className="muted">Explainable by design - every opportunity carries a reason, never just a score.</p>
       <GrowNewOpportunityForm />
+      <div className="grow-inline-form-row">
+        <label htmlFor="grow-opportunity-type-filter">Opportunity type</label>
+        <select
+          id="grow-opportunity-type-filter"
+          value={typeFilter}
+          onChange={(event) => {
+            const parsed = parseGrowOpportunityListTypeFilter(event.target.value);
+            if (parsed.ok) setTypeFilter(parsed.filter);
+          }}
+        >
+          {GROW_OPPORTUNITY_LIST_TYPE_FILTERS.map((filter) => (
+            <option key={filter} value={filter}>
+              {GROW_OPPORTUNITY_LIST_TYPE_FILTER_LABELS[filter]}
+            </option>
+          ))}
+        </select>
+      </div>
       {/* AE GROW Pilot Readiness WP6b (D6) — see GrowContactList above. */}
       <GrowDataRegionStatus
         query={opportunities}
