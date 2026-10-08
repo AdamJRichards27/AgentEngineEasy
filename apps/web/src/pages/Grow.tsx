@@ -152,6 +152,8 @@ interface GrowOpportunity {
   status: string;
   stage: string;
   reason: string | null;
+  /** Set when the opportunity was marked Lost. Already on GET /grow/opportunities. */
+  lostReason?: string | null;
   partyId: number;
   propertyId: number | null;
   recommendedNextAction: string | null;
@@ -325,6 +327,8 @@ interface GrowContact360Opportunity {
   status: string;
   stage: string;
   reason: string | null;
+  /** Present on Contact 360 once the contact read includes the stored lost reason. */
+  lostReason?: string | null;
   nextActionDueAt: string | null;
   recommendedNextAction: string | null;
   propertyId: number | null;
@@ -1084,6 +1088,13 @@ function useUpdateOpportunityLifecycle(opportunityId: number, onSaved: () => voi
 
 function opportunityLifecycleOpen(status: string, stage: string): boolean {
   return status === "Open" && stage !== "Lost" && stage !== "Converted";
+}
+
+/** Status cell for a Lost row names the stored lost reason. Other statuses stay as they are. */
+function opportunityStatusLabel(status: string, lostReason: string | null | undefined): string {
+  if (status !== "Lost") return status;
+  const reason = typeof lostReason === "string" ? lostReason.trim() : "";
+  return reason.length > 0 ? `Lost: ${reason}` : "Lost";
 }
 
 // PATCH /grow/contacts/commitments/:id is the one write behind Complete,
@@ -3892,7 +3903,7 @@ export function GrowContactOpportunitiesSection({
                 <td>{o.stage}</td>
                 <td>
                   <span className={`pill ${o.status === "Open" ? "pill-success" : o.status === "Lost" ? "pill-danger" : ""}`}>
-                    {o.status}
+                    {opportunityStatusLabel(o.status, o.lostReason)}
                   </span>
                 </td>
                 <td>{o.reason ?? "–"}</td>
@@ -3969,7 +3980,7 @@ const GrowOpportunityCells = memoRow(function GrowOpportunityCells({
       <td>{opportunity.stage}</td>
       <td>
         <span className={`pill ${opportunity.status === "Open" ? "pill-success" : opportunity.status === "Lost" ? "pill-danger" : ""}`}>
-          {opportunity.status}
+          {opportunityStatusLabel(opportunity.status, opportunity.lostReason)}
         </span>
       </td>
       <td>{opportunity.reason ?? "–"}</td>

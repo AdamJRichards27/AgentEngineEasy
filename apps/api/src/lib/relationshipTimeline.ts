@@ -150,6 +150,22 @@ function isMeaningfulUpdate(createdAt: Date, updatedAt: Date): boolean {
   return updatedAt.getTime() - createdAt.getTime() > UPDATE_EVENT_THRESHOLD_MS;
 }
 
+// The update event is the lifecycle line Contact 360 already renders from `summary`.
+// lostReason is a column on the opportunity row this function already selected for
+// this brokerage and party — no extra query. It is appended only while the row is Lost.
+function opportunityUpdatedSummary(opportunity: {
+  opportunityType: string;
+  stage: string;
+  status: string;
+  lostReason: string | null;
+}): string {
+  const base = `Opportunity updated: ${opportunity.opportunityType} (${opportunity.stage}/${opportunity.status}).`;
+  if (opportunity.status !== "Lost") return base;
+  const lostReason = opportunity.lostReason?.trim() ?? "";
+  if (lostReason.length === 0) return base;
+  return `${base} Lost reason: ${lostReason}.`;
+}
+
 // AE GROW Priority 3. See the file header for why this produces at most one event per message
 // row (status is always the message's latest known state) and why only EMAIL/SMS surface.
 function buildCommunicationEvent(
@@ -466,7 +482,7 @@ export async function getRelationshipTimeline(
         id: `opportunity:${o.id}:UPDATED`,
         type: "OPPORTUNITY_UPDATED",
         occurredAt: o.updatedAt.toISOString(),
-        summary: `Opportunity updated: ${o.opportunityType} (${o.stage}/${o.status}).`,
+        summary: opportunityUpdatedSummary(o),
         propertyId: o.propertyId,
         propertyLabel,
         opportunityId: o.id,

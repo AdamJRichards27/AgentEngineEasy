@@ -294,6 +294,56 @@ test("type, contact search and the cursor stay in agreement", async () => {
   assert.equal(reasonAndType.body.opportunities?.[0]?.id, ids.beaPm);
 });
 
+test("a lost opportunity's reason is on the contact timeline and stays in this brokerage", async () => {
+  const lostReason = `UAT check ${suffix}`;
+  const ownReason = `own reason ${suffix}`;
+  const id = await createOpenOpportunity(ownReason, "Other");
+  await db
+    .update(growOpportunities)
+    .set({ createdAt: new Date(Date.now() - 60_000) })
+    .where(eq(growOpportunities.id, id));
+
+  const lost = await lifecycle(A.admin.cookie, id, { status: "Lost", lostReason: `  ${lostReason}  ` });
+  assert.equal(lost.status, 200, await lost.clone().text());
+
+  const listed = await getOpportunities(A.admin.cookie, { search: ownReason });
+  assert.equal(listed.status, 200, listed.text);
+  const row = (listed.body.opportunities ?? []).find((opportunity) => opportunity.id === id) as
+    | (Opp & { status?: string; lostReason?: string | null })
+    | undefined;
+  assert.ok(row);
+  assert.equal(row.status, "Lost");
+  assert.equal(row.reason, ownReason);
+  assert.equal(row.lostReason, lostReason);
+
+  const foreignList = await getOpportunities(B.admin.cookie, { search: lostReason });
+  assert.equal(foreignList.body.total, 0);
+  assert.equal(foreignList.text.includes(lostReason), false);
+
+  const detailRes = await send("GET", `/grow/contacts/${ids.ada}`, A.admin.cookie);
+  assert.equal(detailRes.status, 200, await detailRes.clone().text());
+  const detail = (await detailRes.json()) as {
+    opportunities: Array<{ id: number; status: string; reason: string | null; lostReason: string | null }>;
+    timeline: Array<{ type: string; opportunityId: number | null; summary: string }>;
+  };
+  const contactOpportunity = detail.opportunities.find((opportunity) => opportunity.id === id);
+  assert.ok(contactOpportunity);
+  assert.equal(contactOpportunity.status, "Lost");
+  assert.equal(contactOpportunity.reason, ownReason);
+  assert.equal(contactOpportunity.lostReason, lostReason);
+
+  const updated = detail.timeline.find((event) => event.type === "OPPORTUNITY_UPDATED" && event.opportunityId === id);
+  assert.ok(updated, JSON.stringify(detail.timeline.filter((event) => event.opportunityId === id)));
+  assert.equal(updated.summary, `Opportunity updated: Other (Lost/Lost). Lost reason: ${lostReason}.`);
+  const created = detail.timeline.find((event) => event.type === "OPPORTUNITY_CREATED" && event.opportunityId === id);
+  assert.ok(created);
+  assert.equal(created.summary.includes(lostReason), false);
+
+  const foreignDetail = await send("GET", `/grow/contacts/${ids.ada}`, B.admin.cookie);
+  assert.equal(foreignDetail.status, 404);
+  assert.equal((await foreignDetail.text()).includes(lostReason), false);
+});
+
 test("POST /grow/opportunities rejects an opportunityType outside the domain list", async () => {
   for (const opportunityType of ["General", "general", "Nope", "listing"]) {
     const rejected = await createOpportunity(A.admin.cookie, {
