@@ -8,6 +8,7 @@ import { db, users, type UserRole } from "@aee/db";
 import { eq } from "drizzle-orm";
 import { logger, incrementCounter } from "@aee/events";
 import { readSessionCookie, verifySessionToken } from "../lib/session.js";
+import { applyPlatformOwnerContext } from "../lib/platformOwner.js";
 
 // AgentEngineEasy's 3-role model (Build Brief §22) — deliberately small.
 // Agent: full access to their own properties/transactions.
@@ -101,6 +102,14 @@ export async function loadSession(req: Request, res: Response, next: NextFunctio
   // as the isActive/brokerageId checks already do below.
   if (row && row.isActive && row.brokerageId && row.sessionEpoch === verified.epoch) {
     req.authedUser = { id: row.id, role: row.role as UserRole, brokerageId: row.brokerageId };
+    try {
+      if (!await applyPlatformOwnerContext(req, res)) return;
+    } catch {
+      // Never fall back to a brokerage identity if Owner permission/context
+      // lookup or its mandatory audit fails.
+      res.status(503).json({ error: "Your access could not be verified. Please retry." });
+      return;
+    }
   } else if (!row || !row.isActive || !row.brokerageId) {
     // AE GROW Pilot Readiness: this branch was completely silent, so a
     // cryptographically valid session that stopped resolving produced a bare

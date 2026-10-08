@@ -300,13 +300,37 @@ function humanizeServerError(path: string): string {
 export const NETWORK_ERROR_MESSAGE = "We couldn't reach Agent Engine. Check your connection and try again.";
 export const SESSION_ENDED_MESSAGE = "Your session has ended — please sign in again.";
 
+let ownerSelectedBrokerageId: number | null = null;
+
+// Memory only: never derive a write's tenant from shared storage or retry a
+// context_changed rejection against a freshly fetched tenant.
+export function configureOwnerRequestContext(user: {
+  platformOwner?: boolean;
+  ownerSelectedBrokerageId?: number | null;
+} | null | undefined): void {
+  ownerSelectedBrokerageId = user?.platformOwner ? user.ownerSelectedBrokerageId ?? null : null;
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  // Callers cannot override this safety guard (including on read requests).
+  headers.delete("X-AEE-Owner-Brokerage");
+  headers.delete("X-AEE-Owner-Action");
+  const method = (init?.method ?? "GET").toUpperCase();
+  const ownerPath = path.split(/[?#]/)[0];
+  if (method !== "GET" && method !== "HEAD" && (ownerPath === "/owner" || ownerPath.startsWith("/owner/"))) {
+    headers.set("X-AEE-Owner-Action", "1");
+  }
+  if (method !== "GET" && method !== "HEAD" && ownerSelectedBrokerageId !== null) {
+    headers.set("X-AEE-Owner-Brokerage", String(ownerSelectedBrokerageId));
+  }
   let res: Response;
   try {
     res = await fetch(`/api${path}`, {
       ...init,
       credentials: "include",
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      headers,
     });
   } catch (error) {
     // A deliberate cancellation (AbortSignal) is not a failure — rethrow it
@@ -353,7 +377,12 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
       // Non-JSON error body — fall through with no server message.
     }
     const forbidden = res.status === 403 ? { reason: serverReason, entitlementKey, upgrade } : undefined;
-    throw new ApiError(res.status, humanizeApiError(path, res.status, serverMessage, correlationId, forbidden), `API ${path} failed: ${res.status}`, serverReason, {
+    const contextChanged = res.status === 409 && [serverReason, serverCode, serverMessage]
+      .some((value) => value?.toLowerCase() === "context_changed");
+    const friendly = contextChanged
+      ? "Your selected brokerage changed in another tab. This change was not saved. Reload the page before continuing."
+      : humanizeApiError(path, res.status, serverMessage, correlationId, forbidden);
+    throw new ApiError(res.status, friendly, `API ${path} failed: ${res.status}`, serverReason, {
       code: serverCode,
       sideEffectApplied,
       correlationId,

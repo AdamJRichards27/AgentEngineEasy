@@ -14,6 +14,7 @@ import { getActiveLegalVersions } from "../lib/auth/legalVersions.js";
 import { normalizePersonName } from "../lib/auth/personName.js";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
+import { isPlatformOwner, setOwnerContextCookie } from "../lib/platformOwner.js";
 
 export const authRouter = Router();
 
@@ -107,6 +108,10 @@ authRouter.post("/dev-login", async (req, res) => {
 
   const [existing] = await db.select().from(users).where(eq(users.email, email.toLowerCase()));
   if (existing) {
+    if (await isPlatformOwner(existing.id)) {
+      res.status(403).json({ error: "Platform Owners must sign in with their password." });
+      return;
+    }
     if (!existing.isActive) {
       res.status(403).json({ error: "This account has been deactivated." });
       return;
@@ -185,9 +190,16 @@ authRouter.get("/me", requireAuth, async (req, res) => {
     res.status(401).json({ error: "Not authenticated" });
     return;
   }
-  const [b] = row.brokerageId ? await db.select().from(brokerages).where(eq(brokerages.id, row.brokerageId)) : [];
+  const [b] = await db.select().from(brokerages).where(eq(brokerages.id, authed.brokerageId));
   const entitlements = await resolveEntitlements(authed);
-  res.json({ user: userView(row, b?.name), entitlements: Array.from(entitlements) });
+  res.json({ user: {
+    ...userView({ ...row, brokerageId: authed.brokerageId, role: authed.role }, b?.name),
+    platformOwner: !!req.platformOwner,
+    ...(req.platformOwner ? {
+      ownerHomeBrokerageId: req.platformOwner.homeBrokerageId,
+      ownerSelectedBrokerageId: req.platformOwner.selectedBrokerageId,
+    } : {}),
+  }, entitlements: Array.from(entitlements) });
 });
 
 const updateOwnNameSchema = z
@@ -294,6 +306,7 @@ authRouter.post("/logout", async (req, res) => {
     }
   }
   clearSessionCookie(res);
+  setOwnerContextCookie(res, null, "");
   res.status(204).end();
 });
 
