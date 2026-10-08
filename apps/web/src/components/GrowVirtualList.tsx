@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode, type UIEvent } from "react";
+import { GrowTableScroll } from "./GrowTableScroll";
 import { apiErrorMessage } from "../lib/api";
 import { showingCountLabel } from "../lib/growListQuery";
 
@@ -202,17 +203,23 @@ export function GrowVirtualTable<T>({
 }) {
   const slice = useVirtualSlice(items.length, estimate);
   const rows = items.slice(slice.start, slice.end);
+  function onRegionScroll(event: UIEvent<HTMLDivElement>) {
+    slice.onScroll(event, hasMore ? onLoadMore : undefined);
+  }
+  function onRegionKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    onViewportKeyDown(event, estimate);
+  }
   return (
     <>
       <CountLine shown={items.length} total={total} singular={singular} plural={plural} />
-      <div
-        className="grow-table-scroll grow-virtual-viewport"
+      <GrowTableScroll
+        className="grow-virtual-viewport"
         role="region"
         aria-label={label}
         tabIndex={0}
         aria-busy={loadingMore ? true : undefined}
-        onScroll={(event) => slice.onScroll(event, hasMore ? onLoadMore : undefined)}
-        onKeyDown={(event) => onViewportKeyDown(event, estimate)}
+        onScroll={onRegionScroll}
+        onKeyDown={onRegionKeyDown}
       >
         <table className="grow-table">
           <thead>{head}</thead>
@@ -232,7 +239,7 @@ export function GrowVirtualTable<T>({
             ) : null}
           </tbody>
         </table>
-      </div>
+      </GrowTableScroll>
       <LoadMore plural={plural} hasMore={hasMore} loadingMore={loadingMore} moreError={moreError} onLoadMore={onLoadMore} />
     </>
   );
