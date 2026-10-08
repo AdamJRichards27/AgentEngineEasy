@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { growListPath, showingCountLabel } from "../growListQuery";
+import { growListPath, listSearchEmptyMessage, showingCountLabel } from "../growListQuery";
 
 test("grow list paths omit empty filters and keep search on the server", () => {
   assert.equal(growListPath("/grow/contacts"), "/grow/contacts");
@@ -17,6 +17,17 @@ test("grow list paths omit empty filters and keep search on the server", () => {
     growListPath("/grow/opportunities", { search: "Ada", type: "other", cursor: "abc" }),
     "/grow/opportunities?search=Ada&type=other&cursor=abc",
   );
+  assert.equal(
+    growListPath("/grow/contacts", { search: "Ada", role: "Buyer" }),
+    "/grow/contacts?search=Ada&role=Buyer",
+  );
+  assert.equal(growListPath("/grow/relationships", { search: "Queen St", role: "" }), "/grow/relationships?search=Queen+St");
+});
+
+test("a filtered empty list names the current search and an idle list does not", () => {
+  assert.equal(listSearchEmptyMessage("", "relationships", "No relationships yet."), "No relationships yet.");
+  assert.equal(listSearchEmptyMessage("  ", "activities", "No activity logged yet."), "No activity logged yet.");
+  assert.equal(listSearchEmptyMessage("Ada", "opportunities", "No opportunities yet."), "No opportunities match “Ada”.");
 });
 
 test("showing count names the filtered total", () => {

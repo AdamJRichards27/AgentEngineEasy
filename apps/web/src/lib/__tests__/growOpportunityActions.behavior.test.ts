@@ -49,7 +49,7 @@ function byId(tree: unknown, id: string): ElementNode | undefined {
 }
 
 function form(tree: unknown): ElementNode | undefined {
-  return findAll(tree, (element) => element.type === "form")[0];
+  return findAll(tree, (element) => element.type === "form" && element.props?.role !== "search")[0];
 }
 
 class FakeApiError extends Error {

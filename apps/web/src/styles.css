@@ -1284,8 +1284,20 @@ details.section > *:not(summary) {
 
 .grow-virtual-viewport {
   max-height: 32rem;
+  min-height: 0;
+  min-width: 0;
   overflow: auto;
+  /* Scroll anchoring fights the spacer when row heights differ from the
+     estimate and leaves a blank gap the End key cannot cross. */
+  overflow-anchor: none;
   outline: none;
+}
+
+/* One scrollport for both axes. overflow-x on .grow-table-scroll alone must
+   not leave overflow-y at the initial value. */
+.grow-table-scroll.grow-virtual-viewport {
+  overflow-x: auto;
+  overflow-y: auto;
 }
 
 .grow-virtual-viewport:focus-visible {
@@ -1301,10 +1313,13 @@ details.section > *:not(summary) {
 }
 
 .grow-virtual-spacer,
-.grow-virtual-spacer::before {
+.grow-virtual-spacer::before,
+.grow-virtual-spacer td {
   border: 0;
   padding: 0;
   margin: 0;
+  line-height: 0;
+  font-size: 0;
   content: none;
 }
 
@@ -1603,6 +1618,19 @@ ul.pc-item-list li {
 .grow-inline-form-row input {
   flex: 1 1 220px;
   margin-top: 0;
+}
+
+.grow-list-filter {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.grow-list-filter input,
+.grow-list-filter select {
+  width: 100%;
 }
 
 .grow-contact-roles {
