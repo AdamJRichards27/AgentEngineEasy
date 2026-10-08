@@ -21,6 +21,7 @@ import { logAudit } from "./audit.js";
 import {
   noteGrowComparableSaleIsolationRejection,
   noteGrowMarketCompetitionIsolationRejection,
+  noteGrowPartyIsolationRejection,
 } from "./grow/isolationRejection.js";
 import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import {
@@ -298,7 +299,13 @@ export async function generateAppraisalPresentation(
 
   const [property] = await db.select().from(properties).where(eq(properties.id, appraisal.propertyId));
   const [party] = appraisal.partyId
-    ? await db.select().from(parties).where(eq(parties.id, appraisal.partyId))
+    ? // E-9 A2: tenant-scoped contact lookup, same as the owner lookup below.
+      // A foreign party id (bad row) must never put that contact's name into
+      // this brokerage's generated presentation.
+      await db
+        .select()
+        .from(parties)
+        .where(and(eq(parties.id, appraisal.partyId), eq(parties.brokerageId, input.brokerageId)))
     : [null];
   const [owner] = appraisal.ownerUserId
     ? // WP1 P1-2: tenant-scoped owner lookup -- a foreign-brokerage owner id (bad row) must
@@ -463,6 +470,20 @@ export async function prepareAppraisalRunHandoff(
   }
   if (!appraisal.partyId) {
     throw new AppraisalAccessError("This appraisal has no linked contact to record as the seller.");
+  }
+
+  // E-9 A2: appraisals.party_id is not re-checked against the caller brokerage.
+  // Before inserting a Seller link, require the party to belong here. A miss
+  // is refused exactly like createAppraisalFromContact — AppraisalAccessError
+  // "Contact not found", which the route maps to HTTP 404. That response does
+  // not confirm the foreign id exists, and this function inserts nothing.
+  const [sellerParty] = await db
+    .select({ id: parties.id })
+    .from(parties)
+    .where(and(eq(parties.id, appraisal.partyId), eq(parties.brokerageId, input.brokerageId)));
+  if (!sellerParty) {
+    await noteGrowPartyIsolationRejection(appraisal.partyId, input.brokerageId);
+    throw new AppraisalAccessError("Contact not found");
   }
 
   const existingLinks = await db

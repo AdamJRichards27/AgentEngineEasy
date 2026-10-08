@@ -478,11 +478,14 @@ export async function recordAppraisalOutcome(input: {
     outcomeReason: input.outcomeReason ?? null,
   });
 
+  // E-9 A2: opportunity_id is not a foreign key. Both updates also require
+  // the opportunity to belong to this brokerage, so a bad id cannot write
+  // another brokerage's stage or status.
   if (input.outcome === "WON" && updated.opportunityId) {
     await db
       .update(growOpportunities)
       .set({ stage: "Converted", status: "Converted", closedAt: new Date(), updatedAt: new Date() })
-      .where(eq(growOpportunities.id, updated.opportunityId));
+      .where(and(eq(growOpportunities.id, updated.opportunityId), eq(growOpportunities.brokerageId, input.brokerageId)));
     await publishAppraisalEvent("OPPORTUNITY_CONVERTED", updated, input.brokerageId, input.userId, {
       opportunityId: updated.opportunityId,
     });
@@ -495,7 +498,7 @@ export async function recordAppraisalOutcome(input: {
         closedAt: input.outcome === "LOST" ? new Date() : null,
         updatedAt: new Date(),
       })
-      .where(eq(growOpportunities.id, updated.opportunityId));
+      .where(and(eq(growOpportunities.id, updated.opportunityId), eq(growOpportunities.brokerageId, input.brokerageId)));
   }
 
   return updated;
@@ -599,7 +602,10 @@ export async function listAppraisalPipeline(input: {
     })
     .from(appraisals)
     .innerJoin(properties, eq(properties.id, appraisals.propertyId))
-    .leftJoin(parties, eq(parties.id, appraisals.partyId))
+    // E-9 A2: same tenant predicate as the owner join below. A bad party_id
+    // that points at another brokerage yields no contact name; the appraisal
+    // row itself still lists.
+    .leftJoin(parties, and(eq(parties.id, appraisals.partyId), eq(parties.brokerageId, input.brokerageId)))
     // WP1 P1-2: the owner join is tenant-scoped too, so even a pre-existing bad row whose
     // ownerUserId points at another brokerage's user never exposes that user's name.
     .leftJoin(users, and(eq(users.id, appraisals.ownerUserId), eq(users.brokerageId, input.brokerageId)))
