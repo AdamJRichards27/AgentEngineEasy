@@ -45,6 +45,7 @@ import {
 import { renderTemplate } from "./templates.js";
 import { partyDisplayName } from "./recipientResolution.js";
 import { applyMessageTransition, queueMessage, evaluateAndDispatchQueuedMessage, type QueueMessageResult } from "./outbox.js";
+import { assertMessageMayLeave } from "./outboundConsent.js";
 import {
   APPROVAL_REQUIRED_BEFORE_SEND,
   SERVICE_NEEDS_ANOTHER_HUMAN,
@@ -491,6 +492,8 @@ export async function requeueMessage(messageId: number, brokerageId: number, use
   if (existing.status !== "BLOCKED_BY_CONSENT" && existing.status !== "BLOCKED_BY_COST_CONTROL") {
     throw new CommunicationTransitionError(`Only a message blocked by consent or cost control can be requeued (this one is ${existing.status}).`);
   }
+  // GP-4: a still-refused recipient stays blocked. Do not pass through QUEUED.
+  await assertMessageMayLeave(existing, userId);
   const queued = await applyMessageTransition({
     messageId,
     brokerageId,

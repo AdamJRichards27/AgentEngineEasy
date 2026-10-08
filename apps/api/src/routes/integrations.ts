@@ -37,6 +37,7 @@ import { getIntegrationOverview, getIntegrationActivity, getReconciliationSnapsh
 import { getOrCreateIntegrationSettings, updateIntegrationSettings } from "../lib/integrations/settings.js";
 import { IntegrationError, INTEGRATION_CAPABILITIES } from "../lib/integrations/types.js";
 import { CommunicationTenancyError, CommunicationTransitionError } from "../lib/communications/types.js";
+import { OutboundConsentRefused } from "../lib/communications/outboundConsent.js";
 
 export const integrationsRouter = Router();
 
@@ -341,6 +342,7 @@ integrationsRouter.post("/integrations/connections/:id/actions/send-sms", async 
     res.json({ result: { outcome: result.outcome, messageId: result.message.id, status: result.message.status } });
   } catch (err) {
     if (handleIntegrationError(err, res)) return;
+    if (err instanceof OutboundConsentRefused) return void res.status(err.statusCode).json({ error: err.message, code: err.code });
     if (err instanceof CommunicationTenancyError) return void res.status(404).json({ error: "Message not found." });
     if (err instanceof CommunicationTransitionError) return void res.status(409).json({ error: err.message });
     throw err;

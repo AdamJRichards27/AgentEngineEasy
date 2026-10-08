@@ -29,6 +29,7 @@ import {
   grantEntitlement,
 } from "./testHelpers.js";
 import { sendSmsViaIntegration, COMMS_SMS_ENTITLEMENT_KEY, SMS_DELIVERY_WEBHOOK_EVENT_TYPE } from "../commsProof.js";
+import { OutboundConsentRefused } from "../../communications/outboundConsent.js";
 import { MOCK_SMS_PROVIDER_ID } from "../adapters/mockSms.js";
 import { processInboundWebhook } from "../webhooks.js";
 import { updateIntegrationSettings } from "../settings.js";
@@ -257,10 +258,13 @@ test("safety: missing consent — a MARKETING SMS with no opt-in record is block
   const { connection } = await createActiveMockSmsConnection(A.brokerageId, actor);
   const { message } = await draftSmsMessage(A.brokerageId, A.admin.cookie, A.admin.user.id, { classification: "MARKETING", recipientDestination: `+614${Date.now()}` });
 
-  const result = await sendSmsViaIntegration({ messageId: message.id, brokerageId: A.brokerageId, connectionId: connection.id, actor });
-  assert.equal(result.outcome, "BLOCKED_BY_CONSENT");
-  assert.equal(result.message.status, "BLOCKED_BY_CONSENT");
-  assert.equal(result.message.provider, null, "a consent-blocked message must never reach the mock adapter");
+  await assert.rejects(
+    () => sendSmsViaIntegration({ messageId: message.id, brokerageId: A.brokerageId, connectionId: connection.id, actor }),
+    (err: unknown) => err instanceof OutboundConsentRefused && err.code === "CONSENT_REQUIRED",
+  );
+  const [row] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, message.id));
+  assert.equal(row?.status, "DRAFT", "a refused marketing SMS must not be queued");
+  assert.equal(row?.provider, null, "a consent-blocked message must never reach the mock adapter");
 });
 
 test("safety: cost-control block — an SMS that would exceed the brokerage's hard threshold is blocked, never sent", async () => {

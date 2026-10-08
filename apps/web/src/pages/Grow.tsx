@@ -3426,6 +3426,7 @@ function GrowContactDetail({
         canStartThread={canManageContacts}
         quickComposeChannel={pendingComposeChannel}
         onQuickComposeHandled={onComposeHandled}
+        contactability={data.contactability}
       />
 
       <section className="card">

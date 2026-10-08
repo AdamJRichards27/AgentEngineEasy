@@ -55,6 +55,8 @@ import {
   type CommunicationMessage,
   type CommunicationParticipant,
 } from "../lib/communications";
+import { knownOutboundSendBlock } from "../lib/outboundSendConsent";
+import type { GrowContactability } from "../lib/contactability";
 
 // A source of recipient candidates for a thread's "+ Add recipient"
 // control -- either a property's linked parties or (AE Grow Priority 3) a
@@ -176,6 +178,7 @@ export function ContactCommunicationsSection({
   canStartThread,
   quickComposeChannel,
   onQuickComposeHandled,
+  contactability,
 }: {
   partyId: number;
   // Gates thread creation (Email/SMS quick-start and "+ New Thread") on
@@ -191,6 +194,9 @@ export function ContactCommunicationsSection({
   // being navigated here. Cleared via onQuickComposeHandled once handled.
   quickComposeChannel?: CommunicationChannel | null;
   onQuickComposeHandled?: () => void;
+  // Contact 360 already loaded this. Absent consent disables Email/SMS
+  // before a thread is created. The send request still enforces it.
+  contactability?: GrowContactability | null;
 }) {
   const queryClient = useQueryClient();
   const [selectedThreadId, setSelectedThreadId] = useState<number | null>(null);
@@ -209,6 +215,10 @@ export function ContactCommunicationsSection({
     queryFn: () => fetchContactRecipientCandidates(partyId),
   });
   const candidate = candidatesData?.candidates[0];
+  const emailSendBlock = knownOutboundSendBlock(contactability, "EMAIL");
+  const smsSendBlock = knownOutboundSendBlock(contactability, "SMS");
+  const sendBlockForChannel = (channel: CommunicationChannel) =>
+    channel === "EMAIL" ? emailSendBlock : channel === "SMS" ? smsSendBlock : null;
 
   const invalidateThreads = () => queryClient.invalidateQueries({ queryKey: ["communications-threads", "party", partyId] });
 
@@ -236,11 +246,13 @@ export function ContactCommunicationsSection({
   // 360 needs, without a second composer implementation.
   const quickStart = useMutation({
     mutationFn: async (channel: CommunicationChannel) => {
+      if (sendBlockForChannel(channel)) return { thread: null, channel };
       const thread = await createContactCommunicationThread(partyId, { subject: channel === "EMAIL" ? "Email" : "SMS" });
       await addParticipantFromParty(thread.id, { partyId, role: "Contact" });
       return { thread, channel };
     },
     onSuccess: ({ thread, channel }) => {
+      if (!thread) return;
       setQuickStartError(null);
       invalidateThreads();
       setSelectedThreadId(thread.id);
@@ -251,7 +263,7 @@ export function ContactCommunicationsSection({
 
   useEffect(() => {
     if (!quickComposeChannel) return;
-    if (canStartThread && !quickStart.isPending) {
+    if (canStartThread && !quickStart.isPending && !sendBlockForChannel(quickComposeChannel)) {
       quickStart.mutate(quickComposeChannel);
     }
     onQuickComposeHandled?.();
@@ -273,8 +285,8 @@ export function ContactCommunicationsSection({
           <button
             type="button"
             className="btn btn-primary btn-small"
-            disabled={!candidate?.email || quickStart.isPending}
-            title={candidate?.email ? undefined : "No email on file for this contact"}
+            disabled={!candidate?.email || quickStart.isPending || Boolean(emailSendBlock)}
+            title={emailSendBlock ?? (candidate?.email ? undefined : "No email on file for this contact")}
             onClick={() => quickStart.mutate("EMAIL")}
           >
             Email
@@ -282,14 +294,16 @@ export function ContactCommunicationsSection({
           <button
             type="button"
             className="btn btn-secondary btn-small"
-            disabled={!candidate?.mobile || quickStart.isPending}
-            title={candidate?.mobile ? undefined : "No mobile on file for this contact"}
+            disabled={!candidate?.mobile || quickStart.isPending || Boolean(smsSendBlock)}
+            title={smsSendBlock ?? (candidate?.mobile ? undefined : "No mobile on file for this contact")}
             onClick={() => quickStart.mutate("SMS")}
           >
             SMS
           </button>
         </div>
       )}
+      {emailSendBlock && <p className="error-text">{emailSendBlock}</p>}
+      {smsSendBlock && smsSendBlock !== emailSendBlock && <p className="error-text">{smsSendBlock}</p>}
       {quickStartError && <p className="error-text">{quickStartError}</p>}
 
       {isLoading ? (
@@ -321,6 +335,7 @@ export function ContactCommunicationsSection({
                   recipientSource={recipientSource}
                   onChanged={invalidateThreads}
                   initialComposerChannel={autoComposeChannel ?? undefined}
+                  sendBlockForChannel={sendBlockForChannel}
                 />
               )}
             </li>
@@ -365,6 +380,7 @@ function ThreadDetailBlock({
   recipientSource,
   onChanged,
   initialComposerChannel,
+  sendBlockForChannel,
 }: {
   threadId: number;
   recipientSource: RecipientSource;
@@ -375,6 +391,7 @@ function ThreadDetailBlock({
   // quick-start above. Undefined for the property-first flow, which keeps
   // its original two-step "expand thread, then compose" behaviour.
   initialComposerChannel?: CommunicationChannel;
+  sendBlockForChannel?: (channel: CommunicationChannel) => string | null;
 }) {
   const queryClient = useQueryClient();
   const [showComposer, setShowComposer] = useState(initialComposerChannel != null);
@@ -409,7 +426,7 @@ function ThreadDetailBlock({
       ) : (
         <ul className="item-list">
           {data.messages.map((m) => (
-            <MessageRow key={m.id} message={m} onChanged={invalidate} />
+            <MessageRow key={m.id} message={m} onChanged={invalidate} knownSendBlock={sendBlockForChannel?.(m.channel) ?? null} />
           ))}
         </ul>
       )}
@@ -718,7 +735,15 @@ function ComposerForm({
 // the action is actually allowed (e.g. approval permissions, the
 // transition table); a rejected action surfaces its reason inline rather
 // than being silently hidden ahead of time.
-function MessageRow({ message, onChanged }: { message: CommunicationMessage; onChanged: () => void }) {
+export function MessageRow({
+  message,
+  onChanged,
+  knownSendBlock = null,
+}: {
+  message: CommunicationMessage;
+  onChanged: () => void;
+  knownSendBlock?: string | null;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -747,6 +772,7 @@ function MessageRow({ message, onChanged }: { message: CommunicationMessage; onC
       </p>
       {message.bodyText && <p>{message.bodyText}</p>}
       {message.failureDetail && <p className="error-text">{message.failureDetail}</p>}
+      {knownSendBlock && <p className="error-text">{knownSendBlock}</p>}
       {error && <p className="error-text">{error}</p>}
 
       <div className="pc-item-actions">
@@ -755,7 +781,7 @@ function MessageRow({ message, onChanged }: { message: CommunicationMessage; onC
             <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => run(() => requestApproval(message.id, message.version))}>
               Request Approval
             </button>
-            <button className="btn btn-primary btn-small" disabled={busy} onClick={() => run(() => sendMessageNow(message.id, message.version))}>
+            <button className="btn btn-primary btn-small" disabled={busy || Boolean(knownSendBlock)} onClick={() => run(() => sendMessageNow(message.id, message.version))}>
               Send Now
             </button>
             <button className="btn btn-link btn-small" disabled={busy} onClick={() => run(() => cancelMessage(message.id, message.version))}>
@@ -777,7 +803,7 @@ function MessageRow({ message, onChanged }: { message: CommunicationMessage; onC
 
         {message.status === "APPROVED" && (
           <>
-            <button className="btn btn-primary btn-small" disabled={busy} onClick={() => run(() => sendMessageNow(message.id, message.version))}>
+            <button className="btn btn-primary btn-small" disabled={busy || Boolean(knownSendBlock)} onClick={() => run(() => sendMessageNow(message.id, message.version))}>
               Send
             </button>
             <button className="btn btn-link btn-small" disabled={busy} onClick={() => run(() => cancelMessage(message.id, message.version))}>
@@ -788,7 +814,7 @@ function MessageRow({ message, onChanged }: { message: CommunicationMessage; onC
 
         {(message.status === "BLOCKED_BY_CONSENT" || message.status === "BLOCKED_BY_COST_CONTROL") && (
           <>
-            <button className="btn btn-primary btn-small" disabled={busy} onClick={() => run(() => requeueMessage(message.id, message.version))}>
+            <button className="btn btn-primary btn-small" disabled={busy || Boolean(knownSendBlock)} onClick={() => run(() => requeueMessage(message.id, message.version))}>
               Retry
             </button>
             <button className="btn btn-link btn-small" disabled={busy} onClick={() => run(() => cancelMessage(message.id, message.version))}>

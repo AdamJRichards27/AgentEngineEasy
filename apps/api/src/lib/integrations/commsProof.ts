@@ -58,16 +58,14 @@ import { IntegrationError, INTEGRATION_CAPABILITIES, type ActorRef, type Integra
 import { MOCK_SMS_PROVIDER_ID } from "./adapters/mockSms.js";
 import { requireEntitlement } from "../entitlements/resolver.js";
 import { EntitlementError } from "../entitlements/types.js";
-import { checkConsent } from "../communications/consent.js";
 import { checkCostControl, recordCost, SMS_ESTIMATED_COST_CENTS_PER_MESSAGE } from "../communications/costControl.js";
+import { assertMessageMayLeave } from "../communications/outboundConsent.js";
 import { isWithinQuietHours, nextAllowedSendTime } from "../communications/quietHours.js";
 import { getOrCreateCommunicationSettings } from "../communications/settings.js";
 import { applyMessageTransition, patchQueuedSchedule } from "../communications/outbox.js";
 import {
   CommunicationTenancyError,
   CommunicationTransitionError,
-  type CommunicationChannel,
-  type CommunicationClassification,
   type FailureCategory as CommunicationFailureCategory,
 } from "../communications/types.js";
 
@@ -187,11 +185,11 @@ export async function sendSmsViaIntegration(input: SendSmsViaIntegrationInput): 
     throw err;
   }
 
-  // Transition to QUEUED FIRST — mirrors outbox.ts's own queueMessage ->
-  // evaluateAndDispatchQueuedMessage split exactly: the consent/cost-control
-  // block edges only exist FROM QUEUED (and DRAFT) in
-  // COMMUNICATION_MESSAGE_STATUS_TRANSITIONS, never from APPROVED directly,
-  // so the gates below must run against a message already at QUEUED.
+  // GP-4: consent is decided before QUEUED. A refusal throws and leaves the
+  // message at DRAFT/APPROVED. Cost control and quiet hours still run only
+  // after the message is queued, matching outbox.ts.
+  await assertMessageMayLeave(existing, input.actor.id);
+
   const idempotencyKey = existing.idempotencyKey ?? `msg-${existing.id}-${randomUUID()}`;
   const queued = await applyMessageTransition({
     messageId: existing.id,
@@ -203,21 +201,6 @@ export async function sendSmsViaIntegration(input: SendSmsViaIntegrationInput): 
     auditAction: "communication_message_queued",
   });
   await publishCommsProofEvent("COMMUNICATION_MESSAGE_QUEUED", queued, input.actor.id);
-
-  const consentResult = await checkConsent(input.brokerageId, "SMS" as CommunicationChannel, existing.recipientDestination!, existing.classification as CommunicationClassification);
-  if (!consentResult.allowed) {
-    const blocked = await applyMessageTransition({
-      messageId: existing.id,
-      brokerageId: input.brokerageId,
-      toStatus: "BLOCKED_BY_CONSENT",
-      expectedVersion: queued.version,
-      actorUserId: input.actor.id,
-      patch: { failureCategory: "CONSENT_BLOCKED", failureDetail: consentResult.reason },
-      auditAction: "communication_message_blocked_by_consent",
-    });
-    await publishCommsProofEvent("COMMUNICATION_MESSAGE_BLOCKED", blocked, input.actor.id);
-    return { message: blocked, outcome: "BLOCKED_BY_CONSENT" };
-  }
 
   const costResult = await checkCostControl(input.brokerageId, input.actor.id, "SMS");
   if (!costResult.allowed) {
