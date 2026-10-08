@@ -1688,6 +1688,29 @@ ul.pc-item-list li {
   border-style: solid;
 }
 
+/* GP-2 — Contact 360 edit. Single column, full-width fields, wrapping
+   actions, so the form stays usable at a 375px phone width. */
+.grow-contact-edit {
+  margin-top: 0.75rem;
+  max-width: 100%;
+}
+
+.grow-contact-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.grow-contact-edit-note {
+  margin: 0;
+}
+
+@media (max-width: 420px) {
+  .grow-contact-edit-actions .btn {
+    flex: 1 1 8rem;
+  }
+}
+
 .grow-call-panel {
   margin-top: 1rem;
 }
