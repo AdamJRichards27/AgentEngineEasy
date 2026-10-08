@@ -438,6 +438,16 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     const reset = await call("/auth/password-reset/confirm", scoped, "POST", { token: token.plaintext, password: "Replacement-Password-99" });
     assert.equal(reset.status, 403);
     assert.equal((await reset.json() as { code?: string }).code, "OWNER_TARGET_PROTECTED");
+    await db.update(users).set({ isActive: false }).where(eq(users.id, otherOwnerId));
+    try {
+      const enabled = await call(`/auth/admin/users/${otherOwnerId}/enable`, scoped, "POST", {}, { "X-AEE-Owner-Brokerage": String(homeId) });
+      assert.equal(enabled.status, 403);
+      assert.equal((await enabled.json() as { code?: string }).code, "OWNER_TARGET_PROTECTED");
+      const [stillDisabled] = await db.select().from(users).where(eq(users.id, otherOwnerId));
+      assert.equal(stillDisabled?.isActive, false);
+    } finally {
+      await db.update(users).set({ isActive: true }).where(eq(users.id, otherOwnerId));
+    }
     const [after] = await db.select().from(users).where(eq(users.id, otherOwnerId));
     assert.equal(after?.isActive, true);
     assert.equal(after?.role, before?.role);
