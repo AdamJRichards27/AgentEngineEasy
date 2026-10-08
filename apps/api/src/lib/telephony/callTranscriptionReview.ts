@@ -26,7 +26,12 @@ import { logAudit } from "../audit.js";
 import { logger } from "@aee/events";
 import { summarizeErrorCause } from "../errorCause.js";
 import { type ConsentTransaction, writeAuditInTransaction } from "../consentControlsPersistence.js";
-import { shouldFailCallTranscriptionAuditForTests } from "./callTranscriptions.js";
+import {
+  isRecordingConsentWithdrawn,
+  readRecordingConsentWithdrawalState,
+  RECORDING_CONSENT_WITHDRAWN_MESSAGE,
+  shouldFailCallTranscriptionAuditForTests,
+} from "./callTranscriptions.js";
 import {
   approvedStructuredOutputCounts,
   FORWARD_REVIEW_DISCARD_PURGE_ID,
@@ -60,7 +65,8 @@ export class CallTranscriptionReviewError extends Error {
       | "STALE"
       | "TERMINAL"
       | "CONCURRENT"
-      | "AUDIT_FAILURE",
+      | "AUDIT_FAILURE"
+      | "CONSENT_WITHDRAWN",
     message: string,
   ) {
     super(message);
@@ -440,6 +446,31 @@ async function retentionFacts(
   return { sha, byteCount, consentReference };
 }
 
+function explicitConsentId(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * The capture consent is the retention audit's reference when one was stored,
+ * otherwise the session's recordingConsentId. Both reads are brokerage-scoped.
+ * Discard does not use this: withdrawal must not trap an unreviewed transcript.
+ */
+async function captureConsentId(
+  tx: ConsentTransaction,
+  row: Pick<GrowCallTranscription, "brokerageId" | "callSessionId" | "partyId" | "retentionAudit">,
+): Promise<number | null> {
+  const audited = explicitConsentId(row.retentionAudit?.consentReference);
+  if (audited != null) return audited;
+  const [session] = await tx.select({
+    recordingConsentId: growCallSessions.recordingConsentId,
+  }).from(growCallSessions).where(and(
+    eq(growCallSessions.id, row.callSessionId),
+    eq(growCallSessions.brokerageId, row.brokerageId),
+    eq(growCallSessions.partyId, row.partyId),
+  )).limit(1);
+  return session?.recordingConsentId ?? null;
+}
+
 export async function saveCallTranscriptionReview(input: {
   brokerageId: number;
   callSessionId: number;
@@ -457,11 +488,30 @@ export async function saveCallTranscriptionReview(input: {
   // resolves access/source status before entering the commit transaction.
 
   return db.transaction(async (tx) => {
-    const [locked] = await tx.select().from(growCallTranscriptions).where(and(
+    const reviewWhere = and(
       eq(growCallTranscriptions.id, input.transcriptionId),
       eq(growCallTranscriptions.callSessionId, input.callSessionId),
       eq(growCallTranscriptions.brokerageId, input.brokerageId),
-    )).for("update");
+    );
+    // Lock the capture consent before the transcription row. Transcript commit
+    // takes the consent row and then the transcription row; the same order
+    // here avoids a deadlock. The locked row is checked again below.
+    const [preview] = await tx.select().from(growCallTranscriptions).where(reviewWhere).limit(1);
+    if (!preview) {
+      await noteGrowCallTranscriptionIsolationRejection(input.transcriptionId, input.brokerageId);
+      throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
+    }
+    const previewConsentId = await captureConsentId(tx, preview);
+    // Hold the consent row before the transcription lock (see comment above).
+    // The refusal is raised only after the locked row is confirmed still mutable,
+    // so a review that was already saved stays on its existing terminal error.
+    const previewConsent = await readRecordingConsentWithdrawalState(tx, {
+      brokerageId: preview.brokerageId,
+      partyId: preview.partyId,
+      consentId: previewConsentId,
+    }, true);
+
+    const [locked] = await tx.select().from(growCallTranscriptions).where(reviewWhere).for("update");
     if (!locked) {
       await noteGrowCallTranscriptionIsolationRejection(input.transcriptionId, input.brokerageId);
       throw new CallTranscriptionReviewError("NOT_FOUND", "Transcription not found.");
@@ -469,6 +519,13 @@ export async function saveCallTranscriptionReview(input: {
     await assertSourceLedger(tx, locked, true);
     assertMutable(locked);
     validateReviewState(locked, items);
+    const lockedConsentId = await captureConsentId(tx, locked);
+    if (lockedConsentId !== previewConsentId) {
+      throw new CallTranscriptionReviewError("CONCURRENT", "Review changed concurrently; retry.");
+    }
+    if (isRecordingConsentWithdrawn(previewConsent)) {
+      throw new CallTranscriptionReviewError("CONSENT_WITHDRAWN", RECORDING_CONSENT_WITHDRAWN_MESSAGE);
+    }
     const reviewedAt = new Date().toISOString();
     const reviewState: CallTranscriptionItemReview[] = items.map((item) => ({
       ...item,

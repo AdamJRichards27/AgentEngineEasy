@@ -4,6 +4,7 @@ import { ApiError, apiFetch } from "../lib/api";
 import {
   createReviewItems,
   serializeReviewItems,
+  reviewSaveErrorMessage,
   showsInterimCallTranscript,
   transcriptionStatusLabel,
   validateReviewItems,
@@ -222,7 +223,7 @@ export function GrowContactTranscriptPanel({
             </div>
           ))}
           {formError && <p className="error-text">{formError}</p>}
-          {save.isError && <p className="error-text">{friendlyError(save.error, "Couldn't save this review. Your edits are still here.")}</p>}
+          {save.isError && <p className="error-text">{reviewSaveErrorMessage(save.error, "Couldn't save this review. Your edits are still here.")}</p>}
           {discard.isError && <p className="error-text">{friendlyError(discard.error, "Couldn't discard this transcript. Try again.")}</p>}
           <div className="grow-call-actions">
             <button type="button" className="btn btn-primary" disabled={pending} onClick={submit}>{save.isPending ? "Saving…" : "Save review"}</button>

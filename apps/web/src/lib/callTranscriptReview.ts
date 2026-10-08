@@ -11,6 +11,21 @@ export function showsInterimCallTranscript(processingState: string): boolean {
   return processingState === "AWAITING_AGENT_REVIEW";
 }
 
+export const REVIEW_SAVE_CONSENT_WITHDRAWN_MESSAGE =
+  "Recording consent for this call has been withdrawn, so this review can’t be saved. You can still discard the transcript. Nothing already saved is changed.";
+
+/** Save-review failure copy. A withdrawn consent stays on the review screen so Discard remains available. */
+export function reviewSaveErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && (error as { code?: unknown }).code === "CONSENT_WITHDRAWN") {
+    return REVIEW_SAVE_CONSENT_WITHDRAWN_MESSAGE;
+  }
+  if (error && typeof error === "object" && typeof (error as { friendly?: unknown }).friendly === "string") {
+    const friendly = (error as { friendly: string }).friendly.trim();
+    if (friendly) return (error as { friendly: string }).friendly;
+  }
+  return fallback;
+}
+
 export function transcriptionStatusLabel(state: string, failureReason?: string | null): TranscriptDisplayState {
   if (state === "PENDING" || state === "MEDIA_PROCESSING" || state === "TRANSCRIBING") return "Processing call";
   if (state === "AWAITING_AGENT_REVIEW") return "Needs review";

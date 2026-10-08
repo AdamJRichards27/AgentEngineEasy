@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createReviewItems,
+  REVIEW_SAVE_CONSENT_WITHDRAWN_MESSAGE,
+  reviewSaveErrorMessage,
   serializeReviewItems,
   showsInterimCallTranscript,
   transcriptionStatusLabel,
@@ -84,4 +86,15 @@ test("creates every AI draft as an independently undecided review item", () => {
       { itemId: "followup-1", decision: "APPROVED" },
     ],
   );
+});
+
+test("a withdrawn-consent save shows that the review cannot be saved and discard is still available", () => {
+  assert.equal(
+    reviewSaveErrorMessage({ status: 409, code: "CONSENT_WITHDRAWN", friendly: "Recording consent has been withdrawn; no new transcription or AI processing is permitted." }, "fallback"),
+    REVIEW_SAVE_CONSENT_WITHDRAWN_MESSAGE,
+  );
+  assert.match(REVIEW_SAVE_CONSENT_WITHDRAWN_MESSAGE, /can’t be saved/);
+  assert.match(REVIEW_SAVE_CONSENT_WITHDRAWN_MESSAGE, /discard the transcript/);
+  assert.equal(reviewSaveErrorMessage({ friendly: "Check the review and try again." }, "fallback"), "Check the review and try again.");
+  assert.equal(reviewSaveErrorMessage(new Error("nope"), "fallback"), "fallback");
 });
