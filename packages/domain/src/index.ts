@@ -5,3 +5,4 @@
  */
 export * from "./canonicalSources.js";
 export * from "./growOpportunityType.js";
+export * from "./meaningfulActivity.js";
