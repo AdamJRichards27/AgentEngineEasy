@@ -6,3 +6,4 @@
 export * from "./canonicalSources.js";
 export * from "./growOpportunityType.js";
 export * from "./growOpportunityLifecycle.js";
+export * from "./meaningfulActivity.js";

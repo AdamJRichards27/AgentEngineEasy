@@ -10,13 +10,24 @@ import {
   properties,
 } from "@aee/db";
 import {
+  ACTIVITY_DETAILS_INVALID,
+  ACTIVITY_FIELDS_REQUIRED,
+  CALL_SUMMARY_REVIEW_ONLY,
   CLASSIFIED_OPPORTUNITY_TYPES,
+  CONTACT_REFERENCE_INVALID,
   GROW_OPPORTUNITY_TYPES,
+  OPPORTUNITY_REFERENCE_INVALID,
   PROPERTY_MANAGEMENT_OPPORTUNITY_TYPE,
+  PROPERTY_REFERENCE_INVALID,
   SELLER_SIDE_OPPORTUNITY_TYPES,
   applyGrowOpportunityLifecycle,
   isGrowOpportunityType,
+  parseActivityOccurredAt,
+  parseActivitySummary,
   parseGrowOpportunityLifecycleRequest,
+  parseOptionalDurationMinutes,
+  parseOptionalOutcome,
+  parsePostedActivityType,
   parseGrowOpportunityListTypeFilter,
   type GrowOpportunityListTypeFilter,
 } from "@aee/domain";
@@ -599,24 +610,108 @@ growRouter.get("/activities", requireAuth, requireEntitlement("grow.access"), as
   });
 });
 
+function readBodyId(
+  value: unknown,
+  code: string,
+  label: string,
+): { ok: true; id: number | null } | { ok: false; code: string; error: string } {
+  if (value === undefined || value === null) return { ok: true, id: null };
+  if (typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_SIGNED_INT4) {
+    return { ok: true, id: value };
+  }
+  return { ok: false, code, error: `${label} must be a positive integer` };
+}
+
+function activityError(res: { status: (code: number) => { json: (body: unknown) => void } }, status: number, error: string, code: string) {
+  res.status(status).json({ error, code });
+}
+
+// POST /grow/activities records an interaction that already happened.
+// It does not place a call, open a recording, run transcription, or send
+// through a provider. Calling stays on the call routes and stays disabled
+// until those routes are explicitly enabled.
 growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const activityType = typeof req.body?.activityType === "string" ? req.body.activityType : undefined;
-  const summary = typeof req.body?.summary === "string" ? req.body.summary : undefined;
-  if (!activityType || !summary) {
-    res.status(400).json({ error: "activityType and summary are required" });
+  if (typeof req.body?.activityType !== "string" || typeof req.body?.summary !== "string") {
+    activityError(res, 400, "activityType and summary are required", ACTIVITY_FIELDS_REQUIRED);
+    return;
+  }
+  const parsedType = parsePostedActivityType(req.body.activityType);
+  if (!parsedType.ok) {
+    activityError(res, 400, parsedType.error, parsedType.code);
     return;
   }
   // Reviewed call summaries require server-authenticated approval provenance.
   // They can only be created by the explicit transcription review Save route.
-  if (activityType === "call_summary") {
-    res.status(400).json({ error: "Call summaries must be saved through transcription review." });
+  if (parsedType.activityType === "call_summary") {
+    activityError(res, 400, "Call summaries must be saved through transcription review.", CALL_SUMMARY_REVIEW_ONLY);
     return;
   }
+  const parsedSummary = parseActivitySummary(req.body.summary);
+  if (!parsedSummary.ok) {
+    activityError(res, 400, parsedSummary.error, parsedSummary.code);
+    return;
+  }
+  const activityType = parsedType.activityType;
+  const summary = parsedSummary.summary;
 
-  const partyId = typeof req.body?.partyId === "number" ? req.body.partyId : null;
-  const propertyId = typeof req.body?.propertyId === "number" ? req.body.propertyId : null;
-  const opportunityId = typeof req.body?.opportunityId === "number" ? req.body.opportunityId : null;
+  let occurredAt = new Date();
+  if (req.body?.occurredAt !== undefined && req.body?.occurredAt !== null) {
+    const parsedOccurredAt = parseActivityOccurredAt(req.body.occurredAt);
+    if (!parsedOccurredAt.ok) {
+      activityError(res, 400, parsedOccurredAt.error, parsedOccurredAt.code);
+      return;
+    }
+    occurredAt = parsedOccurredAt.occurredAt;
+  }
+  const duration = parseOptionalDurationMinutes(req.body?.durationMinutes);
+  if (!duration.ok) {
+    activityError(res, 400, duration.error, duration.code);
+    return;
+  }
+  const outcome = parseOptionalOutcome(req.body?.outcome);
+  if (!outcome.ok) {
+    activityError(res, 400, outcome.error, outcome.code);
+    return;
+  }
+  let details: Record<string, unknown> = {};
+  if (req.body?.details !== undefined && req.body?.details !== null) {
+    if (typeof req.body.details !== "object" || Array.isArray(req.body.details)) {
+      activityError(res, 400, "details must be an object", ACTIVITY_DETAILS_INVALID);
+      return;
+    }
+    details = { ...(req.body.details as Record<string, unknown>) };
+  }
+  if (duration.durationMinutes !== null) details.durationMinutes = duration.durationMinutes;
+  if (outcome.outcome !== null) details.outcome = outcome.outcome;
+
+  const party = readBodyId(req.body?.partyId, CONTACT_REFERENCE_INVALID, "partyId");
+  if (!party.ok) {
+    activityError(res, 400, party.error, party.code);
+    return;
+  }
+  const contact = readBodyId(req.body?.contactId, CONTACT_REFERENCE_INVALID, "contactId");
+  if (!contact.ok) {
+    activityError(res, 400, contact.error, contact.code);
+    return;
+  }
+  if (party.id !== null && contact.id !== null && party.id !== contact.id) {
+    activityError(res, 400, "partyId and contactId must be the same contact", CONTACT_REFERENCE_INVALID);
+    return;
+  }
+  const property = readBodyId(req.body?.propertyId, PROPERTY_REFERENCE_INVALID, "propertyId");
+  if (!property.ok) {
+    activityError(res, 400, property.error, property.code);
+    return;
+  }
+  const opportunity = readBodyId(req.body?.opportunityId, OPPORTUNITY_REFERENCE_INVALID, "opportunityId");
+  if (!opportunity.ok) {
+    activityError(res, 400, opportunity.error, opportunity.code);
+    return;
+  }
+  const partyId = party.id ?? contact.id;
+  const propertyId = property.id;
+  const opportunityId = opportunity.id;
 
   // Tenant isolation on the referenced rows, not just the new row: mirrors the same check in
   // POST /relationships above. All three are optional here (unlike partyId/propertyId on
@@ -654,6 +749,13 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
       res.status(404).json({ error: "Opportunity not found in this brokerage" });
       return;
     }
+    // FU-1 — same owner-or-own-property rule as GET /grow/opportunities.
+    // A hidden row is the same 404 as a missing one, and it is not an
+    // isolation rejection: the row is in this brokerage.
+    if (!(await assertOwnedOrPropertyVisibleForWrite(user, opportunity.propertyId, opportunity.ownerUserId))) {
+      res.status(404).json({ error: "Opportunity not found in this brokerage" });
+      return;
+    }
   }
 
   const [inserted] = await db
@@ -664,9 +766,9 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
       propertyId,
       opportunityId,
       activityType,
-      occurredAt: req.body?.occurredAt ? new Date(req.body.occurredAt) : new Date(),
+      occurredAt,
       summary,
-      details: req.body?.details ?? {},
+      details,
       responsibleUserId: user.id,
       source: "manual",
     })
