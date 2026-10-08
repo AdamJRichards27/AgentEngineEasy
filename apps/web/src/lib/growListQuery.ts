@@ -26,3 +26,9 @@ export function growListPath(
 export function showingCountLabel(shown: number, total: number, singular: string, plural: string): string {
   return `Showing ${shown} of ${total} ${total === 1 ? singular : plural}`;
 }
+
+/** Empty copy for a list whose search is applied on the server. */
+export function listSearchEmptyMessage(search: string, noun: string, idle: string): string {
+  const term = search.trim();
+  return term.length > 0 ? `No ${noun} match “${term}”.` : idle;
+}

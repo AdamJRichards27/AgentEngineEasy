@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch, apiErrorMessage } from "../lib/api";
@@ -33,6 +33,7 @@ import {
   canonicalGrowContactHref,
   contactsEmptyMessage,
   growComposeChannelFromSearch,
+  growDataRegionState,
   growContactIdFromPath,
   growContactPath,
   growNavigationMode,
@@ -80,7 +81,7 @@ import {
 } from "../lib/growTerms";
 import { GrowTableScroll } from "../components/GrowTableScroll";
 import { GrowVirtualTable, GrowVirtualTimeline, memoRow, useGrowCursorPages } from "../components/GrowVirtualList";
-import { growListPath } from "../lib/growListQuery";
+import { growListPath, listSearchEmptyMessage } from "../lib/growListQuery";
 import {
   GROW_OPPORTUNITY_LIST_TYPE_FILTER_LABELS,
   GROW_OPPORTUNITY_LIST_TYPE_FILTERS,
@@ -2137,22 +2138,83 @@ export function GrowNewContactForm() {
   );
 }
 
+const GROW_LIST_SEARCH_DEBOUNCE_MS = 300;
+
+function useDebouncedListSearch() {
+  const [text, setText] = useState("");
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(text.trim()), GROW_LIST_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [text]);
+  return {
+    text,
+    query,
+    setText,
+    commit() {
+      setQuery(text.trim());
+    },
+  };
+}
+
+function GrowListSearch({
+  id,
+  label,
+  placeholder,
+  text,
+  onText,
+  onCommit,
+}: {
+  id: string;
+  label: string;
+  placeholder: string;
+  text: string;
+  onText: (value: string) => void;
+  onCommit: () => void;
+}) {
+  return (
+    <form
+      className="grow-inline-form-row"
+      role="search"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onCommit();
+      }}
+    >
+      <label className="grow-list-filter" htmlFor={id}>
+        {label}
+        <input
+          id={id}
+          type="search"
+          value={text}
+          placeholder={placeholder}
+          autoComplete="off"
+          onChange={(event) => onText(event.target.value)}
+        />
+      </label>
+    </form>
+  );
+}
+
 export function GrowContactList() {
   const [search, setSearch] = useState("");
   const [committedSearch, setCommittedSearch] = useState("");
+  const [role, setRole] = useState("");
+  const relationshipSearch = useDebouncedListSearch();
+  const activitySearch = useDebouncedListSearch();
 
   const contacts = useQuery<GrowContactListPage>({
-    queryKey: ["grow-contacts", committedSearch],
-    queryFn: () => apiFetch(growListPath("/grow/contacts", { search: committedSearch })),
+    queryKey: ["grow-contacts", committedSearch, role],
+    queryFn: () => apiFetch(growListPath("/grow/contacts", { search: committedSearch, role })),
   });
   const contactPages = useGrowCursorPages({
-    resetKey: committedSearch,
+    resetKey: `${committedSearch}\0${role}`,
     page: contacts.data
       ? { items: contacts.data.contacts, nextCursor: contacts.data.nextCursor, total: contacts.data.total }
       : undefined,
     getId: (contact) => contact.id,
     fetchPage: (cursor) =>
-      apiFetch<GrowContactListPage>(growListPath("/grow/contacts", { search: committedSearch, cursor })).then((page) => ({
+      apiFetch<GrowContactListPage>(growListPath("/grow/contacts", { search: committedSearch, role, cursor })).then((page) => ({
         items: page.contacts,
         nextCursor: page.nextCursor,
         total: page.total,
@@ -2164,39 +2226,46 @@ export function GrowContactList() {
   // still useful alongside the new per-contact Contact 360 below, and nothing about Contact 360
   // required removing it. Both lists are paged the same way as contacts.
   const relationships = useQuery<GrowRelationshipListPage>({
-    queryKey: ["grow-relationships"],
-    queryFn: () => apiFetch("/grow/relationships"),
+    queryKey: ["grow-relationships", relationshipSearch.query],
+    queryFn: () => apiFetch(growListPath("/grow/relationships", { search: relationshipSearch.query })),
   });
   const relationshipPages = useGrowCursorPages({
-    resetKey: "relationships",
+    resetKey: `relationships\0${relationshipSearch.query}`,
     page: relationships.data
       ? { items: relationships.data.relationships, nextCursor: relationships.data.nextCursor, total: relationships.data.total }
       : undefined,
     getId: (relationship) => relationship.id,
     fetchPage: (cursor) =>
-      apiFetch<GrowRelationshipListPage>(growListPath("/grow/relationships", { cursor })).then((page) => ({
+      apiFetch<GrowRelationshipListPage>(growListPath("/grow/relationships", { search: relationshipSearch.query, cursor })).then((page) => ({
         items: page.relationships,
         nextCursor: page.nextCursor,
         total: page.total,
       })),
   });
   const activities = useQuery<GrowActivityListPage>({
-    queryKey: ["grow-activities"],
-    queryFn: () => apiFetch("/grow/activities"),
+    queryKey: ["grow-activities", activitySearch.query],
+    queryFn: () => apiFetch(growListPath("/grow/activities", { search: activitySearch.query })),
   });
   const activityPages = useGrowCursorPages({
-    resetKey: "activities",
+    resetKey: `activities\0${activitySearch.query}`,
     page: activities.data
       ? { items: activities.data.activities, nextCursor: activities.data.nextCursor, total: activities.data.total }
       : undefined,
     getId: (activity) => activity.id,
     fetchPage: (cursor) =>
-      apiFetch<GrowActivityListPage>(growListPath("/grow/activities", { cursor })).then((page) => ({
+      apiFetch<GrowActivityListPage>(growListPath("/grow/activities", { search: activitySearch.query, cursor })).then((page) => ({
         items: page.activities,
         nextCursor: page.nextCursor,
         total: page.total,
       })),
   });
+
+  const contactCount = contacts.data ? contactPages.items.length : undefined;
+  const contactState = growDataRegionState(contacts, contactCount);
+  const relationshipCount = relationships.data ? relationshipPages.items.length : undefined;
+  const relationshipState = growDataRegionState(relationships, relationshipCount);
+  const activityCount = activities.data ? activityPages.items.length : undefined;
+  const activityState = growDataRegionState(activities, activityCount);
 
   return (
     <div>
@@ -2212,12 +2281,30 @@ export function GrowContactList() {
           }}
         >
           <input
-            type="text"
+            type="search"
             placeholder="Search by name, organisation, or email"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search contacts"
           />
+          <label className="grow-list-filter" htmlFor="grow-contacts-role">
+            Role
+            <select
+              id="grow-contacts-role"
+              value={role}
+              onChange={(event) => {
+                setRole(event.target.value);
+                setCommittedSearch(search.trim());
+              }}
+            >
+              <option value="">All roles</option>
+              {GROW_CONTACT_ROLES.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
           <button type="submit" className="btn btn-secondary btn-small">
             Search
           </button>
@@ -2225,20 +2312,24 @@ export function GrowContactList() {
 
         {/* AE GROW Pilot Readiness WP6b (D6) — an explicit failed state with a
             Try again that refetches this region's own query, plus a distinct
-            "nothing matched that search" vs "no contacts at all" empty state. */}
+            "nothing matched that search" vs "no contacts at all" empty state.
+            The empty sentence is the current filter only: a later result
+            replaces it instead of leaving it above the rows. */}
         <GrowDataRegionStatus
+          key={`${committedSearch}\0${role}`}
           query={contacts}
-          itemCount={contacts.data ? contactPages.items.length : undefined}
+          itemCount={contactCount}
           errorFallback="Couldn't load contacts."
-          emptyMessage={contactsEmptyMessage(committedSearch)}
+          emptyMessage={contactsEmptyMessage(committedSearch, role)}
           onRetry={() => void contacts.refetch()}
         />
-        {contacts.data && contactPages.items.length > 0 && (
+        {contactState === "ready" && (
           <GrowVirtualTable
             label="Contacts"
             singular="contact"
             plural="contacts"
             colSpan={5}
+            resetKey={`${committedSearch}\0${role}`}
             items={contactPages.items}
             total={contactPages.total}
             getKey={(contact) => contact.id}
@@ -2263,19 +2354,29 @@ export function GrowContactList() {
       <section className="card">
         <h2>Relationships</h2>
         <p className="muted">Every person linked to a property, with why the link exists - never just an owner field.</p>
+        <GrowListSearch
+          id="grow-relationships-search"
+          label="Search relationships"
+          placeholder="Name, organisation, or address"
+          text={relationshipSearch.text}
+          onText={relationshipSearch.setText}
+          onCommit={relationshipSearch.commit}
+        />
         <GrowDataRegionStatus
+          key={relationshipSearch.query}
           query={relationships}
-          itemCount={relationships.data ? relationshipPages.items.length : undefined}
+          itemCount={relationshipCount}
           errorFallback="Couldn't load relationships."
-          emptyMessage="No relationships yet."
+          emptyMessage={listSearchEmptyMessage(relationshipSearch.query, "relationships", "No relationships yet.")}
           onRetry={() => void relationships.refetch()}
         />
-        {relationships.data && relationshipPages.items.length > 0 && (
+        {relationshipState === "ready" && (
           <GrowVirtualTable
             label="Relationships"
             singular="relationship"
             plural="relationships"
             colSpan={5}
+            resetKey={`relationships\0${relationshipSearch.query}`}
             items={relationshipPages.items}
             total={relationshipPages.total}
             getKey={(relationship) => relationship.id}
@@ -2299,18 +2400,28 @@ export function GrowContactList() {
 
       <section className="card">
         <h2>Recent activity</h2>
+        <GrowListSearch
+          id="grow-activities-search"
+          label="Search activity"
+          placeholder="Search summaries"
+          text={activitySearch.text}
+          onText={activitySearch.setText}
+          onCommit={activitySearch.commit}
+        />
         <GrowDataRegionStatus
+          key={activitySearch.query}
           query={activities}
-          itemCount={activities.data ? activityPages.items.length : undefined}
+          itemCount={activityCount}
           errorFallback="Couldn't load recent activity."
-          emptyMessage="No activity logged yet."
+          emptyMessage={listSearchEmptyMessage(activitySearch.query, "activities", "No activity logged yet.")}
           onRetry={() => void activities.refetch()}
         />
-        {activities.data && activityPages.items.length > 0 && (
+        {activityState === "ready" && (
           <GrowVirtualTimeline
             label="Recent activity"
             singular="activity"
             plural="activities"
+            resetKey={`activities\0${activitySearch.query}`}
             items={activityPages.items}
             total={activityPages.total}
             getKey={(activity) => activity.id}
@@ -3775,19 +3886,27 @@ export function GrowOpportunitiesTab({
   const canViewContacts = hasEntitlement("grow.contacts.read");
   const canReadAppraisals = useCanReadAppraisals();
   const [typeFilter, setTypeFilter] = useState<GrowOpportunityListTypeFilter>("all");
+  const opportunitySearch = useDebouncedListSearch();
+  // An empty search keeps the key C-5a already asserts: ["grow-opportunities", type].
+  // A search is appended so the two filters refetch together.
+  const opportunityQueryKey = opportunitySearch.query
+    ? ["grow-opportunities", typeFilter, opportunitySearch.query]
+    : ["grow-opportunities", typeFilter];
 
   const opportunities = useQuery<GrowOpportunityListPage>({
-    queryKey: ["grow-opportunities", typeFilter],
-    queryFn: () => apiFetch(growListPath("/grow/opportunities", { type: typeFilter })),
+    queryKey: opportunityQueryKey,
+    queryFn: () => apiFetch(growListPath("/grow/opportunities", { search: opportunitySearch.query, type: typeFilter })),
   });
   const opportunityPages = useGrowCursorPages({
-    resetKey: typeFilter,
+    resetKey: `${typeFilter}\0${opportunitySearch.query}`,
     page: opportunities.data
       ? { items: opportunities.data.opportunities, nextCursor: opportunities.data.nextCursor, total: opportunities.data.total }
       : undefined,
     getId: (opportunity) => opportunity.id,
     fetchPage: (cursor) =>
-      apiFetch<GrowOpportunityListPage>(growListPath("/grow/opportunities", { type: typeFilter, cursor })).then((page) => ({
+      apiFetch<GrowOpportunityListPage>(
+        growListPath("/grow/opportunities", { search: opportunitySearch.query, type: typeFilter, cursor }),
+      ).then((page) => ({
         items: page.opportunities,
         nextCursor: page.nextCursor,
         total: page.total,
@@ -3795,6 +3914,8 @@ export function GrowOpportunitiesTab({
   });
   const pipeline = useAppraisalPipeline(canReadAppraisals);
   const appraisalRows = canReadAppraisals ? (pipeline.data?.appraisals ?? []) : [];
+  const opportunityCount = opportunities.data ? opportunityPages.items.length : undefined;
+  const opportunityState = growDataRegionState(opportunities, opportunityCount);
 
   function onSaved() {
     void opportunities.refetch();
@@ -3824,21 +3945,31 @@ export function GrowOpportunitiesTab({
           ))}
         </select>
       </div>
+      <GrowListSearch
+        id="grow-opportunities-search"
+        label="Search opportunities"
+        placeholder="Search by reason"
+        text={opportunitySearch.text}
+        onText={opportunitySearch.setText}
+        onCommit={opportunitySearch.commit}
+      />
       {/* AE GROW Pilot Readiness WP6b (D6) — see GrowContactList above. */}
       <GrowDataRegionStatus
+        key={`${typeFilter}\0${opportunitySearch.query}`}
         query={opportunities}
-        itemCount={opportunities.data ? opportunityPages.items.length : undefined}
+        itemCount={opportunityCount}
         errorFallback="Couldn't load opportunities."
-        emptyMessage="No opportunities yet."
+        emptyMessage={listSearchEmptyMessage(opportunitySearch.query, "opportunities", "No opportunities yet.")}
         onRetry={() => void opportunities.refetch()}
       />
-      {opportunities.data && opportunityPages.items.length > 0 && (
+      {opportunityState === "ready" && (
         <GrowVirtualTable
           label="Opportunities"
           singular="opportunity"
           plural="opportunities"
           colSpan={6}
           estimate={120}
+          resetKey={`${typeFilter}\0${opportunitySearch.query}`}
           items={opportunityPages.items}
           total={opportunityPages.total}
           getKey={(opportunity) => opportunity.id}
