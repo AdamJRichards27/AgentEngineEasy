@@ -69,6 +69,10 @@ function createHarness() {
     beginRender() {
       stateCursor = 0;
     },
+    reset() {
+      state.length = 0;
+      stateCursor = 0;
+    },
     useState(initial: unknown) {
       const index = stateCursor++;
       if (!(index in state)) state[index] = typeof initial === "function" ? (initial as () => unknown)() : initial;
@@ -624,7 +628,9 @@ test("Start stays hidden when the property already has an appraisal, including a
       assert.equal(button(tab, "Record outcome"), undefined);
       assert.equal(button(tab, "Appointment scheduled"), undefined);
 
-      otherContact.hooks.beginRender();
+      // The tab now keeps its own type-filter state. The contact section is a
+      // different component, so it must not reuse the tab's hook slots.
+      otherContact.hooks.reset();
       const contactOpp = page.GrowContactOpportunitiesSection({
         partyId: 12,
         opportunities: [

@@ -11,6 +11,12 @@ test("grow list paths omit empty filters and keep search on the server", () => {
   );
   assert.equal(growListPath("/grow/opportunities", { id: 41 }), "/grow/opportunities?id=41");
   assert.equal(growListPath("/grow/activities", { cursor: null, search: "" }), "/grow/activities");
+  assert.equal(growListPath("/grow/opportunities", { type: "all" }), "/grow/opportunities");
+  assert.equal(growListPath("/grow/opportunities", { type: "seller_side" }), "/grow/opportunities?type=seller_side");
+  assert.equal(
+    growListPath("/grow/opportunities", { search: "Ada", type: "other", cursor: "abc" }),
+    "/grow/opportunities?search=Ada&type=other&cursor=abc",
+  );
 });
 
 test("showing count names the filtered total", () => {

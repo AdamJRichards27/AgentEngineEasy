@@ -4,3 +4,4 @@
  * Barrel export. Widen this as more domains are added beyond financial.
  */
 export * from "./canonicalSources.js";
+export * from "./growOpportunityType.js";
