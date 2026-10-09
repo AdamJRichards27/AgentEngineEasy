@@ -1,7 +1,7 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { apiFetch, ApiError, setSessionExpiredHandler } from "./api";
+import { apiFetch, ApiError, configureOwnerRequestContext, setSessionExpiredHandler } from "./api";
 import { createSessionEndedNotice, createSessionExpiryCoordinator } from "./sessionExpiry";
 import { classifySessionProbe, type SessionProbeState } from "./sessionProbe";
 
@@ -13,6 +13,9 @@ export interface SessionUser {
   role: string;
   brokerageId: number | null;
   brokerageName: string | null;
+  platformOwner: boolean;
+  ownerHomeBrokerageId?: number;
+  ownerSelectedBrokerageId?: number | null;
 }
 
 // AE GROW Priority 0.5 — Workstream 1: GET /auth/me now also returns `entitlements` as a
@@ -42,6 +45,7 @@ interface SessionResponse {
 // connectivity state with a retry instead of a sign-in form nobody can use.
 // See lib/sessionProbe.ts for the classification rules.
 export function useSession() {
+  const previousOwnerContext = useRef<{ id: number; brokerageId: number | null } | null>(null);
   const query = useQuery<SessionResponse | null, ApiError, SessionUser | null>({
     queryKey: ["session"],
     queryFn: () => apiFetch<SessionResponse>("/auth/me"),
@@ -51,6 +55,22 @@ export function useSession() {
     select: (data) => data?.user ?? null,
     retry: false,
   });
+  useEffect(() => {
+    const user = query.data;
+    const previous = previousOwnerContext.current;
+    if (!query.isError && user?.platformOwner && previous?.id === user.id &&
+        previous.brokerageId !== (user.ownerSelectedBrokerageId ?? null)) {
+      // Another browser tab may have switched the shared HttpOnly context
+      // cookie. Never relabel cached records from the old tenant or submit
+      // writes under the new tenant while those old records remain visible.
+      configureOwnerRequestContext(null);
+      window.location.assign(user.ownerSelectedBrokerageId == null ? "/owner" : "/settings/users");
+      return;
+    }
+    previousOwnerContext.current = user?.platformOwner
+      ? { id: user.id, brokerageId: user.ownerSelectedBrokerageId ?? null } : null;
+    configureOwnerRequestContext(query.isError ? null : query.data);
+  }, [query.data, query.isError]);
   const probe: SessionProbeState = classifySessionProbe({
     isLoading: query.isLoading,
     hasUser: !!query.data,
@@ -112,6 +132,7 @@ export async function logoutAndClearSession(queryClient: QueryClient, navigate: 
   } catch {
     // The cookie may already be gone. Still leave the signed-in screen.
   }
+  configureOwnerRequestContext(null);
   queryClient.setQueryData(["session"], null);
   queryClient.removeQueries({
     predicate: (query) => query.queryKey[0] !== "session",
@@ -182,5 +203,13 @@ export function useCompleteSignIn() {
     sessionEndedNotice.set(false);
     queryClient.removeQueries({ predicate: (query) => !isSessionQuery(query) });
     await queryClient.invalidateQueries({ queryKey: ["session"], exact: true });
+    // Also covers sign-in callers before the useSession effect runs.
+    const session = await queryClient.fetchQuery<SessionResponse>({
+      queryKey: ["session"],
+      queryFn: () => apiFetch<SessionResponse>("/auth/me"),
+      retry: false,
+      staleTime: Infinity,
+    });
+    configureOwnerRequestContext(session.user);
   };
 }
