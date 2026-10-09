@@ -14,6 +14,7 @@ import {
   signatureRequests,
   agencyAgreementTerms,
   insertPropertySchema,
+  WORKFLOW_STAGES,
 } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
@@ -143,6 +144,20 @@ const READY_TO_LIST_STEPS = [
   { stepKey: "AgencyAgreement", label: "Agency Agreement", sequence: 2 },
   { stepKey: "RequiredDocuments", label: "Required Documents", sequence: 3 },
 ];
+
+const READY_TO_LIST_STAGE = "Ready to List";
+const PROPERTY_READY_TO_LIST_AUDIT = "PROPERTY_READY_TO_LIST";
+
+// Appraisal is the only WORKFLOW_STAGES value before Ready to List. Grow's
+// run handoff does not write workflowStage, so a handed-off property is
+// still at Appraisal — that is the stage this action is meant to leave.
+function readyToListTransition(stage: string): "advance" | "replay" | "refuse" {
+  if (stage === READY_TO_LIST_STAGE) return "replay";
+  const index = WORKFLOW_STAGES.findIndex((known) => known === stage);
+  const readyIndex = WORKFLOW_STAGES.indexOf(READY_TO_LIST_STAGE);
+  if (index >= 0 && index < readyIndex) return "advance";
+  return "refuse";
+}
 
 // Start Property (Build Brief §3): search or manually create an address,
 // establish the Property Record immediately, gather everything else
@@ -606,6 +621,17 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
     return;
   }
 
+  // R-F31: never walk a later stage back to Ready to List. Refusal is the
+  // same 400 { error: string } this handler already uses (no 409 stage
+  // conflict exists in this file) and it returns before any write.
+  const transition = readyToListTransition(property.workflowStage);
+  if (transition === "refuse") {
+    res.status(400).json({
+      error: `Ready to List cannot move a property that is already at ${property.workflowStage}.`,
+    });
+    return;
+  }
+
   const links = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, id));
   const sellerLinks = links.filter((l) => l.role === "Seller");
   if (sellerLinks.length === 0) {
@@ -693,7 +719,28 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 
   await refreshReadyToListSteps(id);
 
-  await db.update(properties).set({ workflowStage: "Ready to List" }).where(eq(properties.id, id));
+  // Replay at Ready to List writes neither the stage nor an audit row.
+  // The conditional stage match is the backstop if the row moved on after
+  // the read above: a later stage is left where it is, and no audit is written.
+  if (transition === "advance") {
+    const [advanced] = await db
+      .update(properties)
+      .set({ workflowStage: READY_TO_LIST_STAGE, updatedAt: new Date() })
+      .where(and(eq(properties.id, id), eq(properties.workflowStage, property.workflowStage)))
+      .returning({ id: properties.id });
+    if (advanced) {
+      await logAudit({
+        brokerageId: user.brokerageId,
+        userId: user.id,
+        action: PROPERTY_READY_TO_LIST_AUDIT,
+        recordType: "property",
+        recordId: String(id),
+        propertyId: id,
+        previousValue: property.workflowStage,
+        updatedValue: READY_TO_LIST_STAGE,
+      });
+    }
+  }
 
   try {
     await publishDomainEvent({
