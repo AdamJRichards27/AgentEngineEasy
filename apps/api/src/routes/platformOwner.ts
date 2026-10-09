@@ -91,15 +91,25 @@ platformOwnerRouter.patch("/brokerages/:id", async (req, res) => {
   });
   res.json({ brokerage: { id: brokerage.id, name: brokerage.name } });
 });
+// Selecting a brokerage re-authenticates. Leaving does not: brokerageId null
+// is enough, and currentPassword is ignored so a stale password cannot trap
+// the owner in the selected brokerage.
 const contextSchema = z.object({
   brokerageId: z.number().int().positive().nullable(),
-  currentPassword: z.string().min(1),
+  currentPassword: z.string().min(1).optional(),
 }).strict();
 platformOwnerRouter.post("/context", authRateLimiter, async (req, res) => {
   const parsed = contextSchema.safeParse(req.body);
   if (!parsed.success) {
     const passwordIssue = parsed.error.issues.some((issue) => issue.path[0] === "currentPassword");
     const brokerageIssue = parsed.error.issues.some((issue) => issue.path[0] === "brokerageId");
+    const leaving = !!req.body && typeof req.body === "object" && (req.body as { brokerageId?: unknown }).brokerageId === null;
+    if (leaving && parsed.error.issues.every((issue) => issue.path[0] === "currentPassword")) {
+      await auditOwner(req, "context_exited", null);
+      setOwnerContextCookie(res, null, readSessionCookie(req.headers.cookie)!);
+      res.json({ selectedBrokerageId: null });
+      return;
+    }
     if (passwordIssue && !brokerageIssue) {
       res.status(401).json({ error: "Enter your current password to switch brokerage.", code: "OWNER_REAUTH_REQUIRED" });
       return;
@@ -108,12 +118,16 @@ platformOwnerRouter.post("/context", authRateLimiter, async (req, res) => {
     return;
   }
   const { brokerageId, currentPassword } = parsed.data;
-  const [user] = await db.select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, req.authedUser!.id));
-  if (!user?.passwordHash || !(await verifyPassword(user.passwordHash, currentPassword))) {
-    res.status(401).json({ error: "Current password is incorrect.", code: "OWNER_REAUTH_REQUIRED" });
-    return;
-  }
   if (brokerageId !== null) {
+    if (!currentPassword) {
+      res.status(401).json({ error: "Enter your current password to switch brokerage.", code: "OWNER_REAUTH_REQUIRED" });
+      return;
+    }
+    const [user] = await db.select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, req.authedUser!.id));
+    if (!user?.passwordHash || !(await verifyPassword(user.passwordHash, currentPassword))) {
+      res.status(401).json({ error: "Current password is incorrect.", code: "OWNER_REAUTH_REQUIRED" });
+      return;
+    }
     const [exists] = await db.select({ id: brokerages.id }).from(brokerages).where(eq(brokerages.id, brokerageId));
     if (!exists) { res.status(404).json({ error: "Brokerage not found." }); return; }
   }

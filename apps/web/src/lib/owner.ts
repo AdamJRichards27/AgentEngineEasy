@@ -55,10 +55,11 @@ export function useRenameOwnerBrokerage() {
 
 export function useOwnerContext() {
   return useMutation({
-    mutationFn: ({ brokerageId, currentPassword }: { brokerageId: number | null; currentPassword: string }) =>
+    mutationFn: ({ brokerageId, currentPassword }: { brokerageId: number | null; currentPassword?: string }) =>
       apiFetch("/owner/context", {
         method: "POST",
-        body: JSON.stringify({ brokerageId, currentPassword }),
+        // Selecting sends the password. Leaving omits it; the session is enough.
+        body: JSON.stringify(currentPassword === undefined ? { brokerageId } : { brokerageId, currentPassword }),
       }),
     retry: false,
     // A full navigation discards every tenant query, local edit and mutation.

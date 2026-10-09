@@ -28,7 +28,9 @@ passwordless login is explicitly prohibited for Owners.
   `/api/auth/admin/invitations`, `.../revoke`, and `/api/auth/admin/succession`).
   Every other write returns 403 `OWNER_ACTION_NOT_PERMITTED`. Reads are unchanged.
   Home-brokerage writes keep the owner's real administrator authority.
-- Selecting or leaving a brokerage requires the owner's current password.
+- Selecting a brokerage requires the owner's current password. Leaving the
+  selected brokerage does not: the existing session is enough, and the
+  context cookie is cleared without re-authentication.
 - Platform Owner sessions expire 12 hours after they were issued. Other
   sessions keep the existing 30-day lifetime.
 - One Platform Owner cannot deactivate, change the role of, reset the

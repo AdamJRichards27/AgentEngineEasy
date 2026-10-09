@@ -115,3 +115,14 @@ test("owner guard prevents operational page mounting without context and keeps o
   assert.match(owner, /currentPassword/);
   assert.match(owner, /retry: false/);
 });
+
+test("leaving owner context does not send the current password", () => {
+  const banner = readFileSync(new URL("../../components/OwnerContextBanner.tsx", import.meta.url), "utf8");
+  const owner = readFileSync(new URL("../owner.ts", import.meta.url), "utf8");
+  assert.match(banner, /Exit brokerage/);
+  assert.match(banner, /context\.mutate\(\{ brokerageId: null \}\)/);
+  assert.doesNotMatch(banner, /currentPassword/);
+  assert.match(owner, /currentPassword === undefined \? \{ brokerageId \} : \{ brokerageId, currentPassword \}/);
+  const page = readFileSync(new URL("../../pages/Owner.tsx", import.meta.url), "utf8");
+  assert.match(page, /context\.mutate\(\{ brokerageId: brokerage\.id, currentPassword \}\)/);
+});

@@ -14,11 +14,13 @@ import {
   auditLogs,
   consentRecords,
   passwordResetTokens,
+  growActivities,
 } from "@aee/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { loadSession, requireAuth } from "../../middlewares/auth.js";
 import { platformOwnerRouter } from "../platformOwner.js";
 import { authRouter } from "../auth.js";
+import { growRouter } from "../grow.js";
 import { createSessionToken } from "../../lib/session.js";
 import { createOwnerContextToken } from "../../lib/ownerContextToken.js";
 import { hashPassword } from "../../lib/auth/password.js";
@@ -130,6 +132,7 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     app.use(express.json(), loadSession);
     app.use("/api/owner", platformOwnerRouter);
     app.use("/api/auth", authRouter);
+    app.use("/api/grow", growRouter);
     app.all("/api/scope-probe", requireAuth, (req, res) => res.json(req.authedUser));
     for (const path of deniedWrites) {
       for (const method of ["post", "put", "patch", "delete"] as const) {
@@ -214,6 +217,31 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     assert.equal((await call("/auth/login", "", "POST", { email: `owner-one-${suffix}@example.invalid`, password })).status, 428);
   });
 
+  test("leaving owner context does not require a password", async () => {
+    const scoped = await selectBrokerage(tenantAId);
+    assert.equal(((await (await call("/scope-probe", scoped)).json()) as { brokerageId: number }).brokerageId, tenantAId);
+    const exit = await call("/owner/context", scoped, "POST", { brokerageId: null }, { "X-AEE-Owner-Action": "1" });
+    assert.equal(exit.status, 200, await exit.clone().text());
+    const exitBody = await exit.json() as { selectedBrokerageId: number | null; code?: string };
+    assert.equal(exitBody.selectedBrokerageId, null);
+    assert.equal(exitBody.code, undefined);
+    assert.ok(exit.headers.get("set-cookie")!.includes("Max-Age=0"));
+    const exited = await db.select().from(platformOwnerAudit).where(and(
+      eq(platformOwnerAudit.ownerUserId, ownerId),
+      eq(platformOwnerAudit.action, "context_exited"),
+    ));
+    assert.ok(exited.length > 0);
+    assert.equal((await call("/scope-probe", ownerCookie)).status, 409);
+    const again = await selectBrokerage(tenantAId);
+    const wrongPassword = await call("/owner/context", again, "POST", { brokerageId: null, currentPassword: "wrong-password-value" }, { "X-AEE-Owner-Action": "1" });
+    assert.equal(wrongPassword.status, 200, await wrongPassword.clone().text());
+    assert.equal((await wrongPassword.json() as { selectedBrokerageId: number | null }).selectedBrokerageId, null);
+    assert.ok(wrongPassword.headers.get("set-cookie")!.includes("Max-Age=0"));
+    const selectWithoutPassword = await call("/owner/context", ownerCookie, "POST", { brokerageId: tenantAId }, { "X-AEE-Owner-Action": "1" });
+    assert.equal(selectWithoutPassword.status, 401);
+    assert.equal((await selectWithoutPassword.json() as { code?: string }).code, "OWNER_REAUTH_REQUIRED");
+  });
+
   test("F6 owner actions are classified as surface owner, including context selection", async () => {
     const scoped = await selectBrokerage(tenantAId);
     const create = await call("/owner/brokerages", ownerCookie, "POST", { name: `Created through Owner API ${suffix}` }, { "X-AEE-Owner-Action": "1" });
@@ -287,6 +315,35 @@ describe("platform owner access", { skip: !ownerIntegrationDatabaseAllowed(), co
     const homeWrite = await call("/payments/refund", homeScoped, "POST", {}, { "X-AEE-Owner-Brokerage": String(homeId) });
     assert.equal(homeWrite.status, 200);
     assert.deepEqual(writes, ["/api/payments/refund"]);
+  });
+
+  test("F2 a real Grow write is blocked while the owner is in another brokerage", async () => {
+    const scoped = await selectBrokerage(tenantAId);
+    const activityBody = { activityType: "note", summary: `Owner write block ${suffix}` };
+    const before = await db.select({ id: growActivities.id }).from(growActivities).where(eq(growActivities.brokerageId, tenantAId));
+    const read = await call("/grow/activities", scoped);
+    const readBody = await read.json() as { code?: string; reason?: string };
+    assert.notEqual(readBody.code, "OWNER_ACTION_NOT_PERMITTED");
+    assert.equal(read.status, 403);
+    assert.equal(readBody.reason, "ENTITLEMENT_MISSING");
+    const blocked = await call("/grow/activities", scoped, "POST", activityBody, { "X-AEE-Owner-Brokerage": String(tenantAId) });
+    assert.equal(blocked.status, 403, await blocked.clone().text());
+    const blockedBody = await blocked.json() as { code?: string; reason?: string };
+    assert.equal(blockedBody.code, "OWNER_ACTION_NOT_PERMITTED");
+    assert.equal(blockedBody.reason, undefined);
+    const after = await db.select({ id: growActivities.id }).from(growActivities).where(eq(growActivities.brokerageId, tenantAId));
+    assert.equal(after.length, before.length);
+    const adminWrite = await call("/grow/activities", adminCookie, "POST", activityBody);
+    assert.equal(adminWrite.status, 403);
+    const adminBody = await adminWrite.json() as { code?: string; reason?: string };
+    assert.equal(adminBody.reason, "ENTITLEMENT_MISSING");
+    assert.notEqual(adminBody.code, "OWNER_ACTION_NOT_PERMITTED");
+    const homeScoped = await selectBrokerage(homeId);
+    const homeWrite = await call("/grow/activities", homeScoped, "POST", activityBody, { "X-AEE-Owner-Brokerage": String(homeId) });
+    assert.equal(homeWrite.status, 403);
+    const homeBody = await homeWrite.json() as { code?: string; reason?: string };
+    assert.equal(homeBody.reason, "ENTITLEMENT_MISSING");
+    assert.notEqual(homeBody.code, "OWNER_ACTION_NOT_PERMITTED");
   });
 
   test("F2 allowed user-admin and invitation routes still work, and a non-owner admin is unchanged", async () => {
