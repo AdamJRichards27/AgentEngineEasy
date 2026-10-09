@@ -1,5 +1,14 @@
-import { and, asc, desc, eq, exists, gt, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, isNotNull, isNull, lt, max, or, sql, type SQL } from "drizzle-orm";
 import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import {
+  EXCLUDED_ACTIVITY_KIND_MARKERS,
+  MEANINGFUL_GROW_ACTIVITY_TYPES,
+  NON_CONTACT_STATUSES,
+  activityLinkageKeys,
+  isMeaningfulActivity,
+  lastMeaningfulContactAt,
+  type MeaningfulActivityInput,
+} from "@aee/domain";
 import { fetchLastQualifyingContactByParty } from "./qualifyingCommunications.js";
 import { visibleLinkedPropertySql, visibleOwnedOrLinkedPropertySql, visibleRequiredPropertySql } from "./propertyVisibility.js";
 import { isOverdueLocal, isToday, localDateKey, resolveTimeZone, startOfLocalDay } from "./commandCentre/timezone.js";
@@ -849,9 +858,80 @@ async function fetchPropertyIntelligenceSignalRows(
  * C-6 — the map also includes qualifying Hub messages (sent/delivered
  * outbound email, SMS, and calls, and received inbound). That is a second
  * grouped aggregate, scoped to the same party ids, defined in
- * lib/qualifyingCommunications.ts. The later of the two timestamps is the
- * last contact. Nothing is written to grow_activities.
+ * lib/qualifyingCommunications.ts. Nothing is written to grow_activities.
+ *
+ * D3 — only meaningful contact moves the timestamp. The WHERE clause is the
+ * same classification as packages/domain isMeaningfulActivity: meaningful
+ * types, not a reschedule or task edit, and not an email, SMS, or call that
+ * failed or was only attempted. A call_summary is left out when a call row
+ * already carries the same details.callSessionId, so approving a summary
+ * cannot move the contact later than the call. The predicate is residual on
+ * grow_activities (brokerage_id, party_id, occurred_at); it does not need a
+ * new index. The winning row is then passed through isMeaningfulActivity,
+ * and lastMeaningfulContactAt merges it with the Hub message so a shared
+ * message id or provider message id counts once.
  */
+function meaningfulActivitySqlList(values: readonly string[]): SQL {
+  return sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  );
+}
+
+function meaningfulGrowActivitySql(): SQL {
+  const types = meaningfulActivitySqlList(MEANINGFUL_GROW_ACTIVITY_TYPES);
+  const statuses = meaningfulActivitySqlList(NON_CONTACT_STATUSES.map((status) => status.toLowerCase()));
+  const kindExcluded = sql.join(
+    EXCLUDED_ACTIVITY_KIND_MARKERS.map(
+      (marker) => sql`coalesce(lower(${growActivities.details}->>'kind'), '') like ${`%${marker}%`}`,
+    ),
+    sql` or `,
+  );
+  // One statement. The EXISTS seeks the same (brokerage_id, party_id) prefix
+  // the outer aggregate already uses. activity_type and the json key are
+  // residual filters, not a new index.
+  return sql`(
+    lower(${growActivities.activityType}) in (${types})
+    and not (${kindExcluded})
+    and (
+      lower(${growActivities.activityType}) not in ('call', 'email', 'sms')
+      or (lower(${growActivities.activityType}) = 'call' and lower(${growActivities.source}) = 'manual')
+      or ${growActivities.details}->>'status' is null
+      or lower(${growActivities.details}->>'status') not in (${statuses})
+    )
+    and not (
+      lower(${growActivities.activityType}) = 'call_summary'
+      and coalesce(${growActivities.details}->>'callSessionId', '') <> ''
+      and exists (
+        select 1 from grow_activities call_row
+        where call_row.brokerage_id = ${growActivities.brokerageId}
+          and call_row.party_id = ${growActivities.partyId}
+          and lower(call_row.activity_type) = 'call'
+          and call_row.details->>'callSessionId' = ${growActivities.details}->>'callSessionId'
+      )
+    )
+  )`;
+}
+
+function asActivityDetails(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asOccurredAt(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
+}
+
+function sharesActivityLinkage(left: MeaningfulActivityInput, right: MeaningfulActivityInput): boolean {
+  const keys = new Set(activityLinkageKeys(left));
+  return activityLinkageKeys(right).some((key) => keys.has(key));
+}
+
 async function fetchLastActivityByParty(
   brokerageId: number,
   partyIds: number[],
@@ -869,13 +949,33 @@ async function fetchLastActivityByParty(
 
   const [rows, qualifyingContacts] = await Promise.all([
     db
-      .select({ partyId: growActivities.partyId, lastOccurredAt: max(growActivities.occurredAt) })
+      .select({
+        partyId: growActivities.partyId,
+        lastOccurredAt: max(growActivities.occurredAt),
+        activityId: sql<number>`(array_agg(${growActivities.id} order by ${growActivities.occurredAt} desc, ${growActivities.id} desc))[1]`,
+        activityType: sql<string>`(array_agg(${growActivities.activityType} order by ${growActivities.occurredAt} desc, ${growActivities.id} desc))[1]`,
+        source: sql<string | null>`(array_agg(${growActivities.source} order by ${growActivities.occurredAt} desc, ${growActivities.id} desc))[1]`,
+        sourceId: sql<string | null>`(array_agg(${growActivities.sourceId} order by ${growActivities.occurredAt} desc, ${growActivities.id} desc))[1]`,
+        details: sql<unknown>`(array_agg(${growActivities.details} order by ${growActivities.occurredAt} desc, ${growActivities.id} desc))[1]`,
+        // Latest meaningful row that is not a Hub mirror. Used only when the
+        // winning row shares a message id with the Hub aggregate, so that
+        // mirror cannot hide an earlier real call or meeting. Same statement,
+        // same (brokerage_id, party_id, occurred_at) index.
+        unlinkedOccurredAt: max(sql`case
+          when coalesce(${growActivities.details}->>'communicationMessageId', '') = ''
+           and coalesce(${growActivities.details}->>'messageId', '') = ''
+           and coalesce(${growActivities.details}->>'providerMessageId', '') = ''
+          then ${growActivities.occurredAt}
+          else null
+        end`),
+      })
       .from(growActivities)
       .where(
         and(
           eq(growActivities.brokerageId, brokerageId),
           isNotNull(growActivities.partyId),
           sql`${growActivities.partyId} = any(${idArray})`,
+          meaningfulGrowActivitySql(),
           // An activity on a property the caller cannot see is not their last
           // contact. Null when the caller is brokerage-wide.
           visibleLinkedPropertySql(growActivities.propertyId, restrictToPropertyIds),
@@ -885,17 +985,52 @@ async function fetchLastActivityByParty(
     fetchLastQualifyingContactByParty(brokerageId, partyIds, restrictToPropertyIds),
   ]);
 
+  const activityByParty = new Map<number, MeaningfulActivityInput>();
+  const unlinkedByParty = new Map<number, Date>();
   for (const row of rows) {
     // drizzle's max() reuses the column's own driver mapper, so occurredAt
     // decodes here exactly as it did when this loop read raw rows.
     if (row.partyId === null || row.lastOccurredAt === null) continue;
+    const unlinkedAt = asOccurredAt(row.unlinkedOccurredAt);
+    if (unlinkedAt) unlinkedByParty.set(row.partyId, unlinkedAt);
+    const activity: MeaningfulActivityInput = {
+      id: typeof row.activityId === "number" ? row.activityId : Number(row.activityId),
+      kind: "grow_activity",
+      activityType: row.activityType,
+      source: row.source,
+      sourceId: row.sourceId,
+      occurredAt: row.lastOccurredAt,
+      details: asActivityDetails(row.details),
+    };
+    if (!isMeaningfulActivity(activity)) continue;
+    activityByParty.set(row.partyId, activity);
     lastActivityByParty.set(row.partyId, row.lastOccurredAt);
   }
-  for (const [partyId, contactedAt] of qualifyingContacts) {
-    const recorded = lastActivityByParty.get(partyId);
-    if (!recorded || contactedAt.getTime() > recorded.getTime()) {
-      lastActivityByParty.set(partyId, contactedAt);
+  for (const [partyId, contacted] of qualifyingContacts) {
+    const hub: MeaningfulActivityInput = {
+      id: contacted.messageId,
+      kind: "hub_message",
+      channel: contacted.channel,
+      direction: contacted.direction,
+      status: contacted.status,
+      providerMessageId: contacted.providerMessageId,
+      occurredAt: contacted.at,
+    };
+    const activity = activityByParty.get(partyId);
+    // A newer grow row that only mirrors this Hub message must not hide a
+    // real contact that happened between the message and the mirror.
+    if (activity && sharesActivityLinkage(activity, hub)) {
+      const unlinkedAt = unlinkedByParty.get(partyId) ?? null;
+      const standIn: MeaningfulActivityInput[] = unlinkedAt
+        ? [{ kind: "grow_activity", activityType: "meeting", source: "manual", occurredAt: unlinkedAt }]
+        : [];
+      const latest = lastMeaningfulContactAt([hub, ...standIn]);
+      if (latest) lastActivityByParty.set(partyId, latest);
+      else lastActivityByParty.delete(partyId);
+      continue;
     }
+    const latest = lastMeaningfulContactAt(activity ? [activity, hub] : [hub]);
+    if (latest) lastActivityByParty.set(partyId, latest);
   }
   return lastActivityByParty;
 }

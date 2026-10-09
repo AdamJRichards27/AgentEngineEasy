@@ -12,7 +12,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, auditLogs, entitlementGrants, growOpportunitySignals } from "@aee/db";
+import { db, auditLogs, entitlementGrants, growActivities, growOpportunitySignals } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
@@ -311,12 +311,18 @@ test("an Active relationship with contact recorded 30 days ago surfaces as Keep 
   const propertyId = await createProperty(A.agent.cookie, "15 Long Overdue Contact Rd");
   const partyId = await createParty(A.agent.cookie, propertyId, { firstName: "Wanda", lastName: "WentCold" });
   await createRelationship(A.agent.cookie, { partyId, propertyId, relationshipType: "prospective_seller" });
-  await createActivity(A.agent.cookie, {
+  // A sent email is meaningful contact, and it is written by the send path,
+  // not by hand. POST /grow/activities refuses it.
+  await db.insert(growActivities).values({
+    brokerageId: A.brokerageId,
     partyId,
     propertyId,
     activityType: "email",
+    occurredAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
     summary: "Sent a market update email.",
-    occurredAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    details: { status: "SENT" },
+    responsibleUserId: A.agent.user.id,
+    source: "communications",
   });
 
   const { body } = await fetchToday(A.agent.cookie);

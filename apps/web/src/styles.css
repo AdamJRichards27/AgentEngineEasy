@@ -1555,6 +1555,45 @@ ul.pc-item-list li {
   margin-top: 0.5rem;
 }
 
+.grow-opportunity-lifecycle {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+  flex: 1 1 12rem;
+  min-width: min(100%, 12rem);
+  max-width: 18rem;
+}
+
+.grow-opportunity-lifecycle select,
+.grow-opportunity-lifecycle input {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* At a phone width the actions column stays on screen while the rest of the
+   row scrolls, so Change stage, Mark lost and Close remain reachable. */
+@media (max-width: 480px) {
+  .grow-table .grow-opportunity-actions-cell {
+    position: sticky;
+    right: 0;
+    background: var(--color-surface);
+    z-index: 2;
+    box-shadow: -6px 0 8px rgba(15, 23, 42, 0.06);
+  }
+
+  .grow-virtual-viewport .grow-table thead th.grow-opportunity-actions-cell {
+    z-index: 3;
+  }
+
+  .grow-opportunity-lifecycle select,
+  .grow-opportunity-lifecycle input,
+  .grow-opportunity-lifecycle .btn {
+    min-height: 2.75rem;
+  }
+}
+
 .grow-inline-form {
   margin-top: 0.5rem;
   padding: 0.75rem;
@@ -1633,6 +1672,30 @@ ul.pc-item-list li {
   width: 100%;
 }
 
+/* GP-5 — list search sits inside a column flex label, and the row rule
+   `flex: 1 1 220px` was applying on that vertical axis, so the field
+   rendered about 220px tall. Reset the basis and keep one compact height
+   on desktop and at 375px. The contacts search is a direct row child;
+   the same height keeps the toolbars aligned. */
+.grow-inline-form-row .grow-list-filter input,
+.grow-inline-form-row .grow-list-filter select,
+.grow-inline-form-row > input[type="search"] {
+  box-sizing: border-box;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  max-height: 2.5rem;
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
+  appearance: none;
+}
+
+.grow-inline-form-row .grow-list-filter input,
+.grow-inline-form-row .grow-list-filter select {
+  flex: 0 0 auto;
+  width: 100%;
+  margin-top: 0.3rem;
+}
+
 .grow-contact-roles {
   display: flex;
   flex-wrap: wrap;
@@ -1647,6 +1710,29 @@ ul.pc-item-list li {
 
 .grow-contact-roles button.pill.pill-success {
   border-style: solid;
+}
+
+/* GP-2 — Contact 360 edit. Single column, full-width fields, wrapping
+   actions, so the form stays usable at a 375px phone width. */
+.grow-contact-edit {
+  margin-top: 0.75rem;
+  max-width: 100%;
+}
+
+.grow-contact-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.grow-contact-edit-note {
+  margin: 0;
+}
+
+@media (max-width: 420px) {
+  .grow-contact-edit-actions .btn {
+    flex: 1 1 8rem;
+  }
 }
 
 .grow-call-panel {

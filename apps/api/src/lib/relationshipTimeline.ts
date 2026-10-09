@@ -46,10 +46,12 @@ import {
 // contact-first-or-property-first anchoring: (1) messages denormalised directly onto this
 // party via communicationMessages.partyId (a contact-first thread), and (2) messages on a
 // property-first thread where this contact is nonetheless a listed participant
-// (communicationParticipants.partyId). Both are resolved without a SQL join — a join across
-// communicationThreads/communicationParticipants/communicationMessages would multiply rows the
-// same way joining the Grow tables above would, so this follows the same per-table-query +
-// in-memory-merge convention, just over two sequential hops for path (2) instead of one.
+// (communicationParticipants.partyId). Path (1) is a single-table read.
+// Path (2) inner-joins communication_threads on thread_id (one thread per
+// participant row, so the join does not multiply participant rows) and
+// requires communication_threads.brokerage_id in that query. Messages are
+// still loaded in a second query so a thread with several participants
+// does not multiply message rows.
 //
 // Noise control: communicationMessages.status is denormalised to always hold a message's
 // LATEST known state (see communications.ts's own header comment) — there is exactly one
@@ -148,6 +150,22 @@ const UPDATE_EVENT_THRESHOLD_MS = 2000;
 
 function isMeaningfulUpdate(createdAt: Date, updatedAt: Date): boolean {
   return updatedAt.getTime() - createdAt.getTime() > UPDATE_EVENT_THRESHOLD_MS;
+}
+
+// The update event is the lifecycle line Contact 360 already renders from `summary`.
+// lostReason is a column on the opportunity row this function already selected for
+// this brokerage and party — no extra query. It is appended only while the row is Lost.
+function opportunityUpdatedSummary(opportunity: {
+  opportunityType: string;
+  stage: string;
+  status: string;
+  lostReason: string | null;
+}): string {
+  const base = `Opportunity updated: ${opportunity.opportunityType} (${opportunity.stage}/${opportunity.status}).`;
+  if (opportunity.status !== "Lost") return base;
+  const lostReason = opportunity.lostReason?.trim() ?? "";
+  if (lostReason.length === 0) return base;
+  return `${base} Lost reason: ${lostReason}.`;
 }
 
 // AE GROW Priority 3. See the file header for why this produces at most one event per message
@@ -293,11 +311,16 @@ export async function getRelationshipTimeline(
       .where(and(eq(communicationMessages.partyId, partyId), eq(communicationMessages.brokerageId, brokerageId))),
     // AE GROW Priority 3, path 2 (part 1/2) — property-first threads where this contact is
     // nonetheless a listed participant (e.g. a buyer on a property-anchored thread).
-    // communicationParticipants carries no brokerageId of its own, so tenant-scoping this path
-    // is finished below via its thread, once the party's own tenant match has been confirmed.
+    // communicationParticipants carries no brokerageId of its own. The inner
+    // join to communication_threads puts brokerage_id in this query. The
+    // second hop below re-checks the thread before loading messages.
     db
       .select({ threadId: communicationParticipants.threadId })
       .from(communicationParticipants)
+      .innerJoin(
+        communicationThreads,
+        and(eq(communicationThreads.id, communicationParticipants.threadId), eq(communicationThreads.brokerageId, brokerageId)),
+      )
       .where(eq(communicationParticipants.partyId, partyId)),
   ]);
 
@@ -306,12 +329,12 @@ export async function getRelationshipTimeline(
   // Tenant isolation: the party itself is the gate. Source queries above carry brokerageId
   // in SQL where the table has that column. `appraisals` has none, so the query above
   // inner-joins properties and requires properties.brokerage_id. communicationParticipants
-  // still has no brokerage_id and is looked up by partyId alone; its threads are re-checked
-  // below. A partyId collision across brokerages, while not actually possible, is still not
-  // something this function trusts on its own — so nothing is trusted until the party itself is
-  // confirmed to belong to the caller's brokerage. Callers MUST check this themselves before
-  // calling, but as a second line of defence this function refuses to produce any events for a
-  // cross-tenant party.
+  // has none either, so that query inner-joins communication_threads and requires
+  // communication_threads.brokerage_id. A partyId collision across brokerages, while not
+  // actually possible, is still not something this function trusts on its own — so nothing
+  // is trusted until the party itself is confirmed to belong to the caller's brokerage.
+  // Callers MUST check this themselves before calling, but as a second line of defence this
+  // function refuses to produce any events for a cross-tenant party.
   if (!party || party.brokerageId !== brokerageId) {
     return [];
   }
@@ -466,7 +489,7 @@ export async function getRelationshipTimeline(
         id: `opportunity:${o.id}:UPDATED`,
         type: "OPPORTUNITY_UPDATED",
         occurredAt: o.updatedAt.toISOString(),
-        summary: `Opportunity updated: ${o.opportunityType} (${o.stage}/${o.status}).`,
+        summary: opportunityUpdatedSummary(o),
         propertyId: o.propertyId,
         propertyLabel,
         opportunityId: o.id,

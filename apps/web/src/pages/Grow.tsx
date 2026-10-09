@@ -19,6 +19,7 @@ import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptP
 // already Grow Today, Contact 360 and the call panel at once;
 // that extraction is the explicit mitigation recorded in the roadmap.
 import { GrowContactConsentPanel } from "../components/GrowContactConsentPanel";
+import { GrowContactEditForm } from "../components/GrowContactEditForm";
 import type { GrowContactability } from "../lib/contactability";
 import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -28,6 +29,7 @@ import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 // AE GROW Pilot Readiness WP8 (D11) — turns the server's fail-closed recording
 // outcome into one plain sentence for the agent; see that module's header.
 import { describeRecordingRefusal } from "../lib/callRecording";
+import { growCallingSurfaces } from "../lib/growCalling";
 import {
   applyGrowNavigation,
   canonicalGrowContactHref,
@@ -83,11 +85,14 @@ import { GrowTableScroll } from "../components/GrowTableScroll";
 import { GrowVirtualTable, GrowVirtualTimeline, memoRow, useGrowCursorPages } from "../components/GrowVirtualList";
 import { growListPath, listSearchEmptyMessage } from "../lib/growListQuery";
 import {
+  ACTIVITY_TYPE_NOT_MANUAL,
   GROW_OPPORTUNITY_LIST_TYPE_FILTER_LABELS,
   GROW_OPPORTUNITY_LIST_TYPE_FILTERS,
+  GROW_OPPORTUNITY_MANUAL_STAGES,
   GROW_OPPORTUNITY_TYPES,
   parseGrowOpportunityListTypeFilter,
   type GrowOpportunityListTypeFilter,
+  type GrowOpportunityManualStage,
 } from "@aee/domain";
 import { appraisalWorkspacePath } from "../lib/appraisalUi";
 import {
@@ -149,10 +154,14 @@ interface GrowOpportunity {
   status: string;
   stage: string;
   reason: string | null;
+  /** Set when the opportunity was marked Lost. Already on GET /grow/opportunities. */
+  lostReason?: string | null;
   partyId: number;
   propertyId: number | null;
   recommendedNextAction: string | null;
   nextActionDueAt: string | null;
+  /** Same-brokerage contact name from GET /grow/opportunities. Null when the party join misses. */
+  contactName?: string | null;
 }
 
 // AE GROW Priority 2 — Contact Intelligence & Relationship Timeline, frontend types.
@@ -320,6 +329,8 @@ interface GrowContact360Opportunity {
   status: string;
   stage: string;
   reason: string | null;
+  /** Present on Contact 360 once the contact read includes the stored lost reason. */
+  lostReason?: string | null;
   nextActionDueAt: string | null;
   recommendedNextAction: string | null;
   propertyId: number | null;
@@ -515,7 +526,14 @@ function sandboxCallStatusLabel(status: string): string {
 // through it instead, because that cast renders the literal string "undefined"
 // whenever the failure isn't an ApiError — a dropped connection, an aborted
 // request, or anything thrown before the response was parsed.
-function growErrorMessage(error: unknown, fallback: string): string {
+// A hand-log refusal carries the server's sentence ("Only calls, meetings and
+// notes can be logged by hand."). Show that text. Other failures stay on
+// apiErrorMessage, which is the plain sentence every other panel already uses.
+export function growErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && (error as { code?: unknown }).code === ACTIVITY_TYPE_NOT_MANUAL) {
+    const serverMessage = (error as { serverMessage?: unknown }).serverMessage;
+    if (typeof serverMessage === "string" && serverMessage.trim().length > 0) return serverMessage;
+  }
   return apiErrorMessage(error, fallback);
 }
 
@@ -1061,6 +1079,33 @@ function useUpdateOpportunityNextAction(opportunityId: number | null, onSaved: (
   });
 }
 
+type GrowOpportunityLifecycleInput =
+  | { stage: GrowOpportunityManualStage }
+  | { status: "Lost"; lostReason: string }
+  | { status: "Closed" };
+
+function useUpdateOpportunityLifecycle(opportunityId: number, onSaved: () => void) {
+  return useMutation<unknown, unknown, GrowOpportunityLifecycleInput>({
+    mutationFn: (body) =>
+      apiFetch(`/grow/opportunities/${opportunityId}/lifecycle`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: onSaved,
+  });
+}
+
+function opportunityLifecycleOpen(status: string, stage: string): boolean {
+  return status === "Open" && stage !== "Lost" && stage !== "Converted";
+}
+
+/** Status cell for a Lost row names the stored lost reason. Other statuses stay as they are. */
+function opportunityStatusLabel(status: string, lostReason: string | null | undefined): string {
+  if (status !== "Lost") return status;
+  const reason = typeof lostReason === "string" ? lostReason.trim() : "";
+  return reason.length > 0 ? `Lost: ${reason}` : "Lost";
+}
+
 // PATCH /grow/contacts/commitments/:id is the one write behind Complete,
 // Cancel, and Reschedule. A status change sends { status }. A reschedule
 // sends { dueAt } alone — the route rejects a body that names both. Grow
@@ -1276,6 +1321,52 @@ function useAddGrowNote(onSaved: () => void) {
   });
 }
 
+interface GrowManualActivityInput {
+  activityType: "call" | "meeting";
+  summary: string;
+  occurredAt: string;
+  partyId: number;
+  propertyId: number | null;
+  opportunityId: number | null;
+  durationMinutes: number | null;
+  outcome: string | null;
+}
+
+// POST /grow/activities for a call or meeting that already happened.
+// The body is an activity row. Nothing here opens a call, a recording,
+// transcription, or a provider.
+function useLogManualActivity(onSaved: () => void) {
+  return useMutation<unknown, unknown, GrowManualActivityInput>({
+    mutationFn: (input) =>
+      apiFetch("/grow/activities", {
+        method: "POST",
+        body: JSON.stringify({
+          activityType: input.activityType,
+          summary: input.summary,
+          occurredAt: input.occurredAt,
+          partyId: input.partyId,
+          ...(input.propertyId ? { propertyId: input.propertyId } : {}),
+          ...(input.opportunityId ? { opportunityId: input.opportunityId } : {}),
+          ...(input.durationMinutes !== null ? { durationMinutes: input.durationMinutes } : {}),
+          ...(input.outcome ? { outcome: input.outcome } : {}),
+        }),
+      }),
+    onSuccess: onSaved,
+  });
+}
+
+function localDatetimeValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function datetimeLocalToIso(value: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 function GrowNoteForm({
   idPrefix,
   submitting,
@@ -1310,6 +1401,135 @@ function GrowNoteForm({
         Save note
       </button>
     </form>
+  );
+}
+
+function GrowManualActivityForm({
+  idPrefix,
+  submitting,
+  onSubmit,
+}: {
+  idPrefix: string;
+  submitting: boolean;
+  onSubmit: (input: {
+    activityType: "call" | "meeting";
+    summary: string;
+    occurredAt: string;
+    durationMinutes: number | null;
+    outcome: string | null;
+  }) => void;
+}) {
+  const [activityType, setActivityType] = useState<"call" | "meeting">("call");
+  const [occurredAt, setOccurredAt] = useState(() => localDatetimeValue(new Date()));
+  const [durationMinutes, setDurationMinutes] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [summary, setSummary] = useState("");
+
+  return (
+    <form
+      className="stack grow-inline-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const trimmed = summary.trim();
+        const iso = datetimeLocalToIso(occurredAt);
+        if (!trimmed || !iso) return;
+        const durationText = durationMinutes.trim();
+        const duration = durationText.length === 0 ? null : Number(durationText);
+        if (duration !== null && (!Number.isInteger(duration) || duration < 1)) return;
+        const trimmedOutcome = outcome.trim();
+        onSubmit({
+          activityType,
+          summary: trimmed,
+          occurredAt: iso,
+          durationMinutes: duration,
+          outcome: trimmedOutcome.length > 0 ? trimmedOutcome : null,
+        });
+      }}
+    >
+      <p className="muted">Records a call or meeting that already happened. It does not place a call.</p>
+      <label htmlFor={`${idPrefix}-type`}>Type</label>
+      <select
+        id={`${idPrefix}-type`}
+        value={activityType}
+        onChange={(event) => setActivityType(event.target.value === "meeting" ? "meeting" : "call")}
+      >
+        <option value="call">Call</option>
+        <option value="meeting">Meeting</option>
+      </select>
+      <label htmlFor={`${idPrefix}-occurred`}>When it happened</label>
+      <input
+        id={`${idPrefix}-occurred`}
+        type="datetime-local"
+        value={occurredAt}
+        onChange={(event) => setOccurredAt(event.target.value)}
+        required
+      />
+      <label htmlFor={`${idPrefix}-duration`}>Duration in minutes (optional)</label>
+      <input
+        id={`${idPrefix}-duration`}
+        type="number"
+        min={1}
+        max={1440}
+        step={1}
+        value={durationMinutes}
+        onChange={(event) => setDurationMinutes(event.target.value)}
+      />
+      <label htmlFor={`${idPrefix}-outcome`}>Outcome (optional)</label>
+      <input
+        id={`${idPrefix}-outcome`}
+        type="text"
+        maxLength={200}
+        value={outcome}
+        onChange={(event) => setOutcome(event.target.value)}
+      />
+      <label htmlFor={`${idPrefix}-summary`}>Summary</label>
+      <textarea
+        id={`${idPrefix}-summary`}
+        value={summary}
+        onChange={(event) => setSummary(event.target.value)}
+        required
+        rows={2}
+        maxLength={2000}
+      />
+      <button className="btn btn-primary btn-small" type="submit" disabled={submitting}>
+        Save call or meeting
+      </button>
+    </form>
+  );
+}
+
+// Contact 360's recent-activity log. Opportunity rows use the same form.
+export function GrowContactActivityLog({ partyId, canLog }: { partyId: number; canLog: boolean }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const logActivity = useLogManualActivity(() => {
+    setOpen(false);
+    queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+    queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+    queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
+  });
+  if (!canLog) return null;
+  return (
+    <div className="grow-manual-activity">
+      <button type="button" className="btn btn-secondary btn-small" disabled={logActivity.isPending} onClick={() => setOpen((value) => !value)}>
+        {open ? "Cancel" : "Log call or meeting"}
+      </button>
+      {logActivity.isError && <p className="error-text">{growErrorMessage(logActivity.error, "Something went wrong. Try again.")}</p>}
+      {open && (
+        <GrowManualActivityForm
+          idPrefix={`grow-contact-activity-${partyId}`}
+          submitting={logActivity.isPending}
+          onSubmit={(input) =>
+            logActivity.mutate({
+              ...input,
+              partyId,
+              propertyId: null,
+              opportunityId: null,
+            })
+          }
+        />
+      )}
+    </div>
   );
 }
 
@@ -1557,6 +1777,8 @@ function GrowOpportunityRowActions({
   opportunityId,
   partyId,
   propertyId,
+  stage,
+  status,
   appraisal,
   canManageOpportunities,
   canAddNote,
@@ -1568,6 +1790,8 @@ function GrowOpportunityRowActions({
   opportunityId: number;
   partyId: number | null;
   propertyId: number | null;
+  stage: string;
+  status: string;
   appraisal: GrowAppraisalSummary | null;
   canManageOpportunities: boolean;
   canAddNote: boolean;
@@ -1576,7 +1800,8 @@ function GrowOpportunityRowActions({
   onAskAE: (() => void) | null;
   onSaved: () => void;
 }) {
-  const [openForm, setOpenForm] = useState<"note" | "nextAction" | null>(null);
+  const [openForm, setOpenForm] = useState<"note" | "log" | "nextAction" | "lost" | null>(null);
+  const [lostReason, setLostReason] = useState("");
   const canManageAppraisals = useCanManageAppraisals();
   const updateNextAction = useUpdateOpportunityNextAction(opportunityId, () => {
     setOpenForm(null);
@@ -1586,13 +1811,33 @@ function GrowOpportunityRowActions({
     setOpenForm(null);
     onSaved();
   });
-  const busy = addNote.isPending || updateNextAction.isPending;
+  const logActivity = useLogManualActivity(() => {
+    setOpenForm(null);
+    onSaved();
+  });
+  const updateLifecycle = useUpdateOpportunityLifecycle(opportunityId, () => {
+    setOpenForm(null);
+    setLostReason("");
+    onSaved();
+  });
+  const busy = addNote.isPending || logActivity.isPending || updateNextAction.isPending || updateLifecycle.isPending;
   const showAddNote = canAddNote && partyId !== null;
+  const showLifecycle = canManageOpportunities && opportunityLifecycleOpen(status, stage);
+  const stageChoices = (GROW_OPPORTUNITY_MANUAL_STAGES as readonly string[]).includes(stage)
+    ? [...GROW_OPPORTUNITY_MANUAL_STAGES]
+    : [stage, ...GROW_OPPORTUNITY_MANUAL_STAGES];
+  const stageFieldId = `grow-opportunity-stage-${opportunityId}`;
+  const lostReasonFieldId = `grow-opportunity-lost-reason-${opportunityId}`;
+  const trimmedLostReason = lostReason.trim();
   const errorMessage = addNote.isError
     ? growErrorMessage(addNote.error, "Something went wrong. Try again.")
-    : updateNextAction.isError
-      ? growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")
-      : null;
+    : logActivity.isError
+      ? growErrorMessage(logActivity.error, "Something went wrong. Try again.")
+      : updateNextAction.isError
+        ? growErrorMessage(updateNextAction.error, "Something went wrong. Try again.")
+        : updateLifecycle.isError
+          ? growErrorMessage(updateLifecycle.error, "Something went wrong. Try again.")
+          : null;
 
   return (
     <div className="grow-action-card-actions">
@@ -1604,6 +1849,16 @@ function GrowOpportunityRowActions({
           onClick={() => setOpenForm(openForm === "note" ? null : "note")}
         >
           {openForm === "note" ? "Cancel" : "Add note"}
+        </button>
+      )}
+      {showAddNote && (
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          disabled={busy}
+          onClick={() => setOpenForm(openForm === "log" ? null : "log")}
+        >
+          {openForm === "log" ? "Cancel" : "Log call or meeting"}
         </button>
       )}
       {canManageOpportunities && (
@@ -1638,7 +1893,73 @@ function GrowOpportunityRowActions({
         appraisal={appraisal}
         canWrite={canManageAppraisals}
       />
-      {errorMessage && <p className="error-text">{errorMessage}</p>}
+      {showLifecycle && (
+        <div className="grow-opportunity-lifecycle">
+          <label htmlFor={stageFieldId}>Change stage</label>
+          <select
+            id={stageFieldId}
+            value={stage}
+            disabled={busy}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (!(GROW_OPPORTUNITY_MANUAL_STAGES as readonly string[]).includes(next) || next === stage) return;
+              updateLifecycle.mutate({ stage: next as GrowOpportunityManualStage });
+            }}
+          >
+            {stageChoices.map((choice) => (
+              <option
+                key={choice}
+                value={choice}
+                disabled={!(GROW_OPPORTUNITY_MANUAL_STAGES as readonly string[]).includes(choice)}
+              >
+                {choice}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn btn-secondary btn-small"
+            disabled={busy}
+            onClick={() => setOpenForm(openForm === "lost" ? null : "lost")}
+          >
+            {openForm === "lost" ? "Cancel" : "Mark lost"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary btn-small"
+            id={`grow-opportunity-close-${opportunityId}`}
+            disabled={busy}
+            aria-label="Close opportunity"
+            onClick={() => updateLifecycle.mutate({ status: "Closed" })}
+          >
+            Close
+          </button>
+          {openForm === "lost" && (
+            <form
+              className="stack grow-inline-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!trimmedLostReason) return;
+                updateLifecycle.mutate({ status: "Lost", lostReason: trimmedLostReason });
+              }}
+            >
+              <label htmlFor={lostReasonFieldId}>Lost reason</label>
+              <input
+                id={lostReasonFieldId}
+                type="text"
+                value={lostReason}
+                required
+                aria-required="true"
+                onChange={(event) => setLostReason(event.target.value)}
+              />
+              <button type="submit" className="btn btn-primary btn-small" disabled={busy || trimmedLostReason.length === 0}>
+                Mark lost
+              </button>
+            </form>
+          )}
+        </div>
+      )}
+      {errorMessage && <p className="error-text" role="alert">{errorMessage}</p>}
       {openForm === "note" && partyId !== null && (
         <GrowNoteForm
           idPrefix={`grow-opportunity-note-${opportunityId}`}
@@ -1646,6 +1967,20 @@ function GrowOpportunityRowActions({
           onSubmit={(summary) =>
             addNote.mutate({
               summary,
+              partyId,
+              propertyId,
+              opportunityId,
+            })
+          }
+        />
+      )}
+      {openForm === "log" && partyId !== null && (
+        <GrowManualActivityForm
+          idPrefix={`grow-opportunity-activity-${opportunityId}`}
+          submitting={busy}
+          onSubmit={(input) =>
+            logActivity.mutate({
+              ...input,
               partyId,
               propertyId,
               opportunityId,
@@ -2909,7 +3244,7 @@ function linkPropertyErrorMessage(error: unknown): string {
 // summary, household relationships, properties, the Relationship Timeline, notes/activities/
 // commitments, and opportunities — matching the "understand this relationship in seconds" UX
 // goal rather than a screen that fires off five separate requests or a generic CRM record view.
-function GrowContactDetail({
+export function GrowContactDetail({
   partyId,
   onBack,
   pendingComposeChannel,
@@ -2923,9 +3258,21 @@ function GrowContactDetail({
   onComposeHandled: () => void;
 }) {
   const queryClient = useQueryClient();
-  const { hasEntitlement } = useEntitlements();
+  const { hasEntitlement, isLoading: entitlementsLoading } = useEntitlements();
   const canManageContacts = hasEntitlement("grow.contacts.manage");
   const canManageActivities = hasEntitlement("grow.activities.manage");
+  // GP-5 — the workspace already loads this. Optional calling/provider flags
+  // hide the cards; a missing flag does not. Entitlements still decide.
+  const access = useQuery<GrowAccess & { callingEnabled?: boolean; providerEnabled?: boolean }>({
+    queryKey: ["grow-access"],
+    queryFn: () => apiFetch("/grow/access"),
+  });
+  const callingSurfaces = growCallingSurfaces({
+    entitlementsKnown: entitlementsLoading !== true && access.isLoading !== true,
+    hasEntitlement,
+    callingEnabled: access.data?.callingEnabled,
+    providerEnabled: access.data?.providerEnabled,
+  });
 
   const detail = useQuery<GrowContact360>({
     queryKey: ["grow-contact", partyId],
@@ -3050,6 +3397,7 @@ function GrowContactDetail({
           {c.email ?? "No email on file"}
           {c.mobile ? ` · ${c.mobile}` : ""}
         </p>
+        <GrowContactEditForm partyId={partyId} contact={c} canEdit={canManageContacts} />
         <div className="grow-contact-roles">
           {GROW_CONTACT_ROLES.map((role) => {
             const active = data.roles.includes(role);
@@ -3082,17 +3430,19 @@ function GrowContactDetail({
           panel adds no second round trip. */}
       <GrowContactConsentPanel partyId={partyId} contactability={data.contactability} onChanged={invalidate} />
 
-      <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />
-      <GrowContactTranscriptPanel
-        partyId={partyId}
-        contactName={c.displayName}
-        onReviewSaved={() => {
-          // The API writes the approved call-summary activity atomically with Save.
-          // Refresh only read models here; the browser never persists the activity.
-          queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
-          queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
-        }}
-      />
+      {callingSurfaces.call && <GrowContactCallPanel partyId={partyId} contactName={c.displayName} />}
+      {callingSurfaces.transcripts && (
+        <GrowContactTranscriptPanel
+          partyId={partyId}
+          contactName={c.displayName}
+          onReviewSaved={() => {
+            // The API writes the approved call-summary activity atomically with Save.
+            // Refresh only read models here; the browser never persists the activity.
+            queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+            queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
+          }}
+        />
+      )}
 
       <div className="stat-tiles">
         <StatTile label="Related Properties" value={data.intelligence.relatedPropertyCount} />
@@ -3110,6 +3460,7 @@ function GrowContactDetail({
         canStartThread={canManageContacts}
         quickComposeChannel={pendingComposeChannel}
         onQuickComposeHandled={onComposeHandled}
+        contactability={data.contactability}
       />
 
       <section className="card">
@@ -3317,6 +3668,8 @@ function GrowContactDetail({
             ))}
           </ul>
         )}
+
+        <GrowContactActivityLog partyId={partyId} canLog={canManageActivities} />
 
         {/* Stage F4.3: the caller's own pending CREATE_GROW_COMMITMENT
             proposals for this contact, approved/rejected only by explicit
@@ -3781,7 +4134,7 @@ export function GrowContactOpportunitiesSection({
                 <td>{o.stage}</td>
                 <td>
                   <span className={`pill ${o.status === "Open" ? "pill-success" : o.status === "Lost" ? "pill-danger" : ""}`}>
-                    {o.status}
+                    {opportunityStatusLabel(o.status, o.lostReason)}
                   </span>
                 </td>
                 <td>{o.reason ?? "–"}</td>
@@ -3797,6 +4150,8 @@ export function GrowContactOpportunitiesSection({
                     opportunityId={o.id}
                     partyId={partyId}
                     propertyId={o.propertyId}
+                    stage={o.stage}
+                    status={o.status}
                     appraisal={appraisalForProperty(appraisalRows, o.propertyId, partyId)}
                     canManageOpportunities={canManageOpportunities}
                     canAddNote={canAddNote}
@@ -3840,13 +4195,23 @@ const GrowOpportunityCells = memoRow(function GrowOpportunityCells({
   onAskAE: (() => void) | null;
   onSaved: () => void;
 }) {
+  const contactName = opportunity.contactName?.trim() ? opportunity.contactName.trim() : null;
   return (
     <>
+      <td>
+        {contactName && canViewContacts ? (
+          <Link href={growContactPath(opportunity.partyId)} className="btn btn-link btn-small">
+            {contactName}
+          </Link>
+        ) : (
+          (contactName ?? "–")
+        )}
+      </td>
       <td>{opportunity.opportunityType}</td>
       <td>{opportunity.stage}</td>
       <td>
         <span className={`pill ${opportunity.status === "Open" ? "pill-success" : opportunity.status === "Lost" ? "pill-danger" : ""}`}>
-          {opportunity.status}
+          {opportunityStatusLabel(opportunity.status, opportunity.lostReason)}
         </span>
       </td>
       <td>{opportunity.reason ?? "–"}</td>
@@ -3854,11 +4219,13 @@ const GrowOpportunityCells = memoRow(function GrowOpportunityCells({
         {opportunity.recommendedNextAction ?? "–"}
         {opportunity.nextActionDueAt ? ` (due ${formatWhen(opportunity.nextActionDueAt)})` : ""}
       </td>
-      <td>
+      <td className="grow-opportunity-actions-cell">
         <GrowOpportunityRowActions
           opportunityId={opportunity.id}
           partyId={opportunity.partyId}
           propertyId={opportunity.propertyId}
+          stage={opportunity.stage}
+          status={opportunity.status}
           appraisal={appraisal}
           canManageOpportunities={canManageOpportunities}
           canAddNote={canAddNote}
@@ -3886,6 +4253,7 @@ export function GrowOpportunitiesTab({
   const canViewContacts = hasEntitlement("grow.contacts.read");
   const canReadAppraisals = useCanReadAppraisals();
   const [typeFilter, setTypeFilter] = useState<GrowOpportunityListTypeFilter>("all");
+  const [listVersion, setListVersion] = useState(0);
   const opportunitySearch = useDebouncedListSearch();
   // An empty search keeps the key C-5a already asserts: ["grow-opportunities", type].
   // A search is appended so the two filters refetch together.
@@ -3898,7 +4266,7 @@ export function GrowOpportunitiesTab({
     queryFn: () => apiFetch(growListPath("/grow/opportunities", { search: opportunitySearch.query, type: typeFilter })),
   });
   const opportunityPages = useGrowCursorPages({
-    resetKey: `${typeFilter}\0${opportunitySearch.query}`,
+    resetKey: `${typeFilter}\0${opportunitySearch.query}\0${listVersion}`,
     page: opportunities.data
       ? { items: opportunities.data.opportunities, nextCursor: opportunities.data.nextCursor, total: opportunities.data.total }
       : undefined,
@@ -3918,6 +4286,7 @@ export function GrowOpportunitiesTab({
   const opportunityState = growDataRegionState(opportunities, opportunityCount);
 
   function onSaved() {
+    setListVersion((version) => version + 1);
     void opportunities.refetch();
     queryClient.invalidateQueries({ queryKey: ["grow-today"] });
     queryClient.invalidateQueries({ queryKey: ["grow-activities"] });
@@ -3948,7 +4317,7 @@ export function GrowOpportunitiesTab({
       <GrowListSearch
         id="grow-opportunities-search"
         label="Search opportunities"
-        placeholder="Search by reason"
+        placeholder="Search by contact or reason"
         text={opportunitySearch.text}
         onText={opportunitySearch.setText}
         onCommit={opportunitySearch.commit}
@@ -3967,9 +4336,9 @@ export function GrowOpportunitiesTab({
           label="Opportunities"
           singular="opportunity"
           plural="opportunities"
-          colSpan={6}
-          estimate={120}
-          resetKey={`${typeFilter}\0${opportunitySearch.query}`}
+          colSpan={7}
+          estimate={160}
+          resetKey={`${typeFilter}\0${opportunitySearch.query}\0${listVersion}`}
           items={opportunityPages.items}
           total={opportunityPages.total}
           getKey={(opportunity) => opportunity.id}
@@ -3979,12 +4348,13 @@ export function GrowOpportunitiesTab({
           onLoadMore={opportunityPages.loadMore}
           head={
             <tr>
+              <th>Contact</th>
               <th>Type</th>
               <th>Stage</th>
               <th>Status</th>
               <th>Reason</th>
               <th>Next action</th>
-              <th></th>
+              <th className="grow-opportunity-actions-cell"></th>
             </tr>
           }
           renderCells={(opportunity) => (

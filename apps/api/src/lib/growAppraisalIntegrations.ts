@@ -19,10 +19,12 @@ import type {
 import { logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 import {
+  noteGrowAppraisalIsolationRejection,
   noteGrowComparableSaleIsolationRejection,
   noteGrowMarketCompetitionIsolationRejection,
   noteGrowPartyIsolationRejection,
 } from "./grow/isolationRejection.js";
+import { appraisalPropertyInBrokerage } from "./appraisals.js";
 import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import {
   assertAppraisalInBrokerage,
@@ -43,6 +45,7 @@ import {
   addParticipantFromParty,
   partyDisplayName as computePartyDisplayName,
 } from "./communications/recipientResolution.js";
+import { assertMessageMayLeave } from "./communications/outboundConsent.js";
 import { askCopilot } from "./ai/orchestrator.js";
 import { ingestDocumentVersion } from "./documentStorage.js";
 
@@ -125,6 +128,10 @@ export async function sendAppraisal(input: SendAppraisalInput): Promise<SendAppr
     recipientParticipantId: participant.id,
     createdByUserId: input.userId,
   });
+
+  // GP-4: an appraisal send is an A-8 email/SMS, including when the body was
+  // drafted by the copilot. Refuse before approval or queueing.
+  await assertMessageMayLeave(message, input.userId);
 
   let status: "sent" | "pending_approval";
   if (requiresApproval(message)) {
@@ -348,10 +355,15 @@ export async function generateAppraisalPresentation(
     metadata: { appraisalId: appraisal.id },
   });
 
-  await db
+  const [updatedPresentation] = await db
     .update(appraisals)
     .set({ presentationDocumentId: documentId, updatedAt: new Date() })
-    .where(eq(appraisals.id, appraisal.id));
+    .where(and(eq(appraisals.id, appraisal.id), appraisalPropertyInBrokerage(input.brokerageId)))
+    .returning({ id: appraisals.id });
+  if (!updatedPresentation) {
+    await noteGrowAppraisalIsolationRejection(appraisal.id, input.brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
 
   await logAudit({
     userId: input.userId,

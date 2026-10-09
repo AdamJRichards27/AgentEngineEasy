@@ -252,7 +252,7 @@ test("A-3: a message deferred past quiet hours is BLOCKED_BY_CONSENT when the sw
   const final = await readMessage(draft.id);
   assert.equal(final.status, "BLOCKED_BY_CONSENT");
   assert.equal(final.failureCategory, "CONSENT_BLOCKED", "reuses the existing failure taxonomy, not a new one");
-  assert.match(final.failureDetail ?? "", /opted out/i);
+  assert.equal(final.failureDetail, "Can't send: no recorded consent for this email/mobile.");
   assert.equal(final.sentAt, null, "a blocked message was never sent");
   assert.equal(final.provider, null);
 

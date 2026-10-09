@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { and, desc, eq, ilike, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
 import {
+  appraisals,
   db,
   growActivities,
   growOpportunities,
@@ -9,12 +10,30 @@ import {
   properties,
 } from "@aee/db";
 import {
+  ACTIVITY_DETAILS_INVALID,
+  ACTIVITY_FIELDS_REQUIRED,
+  ACTIVITY_TYPE_NOT_MANUAL,
+  CALL_SUMMARY_REVIEW_ONLY,
   CLASSIFIED_OPPORTUNITY_TYPES,
+  CONTACT_REFERENCE_INVALID,
+  GROW_OPPORTUNITY_TYPES,
+  OPPORTUNITY_REFERENCE_INVALID,
   PROPERTY_MANAGEMENT_OPPORTUNITY_TYPE,
+  PROPERTY_REFERENCE_INVALID,
   SELLER_SIDE_OPPORTUNITY_TYPES,
+  applyGrowOpportunityLifecycle,
+  isGrowOpportunityType,
+  parseActivityOccurredAt,
+  parseActivitySummary,
+  parseGrowOpportunityLifecycleRequest,
+  parseOptionalDurationMinutes,
+  parseOptionalOutcome,
+  parsePostedActivityType,
+  POSTABLE_MANUAL_ACTIVITY_TYPES,
   parseGrowOpportunityListTypeFilter,
   type GrowOpportunityListTypeFilter,
 } from "@aee/domain";
+import { appraisalLifecycleClosed } from "../lib/appraisalFinaliseGuard.js";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision, resolveEntitlements } from "../lib/entitlements/resolver.js";
@@ -65,6 +84,52 @@ function parsePositiveId(value: unknown): number | null {
   return Number.isInteger(n) && n > 0 && n <= MAX_SIGNED_INT4 ? n : null;
 }
 
+/** Same preference as the Grow contact list: organisation, then first and last. */
+function opportunityContactName(party: {
+  firstName: string | null;
+  lastName: string | null;
+  organisationName: string | null;
+} | null): string | null {
+  if (!party) return null;
+  const organisation = party.organisationName?.trim() ?? "";
+  if (organisation.length > 0) return organisation;
+  const name = `${party.firstName ?? ""} ${party.lastName ?? ""}`.replace(/\s+/g, " ").trim();
+  return name.length > 0 ? name : null;
+}
+
+function opportunityLifecycleAuditValue(row: {
+  stage: string;
+  status: string;
+  lostReason: string | null;
+  closedAt: Date | null;
+}): string {
+  return JSON.stringify({
+    stage: row.stage,
+    status: row.status,
+    lostReason: row.lostReason,
+    closedAt: row.closedAt ? row.closedAt.toISOString() : null,
+  });
+}
+
+/** A linked appraisal that is not WON, LOST, DEFERRED or ARCHIVED. The join
+ * is tenant-scoped through the property, because appraisals have no brokerage id. */
+async function opportunityHasActiveAppraisal(
+  brokerageId: number,
+  opportunityId: number,
+  convertedAppraisalId: number | null,
+): Promise<boolean> {
+  const link =
+    convertedAppraisalId === null
+      ? eq(appraisals.opportunityId, opportunityId)
+      : or(eq(appraisals.opportunityId, opportunityId), eq(appraisals.id, convertedAppraisalId))!;
+  const rows = await db
+    .select({ status: appraisals.status })
+    .from(appraisals)
+    .innerJoin(properties, eq(appraisals.propertyId, properties.id))
+    .where(and(eq(properties.brokerageId, brokerageId), link));
+  return rows.some((row) => !appraisalLifecycleClosed(row.status));
+}
+
 // Canonical growRelationships.status values (packages/db/src/schema/grow.ts column comment;
 // "PendingReview" is also what the import pipeline writes, lib/import/execute.ts).
 const GROW_RELATIONSHIP_STATUSES = ["Active", "Historical", "PendingReview"] as const;
@@ -73,7 +138,9 @@ const GROW_RELATIONSHIP_ROLE_MAX = 200;
 /**
  * Predicates for GET /grow/opportunities. Brokerage and own-property visibility
  * are always included. `id`, `search`, and `type` are optional and apply to
- * the page and the exact count together.
+ * the page and the exact count together. `search` matches the reason and the
+ * same-brokerage contact name. Callers join parties on party id and brokerage
+ * id, so a party in another brokerage cannot satisfy the name match.
  *
  * `type` is a group, not a raw opportunity_type equality. Seller-side is
  * Listing and Appraisal. Property Management is PropertyManagement and is not
@@ -96,7 +163,19 @@ function opportunityListConditions(
   );
   if (visibility) conditions.push(visibility);
   if (filters.id !== undefined) conditions.push(eq(growOpportunities.id, filters.id));
-  if (filters.search && filters.search.length > 0) conditions.push(ilike(growOpportunities.reason, `%${filters.search}%`));
+  if (filters.search && filters.search.length > 0) {
+    const pattern = `%${filters.search}%`;
+    const fullNamePattern = `%${filters.search.replace(/\s+/g, " ")}%`;
+    conditions.push(
+      or(
+        ilike(growOpportunities.reason, pattern),
+        ilike(parties.firstName, pattern),
+        ilike(parties.lastName, pattern),
+        ilike(parties.organisationName, pattern),
+        sql`regexp_replace(concat_ws(' ', btrim(${parties.firstName}), btrim(${parties.lastName})), '[[:space:]]+', ' ', 'g') ILIKE ${fullNamePattern}`,
+      )!,
+    );
+  }
   const type = filters.type ?? "all";
   if (type === "seller_side") {
     conditions.push(inArray(growOpportunities.opportunityType, [...SELLER_SIDE_OPPORTUNITY_TYPES]));
@@ -533,24 +612,115 @@ growRouter.get("/activities", requireAuth, requireEntitlement("grow.access"), as
   });
 });
 
+function readBodyId(
+  value: unknown,
+  code: string,
+  label: string,
+): { ok: true; id: number | null } | { ok: false; code: string; error: string } {
+  if (value === undefined || value === null) return { ok: true, id: null };
+  if (typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_SIGNED_INT4) {
+    return { ok: true, id: value };
+  }
+  return { ok: false, code, error: `${label} must be a positive integer` };
+}
+
+function activityError(res: { status: (code: number) => { json: (body: unknown) => void } }, status: number, error: string, code: string) {
+  res.status(status).json({ error, code });
+}
+
+// POST /grow/activities records an interaction that already happened.
+// It does not place a call, open a recording, run transcription, or send
+// through a provider. Calling stays on the call routes and stays disabled
+// until those routes are explicitly enabled.
 growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.manage"), async (req, res) => {
   const user = req.authedUser!;
-  const activityType = typeof req.body?.activityType === "string" ? req.body.activityType : undefined;
-  const summary = typeof req.body?.summary === "string" ? req.body.summary : undefined;
-  if (!activityType || !summary) {
-    res.status(400).json({ error: "activityType and summary are required" });
+  if (typeof req.body?.activityType !== "string" || typeof req.body?.summary !== "string") {
+    activityError(res, 400, "activityType and summary are required", ACTIVITY_FIELDS_REQUIRED);
+    return;
+  }
+  const parsedType = parsePostedActivityType(req.body.activityType);
+  if (!parsedType.ok) {
+    activityError(res, 400, parsedType.error, parsedType.code);
     return;
   }
   // Reviewed call summaries require server-authenticated approval provenance.
   // They can only be created by the explicit transcription review Save route.
-  if (activityType === "call_summary") {
-    res.status(400).json({ error: "Call summaries must be saved through transcription review." });
+  if (parsedType.activityType === "call_summary") {
+    activityError(res, 400, "Call summaries must be saved through transcription review.", CALL_SUMMARY_REVIEW_ONLY);
     return;
   }
+  // Hand logging is calls, meetings, and notes. Server-internal writers
+  // (reschedule system_event, task completion, transcription, import) do not
+  // come through this route.
+  if (!(POSTABLE_MANUAL_ACTIVITY_TYPES as readonly string[]).includes(parsedType.activityType)) {
+    activityError(res, 400, "Only calls, meetings and notes can be logged by hand.", ACTIVITY_TYPE_NOT_MANUAL);
+    return;
+  }
+  const parsedSummary = parseActivitySummary(req.body.summary);
+  if (!parsedSummary.ok) {
+    activityError(res, 400, parsedSummary.error, parsedSummary.code);
+    return;
+  }
+  const activityType = parsedType.activityType;
+  const summary = parsedSummary.summary;
 
-  const partyId = typeof req.body?.partyId === "number" ? req.body.partyId : null;
-  const propertyId = typeof req.body?.propertyId === "number" ? req.body.propertyId : null;
-  const opportunityId = typeof req.body?.opportunityId === "number" ? req.body.opportunityId : null;
+  let occurredAt = new Date();
+  if (req.body?.occurredAt !== undefined && req.body?.occurredAt !== null) {
+    const parsedOccurredAt = parseActivityOccurredAt(req.body.occurredAt);
+    if (!parsedOccurredAt.ok) {
+      activityError(res, 400, parsedOccurredAt.error, parsedOccurredAt.code);
+      return;
+    }
+    occurredAt = parsedOccurredAt.occurredAt;
+  }
+  const duration = parseOptionalDurationMinutes(req.body?.durationMinutes);
+  if (!duration.ok) {
+    activityError(res, 400, duration.error, duration.code);
+    return;
+  }
+  const outcome = parseOptionalOutcome(req.body?.outcome);
+  if (!outcome.ok) {
+    activityError(res, 400, outcome.error, outcome.code);
+    return;
+  }
+  let details: Record<string, unknown> = {};
+  if (req.body?.details !== undefined && req.body?.details !== null) {
+    if (typeof req.body.details !== "object" || Array.isArray(req.body.details)) {
+      activityError(res, 400, "details must be an object", ACTIVITY_DETAILS_INVALID);
+      return;
+    }
+    details = { ...(req.body.details as Record<string, unknown>) };
+  }
+  if (duration.durationMinutes !== null) details.durationMinutes = duration.durationMinutes;
+  if (outcome.outcome !== null) details.outcome = outcome.outcome;
+
+  const party = readBodyId(req.body?.partyId, CONTACT_REFERENCE_INVALID, "partyId");
+  if (!party.ok) {
+    activityError(res, 400, party.error, party.code);
+    return;
+  }
+  const contact = readBodyId(req.body?.contactId, CONTACT_REFERENCE_INVALID, "contactId");
+  if (!contact.ok) {
+    activityError(res, 400, contact.error, contact.code);
+    return;
+  }
+  if (party.id !== null && contact.id !== null && party.id !== contact.id) {
+    activityError(res, 400, "partyId and contactId must be the same contact", CONTACT_REFERENCE_INVALID);
+    return;
+  }
+  const property = readBodyId(req.body?.propertyId, PROPERTY_REFERENCE_INVALID, "propertyId");
+  if (!property.ok) {
+    activityError(res, 400, property.error, property.code);
+    return;
+  }
+  const opportunity = readBodyId(req.body?.opportunityId, OPPORTUNITY_REFERENCE_INVALID, "opportunityId");
+  if (!opportunity.ok) {
+    activityError(res, 400, opportunity.error, opportunity.code);
+    return;
+  }
+  const partyId = party.id ?? contact.id;
+  const propertyId = property.id;
+  const opportunityId = opportunity.id;
 
   // Tenant isolation on the referenced rows, not just the new row: mirrors the same check in
   // POST /relationships above. All three are optional here (unlike partyId/propertyId on
@@ -588,6 +758,13 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
       res.status(404).json({ error: "Opportunity not found in this brokerage" });
       return;
     }
+    // FU-1 — same owner-or-own-property rule as GET /grow/opportunities.
+    // A hidden row is the same 404 as a missing one, and it is not an
+    // isolation rejection: the row is in this brokerage.
+    if (!(await assertOwnedOrPropertyVisibleForWrite(user, opportunity.propertyId, opportunity.ownerUserId))) {
+      res.status(404).json({ error: "Opportunity not found in this brokerage" });
+      return;
+    }
   }
 
   const [inserted] = await db
@@ -598,9 +775,9 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
       propertyId,
       opportunityId,
       activityType,
-      occurredAt: req.body?.occurredAt ? new Date(req.body.occurredAt) : new Date(),
+      occurredAt,
       summary,
-      details: req.body?.details ?? {},
+      details,
       responsibleUserId: user.id,
       source: "manual",
     })
@@ -640,17 +817,36 @@ growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"),
   const pageWhere = cursor
     ? and(filtered, descendingKeysetBefore(growOpportunities.createdAt, growOpportunities.id, cursor))
     : filtered;
+  // E-9 A2: party_id alone is not a tenant boundary. The join also requires
+  // this brokerage, so a bad row pointing at another brokerage's party keeps
+  // the opportunity and contributes no name.
+  const partyJoin = and(eq(growOpportunities.partyId, parties.id), eq(parties.brokerageId, user.brokerageId));
   const [fetched, counted] = await Promise.all([
     db
-      .select({ row: growOpportunities, sortAt: sortAtSql(growOpportunities.createdAt) })
+      .select({
+        row: growOpportunities,
+        partyFirstName: parties.firstName,
+        partyLastName: parties.lastName,
+        partyOrganisationName: parties.organisationName,
+        sortAt: sortAtSql(growOpportunities.createdAt),
+      })
       .from(growOpportunities)
+      .leftJoin(parties, partyJoin)
       .where(pageWhere)
       .orderBy(desc(growOpportunities.createdAt), desc(growOpportunities.id))
       .limit(limit + 1),
-    db.select({ total: sql<number>`count(*)::int` }).from(growOpportunities).where(filtered),
+    db.select({ total: sql<number>`count(*)::int` }).from(growOpportunities).leftJoin(parties, partyJoin).where(filtered),
   ]);
   const page = sliceGrowListPage(
-    fetched.map((entry) => ({ ...entry.row, sortAt: entry.sortAt })),
+    fetched.map((entry) => ({
+      ...entry.row,
+      contactName: opportunityContactName({
+        firstName: entry.partyFirstName,
+        lastName: entry.partyLastName,
+        organisationName: entry.partyOrganisationName,
+      }),
+      sortAt: entry.sortAt,
+    })),
     limit,
   );
   res.json({
@@ -672,6 +868,10 @@ growRouter.post(
     const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
     if (!partyId || !opportunityType || !reason) {
       res.status(400).json({ error: "partyId, opportunityType, and reason are required" });
+      return;
+    }
+    if (!isGrowOpportunityType(opportunityType)) {
+      res.status(400).json({ error: `opportunityType must be one of ${GROW_OPPORTUNITY_TYPES.join(", ")}` });
       return;
     }
 
@@ -832,6 +1032,132 @@ growRouter.patch(
         recommendedNextAction: updated.recommendedNextAction,
       }),
     });
+
+    res.json({ opportunity: updated });
+  },
+);
+
+// GP-1 — manual lifecycle. Next-action updates stay on PATCH /opportunities/:id.
+// Stage moves among New, Contacted and Qualified, Mark lost, and Close live
+// here so that route's body stays the follow-up write. AppraisalBooked and
+// Converted stay appraisal-driven. Lost and Closed are not reopened: the
+// domain has no such transition.
+growRouter.patch(
+  "/opportunities/:id/lifecycle",
+  requireAuth,
+  requireEntitlement("grow.opportunities.manage"),
+  async (req, res) => {
+    const user = req.authedUser!;
+    const id = parsePositiveId(req.params.id);
+    if (id === null) {
+      res.status(400).json({ error: "Invalid opportunity id" });
+      return;
+    }
+    const parsed = parseGrowOpportunityLifecycleRequest(req.body);
+    if (!parsed.ok) {
+      res.status(parsed.status).json({ error: parsed.error });
+      return;
+    }
+
+    const [existing] = await db
+      .select()
+      .from(growOpportunities)
+      .where(and(eq(growOpportunities.id, id), eq(growOpportunities.brokerageId, user.brokerageId)))
+      .limit(1);
+    if (!existing) {
+      await noteGrowOpportunityIsolationRejection(id, user.brokerageId);
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+    if (!(await assertOwnedOrPropertyVisibleForWrite(user, existing.propertyId, existing.ownerUserId))) {
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+
+    const activeAppraisalLinked = await opportunityHasActiveAppraisal(
+      user.brokerageId,
+      existing.id,
+      existing.convertedAppraisalId,
+    );
+    const decision = applyGrowOpportunityLifecycle({
+      command: parsed.command,
+      status: existing.status,
+      stage: existing.stage,
+      activeAppraisalLinked,
+    });
+    if (!decision.ok) {
+      res.status(decision.status).json({ error: decision.error });
+      return;
+    }
+
+    const nextLostReason = decision.patch.lostReason !== undefined ? decision.patch.lostReason : existing.lostReason;
+    const unchanged =
+      decision.patch.stage === existing.stage &&
+      decision.patch.status === existing.status &&
+      nextLostReason === existing.lostReason &&
+      !decision.patch.close;
+    if (unchanged) {
+      res.json({ opportunity: existing });
+      return;
+    }
+
+    const now = new Date();
+    const [updated] = await db
+      .update(growOpportunities)
+      .set({
+        stage: decision.patch.stage,
+        status: decision.patch.status,
+        lostReason: nextLostReason,
+        closedAt: decision.patch.close ? now : existing.closedAt,
+        updatedAt: now,
+      })
+      .where(and(eq(growOpportunities.id, id), eq(growOpportunities.brokerageId, user.brokerageId)))
+      .returning();
+    if (!updated) {
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "grow_opportunity_lifecycle_updated",
+      recordType: "grow_opportunity",
+      recordId: String(id),
+      propertyId: existing.propertyId ?? undefined,
+      previousValue: opportunityLifecycleAuditValue(existing),
+      updatedValue: opportunityLifecycleAuditValue(updated),
+    });
+
+    if (updated.stage !== existing.stage) {
+      try {
+        await publishDomainEvent({
+          eventType: "OPPORTUNITY_STAGE_CHANGED",
+          occurredAt: now,
+          propertyId: updated.propertyId,
+          transactionId: null,
+          partyId: updated.partyId,
+          brokerageId: user.brokerageId,
+          agentId: user.id,
+          actorType: "USER",
+          actorId: user.id,
+          source: "api:grow:opportunities:lifecycle",
+          correlationId: currentCorrelationId(),
+          causationId: null,
+          idempotencyKey: `opportunity-stage-changed:${updated.id}:${now.getTime()}`,
+          payload: {
+            opportunityId: updated.id,
+            previousStage: existing.stage,
+            stage: updated.stage,
+            previousStatus: existing.status,
+            status: updated.status,
+          },
+          metadata: {},
+        });
+      } catch (err) {
+        logger.error("publish_domain_event_failed", { eventType: "OPPORTUNITY_STAGE_CHANGED", error: err });
+      }
+    }
 
     res.json({ opportunity: updated });
   },

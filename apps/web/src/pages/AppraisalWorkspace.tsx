@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useParams } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../lib/api";
+import { DEMO_AI_LABEL, userVisibleAiText } from "../lib/demoAi";
 import { useEntitlements } from "../lib/session";
 import { SAVE_DUE_FOLLOW_UP_LABEL } from "../lib/growTerms";
 import {
@@ -127,6 +128,14 @@ function blankToNull(value: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function handoffErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.friendly.trim()) {
+    if (error.status === 404) return "That appraisal couldn't be found.";
+    return error.friendly;
+  }
+  return "Couldn't hand this appraisal to Run. Try again.";
+}
+
 function appraisalActionError(error: unknown): string {
   if (error instanceof ApiError && error.status === 404) return "That couldn't be found.";
   if (error instanceof ApiError && error.status === 400) return apiErrorMessage(error, "Check the details and try again.");
@@ -171,6 +180,8 @@ export default function AppraisalWorkspace() {
   const [sendSubject, setSendSubject] = useState("");
   const [sendBody, setSendBody] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [handoffNotice, setHandoffNotice] = useState<{ message: string; propertyId: number } | null>(null);
+  const [handoffError, setHandoffError] = useState<string | null>(null);
 
   const workspace = useQuery<WorkspaceResponse>({
     queryKey: ["grow-appraisal-workspace", appraisalId],
@@ -303,8 +314,21 @@ export default function AppraisalWorkspace() {
     onError: (error) => setErrorMessage(appraisalActionError(error)),
   });
   const draftMarketPosition = useMutation({
-    mutationFn: () => apiFetch(`/grow/appraisals/${appraisalId}/market-position/generate`, { method: "POST" }),
-    onSuccess: refresh,
+    mutationFn: () =>
+      apiFetch<{ draftNarrative?: string }>(`/grow/appraisals/${appraisalId}/market-position/generate`, { method: "POST" }),
+    onSuccess: (result) => {
+      const currentAppraisal = workspace.data?.appraisal;
+      if (!currentAppraisal) return;
+      const narrative = userVisibleAiText(result?.draftNarrative ?? "");
+      setDetails((current) => ({
+        ...(current ?? detailDraft(currentAppraisal)),
+        marketPositionNarrative: narrative,
+      }));
+      setErrorMessage(null);
+      if (appraisalId !== null) {
+        queryClient.invalidateQueries({ queryKey: ["grow-appraisal-workspace", appraisalId] });
+      }
+    },
     onError: (error) => setErrorMessage(appraisalActionError(error)),
   });
   const createPresentation = useMutation({
@@ -318,9 +342,30 @@ export default function AppraisalWorkspace() {
     onError: (error) => setErrorMessage(appraisalActionError(error)),
   });
   const handOff = useMutation({
-    mutationFn: () => apiFetch(`/grow/appraisals/${appraisalId}/run-handoff`, { method: "POST" }),
-    onSuccess: refresh,
-    onError: (error) => setErrorMessage(appraisalActionError(error)),
+    mutationFn: () =>
+      apiFetch<{ propertyId?: number; sellerLinkCreated?: boolean }>(`/grow/appraisals/${appraisalId}/run-handoff`, {
+        method: "POST",
+      }),
+    onSuccess: (result) => {
+      const currentAppraisal = workspace.data?.appraisal;
+      const handedPropertyId = result?.propertyId ?? currentAppraisal?.propertyId;
+      if (currentAppraisal == null || handedPropertyId == null) return;
+      const summaryRow = pipeline.data?.appraisals.find((row) => row.id === currentAppraisal.id);
+      const handedAddress = summaryRow?.propertyAddress ?? `Property ${handedPropertyId}`;
+      const seller = result?.sellerLinkCreated
+        ? " The contact is now recorded as the seller on that property."
+        : " The seller was already on that property.";
+      setHandoffNotice({
+        message: `Handed this appraisal to Run for ${handedAddress}.${seller}`,
+        propertyId: handedPropertyId,
+      });
+      setHandoffError(null);
+      refresh();
+    },
+    onError: (error) => {
+      setHandoffNotice(null);
+      setHandoffError(handoffErrorMessage(error));
+    },
   });
 
   if (!canRead) {
@@ -398,7 +443,7 @@ export default function AppraisalWorkspace() {
 
   function submitDetails() {
     const narrative = {
-      marketPositionNarrative: blankToNull(draft.marketPositionNarrative),
+      marketPositionNarrative: blankToNull(userVisibleAiText(draft.marketPositionNarrative)),
       sellingStrategy: blankToNull(draft.sellingStrategy),
       marketingProposal: blankToNull(draft.marketingProposal),
       recommendedNextSteps: blankToNull(draft.recommendedNextSteps),
@@ -635,11 +680,16 @@ export default function AppraisalWorkspace() {
                 {appraisal.pricingCommentary && <p>{appraisal.pricingCommentary}</p>}
               </div>
             )}
+            {userVisibleAiText(draft.marketPositionNarrative) === DEMO_AI_LABEL && (
+              <p id="appraisal-demo-ai" role="status">
+                {DEMO_AI_LABEL}
+              </p>
+            )}
             <label htmlFor="appraisal-market-position">
               Market position
               <textarea
                 id="appraisal-market-position"
-                value={draft.marketPositionNarrative}
+                value={userVisibleAiText(draft.marketPositionNarrative)}
                 rows={3}
                 onChange={(event) => updateDetail("marketPositionNarrative", event.target.value)}
               />
@@ -705,7 +755,7 @@ export default function AppraisalWorkspace() {
           <div className="stack">
             <p>{priceLabel ?? "No price range"}</p>
             {appraisal.pricingCommentary && <p>{appraisal.pricingCommentary}</p>}
-            {appraisal.marketPositionNarrative && <p>{appraisal.marketPositionNarrative}</p>}
+            {appraisal.marketPositionNarrative && <p>{userVisibleAiText(appraisal.marketPositionNarrative)}</p>}
             {appraisal.sellingStrategy && <p>{appraisal.sellingStrategy}</p>}
             {appraisal.marketingProposal && <p>{appraisal.marketingProposal}</p>}
             {appraisal.commissionProposal && <p>{appraisal.commissionProposal}</p>}
@@ -929,6 +979,17 @@ export default function AppraisalWorkspace() {
         <section className="card">
           <h2>Run</h2>
           <p className="muted">Hand this won appraisal to Run. The appraisal record itself stays as it is.</p>
+          {handoffNotice && (
+            <p id="appraisal-run-handoff-confirmation" role="status">
+              {handoffNotice.message}{" "}
+              <Link href={`/properties/${handoffNotice.propertyId}`}>Open the property in Run</Link>
+            </p>
+          )}
+          {handoffError && (
+            <p id="appraisal-run-handoff-error" className="error-text" role="alert">
+              {handoffError}
+            </p>
+          )}
           <button
             type="button"
             className="btn btn-secondary btn-small"

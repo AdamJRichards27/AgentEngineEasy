@@ -10,8 +10,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, communicationMessages, entitlementGrants } from "@aee/db";
+import { db, communicationMessages, communicationConsent, entitlementGrants, growContactChannelConsents } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { normalizeDestination } from "../../lib/communications/consent.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -146,7 +147,32 @@ test("WP1 P2-3: mutations on a contact-first (Grow) thread require grow.contacts
   assert.equal(cancelRes.status, 200, "cancel only withdraws an unsent message and stays available");
 
   // Restoring the entitlement restores the flow (proves the 403 was the entitlement, not the row).
+  // GP-4: a party-linked send also needs a destination consent row and an
+  // affirmative F2 head. This test is about the entitlement, so those rows
+  // are recorded before the send that is expected to succeed.
   await grant(A.brokerageId, "grow.contacts.manage");
+  const destination = normalizeDestination("EMAIL", `wp1-grow-thread-${suffix}@example.com`);
+  await db.insert(communicationConsent).values({
+    brokerageId: A.brokerageId,
+    partyId,
+    destination,
+    channel: "EMAIL",
+    marketingOptIn: false,
+    transactionalOptOut: false,
+    source: "MANUAL",
+    recordedByUserId: A.agent.user.id,
+  });
+  await db.insert(growContactChannelConsents).values({
+    brokerageId: A.brokerageId,
+    partyId,
+    channel: "EMAIL",
+    state: "EXPRESS",
+    source: "MANUAL",
+    captureMethod: "WRITTEN",
+    purpose: "EMAIL",
+    scope: "OUTBOUND",
+    recordedByUserId: A.agent.user.id,
+  });
   const sendRes = await post(`/communications/messages/${pending.id}/send`, A.agent.cookie, { expectedVersion: pending.version });
   assert.equal(sendRes.status, 200, await sendRes.clone().text());
 });

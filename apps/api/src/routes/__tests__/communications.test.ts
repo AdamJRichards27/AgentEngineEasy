@@ -7,8 +7,8 @@
 //      approval before it can send — the same authority gate as #2, from a
 //      template rather than free text.
 //   5. Delivery failure and bounded retry, reaching a terminal state.
-//   6. A marketing send is blocked by missing opt-in, then succeeds once
-//      consent is recorded and the message is requeued.
+//   6. A marketing send is refused before it is queued when there is no
+//      opt-in, then succeeds once consent is recorded and send is retried.
 //   7. A redelivered inbound webhook is processed exactly once (idempotency).
 //   8. Tenant isolation — another brokerage cannot read or act on this one's
 //      threads/messages.
@@ -23,7 +23,9 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { createHmac } from "node:crypto";
 import { eq, and } from "drizzle-orm";
-import { db, users, communicationThreads, communicationMessages, communicationWebhookEvents, entitlementGrants } from "@aee/db";
+import { db, users, communicationThreads, communicationMessages, communicationWebhookEvents, communicationConsent, entitlementGrants, growContactChannelConsents } from "@aee/db";
+import { normalizeDestination } from "../../lib/communications/consent.js";
+import { OUTBOUND_CONSENT_REQUIRED_MESSAGE } from "../../lib/communications/outboundConsent.js";
 import { dispatchMessage, queueMessage } from "../../lib/communications/outbox.js";
 import { CommunicationTransitionError } from "../../lib/communications/types.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
@@ -493,9 +495,13 @@ test("6. a marketing send is blocked without opt-in, then succeeds once consent 
   assert.equal(approved.status, "APPROVED");
 
   const blockedSend = await sendMessage(agent.cookie, draft.id, approved.version);
-  assert.equal(blockedSend.status, 200);
-  assert.equal(blockedSend.body.blocked, true);
-  assert.equal(blockedSend.body.message.status, "BLOCKED_BY_CONSENT");
+  assert.equal(blockedSend.status, 409);
+  assert.equal(blockedSend.body.code, "CONSENT_REQUIRED");
+  assert.equal(blockedSend.body.error, OUTBOUND_CONSENT_REQUIRED_MESSAGE);
+
+  const [stillApproved] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, draft.id));
+  assert.equal(stillApproved?.status, "APPROVED", "a refused marketing send must not be queued");
+  assert.equal(stillApproved?.version, approved.version);
 
   // AE GROW W1-A (A-2): recording consent now requires grow.contacts.manage.
   // Granted just for this step and handed straight back, because the
@@ -509,14 +515,10 @@ test("6. a marketing send is blocked without opt-in, then succeeds once consent 
   assert.equal(consentRes.status, 201);
   await revoke(brokerageId, "grow.contacts.manage");
 
-  const requeueRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
-    method: "POST",
-    headers: authHeaders(agent.cookie),
-    body: JSON.stringify({ expectedVersion: blockedSend.body.message.version }),
-  });
-  const requeued = await jsonOf<{ blocked: boolean; dispatched: boolean; message: { status: string } }>(requeueRes);
-  assert.equal(requeued.blocked, false);
-  assert.equal(requeued.message.status, "SENT");
+  const sent = await sendMessage(agent.cookie, draft.id, approved.version);
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.blocked, false);
+  assert.equal(sent.body.message.status, "SENT");
 });
 
 // ---------------------------------------------------------------------
@@ -654,15 +656,48 @@ test("8. a message/thread from one brokerage is invisible and inaccessible to an
 // =======================================================================
 
 let contactFirstPartyId: number;
+let contactFirstEmail = "";
 let contactFirstThreadId: number;
 let contactFirstParticipantId: number;
 
+async function allowPartyChannel(
+  targetBrokerageId: number,
+  partyId: number,
+  channel: "EMAIL" | "SMS",
+  destination: string,
+  userId: number,
+  marketingOptIn = false,
+) {
+  await db.insert(communicationConsent).values({
+    brokerageId: targetBrokerageId,
+    partyId,
+    destination: normalizeDestination(channel, destination),
+    channel,
+    marketingOptIn,
+    transactionalOptOut: false,
+    source: "MANUAL",
+    recordedByUserId: userId,
+  });
+  await db.insert(growContactChannelConsents).values({
+    brokerageId: targetBrokerageId,
+    partyId,
+    channel,
+    state: "EXPRESS",
+    source: "MANUAL",
+    captureMethod: "WRITTEN",
+    purpose: channel,
+    scope: "OUTBOUND",
+    recordedByUserId: userId,
+  });
+}
+
 test("AE Grow Priority 3 — creating a contact-first thread requires grow.contacts.manage and anchors the thread to partyId with propertyId null", async () => {
   const originPropertyId = await createHttpProperty(agent.cookie, "Contact First Origin Property");
+  contactFirstEmail = `cara-contactfirst-${Date.now()}@example.com`;
   contactFirstPartyId = await createHttpParty(agent.cookie, originPropertyId, {
     firstName: "Cara",
     lastName: "ContactFirst",
-    email: `cara-contactfirst-${Date.now()}@example.com`,
+    email: contactFirstEmail,
     mobile: "0400222333",
   });
 
@@ -719,6 +754,7 @@ test("AE Grow Priority 3 — an email send from a contact-first thread reaches S
   });
   assert.equal(draft.status, "DRAFT");
 
+  await allowPartyChannel(brokerageId, contactFirstPartyId, "EMAIL", contactFirstEmail, agent.user.id);
   const { status, body } = await sendMessage(agent.cookie, draft.id, draft.version);
   assert.equal(status, 200);
   assert.equal(body.dispatched, true);
@@ -738,6 +774,7 @@ test("AE Grow Priority 3 — an SMS send from a contact-first thread reaches SEN
   });
   assert.equal(draft.status, "DRAFT");
 
+  await allowPartyChannel(brokerageId, contactFirstPartyId, "SMS", "0400222333", agent.user.id);
   const { status, body } = await sendMessage(agent.cookie, draft.id, draft.version);
   assert.equal(status, 200);
   assert.equal(body.dispatched, true);
@@ -788,7 +825,7 @@ test("AE Grow Priority 3 — a brokerage cannot create a thread for, read, or se
   );
 });
 
-test("AE Grow Priority 3 — a marketing email on a contact-first thread is blocked without opt-in, then succeeds once consent is recorded and requeued", async () => {
+test("AE Grow Priority 3 — a marketing email on a contact-first thread is refused without consent, then succeeds once consent is recorded", async () => {
   const marketingOriginPropertyId = await createHttpProperty(agent.cookie, "Contact First Marketing Origin");
   const marketingPartyId = await createHttpParty(agent.cookie, marketingOriginPropertyId, { firstName: "Mia", lastName: "Marketing" });
   const threadRes = await createContactThread(agent.cookie, marketingPartyId, "Marketing outreach");
@@ -818,30 +855,38 @@ test("AE Grow Priority 3 — a marketing email on a contact-first thread is bloc
   assert.equal(approved.status, "APPROVED");
 
   const blockedSend = await sendMessage(agent.cookie, draft.id, approved.version);
-  assert.equal(blockedSend.status, 200);
-  assert.equal(blockedSend.body.blocked, true);
-  assert.equal(blockedSend.body.message.status, "BLOCKED_BY_CONSENT");
-  assert.equal(blockedSend.body.message.partyId, marketingPartyId, "the blocked message must still carry its contact-first partyId");
-  assert.equal(blockedSend.body.message.propertyId, null);
+  assert.equal(blockedSend.status, 409);
+  assert.equal(blockedSend.body.code, "CONSENT_REQUIRED");
+  const [stillApproved] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, draft.id));
+  assert.equal(stillApproved?.status, "APPROVED");
+  assert.equal(stillApproved?.partyId, marketingPartyId, "the refused message must still carry its contact-first partyId");
+  assert.equal(stillApproved?.propertyId, null);
 
   const consentRes = await fetch(`${baseUrl}/api/communications/consent`, {
     method: "POST",
     headers: authHeaders(agent.cookie),
-    body: JSON.stringify({ channel: "EMAIL", destination, marketingOptIn: true }),
+    body: JSON.stringify({ channel: "EMAIL", destination, marketingOptIn: true, partyId: marketingPartyId }),
   });
   assert.equal(consentRes.status, 201);
-
-  const requeueRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
-    method: "POST",
-    headers: authHeaders(agent.cookie),
-    body: JSON.stringify({ expectedVersion: blockedSend.body.message.version }),
+  await db.insert(growContactChannelConsents).values({
+    brokerageId,
+    partyId: marketingPartyId,
+    channel: "EMAIL",
+    state: "EXPRESS",
+    source: "MANUAL",
+    captureMethod: "WRITTEN",
+    purpose: "EMAIL",
+    scope: "OUTBOUND",
+    recordedByUserId: agent.user.id,
   });
-  const requeued = await jsonOf<{ blocked: boolean; message: { status: string } }>(requeueRes);
-  assert.equal(requeued.blocked, false);
-  assert.equal(requeued.message.status, "SENT");
+
+  const sent = await sendMessage(agent.cookie, draft.id, approved.version);
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.blocked, false);
+  assert.equal(sent.body.message.status, "SENT");
 });
 
-test("AE Grow Priority 3 — a marketing SMS on a contact-first thread is blocked without opt-in, then succeeds once consent is recorded and requeued", async () => {
+test("AE Grow Priority 3 — a marketing SMS on a contact-first thread is refused without consent, then succeeds once consent is recorded", async () => {
   const marketingOriginPropertyId = await createHttpProperty(agent.cookie, "Contact First SMS Marketing Origin");
   const marketingPartyId = await createHttpParty(agent.cookie, marketingOriginPropertyId, { firstName: "Sam", lastName: "SmsMarketing" });
   const threadRes = await createContactThread(agent.cookie, marketingPartyId, "SMS marketing outreach");
@@ -871,25 +916,33 @@ test("AE Grow Priority 3 — a marketing SMS on a contact-first thread is blocke
   assert.equal(approved.status, "APPROVED");
 
   const blockedSend = await sendMessage(agent.cookie, draft.id, approved.version);
-  assert.equal(blockedSend.status, 200);
-  assert.equal(blockedSend.body.blocked, true);
-  assert.equal(blockedSend.body.message.status, "BLOCKED_BY_CONSENT");
+  assert.equal(blockedSend.status, 409);
+  assert.equal(blockedSend.body.code, "CONSENT_REQUIRED");
+  const [stillApproved] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, draft.id));
+  assert.equal(stillApproved?.status, "APPROVED");
 
   const consentRes = await fetch(`${baseUrl}/api/communications/consent`, {
     method: "POST",
     headers: authHeaders(agent.cookie),
-    body: JSON.stringify({ channel: "SMS", destination, marketingOptIn: true }),
+    body: JSON.stringify({ channel: "SMS", destination, marketingOptIn: true, partyId: marketingPartyId }),
   });
   assert.equal(consentRes.status, 201);
-
-  const requeueRes = await fetch(`${baseUrl}/api/communications/messages/${draft.id}/requeue`, {
-    method: "POST",
-    headers: authHeaders(agent.cookie),
-    body: JSON.stringify({ expectedVersion: blockedSend.body.message.version }),
+  await db.insert(growContactChannelConsents).values({
+    brokerageId,
+    partyId: marketingPartyId,
+    channel: "SMS",
+    state: "EXPRESS",
+    source: "MANUAL",
+    captureMethod: "WRITTEN",
+    purpose: "SMS",
+    scope: "OUTBOUND",
+    recordedByUserId: agent.user.id,
   });
-  const requeued = await jsonOf<{ blocked: boolean; message: { status: string } }>(requeueRes);
-  assert.equal(requeued.blocked, false);
-  assert.equal(requeued.message.status, "SENT");
+
+  const sent = await sendMessage(agent.cookie, draft.id, approved.version);
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.blocked, false);
+  assert.equal(sent.body.message.status, "SENT");
 });
 
 test("AE Grow Priority 3 regression — a property-first thread and message keep propertyId set and partyId null throughout the lifecycle, unchanged by the contact-first addition", async () => {
