@@ -2,6 +2,7 @@
 // from an opportunity row. The write is POST /grow/activities. It does not
 // place a call.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 
@@ -35,6 +36,12 @@ function byId(tree: unknown, id: string): ElementNode | undefined {
 
 function form(tree: unknown): ElementNode | undefined {
   return findAll(tree, (element) => element.type === "form" && element.props?.role !== "search")[0];
+}
+
+function optionValues(tree: unknown, id: string): string[] {
+  const node = byId(tree, id);
+  assert.ok(node, id);
+  return findAll(node, (element) => element.type === "option").map((option) => String(option.props?.value));
 }
 
 type Call = { path: string; options?: { method?: string; body?: string } };
@@ -227,6 +234,37 @@ function setValue(tree: unknown, id: string, value: string) {
   (node.props!.onChange as (event: unknown) => void)({ target: { value } });
 }
 
+const POSTED_ACTIVITY_TYPES = ["call", "meeting", "note"] as const;
+
+test("the client posts only note, call, and meeting", () => {
+  const source = readFileSync(new URL("../../pages/Grow.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("function useAddGrowNote");
+  const end = source.indexOf("export function GrowContactActivityLog");
+  assert.ok(start > 0 && end > start);
+  const writers = source.slice(start, end);
+  const known = [
+    "call",
+    "call_summary",
+    "email",
+    "sms",
+    "meeting",
+    "appraisal",
+    "note",
+    "task_completion",
+    "campaign_response",
+    "property_enquiry",
+    "offer_related",
+    "system_event",
+  ];
+  const mentioned = [
+    ...new Set([...writers.matchAll(/"([a-z_]+)"/g)].map((match) => match[1]).filter((value) => known.includes(value))),
+  ].sort();
+  assert.deepEqual(mentioned, [...POSTED_ACTIVITY_TYPES].sort());
+  assert.match(writers, /activityType:\s*"note"/);
+  assert.match(writers, /activityType:\s*input\.activityType/);
+  assert.match(writers, /activityType:\s*"call"\s*\|\s*"meeting"/);
+});
+
 test("a user without grow.activities.manage is not offered the log form", async () => {
   const { hooks } = installGlobals(["grow.access", "grow.contacts.read", "grow.opportunities.manage"]);
   try {
@@ -329,6 +367,92 @@ test("Contact 360 logs a past call for that contact only", async () => {
         partyId: 12,
       });
       assert.ok(invalidated.some((key) => Array.isArray(key) && key[0] === "grow-contact" && key[1] === 12));
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("an opportunity row posts only call, meeting, and note", async () => {
+  const { hooks, calls, pending } = installGlobals(CAN_LOG);
+  try {
+    await withVite(async (vite) => {
+      const { GrowOpportunitiesTab } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        GrowOpportunitiesTab: (props: Record<string, unknown>) => unknown;
+      };
+      const render = () => {
+        hooks.beginRender();
+        return GrowOpportunitiesTab({ onViewContact: () => {} });
+      };
+
+      let tree = render();
+      (button(tree, "Log call or meeting")!.props!.onClick as () => void)();
+      tree = render();
+      assert.deepEqual(optionValues(tree, "grow-opportunity-activity-41-type"), ["call", "meeting"]);
+      setValue(tree, "grow-opportunity-activity-41-occurred", "2026-03-15T14:30");
+      setValue(tree, "grow-opportunity-activity-41-summary", "Called Pat");
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+
+      tree = render();
+      (button(tree, "Log call or meeting")!.props!.onClick as () => void)();
+      tree = render();
+      setValue(tree, "grow-opportunity-activity-41-type", "meeting");
+      setValue(tree, "grow-opportunity-activity-41-occurred", "2026-03-16T14:30");
+      setValue(tree, "grow-opportunity-activity-41-summary", "Met Pat");
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+
+      tree = render();
+      (button(tree, "Add note")!.props!.onClick as () => void)();
+      tree = render();
+      setValue(tree, "grow-opportunity-note-41-note", "Left a note");
+      tree = render();
+      await (form(tree)!.props!.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault: () => {} });
+      await Promise.all(pending);
+
+      assert.equal(calls.length, 3);
+      const posted = calls.map((entry) => {
+        assert.equal(entry.path, "/grow/activities");
+        assert.equal(entry.options?.method, "POST");
+        return (JSON.parse(entry.options!.body!) as { activityType: string }).activityType;
+      });
+      assert.deepEqual(posted, ["call", "meeting", "note"]);
+      assert.deepEqual([...new Set(posted)].sort(), [...POSTED_ACTIVITY_TYPES].sort());
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("growErrorMessage shows the server sentence when a type cannot be logged by hand", async () => {
+  installGlobals(CAN_LOG);
+  try {
+    await withVite(async (vite) => {
+      const { growErrorMessage } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {
+        growErrorMessage: (error: unknown, fallback: string) => string;
+      };
+      const serverMessage = "Only calls, meetings and notes can be logged by hand.";
+      assert.equal(
+        growErrorMessage(
+          {
+            code: "ACTIVITY_TYPE_NOT_MANUAL",
+            serverMessage,
+            friendly: "That didn't go through. Check the details and try again.",
+          },
+          "Something went wrong. Try again.",
+        ),
+        serverMessage,
+      );
+      assert.equal(
+        growErrorMessage(
+          { code: "ACTIVITY_TYPE_NOT_ALLOWED", serverMessage: "activityType must be one of call, meeting" },
+          "Something went wrong. Try again.",
+        ),
+        "Something went wrong. Try again.",
+      );
     });
   } finally {
     clearGlobals();
