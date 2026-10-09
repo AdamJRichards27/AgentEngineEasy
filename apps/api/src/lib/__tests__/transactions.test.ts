@@ -271,10 +271,18 @@ test("closeTransaction reports every real blocker (unconditional, pending condit
   // A Pending condition that is deliberately never resolved (blocker 2).
   await addCondition({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, description: "Subject to finance" });
 
-  // Reach Settled independently of the unconditional/condition/AML state --
-  // completeSettlement only requires a scheduled settlement date.
+  // Reach Settled without completeSettlement. Routine completion now requires
+  // unconditionalAt, and this test still needs that close blocker (plus the
+  // pending condition and incomplete buyer AML) to stay in place.
   await scheduleSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, settlementDate: new Date("2027-04-01") });
-  await completeSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
+  await db
+    .update(transactions)
+    .set({
+      status: "Settled",
+      settlementCompletedAt: new Date("2027-04-02T00:00:00.000Z"),
+      updatedAt: new Date(),
+    })
+    .where(eq(transactions.id, transactionId));
 
   // Manufacture blockers 4 and 5 directly -- a real open attention item and
   // a real active task, exactly the shape the WAE catalogue would create.
@@ -347,6 +355,13 @@ test("completeSettlement rolls back atomically on a mid-transaction failure, and
   assert.ok(settlementStep, "the Transaction workflow must have a Settlement step");
   assert.equal(settlementStep.status, "InProgress", "sanity check: contract is signed and settlement is scheduled but not yet completed");
 
+  // The accepted offer carries a pending condition, so unconditionalAt is still
+  // null. This test is about atomic rollback, not the completion gate.
+  await db
+    .update(transactions)
+    .set({ unconditionalAt: new Date(), updatedAt: new Date() })
+    .where(eq(transactions.id, transactionId));
+
   // Force the workflowSteps write inside completeSettlement's db.transaction()
   // to fail, simulating the crash this remediation protects against (see
   // completeSettlement in lib/transactions.ts and refreshTransactionSteps in
@@ -393,6 +408,12 @@ test("closeTransaction rolls back atomically on a mid-transaction failure, and a
   });
   await recordContractSigned({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
   await scheduleSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId, settlementDate: new Date("2027-06-01") });
+  // Same as the settlement atomicity fixture: the carried condition leaves
+  // unconditionalAt null, and this test is about close rollback, not that gate.
+  await db
+    .update(transactions)
+    .set({ unconditionalAt: new Date(), updatedAt: new Date() })
+    .where(eq(transactions.id, transactionId));
   await completeSettlement({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
 
   const [propertyBefore] = await db.select().from(properties).where(eq(properties.id, propertyId));
