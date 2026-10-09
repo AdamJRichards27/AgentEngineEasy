@@ -8,9 +8,12 @@ import {
   ACTIVITY_OUTCOME_INVALID,
   ACTIVITY_SUMMARY_INVALID,
   ACTIVITY_TYPE_NOT_ALLOWED,
+  ACTIVITY_TYPE_NOT_MANUAL,
   GROW_ACTIVITY_TYPES,
+  MANUAL_LOG_ACTIVITY_TYPES,
   OCCURRED_AT_INVALID,
   OCCURRED_AT_OUT_OF_RANGE,
+  POSTABLE_MANUAL_ACTIVITY_TYPES,
   isMeaningfulActivity,
   lastMeaningfulContactAt,
   parseActivityOccurredAt,
@@ -37,6 +40,24 @@ test("posted activity types are the existing domain allow-list, case-insensitive
   const rejected = parsePostedActivityType("phone");
   assert.equal(rejected.ok, false);
   if (!rejected.ok) assert.equal(rejected.code, ACTIVITY_TYPE_NOT_ALLOWED);
+});
+
+test("hand-logged posts are calls, meetings, and the existing note write", () => {
+  assert.deepEqual(POSTABLE_MANUAL_ACTIVITY_TYPES, ["call", "meeting", "note"]);
+  assert.deepEqual(POSTABLE_MANUAL_ACTIVITY_TYPES, [...MANUAL_LOG_ACTIVITY_TYPES, "note"]);
+  assert.equal(ACTIVITY_TYPE_NOT_MANUAL, "ACTIVITY_TYPE_NOT_MANUAL");
+  assert.notEqual(ACTIVITY_TYPE_NOT_MANUAL, ACTIVITY_TYPE_NOT_ALLOWED);
+  for (const activityType of POSTABLE_MANUAL_ACTIVITY_TYPES) {
+    const parsed = parsePostedActivityType(activityType.toUpperCase());
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) assert.equal(parsed.activityType, activityType);
+  }
+  const unknown = parsePostedActivityType("phone");
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) assert.equal(unknown.code, ACTIVITY_TYPE_NOT_ALLOWED);
+  const known = parsePostedActivityType("SYSTEM_EVENT");
+  assert.equal(known.ok, true);
+  if (known.ok) assert.equal(known.activityType, "system_event");
 });
 
 test("summary, duration, outcome, and occurred-at reject the cases the route must 400", () => {

@@ -5,11 +5,13 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { db, entitlementGrants } from "@aee/db";
+import { eq } from "drizzle-orm";
+import { db, entitlementGrants, growActivities } from "@aee/db";
 import {
   ACTIVITY_DURATION_INVALID,
   ACTIVITY_FIELDS_REQUIRED,
   ACTIVITY_TYPE_NOT_ALLOWED,
+  ACTIVITY_TYPE_NOT_MANUAL,
   CALL_SUMMARY_REVIEW_ONLY,
   CONTACT_REFERENCE_INVALID,
   OCCURRED_AT_INVALID,
@@ -148,6 +150,107 @@ test("POST /grow/activities rejects a bad type, date, duration, and mismatched c
     assert.equal(loggedBody.activity.summary, "Spoke with Pat yesterday");
     assert.equal(loggedBody.activity.details.durationMinutes, 12);
     assert.equal(loggedBody.activity.details.outcome, "Will send the appraisal");
+  } finally {
+    await cleanupBrokerages([created.brokerageId]);
+  }
+});
+
+test("POST /grow/activities accepts only calls, meetings and notes, and writes no row for anything else", async () => {
+  const created = await createBrokerageWithUsers(baseUrl, `GP3 Manual ${suffix}`);
+  try {
+    await grant(created.brokerageId);
+    const cookie = created.agent.cookie;
+    const handLoggedOnly = "Only calls, meetings and notes can be logged by hand.";
+    const rejected = [
+      "system_event",
+      "task_completion",
+      "email",
+      "sms",
+      "appraisal",
+      "campaign_response",
+      "property_enquiry",
+      "offer_related",
+      "Email",
+    ] as const;
+    for (const activityType of rejected) {
+      const res = await send("POST", "/grow/activities", cookie, {
+        activityType,
+        summary: `Hand log ${activityType}`,
+      });
+      const body = (await res.json()) as { code?: string; error?: string };
+      assert.equal(res.status, 400, JSON.stringify(body));
+      assert.equal(body.code, ACTIVITY_TYPE_NOT_MANUAL, activityType);
+      assert.equal(body.error, handLoggedOnly, activityType);
+    }
+
+    const unknown = await send("POST", "/grow/activities", cookie, {
+      activityType: "phone",
+      summary: "not a type",
+    });
+    const unknownBody = (await unknown.json()) as { code?: string };
+    assert.equal(unknown.status, 400, JSON.stringify(unknownBody));
+    assert.equal(unknownBody.code, ACTIVITY_TYPE_NOT_ALLOWED);
+
+    const summary = await send("POST", "/grow/activities", cookie, {
+      activityType: "CALL_SUMMARY",
+      summary: "reviewed elsewhere",
+    });
+    const summaryBody = (await summary.json()) as { code?: string };
+    assert.equal(summary.status, 400, JSON.stringify(summaryBody));
+    assert.equal(summaryBody.code, CALL_SUMMARY_REVIEW_ONLY);
+
+    const untouched = await db
+      .select({ id: growActivities.id })
+      .from(growActivities)
+      .where(eq(growActivities.brokerageId, created.brokerageId));
+    assert.equal(untouched.length, 0, "a refused type writes no activity row");
+
+    for (const activityType of ["call", "meeting", "note", "Call"] as const) {
+      const res = await send("POST", "/grow/activities", cookie, {
+        activityType,
+        summary: `Logged ${activityType}`,
+      });
+      const body = (await res.json()) as { activity?: { activityType?: string; source?: string } };
+      assert.equal(res.status, 201, JSON.stringify(body));
+      assert.equal(body.activity?.activityType, activityType.toLowerCase());
+      assert.equal(body.activity?.source, "manual");
+    }
+  } finally {
+    await cleanupBrokerages([created.brokerageId]);
+  }
+});
+
+test("a reschedule still writes its system_event", async () => {
+  const created = await createBrokerageWithUsers(baseUrl, `GP3 Reschedule ${suffix}`);
+  try {
+    await grant(created.brokerageId);
+    const cookie = created.agent.cookie;
+    const partyId = await createContact(cookie, "Ren");
+    const commitment = await send("POST", `/grow/contacts/${partyId}/commitments`, cookie, {
+      description: "Send a market update",
+      dueAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    assert.equal(commitment.status, 201, await commitment.clone().text());
+    const commitmentId = ((await commitment.json()) as { commitment: { id: number } }).commitment.id;
+    const nextDueAt = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+    const rescheduled = await send("PATCH", `/grow/contacts/commitments/${commitmentId}`, cookie, {
+      dueAt: nextDueAt,
+    });
+    assert.equal(rescheduled.status, 200, await rescheduled.clone().text());
+
+    const rows = await db
+      .select()
+      .from(growActivities)
+      .where(eq(growActivities.brokerageId, created.brokerageId));
+    const systemEvents = rows.filter((row) => row.activityType === "system_event");
+    assert.equal(systemEvents.length, 1, "the reschedule writer still inserts one system_event");
+    const details = systemEvents[0]?.details as { kind?: string; commitmentId?: number } | null;
+    assert.equal(details?.kind, "commitment_rescheduled");
+    assert.equal(details?.commitmentId, commitmentId);
+    assert.equal(
+      rows.some((row) => row.activityType !== "system_event"),
+      false,
+    );
   } finally {
     await cleanupBrokerages([created.brokerageId]);
   }

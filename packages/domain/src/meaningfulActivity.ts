@@ -40,6 +40,15 @@ export const MANUAL_LOG_ACTIVITY_TYPES = ["call", "meeting"] as const;
 export type ManualLogActivityType = (typeof MANUAL_LOG_ACTIVITY_TYPES)[number];
 
 /**
+ * Types POST /grow/activities accepts from an agent. call and meeting are
+ * MANUAL_LOG_ACTIVITY_TYPES. note is the existing Add note write. Other known
+ * types stay on GROW_ACTIVITY_TYPES for server-internal writers and for D3;
+ * the route refuses those with ACTIVITY_TYPE_NOT_MANUAL.
+ */
+export const POSTABLE_MANUAL_ACTIVITY_TYPES = ["call", "meeting", "note"] as const;
+export type PostableManualActivityType = (typeof POSTABLE_MANUAL_ACTIVITY_TYPES)[number];
+
+/**
  * Types that can be meaningful contact before status and dedupe. Notes,
  * system events, task completions, and the other non-contact types are absent.
  */
@@ -100,6 +109,7 @@ export const ACTIVITY_DURATION_MAX_MINUTES = 24 * 60;
 
 export const ACTIVITY_FIELDS_REQUIRED = "ACTIVITY_FIELDS_REQUIRED";
 export const ACTIVITY_TYPE_NOT_ALLOWED = "ACTIVITY_TYPE_NOT_ALLOWED";
+export const ACTIVITY_TYPE_NOT_MANUAL = "ACTIVITY_TYPE_NOT_MANUAL";
 export const CALL_SUMMARY_REVIEW_ONLY = "CALL_SUMMARY_REVIEW_ONLY";
 export const OCCURRED_AT_INVALID = "OCCURRED_AT_INVALID";
 export const OCCURRED_AT_OUT_OF_RANGE = "OCCURRED_AT_OUT_OF_RANGE";
@@ -143,10 +153,12 @@ export function isManualLogActivityType(value: string): value is ManualLogActivi
 }
 
 /**
- * Allow-list for POST /grow/activities. Matching is case-insensitive and the
- * returned type is the canonical lowercase value. call_summary is in the
- * domain list; the route still refuses it because only transcription review
- * may write one.
+ * Recognises a stored activity type on POST /grow/activities. Matching is
+ * case-insensitive and the returned type is the canonical lowercase value.
+ * An unknown string is ACTIVITY_TYPE_NOT_ALLOWED. Known types are still
+ * returned: the route refuses call_summary with CALL_SUMMARY_REVIEW_ONLY and
+ * any other type outside POSTABLE_MANUAL_ACTIVITY_TYPES with
+ * ACTIVITY_TYPE_NOT_MANUAL.
  */
 export function parsePostedActivityType(
   value: unknown,

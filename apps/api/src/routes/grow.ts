@@ -12,6 +12,7 @@ import {
 import {
   ACTIVITY_DETAILS_INVALID,
   ACTIVITY_FIELDS_REQUIRED,
+  ACTIVITY_TYPE_NOT_MANUAL,
   CALL_SUMMARY_REVIEW_ONLY,
   CLASSIFIED_OPPORTUNITY_TYPES,
   CONTACT_REFERENCE_INVALID,
@@ -28,6 +29,7 @@ import {
   parseOptionalDurationMinutes,
   parseOptionalOutcome,
   parsePostedActivityType,
+  POSTABLE_MANUAL_ACTIVITY_TYPES,
   parseGrowOpportunityListTypeFilter,
   type GrowOpportunityListTypeFilter,
 } from "@aee/domain";
@@ -645,6 +647,13 @@ growRouter.post("/activities", requireAuth, requireEntitlement("grow.activities.
   // They can only be created by the explicit transcription review Save route.
   if (parsedType.activityType === "call_summary") {
     activityError(res, 400, "Call summaries must be saved through transcription review.", CALL_SUMMARY_REVIEW_ONLY);
+    return;
+  }
+  // Hand logging is calls, meetings, and notes. Server-internal writers
+  // (reschedule system_event, task completion, transcription, import) do not
+  // come through this route.
+  if (!(POSTABLE_MANUAL_ACTIVITY_TYPES as readonly string[]).includes(parsedType.activityType)) {
+    activityError(res, 400, "Only calls, meetings and notes can be logged by hand.", ACTIVITY_TYPE_NOT_MANUAL);
     return;
   }
   const parsedSummary = parseActivitySummary(req.body.summary);
