@@ -13,6 +13,17 @@ import { logAudit } from "./audit.js";
 // moment it's exchanged, same as a real cash/unconditional contract.
 const RESOLVED_NON_BLOCKING_STATUSES: ContractConditionStatus[] = ["Satisfied", "Waived", "NotApplicable"];
 
+/**
+ * R-F30 — Closed is terminal for condition and exchange writers too.
+ * Call only on a path that would write. Exchange and unconditional
+ * replays that return before any write stay successful.
+ */
+function refuseClosedTransaction(transaction: { id: number; status: string }): void {
+  if (transaction.status === "Closed") {
+    throw new Error(`Transaction ${transaction.id} is closed — no further changes can be recorded.`);
+  }
+}
+
 async function loadTransactionInBrokerage(transactionId: number, brokerageId: number): Promise<Transaction> {
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
   if (!transaction) throw new Error(`Transaction ${transactionId} not found`);
@@ -33,6 +44,7 @@ export async function addCondition(input: {
   dueDate?: Date | null;
 }): Promise<TransactionCondition> {
   const transaction = await loadTransactionInBrokerage(input.transactionId, input.brokerageId);
+  refuseClosedTransaction(transaction);
   if (transaction.unconditionalAt) {
     throw new Error(`Transaction ${transaction.id} is already unconditional — cannot add further conditions.`);
   }
@@ -70,6 +82,7 @@ export async function rescheduleConditionDueDate(input: {
   const [condition] = await db.select().from(transactionConditions).where(eq(transactionConditions.id, input.conditionId));
   if (!condition) throw new Error(`Condition ${input.conditionId} not found`);
   const transaction = await loadTransactionInBrokerage(condition.transactionId, input.brokerageId);
+  refuseClosedTransaction(transaction);
 
   const history = Array.isArray(condition.dueDateHistory) ? condition.dueDateHistory : [];
   const nextHistory = [
@@ -120,6 +133,7 @@ export async function resolveCondition(input: {
   const [condition] = await db.select().from(transactionConditions).where(eq(transactionConditions.id, input.conditionId));
   if (!condition) throw new Error(`Condition ${input.conditionId} not found`);
   const transaction = await loadTransactionInBrokerage(condition.transactionId, input.brokerageId);
+  refuseClosedTransaction(transaction);
 
   const [updated] = await db
     .update(transactionConditions)
@@ -158,6 +172,7 @@ export async function resolveCondition(input: {
 export async function recordExchange(input: { transactionId: number; userId: number; brokerageId: number }): Promise<Transaction> {
   const transaction = await loadTransactionInBrokerage(input.transactionId, input.brokerageId);
   if (transaction.exchangedAt) return transaction;
+  refuseClosedTransaction(transaction);
   if (!transaction.contractDate) {
     throw new Error(`Transaction ${transaction.id} cannot be exchanged before the contract is signed.`);
   }
@@ -231,6 +246,7 @@ export async function maybeRecordUnconditional(input: {
   const conditions = await db.select().from(transactionConditions).where(eq(transactionConditions.transactionId, transaction.id));
   const allResolved = conditions.every((c) => RESOLVED_NON_BLOCKING_STATUSES.includes(c.status as ContractConditionStatus));
   if (!allResolved) return transaction;
+  refuseClosedTransaction(transaction);
 
   const [updated] = await db
     .update(transactions)
