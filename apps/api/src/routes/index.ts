@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authSurfaceRateLimiter } from "../middlewares/rateLimit.js";
 import { authRouter } from "./auth.js";
+import { platformOwnerRouter } from "./platformOwner.js";
 import { privacyRouter } from "./privacy.js";
 import { healthRouter } from "./health.js";
 import { metricsRouter } from "./metrics.js";
@@ -41,6 +42,7 @@ import { integrationsRouter } from "./integrations.js";
 import { integrationsWebhooksRouter } from "./integrationsWebhooks.js";
 
 export const apiRouter = Router();
+apiRouter.use("/owner", platformOwnerRouter);
 
 // Stricter rate limit than the app-wide default (see middlewares/rateLimit.ts)
 // — sign-in endpoints are the highest-value target for credential-stuffing /

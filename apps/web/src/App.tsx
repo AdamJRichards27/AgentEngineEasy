@@ -7,6 +7,8 @@ import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
 import { buildProductNavLinks, navLinkIsActive, resolveLandingRoute } from "./lib/productNav";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { OwnerContextBanner } from "./components/OwnerContextBanner";
+import type { SessionUser } from "./lib/session";
 
 // I-18 — each authenticated page is its own chunk. Pre-session pages stay
 // eager: they render before a session exists, outside the Suspense below,
@@ -27,6 +29,7 @@ const FinancialOperations = lazy(() => import("./pages/FinancialOperations"));
 const Settings = lazy(() => import("./pages/Settings"));
 const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
+const Owner = lazy(() => import("./pages/Owner"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -84,7 +87,8 @@ export default function App() {
       <div className="staging-banner">Staging Environment — Test Data Only</div>
       <Switch>
       <Route path="/login">
-        {isSignedIn ? <Redirect to={resolveLandingRoute({ role: user?.role, entitlements })} /> : <Login />}
+        {isSignedIn ? <Redirect to={user?.platformOwner && user.ownerSelectedBrokerageId == null
+          ? "/owner" : resolveLandingRoute({ role: user?.role, entitlements })} /> : <Login />}
       </Route>
       {/* Critical Blocker Remediation, Phases 2/4 — public, unauthenticated
           routes for the invitation-only auth flows. These must sit outside
@@ -145,7 +149,7 @@ function SidebarLayout({
   entitlements,
   onSignOut,
 }: {
-  user: { firstName: string; lastName: string; role: string; brokerageName: string | null } | undefined;
+  user: SessionUser | undefined;
   entitlements: string[];
   onSignOut: () => void;
 }) {
@@ -156,7 +160,8 @@ function SidebarLayout({
   // lib/productNav.ts rather than recomputed inline here -- see that file's own header comment
   // for the full ordering/entitlement rationale. This is a straight extraction: who sees
   // Pit Crew/Financial is unchanged, only Grow's position (now first) has moved.
-  const links = buildProductNavLinks({ role: user?.role, entitlements });
+  const ownerWithoutContext = !!user?.platformOwner && user.ownerSelectedBrokerageId == null;
+  const links = ownerWithoutContext ? [] : buildProductNavLinks({ role: user?.role, entitlements });
 
   return (
     <>
@@ -169,6 +174,10 @@ function SidebarLayout({
             <span>Agent Engine</span>
           </div>
           <div className="app-sidebar-nav">
+            {user?.platformOwner && <Link href="/owner"
+              className={`app-sidebar-link${location === "/owner" ? " active" : ""}`}>
+              Platform Owner
+            </Link>}
             {links.map((l) => (
               <Link
                 key={l.path}
@@ -178,9 +187,9 @@ function SidebarLayout({
                 {l.label}
               </Link>
             ))}
-            <Link href="/properties/start" className="btn btn-primary btn-small app-sidebar-cta">
+            {!ownerWithoutContext && <Link href="/properties/start" className="btn btn-primary btn-small app-sidebar-cta">
               + Start Property
-            </Link>
+            </Link>}
           </div>
         </div>
         <div className="app-sidebar-footer">
@@ -201,7 +210,8 @@ function SidebarLayout({
       </nav>
       <div className="app-content">
         <main>
-          {(!user?.firstName?.trim() || !user?.lastName?.trim()) && (
+          {user?.platformOwner && <OwnerContextBanner user={user} />}
+          {!ownerWithoutContext && (!user?.firstName?.trim() || !user?.lastName?.trim()) && (
             <section className="card" role="status">
               <h2>Complete your profile</h2>
               <p>Add your first and last name so your brokerage can see who you are.</p>
@@ -215,7 +225,8 @@ function SidebarLayout({
               resets it. */}
           <ErrorBoundary label="this page" resetKey={location}>
             <Suspense fallback={<div className="app-loading">Loading…</div>}>
-              <Switch>
+              {ownerWithoutContext && location !== "/owner" ? <Redirect to="/owner" replace /> : <Switch>
+                <Route path="/owner" component={Owner} />
                 <Route path="/" component={Home} />
                 <Route path="/today" component={CommandCentre} />
                 <Route path="/properties" component={PropertiesList} />
@@ -236,7 +247,7 @@ function SidebarLayout({
                 <Route>
                   <p>Page not found.</p>
                 </Route>
-              </Switch>
+              </Switch>}
             </Suspense>
           </ErrorBoundary>
         </main>
