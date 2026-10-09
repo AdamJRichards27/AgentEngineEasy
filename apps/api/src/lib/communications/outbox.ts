@@ -43,13 +43,11 @@
 //
 // AE GROW PRIORITY 3: this send path (queueMessage -> evaluateAndDispatch-
 // QueuedMessage -> dispatchMessage) is the SOLE place sandboxEmailProvider/
-// sandboxSmsProvider are ever called — steps 5/6/7 above (consent, cost
-// control, quiet hours) plus step 8a's dispatch-time consent re-check run
-// unconditionally before either provider is
-// reached, for every EMAIL/SMS message regardless of whether it is
-// property-first or contact-first (these gates key on channel/destination/
-// classification, never on propertyId/partyId), so no separate contact-
-// first enforcement was needed here.
+// sandboxSmsProvider are ever called. GP-4 refuses a party-linked EMAIL/SMS
+// send before the QUEUED transition unless legacy destination consent and an
+// affirmative F2 consent head both exist, and DNC always blocks. A message
+// that was already queued (quiet-hours deferral, retry sweep) is moved to
+// BLOCKED_BY_CONSENT by the same gate instead of reaching a provider.
 //
 // AE GROW W3-B: the two provider calls in dispatchMessage() below now go
 // through providers/registry.ts's resolveEmailProvider()/resolveSmsProvider()
@@ -76,11 +74,10 @@ import {
   isRetryableFailure,
   isValidCommunicationStatusTransition,
   type CommunicationChannel,
-  type CommunicationClassification,
   type CommunicationMessageStatus,
 } from "./types.js";
 import { APPROVAL_REQUIRED_BEFORE_SEND, requiresApproval } from "./approvalPolicy.js";
-import { checkConsent } from "./consent.js";
+import { assertMessageMayLeave, OutboundConsentRefused } from "./outboundConsent.js";
 import { checkCostControl, recordCost, SMS_ESTIMATED_COST_CENTS_PER_MESSAGE } from "./costControl.js";
 import { isWithinQuietHours, nextAllowedSendTime } from "./quietHours.js";
 import { getOrCreateCommunicationSettings } from "./settings.js";
@@ -209,6 +206,26 @@ async function publishCommunicationEvent(eventType: CommunicationOutboxEventType
   }).catch((err) => logger.error("publish_domain_event_failed", { eventType, messageId: message.id, error: err instanceof Error ? err.message : String(err) }));
 }
 
+/** A message already at QUEUED or RETRY_SCHEDULED failed the consent gate. It must not be dispatched. */
+async function blockAlreadyQueuedForConsent(
+  message: CommunicationMessage,
+  brokerageId: number,
+  actorUserId: number | null,
+  refusal: OutboundConsentRefused,
+): Promise<CommunicationMessage> {
+  const blocked = await applyMessageTransition({
+    messageId: message.id,
+    brokerageId,
+    toStatus: "BLOCKED_BY_CONSENT",
+    expectedVersion: message.version,
+    actorUserId,
+    patch: { failureCategory: "CONSENT_BLOCKED", failureDetail: refusal.message },
+    auditAction: "communication_message_blocked_by_consent",
+  });
+  await publishCommunicationEvent("COMMUNICATION_MESSAGE_BLOCKED", blocked, actorUserId);
+  return blocked;
+}
+
 export interface QueueMessageResult {
   message: CommunicationMessage;
   blocked: boolean;
@@ -237,6 +254,10 @@ export async function queueMessage(messageId: number, brokerageId: number, actor
   if (!existing.bodyText || !existing.bodyText.trim()) {
     throw new CommunicationTransitionError("This message has no content to send.");
   }
+
+  // GP-4: refuse before QUEUED. A missing or failed consent lookup must not
+  // leave a queued message behind.
+  await assertMessageMayLeave(existing, actorUserId);
 
   const now = new Date();
   const requestedSendAt = existing.scheduledAt && existing.scheduledAt > now ? existing.scheduledAt : now;
@@ -309,24 +330,12 @@ export async function evaluateAndDispatchQueuedMessage(
 
   const costUserId = queued.sendOnBehalfOfUserId ?? queued.senderUserId ?? null;
 
-  const consentResult = await checkConsent(
-    brokerageId,
-    queued.channel as CommunicationChannel,
-    queued.recipientDestination!,
-    queued.classification as CommunicationClassification,
-  );
-  if (!consentResult.allowed) {
-    const blocked = await applyMessageTransition({
-      messageId,
-      brokerageId,
-      toStatus: "BLOCKED_BY_CONSENT",
-      expectedVersion: queued.version,
-      actorUserId,
-      patch: { failureCategory: "CONSENT_BLOCKED", failureDetail: consentResult.reason },
-      auditAction: "communication_message_blocked_by_consent",
-    });
-    await publishCommunicationEvent("COMMUNICATION_MESSAGE_BLOCKED", blocked, actorUserId);
-    return { message: blocked, blocked: true, blockedReason: consentResult.reason, dispatched: false };
+  try {
+    await assertMessageMayLeave(queued, actorUserId);
+  } catch (err) {
+    if (!(err instanceof OutboundConsentRefused)) throw err;
+    const blocked = await blockAlreadyQueuedForConsent(queued, brokerageId, actorUserId, err);
+    return { message: blocked, blocked: true, blockedReason: err.message, dispatched: false };
   }
 
   const costResult = await checkCostControl(brokerageId, costUserId, queued.channel as CommunicationChannel);
@@ -396,24 +405,11 @@ export async function dispatchMessage(messageId: number, brokerageId: number): P
   // failure category, so a message blocked at dispatch is indistinguishable
   // from one blocked at enqueue and requeues through the same path.
   if (isDispatchedChannel(channel)) {
-    const consentResult = await checkConsent(
-      brokerageId,
-      channel,
-      existing.recipientDestination!,
-      existing.classification as CommunicationClassification,
-    );
-    if (!consentResult.allowed) {
-      const blocked = await applyMessageTransition({
-        messageId,
-        brokerageId,
-        toStatus: "BLOCKED_BY_CONSENT",
-        expectedVersion: existing.version,
-        actorUserId: null,
-        patch: { failureCategory: "CONSENT_BLOCKED", failureDetail: consentResult.reason },
-        auditAction: "communication_message_blocked_by_consent",
-      });
-      await publishCommunicationEvent("COMMUNICATION_MESSAGE_BLOCKED", blocked, null);
-      return blocked;
+    try {
+      await assertMessageMayLeave(existing, null);
+    } catch (err) {
+      if (!(err instanceof OutboundConsentRefused)) throw err;
+      return blockAlreadyQueuedForConsent(existing, brokerageId, null, err);
     }
   }
 

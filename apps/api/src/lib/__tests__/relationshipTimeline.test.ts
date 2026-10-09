@@ -24,6 +24,8 @@ import type { Server } from "node:http";
 import { getRelationshipTimeline } from "../relationshipTimeline.js";
 import { createThread, createDraftMessage } from "../communications/messages.js";
 import { queueMessage, applyMessageTransition } from "../communications/outbox.js";
+import { normalizeDestination } from "../communications/consent.js";
+import { db, communicationConsent, growContactChannelConsents } from "@aee/db";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../routes/__tests__/testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -117,6 +119,28 @@ async function draftAndSend(input: SendFixtureInput) {
   });
   assert.equal(message.partyId, input.partyId);
   assert.equal(message.propertyId, null);
+
+  await db.insert(communicationConsent).values({
+    brokerageId: input.brokerageId,
+    partyId: input.partyId,
+    destination: normalizeDestination(input.channel, input.recipientDestination),
+    channel: input.channel,
+    marketingOptIn: false,
+    transactionalOptOut: false,
+    source: "MANUAL",
+    recordedByUserId: input.senderUserId,
+  });
+  await db.insert(growContactChannelConsents).values({
+    brokerageId: input.brokerageId,
+    partyId: input.partyId,
+    channel: input.channel,
+    state: "EXPRESS",
+    source: "MANUAL",
+    captureMethod: "WRITTEN",
+    purpose: input.channel,
+    scope: "OUTBOUND",
+    recordedByUserId: input.senderUserId,
+  });
 
   const result = await queueMessage(message.id, input.brokerageId, input.senderUserId, message.version);
   return { thread, message: result.message, result };

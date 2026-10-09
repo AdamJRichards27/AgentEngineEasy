@@ -60,6 +60,7 @@ import {
   CommunicationTemplateError,
 } from "../lib/communications/templates.js";
 import { checkConsent, recordConsent, CommunicationConsentPartyError } from "../lib/communications/consent.js";
+import { OutboundConsentRefused } from "../lib/communications/outboundConsent.js";
 import { getCostSummary } from "../lib/communications/costControl.js";
 import { getOrCreateCommunicationSettings, updateCommunicationSettings } from "../lib/communications/settings.js";
 import {
@@ -95,6 +96,10 @@ function parsePositiveId(value: unknown): number | null {
 }
 
 function handleCommunicationsError(err: unknown, res: Response): boolean {
+  if (err instanceof OutboundConsentRefused) {
+    res.status(err.statusCode).json({ error: err.message, code: err.code });
+    return true;
+  }
   if (err instanceof CommunicationConcurrencyError) {
     res.status(409).json({ error: err.message });
     return true;

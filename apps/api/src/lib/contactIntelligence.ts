@@ -1,5 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db, growActivities, growCommitments, growContactRoles, growOpportunities, growRelationships } from "@aee/db";
+import { lastMeaningfulContactAt, type MeaningfulActivityInput } from "@aee/domain";
+import { fetchLastQualifyingContactByParty } from "./qualifyingCommunications.js";
 import { linkedPropertyHidden, ownedOrLinkedHidden } from "./propertyVisibility.js";
 
 // AE GROW Priority 2 — Contact Intelligence Summary (§9).
@@ -53,7 +55,7 @@ export async function getContactIntelligenceSummary(
   //
   // The JS filters below are unchanged and are now redundant by construction — they are kept as
   // the defence in depth this function already documented, not as the thing doing the scoping.
-  const [roleRows, relationshipRows, activityRows, opportunityRows, commitmentRows] = await Promise.all([
+  const [roleRows, relationshipRows, activityRows, opportunityRows, commitmentRows, hubByParty] = await Promise.all([
     db
       .select()
       .from(growContactRoles)
@@ -74,6 +76,10 @@ export async function getContactIntelligenceSummary(
       .select()
       .from(growCommitments)
       .where(and(eq(growCommitments.partyId, partyId), eq(growCommitments.brokerageId, brokerageId))),
+    // One grouped aggregate for this contact, the same read Grow Today uses.
+    // Qualifying Hub messages count; a message already linked to an activity
+    // is collapsed by lastMeaningfulContactAt.
+    fetchLastQualifyingContactByParty(brokerageId, [partyId], restrictToPropertyIds),
   ]);
 
   // Tenant isolation, second line of defence: a row belonging to another brokerage cannot exist
@@ -105,10 +111,33 @@ export async function getContactIntelligenceSummary(
   const relatedPropertyIds = new Set<number>();
   for (const r of relationships) if (r.propertyId) relatedPropertyIds.add(r.propertyId);
 
-  const interactionTimestamps: Date[] = activities.map((a) => a.occurredAt);
-  const mostRecentInteraction = interactionTimestamps.length > 0
-    ? interactionTimestamps.reduce((latest, d) => (d > latest ? d : latest))
-    : null;
+  // D3 — relationship recency. Notes, system events, reschedules, and a
+  // second record of the same interaction do not move this timestamp.
+  const contactInputs: MeaningfulActivityInput[] = activities.map((activity) => ({
+    id: activity.id,
+    kind: "grow_activity",
+    activityType: activity.activityType,
+    source: activity.source,
+    sourceId: activity.sourceId,
+    occurredAt: activity.occurredAt,
+    details:
+      activity.details && typeof activity.details === "object" && !Array.isArray(activity.details)
+        ? (activity.details as Record<string, unknown>)
+        : null,
+  }));
+  const hubContact = hubByParty.get(partyId);
+  if (hubContact) {
+    contactInputs.push({
+      id: hubContact.messageId,
+      kind: "hub_message",
+      channel: hubContact.channel,
+      direction: hubContact.direction,
+      status: hubContact.status,
+      providerMessageId: hubContact.providerMessageId,
+      occurredAt: hubContact.at,
+    });
+  }
+  const mostRecentInteraction = lastMeaningfulContactAt(contactInputs);
 
   const openCommitments = commitments.filter((c) => c.status === "Open");
   const nextFollowUp = openCommitments.length > 0

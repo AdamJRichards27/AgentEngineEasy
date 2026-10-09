@@ -389,7 +389,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   const [agreementTerms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, id));
   // Stage A (#114) — surfaced additively; an unstarted appraisal is simply
   // null here, never a blocking field.
-  const appraisal = await getAppraisalByProperty(id);
+  const appraisal = await getAppraisalByProperty(id, user.brokerageId);
 
   res.json({
     property: {

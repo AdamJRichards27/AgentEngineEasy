@@ -31,9 +31,10 @@
 //      A row whose moment is null does not qualify.
 //
 // Coach activity rows use the same moment, and the activity type is the
-// grow_activities vocabulary for that channel: email, sms, call. A Hub
-// row is not deduped against a grow_activities row. The Hub does not
-// write one, so when both exist they are two records and both count.
+// grow_activities vocabulary for that channel: email, sms, call. Grow Today
+// dedupes a Hub row against a grow activity only when they share a linkage
+// key (message id or provider message id). The Hub does not copy itself
+// into grow_activities, so an unlinked pair stays two records.
 //
 // TENANCY (A3). communication_participants has no brokerage_id. Every
 // query joins the participant to its thread and the party, and filters
@@ -102,6 +103,19 @@ function asPartyId(value: unknown): number | null {
   return null;
 }
 
+function asText(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+export interface LastQualifyingContact {
+  at: Date;
+  messageId: number;
+  channel: string;
+  direction: string;
+  status: string;
+  providerMessageId: string | null;
+}
+
 /**
  * Latest qualifying contact moment per party, for the party ids the caller
  * already has in scope. One grouped aggregate. An empty id list issues no
@@ -117,19 +131,27 @@ export async function fetchLastQualifyingContactByParty(
   brokerageId: number,
   partyIds: number[],
   restrictToPropertyIds: number[] | null,
-): Promise<Map<number, Date>> {
-  const lastByParty = new Map<number, Date>();
+): Promise<Map<number, LastQualifyingContact>> {
+  const lastByParty = new Map<number, LastQualifyingContact>();
   const ids = partyIds.filter((id) => Number.isInteger(id));
   if (ids.length === 0) return lastByParty;
 
   const idArray = sql`array(select jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)::int)`;
 
+  // Still one grouped aggregate. array_agg keeps the winning message's
+  // linkage fields so Grow Today can dedupe it against a grow activity
+  // without a second query. max() stays, so the contact moment is unchanged.
   const rows = await db
     .select({
       partyId: communicationParticipants.partyId,
       // A fresh expression each time: a drizzle SQL object is not reusable
       // across two clauses.
       lastContactedAt: max(qualifyingContactedAt()),
+      messageId: sql<number>`(array_agg(${communicationMessages.id} order by ${qualifyingContactedAt()} desc, ${communicationMessages.id} desc))[1]`,
+      channel: sql<string>`(array_agg(${communicationMessages.channel} order by ${qualifyingContactedAt()} desc, ${communicationMessages.id} desc))[1]`,
+      direction: sql<string>`(array_agg(${communicationMessages.direction} order by ${qualifyingContactedAt()} desc, ${communicationMessages.id} desc))[1]`,
+      status: sql<string>`(array_agg(${communicationMessages.status} order by ${qualifyingContactedAt()} desc, ${communicationMessages.id} desc))[1]`,
+      providerMessageId: sql<string | null>`(array_agg(${communicationMessages.providerMessageId} order by ${qualifyingContactedAt()} desc, ${communicationMessages.id} desc))[1]`,
     })
     .from(communicationMessages)
     .innerJoin(communicationThreads, eq(communicationThreads.id, communicationMessages.threadId))
@@ -152,8 +174,21 @@ export async function fetchLastQualifyingContactByParty(
   for (const row of rows) {
     const partyId = asPartyId(row.partyId);
     const contacted = asUtcDate(row.lastContactedAt);
-    if (partyId === null || contacted === null) continue;
-    lastByParty.set(partyId, contacted);
+    const messageId = asPartyId(row.messageId);
+    const channel = asText(row.channel);
+    const direction = asText(row.direction);
+    const status = asText(row.status);
+    if (partyId === null || contacted === null || messageId === null || channel === null || direction === null || status === null) {
+      continue;
+    }
+    lastByParty.set(partyId, {
+      at: contacted,
+      messageId,
+      channel,
+      direction,
+      status,
+      providerMessageId: asText(row.providerMessageId),
+    });
   }
   return lastByParty;
 }

@@ -34,6 +34,7 @@ import type { ComparableSaleInput, MarketCompetitionInput } from "../lib/growApp
 import { AiFeatureDisabledError, AiEntitlementError } from "../lib/ai/types.js";
 import { AiDailyCapExceededError } from "../lib/ai/dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
+import { OutboundConsentRefused } from "../lib/communications/outboundConsent.js";
 import {
   assertOwnedOrPropertyVisibleForWrite,
   assertPropertyVisibleForWrite,
@@ -82,6 +83,10 @@ const GENERIC_APPRAISAL_ERROR = "An unexpected error occurred. Please try again 
 /** Maps this feature's typed errors to the same shape/status style the
  * rest of the API already uses (see routes/appraisals.ts, routes/ai.ts). */
 function handleGrowAppraisalError(err: unknown, res: import("express").Response): void {
+  if (err instanceof OutboundConsentRefused) {
+    res.status(err.statusCode).json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof AppraisalAccessError) {
     res.status(404).json({ error: err.message });
     return;
