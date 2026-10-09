@@ -128,7 +128,9 @@ test("Property Timeline: full property+transaction lifecycle produces exactly on
   });
   assert.equal(scheduleRes.status, 200, await scheduleRes.text());
 
-  const completeRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/settlement-complete`, { method: "POST", headers });
+  // Settlement completion and funds received are Brokerage Administrator only.
+  const adminHeaders = { "content-type": "application/json", cookie: A.admin.cookie };
+  const completeRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/settlement-complete`, { method: "POST", headers: adminHeaders });
   const completeBody = await completeRes.text();
   assert.equal(completeRes.status, 200, completeBody);
   const { transaction: settled } = JSON.parse(completeBody) as { transaction: { grossCommissionCents: number; gstCents: number } };
@@ -136,7 +138,7 @@ test("Property Timeline: full property+transaction lifecycle produces exactly on
 
   const fundsRes = await fetch(`${baseUrl}/api/transactions/${transactionId}/funds-received`, {
     method: "POST",
-    headers,
+    headers: adminHeaders,
     body: JSON.stringify({ amountCents: settled.grossCommissionCents + settled.gstCents }),
   });
   assert.equal(fundsRes.status, 200, await fundsRes.text());

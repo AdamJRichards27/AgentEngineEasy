@@ -223,42 +223,73 @@ transactionsRouter.post("/:id/settlement-schedule", requireAuth, requiresRunAcce
   );
 });
 
-transactionsRouter.post("/:id/settlement-complete", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
-  const id = accessCheckedTransactionId(req);
-  const user = req.authedUser!;
-  await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
-});
+// Settlement completion, commission calculation (including force) and
+// funds-received recording are Brokerage Administrator sign-off, same
+// precedent as agent-paid and close below. requireRole stays after
+// requireTransactionAccess so another brokerage is still 404, and after
+// requiresRunAccess so a missing run.access is still the entitlement 403.
+// Refusals are requireRole's existing `{ error: "Forbidden" }` with no
+// audit row — this router has no separate refusal-audit convention.
+// No new force flag: completeSettlement's existing prerequisites still
+// run, and the automatic commission calculation inside that function is
+// unchanged (it runs as part of the administrator's settlement action).
+transactionsRouter.post(
+  "/:id/settlement-complete",
+  requireAuth,
+  requiresRunAccess,
+  requireTransactionAccess,
+  requireRole(...BROKERAGE_ADMIN_ROLES),
+  async (req, res) => {
+    const id = accessCheckedTransactionId(req);
+    const user = req.authedUser!;
+    await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+  },
+);
 
-transactionsRouter.post("/:id/calculate-commission", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
-  const id = accessCheckedTransactionId(req);
-  const user = req.authedUser!;
-  await handle(
-    () => calculateCommission({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force: req.body?.force === true }),
-    res,
-  );
-});
+transactionsRouter.post(
+  "/:id/calculate-commission",
+  requireAuth,
+  requiresRunAccess,
+  requireTransactionAccess,
+  requireRole(...BROKERAGE_ADMIN_ROLES),
+  async (req, res) => {
+    const id = accessCheckedTransactionId(req);
+    const user = req.authedUser!;
+    await handle(
+      () => calculateCommission({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force: req.body?.force === true }),
+      res,
+    );
+  },
+);
 
 const fundsReceivedSchema = z.object({ amountCents: z.number().int().positive() });
 
-transactionsRouter.post("/:id/funds-received", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
-  const id = accessCheckedTransactionId(req);
-  const parsed = fundsReceivedSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.flatten() });
-    return;
-  }
-  const user = req.authedUser!;
-  await handle(
-    () =>
-      recordFundsReceived({
-        transactionId: id,
-        userId: user.id,
-        brokerageId: user.brokerageId,
-        amountCents: parsed.data.amountCents,
-      }),
-    res,
-  );
-});
+transactionsRouter.post(
+  "/:id/funds-received",
+  requireAuth,
+  requiresRunAccess,
+  requireTransactionAccess,
+  requireRole(...BROKERAGE_ADMIN_ROLES),
+  async (req, res) => {
+    const id = accessCheckedTransactionId(req);
+    const parsed = fundsReceivedSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const user = req.authedUser!;
+    await handle(
+      () =>
+        recordFundsReceived({
+          transactionId: id,
+          userId: user.id,
+          brokerageId: user.brokerageId,
+          amountCents: parsed.data.amountCents,
+        }),
+      res,
+    );
+  },
+);
 
 // Financial disbursement sign-off — restricted to Brokerage Administrators,
 // same precedent as refunds (Phase 6) and AML exception resolution (Phase 4).
