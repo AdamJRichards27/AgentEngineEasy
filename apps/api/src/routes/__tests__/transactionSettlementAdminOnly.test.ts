@@ -1,14 +1,15 @@
 // R-F35a — settlement completion, funds received, and commission calculation
 // (normal and force) are Brokerage Administrator only at the route.
-// Same HTTP harness as runTransactionLifecycleGuards.test.ts. The gate is
-// requireRole after requiresRunAccess and requireTransactionAccess, matching
-// agent-paid. Refusals are that middleware's `{ error: "Forbidden" }` and
-// write no audit row.
-import { test, before, after } from "node:test";
+// Same HTTP harness as runTransactionLifecycleGuards.test.ts. The gate sits
+// after requiresRunAccess and requireTransactionAccess. A same-brokerage
+// refusal is 403 and writes one denial audit row. Another brokerage is 404
+// and writes nothing, so the audit log cannot confirm that transaction exists.
+import { test, before, after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq, inArray } from "drizzle-orm";
 import { auditLogs, db, transactions, users } from "@aee/db";
+import { logger } from "@aee/events";
 import {
   createBrokerageWithUsers,
   createTransactionFromListedProperty,
@@ -25,6 +26,12 @@ process.env.SESSION_SECRET =
 process.env.ALLOW_DEV_AUTH = "true";
 
 const SUCCESS_ACTIONS = ["settlement_completed", "commission_calculated", "funds_received"] as const;
+const DENIAL_ACTIONS = [
+  "settlement_complete_denied",
+  "funds_received_denied",
+  "commission_calculation_denied",
+  "commission_calculation_force_denied",
+] as const;
 const MILESTONE_EVENTS = ["SETTLEMENT_COMPLETED", "COMMISSION_CALCULATED", "FUNDS_RECEIVED"] as const;
 
 let server: Server;
@@ -63,6 +70,65 @@ async function loadTransaction(id: number) {
   const [row] = await db.select().from(transactions).where(eq(transactions.id, id));
   if (!row) throw new Error(`transaction ${id} missing`);
   return row;
+}
+
+async function transactionAudits(id: number) {
+  const rows = await db
+    .select()
+    .from(auditLogs)
+    .where(and(eq(auditLogs.recordType, "transaction"), eq(auditLogs.recordId, String(id))));
+  return rows.sort((a, b) => a.id - b.id);
+}
+
+async function denialAudits(id: number) {
+  const rows = await transactionAudits(id);
+  return rows.filter((row) => (DENIAL_ACTIONS as readonly string[]).includes(row.action));
+}
+
+async function brokerageDenialIds(brokerageId: number): Promise<number[]> {
+  const rows = await db
+    .select({ id: auditLogs.id })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, brokerageId), inArray(auditLogs.action, [...DENIAL_ACTIONS])));
+  return rows.map((row) => row.id).sort((a, b) => a - b);
+}
+
+function expectedDenialAction(label: string): (typeof DENIAL_ACTIONS)[number] {
+  switch (label) {
+    case "settlement-complete":
+      return "settlement_complete_denied";
+    case "funds-received":
+      return "funds_received_denied";
+    case "calculate-commission":
+      return "commission_calculation_denied";
+    case "calculate-commission force":
+      return "commission_calculation_force_denied";
+    default:
+      throw new Error(`unexpected attempt ${label}`);
+  }
+}
+
+function assertDenialRow(
+  row: Awaited<ReturnType<typeof denialAudits>>[number],
+  expected: { userId: number; role: string; brokerageId: number; transactionId: number; action: string },
+): void {
+  assert.equal(row.userId, expected.userId);
+  assert.equal(row.brokerageId, expected.brokerageId);
+  assert.equal(row.recordType, "transaction");
+  assert.equal(row.recordId, String(expected.transactionId));
+  assert.equal(row.action, expected.action);
+  assert.ok(row.createdAt instanceof Date);
+  assert.ok(Date.now() - row.createdAt.getTime() < 60_000);
+  assert.equal(row.userEmail, null);
+  assert.equal(row.previousValue, null);
+  assert.equal(row.providerReference, null);
+  assert.equal(row.propertyId, null);
+  const detail = JSON.parse(row.updatedValue ?? "") as { actorRole: string; reason: string };
+  assert.deepEqual(detail, { actorRole: expected.role, reason: "ROLE_NOT_PERMITTED" });
+  const stored = `${row.action} ${row.updatedValue ?? ""} ${row.previousValue ?? ""} ${row.userEmail ?? ""}`;
+  assert.doesNotMatch(stored, /amountCents|password|account|secret|authorization|cookie/i);
+  assert.equal(stored.includes("100"), false);
+  assert.equal(stored.includes("250000"), false);
 }
 
 async function successAuditIds(id: number): Promise<number[]> {
@@ -141,7 +207,7 @@ after(async () => {
   }
 });
 
-test("Agent and Pit Crew are forbidden from settlement completion, funds received, and commission calculation, and nothing changes", async () => {
+test("Agent and Pit Crew are forbidden from settlement completion, funds received, and commission calculation, with one denial audit and no transaction change", async () => {
   const [pitRow] = await db.select().from(users).where(eq(users.id, pitCrew.user.id));
   assert.equal(pitRow.role, "Pit Crew");
   assert.equal(A.agent.user.role, "Agent");
@@ -156,28 +222,45 @@ test("Agent and Pit Crew are forbidden from settlement completion, funds receive
   const auditsBefore = await successAuditIds(transactionId);
   const eventsBefore = await milestoneEventIds(propertyId);
   assert.deepEqual(auditsBefore, []);
+  const seenDenialIds = new Set((await denialAudits(transactionId)).map((row) => row.id));
 
   for (const caller of [
-    { role: "Agent", cookie: A.agent.cookie },
-    { role: "Pit Crew", cookie: pitCrew.cookie },
+    { role: "Agent", userId: A.agent.user.id, cookie: A.agent.cookie },
+    { role: "Pit Crew", userId: pitCrew.user.id, cookie: pitCrew.cookie },
   ]) {
     for (const attempt of attemptsFor(transactionId)) {
       const res = await postJson(attempt.path, caller.cookie, attempt.body);
       const text = await res.text();
       assert.equal(res.status, 403, `${caller.role} ${attempt.label}: ${text}`);
       assert.deepEqual(JSON.parse(text), { error: "Forbidden" }, `${caller.role} ${attempt.label}`);
+
+      const added = (await denialAudits(transactionId)).filter((row) => !seenDenialIds.has(row.id));
+      assert.equal(added.length, 1, `${caller.role} ${attempt.label} must write exactly one denial audit`);
+      assertDenialRow(added[0]!, {
+        userId: caller.userId,
+        role: caller.role,
+        brokerageId: A.brokerageId,
+        transactionId,
+        action: expectedDenialAction(attempt.label),
+      });
+      seenDenialIds.add(added[0]!.id);
+      assert.deepEqual(await loadTransaction(transactionId), ready);
+      assert.deepEqual(await successAuditIds(transactionId), auditsBefore);
     }
   }
 
+  assert.equal(seenDenialIds.size, 8);
   assert.deepEqual(await loadTransaction(transactionId), ready);
   assert.deepEqual(await successAuditIds(transactionId), auditsBefore);
   assert.deepEqual(await milestoneEventIds(propertyId), eventsBefore);
 });
 
-test("another brokerage still receives 404 before the role check", async () => {
+test("another brokerage still receives 404 before the role check and writes no denial audit", async () => {
   const before = await loadTransaction(transactionId);
-  const auditsBefore = await successAuditIds(transactionId);
+  const auditsBefore = await transactionAudits(transactionId);
+  const successBefore = await successAuditIds(transactionId);
   const eventsBefore = await milestoneEventIds(propertyId);
+  const foreignDenialsBefore = await brokerageDenialIds(B.brokerageId);
 
   for (const caller of [
     { role: "Brokerage Administrator", cookie: B.admin.cookie },
@@ -192,7 +275,12 @@ test("another brokerage still receives 404 before the role check", async () => {
   }
 
   assert.deepEqual(await loadTransaction(transactionId), before);
-  assert.deepEqual(await successAuditIds(transactionId), auditsBefore);
+  assert.deepEqual(await transactionAudits(transactionId), auditsBefore);
+  assert.deepEqual(await successAuditIds(transactionId), successBefore);
+  assert.deepEqual(await brokerageDenialIds(B.brokerageId), foreignDenialsBefore);
+  assert.ok(
+    (await transactionAudits(transactionId)).every((row) => row.brokerageId !== B.brokerageId && row.userId !== B.admin.user.id && row.userId !== B.agent.user.id),
+  );
   assert.deepEqual(await milestoneEventIds(propertyId), eventsBefore);
 });
 
@@ -350,4 +438,57 @@ test("a Brokerage Administrator still passes every settlement prerequisite, then
   assert.equal((await getDomainEventsForProperty(ownedPropertyId, "SETTLEMENT_COMPLETED")).length, 1);
   assert.equal((await getDomainEventsForProperty(auto.propertyId, "COMMISSION_CALCULATED")).length, 1);
   assert.equal((await getDomainEventsForProperty(auto.propertyId, "SETTLEMENT_COMPLETED")).length, 1);
+  assert.deepEqual(await denialAudits(id), []);
+  assert.deepEqual(await denialAudits(auto.transactionId), []);
+});
+
+test("a failed denial audit still returns 403 and changes nothing", async (t: TestContext) => {
+  const beforeRow = await loadTransaction(transactionId);
+  const auditsBefore = await transactionAudits(transactionId);
+  const eventsBefore = await milestoneEventIds(propertyId);
+  const seen: Array<{ message: string; fields?: Record<string, unknown> }> = [];
+  const originalError = logger.error.bind(logger);
+  t.mock.method(logger, "error", (message: string, fields?: Record<string, unknown>) => {
+    seen.push({ message, fields });
+    originalError(message, fields);
+  });
+
+  const originalInsert = db.insert.bind(db);
+  t.mock.method(db, "insert", ((table: unknown) => {
+    const builder = originalInsert(table as Parameters<typeof originalInsert>[0]);
+    if (table === auditLogs) {
+      const originalValues = builder.values.bind(builder);
+      t.mock.method(builder, "values", (input: { action?: string }) => {
+        if (typeof input?.action === "string" && input.action.endsWith("_denied")) {
+          throw new Error("denial audit insert failed");
+        }
+        return originalValues(input as never);
+      });
+    }
+    return builder;
+  }) as typeof db.insert);
+
+  for (const attempt of attemptsFor(transactionId)) {
+    const res = await postJson(attempt.path, A.agent.cookie, attempt.body);
+    const text = await res.text();
+    assert.equal(res.status, 403, `${attempt.label}: ${text}`);
+    assert.deepEqual(JSON.parse(text), { error: "Forbidden" });
+  }
+
+  assert.deepEqual(await loadTransaction(transactionId), beforeRow);
+  assert.deepEqual(await transactionAudits(transactionId), auditsBefore);
+  assert.deepEqual(await milestoneEventIds(propertyId), eventsBefore);
+  const failures = seen.filter((entry) => entry.message === "log_audit_failed");
+  assert.equal(failures.length, attemptsFor(transactionId).length);
+  for (const failure of failures) {
+    const fields = failure.fields ?? {};
+    assert.equal(typeof fields.action, "string");
+    assert.match(String(fields.action), /_denied$/);
+    assert.equal(fields.recordId, String(transactionId));
+    assert.equal(fields.brokerageId, A.brokerageId);
+    assert.equal(fields.userId, A.agent.user.id);
+    assert.equal("updatedValue" in fields, false);
+    assert.equal("amountCents" in fields, false);
+    assert.equal(JSON.stringify(fields).includes("password"), false);
+  }
 });
