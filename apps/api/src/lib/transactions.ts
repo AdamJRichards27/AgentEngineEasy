@@ -27,6 +27,18 @@ const TRANSACTION_STEPS = [
 
 const GST_RATE_BPS = 1000; // 10% — AU GST, same convention as ServiceOrder pricing (Phase 4/6)
 
+/**
+ * R-F30 — Closed is terminal. Call this only on a path that would write.
+ * Idempotent replays that return before any write must not call it, so a
+ * repeat of contract-signed / settlement-complete / agent-paid / close
+ * stays a 200. Plain Error keeps the router's existing 400.
+ */
+function refuseClosedTransaction(transaction: { id: number; status: string }): void {
+  if (transaction.status === "Closed") {
+    throw new Error(`Transaction ${transaction.id} is closed — no further changes can be recorded.`);
+  }
+}
+
 export interface AcceptOfferResult {
   offer: Offer;
   transaction: Transaction;
@@ -286,7 +298,18 @@ async function publishTransactionEvent(
   }
 }
 
-/** Idempotent — a second call after contractDate is already set is a no-op. */
+/**
+ * Idempotent — a second call after contractDate is already set is a no-op,
+ * including after the transaction is Closed.
+ *
+ * R-F30 — never move status or workflowStage backward. UnderContract /
+ * workflowStage Contract is set only from ContractPreparation. A later
+ * status (SettlementScheduled, and anything else that is not Settled or
+ * Closed) still records the contract date, buyer AML, the audit row, and
+ * CONTRACT_SIGNED, and leaves status and workflowStage where they are.
+ * Settled or Closed with no contract date is refused: those states cannot
+ * acquire a contract date after the fact.
+ */
 export async function recordContractSigned(input: {
   transactionId: number;
   userId: number;
@@ -295,15 +318,26 @@ export async function recordContractSigned(input: {
 }): Promise<Transaction> {
   const transaction = await loadTransaction(input.transactionId);
   if (transaction.contractDate) return transaction;
+  refuseClosedTransaction(transaction);
+  if (transaction.status === "Settled") {
+    throw new Error(`Transaction ${transaction.id} cannot record a signed contract after settlement.`);
+  }
 
   const contractDate = input.contractDate ?? new Date();
+  const advanceToUnderContract = transaction.status === "ContractPreparation";
   const [updated] = await db
     .update(transactions)
-    .set({ contractDate, status: "UnderContract", updatedAt: new Date() })
+    .set({
+      contractDate,
+      ...(advanceToUnderContract ? { status: "UnderContract" } : {}),
+      updatedAt: new Date(),
+    })
     .where(eq(transactions.id, transaction.id))
     .returning();
 
-  await db.update(properties).set({ workflowStage: "Contract", updatedAt: new Date() }).where(eq(properties.id, transaction.propertyId));
+  if (advanceToUnderContract) {
+    await db.update(properties).set({ workflowStage: "Contract", updatedAt: new Date() }).where(eq(properties.id, transaction.propertyId));
+  }
   await refreshTransactionSteps(transaction.propertyId);
 
   // Stage F (#119) — AML/CTF buyer-party linkage. Sellers are AML-checked
@@ -341,6 +375,7 @@ export async function recordContractSigned(input: {
 export async function recordFinanceApproved(input: { transactionId: number; userId: number; brokerageId: number }): Promise<Transaction> {
   const transaction = await loadTransaction(input.transactionId);
   if (transaction.financeApprovedAt) return transaction;
+  refuseClosedTransaction(transaction);
 
   const [updated] = await db
     .update(transactions)
@@ -380,6 +415,9 @@ export async function scheduleSettlement(input: {
   const transaction = await loadTransaction(input.transactionId);
   if (transaction.status === "Settled" || transaction.status === "Closed") {
     throw new Error(`Transaction ${transaction.id} has already settled — cannot reschedule.`);
+  }
+  if (!transaction.contractDate) {
+    throw new Error(`Transaction ${transaction.id} cannot schedule settlement before the contract is signed.`);
   }
 
   const [updated] = await db
@@ -423,6 +461,7 @@ export async function calculateCommission(input: {
 }): Promise<Transaction> {
   const transaction = await loadTransaction(input.transactionId);
   if (transaction.commissionCalculatedAt && !input.force) return transaction;
+  refuseClosedTransaction(transaction);
 
   const [terms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, transaction.propertyId));
   if (!terms) {
@@ -478,6 +517,10 @@ export async function completeSettlement(input: {
   if (!transaction.settlementDate) {
     throw new Error(`Transaction ${transaction.id} has no settlement date scheduled yet.`);
   }
+  if (!transaction.contractDate) {
+    throw new Error(`Transaction ${transaction.id} cannot complete settlement before the contract is signed.`);
+  }
+  refuseClosedTransaction(transaction);
 
   const completedAt = input.completedAt ?? new Date();
 
@@ -537,6 +580,7 @@ export async function recordFundsReceived(input: {
     throw new Error("amountCents must be a positive number.");
   }
   const transaction = await loadTransaction(input.transactionId);
+  refuseClosedTransaction(transaction);
 
   const [updated] = await db
     .update(transactions)
@@ -572,6 +616,7 @@ export async function recordFundsReceived(input: {
 export async function recordAgentPaid(input: { transactionId: number; userId: number; brokerageId: number }): Promise<Transaction> {
   const transaction = await loadTransaction(input.transactionId);
   if (transaction.agentPaidAt) return transaction;
+  refuseClosedTransaction(transaction);
   if (!transaction.settlementCompletedAt) {
     throw new Error(`Transaction ${transaction.id} cannot be marked paid before settlement is completed.`);
   }
@@ -617,6 +662,7 @@ export async function recordLegalRepresentatives(input: {
   buyerSolicitorPartyId?: number | null;
 }): Promise<Transaction> {
   const transaction = await loadTransaction(input.transactionId);
+  refuseClosedTransaction(transaction);
   const existing = (transaction.legalRepresentatives ?? {}) as {
     sellerSolicitorPartyId?: number | null;
     buyerSolicitorPartyId?: number | null;
