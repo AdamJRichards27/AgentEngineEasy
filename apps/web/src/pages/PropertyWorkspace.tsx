@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary";
 import { apiFetch, apiErrorMessage } from "../lib/api";
+import { transactionPanelActionVisibility } from "../lib/transactionPanelActions";
 import {
   type PropertyExceptionsResponse,
   type RiskExceptionRow,
@@ -721,7 +722,13 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         ? { title: `Review ${received.length} offer${received.length > 1 ? "s" : ""}`, description: "See Offers below." }
         : { title: "Awaiting offers", description: "Record an offer as soon as a buyer submits one — see Offers below." };
   } else if (transaction) {
-    if (!transaction.contractDate) {
+    // R-F32 — the Next step slot uses the same R-F30 visibility as the
+    // Transaction panel. Settled or Closed cannot gain a contract date,
+    // and Closed cannot record finance approval.
+    const panelActions = transactionPanelActionVisibility(transaction);
+    if (panelActions.closed) {
+      primary = { title: "Transaction closed", description: "There's nothing further to action on this property." };
+    } else if (panelActions.markContractSigned) {
       primary = {
         title: "Prepare Contract",
         action: (
@@ -730,7 +737,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           </button>
         ),
       };
-    } else if (!transaction.financeApprovedAt) {
+    } else if (panelActions.markFinanceApproved) {
       primary = {
         title: "Confirm Finance",
         action: (
@@ -1755,16 +1762,21 @@ function TransactionBlockView({
 }) {
   const [settlementDate, setSettlementDate] = useState("");
   const [fundsAmount, setFundsAmount] = useState("");
+  // R-F32 — offer a control only when R-F30 would accept the write.
+  // Milestone text stays visible either way. `error` stays below so a
+  // stale click still shows the server message.
+  const actions = transactionPanelActionVisibility(transaction);
 
   return (
     <div className="stack">
       <p>
         {formatCents(transaction.purchasePriceCents)} · <span className="pill">{transaction.status}</span>
       </p>
+      {actions.closedNote && <p className="muted">{actions.closedNote}</p>}
 
       <div>
         Contract: {transaction.contractDate ? `signed ${transaction.contractDate}` : "not yet signed"}
-        {!transaction.contractDate && (
+        {actions.markContractSigned && (
           <button className="btn btn-small" onClick={() => onAction("contract-signed")} style={{ marginLeft: "0.5rem" }}>
             Mark Contract Signed
           </button>
@@ -1773,7 +1785,7 @@ function TransactionBlockView({
 
       <div>
         Finance: {transaction.financeApprovedAt ? `approved ${transaction.financeApprovedAt}` : "not recorded"}
-        {!transaction.financeApprovedAt && (
+        {actions.markFinanceApproved && (
           <button className="btn btn-small" onClick={() => onAction("finance-approved")} style={{ marginLeft: "0.5rem" }}>
             Mark Finance Approved
           </button>
@@ -1783,6 +1795,7 @@ function TransactionBlockView({
       {/* Stage E (#118) — contract conditions + exchange/unconditional. */}
       <ConditionsBlock
         conditions={conditions}
+        editable={actions.editConditions}
         onAdd={onAddCondition}
         addError={addConditionError}
         onReschedule={onRescheduleCondition}
@@ -1791,7 +1804,7 @@ function TransactionBlockView({
 
       <div>
         Exchange: {transaction.exchangedAt ? `exchanged ${transaction.exchangedAt}` : "not yet exchanged"}
-        {!transaction.exchangedAt && (
+        {actions.markExchange && (
           <button className="btn btn-small" onClick={onExchange} style={{ marginLeft: "0.5rem" }}>
             Mark Contracts Exchanged
           </button>
@@ -1803,7 +1816,7 @@ function TransactionBlockView({
         {transaction.unconditionalAt
           ? `became unconditional ${transaction.unconditionalAt}`
           : "not yet unconditional"}
-        {!transaction.unconditionalAt && (
+        {actions.markUnconditional && (
           <button className="btn btn-small" onClick={onMarkUnconditional} style={{ marginLeft: "0.5rem" }}>
             Mark Unconditional
           </button>
@@ -1815,6 +1828,7 @@ function TransactionBlockView({
       <LegalRepresentativesForm
         initial={transaction.legalRepresentatives}
         solicitors={solicitors}
+        editable={actions.editLegalRepresentatives}
         onSave={onSaveLegalReps}
       />
 
@@ -1826,17 +1840,21 @@ function TransactionBlockView({
             ? `scheduled ${new Date(transaction.settlementDate).toLocaleDateString()}`
             : "not yet scheduled"}
       </div>
-      {!transaction.settlementCompletedAt && (
+      {(actions.scheduleSettlement || actions.completeSettlement) && (
         <div className="inline-form">
-          <input type="date" value={settlementDate} onChange={(e) => setSettlementDate(e.target.value)} />
-          <button
-            className="btn btn-small"
-            onClick={() => settlementDate && onAction("settlement-schedule", { settlementDate })}
-            disabled={!settlementDate}
-          >
-            Schedule Settlement
-          </button>
-          {transaction.settlementDate && (
+          {actions.scheduleSettlement && (
+            <>
+              <input type="date" value={settlementDate} onChange={(e) => setSettlementDate(e.target.value)} />
+              <button
+                className="btn btn-small"
+                onClick={() => settlementDate && onAction("settlement-schedule", { settlementDate })}
+                disabled={!settlementDate}
+              >
+                Schedule Settlement
+              </button>
+            </>
+          )}
+          {actions.completeSettlement && (
             <button className="btn btn-small" onClick={() => onAction("settlement-complete")}>
               Mark Settlement Completed
             </button>
@@ -1849,7 +1867,7 @@ function TransactionBlockView({
         {transaction.commissionCalculatedAt
           ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
           : "not yet calculated"}
-        {!transaction.commissionCalculatedAt && (
+        {actions.calculateCommission && (
           <button className="btn btn-small" onClick={() => onAction("calculate-commission")} style={{ marginLeft: "0.5rem" }}>
             Calculate Commission
           </button>
@@ -1858,23 +1876,27 @@ function TransactionBlockView({
 
       <div className="inline-form">
         <span>Funds received: {formatCents(transaction.fundsReceivedCents)}</span>
-        <input value={fundsAmount} onChange={(e) => setFundsAmount(e.target.value)} placeholder="Amount ($)" />
-        <button
-          className="btn btn-small"
-          onClick={() => {
-            if (!fundsAmount) return;
-            onAction("funds-received", { amountCents: Math.round(Number(fundsAmount) * 100) });
-            setFundsAmount("");
-          }}
-          disabled={!fundsAmount}
-        >
-          Record Funds Received
-        </button>
+        {actions.recordFundsReceived && (
+          <>
+            <input value={fundsAmount} onChange={(e) => setFundsAmount(e.target.value)} placeholder="Amount ($)" />
+            <button
+              className="btn btn-small"
+              onClick={() => {
+                if (!fundsAmount) return;
+                onAction("funds-received", { amountCents: Math.round(Number(fundsAmount) * 100) });
+                setFundsAmount("");
+              }}
+              disabled={!fundsAmount}
+            >
+              Record Funds Received
+            </button>
+          </>
+        )}
       </div>
 
       <div>
         Agent paid: {transaction.agentPaidAt ?? "not yet"}
-        {!transaction.agentPaidAt && (
+        {actions.markAgentPaid && (
           <button className="btn btn-small" onClick={() => onAction("agent-paid")} style={{ marginLeft: "0.5rem" }}>
             Mark Agent Paid
           </button>
@@ -1904,12 +1926,14 @@ const CONDITION_RESOLUTIONS = ["Satisfied", "Waived", "Failed", "NotApplicable"]
 // agent-recorded tracking.
 function ConditionsBlock({
   conditions,
+  editable,
   onAdd,
   addError,
   onReschedule,
   onResolve,
 }: {
   conditions: ConditionBlock[];
+  editable: boolean;
   onAdd: (input: Record<string, unknown>) => void;
   addError: string | null;
   onReschedule: (conditionId: number, newDueDate: string | null) => void;
@@ -1945,7 +1969,7 @@ function ConditionsBlock({
                 </span>
                 {c.dueDate && ` · due ${new Date(c.dueDate).toLocaleDateString()}`}
               </div>
-              {c.status === "Pending" && (
+              {editable && c.status === "Pending" && (
                 <div className="inline-form" style={{ marginTop: "0.3rem" }}>
                   <input
                     type="date"
@@ -1988,11 +2012,11 @@ function ConditionsBlock({
           ))}
         </ul>
       )}
-      {!showAdd ? (
+      {editable && !showAdd ? (
         <button className="btn btn-link" onClick={() => setShowAdd(true)}>
           + Add Condition
         </button>
-      ) : (
+      ) : editable ? (
         <div className="inline-form">
           <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. Subject to building & pest inspection" />
           <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
@@ -2003,7 +2027,7 @@ function ConditionsBlock({
             Cancel
           </button>
         </div>
-      )}
+      ) : null}
       {addError && <p className="error-text">{addError}</p>}
     </div>
   );
@@ -2016,10 +2040,12 @@ function ConditionsBlock({
 function LegalRepresentativesForm({
   initial,
   solicitors,
+  editable,
   onSave,
 }: {
   initial: { sellerSolicitorPartyId?: number | null; buyerSolicitorPartyId?: number | null } | null;
   solicitors: PartyLink[];
+  editable: boolean;
   onSave: (input: Record<string, unknown>) => void;
 }) {
   const [sellerSolicitorPartyId, setSellerSolicitorPartyId] = useState(
@@ -2028,6 +2054,21 @@ function LegalRepresentativesForm({
   const [buyerSolicitorPartyId, setBuyerSolicitorPartyId] = useState(
     initial?.buyerSolicitorPartyId ? String(initial.buyerSolicitorPartyId) : "",
   );
+
+  if (!editable) {
+    const labelFor = (partyId: number | null | undefined) => {
+      if (!partyId) return "not recorded";
+      const match = solicitors.find((solicitor) => solicitor.partyId === partyId);
+      return match ? partyName(match.party) : "not recorded";
+    };
+    return (
+      <div>
+        <h3 style={{ marginBottom: "0.4rem" }}>Legal representatives</h3>
+        <p className="muted">Seller's solicitor: {labelFor(initial?.sellerSolicitorPartyId)}</p>
+        <p className="muted">Buyer's solicitor: {labelFor(initial?.buyerSolicitorPartyId)}</p>
+      </div>
+    );
+  }
 
   if (solicitors.length === 0 && !initial?.sellerSolicitorPartyId && !initial?.buyerSolicitorPartyId) {
     return (
