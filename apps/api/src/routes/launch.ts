@@ -13,6 +13,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   CAMPAIGN_ITEM_TYPES,
   CAMPAIGN_ITEM_STATUSES,
@@ -50,6 +51,17 @@ import {
 
 export const launchRouter = Router();
 
+// R-F35b — Launch is a Run surface. Every route below requires run.access
+// after requireAuth and before the handler's tenant check (and before
+// requireRole, where that gate already exists), matching
+// routes/transactions.ts: an unentitled caller is refused without a
+// same-brokerage existence oracle, and the denial is requireEntitlement's
+// existing 403. Applied per route, not via Router.use() — this router is
+// mounted unprefixed, and a blanket use() would intercept requests that
+// only pass through it on the way to a later sibling. There is no
+// provider webhook on this router.
+const requiresRunAccess = requireEntitlement("run.access");
+
 function actorFrom(user: AuthedUser): ActorRef {
   return { id: user.id, role: user.role };
 }
@@ -83,7 +95,7 @@ function handleLaunchError(err: unknown, res: import("express").Response): boole
 // — a property before AGENCY_AGREEMENT_SIGNED is a normal state, and the
 // Property Card's progressive-disclosure UI reads this to decide whether
 // to show "Start Launch" or the full Launch panel.
-launchRouter.get("/properties/:propertyId/launch", requireAuth, async (req, res) => {
+launchRouter.get("/properties/:propertyId/launch", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
   const user = req.authedUser!;
   try {
@@ -95,7 +107,7 @@ launchRouter.get("/properties/:propertyId/launch", requireAuth, async (req, res)
   }
 });
 
-launchRouter.post("/properties/:propertyId/launch", requireAuth, async (req, res) => {
+launchRouter.post("/properties/:propertyId/launch", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
   const user = req.authedUser!;
   try {
@@ -107,7 +119,7 @@ launchRouter.post("/properties/:propertyId/launch", requireAuth, async (req, res
   }
 });
 
-launchRouter.get("/launch/:id/transitions", requireAuth, async (req, res) => {
+launchRouter.get("/launch/:id/transitions", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   try {
     const transitions = await getLaunchPlanTransitions(req.params.id, user.brokerageId);
@@ -120,7 +132,7 @@ launchRouter.get("/launch/:id/transitions", requireAuth, async (req, res) => {
 
 const applyTemplateSchema = z.object({ templateType: z.enum(LAUNCH_TEMPLATE_TYPES) });
 
-launchRouter.post("/launch/:id/template", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/template", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = applyTemplateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -138,7 +150,7 @@ launchRouter.post("/launch/:id/template", requireAuth, async (req, res) => {
 
 const targetDateSchema = z.object({ targetLaunchDate: z.coerce.date() });
 
-launchRouter.post("/launch/:id/target-date", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/target-date", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = targetDateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -154,7 +166,7 @@ launchRouter.post("/launch/:id/target-date", requireAuth, async (req, res) => {
   }
 });
 
-launchRouter.post("/launch/:id/pause", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/pause", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ reason: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!parsed.success) {
@@ -170,7 +182,7 @@ launchRouter.post("/launch/:id/pause", requireAuth, async (req, res) => {
   }
 });
 
-launchRouter.post("/launch/:id/resume", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/resume", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   try {
     const plan = await resumeLaunchPlan(req.params.id, user.brokerageId, actorFrom(user));
@@ -181,7 +193,7 @@ launchRouter.post("/launch/:id/resume", requireAuth, async (req, res) => {
   }
 });
 
-launchRouter.post("/launch/:id/cancel", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/cancel", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ reason: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!parsed.success) {
@@ -211,7 +223,7 @@ const addCampaignItemSchema = z.object({
   responsibleUserId: z.number().int().nullable().optional(),
 });
 
-launchRouter.post("/launch/:id/campaign-items", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/campaign-items", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = addCampaignItemSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -229,7 +241,7 @@ launchRouter.post("/launch/:id/campaign-items", requireAuth, async (req, res) =>
 
 const updateStatusSchema = z.object({ status: z.enum(CAMPAIGN_ITEM_STATUSES), blockedReason: z.string().max(2000).optional() });
 
-launchRouter.post("/launch/campaign-items/:itemId/status", requireAuth, async (req, res) => {
+launchRouter.post("/launch/campaign-items/:itemId/status", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = updateStatusSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -247,7 +259,7 @@ launchRouter.post("/launch/campaign-items/:itemId/status", requireAuth, async (r
 
 const assignResponsibilitySchema = z.object({ ownerType: z.enum(LAUNCH_OWNER_TYPES), ownerUserId: z.number().int().nullable() });
 
-launchRouter.post("/launch/campaign-items/:itemId/responsibility", requireAuth, async (req, res) => {
+launchRouter.post("/launch/campaign-items/:itemId/responsibility", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = assignResponsibilitySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -265,7 +277,7 @@ launchRouter.post("/launch/campaign-items/:itemId/responsibility", requireAuth, 
 
 const vendorCostSchema = z.object({ vendorName: z.string().max(200).nullable(), costCents: z.number().int().min(0) });
 
-launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, async (req, res) => {
+launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = vendorCostSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -283,7 +295,7 @@ launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, asy
 
 const evidenceSchema = z.object({ label: z.string().min(1).max(200), url: z.string().min(1).max(2000) });
 
-launchRouter.post("/launch/campaign-items/:itemId/evidence", requireAuth, async (req, res) => {
+launchRouter.post("/launch/campaign-items/:itemId/evidence", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = evidenceSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -309,7 +321,7 @@ const requestApprovalSchema = z.object({
   requestedAmountCents: z.number().int().min(0),
 });
 
-launchRouter.post("/launch/:id/vendor-approvals", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/vendor-approvals", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = requestApprovalSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -331,7 +343,7 @@ const decideApprovalSchema = z.object({
   decisionNotes: z.string().max(2000).nullable().optional(),
 });
 
-launchRouter.post("/launch/vendor-approvals/:approvalId/decide", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+launchRouter.post("/launch/vendor-approvals/:approvalId/decide", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const user = req.authedUser!;
   const parsed = decideApprovalSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -356,7 +368,7 @@ launchRouter.post("/launch/vendor-approvals/:approvalId/decide", requireAuth, re
 
 const budgetSchema = z.object({ budgetCents: z.number().int().min(0) });
 
-launchRouter.post("/launch/:id/budget", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+launchRouter.post("/launch/:id/budget", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const user = req.authedUser!;
   const parsed = budgetSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -376,7 +388,7 @@ launchRouter.post("/launch/:id/budget", requireAuth, requireRole(...BROKERAGE_AD
 // Portal destinations.
 // ---------------------------------------------------------------------
 
-launchRouter.post("/launch/:id/portal-destinations", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/portal-destinations", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ portalName: z.string().min(1).max(200) }).safeParse(req.body);
   if (!parsed.success) {
@@ -392,7 +404,7 @@ launchRouter.post("/launch/:id/portal-destinations", requireAuth, async (req, re
   }
 });
 
-launchRouter.post("/launch/portal-destinations/:destId/submit", requireAuth, async (req, res) => {
+launchRouter.post("/launch/portal-destinations/:destId/submit", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ listingUrl: z.string().max(2000).optional() }).safeParse(req.body);
   if (!parsed.success) {
@@ -408,7 +420,7 @@ launchRouter.post("/launch/portal-destinations/:destId/submit", requireAuth, asy
   }
 });
 
-launchRouter.post("/launch/portal-destinations/:destId/fail", requireAuth, async (req, res) => {
+launchRouter.post("/launch/portal-destinations/:destId/fail", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ failureReason: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!parsed.success) {
@@ -424,7 +436,7 @@ launchRouter.post("/launch/portal-destinations/:destId/fail", requireAuth, async
   }
 });
 
-launchRouter.post("/launch/portal-destinations/:destId/live", requireAuth, async (req, res) => {
+launchRouter.post("/launch/portal-destinations/:destId/live", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ listingUrl: z.string().max(2000).optional() }).safeParse(req.body);
   if (!parsed.success) {
@@ -444,7 +456,7 @@ launchRouter.post("/launch/portal-destinations/:destId/live", requireAuth, async
 // Market Ready / Listing Live.
 // ---------------------------------------------------------------------
 
-launchRouter.post("/launch/:id/market-ready/evaluate", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/market-ready/evaluate", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   try {
     const result = await evaluateAndUpdateMarketReady(req.params.id, user.brokerageId, actorFrom(user));
@@ -455,7 +467,7 @@ launchRouter.post("/launch/:id/market-ready/evaluate", requireAuth, async (req, 
   }
 });
 
-launchRouter.post("/launch/:id/market-ready/override", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+launchRouter.post("/launch/:id/market-ready/override", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const user = req.authedUser!;
   const parsed = z.object({ reason: z.string().min(1).max(2000) }).safeParse(req.body);
   if (!parsed.success) {
@@ -471,7 +483,7 @@ launchRouter.post("/launch/:id/market-ready/override", requireAuth, requireRole(
   }
 });
 
-launchRouter.post("/launch/:id/confirm-live", requireAuth, async (req, res) => {
+launchRouter.post("/launch/:id/confirm-live", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   try {
     const plan = await confirmLaunchLive(req.params.id, user.brokerageId, actorFrom(user));

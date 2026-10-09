@@ -3,6 +3,7 @@ import multer from "multer";
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
 import {
   DocumentStorageError,
@@ -36,6 +37,17 @@ import {
 // app. See lib/documents.ts's own "Tenant chokepoints" comment for the
 // fetch-time discipline this relies on.
 export const documentsRouter = Router();
+
+// R-F35b — Agency-agreement and listing documents are part of Run. Every
+// session route requires run.access after requireAuth and before the
+// handler's tenant check, matching routes/transactions.ts. The denial is
+// requireEntitlement's existing 403. Two routes stay open because they
+// have no session: POST /webhook (e-sign provider, HMAC over the raw
+// body) and GET /signed-download/:versionId (the query signature is the
+// credential; requireEntitlement would 401 every redemption). Grow
+// appraisal presentation writes go through lib/documentStorage.ts, not
+// these routes, and no Grow page calls them.
+const requiresRunAccess = requireEntitlement("run.access");
 
 // AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
 // routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
@@ -145,7 +157,7 @@ const agencyTermsSchema = z
     path: ["flatFeeCents"],
   });
 
-documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, async (req, res) => {
+documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const parsed = agencyTermsSchema.safeParse(req.body);
@@ -172,7 +184,7 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, async (r
   }
 });
 
-documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, async (req, res) => {
+documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -186,7 +198,7 @@ documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, async (r
 
 // Template population — idempotent/incremental, safe to call again after
 // agency terms are captured or a prior partial run (see lib/documents.ts).
-documentsRouter.post("/packages/:packageId/populate", requireAuth, async (req, res) => {
+documentsRouter.post("/packages/:packageId/populate", requireAuth, requiresRunAccess, async (req, res) => {
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;
@@ -198,7 +210,7 @@ documentsRouter.post("/packages/:packageId/populate", requireAuth, async (req, r
   }
 });
 
-documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, async (req, res) => {
+documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, requiresRunAccess, async (req, res) => {
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;
@@ -286,7 +298,7 @@ documentsRouter.get("/signed-download/:versionId", async (req, res) => {
 // Lets the agent preview a generated (or signed) document's stored content
 // before sending it, or review what was actually sent (Phase 5 "completed
 // document storage" needs to be genuinely retrievable, not just a key).
-documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
+documentsRouter.get("/:documentId/content", requireAuth, requiresRunAccess, async (req, res) => {
   const documentId = readIdParam(res, req.params.documentId, "document");
   if (documentId === null) return;
   const user = req.authedUser!;
@@ -317,6 +329,7 @@ documentsRouter.get("/:documentId/content", requireAuth, async (req, res) => {
 documentsRouter.post(
   "/:documentId/versions",
   requireAuth,
+  requiresRunAccess,
   documentUpload.single("file"),
   async (req, res) => {
     const documentId = readIdParam(res, req.params.documentId, "document");
@@ -384,7 +397,7 @@ documentsRouter.post(
   },
 );
 
-documentsRouter.post("/:documentId/signed-download", requireAuth, async (req, res) => {
+documentsRouter.post("/:documentId/signed-download", requireAuth, requiresRunAccess, async (req, res) => {
   const documentId = readIdParam(res, req.params.documentId, "document");
   if (documentId === null) return;
   const user = req.authedUser!;
@@ -413,7 +426,7 @@ documentsRouter.post("/:documentId/signed-download", requireAuth, async (req, re
   }
 });
 
-documentsRouter.post("/:documentId/quarantine", requireAuth, async (req, res) => {
+documentsRouter.post("/:documentId/quarantine", requireAuth, requiresRunAccess, async (req, res) => {
   const documentId = readIdParam(res, req.params.documentId, "document");
   if (documentId === null) return;
   const user = req.authedUser!;
@@ -440,7 +453,7 @@ documentsRouter.post("/:documentId/quarantine", requireAuth, async (req, res) =>
   }
 });
 
-documentsRouter.get("/packages/by-property/:propertyId", requireAuth, async (req, res) => {
+documentsRouter.get("/packages/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
