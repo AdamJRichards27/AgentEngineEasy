@@ -19,10 +19,12 @@ import type {
 import { logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 import {
+  noteGrowAppraisalIsolationRejection,
   noteGrowComparableSaleIsolationRejection,
   noteGrowMarketCompetitionIsolationRejection,
   noteGrowPartyIsolationRejection,
 } from "./grow/isolationRejection.js";
+import { appraisalPropertyInBrokerage } from "./appraisals.js";
 import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import {
   assertAppraisalInBrokerage,
@@ -353,10 +355,15 @@ export async function generateAppraisalPresentation(
     metadata: { appraisalId: appraisal.id },
   });
 
-  await db
+  const [updatedPresentation] = await db
     .update(appraisals)
     .set({ presentationDocumentId: documentId, updatedAt: new Date() })
-    .where(eq(appraisals.id, appraisal.id));
+    .where(and(eq(appraisals.id, appraisal.id), appraisalPropertyInBrokerage(input.brokerageId)))
+    .returning({ id: appraisals.id });
+  if (!updatedPresentation) {
+    await noteGrowAppraisalIsolationRejection(appraisal.id, input.brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
 
   await logAudit({
     userId: input.userId,

@@ -26,6 +26,7 @@ import { and, asc, desc, eq, lte } from "drizzle-orm";
 import {
   db,
   communicationParticipants,
+  communicationThreads,
   growContactChannelConsents,
   growContactChannelSuppressions,
   growContactDncrStatuses,
@@ -76,6 +77,7 @@ interface OutboundConsentSnapshot {
 export interface OutboundConsentLoadInput {
   id: number;
   brokerageId: number;
+  threadId: number;
   channel: string;
   classification: string;
   recipientDestination: string | null;
@@ -178,12 +180,25 @@ export const outboundConsentReads = {
 async function resolveRecipientPartyId(message: OutboundConsentLoadInput): Promise<number | null> {
   if (message.partyId != null) return message.partyId;
   if (message.recipientParticipantId == null) return null;
+  // Participants have no brokerage_id. A row counts only when it sits on
+  // this message's thread and that thread belongs to this brokerage.
+  // A miss throws CommunicationTenancyError, so the send is refused
+  // before the legacy no-party consent path.
   const [participant] = await db
     .select({ partyId: communicationParticipants.partyId })
     .from(communicationParticipants)
-    .where(eq(communicationParticipants.id, message.recipientParticipantId))
+    .innerJoin(communicationThreads, eq(communicationThreads.id, communicationParticipants.threadId))
+    .where(
+      and(
+        eq(communicationParticipants.id, message.recipientParticipantId),
+        eq(communicationParticipants.threadId, message.threadId),
+        eq(communicationThreads.id, message.threadId),
+        eq(communicationThreads.brokerageId, message.brokerageId),
+      ),
+    )
     .limit(1);
-  return participant?.partyId ?? null;
+  if (!participant) throw new CommunicationTenancyError();
+  return participant.partyId ?? null;
 }
 
 function f2HeadIsAffirmative(row: GrowContactChannelConsent, now: Date): boolean {
@@ -334,6 +349,7 @@ export async function assertMessageMayLeave(message: CommunicationMessage, actor
   const input: OutboundConsentLoadInput = {
     id: message.id,
     brokerageId: message.brokerageId,
+    threadId: message.threadId,
     channel: message.channel,
     classification: message.classification,
     recipientDestination: message.recipientDestination,

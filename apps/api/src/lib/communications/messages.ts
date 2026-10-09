@@ -228,7 +228,17 @@ export async function listRecentMessagesForBrokerage(
 
 export async function listParticipants(threadId: number, brokerageId: number): Promise<CommunicationParticipant[]> {
   await getThread(threadId, brokerageId); // tenant check
-  return db.select().from(communicationParticipants).where(eq(communicationParticipants.threadId, threadId));
+  // communication_participants has no brokerage_id. The thread join is the
+  // tenant predicate, not only the getThread check above.
+  const rows = await db
+    .select({ participant: communicationParticipants })
+    .from(communicationParticipants)
+    .innerJoin(
+      communicationThreads,
+      and(eq(communicationThreads.id, communicationParticipants.threadId), eq(communicationThreads.brokerageId, brokerageId)),
+    )
+    .where(eq(communicationParticipants.threadId, threadId));
+  return rows.map((row) => row.participant);
 }
 
 /**
@@ -294,8 +304,16 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
   let recipientDestination = input.recipientDestination ?? null;
 
   if (input.recipientParticipantId != null) {
-    const [participant] = await db.select().from(communicationParticipants).where(eq(communicationParticipants.id, input.recipientParticipantId));
-    if (!participant || participant.threadId !== input.threadId) throw new CommunicationTenancyError();
+    const [row] = await db
+      .select({ participant: communicationParticipants })
+      .from(communicationParticipants)
+      .innerJoin(
+        communicationThreads,
+        and(eq(communicationThreads.id, communicationParticipants.threadId), eq(communicationThreads.brokerageId, input.brokerageId)),
+      )
+      .where(and(eq(communicationParticipants.id, input.recipientParticipantId), eq(communicationParticipants.threadId, input.threadId)));
+    if (!row) throw new CommunicationTenancyError();
+    const participant = row.participant;
     recipientDisplayName = participant.displayName;
     // SMS/EMAIL go straight to their own channel's destination (no
     // cross-channel fallback — a message drafted for SMS should never
