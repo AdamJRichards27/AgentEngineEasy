@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, appraisals, properties } from "@aee/db";
 import type { Appraisal } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
@@ -24,6 +24,25 @@ import { noteGrowPropertyIsolationRejection } from "./grow/isolationRejection.js
  * free-form JSON — same "no invented integration" discipline
  * offers.conditions already established.
  */
+
+/**
+ * `appraisals` has no brokerage_id. A row belongs to a brokerage only when
+ * its property does. Updates cannot join, so the predicate is this
+ * subquery in the WHERE.
+ */
+export function appraisalPropertyInBrokerage(brokerageId: number) {
+  return sql`${appraisals.propertyId} in (select ${properties.id} from ${properties} where ${properties.brokerageId} = ${brokerageId})`;
+}
+
+async function selectAppraisalForBrokerageProperty(propertyId: number, brokerageId: number): Promise<Appraisal | undefined> {
+  const [row] = await db
+    .select({ appraisal: appraisals })
+    .from(appraisals)
+    .innerJoin(properties, eq(properties.id, appraisals.propertyId))
+    .where(and(eq(appraisals.propertyId, propertyId), eq(properties.brokerageId, brokerageId)));
+  return row?.appraisal;
+}
+
 export async function getOrCreateAppraisal(input: {
   propertyId: number;
   userId: number;
@@ -35,7 +54,7 @@ export async function getOrCreateAppraisal(input: {
     throw new Error(`Property ${input.propertyId} not found`);
   }
 
-  const [existing] = await db.select().from(appraisals).where(eq(appraisals.propertyId, input.propertyId));
+  const existing = await selectAppraisalForBrokerageProperty(input.propertyId, input.brokerageId);
   if (existing) {
     return { appraisal: existing, created: false };
   }
@@ -105,8 +124,12 @@ export async function updateAppraisal(input: {
       comparableSales: input.comparableSales !== undefined ? input.comparableSales : appraisal.comparableSales,
       updatedAt: new Date(),
     })
-    .where(eq(appraisals.id, appraisal.id))
+    .where(and(eq(appraisals.id, appraisal.id), appraisalPropertyInBrokerage(input.brokerageId)))
     .returning();
+  if (!updated) {
+    await noteGrowPropertyIsolationRejection(input.propertyId, input.brokerageId);
+    throw new Error(`Property ${input.propertyId} not found`);
+  }
 
   await logAudit({
     userId: input.userId,
@@ -127,7 +150,7 @@ export async function finaliseAppraisal(input: { propertyId: number; userId: num
     throw new Error(`Property ${input.propertyId} not found`);
   }
 
-  const [existing] = await db.select().from(appraisals).where(eq(appraisals.propertyId, input.propertyId));
+  const existing = await selectAppraisalForBrokerageProperty(input.propertyId, input.brokerageId);
   if (!existing) {
     throw new Error(`No appraisal has been started for property ${input.propertyId}.`);
   }
@@ -146,8 +169,12 @@ export async function finaliseAppraisal(input: { propertyId: number; userId: num
   const [updated] = await db
     .update(appraisals)
     .set({ isFinalised: true, finalisedSnapshot, updatedAt: new Date() })
-    .where(eq(appraisals.id, existing.id))
+    .where(and(eq(appraisals.id, existing.id), appraisalPropertyInBrokerage(input.brokerageId)))
     .returning();
+  if (!updated) {
+    await noteGrowPropertyIsolationRejection(input.propertyId, input.brokerageId);
+    throw new Error(`Property ${input.propertyId} not found`);
+  }
 
   await logAudit({
     userId: input.userId,
@@ -187,7 +214,7 @@ export async function finaliseAppraisal(input: { propertyId: number; userId: num
   return updated;
 }
 
-export async function getAppraisalByProperty(propertyId: number): Promise<Appraisal | null> {
-  const [appraisal] = await db.select().from(appraisals).where(eq(appraisals.propertyId, propertyId));
+export async function getAppraisalByProperty(propertyId: number, brokerageId: number): Promise<Appraisal | null> {
+  const appraisal = await selectAppraisalForBrokerageProperty(propertyId, brokerageId);
   return appraisal ?? null;
 }

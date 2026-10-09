@@ -13,7 +13,7 @@ import type { Appraisal, AppraisalComparableSale, AppraisalMarketCompetition } f
 import { publishDomainEvent, currentCorrelationId, logger, type AgentEngineEasyEventType } from "@aee/events";
 import { partyDisplayName as computePartyDisplayName } from "./communications/recipientResolution.js";
 import { logAudit } from "./audit.js";
-import { getOrCreateAppraisal } from "./appraisals.js";
+import { appraisalPropertyInBrokerage, getOrCreateAppraisal } from "./appraisals.js";
 import {
   APPRAISAL_LIFECYCLE_CLOSED_STATUSES,
   AppraisalLifecycleClosedError,
@@ -97,6 +97,7 @@ function unchangedClosedAppraisalMessage(appraisal: Pick<Appraisal, "status" | "
  * when there is nothing to fill. */
 async function fillEmptyAppraisalLinks(
   base: Appraisal,
+  brokerageId: number,
   links: {
     partyId?: number | null;
     opportunityId?: number | null;
@@ -112,7 +113,15 @@ async function fillEmptyAppraisalLinks(
   if (Object.keys(patch).length === 0) return { appraisal: base, wrote: false };
 
   patch.updatedAt = new Date();
-  const [updated] = await db.update(appraisals).set(patch).where(eq(appraisals.id, base.id)).returning();
+  const [updated] = await db
+    .update(appraisals)
+    .set(patch)
+    .where(and(eq(appraisals.id, base.id), appraisalPropertyInBrokerage(brokerageId)))
+    .returning();
+  if (!updated) {
+    await noteGrowAppraisalIsolationRejection(base.id, brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
   return { appraisal: updated, wrote: true };
 }
 
@@ -141,15 +150,15 @@ async function publishAppraisalEvent(eventType: AgentEngineEasyEventType, apprai
 }
 
 /** Tenant isolation: every Grow appraisal function resolves the row through
- * this helper first, joining to properties.brokerageId (there is no
- * denormalised brokerageId on appraisals -- see schema comment). Never
- * trust a caller-supplied brokerageId without this join. */
+ * this helper first. `appraisals` has no brokerage_id, so the select
+ * inner-joins `properties` and requires `properties.brokerage_id` in the
+ * WHERE, not only in a later JavaScript comparison. */
 export async function assertAppraisalInBrokerage(appraisalId: number, brokerageId: number): Promise<Appraisal> {
   const [row] = await db
     .select({ appraisal: appraisals, propertyBrokerageId: properties.brokerageId })
     .from(appraisals)
     .innerJoin(properties, eq(properties.id, appraisals.propertyId))
-    .where(eq(appraisals.id, appraisalId));
+    .where(and(eq(appraisals.id, appraisalId), eq(properties.brokerageId, brokerageId)));
   if (!row || row.propertyBrokerageId !== brokerageId) {
     await noteGrowAppraisalIsolationRejection(appraisalId, brokerageId);
     throw new AppraisalAccessError("Appraisal not found");
@@ -202,7 +211,7 @@ export async function createAppraisalFromContact(input: {
     }
   }
 
-  const { appraisal: updated, wrote } = await fillEmptyAppraisalLinks(base, {
+  const { appraisal: updated, wrote } = await fillEmptyAppraisalLinks(base, input.brokerageId, {
     partyId: input.partyId,
     ownerUserId: input.userId,
     createdByUserId: input.userId,
@@ -258,7 +267,7 @@ export async function createAppraisalFromOpportunity(input: {
   }
 
   const linkingOpportunity = base.opportunityId == null;
-  const { appraisal: updated, wrote } = await fillEmptyAppraisalLinks(base, {
+  const { appraisal: updated, wrote } = await fillEmptyAppraisalLinks(base, input.brokerageId, {
     partyId: opportunity.partyId,
     opportunityId: opportunity.id,
     ownerUserId: opportunity.ownerUserId ?? input.userId,
@@ -365,7 +374,15 @@ export async function updateAppraisalWorkspace(input: UpdateAppraisalWorkspaceIn
   if (input.appointmentAt !== undefined) patch.appointmentAt = input.appointmentAt ? new Date(input.appointmentAt) : null;
   if (input.presentationAt !== undefined) patch.presentationAt = input.presentationAt ? new Date(input.presentationAt) : null;
 
-  const [updated] = await db.update(appraisals).set(patch).where(eq(appraisals.id, existing.id)).returning();
+  const [updated] = await db
+    .update(appraisals)
+    .set(patch)
+    .where(and(eq(appraisals.id, existing.id), appraisalPropertyInBrokerage(input.brokerageId)))
+    .returning();
+  if (!updated) {
+    await noteGrowAppraisalIsolationRejection(existing.id, input.brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
 
   await logAudit({
     userId: input.userId,
@@ -401,7 +418,15 @@ export async function transitionAppraisalStatus(input: {
   if (input.toStatus === "VIEWED" && !existing.viewedAt) patch.viewedAt = new Date();
   if (input.toStatus === "PRESENTED" && !existing.presentationAt) patch.presentationAt = new Date();
 
-  const [updated] = await db.update(appraisals).set(patch).where(eq(appraisals.id, existing.id)).returning();
+  const [updated] = await db
+    .update(appraisals)
+    .set(patch)
+    .where(and(eq(appraisals.id, existing.id), appraisalPropertyInBrokerage(input.brokerageId)))
+    .returning();
+  if (!updated) {
+    await noteGrowAppraisalIsolationRejection(existing.id, input.brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
 
   await logAudit({
     userId: input.userId,
@@ -462,8 +487,12 @@ export async function recordAppraisalOutcome(input: {
       outcomeAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(appraisals.id, existing.id))
+    .where(and(eq(appraisals.id, existing.id), appraisalPropertyInBrokerage(input.brokerageId)))
     .returning();
+  if (!updated) {
+    await noteGrowAppraisalIsolationRejection(existing.id, input.brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
 
   await logAudit({
     userId: input.userId,
@@ -531,8 +560,12 @@ export async function scheduleAppraisalFollowUp(input: {
       status: nextStatus,
       updatedAt: new Date(),
     })
-    .where(eq(appraisals.id, existing.id))
+    .where(and(eq(appraisals.id, existing.id), appraisalPropertyInBrokerage(input.brokerageId)))
     .returning();
+  if (!updated) {
+    await noteGrowAppraisalIsolationRejection(existing.id, input.brokerageId);
+    throw new AppraisalAccessError("Appraisal not found");
+  }
 
   await logAudit({
     userId: input.userId,

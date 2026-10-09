@@ -112,7 +112,7 @@ appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) =
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const appraisal = await getAppraisalByProperty(propertyId);
+  const appraisal = await getAppraisalByProperty(propertyId, user.brokerageId);
   res.json({ appraisal });
 });
 

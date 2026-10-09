@@ -129,7 +129,7 @@ test("finaliseAppraisal is idempotent and publishes APPRAISAL_COMPLETED exactly 
 });
 
 test("finaliseAppraisal refuses to finalise without a price range, and getAppraisalByProperty is null before one is started", async () => {
-  assert.equal(await getAppraisalByProperty(propertyIdB), null);
+  assert.equal(await getAppraisalByProperty(propertyIdB, B.brokerageId), null);
 
   await getOrCreateAppraisal({ propertyId: propertyIdB, userId: B.agent.user.id, brokerageId: B.brokerageId });
   await assert.rejects(
