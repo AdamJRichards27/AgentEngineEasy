@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, transactions, properties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { logAudit } from "../lib/audit.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   getTransactionByProperty,
@@ -223,42 +224,118 @@ transactionsRouter.post("/:id/settlement-schedule", requireAuth, requiresRunAcce
   );
 });
 
-transactionsRouter.post("/:id/settlement-complete", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
-  const id = accessCheckedTransactionId(req);
-  const user = req.authedUser!;
-  await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
-});
+// Settlement completion, commission calculation (including force) and
+// funds-received recording are Brokerage Administrator sign-off, same
+// precedent as agent-paid and close below. The role gate stays after
+// requireTransactionAccess so another brokerage is still 404, and after
+// requiresRunAccess so a missing run.access is still the entitlement 403.
+// No new force flag: completeSettlement's existing prerequisites still
+// run, and the automatic commission calculation inside that function is
+// unchanged (it runs as part of the administrator's settlement action).
+//
+// Denial audit is local to these three routes. requireRole itself is
+// unchanged, so agent-paid and close keep their existing bare 403.
+// Action names follow the snake_case `*_denied` audit convention
+// (grow_call_destination_binding_denied and the rest). There is no role
+// or reason column on audit_logs; actorRole and ROLE_NOT_PERMITTED live
+// in updatedValue, the same JSON-context slot those denial rows use.
+// Cross-brokerage writes nothing: requireTransactionAccess has already
+// answered 404, and a denial row that stored the foreign transaction id
+// would confirm that the row exists.
+const ROLE_NOT_PERMITTED = "ROLE_NOT_PERMITTED";
 
-transactionsRouter.post("/:id/calculate-commission", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
-  const id = accessCheckedTransactionId(req);
-  const user = req.authedUser!;
-  await handle(
-    () => calculateCommission({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force: req.body?.force === true }),
-    res,
-  );
-});
+function requireSettlementFundsAdmin(actionFor: (req: Request) => string) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const user = req.authedUser;
+    if (!user) {
+      res.status(401).json({ error: "Not authenticated" });
+      return;
+    }
+    if (BROKERAGE_ADMIN_ROLES.includes(user.role)) {
+      next();
+      return;
+    }
+    // logAudit's default path is best-effort: a failed insert is logged as
+    // log_audit_failed and not rethrown. Strict mode is for consent writes
+    // that must roll a source row back with the audit. A refusal has no
+    // source write, so an audit failure must stay a 403 and must not call
+    // next(). That is fail-closed on the action without turning the
+    // refusal into a 500.
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: actionFor(req),
+      recordType: "transaction",
+      recordId: String(accessCheckedTransactionId(req)),
+      updatedValue: JSON.stringify({ actorRole: user.role, reason: ROLE_NOT_PERMITTED }),
+    });
+    res.status(403).json({ error: "Forbidden" });
+  };
+}
+
+function commissionDenialAction(req: Request): string {
+  // Classify the attempt only. The request body, including any amount, is
+  // not stored.
+  return req.body?.force === true ? "commission_calculation_force_denied" : "commission_calculation_denied";
+}
+
+transactionsRouter.post(
+  "/:id/settlement-complete",
+  requireAuth,
+  requiresRunAccess,
+  requireTransactionAccess,
+  requireSettlementFundsAdmin(() => "settlement_complete_denied"),
+  async (req, res) => {
+    const id = accessCheckedTransactionId(req);
+    const user = req.authedUser!;
+    await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+  },
+);
+
+transactionsRouter.post(
+  "/:id/calculate-commission",
+  requireAuth,
+  requiresRunAccess,
+  requireTransactionAccess,
+  requireSettlementFundsAdmin(commissionDenialAction),
+  async (req, res) => {
+    const id = accessCheckedTransactionId(req);
+    const user = req.authedUser!;
+    await handle(
+      () => calculateCommission({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force: req.body?.force === true }),
+      res,
+    );
+  },
+);
 
 const fundsReceivedSchema = z.object({ amountCents: z.number().int().positive() });
 
-transactionsRouter.post("/:id/funds-received", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
-  const id = accessCheckedTransactionId(req);
-  const parsed = fundsReceivedSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.flatten() });
-    return;
-  }
-  const user = req.authedUser!;
-  await handle(
-    () =>
-      recordFundsReceived({
-        transactionId: id,
-        userId: user.id,
-        brokerageId: user.brokerageId,
-        amountCents: parsed.data.amountCents,
-      }),
-    res,
-  );
-});
+transactionsRouter.post(
+  "/:id/funds-received",
+  requireAuth,
+  requiresRunAccess,
+  requireTransactionAccess,
+  requireSettlementFundsAdmin(() => "funds_received_denied"),
+  async (req, res) => {
+    const id = accessCheckedTransactionId(req);
+    const parsed = fundsReceivedSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.flatten() });
+      return;
+    }
+    const user = req.authedUser!;
+    await handle(
+      () =>
+        recordFundsReceived({
+          transactionId: id,
+          userId: user.id,
+          brokerageId: user.brokerageId,
+          amountCents: parsed.data.amountCents,
+        }),
+      res,
+    );
+  },
+);
 
 // Financial disbursement sign-off — restricted to Brokerage Administrators,
 // same precedent as refunds (Phase 6) and AML exception resolution (Phase 4).

@@ -117,7 +117,9 @@ test("settlement cannot be scheduled or completed before the contract is signed,
   assert.equal((await getDomainEventsForProperty(propertyId, "SETTLEMENT_SCHEDULED")).length, 0);
   assert.deepEqual(await auditIds(propertyId), beforeAudits);
 
-  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.agent.cookie);
+  // Prerequisite behaviour, not a role test: the caller is a Brokerage Administrator
+  // so the settlement-complete gate does not answer 403 before this check.
+  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(completeRes.status, 400);
   const completeBody = await bodyOf<{ error: string }>(completeRes);
   assert.equal(completeBody.error, `Transaction ${transactionId} cannot complete settlement before the contract is signed.`);
