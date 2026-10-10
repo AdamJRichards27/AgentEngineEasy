@@ -289,9 +289,16 @@ test("safety: quiet-hours defers the send rather than dispatching immediately", 
   const { connection } = await createActiveMockSmsConnection(A.brokerageId, actor);
   const { message } = await draftSmsMessage(A.brokerageId, A.admin.cookie, A.admin.user.id);
 
-  // A near-24h window (all but the last minute of the day) so this passes
-  // deterministically regardless of what time the test actually runs.
-  await updateCommunicationSettings(A.brokerageId, { timeZone: "UTC", quietHoursStart: "00:00", quietHoursEnd: "23:59" });
+  // Quiet hours are half-open [start, end), so a fixed 00:00–23:59 window
+  // excludes minute 23:59 and the send goes out immediately. A two-hour
+  // window centred on now always contains the current minute, including
+  // when it wraps midnight.
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hhmm = (offsetMinutes: number) => {
+    const at = new Date(Date.now() + offsetMinutes * 60_000);
+    return `${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())}`;
+  };
+  await updateCommunicationSettings(A.brokerageId, { timeZone: "UTC", quietHoursStart: hhmm(-60), quietHoursEnd: hhmm(60) });
   try {
     const result = await sendSmsViaIntegration({ messageId: message.id, brokerageId: A.brokerageId, connectionId: connection.id, actor });
     assert.equal(result.outcome, "DEFERRED_QUIET_HOURS");
