@@ -334,7 +334,7 @@ test("signed but still conditional settlement completion is refused and changes 
   assert.equal(beforeProperty.workflowStage, "Settlement");
   const beforeAudits = await auditIds(propertyId);
 
-  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.agent.cookie);
+  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(completeRes.status, 400);
   const completeBody = await bodyOf<{ error: string }>(completeRes);
   assert.equal(completeBody.error, `Transaction ${transactionId} cannot complete settlement until it is unconditional.`);
@@ -392,7 +392,7 @@ test("signed unconditional settlement completes as before, and a replay stays 20
   assert.deepEqual(await loadTransaction(transactionId), beforeForeign);
   assert.equal((await getDomainEventsForProperty(propertyId, "SETTLEMENT_COMPLETED")).length, 0);
 
-  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.agent.cookie);
+  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(completeRes.status, 200, await completeRes.text());
   const settled = await loadTransaction(transactionId);
   assert.equal(settled.status, "Settled");
@@ -403,7 +403,7 @@ test("signed unconditional settlement completes as before, and a replay stays 20
   assert.equal(audits.filter((row) => row.action === "settlement_completed").length, 1);
 
   const auditsAfterComplete = await auditIds(propertyId);
-  const replayRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.agent.cookie);
+  const replayRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(replayRes.status, 200, await replayRes.text());
   const replayed = await loadTransaction(transactionId);
   assert.equal(replayed.status, "Settled");
