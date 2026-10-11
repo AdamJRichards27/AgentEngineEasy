@@ -220,6 +220,7 @@ amlRouter.post("/:verificationId/resolve-exception", requireAuth, requiresRunAcc
       brokerageId: user.brokerageId,
     });
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "aml_exception_resolved",
       recordType: "aml_verification",
@@ -245,6 +246,7 @@ amlRouter.post("/:verificationId/retry", requireAuth, requiresRunAccess, async (
   try {
     const verification = await retryAmlVerification(verificationId, user.brokerageId);
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "aml_verification_retried",
       recordType: "aml_verification",

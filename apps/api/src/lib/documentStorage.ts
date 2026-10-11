@@ -685,6 +685,7 @@ async function quarantinePendingVersion(input: {
       .returning();
     if (!quarantined) return false;
     await tx.insert(auditLogs).values({
+      brokerageId: input.version.brokerageId,
       userId: input.actorUserId ?? null,
       action: input.action,
       recordType: "document_object_version",
@@ -778,6 +779,7 @@ async function finalizePendingVersion(input: {
       })
       .where(eq(documents.id, currentVersion.documentId));
     await tx.insert(auditLogs).values({
+      brokerageId: activeVersion.brokerageId,
       userId: input.actorUserId ?? null,
       action: input.action,
       recordType: "document_object_version",
@@ -893,6 +895,7 @@ export async function ingestDocumentVersion(
       })
       .returning();
     await tx.insert(auditLogs).values({
+      brokerageId: input.brokerageId,
       userId: input.actorUserId ?? null,
       action: "document_version_upload_pending",
       recordType: "document_object_version",
@@ -928,6 +931,7 @@ export async function ingestDocumentVersion(
     acknowledgement = await provider.headObject(pending.version.storageObjectKey);
   } catch (error) {
     await logAudit({
+      brokerageId: input.brokerageId,
       userId: input.actorUserId,
       action: "document_version_storage_write_failed",
       recordType: "document_object_version",
@@ -971,6 +975,7 @@ export async function ingestDocumentVersion(
     });
   } catch (error) {
     await logAudit({
+      brokerageId: input.brokerageId,
       userId: input.actorUserId,
       action: "document_version_finalization_failed",
       recordType: "document_object_version",
@@ -1193,6 +1198,7 @@ export async function ingestDocumentVersionBatch(
       })
       .returning();
     await tx.insert(auditLogs).values({
+      brokerageId: item.input.brokerageId,
       userId: item.input.actorUserId ?? null,
       action: "document_version_upload_pending",
       recordType: "document_object_version",
@@ -1245,6 +1251,7 @@ export async function ingestDocumentVersionBatch(
             ),
           );
         await tx.insert(auditLogs).values({
+          brokerageId: pending.input.brokerageId,
           userId: pending.input.actorUserId ?? null,
           action: "document_version_integrity_quarantined",
           recordType: "document_object_version",
@@ -1264,6 +1271,7 @@ export async function ingestDocumentVersionBatch(
       }
     } catch (error) {
       await tx.insert(auditLogs).values({
+        brokerageId: pending.input.brokerageId,
         userId: pending.input.actorUserId ?? null,
         action: "document_version_storage_write_failed",
         recordType: "document_object_version",
@@ -1339,6 +1347,7 @@ export async function ingestDocumentVersionBatch(
       })
       .where(eq(documents.id, activeVersion.documentId));
     await tx.insert(auditLogs).values({
+      brokerageId: pending.input.brokerageId,
       userId: pending.input.actorUserId ?? null,
       action: pending.metadataCreated
         ? "document_version_upload_activated"

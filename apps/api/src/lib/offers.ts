@@ -96,6 +96,7 @@ export async function createOffer(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "offer_received",
     recordType: "offer",
@@ -134,6 +135,15 @@ export async function createOffer(input: {
   return offer;
 }
 
+/** Offer withdraw/decline already hold the offer row, not the tenant. One property lookup supplies the brokerage the property row already stores. */
+async function brokerageIdForProperty(propertyId: number): Promise<number | undefined> {
+  const [property] = await db
+    .select({ brokerageId: properties.brokerageId })
+    .from(properties)
+    .where(eq(properties.id, propertyId));
+  return property?.brokerageId;
+}
+
 export async function listOffersForProperty(propertyId: number): Promise<Offer[]> {
   return db.select().from(offers).where(eq(offers.propertyId, propertyId));
 }
@@ -146,7 +156,14 @@ export async function withdrawOffer(offerId: number, userId: number): Promise<Of
     throw new Error(`Offer ${offerId} cannot be withdrawn from status ${offer.status}`);
   }
   const [updated] = await db.update(offers).set({ status: "Withdrawn" }).where(eq(offers.id, offerId)).returning();
-  await logAudit({ userId, action: "offer_withdrawn", recordType: "offer", recordId: String(offerId), propertyId: offer.propertyId });
+  await logAudit({
+    brokerageId: await brokerageIdForProperty(offer.propertyId),
+    userId,
+    action: "offer_withdrawn",
+    recordType: "offer",
+    recordId: String(offerId),
+    propertyId: offer.propertyId,
+  });
   return updated;
 }
 
@@ -158,7 +175,14 @@ export async function declineOffer(offerId: number, userId: number): Promise<Off
     throw new Error(`Offer ${offerId} cannot be declined from status ${offer.status}`);
   }
   const [updated] = await db.update(offers).set({ status: "Declined" }).where(eq(offers.id, offerId)).returning();
-  await logAudit({ userId, action: "offer_declined", recordType: "offer", recordId: String(offerId), propertyId: offer.propertyId });
+  await logAudit({
+    brokerageId: await brokerageIdForProperty(offer.propertyId),
+    userId,
+    action: "offer_declined",
+    recordType: "offer",
+    recordId: String(offerId),
+    propertyId: offer.propertyId,
+  });
   return updated;
 }
 

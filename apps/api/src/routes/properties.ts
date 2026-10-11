@@ -261,6 +261,7 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
   const correlationId = currentCorrelationId();
 
   await logAudit({
+    brokerageId: user.brokerageId,
     userId: user.id,
     action: "property_created",
     recordType: "property",
@@ -554,6 +555,7 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
     .returning();
 
   await logAudit({
+    brokerageId: user.brokerageId,
     userId: user.id,
     action: "ownership_review_resolved",
     recordType: "property",
@@ -604,6 +606,7 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
     .returning();
 
   await logAudit({
+    brokerageId: user.brokerageId,
     userId: user.id,
     action: "listing_details_updated",
     recordType: "property",

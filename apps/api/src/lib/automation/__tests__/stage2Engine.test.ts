@@ -42,6 +42,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
+  auditLogs,
   brokerages,
   users,
   properties,
@@ -194,6 +195,8 @@ async function cleanupBrokerage(brokerageId: number): Promise<void> {
   await db.delete(domainEvents).where(eq(domainEvents.brokerageId, brokerageId));
   await db.delete(properties).where(eq(properties.brokerageId, brokerageId));
   await db.delete(users).where(eq(users.brokerageId, brokerageId));
+  // Run audit rows now reference the brokerage. Delete them before the brokerage row.
+  await db.delete(auditLogs).where(eq(auditLogs.brokerageId, brokerageId));
   await db.delete(brokerages).where(eq(brokerages.id, brokerageId));
 }
 

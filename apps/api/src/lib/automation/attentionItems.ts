@@ -95,6 +95,7 @@ export async function raiseAttentionItem(input: RaiseAttentionItemInput): Promis
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     action: "automation_attention_item_raised",
     recordType: "automation_attention_item",
     recordId: item.id,
@@ -130,6 +131,7 @@ export async function resolveAttentionItem(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.resolvedByUserId,
     action: "automation_attention_item_resolved",
     recordType: "automation_attention_item",

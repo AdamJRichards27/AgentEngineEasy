@@ -211,6 +211,7 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
   // rolled back.
   for (const siblingId of outcome.declinedSiblingIds) {
     await logAudit({
+      brokerageId: input.brokerageId,
       userId: input.userId,
       action: "offer_auto_declined",
       recordType: "offer",
@@ -223,6 +224,7 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
   await refreshTransactionSteps(outcome.propertyId);
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "offer_accepted",
     recordType: "offer",
@@ -366,6 +368,7 @@ export async function recordContractSigned(input: {
   }
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "contract_signed",
     recordType: "transaction",
@@ -394,6 +397,7 @@ export async function recordFinanceApproved(input: { transactionId: number; user
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "finance_approved",
     recordType: "transaction",
@@ -440,6 +444,7 @@ export async function scheduleSettlement(input: {
   await refreshTransactionSteps(transaction.propertyId);
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "settlement_scheduled",
     recordType: "transaction",
@@ -491,6 +496,7 @@ export async function calculateCommission(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "commission_calculated",
     recordType: "transaction",
@@ -566,6 +572,7 @@ export async function completeSettlement(input: {
   });
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "settlement_completed",
     recordType: "transaction",
@@ -616,6 +623,7 @@ export async function recordFundsReceived(input: {
   await refreshTransactionSteps(transaction.propertyId);
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "funds_received",
     recordType: "transaction",
@@ -651,6 +659,7 @@ export async function recordAgentPaid(input: { transactionId: number; userId: nu
   await refreshTransactionSteps(transaction.propertyId);
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "agent_paid",
     recordType: "transaction",
@@ -703,6 +712,7 @@ export async function recordLegalRepresentatives(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "transaction_legal_representatives_updated",
     recordType: "transaction",
@@ -825,6 +835,7 @@ export async function closeTransaction(input: {
   });
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: blockers.length > 0 ? "transaction_closed_forced" : "transaction_closed",
     recordType: "transaction",
