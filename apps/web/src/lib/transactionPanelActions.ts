@@ -1,7 +1,13 @@
 // R-F32 — which Transaction panel controls the API would accept under R-F30.
-// Derived only from fields GET /transactions/by-property already returns
+// Derived from fields GET /transactions/by-property already returns
 // (status, contractDate, and the milestone timestamps the panel already
-// reads). This does not call the API and does not invent a new status.
+// reads) plus the signed-in role useSession() already has. This does not
+// call the API and does not invent a new status.
+//
+// R-F35a — settlement completion, recording funds received, and calculating
+// commission (including force; the panel has no separate force control) are
+// Brokerage Administrator only. Hiding them is a UX nicety. The API's
+// requireRole gate stays the source of truth.
 
 export const CLOSED_TRANSACTION_NOTE = "This transaction is closed — no further changes can be recorded.";
 
@@ -30,13 +36,18 @@ export interface TransactionPanelActionVisibility {
   markUnconditional: boolean;
   /** Requires contractDate. Settled and Closed cannot be rescheduled. */
   scheduleSettlement: boolean;
-  /** Requires contractDate and a settlement date. Closed cannot be completed. */
+  /**
+   * Requires contractDate and a settlement date. Closed cannot be completed.
+   * Brokerage Administrator only.
+   */
   completeSettlement: boolean;
   /**
    * Closed refuses calculate-commission, including force. The panel has no
    * separate force control; this is the only commission action it offers.
+   * Brokerage Administrator only.
    */
   calculateCommission: boolean;
+  /** Closed refuses a new funds write. Brokerage Administrator only. */
   recordFundsReceived: boolean;
   /** Closed refuses a new agent-paid write. An already-paid row stays a no-op and has no button. */
   markAgentPaid: boolean;
@@ -46,11 +57,16 @@ export interface TransactionPanelActionVisibility {
   editLegalRepresentatives: boolean;
 }
 
-export function transactionPanelActionVisibility(transaction: TransactionPanelFields): TransactionPanelActionVisibility {
+export function transactionPanelActionVisibility(
+  transaction: TransactionPanelFields,
+  viewerRole: string | null | undefined,
+): TransactionPanelActionVisibility {
   const closed = transaction.status === "Closed";
   const settled = transaction.status === "Settled";
   const contractSigned = Boolean(transaction.contractDate);
   const settlementDone = Boolean(transaction.settlementCompletedAt);
+  // Same string every other admin-only page compares against (useSession().user.role).
+  const brokerageAdministrator = viewerRole === "Brokerage Administrator";
 
   return {
     closed,
@@ -60,9 +76,10 @@ export function transactionPanelActionVisibility(transaction: TransactionPanelFi
     markExchange: !transaction.exchangedAt && !closed,
     markUnconditional: !transaction.unconditionalAt && !closed,
     scheduleSettlement: contractSigned && !settled && !closed && !settlementDone,
-    completeSettlement: contractSigned && Boolean(transaction.settlementDate) && !closed && !settlementDone,
-    calculateCommission: !transaction.commissionCalculatedAt && !closed,
-    recordFundsReceived: !closed,
+    completeSettlement:
+      brokerageAdministrator && contractSigned && Boolean(transaction.settlementDate) && !closed && !settlementDone,
+    calculateCommission: brokerageAdministrator && !transaction.commissionCalculatedAt && !closed,
+    recordFundsReceived: brokerageAdministrator && !closed,
     markAgentPaid: !transaction.agentPaidAt && !closed,
     editConditions: !closed,
     editLegalRepresentatives: !closed,

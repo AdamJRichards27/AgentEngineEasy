@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary";
 import { apiFetch, apiErrorMessage } from "../lib/api";
+import { useSession } from "../lib/session";
 import { transactionPanelActionVisibility } from "../lib/transactionPanelActions";
 import {
   type PropertyExceptionsResponse,
@@ -308,6 +309,7 @@ function timelineCategoryPillClass(category: TimelineItem["category"]): string {
 export default function PropertyWorkspace({ params }: { params: { id: string } }) {
   const propertyId = Number(params.id);
   const queryClient = useQueryClient();
+  const { user } = useSession();
   const [showAddParty, setShowAddParty] = useState(false);
   const [reviewNotes, setReviewNotes] = useState("");
   const [exceptionNotes, setExceptionNotes] = useState<Record<number, string>>({});
@@ -725,7 +727,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     // R-F32 — the Next step slot uses the same R-F30 visibility as the
     // Transaction panel. Settled or Closed cannot gain a contract date,
     // and Closed cannot record finance approval.
-    const panelActions = transactionPanelActionVisibility(transaction);
+    const panelActions = transactionPanelActionVisibility(transaction, user?.role);
     if (panelActions.closed) {
       primary = { title: "Transaction closed", description: "There's nothing further to action on this property." };
     } else if (panelActions.markContractSigned) {
@@ -1038,6 +1040,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <h2>Transaction</h2>
           <TransactionBlockView
             transaction={transaction}
+            viewerRole={user?.role}
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
             error={transactionAction.isError ? apiErrorMessage(transactionAction.error, "Couldn't update the transaction. Try again.") : null}
             conditions={conditionsData?.conditions ?? []}
@@ -1733,6 +1736,7 @@ function OffersBlock({
 // unconditional (#118), and legal representative capture (#117).
 function TransactionBlockView({
   transaction,
+  viewerRole,
   onAction,
   error,
   conditions,
@@ -1747,6 +1751,7 @@ function TransactionBlockView({
   onSaveLegalReps,
 }: {
   transaction: TransactionBlock;
+  viewerRole: string | null | undefined;
   onAction: (action: string, body?: Record<string, unknown>) => void;
   error: string | null;
   conditions: ConditionBlock[];
@@ -1763,9 +1768,11 @@ function TransactionBlockView({
   const [settlementDate, setSettlementDate] = useState("");
   const [fundsAmount, setFundsAmount] = useState("");
   // R-F32 — offer a control only when R-F30 would accept the write.
-  // Milestone text stays visible either way. `error` stays below so a
-  // stale click still shows the server message.
-  const actions = transactionPanelActionVisibility(transaction);
+  // R-F35a — settlement completion, funds received, and commission
+  // calculation stay hidden unless the signed-in role is Brokerage
+  // Administrator. Milestone text stays visible either way. `error` stays
+  // below so a stale click still shows the server message, including a 403.
+  const actions = transactionPanelActionVisibility(transaction, viewerRole);
 
   return (
     <div className="stack">
