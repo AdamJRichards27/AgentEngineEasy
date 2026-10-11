@@ -1,4 +1,5 @@
 // R-F30 — transaction lifecycle order and a terminal Closed state.
+// R-F36 — routine settlement completion also requires unconditional status.
 // Same HTTP harness as runTransactionVerticalSlice.test.ts and
 // propertyTimeline.test.ts: a real Express app, real session auth, and
 // createTransactionFromListedProperty. No web change is covered here.
@@ -231,6 +232,12 @@ test("a closed transaction rejects later writers and still accepts idempotent re
     settlementDate: "2027-06-01",
   });
   assert.equal(scheduled.status, 200, await scheduled.text());
+  // Completion now requires unconditionalAt. Leave exchangedAt unset so the
+  // exchange attempt after close is still a would-write, not an idempotent replay.
+  await db
+    .update(transactions)
+    .set({ unconditionalAt: new Date(), updatedAt: new Date() })
+    .where(eq(transactions.id, transactionId));
   const completed = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(completed.status, 200, await completed.text());
   const paid = await postJson(`/transactions/${transactionId}/agent-paid`, A.admin.cookie);
@@ -303,4 +310,105 @@ test("a closed transaction rejects later writers and still accepts idempotent re
 
   assert.deepEqual(await loadTransaction(transactionId), beforeRow);
   assert.deepEqual(await auditIds(propertyId), beforeAudits);
+});
+
+test("signed but still conditional settlement completion is refused and changes nothing", async () => {
+  const { propertyId, transactionId } = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
+    address: `4 Conditional Settlement Ave ${suffix}`,
+    conditionsText: "Subject to finance",
+    settlementDate: "2027-05-20",
+  });
+
+  const signed = await postJson(`/transactions/${transactionId}/contract-signed`, A.agent.cookie);
+  assert.equal(signed.status, 200, await signed.text());
+  const scheduled = await postJson(`/transactions/${transactionId}/settlement-schedule`, A.agent.cookie, {
+    settlementDate: "2027-06-20",
+  });
+  assert.equal(scheduled.status, 200, await scheduled.text());
+
+  const beforeTx = await loadTransaction(transactionId);
+  const beforeProperty = await loadProperty(propertyId);
+  assert.equal(beforeTx.status, "SettlementScheduled");
+  assert.ok(beforeTx.contractDate);
+  assert.equal(beforeTx.unconditionalAt, null);
+  assert.equal(beforeProperty.workflowStage, "Settlement");
+  const beforeAudits = await auditIds(propertyId);
+
+  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
+  assert.equal(completeRes.status, 400);
+  const completeBody = await bodyOf<{ error: string }>(completeRes);
+  assert.equal(completeBody.error, `Transaction ${transactionId} cannot complete settlement until it is unconditional.`);
+
+  const afterTx = await loadTransaction(transactionId);
+  const afterProperty = await loadProperty(propertyId);
+  assert.equal(afterTx.status, beforeTx.status);
+  assert.equal(afterProperty.workflowStage, beforeProperty.workflowStage);
+  assert.equal(afterTx.grossCommissionCents, beforeTx.grossCommissionCents);
+  assert.equal(afterTx.gstCents, beforeTx.gstCents);
+  assert.equal(afterTx.commissionCalculatedAt?.toISOString() ?? null, beforeTx.commissionCalculatedAt?.toISOString() ?? null);
+  assert.deepEqual(afterTx, beforeTx);
+  assert.equal((await getDomainEventsForProperty(propertyId, "SETTLEMENT_COMPLETED")).length, 0);
+  const audits = await db.select().from(auditLogs).where(eq(auditLogs.propertyId, propertyId));
+  assert.equal(
+    audits.filter((row) => row.action === "settlement_completed" || row.action === "SETTLEMENT_COMPLETED").length,
+    0,
+  );
+  assert.deepEqual(await auditIds(propertyId), beforeAudits);
+
+  const foreignRes = await postJson(`/transactions/${transactionId}/settlement-complete`, B.agent.cookie);
+  assert.equal(foreignRes.status, 404);
+  const foreignBody = await bodyOf<{ error: string }>(foreignRes);
+  assert.equal(foreignBody.error, "Not found");
+  assert.deepEqual(await loadTransaction(transactionId), beforeTx);
+  assert.equal((await loadProperty(propertyId)).workflowStage, beforeProperty.workflowStage);
+  assert.deepEqual(await auditIds(propertyId), beforeAudits);
+});
+
+test("signed unconditional settlement completes as before, and a replay stays 200", async () => {
+  const { propertyId, transactionId } = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
+    address: `5 Unconditional Settlement Rd ${suffix}`,
+    conditionsText: "",
+    settlementDate: "2027-07-01",
+  });
+
+  const signed = await postJson(`/transactions/${transactionId}/contract-signed`, A.agent.cookie);
+  assert.equal(signed.status, 200, await signed.text());
+  const exchange = await postJson(`/transactions/${transactionId}/exchange`, A.agent.cookie);
+  assert.equal(exchange.status, 200, await exchange.text());
+  const exchanged = await loadTransaction(transactionId);
+  assert.ok(exchanged.contractDate);
+  assert.ok(exchanged.unconditionalAt, "a signed contract with no tracked conditions becomes unconditional on exchange");
+
+  const scheduled = await postJson(`/transactions/${transactionId}/settlement-schedule`, A.agent.cookie, {
+    settlementDate: "2027-07-15",
+  });
+  assert.equal(scheduled.status, 200, await scheduled.text());
+
+  const beforeForeign = await loadTransaction(transactionId);
+  const foreignRes = await postJson(`/transactions/${transactionId}/settlement-complete`, B.agent.cookie);
+  assert.equal(foreignRes.status, 404);
+  const foreignBody = await bodyOf<{ error: string }>(foreignRes);
+  assert.equal(foreignBody.error, "Not found");
+  assert.deepEqual(await loadTransaction(transactionId), beforeForeign);
+  assert.equal((await getDomainEventsForProperty(propertyId, "SETTLEMENT_COMPLETED")).length, 0);
+
+  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
+  assert.equal(completeRes.status, 200, await completeRes.text());
+  const settled = await loadTransaction(transactionId);
+  assert.equal(settled.status, "Settled");
+  assert.ok(settled.settlementCompletedAt);
+  assert.ok(settled.grossCommissionCents && settled.grossCommissionCents > 0, "completion still auto-calculates commission");
+  assert.equal((await getDomainEventsForProperty(propertyId, "SETTLEMENT_COMPLETED")).length, 1);
+  const audits = await db.select().from(auditLogs).where(eq(auditLogs.propertyId, propertyId));
+  assert.equal(audits.filter((row) => row.action === "settlement_completed").length, 1);
+
+  const auditsAfterComplete = await auditIds(propertyId);
+  const replayRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
+  assert.equal(replayRes.status, 200, await replayRes.text());
+  const replayed = await loadTransaction(transactionId);
+  assert.equal(replayed.status, "Settled");
+  assert.equal(replayed.settlementCompletedAt?.toISOString(), settled.settlementCompletedAt?.toISOString());
+  assert.deepEqual(replayed, settled);
+  assert.equal((await getDomainEventsForProperty(propertyId, "SETTLEMENT_COMPLETED")).length, 1);
+  assert.deepEqual(await auditIds(propertyId), auditsAfterComplete);
 });

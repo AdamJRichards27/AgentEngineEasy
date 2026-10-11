@@ -39,6 +39,16 @@ function refuseClosedTransaction(transaction: { id: number; status: string }): v
   }
 }
 
+/**
+ * R-F36 — unconditional status is `unconditionalAt` (transactionConditions.ts
+ * sets it once the contract is exchanged and every tracked condition is
+ * non-blocking, including the zero-condition case). This is the same check
+ * closeTransaction uses. There is no override.
+ */
+function transactionIsUnconditional(transaction: { unconditionalAt: Date | null }): boolean {
+  return Boolean(transaction.unconditionalAt);
+}
+
 export interface AcceptOfferResult {
   offer: Offer;
   transaction: Transaction;
@@ -500,11 +510,19 @@ export async function calculateCommission(input: {
 
 /**
  * Idempotent chokepoint — requires a settlement date to already be
- * scheduled (can't complete what was never scheduled). On first
- * completion, also triggers commission calculation automatically (that's
- * when commission becomes real/invoiceable) if it hasn't run yet — a
- * missing/incomplete agencyAgreementTerms row doesn't block settlement
+ * scheduled (can't complete what was never scheduled), a signed contract,
+ * and unconditional status. The unconditional check is the same
+ * `unconditionalAt` predicate closeTransaction uses. There is no override
+ * and no force flag. scheduleSettlement is unchanged and does not require
+ * unconditional status.
+ *
+ * On first completion, also triggers commission calculation automatically
+ * (that's when commission becomes real/invoiceable) if it hasn't run yet —
+ * a missing/incomplete agencyAgreementTerms row doesn't block settlement
  * itself, it's logged and left for a manual calculate-commission retry.
+ *
+ * A repeat after settlementCompletedAt is already set returns the row
+ * without writing, including when the transaction is already Settled.
  */
 export async function completeSettlement(input: {
   transactionId: number;
@@ -521,6 +539,9 @@ export async function completeSettlement(input: {
     throw new Error(`Transaction ${transaction.id} cannot complete settlement before the contract is signed.`);
   }
   refuseClosedTransaction(transaction);
+  if (!transactionIsUnconditional(transaction)) {
+    throw new Error(`Transaction ${transaction.id} cannot complete settlement until it is unconditional.`);
+  }
 
   const completedAt = input.completedAt ?? new Date();
 
@@ -717,7 +738,7 @@ export class TransactionClosureBlockedError extends Error {
 async function collectClosureBlockers(transaction: Transaction): Promise<string[]> {
   const blockers: string[] = [];
 
-  if (!transaction.unconditionalAt) {
+  if (!transactionIsUnconditional(transaction)) {
     blockers.push("The transaction has not become unconditional yet.");
   }
 

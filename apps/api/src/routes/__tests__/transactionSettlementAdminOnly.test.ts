@@ -371,6 +371,8 @@ test("a Brokerage Administrator still passes every settlement prerequisite, then
   });
   assert.equal(scheduled.status, 200, await scheduled.text());
 
+  await db.update(transactions).set({ unconditionalAt: new Date() }).where(eq(transactions.id, id));
+
   const completed = await postJson(`/transactions/${id}/settlement-complete`, A.admin.cookie);
   assert.equal(completed.status, 200, await completed.clone().text());
   const completedBody = await bodyOf<{
@@ -424,6 +426,7 @@ test("a Brokerage Administrator still passes every settlement prerequisite, then
     settlementDate: "2027-06-01",
   });
   assert.equal(autoScheduled.status, 200, await autoScheduled.text());
+  await db.update(transactions).set({ unconditionalAt: new Date() }).where(eq(transactions.id, auto.transactionId));
   const autoCompleted = await postJson(`/transactions/${auto.transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(autoCompleted.status, 200, await autoCompleted.clone().text());
   const autoBody = await bodyOf<{ transaction: { status: string; grossCommissionCents: number | null } }>(autoCompleted);
