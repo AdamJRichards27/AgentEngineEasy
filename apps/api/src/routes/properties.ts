@@ -14,10 +14,12 @@ import {
   signatureRequests,
   agencyAgreementTerms,
   insertPropertySchema,
+  WORKFLOW_STAGES,
 } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -28,6 +30,17 @@ import { getAppraisalByProperty } from "../lib/appraisals.js";
 import { goLiveProperty } from "../lib/goLive.js";
 
 export const propertiesRouter = Router();
+
+// R-F35b — Ready to List and Go Live are Run transitions. Applied only on
+// those two routes (not Router.use): Grow appraisal workspace reads
+// GET /:id/timeline on this same router, and the Grow -> Run handoff does
+// not call either route — it only prepares a seller link, and the agent's
+// later Ready to List click is the Run action. Order matches
+// routes/transactions.ts: requireAuth, then run.access, then the
+// handler's tenant lookup, so an unentitled caller is refused without a
+// same-brokerage existence oracle. Denial is requireEntitlement's
+// existing 403.
+const requiresRunAccess = requireEntitlement("run.access");
 const propertyDataProvider = createPropertyDataProvider();
 
 // AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
@@ -143,6 +156,20 @@ const READY_TO_LIST_STEPS = [
   { stepKey: "AgencyAgreement", label: "Agency Agreement", sequence: 2 },
   { stepKey: "RequiredDocuments", label: "Required Documents", sequence: 3 },
 ];
+
+const READY_TO_LIST_STAGE = "Ready to List";
+const PROPERTY_READY_TO_LIST_AUDIT = "PROPERTY_READY_TO_LIST";
+
+// Appraisal is the only WORKFLOW_STAGES value before Ready to List. Grow's
+// run handoff does not write workflowStage, so a handed-off property is
+// still at Appraisal — that is the stage this action is meant to leave.
+function readyToListTransition(stage: string): "advance" | "replay" | "refuse" {
+  if (stage === READY_TO_LIST_STAGE) return "replay";
+  const index = WORKFLOW_STAGES.findIndex((known) => known === stage);
+  const readyIndex = WORKFLOW_STAGES.indexOf(READY_TO_LIST_STAGE);
+  if (index >= 0 && index < readyIndex) return "advance";
+  return "refuse";
+}
 
 // Start Property (Build Brief §3): search or manually create an address,
 // establish the Property Record immediately, gather everything else
@@ -596,13 +623,24 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
 // (idempotently), and recomputes the workflow's step statuses from that
 // live state (lib/workflowSteps.ts). Ownership review, by contrast,
 // intentionally does NOT gate this — see lib/ownership.ts / Build Brief §8.
-propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
+propertiesRouter.post("/:id/ready-to-list", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  // R-F31: never walk a later stage back to Ready to List. Refusal is the
+  // same 400 { error: string } this handler already uses (no 409 stage
+  // conflict exists in this file) and it returns before any write.
+  const transition = readyToListTransition(property.workflowStage);
+  if (transition === "refuse") {
+    res.status(400).json({
+      error: `Ready to List cannot move a property that is already at ${property.workflowStage}.`,
+    });
     return;
   }
 
@@ -693,7 +731,28 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 
   await refreshReadyToListSteps(id);
 
-  await db.update(properties).set({ workflowStage: "Ready to List" }).where(eq(properties.id, id));
+  // Replay at Ready to List writes neither the stage nor an audit row.
+  // The conditional stage match is the backstop if the row moved on after
+  // the read above: a later stage is left where it is, and no audit is written.
+  if (transition === "advance") {
+    const [advanced] = await db
+      .update(properties)
+      .set({ workflowStage: READY_TO_LIST_STAGE, updatedAt: new Date() })
+      .where(and(eq(properties.id, id), eq(properties.workflowStage, property.workflowStage)))
+      .returning({ id: properties.id });
+    if (advanced) {
+      await logAudit({
+        brokerageId: user.brokerageId,
+        userId: user.id,
+        action: PROPERTY_READY_TO_LIST_AUDIT,
+        recordType: "property",
+        recordId: String(id),
+        propertyId: id,
+        previousValue: property.workflowStage,
+        updatedValue: READY_TO_LIST_STAGE,
+      });
+    }
+  }
 
   try {
     await publishDomainEvent({
@@ -729,7 +788,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 // gating/transition logic now lives in lib/goLive.ts's goLiveProperty(),
 // shared with Launch's own confirmLaunchLive() — this route is a thin
 // HTTP wrapper over it, not a second implementation.
-propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
+propertiesRouter.post("/:id/go-live", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;

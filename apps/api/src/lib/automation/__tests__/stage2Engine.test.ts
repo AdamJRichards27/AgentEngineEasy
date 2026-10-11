@@ -411,6 +411,13 @@ test("Workflow 5 (Settlement Completed) — end-to-end: a real completeSettlemen
   const { version } = await installSettlementCompletedTemplate({ brokerageId, createdByUserId: adminId });
   await approveAndActivateRuleVersion({ versionId: version.id, brokerageId, approvedByUserId: adminId });
 
+  // This offer has no tracked conditions and was never exchanged, so
+  // unconditionalAt is still null. The test is the SETTLEMENT_COMPLETED
+  // task set, not the completion gate.
+  await db
+    .update(transactions)
+    .set({ unconditionalAt: new Date() })
+    .where(eq(transactions.id, transaction.id));
   await completeSettlement({ transactionId: transaction.id, userId: agentId, brokerageId });
 
   const tasks = await taskKeysFor(propertyId);

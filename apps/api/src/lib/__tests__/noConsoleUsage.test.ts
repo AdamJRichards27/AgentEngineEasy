@@ -76,6 +76,9 @@ const ALLOWLISTED_FILES = new Set<string>([
   // structured logger) because its output is a terminal prompt/result for
   // the operator running it, not a server log line.
   "apps/api/src/scripts/bootstrapAdmin.ts",
+  // Platform Owner operator bootstrap CLI, never imported by the server;
+  // terminal output only, and it does not print passwords, URLs, or emails.
+  "apps/api/src/scripts/bootstrapPlatformOwners.ts",
 ]);
 
 // Directories anywhere under a scan root that are allowed to use console.*

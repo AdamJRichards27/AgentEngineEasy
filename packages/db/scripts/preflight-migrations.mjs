@@ -12,10 +12,68 @@
  *   0022 documents ownership-mode CHECK
  *   0024 grow_call_transcriptions unique (call_session_id, recording_reference)
  *   0025 unique open CREATE_GROW_COMMITMENT proposal per (brokerage, resource)
+ *   0035 platform_owners / platform_owner_audit present when the journal
+ *        when has already been passed (silent-skip hazard)
  *
  * Usage: DATABASE_URL=... node scripts/preflight-migrations.mjs
  */
 import pg from "pg";
+import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const PLATFORM_OWNER_TAG = "0035_platform_owner_access";
+
+/**
+ * Hazard C: drizzle skips 0035 when max(created_at) is already >= its
+ * journal `when` (staging 0034's when is later). A fresh database, or one
+ * that has not yet reached that when, must not fail — db:migrate creates
+ * the tables. A database that is already past the when and is missing
+ * either table must fail before migrate, which would otherwise no-op.
+ */
+export function platformOwnerPreflightDecision(input) {
+  const entry = input.journalEntry;
+  if (!entry) {
+    return { outcome: "skip", message: "Journal has no 0035_platform_owner_access entry; nothing to check." };
+  }
+  if (input.maxCreatedAt === null || input.maxCreatedAt === undefined) {
+    return {
+      outcome: "skip",
+      message: "No migrations recorded yet. db:migrate will apply 0035_platform_owner_access and create platform_owners and platform_owner_audit.",
+    };
+  }
+  if (input.maxCreatedAt < entry.when) {
+    return {
+      outcome: "skip",
+      message: `0035_platform_owner_access (when ${entry.when}) is still ahead of applied history (${input.maxCreatedAt}). db:migrate will create the platform owner tables.`,
+    };
+  }
+  const missing = [];
+  if (!input.platformOwnersExists) missing.push("platform_owners");
+  if (!input.platformOwnerAuditExists) missing.push("platform_owner_audit");
+  if (missing.length > 0) {
+    return {
+      outcome: "fail",
+      message:
+        `Journal contains 0035_platform_owner_access (when ${entry.when}) but ${missing.join(" and ")} ` +
+        `is missing, and drizzle.__drizzle_migrations max(created_at)=${input.maxCreatedAt} is already at or past that when. ` +
+        "The migrator will silently skip 0035. Restore the tables or repair the migration history before db:migrate.",
+    };
+  }
+  return { outcome: "ok", message: "platform_owners and platform_owner_audit exist." };
+}
+
+function readPlatformOwnerJournalEntry() {
+  const journal = JSON.parse(readFileSync(join(scriptDir, "../migrations/meta/_journal.json"), "utf8"));
+  return journal.entries.find((entry) => entry.tag === PLATFORM_OWNER_TAG) ?? null;
+}
+
+function invokedAsCli() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return fileURLToPath(import.meta.url) === resolve(entry);
+}
 
 const checks = [
   {
@@ -101,6 +159,28 @@ async function main() {
         console.log(`OK    ${check.migration}  ${check.description}`);
       }
     }
+    const journalEntry = readPlatformOwnerJournalEntry();
+    let maxCreatedAt = null;
+    const migrationsTable = await client.query("select to_regclass('drizzle.__drizzle_migrations') as oid");
+    if (migrationsTable.rows[0]?.oid) {
+      const max = await client.query("select max(created_at)::text as max from drizzle.__drizzle_migrations");
+      const raw = max.rows[0]?.max;
+      maxCreatedAt = raw === null || raw === undefined ? null : Number(raw);
+    }
+    const decision = platformOwnerPreflightDecision({
+      journalEntry,
+      maxCreatedAt,
+      platformOwnersExists: await tableExists(client, "platform_owners"),
+      platformOwnerAuditExists: await tableExists(client, "platform_owner_audit"),
+    });
+    if (decision.outcome === "fail") {
+      blocking += 1;
+      console.error(`FAIL  0035  ${decision.message}`);
+    } else if (decision.outcome === "skip") {
+      console.log(`SKIP  0035  ${decision.message}`);
+    } else {
+      console.log(`OK    0035  ${decision.message}`);
+    }
   } finally {
     await client.end();
   }
@@ -111,7 +191,9 @@ async function main() {
   console.log("\nAll pre-flight checks passed; db:migrate can proceed.");
 }
 
-main().catch((error) => {
-  console.error("Pre-flight check could not complete:", error instanceof Error ? error.message : error);
-  process.exit(2);
-});
+if (invokedAsCli()) {
+  main().catch((error) => {
+    console.error("Pre-flight check could not complete:", error instanceof Error ? error.message : error);
+    process.exit(2);
+  });
+}

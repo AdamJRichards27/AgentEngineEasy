@@ -318,7 +318,8 @@ test("Stage G: Settlement is scheduled and completed, auto-calculating commissio
   const scheduleRes = await postJson(`/transactions/${transactionId}/settlement-schedule`, A.agent.cookie, { settlementDate: "2027-03-10" });
   assert.equal(scheduleRes.status, 200);
 
-  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.agent.cookie);
+  // Settlement completion and funds received are Brokerage Administrator only.
+  const completeRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
   assert.equal(completeRes.status, 200);
   const { transaction } = await bodyOf<{
     transaction: { status: string; grossCommissionCents: number | null; exchangedAt: string | null; unconditionalAt: string | null };
@@ -328,7 +329,7 @@ test("Stage G: Settlement is scheduled and completed, auto-calculating commissio
   assert.ok(transaction.exchangedAt, "Settlement visibility must retain the earlier Stage E milestones, not just the latest field");
   assert.ok(transaction.unconditionalAt);
 
-  const fundsRes = await postJson(`/transactions/${transactionId}/funds-received`, A.agent.cookie, { amountCents: 82000000 });
+  const fundsRes = await postJson(`/transactions/${transactionId}/funds-received`, A.admin.cookie, { amountCents: 82000000 });
   assert.equal(fundsRes.status, 200);
 
   const agentPaidRes = await postJson(`/transactions/${transactionId}/agent-paid`, A.admin.cookie);

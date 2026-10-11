@@ -71,7 +71,7 @@ export function createSessionToken(userId: number, epoch = 0): string {
   return `${payload}.${sign(payload)}`;
 }
 
-export function verifySessionToken(token: string | undefined | null): { uid: number; epoch: number } | null {
+export function verifySessionToken(token: string | undefined | null): { uid: number; epoch: number; iat: number } | null {
   if (!token) return null;
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
@@ -97,7 +97,9 @@ export function verifySessionToken(token: string | undefined | null): { uid: num
     // row from the DB on every request; this function only decodes and
     // shape-validates what the token itself claims.
     const epoch = typeof decoded?.epoch === "number" ? decoded.epoch : 0;
-    return { uid: decoded.uid, epoch };
+    // iat stays on the verified result so Platform Owner sessions can apply
+    // a shorter absolute lifetime without changing this 30-day cap.
+    return { uid: decoded.uid, epoch, iat: decoded.iat };
   } catch {
     return null;
   }
