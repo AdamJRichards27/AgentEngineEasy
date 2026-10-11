@@ -6,8 +6,48 @@ import test, { after, before } from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 
 const CLOSED_NOTE = "This transaction is closed — no further changes can be recorded.";
+const CONDITIONAL_REASON = "Settlement can be completed once the contract is unconditional";
 const PROPERTY_ID = 42;
 const TRANSACTION_ID = 7;
+
+interface PanelCondition {
+  id: number;
+  transactionId: number;
+  description: string;
+  dueDate: string | null;
+  status: string;
+  notes: string | null;
+  resolvedAt: string | null;
+}
+
+interface PanelQueryOptions {
+  conditions?: PanelCondition[] | "unloaded";
+  fundsReconciliation?: {
+    status: string;
+    expectedCents: number | null;
+    receivedCents: number;
+    varianceCents: number | null;
+  } | null;
+}
+
+function conditionRow(id: number, status: string, description?: string): PanelCondition {
+  return {
+    id,
+    transactionId: TRANSACTION_ID,
+    description: description ?? `Condition ${status}`,
+    dueDate: null,
+    status,
+    notes: null,
+    resolvedAt: status === "Pending" ? null : "2026-10-03T00:00:00.000Z",
+  };
+}
+
+const DEFAULT_CONDITIONS: PanelCondition[] = [
+  {
+    ...conditionRow(3, "Pending", "Subject to building inspection"),
+    dueDate: "2027-05-01T00:00:00.000Z",
+  },
+];
 
 interface ElementNode {
   type?: unknown;
@@ -231,7 +271,7 @@ function transaction(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | null) {
+function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | null, options?: PanelQueryOptions) {
   const workspace = {
     property: {
       id: PROPERTY_ID,
@@ -272,24 +312,22 @@ function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | nu
     [`["service-orders",${PROPERTY_ID}]`]: { ...ready, data: { serviceOrders: [] } },
     '["payment-methods"]': { ...ready, data: { mine: [], brokerage: [] } },
     [`["offers",${PROPERTY_ID}]`]: { ...ready, data: { offers: [] } },
-    [`["transaction",${PROPERTY_ID}]`]: { ...ready, data: { transaction: row } },
-    [`["property-timeline",${PROPERTY_ID}]`]: { ...ready, data: { timeline: [] } },
-    [`["conditions",${TRANSACTION_ID}]`]: {
+    [`["transaction",${PROPERTY_ID}]`]: {
       ...ready,
       data: {
-        conditions: [
-          {
-            id: 3,
-            transactionId: TRANSACTION_ID,
-            description: "Subject to building inspection",
-            dueDate: "2027-05-01T00:00:00.000Z",
-            status: "Pending",
-            notes: null,
-            resolvedAt: null,
-          },
-        ],
+        transaction: row,
+        ...(options?.fundsReconciliation !== undefined ? { fundsReconciliation: options.fundsReconciliation } : {}),
       },
     },
+    [`["property-timeline",${PROPERTY_ID}]`]: { ...ready, data: { timeline: [] } },
+    ...(options?.conditions === "unloaded"
+      ? {}
+      : {
+          [`["conditions",${TRANSACTION_ID}]`]: {
+            ...ready,
+            data: { conditions: options?.conditions ?? DEFAULT_CONDITIONS },
+          },
+        }),
     [`["tasks",${PROPERTY_ID}]`]: { ...ready, data: { tasks: [], attentionItems: [] } },
     [`["property-exceptions",${PROPERTY_ID}]`]: { ...ready, data: { exceptions: [], summary: { openCount: 0, highestSeverity: null } } },
     [`["property-launch",${PROPERTY_ID}]`]: { ...ready, data: { launch: null } },
@@ -313,11 +351,15 @@ function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | nu
   };
 }
 
-function install(row: ReturnType<typeof transaction>, viewerRole: string | null = "Brokerage Administrator") {
+function install(
+  row: ReturnType<typeof transaction>,
+  viewerRole: string | null = "Brokerage Administrator",
+  options?: PanelQueryOptions,
+) {
   const hooks = createHarness();
   Object.assign(globalThis, {
     __txHooks: hooks,
-    __txQueries: queriesFor(row, viewerRole),
+    __txQueries: queriesFor(row, viewerRole, options),
     __txCalls: [] as unknown[],
     __txShownError: null,
     __txShownVariables: undefined,
@@ -360,6 +402,8 @@ test("ContractPreparation hides settlement actions until the contract is signed"
     "Close Transaction": 1,
   });
   assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
+  assert.equal(buttons(section, "Mark Settlement Completed").length, 0);
+  assert.equal(normalized(section).includes(CONDITIONAL_REASON), false);
   assert.equal(buttons(tree, "Mark Contract Signed").length, 2);
   assert.equal(normalized(section).includes(CLOSED_NOTE), false);
   assert.equal(findAll(section, (element) => element.type === "select" && textContent(element).includes("Resolve as")).length, 1);
@@ -383,6 +427,8 @@ test("UnderContract offers schedule and complete once the contract date is set",
   });
   assert.equal(buttons(tree, "Mark Contract Signed").length, 0);
   assert.equal(buttons(tree, "Mark Finance Approved").length, 2);
+  assert.equal(buttons(section, "Mark Settlement Completed")[0]?.props?.disabled, true);
+  assert.match(normalized(section), new RegExp(CONDITIONAL_REASON));
   assert.equal(normalized(section).includes(CLOSED_NOTE), false);
 });
 
@@ -403,6 +449,8 @@ test("SettlementScheduled keeps schedule and complete and still hides contract s
     "Close Transaction": 1,
   });
   assert.equal(buttons(tree, "Mark Contract Signed").length, 0);
+  assert.equal(buttons(section, "Mark Settlement Completed")[0]?.props?.disabled, true);
+  assert.match(normalized(section), new RegExp(CONDITIONAL_REASON));
   assert.match(normalized(section), /SettlementScheduled/);
 });
 
@@ -440,6 +488,8 @@ test("Settled hides contract signed when the date is missing and hides settlemen
   assert.equal(buttons(openTree, "Mark Contract Signed").length, 0);
   assert.equal(buttons(openSection, "Schedule Settlement").length, 0);
   assert.equal(buttons(openSection, "Mark Settlement Completed").length, 1);
+  assert.equal(buttons(openSection, "Mark Settlement Completed")[0]?.props?.disabled, true);
+  assert.match(normalized(openSection), new RegExp(CONDITIONAL_REASON));
 });
 
 test("Closed hides writers and shows the read-only note", () => {
@@ -478,6 +528,7 @@ test("Closed hides writers and shows the read-only note", () => {
   assert.match(normalized(section), /Funds received:/);
   assert.match(normalized(section), /Legal representatives/);
   assert.match(normalized(section), /Closed 2027-07-01/);
+  assert.equal(normalized(section).includes(CONDITIONAL_REASON), false);
 });
 
 test("a stale Schedule Settlement click still shows the server error", () => {
@@ -515,10 +566,11 @@ function fundsAmountInput(section: ElementNode): ElementNode {
   return input;
 }
 
-function underContractReady() {
+function underContractReady(overrides: Record<string, unknown> = {}) {
   return transaction({
     status: "UnderContract",
     contractDate: "2026-10-01T00:00:00.000Z",
+    ...overrides,
   });
 }
 
@@ -533,6 +585,8 @@ test("Brokerage Administrator sees the three financial actions where R-F32 alrea
     "Close Transaction": 1,
   });
   assert.equal(findAll(section, (element) => element.type === "input" && element.props?.placeholder === "Amount ($)").length, 1);
+  assert.equal(buttons(section, "Mark Settlement Completed")[0]?.props?.disabled, true);
+  assert.match(normalized(section), new RegExp(CONDITIONAL_REASON));
 
   const early = install(transaction({ status: "ContractPreparation", contractDate: null }), "Brokerage Administrator");
   const earlySection = transactionSection(early.render());
@@ -586,6 +640,7 @@ for (const role of ["Agent", "Pit Crew"] as const) {
     assert.equal(findAll(section, (element) => element.type === "input" && element.props?.placeholder === "Amount ($)").length, 0);
     assert.match(normalized(section), /not yet calculated/);
     assert.match(normalized(section), /Funds received:/);
+    assert.equal(normalized(section).includes(CONDITIONAL_REASON), false);
     assert.match(normalized(section), /SettlementScheduled|scheduled|UnderContract/);
     assert.equal(normalized(section).includes(CLOSED_NOTE), false);
     assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
@@ -641,10 +696,15 @@ test("a signed-in user with no role does not see the three financial actions", (
 test("a stale financial action click still shows the server 403", () => {
   const friendly = humanizeApiError(`/transactions/${TRANSACTION_ID}/settlement-complete`, 403, "Forbidden");
   assert.equal(friendly, WRONG_ROLE_MESSAGE);
-  const { render } = install(underContractReady(), "Brokerage Administrator");
+  const { render } = install(
+    underContractReady({ unconditionalAt: "2026-10-02T00:00:00.000Z" }),
+    "Brokerage Administrator",
+  );
   let tree = render();
   let section = transactionSection(tree);
   assert.equal(buttons(section, "Mark Settlement Completed").length, 1);
+  assert.equal(buttons(section, "Mark Settlement Completed")[0]?.props?.disabled, false);
+  assert.equal(normalized(section).includes(CONDITIONAL_REASON), false);
   assert.equal(buttons(section, "Calculate Commission").length, 1);
   assert.equal(buttons(section, "Record Funds Received").length, 1);
   assert.equal(normalized(section).includes(WRONG_ROLE_MESSAGE), false);
@@ -680,3 +740,169 @@ test("a stale financial action click still shows the server 403", () => {
   const funds = calls.find((call) => call.action === "funds-received");
   assert.equal(funds?.body?.amountCents, 150000);
 });
+
+function postedActions(): string[] {
+  const recorded = (globalThis as { __txCalls?: Array<{ action?: string }> }).__txCalls ?? [];
+  return recorded.map((call) => call.action ?? "");
+}
+
+function assertSettlement(section: ElementNode, state: "hidden" | "disabled" | "enabled"): void {
+  const found = buttons(section, "Mark Settlement Completed");
+  const hasReason = normalized(section).includes(CONDITIONAL_REASON);
+  if (state === "hidden") {
+    assert.equal(found.length, 0);
+    assert.equal(hasReason, false);
+    return;
+  }
+  assert.equal(found.length, 1, state);
+  assert.equal(Boolean(found[0]?.props?.disabled), state === "disabled", state);
+  assert.equal(hasReason, state === "disabled", state);
+  if (state === "disabled") assert.equal(normalized(section).split(CONDITIONAL_REASON).length - 1, 1);
+}
+
+function signedDeal(overrides: Record<string, unknown> = {}) {
+  return transaction({
+    status: "SettlementScheduled",
+    contractDate: "2026-10-01T00:00:00.000Z",
+    settlementDate: "2027-06-01T00:00:00.000Z",
+    ...overrides,
+  });
+}
+
+test("a pending condition disables Mark Settlement Completed and leaves the funds line in place", () => {
+  const { render } = install(signedDeal(), "Brokerage Administrator", {
+    conditions: [conditionRow(3, "Pending", "Subject to finance")],
+    fundsReconciliation: {
+      status: "MATCHED",
+      expectedCents: 165000,
+      receivedCents: 165000,
+      varianceCents: 0,
+    },
+  });
+  let section = transactionSection(render());
+  assertSettlement(section, "disabled");
+  assert.equal(buttons(section, "Schedule Settlement").length, 1);
+  change(scheduleDateInput(section), "2027-08-01");
+  section = transactionSection(render());
+  assert.equal(buttons(section, "Schedule Settlement")[0]?.props?.disabled, false);
+  assertSettlement(section, "disabled");
+  assert.equal(buttons(section, "Calculate Commission").length, 1);
+  assert.equal(buttons(section, "Record Funds Received").length, 1);
+  const text = normalized(section);
+  const fundsAt = text.indexOf("Funds received:");
+  const lineAt = text.indexOf("Received in full");
+  assert.ok(fundsAt >= 0);
+  assert.ok(lineAt > fundsAt);
+  assert.equal(buttons(section, "Received in full").length, 0);
+  click(buttons(section, "Mark Settlement Completed")[0]);
+  assert.equal(postedActions().includes("settlement-complete"), false);
+});
+
+test("a failed condition keeps settlement completion disabled after exchange", () => {
+  const { render } = install(
+    signedDeal({ exchangedAt: "2026-10-02T00:00:00.000Z" }),
+    "Brokerage Administrator",
+    { conditions: [conditionRow(4, "Failed", "Subject to building")] },
+  );
+  assertSettlement(transactionSection(render()), "disabled");
+});
+
+test("satisfied and waived conditions do not enable settlement before exchange", () => {
+  const { render } = install(signedDeal(), "Brokerage Administrator", {
+    conditions: [conditionRow(5, "Satisfied", "Finance"), conditionRow(6, "Waived", "Building")],
+  });
+  const section = transactionSection(render());
+  assertSettlement(section, "disabled");
+  click(buttons(section, "Mark Settlement Completed")[0]);
+  assert.equal(postedActions().includes("settlement-complete"), false);
+});
+
+test("exchange plus satisfied, waived, or not-applicable conditions enables settlement before the timestamp refreshes", () => {
+  const { render } = install(
+    signedDeal({ exchangedAt: "2026-10-02T00:00:00.000Z", unconditionalAt: null }),
+    "Brokerage Administrator",
+    {
+      conditions: [
+        conditionRow(5, "Satisfied", "Finance"),
+        conditionRow(6, "Waived", "Building"),
+        conditionRow(7, "NotApplicable", "Pest"),
+      ],
+    },
+  );
+  const section = transactionSection(render());
+  assertSettlement(section, "enabled");
+  click(buttons(section, "Mark Settlement Completed")[0]);
+  assert.equal(postedActions().includes("settlement-complete"), true);
+});
+
+test("a signed exchanged contract with no conditions can complete settlement", () => {
+  const { render } = install(
+    signedDeal({ exchangedAt: "2026-10-02T00:00:00.000Z", unconditionalAt: null }),
+    "Brokerage Administrator",
+    { conditions: [] },
+  );
+  assertSettlement(transactionSection(render()), "enabled");
+});
+
+test("a signed contract with no conditions stays conditional until exchange", () => {
+  const { render } = install(signedDeal({ unconditionalAt: null }), "Brokerage Administrator", { conditions: [] });
+  assertSettlement(transactionSection(render()), "disabled");
+});
+
+test("an unloaded conditions list is not treated as zero conditions", () => {
+  const { render } = install(
+    signedDeal({ exchangedAt: "2026-10-02T00:00:00.000Z", unconditionalAt: null }),
+    "Brokerage Administrator",
+    { conditions: "unloaded" },
+  );
+  assertSettlement(transactionSection(render()), "disabled");
+});
+
+test("unconditionalAt enables settlement completion even when a condition row is still pending", () => {
+  const { render } = install(
+    signedDeal({ unconditionalAt: "2026-10-04T00:00:00.000Z" }),
+    "Brokerage Administrator",
+    { conditions: [conditionRow(3, "Pending", "Subject to finance")] },
+  );
+  const section = transactionSection(render());
+  assertSettlement(section, "enabled");
+  click(buttons(section, "Mark Settlement Completed")[0]);
+  assert.equal(postedActions().includes("settlement-complete"), true);
+});
+
+test("settlement completion stays hidden, with no conditional reason, until a settlement date exists", () => {
+  const { render } = install(
+    transaction({
+      status: "UnderContract",
+      contractDate: "2026-10-01T00:00:00.000Z",
+      exchangedAt: "2026-10-02T00:00:00.000Z",
+      unconditionalAt: "2026-10-02T00:00:00.000Z",
+      settlementDate: null,
+    }),
+    "Brokerage Administrator",
+    { conditions: [] },
+  );
+  const section = transactionSection(render());
+  assertSettlement(section, "hidden");
+  assert.equal(buttons(section, "Schedule Settlement").length, 1);
+});
+
+for (const role of ["Agent", "Pit Crew"] as const) {
+  test(`${role} still does not see Mark Settlement Completed once the contract is unconditional`, () => {
+    const { render } = install(
+      signedDeal({
+        exchangedAt: "2026-10-02T00:00:00.000Z",
+        unconditionalAt: "2026-10-02T00:00:00.000Z",
+      }),
+      role,
+      { conditions: [conditionRow(6, "Waived", "Building")] },
+    );
+    const section = transactionSection(render());
+    assertSettlement(section, "hidden");
+    assert.equal(buttons(section, "Schedule Settlement").length, 1);
+    assert.equal(buttons(section, "Calculate Commission").length, 0);
+    assert.equal(buttons(section, "Record Funds Received").length, 0);
+    assert.match(normalized(section), /Funds received:/);
+    assert.match(normalized(section), /not yet calculated/);
+  });
+}
