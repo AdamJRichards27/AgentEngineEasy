@@ -20,6 +20,7 @@ import {
   TransactionClosureBlockedError,
 } from "../lib/transactions.js";
 import { listConditions, addCondition, rescheduleConditionDueDate, resolveCondition, recordExchange, maybeRecordUnconditional } from "../lib/transactionConditions.js";
+import { computeFundsReconciliation } from "../lib/transactionFunds.js";
 
 export const transactionsRouter = Router();
 
@@ -168,13 +169,21 @@ transactionsRouter.get("/by-property/:propertyId", requireAuth, requiresRunAcces
     return;
   }
   const transaction = await getTransactionByProperty(propertyId);
-  res.json({ transaction });
+  // R-F37 — sibling only. The transaction object itself is unchanged, and
+  // a missing transaction stays null on both fields.
+  res.json({
+    transaction,
+    fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
+  });
 });
 
 transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, id));
-  res.json({ transaction });
+  res.json({
+    transaction,
+    fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
+  });
 });
 
 async function handle(fn: () => Promise<unknown>, res: Response): Promise<void> {

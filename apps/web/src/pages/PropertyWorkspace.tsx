@@ -4,6 +4,7 @@ import { AskAgentEngine } from "../components/AskAgentEngine";
 import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { transactionPanelActionVisibility } from "../lib/transactionPanelActions";
+import { fundsReconciliationLabel, type FundsReconciliationView } from "../lib/fundsReconciliation";
 import {
   type PropertyExceptionsResponse,
   type RiskExceptionRow,
@@ -451,7 +452,10 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
   const { data: transactionData } = useQuery({
     queryKey: ["transaction", propertyId],
-    queryFn: () => apiFetch<{ transaction: TransactionBlock | null }>(`/transactions/by-property/${propertyId}`),
+    queryFn: () =>
+      apiFetch<{ transaction: TransactionBlock | null; fundsReconciliation: FundsReconciliationView | null }>(
+        `/transactions/by-property/${propertyId}`,
+      ),
   });
   const invalidateTransaction = () => queryClient.invalidateQueries({ queryKey: ["transaction", propertyId] });
 
@@ -1038,6 +1042,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <h2>Transaction</h2>
           <TransactionBlockView
             transaction={transaction}
+            fundsReconciliation={transactionData?.fundsReconciliation ?? null}
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
             error={transactionAction.isError ? apiErrorMessage(transactionAction.error, "Couldn't update the transaction. Try again.") : null}
             conditions={conditionsData?.conditions ?? []}
@@ -1733,6 +1738,7 @@ function OffersBlock({
 // unconditional (#118), and legal representative capture (#117).
 function TransactionBlockView({
   transaction,
+  fundsReconciliation,
   onAction,
   error,
   conditions,
@@ -1747,6 +1753,7 @@ function TransactionBlockView({
   onSaveLegalReps,
 }: {
   transaction: TransactionBlock;
+  fundsReconciliation: FundsReconciliationView | null;
   onAction: (action: string, body?: Record<string, unknown>) => void;
   error: string | null;
   conditions: ConditionBlock[];
@@ -1893,6 +1900,7 @@ function TransactionBlockView({
           </>
         )}
       </div>
+      {fundsReconciliation && <div>{fundsReconciliationLabel(fundsReconciliation)}</div>}
 
       <div>
         Agent paid: {transaction.agentPaidAt ?? "not yet"}
