@@ -171,6 +171,7 @@ const virtualMocks: Plugin = {
 let vite: ViteDevServer;
 let Page: (props: { params: { id: string } }) => unknown;
 let ApiError: new (status: number, friendly: string) => Error & { friendly: string };
+let humanizeApiError: (path: string, status: number, serverMessage?: string) => string;
 
 before(async () => {
   vite = await createServer({
@@ -196,8 +197,10 @@ before(async () => {
   Page = mod.default;
   const api = (await vite.ssrLoadModule("/src/lib/api.ts")) as {
     ApiError: new (status: number, friendly: string) => Error & { friendly: string };
+    humanizeApiError: (path: string, status: number, serverMessage?: string) => string;
   };
   ApiError = api.ApiError;
+  humanizeApiError = api.humanizeApiError;
 });
 
 after(async () => {
@@ -228,7 +231,7 @@ function transaction(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function queriesFor(row: ReturnType<typeof transaction>) {
+function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | null) {
   const workspace = {
     property: {
       id: PROPERTY_ID,
@@ -290,14 +293,31 @@ function queriesFor(row: ReturnType<typeof transaction>) {
     [`["tasks",${PROPERTY_ID}]`]: { ...ready, data: { tasks: [], attentionItems: [] } },
     [`["property-exceptions",${PROPERTY_ID}]`]: { ...ready, data: { exceptions: [], summary: { openCount: 0, highestSeverity: null } } },
     [`["property-launch",${PROPERTY_ID}]`]: { ...ready, data: { launch: null } },
+    // useSession() reads ["session"]. The query mock returns this object as
+    // the query result and does not apply `select`, so `data` is the user.
+    '["session"]': {
+      ...ready,
+      data:
+        viewerRole === null
+          ? null
+          : {
+              id: 1,
+              email: "viewer@example.com",
+              firstName: "Vic",
+              lastName: "Tor",
+              role: viewerRole,
+              brokerageId: 1,
+              brokerageName: "Harbour Realty",
+            },
+    },
   };
 }
 
-function install(row: ReturnType<typeof transaction>) {
+function install(row: ReturnType<typeof transaction>, viewerRole: string | null = "Brokerage Administrator") {
   const hooks = createHarness();
   Object.assign(globalThis, {
     __txHooks: hooks,
-    __txQueries: queriesFor(row),
+    __txQueries: queriesFor(row, viewerRole),
     __txCalls: [] as unknown[],
     __txShownError: null,
     __txShownVariables: undefined,
@@ -485,4 +505,178 @@ test("a stale Schedule Settlement click still shows the server error", () => {
   const calls = (globalThis as { __txCalls?: Array<{ action?: string; body?: { settlementDate?: string } }> }).__txCalls ?? [];
   const schedule = calls.find((call) => call.action === "settlement-schedule");
   assert.equal(schedule?.body?.settlementDate, "2027-06-01");
+});
+
+const WRONG_ROLE_MESSAGE = "You don't have the right role for that — ask a Brokerage Administrator.";
+
+function fundsAmountInput(section: ElementNode): ElementNode {
+  const input = findAll(section, (element) => element.type === "input" && element.props?.placeholder === "Amount ($)")[0];
+  if (!input) throw new Error("missing funds amount input");
+  return input;
+}
+
+function underContractReady() {
+  return transaction({
+    status: "UnderContract",
+    contractDate: "2026-10-01T00:00:00.000Z",
+  });
+}
+
+test("Brokerage Administrator sees the three financial actions where R-F32 already allows them", () => {
+  const ready = install(underContractReady(), "Brokerage Administrator");
+  const section = transactionSection(ready.render());
+  assertPanel(section, {
+    ...OPEN_WRITERS,
+    "Mark Contract Signed": 0,
+    "Schedule Settlement": 1,
+    "Mark Settlement Completed": 1,
+    "Close Transaction": 1,
+  });
+  assert.equal(findAll(section, (element) => element.type === "input" && element.props?.placeholder === "Amount ($)").length, 1);
+
+  const early = install(transaction({ status: "ContractPreparation", contractDate: null }), "Brokerage Administrator");
+  const earlySection = transactionSection(early.render());
+  assertPanel(earlySection, {
+    "Mark Settlement Completed": 0,
+    "Schedule Settlement": 0,
+    "Calculate Commission": 1,
+    "Record Funds Received": 1,
+    "Mark Contract Signed": 1,
+  });
+
+  const settled = install(
+    transaction({
+      status: "Settled",
+      contractDate: "2026-10-01T00:00:00.000Z",
+      settlementCompletedAt: "2027-06-02T00:00:00.000Z",
+    }),
+    "Brokerage Administrator",
+  );
+  const settledSection = transactionSection(settled.render());
+  assertPanel(settledSection, {
+    "Mark Settlement Completed": 0,
+    "Schedule Settlement": 0,
+    "Calculate Commission": 1,
+    "Record Funds Received": 1,
+    "Mark Agent Paid": 1,
+    "Close Transaction": 1,
+  });
+  assert.equal(buttons(settledSection, "Close Transaction")[0]?.props?.disabled, false);
+});
+
+for (const role of ["Agent", "Pit Crew"] as const) {
+  test(`${role} does not see settlement completion, funds received, or commission calculation`, () => {
+    const ready = install(underContractReady(), role);
+    const section = transactionSection(ready.render());
+    assertPanel(section, {
+      "Mark Contract Signed": 0,
+      "Mark Finance Approved": 1,
+      "Mark Contracts Exchanged": 1,
+      "Mark Unconditional": 1,
+      "Schedule Settlement": 1,
+      "Mark Settlement Completed": 0,
+      "Calculate Commission": 0,
+      "Record Funds Received": 0,
+      "Mark Agent Paid": 1,
+      "Close Transaction": 1,
+      Reschedule: 1,
+      "+ Add Condition": 1,
+      Save: 1,
+    });
+    assert.equal(findAll(section, (element) => element.type === "input" && element.props?.placeholder === "Amount ($)").length, 0);
+    assert.match(normalized(section), /not yet calculated/);
+    assert.match(normalized(section), /Funds received:/);
+    assert.match(normalized(section), /SettlementScheduled|scheduled|UnderContract/);
+    assert.equal(normalized(section).includes(CLOSED_NOTE), false);
+    assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
+
+    const early = install(transaction({ status: "ContractPreparation", contractDate: null }), role);
+    const earlySection = transactionSection(early.render());
+    assertPanel(earlySection, {
+      "Mark Contract Signed": 1,
+      "Schedule Settlement": 0,
+      "Mark Settlement Completed": 0,
+      "Calculate Commission": 0,
+      "Record Funds Received": 0,
+      "Mark Finance Approved": 1,
+    });
+
+    const closed = install(
+      transaction({
+        status: "Closed",
+        contractDate: "2026-10-01T00:00:00.000Z",
+        settlementCompletedAt: "2027-06-02T00:00:00.000Z",
+        closedAt: "2027-07-01T00:00:00.000Z",
+      }),
+      role,
+    );
+    const closedSection = transactionSection(closed.render());
+    assertPanel(closedSection, {
+      "Mark Settlement Completed": 0,
+      "Calculate Commission": 0,
+      "Record Funds Received": 0,
+      "Schedule Settlement": 0,
+      "Mark Contract Signed": 0,
+      "Mark Agent Paid": 0,
+      "Close Transaction": 0,
+    });
+    assert.match(normalized(closedSection), /Funds received:/);
+    assert.match(normalized(closedSection), new RegExp(CLOSED_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+}
+
+test("a signed-in user with no role does not see the three financial actions", () => {
+  const { render } = install(underContractReady(), null);
+  const section = transactionSection(render());
+  assertPanel(section, {
+    "Mark Settlement Completed": 0,
+    "Calculate Commission": 0,
+    "Record Funds Received": 0,
+    "Schedule Settlement": 1,
+    "Mark Finance Approved": 1,
+    "Mark Agent Paid": 1,
+  });
+});
+
+test("a stale financial action click still shows the server 403", () => {
+  const friendly = humanizeApiError(`/transactions/${TRANSACTION_ID}/settlement-complete`, 403, "Forbidden");
+  assert.equal(friendly, WRONG_ROLE_MESSAGE);
+  const { render } = install(underContractReady(), "Brokerage Administrator");
+  let tree = render();
+  let section = transactionSection(tree);
+  assert.equal(buttons(section, "Mark Settlement Completed").length, 1);
+  assert.equal(buttons(section, "Calculate Commission").length, 1);
+  assert.equal(buttons(section, "Record Funds Received").length, 1);
+  assert.equal(normalized(section).includes(WRONG_ROLE_MESSAGE), false);
+
+  (globalThis as { __txScriptedError?: unknown }).__txScriptedError = new ApiError(403, friendly);
+  change(fundsAmountInput(section), "1500");
+  tree = render();
+  section = transactionSection(tree);
+
+  click(buttons(section, "Mark Settlement Completed")[0]);
+  tree = render();
+  section = transactionSection(tree);
+  let error = findAll(section, (element) => element.type === "p" && element.props?.className === "error-text")[0];
+  assert.equal(textContent(error).trim(), WRONG_ROLE_MESSAGE);
+  assert.equal(buttons(section, "Mark Settlement Completed").length, 1);
+
+  click(buttons(section, "Calculate Commission")[0]);
+  tree = render();
+  section = transactionSection(tree);
+  error = findAll(section, (element) => element.type === "p" && element.props?.className === "error-text")[0];
+  assert.equal(textContent(error).trim(), WRONG_ROLE_MESSAGE);
+  assert.equal(buttons(section, "Calculate Commission").length, 1);
+
+  click(buttons(section, "Record Funds Received")[0]);
+  tree = render();
+  section = transactionSection(tree);
+  error = findAll(section, (element) => element.type === "p" && element.props?.className === "error-text")[0];
+  assert.equal(textContent(error).trim(), WRONG_ROLE_MESSAGE);
+
+  const calls = (globalThis as { __txCalls?: Array<{ action?: string; body?: { amountCents?: number } }> }).__txCalls ?? [];
+  assert.equal(calls.some((call) => call.action === "settlement-complete"), true);
+  assert.equal(calls.some((call) => call.action === "calculate-commission"), true);
+  const funds = calls.find((call) => call.action === "funds-received");
+  assert.equal(funds?.body?.amountCents, 150000);
 });
