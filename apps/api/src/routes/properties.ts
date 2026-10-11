@@ -19,6 +19,7 @@ import {
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -29,6 +30,17 @@ import { getAppraisalByProperty } from "../lib/appraisals.js";
 import { goLiveProperty } from "../lib/goLive.js";
 
 export const propertiesRouter = Router();
+
+// R-F35b — Ready to List and Go Live are Run transitions. Applied only on
+// those two routes (not Router.use): Grow appraisal workspace reads
+// GET /:id/timeline on this same router, and the Grow -> Run handoff does
+// not call either route — it only prepares a seller link, and the agent's
+// later Ready to List click is the Run action. Order matches
+// routes/transactions.ts: requireAuth, then run.access, then the
+// handler's tenant lookup, so an unentitled caller is refused without a
+// same-brokerage existence oracle. Denial is requireEntitlement's
+// existing 403.
+const requiresRunAccess = requireEntitlement("run.access");
 const propertyDataProvider = createPropertyDataProvider();
 
 // AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
@@ -611,7 +623,7 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
 // (idempotently), and recomputes the workflow's step statuses from that
 // live state (lib/workflowSteps.ts). Ownership review, by contrast,
 // intentionally does NOT gate this — see lib/ownership.ts / Build Brief §8.
-propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
+propertiesRouter.post("/:id/ready-to-list", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -776,7 +788,7 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, async (req, res) => {
 // gating/transition logic now lives in lib/goLive.ts's goLiveProperty(),
 // shared with Launch's own confirmLaunchLive() — this route is a thin
 // HTTP wrapper over it, not a second implementation.
-propertiesRouter.post("/:id/go-live", requireAuth, async (req, res) => {
+propertiesRouter.post("/:id/go-live", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;

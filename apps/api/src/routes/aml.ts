@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, amlVerifications, serviceOrders, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 import { logAudit } from "../lib/audit.js";
@@ -27,6 +28,15 @@ import { logAudit } from "../lib/audit.js";
 // records created alongside each verification (see lib/aml.ts). Actually
 // charging a stored payment method for those ServiceOrders is Phase 6.
 export const amlRouter = Router();
+
+// R-F35b — AML checks are part of Run (Ready to List and the property
+// workspace). Every authenticated route requires run.access after
+// requireAuth and before the handler's tenant check (and before
+// requireRole on resolve-exception), matching routes/transactions.ts.
+// The denial is requireEntitlement's existing 403. POST /webhook stays
+// open: the caller is the AML provider, authenticated by the HMAC
+// signature, and it carries no session.
+const requiresRunAccess = requireEntitlement("run.access");
 
 // AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
 // routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
@@ -104,7 +114,7 @@ const requestSchema = z.object({
   verificationType: z.string().default("Individual"),
 });
 
-amlRouter.post("/request", requireAuth, async (req, res) => {
+amlRouter.post("/request", requireAuth, requiresRunAccess, async (req, res) => {
   const parsed = requestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -137,7 +147,7 @@ amlRouter.post("/request", requireAuth, async (req, res) => {
   }
 });
 
-amlRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
+amlRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -192,7 +202,7 @@ const resolveExceptionSchema = z.object({ notes: z.string().trim().min(1, "notes
 // this records a compliance decision, not a routine agent action. Requires
 // non-empty notes so it can never be a silent one-click bypass of a failed
 // or flagged identity check.
-amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+amlRouter.post("/:verificationId/resolve-exception", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const verificationId = readIdParam(res, req.params.verificationId, "AML verification");
   if (verificationId === null) return;
   const parsed = resolveExceptionSchema.safeParse(req.body);
@@ -227,7 +237,7 @@ amlRouter.post("/:verificationId/resolve-exception", requireAuth, requireRole(..
 // same AmlVerification row (see lib/aml.ts retryAmlVerification). Any
 // authenticated user can retry; unlike resolve-exception this doesn't
 // override an outcome, it just asks the provider again.
-amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
+amlRouter.post("/:verificationId/retry", requireAuth, requiresRunAccess, async (req, res) => {
   const verificationId = readIdParam(res, req.params.verificationId, "AML verification");
   if (verificationId === null) return;
   const user = req.authedUser!;
@@ -250,7 +260,7 @@ amlRouter.post("/:verificationId/retry", requireAuth, async (req, res) => {
 // Cost/billing visibility for a property's AML checks (Section 11) — the
 // ServiceOrder rows created by initiateAmlIfNeeded, read-only here; actual
 // charging is Phase 6.
-amlRouter.get("/service-orders/by-property/:propertyId", requireAuth, async (req, res) => {
+amlRouter.get("/service-orders/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
