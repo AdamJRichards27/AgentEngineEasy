@@ -305,17 +305,17 @@ test("documents: an out-of-range flat fee (accepted as an int by the route schem
   await assertGenericServerError(res, "PUT /api/documents/agency-agreement-terms/:id");
 });
 
-test("documents: typed/expected domain errors keep their own 400 and their own message", async () => {
-  // lib/documents.ts's "Property <id> not found" is deliberately uniform for
-  // a missing property AND a cross-tenant one; routes/__tests__/documents.test.ts
-  // asserts it verbatim, so it must survive this work package unchanged.
+test("documents: a missing property on GET agency-agreement-terms is 404 Not found, with no internal detail", async () => {
+  // R-F40 — this GET answers 404 { error: "Not found" } for a missing
+  // property, the same body as a foreign property. The body still must not
+  // carry driver text.
   const res = await fetch(`${baseUrl}/api/documents/agency-agreement-terms/2000000000`, {
     method: "GET",
     headers: { cookie },
   });
-  assert.equal(res.status, 400, await res.clone().text());
-  const body = await assertNoInternalDetail(res, "documents typed error");
-  assert.equal(body.error, "Property 2000000000 not found");
+  assert.equal(res.status, 404, await res.clone().text());
+  const body = await assertNoInternalDetail(res, "documents missing property");
+  assert.equal(body.error, "Not found");
 });
 
 test("aml: a non-integer propertyId (accepted as a number by the route schema) is a generic 500, not the driver's bind failure", async () => {

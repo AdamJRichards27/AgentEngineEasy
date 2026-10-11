@@ -1,6 +1,8 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
+import { db, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
@@ -184,10 +186,25 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
   }
 });
 
+// R-F40 — same 404 as GET /transactions/by-property. A missing property and
+// a property in another brokerage are one result. No isolation metric: this
+// slice does not add a tenant_isolation_rejection_total boundary.
+async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
+  const [property] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
+  return property !== undefined;
+}
+
 documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   try {
     const terms = await getAgencyAgreementTerms(propertyId, user.brokerageId);
     res.json({ terms });
@@ -457,6 +474,10 @@ documentsRouter.get("/packages/by-property/:propertyId", requireAuth, requiresRu
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   const result = await getPackageByProperty(propertyId, user.brokerageId);
   res.json(result);
 });

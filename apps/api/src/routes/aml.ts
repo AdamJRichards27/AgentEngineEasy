@@ -147,10 +147,25 @@ amlRouter.post("/request", requireAuth, requiresRunAccess, async (req, res) => {
   }
 });
 
+// R-F40 — same 404 as GET /transactions/by-property. A missing property and
+// a property in another brokerage are one result. No isolation metric: this
+// slice does not add a tenant_isolation_rejection_total boundary.
+async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
+  const [property] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
+  return property !== undefined;
+}
+
 amlRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   // Joined onto properties and filtered by the caller's brokerageId in the
   // same query — a propertyId from another brokerage returns no rows here,
   // never another tenant's AML verification records.
@@ -264,6 +279,10 @@ amlRouter.get("/service-orders/by-property/:propertyId", requireAuth, requiresRu
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   // Same brokerage-scoped join as GET /by-property above — serviceOrders
   // carries no brokerageId of its own, and this is billing data, so a
   // cross-tenant propertyId must return nothing rather than another
