@@ -27,6 +27,7 @@ import {
 import { appraisalPropertyInBrokerage } from "./appraisals.js";
 import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import {
+  appraisalChildInBrokerage,
   assertAppraisalInBrokerage,
   getAppraisalWorkspace,
   transitionAppraisalStatus,
@@ -85,7 +86,10 @@ export async function sendAppraisal(input: SendAppraisalInput): Promise<SendAppr
     throw new AppraisalAccessError("This appraisal has no linked contact to send to.");
   }
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, appraisal.propertyId));
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, appraisal.propertyId), eq(properties.brokerageId, input.brokerageId)));
 
   const candidate = await getContactRecipientCandidate(appraisal.partyId, input.brokerageId);
   if (!candidate || (!candidate.email && !candidate.mobile)) {
@@ -207,7 +211,10 @@ export async function generateMarketPositionDraft(
   const workspace = await getAppraisalWorkspace(input.appraisalId, input.brokerageId);
   const { appraisal, comparableSales, marketCompetition } = workspace;
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, appraisal.propertyId));
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, appraisal.propertyId), eq(properties.brokerageId, input.brokerageId)));
 
   const question = buildMarketPositionPrompt(appraisal, property ?? null, comparableSales, marketCompetition);
 
@@ -304,7 +311,10 @@ export async function generateAppraisalPresentation(
   const workspace = await getAppraisalWorkspace(input.appraisalId, input.brokerageId);
   const { appraisal, comparableSales, marketCompetition } = workspace;
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, appraisal.propertyId));
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, appraisal.propertyId), eq(properties.brokerageId, input.brokerageId)));
   const [party] = appraisal.partyId
     ? // E-9 A2: tenant-scoped contact lookup, same as the owner lookup below.
       // A foreign party id (bad row) must never put that contact's name into
@@ -498,10 +508,12 @@ export async function prepareAppraisalRunHandoff(
     throw new AppraisalAccessError("Contact not found");
   }
 
-  const existingLinks = await db
-    .select()
+  const existingLinkRows = await db
+    .select({ link: propertyParties })
     .from(propertyParties)
+    .innerJoin(properties, and(eq(properties.id, propertyParties.propertyId), eq(properties.brokerageId, input.brokerageId)))
     .where(and(eq(propertyParties.propertyId, appraisal.propertyId), eq(propertyParties.partyId, appraisal.partyId)));
+  const existingLinks = existingLinkRows.map((row) => row.link);
 
   let sellerLinkCreated = false;
   if (!existingLinks.some((l) => l.role === "Seller")) {
@@ -561,7 +573,13 @@ export async function updateComparableSale(
   const [row] = await db
     .update(appraisalComparableSales)
     .set({ ...input, updatedAt: new Date() })
-    .where(and(eq(appraisalComparableSales.id, saleId), eq(appraisalComparableSales.appraisalId, appraisalId)))
+    .where(
+      and(
+        eq(appraisalComparableSales.id, saleId),
+        eq(appraisalComparableSales.appraisalId, appraisalId),
+        appraisalChildInBrokerage(appraisalComparableSales.appraisalId, brokerageId),
+      ),
+    )
     .returning();
   if (!row) {
     await noteGrowComparableSaleIsolationRejection(saleId, brokerageId);
@@ -575,7 +593,13 @@ export async function deleteComparableSale(appraisalId: number, brokerageId: num
   enforceAppraisalPricingRule(appraisal);
   await db
     .delete(appraisalComparableSales)
-    .where(and(eq(appraisalComparableSales.id, saleId), eq(appraisalComparableSales.appraisalId, appraisalId)));
+    .where(
+      and(
+        eq(appraisalComparableSales.id, saleId),
+        eq(appraisalComparableSales.appraisalId, appraisalId),
+        appraisalChildInBrokerage(appraisalComparableSales.appraisalId, brokerageId),
+      ),
+    );
 }
 
 export async function addMarketCompetitionItem(
@@ -603,7 +627,13 @@ export async function updateMarketCompetitionItem(
   const [row] = await db
     .update(appraisalMarketCompetition)
     .set({ ...input, updatedAt: new Date() })
-    .where(and(eq(appraisalMarketCompetition.id, itemId), eq(appraisalMarketCompetition.appraisalId, appraisalId)))
+    .where(
+      and(
+        eq(appraisalMarketCompetition.id, itemId),
+        eq(appraisalMarketCompetition.appraisalId, appraisalId),
+        appraisalChildInBrokerage(appraisalMarketCompetition.appraisalId, brokerageId),
+      ),
+    )
     .returning();
   if (!row) {
     await noteGrowMarketCompetitionIsolationRejection(itemId, brokerageId);
@@ -617,5 +647,11 @@ export async function deleteMarketCompetitionItem(appraisalId: number, brokerage
   enforceAppraisalPricingRule(appraisal);
   await db
     .delete(appraisalMarketCompetition)
-    .where(and(eq(appraisalMarketCompetition.id, itemId), eq(appraisalMarketCompetition.appraisalId, appraisalId)));
+    .where(
+      and(
+        eq(appraisalMarketCompetition.id, itemId),
+        eq(appraisalMarketCompetition.appraisalId, appraisalId),
+        appraisalChildInBrokerage(appraisalMarketCompetition.appraisalId, brokerageId),
+      ),
+    );
 }

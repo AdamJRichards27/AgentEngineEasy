@@ -48,7 +48,12 @@ export async function getOrCreateAppraisal(input: {
   userId: number;
   brokerageId: number;
 }): Promise<{ appraisal: Appraisal; created: boolean }> {
-  const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
+  // E-9 A4: the property is the tenant parent. The brokerage predicate is in
+  // this query, not only in the comparison below.
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, input.propertyId), eq(properties.brokerageId, input.brokerageId)));
   if (!property || property.brokerageId !== input.brokerageId) {
     await noteGrowPropertyIsolationRejection(input.propertyId, input.brokerageId);
     throw new Error(`Property ${input.propertyId} not found`);
@@ -144,7 +149,10 @@ export async function updateAppraisal(input: {
 
 /** Idempotent chokepoint — finalising an already-finalised appraisal just returns it unchanged. */
 export async function finaliseAppraisal(input: { propertyId: number; userId: number; brokerageId: number }): Promise<Appraisal> {
-  const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, input.propertyId), eq(properties.brokerageId, input.brokerageId)));
   if (!property || property.brokerageId !== input.brokerageId) {
     await noteGrowPropertyIsolationRejection(input.propertyId, input.brokerageId);
     throw new Error(`Property ${input.propertyId} not found`);

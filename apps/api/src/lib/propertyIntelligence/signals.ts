@@ -437,8 +437,9 @@ export async function reviewSignal(input: { signalId: number; brokerageId: numbe
       nextReviewAt: addDays(now, REVIEW_QUIET_PERIOD_DAYS),
       updatedAt: now,
     })
-    .where(eq(growOpportunitySignals.id, existing.id))
+    .where(and(eq(growOpportunitySignals.id, existing.id), eq(growOpportunitySignals.brokerageId, input.brokerageId)))
     .returning();
+  if (!updated) throw new PropertyIntelligenceAccessError("Signal not found");
   await logAudit({
     userId: input.userId,
     action: "property_intelligence_signal_reviewed",
@@ -479,8 +480,9 @@ export async function dismissSignal(input: {
       nextReviewAt: addDays(now, DISMISS_QUIET_PERIOD_DAYS),
       updatedAt: now,
     })
-    .where(eq(growOpportunitySignals.id, existing.id))
+    .where(and(eq(growOpportunitySignals.id, existing.id), eq(growOpportunitySignals.brokerageId, input.brokerageId)))
     .returning();
+  if (!updated) throw new PropertyIntelligenceAccessError("Signal not found");
   await logAudit({
     userId: input.userId,
     action: "property_intelligence_signal_dismissed",
@@ -598,8 +600,9 @@ export async function promoteSignal(input: { signalId: number; brokerageId: numb
       nextReviewAt: null,
       updatedAt: new Date(),
     })
-    .where(eq(growOpportunitySignals.id, existing.id))
+    .where(and(eq(growOpportunitySignals.id, existing.id), eq(growOpportunitySignals.brokerageId, input.brokerageId)))
     .returning();
+  if (!updatedSignal) throw new PropertyIntelligenceAccessError("Signal not found");
 
   await logAudit({
     userId: input.userId,

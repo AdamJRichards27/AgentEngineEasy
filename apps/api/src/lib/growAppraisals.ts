@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql, type SQLWrapper } from "drizzle-orm";
 import {
   db,
   appraisals,
@@ -50,6 +50,14 @@ import {
 
 export class AppraisalAccessError extends Error {}
 export class AppraisalTransitionError extends Error {}
+
+/**
+ * E-9 A4. Comparable sales and market competition have no brokerage_id.
+ * A child row belongs to the caller only when its appraisal's property does.
+ */
+export function appraisalChildInBrokerage(appraisalId: SQLWrapper, brokerageId: number) {
+  return sql`${appraisalId} in (select ${appraisals.id} from ${appraisals} inner join ${properties} on ${properties.id} = ${appraisals.propertyId} where ${properties.brokerageId} = ${brokerageId})`;
+}
 
 /** Sec.6 -- explicit, auditable status graph. Deliberately not fully linear:
  * an agent can jump straight to APPOINTMENT_SCHEDULED from DRAFT, but can
@@ -174,11 +182,29 @@ export interface AppraisalWorkspace {
 
 export async function getAppraisalWorkspace(appraisalId: number, brokerageId: number): Promise<AppraisalWorkspace> {
   const appraisal = await assertAppraisalInBrokerage(appraisalId, brokerageId);
-  const [comparableSales, marketCompetition] = await Promise.all([
-    db.select().from(appraisalComparableSales).where(eq(appraisalComparableSales.appraisalId, appraisalId)).orderBy(appraisalComparableSales.displayOrder),
-    db.select().from(appraisalMarketCompetition).where(eq(appraisalMarketCompetition.appraisalId, appraisalId)).orderBy(appraisalMarketCompetition.displayOrder),
+  // E-9 A4: the child tables have no brokerage_id. Join the appraisal's
+  // property and require that brokerage in this query.
+  const [saleRows, competitionRows] = await Promise.all([
+    db
+      .select({ row: appraisalComparableSales })
+      .from(appraisalComparableSales)
+      .innerJoin(appraisals, eq(appraisals.id, appraisalComparableSales.appraisalId))
+      .innerJoin(properties, and(eq(properties.id, appraisals.propertyId), eq(properties.brokerageId, brokerageId)))
+      .where(eq(appraisalComparableSales.appraisalId, appraisalId))
+      .orderBy(appraisalComparableSales.displayOrder),
+    db
+      .select({ row: appraisalMarketCompetition })
+      .from(appraisalMarketCompetition)
+      .innerJoin(appraisals, eq(appraisals.id, appraisalMarketCompetition.appraisalId))
+      .innerJoin(properties, and(eq(properties.id, appraisals.propertyId), eq(properties.brokerageId, brokerageId)))
+      .where(eq(appraisalMarketCompetition.appraisalId, appraisalId))
+      .orderBy(appraisalMarketCompetition.displayOrder),
   ]);
-  return { appraisal, comparableSales, marketCompetition };
+  return {
+    appraisal,
+    comparableSales: saleRows.map((entry) => entry.row),
+    marketCompetition: competitionRows.map((entry) => entry.row),
+  };
 }
 
 /** Sec.7 -- Create from Contact 360. propertyId must already be a real,
@@ -191,7 +217,10 @@ export async function createAppraisalFromContact(input: {
   brokerageId: number;
   userId: number;
 }): Promise<Appraisal> {
-  const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
+  const [party] = await db
+    .select()
+    .from(parties)
+    .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)));
   if (!party || party.brokerageId !== input.brokerageId) {
     await noteGrowPartyIsolationRejection(input.partyId, input.brokerageId);
     throw new AppraisalAccessError("Contact not found");
@@ -240,7 +269,10 @@ export async function createAppraisalFromOpportunity(input: {
   brokerageId: number;
   userId: number;
 }): Promise<Appraisal> {
-  const [opportunity] = await db.select().from(growOpportunities).where(eq(growOpportunities.id, input.opportunityId));
+  const [opportunity] = await db
+    .select()
+    .from(growOpportunities)
+    .where(and(eq(growOpportunities.id, input.opportunityId), eq(growOpportunities.brokerageId, input.brokerageId)));
   if (!opportunity || opportunity.brokerageId !== input.brokerageId) {
     await noteGrowOpportunityIsolationRejection(input.opportunityId, input.brokerageId);
     throw new AppraisalAccessError("Opportunity not found");
@@ -278,7 +310,7 @@ export async function createAppraisalFromOpportunity(input: {
     await db
       .update(growOpportunities)
       .set({ stage: "AppraisalBooked", convertedAppraisalId: updated.id, updatedAt: new Date() })
-      .where(eq(growOpportunities.id, opportunity.id));
+      .where(and(eq(growOpportunities.id, opportunity.id), eq(growOpportunities.brokerageId, input.brokerageId)));
     await publishAppraisalEvent("OPPORTUNITY_STAGE_CHANGED", updated, input.brokerageId, input.userId, {
       opportunityId: opportunity.id,
       stage: "AppraisalBooked",

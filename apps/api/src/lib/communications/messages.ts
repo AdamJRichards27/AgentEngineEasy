@@ -18,7 +18,7 @@
 // anchor — see the file header comment on communications.ts (schema) for
 // the full rationale.
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import {
   db,
   communicationThreads,
@@ -73,14 +73,20 @@ export async function createThread(input: CreateThreadInput): Promise<Communicat
 
   let propertyId: number | null = null;
   if (input.propertyId != null) {
-    const [property] = await db.select().from(properties).where(eq(properties.id, input.propertyId));
+    const [property] = await db
+      .select()
+      .from(properties)
+      .where(and(eq(properties.id, input.propertyId), eq(properties.brokerageId, input.brokerageId)));
     if (!property || property.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
     propertyId = property.id;
   }
 
   let partyId: number | null = null;
   if (input.partyId != null) {
-    const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
+    const [party] = await db
+      .select()
+      .from(parties)
+      .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)));
     if (!party || party.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
     partyId = party.id;
   }
@@ -110,20 +116,26 @@ export async function createThread(input: CreateThreadInput): Promise<Communicat
 }
 
 export async function getThread(threadId: number, brokerageId: number): Promise<CommunicationThread> {
-  const [thread] = await db.select().from(communicationThreads).where(eq(communicationThreads.id, threadId));
+  const [thread] = await db
+    .select()
+    .from(communicationThreads)
+    .where(and(eq(communicationThreads.id, threadId), eq(communicationThreads.brokerageId, brokerageId)));
   if (!thread || thread.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   return thread;
 }
 
 /** Every thread on a property, most-recently-active first — the property-centred UI's list (Section 10). */
 export async function listThreadsForProperty(propertyId: number, brokerageId: number): Promise<CommunicationThread[]> {
-  const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
   if (!property || property.brokerageId !== brokerageId) throw new CommunicationTenancyError();
 
   return db
     .select()
     .from(communicationThreads)
-    .where(eq(communicationThreads.propertyId, propertyId))
+    .where(and(eq(communicationThreads.propertyId, propertyId), eq(communicationThreads.brokerageId, brokerageId)))
     .orderBy(desc(communicationThreads.lastActivityAt));
 }
 
@@ -133,13 +145,16 @@ export async function listThreadsForProperty(propertyId: number, brokerageId: nu
  * party, regardless of whether it also carries a propertyId).
  */
 export async function listThreadsForParty(partyId: number, brokerageId: number): Promise<CommunicationThread[]> {
-  const [party] = await db.select().from(parties).where(eq(parties.id, partyId));
+  const [party] = await db
+    .select()
+    .from(parties)
+    .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party || party.brokerageId !== brokerageId) throw new CommunicationTenancyError();
 
   return db
     .select()
     .from(communicationThreads)
-    .where(eq(communicationThreads.partyId, partyId))
+    .where(and(eq(communicationThreads.partyId, partyId), eq(communicationThreads.brokerageId, brokerageId)))
     .orderBy(desc(communicationThreads.lastActivityAt));
 }
 
@@ -252,11 +267,18 @@ export async function listParticipants(threadId: number, brokerageId: number): P
  */
 export async function listMessagesForThread(threadId: number, brokerageId: number): Promise<CommunicationMessage[]> {
   await getThread(threadId, brokerageId); // tenant check
-  return db.select().from(communicationMessages).where(eq(communicationMessages.threadId, threadId)).orderBy(communicationMessages.createdAt);
+  return db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.threadId, threadId), eq(communicationMessages.brokerageId, brokerageId)))
+    .orderBy(communicationMessages.createdAt);
 }
 
 export async function getMessage(messageId: number, brokerageId: number): Promise<CommunicationMessage> {
-  const [message] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, messageId));
+  const [message] = await db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.id, messageId), eq(communicationMessages.brokerageId, brokerageId)));
   if (!message || message.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   return message;
 }
@@ -337,7 +359,17 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
   let templateVersion: number | null = null;
 
   if (input.templateId != null) {
-    const [template] = await db.select().from(communicationTemplates).where(eq(communicationTemplates.id, input.templateId));
+    // A null brokerage_id is a system template available to every tenant.
+    // A set brokerage_id must be this caller's.
+    const [template] = await db
+      .select()
+      .from(communicationTemplates)
+      .where(
+        and(
+          eq(communicationTemplates.id, input.templateId),
+          or(isNull(communicationTemplates.brokerageId), eq(communicationTemplates.brokerageId, input.brokerageId)),
+        ),
+      );
     if (!template || (template.brokerageId != null && template.brokerageId !== input.brokerageId)) throw new CommunicationTenancyError();
     const rendered = renderTemplate(template, input.placeholderValues ?? {});
     subject = rendered.subject;
@@ -390,7 +422,10 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
     })
     .returning();
 
-  await db.update(communicationThreads).set({ lastActivityAt: new Date(), updatedAt: new Date() }).where(eq(communicationThreads.id, input.threadId));
+  await db
+    .update(communicationThreads)
+    .set({ lastActivityAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(communicationThreads.id, input.threadId), eq(communicationThreads.brokerageId, input.brokerageId)));
 
   await logAudit({
     userId: input.createdByUserId,

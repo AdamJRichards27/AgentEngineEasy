@@ -92,8 +92,9 @@ export async function proposeMatch(input: ProposeMatchInput): Promise<PropertyEx
       matchReasons: input.matchReasons ?? existing.matchReasons,
       updatedAt: new Date(),
     })
-    .where(eq(propertyExternalIdentifiers.id, existing.id))
+    .where(and(eq(propertyExternalIdentifiers.id, existing.id), eq(propertyExternalIdentifiers.brokerageId, input.brokerageId)))
     .returning();
+  if (!updated) throw new PropertyIntelligenceAccessError("Match not found");
   return updated;
 }
 
@@ -124,8 +125,9 @@ export async function confirmMatch(input: { identifierId: number; brokerageId: n
   const [updated] = await db
     .update(propertyExternalIdentifiers)
     .set({ status: "Confirmed", reviewedByUserId: input.userId, reviewedAt: new Date(), updatedAt: new Date() })
-    .where(eq(propertyExternalIdentifiers.id, existing.id))
+    .where(and(eq(propertyExternalIdentifiers.id, existing.id), eq(propertyExternalIdentifiers.brokerageId, input.brokerageId)))
     .returning();
+  if (!updated) throw new PropertyIntelligenceAccessError("Match not found");
 
   await logAudit({
     userId: input.userId,
@@ -160,8 +162,9 @@ export async function rejectMatch(input: {
       rejectedReason: input.rejectedReason ?? null,
       updatedAt: new Date(),
     })
-    .where(eq(propertyExternalIdentifiers.id, existing.id))
+    .where(and(eq(propertyExternalIdentifiers.id, existing.id), eq(propertyExternalIdentifiers.brokerageId, input.brokerageId)))
     .returning();
+  if (!updated) throw new PropertyIntelligenceAccessError("Match not found");
 
   await logAudit({
     userId: input.userId,
