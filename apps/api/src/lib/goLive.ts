@@ -81,7 +81,7 @@ export async function goLiveProperty(
     logger.error("publish_domain_event_failed", { eventType: "LISTING_LIVE", error: err });
   }
 
-  await logAudit({ userId: actor.id, action: "listing_live", recordType: "property", recordId: String(propertyId), propertyId });
+  await logAudit({ brokerageId, userId: actor.id, action: "listing_live", recordType: "property", recordId: String(propertyId), propertyId });
 
   const [updated] = await db.select().from(properties).where(eq(properties.id, propertyId));
   return { ok: true, property: updated, alreadyLive: false };

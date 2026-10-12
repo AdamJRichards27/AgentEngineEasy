@@ -150,6 +150,7 @@ export async function createAutomationTask(input: CreateAutomationTaskInput): Pr
       .where(eq(automationTasks.id, existingActive.id));
 
     await logAudit({
+      brokerageId: input.brokerageId,
       action: input.kind === "REMINDER" ? "automation_reminder_superseded" : "automation_task_superseded",
       recordType: "automation_task",
       recordId: recreated.id,
@@ -181,6 +182,7 @@ export async function createAutomationTask(input: CreateAutomationTaskInput): Pr
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     action: input.kind === "REMINDER" ? "automation_reminder_created" : "automation_task_created",
     recordType: "automation_task",
     recordId: created.id,
@@ -248,6 +250,7 @@ export async function assignAutomationTaskToRole(input: AssignAutomationTaskOwne
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     action: "automation_task_reassigned",
     recordType: "automation_task",
     recordId: updated.id,
@@ -292,6 +295,7 @@ export async function completeAutomationTask(input: { brokerageId: number; taskI
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "automation_task_completed",
     recordType: "automation_task",

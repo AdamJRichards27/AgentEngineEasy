@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { db, brokerages, users, properties, transactions, automationTasks, automationAttentionItems, type UserRole } from "@aee/db";
+import { db, auditLogs, brokerages, users, properties, transactions, automationTasks, automationAttentionItems, type UserRole } from "@aee/db";
 import { createAutomationTask, assignAutomationTaskToRole } from "../tasks.js";
 import { raiseAttentionItem, resolveAttentionItem } from "../attentionItems.js";
 
@@ -55,6 +55,8 @@ async function cleanupBrokerage(brokerageId: number): Promise<void> {
   }
   await db.delete(properties).where(eq(properties.brokerageId, brokerageId));
   await db.delete(users).where(eq(users.brokerageId, brokerageId));
+  // Run audit rows now reference the brokerage. Delete them before the brokerage row.
+  await db.delete(auditLogs).where(eq(auditLogs.brokerageId, brokerageId));
   await db.delete(brokerages).where(eq(brokerages.id, brokerageId));
 }
 

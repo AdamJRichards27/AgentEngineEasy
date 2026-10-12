@@ -202,6 +202,7 @@ export async function populateDocumentPackage(packageId: number, brokerageId: nu
       metadata: { ruleSetVersion: docPackage.ruleSetVersion },
     });
     await logAudit({
+      brokerageId,
       action:
         stored.outcome === "created"
           ? "document_version_generated"
@@ -636,6 +637,7 @@ export async function processEsignWebhook(
           const stored = storedResults[index];
           storedVersions.push(stored.version);
           await logAudit({
+            brokerageId: property.brokerageId,
             action:
               stored.outcome === "created"
                 ? "document_version_ingested_from_esign"
@@ -668,6 +670,7 @@ export async function processEsignWebhook(
         });
         if (!isInvalidPayload) {
           await logAudit({
+            brokerageId: property.brokerageId,
             action: "esign_completed_document_storage_retry_required",
             recordType: "signature_request",
             recordId: String(signatureRequest.id),

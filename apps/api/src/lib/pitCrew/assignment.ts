@@ -374,6 +374,7 @@ async function applyTransition(
   if (!updated) throw new PitCrewConcurrencyError();
 
   await logAudit({
+    brokerageId: ref.brokerageId,
     userId: actor.actorUserId,
     userEmail: actor.actorEmail,
     action,
@@ -689,6 +690,7 @@ export async function handoffWorkItem(
   if (!updated) throw new PitCrewConcurrencyError();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.actorUserId,
     userEmail: input.actorEmail,
     action: "PC_HANDOFF",

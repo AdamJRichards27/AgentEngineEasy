@@ -61,6 +61,7 @@ export async function addCondition(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "transaction_condition_added",
     recordType: "transaction_condition",
@@ -101,6 +102,7 @@ export async function rescheduleConditionDueDate(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "transaction_condition_rescheduled",
     recordType: "transaction_condition",
@@ -148,6 +150,7 @@ export async function resolveCondition(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "transaction_condition_resolved",
     recordType: "transaction_condition",
@@ -180,6 +183,7 @@ export async function recordExchange(input: { transactionId: number; userId: num
   await db.update(transactions).set({ exchangedAt: new Date(), updatedAt: new Date() }).where(eq(transactions.id, transaction.id));
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "contract_exchanged",
     recordType: "transaction",
@@ -255,6 +259,7 @@ export async function maybeRecordUnconditional(input: {
     .returning();
 
   await logAudit({
+    brokerageId: input.brokerageId,
     userId: input.userId,
     action: "transaction_unconditional",
     recordType: "transaction",

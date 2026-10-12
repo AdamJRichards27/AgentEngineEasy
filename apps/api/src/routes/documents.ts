@@ -173,6 +173,7 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
     const terms = await upsertAgencyAgreementTerms({ propertyId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data });
 
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "agency_agreement_terms_updated",
       recordType: "agency_agreement_terms",
@@ -238,6 +239,7 @@ documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, req
       brokerageId: user.brokerageId,
     });
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "document_package_sent_for_signature",
       recordType: "document_package",
@@ -301,6 +303,7 @@ documentsRouter.get("/signed-download/:versionId", async (req, res) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "private, no-store");
     await logAudit({
+      brokerageId: result.version!.brokerageId,
       action: "document_signed_download_redeemed",
       recordType: "document_object_version",
       recordId: String(result.version!.id),
@@ -331,6 +334,7 @@ documentsRouter.get("/:documentId/content", requireAuth, requiresRunAccess, asyn
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "private, no-store");
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "document_content_downloaded",
       recordType: result.versionId ? "document_object_version" : "document",
@@ -375,6 +379,7 @@ documentsRouter.post(
         source: "upload",
       });
       await logAudit({
+        brokerageId: user.brokerageId,
         userId: user.id,
         action:
           stored.outcome === "created"
@@ -424,6 +429,7 @@ documentsRouter.post("/:documentId/signed-download", requireAuth, requiresRunAcc
       user.brokerageId,
     );
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "document_signed_download_created",
       recordType: "document_object_version",
@@ -454,6 +460,7 @@ documentsRouter.post("/:documentId/quarantine", requireAuth, requiresRunAccess, 
   try {
     const version = await quarantineDocument(documentId, user.brokerageId);
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "document_version_quarantined",
       recordType: "document_object_version",

@@ -182,6 +182,7 @@ async function recalculateBudget(plan: LaunchPlan, actor: ActorRef | null): Prom
   // one of them (Build spec: "not flooding with minor updates").
   if (nowExceeded && !wasExceeded) {
     await logAudit({
+      brokerageId: plan.brokerageId,
       userId: actor?.id,
       action: "launch_budget_exceeded",
       recordType: "launch_plan",
@@ -216,7 +217,7 @@ async function evaluateAndUpdateMarketReadyInternal(plan: LaunchPlan, actor: Act
   // re-evaluation that stays ready, or stays blocked, isn't (mirrors the
   // budget-exceeded crossing-edge convention just above).
   if (result.ready && !wasReady) {
-    await logAudit({ userId: actor?.id, action: "launch_market_ready_achieved", recordType: "launch_plan", recordId: plan.id, propertyId: plan.propertyId });
+    await logAudit({ brokerageId: plan.brokerageId, userId: actor?.id, action: "launch_market_ready_achieved", recordType: "launch_plan", recordId: plan.id, propertyId: plan.propertyId });
     await recordTransition(plan.id, plan.brokerageId, "MARKET_READY_ACHIEVED", {
       toValue: "READY",
       actorType: actor ? "USER" : "SYSTEM",
@@ -313,7 +314,7 @@ export async function getOrCreateLaunchPlan(propertyId: number, brokerageId: num
   }
 
   await recordTransition(created.id, brokerageId, "CREATED", { toValue: "PLANNING", actorType: actor ? "USER" : "SYSTEM", actorUserId: actor?.id ?? null });
-  await logAudit({ userId: actor?.id, action: "launch_plan_created", recordType: "launch_plan", recordId: created.id, propertyId });
+  await logAudit({ brokerageId, userId: actor?.id, action: "launch_plan_created", recordType: "launch_plan", recordId: created.id, propertyId });
   await emit(
     "LAUNCH_PLAN_CREATED",
     created,
@@ -370,7 +371,7 @@ export async function applyTemplate(launchPlanId: string, brokerageId: number, a
   }
 
   await recordTransition(launchPlanId, brokerageId, "TEMPLATE_APPLIED", { toValue: templateType, actorType: "USER", actorUserId: actor.id });
-  await logAudit({ userId: actor.id, action: "launch_template_applied", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: templateType });
+  await logAudit({ brokerageId, userId: actor.id, action: "launch_template_applied", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: templateType });
   await emit("LAUNCH_TEMPLATE_APPLIED", plan, actor, "api:launch:apply-template", { launchPlanId, templateType, itemCount: createdItems.length });
 
   for (const item of createdItems) {
@@ -415,6 +416,7 @@ export async function setTargetLaunchDate(launchPlanId: string, brokerageId: num
     actorUserId: actor.id,
   });
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "launch_target_date_changed",
     recordType: "launch_plan",
@@ -481,7 +483,7 @@ export async function addCampaignItem(launchPlanId: string, brokerageId: number,
     })
     .returning();
 
-  await logAudit({ userId: actor.id, action: "campaign_item_added", recordType: "campaign_item", recordId: item.id, propertyId: plan.propertyId, updatedValue: item.title });
+  await logAudit({ brokerageId, userId: actor.id, action: "campaign_item_added", recordType: "campaign_item", recordId: item.id, propertyId: plan.propertyId, updatedValue: item.title });
   await emit("CAMPAIGN_ITEM_ADDED", plan, actor, "api:launch:add-campaign-item", { launchPlanId, campaignItemId: item.id, itemType: item.itemType });
   if (defaultAssigned) {
     await emit("LAUNCH_DEFAULT_RESPONSIBILITY_ASSIGNED", plan, actor, "api:launch:add-campaign-item", { campaignItemId: item.id, ownerType, ownerUserId });
@@ -511,6 +513,7 @@ export async function updateCampaignItemStatus(campaignItemId: string, brokerage
 
   const scope = { propertyId: item.propertyId, brokerageId };
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "campaign_item_status_changed",
     recordType: "campaign_item",
@@ -540,6 +543,7 @@ export async function assignResponsibility(campaignItemId: string, brokerageId: 
     .where(eq(campaignItems.id, campaignItemId))
     .returning();
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "campaign_item_responsibility_assigned",
     recordType: "campaign_item",
@@ -563,6 +567,7 @@ export async function recordVendorAndCost(campaignItemId: string, brokerageId: n
 
   const scope = { propertyId: item.propertyId, brokerageId };
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "campaign_item_vendor_cost_recorded",
     recordType: "campaign_item",
@@ -612,7 +617,7 @@ export async function attachCampaignItemEvidence(campaignItemId: string, brokera
     .set({ evidence: sql`${campaignItems.evidence} || ${JSON.stringify([entry])}::jsonb`, updatedAt: new Date() })
     .where(eq(campaignItems.id, campaignItemId))
     .returning();
-  await logAudit({ userId: actor.id, action: "campaign_item_evidence_attached", recordType: "campaign_item", recordId: campaignItemId, propertyId: item.propertyId, updatedValue: label });
+  await logAudit({ brokerageId, userId: actor.id, action: "campaign_item_evidence_attached", recordType: "campaign_item", recordId: campaignItemId, propertyId: item.propertyId, updatedValue: label });
   await emit("CAMPAIGN_ITEM_EVIDENCE_ATTACHED", { propertyId: item.propertyId, brokerageId }, actor, "api:launch:attach-evidence", { campaignItemId, label });
   return updated;
 }
@@ -648,6 +653,7 @@ async function requestVendorApprovalInternal(
     })
     .returning();
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "vendor_approval_requested",
     recordType: "vendor_approval",
@@ -704,6 +710,7 @@ export async function decideVendorApproval(
   }
 
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "vendor_approval_decided",
     recordType: "vendor_approval",
@@ -724,6 +731,7 @@ export async function setBudget(launchPlanId: string, brokerageId: number, actor
   await db.update(launchPlans).set({ budgetCents, budgetSetAt: new Date(), budgetSetBy: actor.id, updatedAt: new Date() }).where(eq(launchPlans.id, launchPlanId));
   await recordTransition(launchPlanId, brokerageId, "BUDGET_SET", { fromValue: String(plan.budgetCents), toValue: String(budgetCents), actorType: "USER", actorUserId: actor.id });
   await logAudit({
+    brokerageId,
     userId: actor.id,
     action: "launch_budget_set",
     recordType: "launch_plan",
@@ -745,7 +753,7 @@ export async function setBudget(launchPlanId: string, brokerageId: number, actor
 export async function addPortalDestination(launchPlanId: string, brokerageId: number, actor: ActorRef, portalName: string): Promise<PortalDestination> {
   const plan = await loadLaunchPlanInBrokerage(launchPlanId, brokerageId);
   const [dest] = await db.insert(portalDestinations).values({ launchPlanId, propertyId: plan.propertyId, brokerageId, portalName }).returning();
-  await logAudit({ userId: actor.id, action: "portal_destination_added", recordType: "portal_destination", recordId: dest.id, propertyId: plan.propertyId, updatedValue: portalName });
+  await logAudit({ brokerageId, userId: actor.id, action: "portal_destination_added", recordType: "portal_destination", recordId: dest.id, propertyId: plan.propertyId, updatedValue: portalName });
   await emit("PORTAL_DESTINATION_ADDED", plan, actor, "api:launch:add-portal-destination", { launchPlanId, portalDestinationId: dest.id, portalName });
 
   await afterLaunchMutation(launchPlanId, brokerageId, actor);
@@ -773,7 +781,7 @@ export async function recordPortalSubmission(portalDestinationId: string, broker
     .set({ status: "SUBMITTED", submittedAt: new Date(), submittedBy: actor?.id ?? null, listingUrl: listingUrl ?? dest.listingUrl, failureReason: null, updatedAt: new Date() })
     .where(eq(portalDestinations.id, portalDestinationId))
     .returning();
-  await logAudit({ userId: actor?.id, action: "portal_submission_recorded", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
+  await logAudit({ brokerageId, userId: actor?.id, action: "portal_submission_recorded", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
   await emit("PORTAL_SUBMISSION_RECORDED", { propertyId: dest.propertyId, brokerageId }, actor, "api:launch:record-portal-submission", { portalDestinationId, portalName: dest.portalName });
 
   await afterLaunchMutation(dest.launchPlanId, brokerageId, actor);
@@ -788,7 +796,7 @@ export async function recordPortalFailure(portalDestinationId: string, brokerage
     .set({ status: "FAILED", failureReason, updatedAt: new Date() })
     .where(eq(portalDestinations.id, portalDestinationId))
     .returning();
-  await logAudit({ userId: actor?.id, action: "portal_submission_failed", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: failureReason });
+  await logAudit({ brokerageId, userId: actor?.id, action: "portal_submission_failed", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: failureReason });
   await emit("PORTAL_SUBMISSION_FAILED", { propertyId: dest.propertyId, brokerageId }, actor, "api:launch:record-portal-failure", { portalDestinationId, portalName: dest.portalName, failureReason });
 
   await afterLaunchMutation(dest.launchPlanId, brokerageId, actor);
@@ -818,7 +826,7 @@ export async function confirmPortalLive(portalDestinationId: string, brokerageId
     .set({ status: "LIVE", liveConfirmedAt: new Date(), liveConfirmedBy: actor?.id ?? null, listingUrl: listingUrl ?? dest.listingUrl, updatedAt: new Date() })
     .where(eq(portalDestinations.id, portalDestinationId))
     .returning();
-  await logAudit({ userId: actor?.id, action: "portal_confirmed_live", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
+  await logAudit({ brokerageId, userId: actor?.id, action: "portal_confirmed_live", recordType: "portal_destination", recordId: portalDestinationId, propertyId: dest.propertyId, updatedValue: dest.portalName });
 
   await afterLaunchMutation(dest.launchPlanId, brokerageId, actor);
   return updated;
@@ -843,7 +851,7 @@ export async function overrideMarketReady(launchPlanId: string, brokerageId: num
     .set({ marketReadyOverriddenAt: new Date(), marketReadyOverriddenBy: actor.id, marketReadyOverrideReason: reason, updatedAt: new Date() })
     .where(eq(launchPlans.id, launchPlanId));
   await recordTransition(launchPlanId, brokerageId, "MARKET_READY_OVERRIDDEN", { toValue: "OVERRIDDEN", actorType: "USER", actorUserId: actor.id, reason });
-  await logAudit({ userId: actor.id, action: "market_ready_overridden", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: reason });
+  await logAudit({ brokerageId, userId: actor.id, action: "market_ready_overridden", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: reason });
   await emit("MARKET_READY_OVERRIDDEN", plan, actor, "api:launch:override-market-ready", { launchPlanId, reason });
 
   await refreshLaunchPlanStatus(launchPlanId, brokerageId);
@@ -879,7 +887,7 @@ export async function confirmLaunchLive(launchPlanId: string, brokerageId: numbe
     .where(eq(launchPlans.id, launchPlanId))
     .returning();
   await recordTransition(launchPlanId, brokerageId, "LISTING_LIVE_CONFIRMED", { fromValue: plan.status, toValue: "LISTING_LIVE", actorType: "USER", actorUserId: actor.id });
-  await logAudit({ userId: actor.id, action: "launch_listing_live_confirmed", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId });
+  await logAudit({ brokerageId, userId: actor.id, action: "launch_listing_live_confirmed", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId });
 
   return updated;
 }
@@ -900,7 +908,7 @@ export async function pauseLaunchPlan(launchPlanId: string, brokerageId: number,
     .where(eq(launchPlans.id, launchPlanId))
     .returning();
   await recordTransition(launchPlanId, brokerageId, "PAUSED", { fromValue: plan.status, toValue: "PAUSED", actorType: "USER", actorUserId: actor.id, reason });
-  await logAudit({ userId: actor.id, action: "launch_paused", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: reason });
+  await logAudit({ brokerageId, userId: actor.id, action: "launch_paused", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: reason });
   await emit("LAUNCH_PAUSED", plan, actor, "api:launch:pause", { launchPlanId, reason });
   return updated;
 }
@@ -913,7 +921,7 @@ export async function resumeLaunchPlan(launchPlanId: string, brokerageId: number
   }
   await db.update(launchPlans).set({ pausedAt: null, pausedBy: null, pauseReason: null, updatedAt: new Date() }).where(eq(launchPlans.id, launchPlanId));
   await recordTransition(launchPlanId, brokerageId, "RESUMED", { fromValue: "PAUSED", toValue: null, actorType: "USER", actorUserId: actor.id });
-  await logAudit({ userId: actor.id, action: "launch_resumed", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId });
+  await logAudit({ brokerageId, userId: actor.id, action: "launch_resumed", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId });
 
   await afterLaunchMutation(launchPlanId, brokerageId, actor);
   return loadLaunchPlanInBrokerage(launchPlanId, brokerageId);
@@ -931,7 +939,7 @@ export async function cancelLaunchPlan(launchPlanId: string, brokerageId: number
     .where(eq(launchPlans.id, launchPlanId))
     .returning();
   await recordTransition(launchPlanId, brokerageId, "CANCELLED", { fromValue: plan.status, toValue: "CANCELLED", actorType: "USER", actorUserId: actor.id, reason });
-  await logAudit({ userId: actor.id, action: "launch_cancelled", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: reason });
+  await logAudit({ brokerageId, userId: actor.id, action: "launch_cancelled", recordType: "launch_plan", recordId: launchPlanId, propertyId: plan.propertyId, updatedValue: reason });
   await emit("LAUNCH_CANCELLED", plan, actor, "api:launch:cancel", { launchPlanId, reason });
   return updated;
 }
