@@ -294,9 +294,8 @@ test("GET /api/aml/by-property/:propertyId returns nothing for a different broke
   const seeded = await seedVerification(A.agent.cookie);
 
   const crossTenant = await fetch(`${baseUrl}/api/aml/by-property/${seeded.propertyId}`, { headers: { cookie: B.agent.cookie } });
-  assert.equal(crossTenant.status, 200, "the route lists rather than 404s, so it must return an empty list, not another tenant's rows");
-  const crossTenantBody = await json<{ verifications: unknown[] }>(crossTenant);
-  assert.deepEqual(crossTenantBody.verifications, []);
+  assert.equal(crossTenant.status, 404);
+  assert.deepEqual(await json<{ error: string }>(crossTenant), { error: "Not found" });
 
   const sameTenant = await fetch(`${baseUrl}/api/aml/by-property/${seeded.propertyId}`, { headers: { cookie: A.agent.cookie } });
   assert.equal(sameTenant.status, 200);
@@ -308,9 +307,8 @@ test("GET /api/aml/service-orders/by-property/:propertyId returns nothing for a 
   const seeded = await seedVerification(A.agent.cookie);
 
   const crossTenant = await fetch(`${baseUrl}/api/aml/service-orders/by-property/${seeded.propertyId}`, { headers: { cookie: B.agent.cookie } });
-  assert.equal(crossTenant.status, 200);
-  const crossTenantBody = await json<{ serviceOrders: unknown[] }>(crossTenant);
-  assert.deepEqual(crossTenantBody.serviceOrders, [], "billing/cost records must never leak cross-tenant");
+  assert.equal(crossTenant.status, 404);
+  assert.deepEqual(await json<{ error: string }>(crossTenant), { error: "Not found" });
 
   const sameTenant = await fetch(`${baseUrl}/api/aml/service-orders/by-property/${seeded.propertyId}`, { headers: { cookie: A.agent.cookie } });
   assert.equal(sameTenant.status, 200);

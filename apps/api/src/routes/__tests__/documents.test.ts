@@ -185,21 +185,15 @@ test("GET /agency-agreement-terms/:propertyId rejects a property belonging to a 
   assert.equal(putRes.status, 200);
 
   const crossTenant = await fetch(`${baseUrl}/api/documents/agency-agreement-terms/${propertyId}`, { headers: { cookie: B.agent.cookie } });
-  assert.equal(crossTenant.status, 400);
+  assert.equal(crossTenant.status, 404);
   const body = await json<{ error: string }>(crossTenant);
-  // The message echoes back whatever id the caller supplied (same
-  // convention as e.g. lib/transactionConditions.ts's loadTransactionInBrokerage)
-  // — that's not a leak, since B already knows the id it asked for either
-  // way. What must not exist is a DIFFERENT wording that would let B tell
-  // "belongs to another brokerage" apart from "doesn't exist at all".
-  assert.equal(body.error, `Property ${propertyId} not found`);
+  assert.equal(body.error, "Not found");
 
-  // A genuinely nonexistent propertyId under B's own brokerage goes through
-  // the exact same code path and produces the same status + template.
+  // A genuinely nonexistent propertyId produces the same status and body.
   const nonexistent = await fetch(`${baseUrl}/api/documents/agency-agreement-terms/999999999`, { headers: { cookie: B.agent.cookie } });
   assert.equal(nonexistent.status, crossTenant.status);
   const nonexistentBody = await json<{ error: string }>(nonexistent);
-  assert.equal(nonexistentBody.error, "Property 999999999 not found");
+  assert.equal(nonexistentBody.error, body.error);
 });
 
 // ---------------------------------------------------------------------
@@ -389,13 +383,14 @@ test("GET /packages/by-property/:propertyId returns nothing for a different brok
   const { propertyId } = await createReadyToListProperty(A.agent.cookie, `${Math.floor(Math.random() * 1_000_000)} By Property Cross Tenant Rd`);
 
   const crossTenant = await getByProperty(B.agent.cookie, propertyId);
-  assert.equal(crossTenant.res.status, 200, "the route returns a null/empty shape rather than 404ing, so it must never leak another tenant's package");
-  assert.deepEqual(crossTenant.body, { documentPackage: null, documents: [], signatureRequest: null });
+  assert.equal(crossTenant.res.status, 404);
+  assert.deepEqual(crossTenant.body as unknown, { error: "Not found" });
 
-  // Same shape as a genuinely package-less property in B's own brokerage.
+  // A property in B's own brokerage with no package stays the empty 200.
   const bareInB = await createBareProperty(B.agent.cookie, `${Math.floor(Math.random() * 1_000_000)} By Property No Package Rd`);
   const noPackage = await getByProperty(B.agent.cookie, bareInB);
-  assert.deepEqual(noPackage.body, crossTenant.body);
+  assert.equal(noPackage.res.status, 200);
+  assert.deepEqual(noPackage.body, { documentPackage: null, documents: [], signatureRequest: null });
 
   const sameTenant = await getByProperty(A.agent.cookie, propertyId);
   assert.equal(sameTenant.res.status, 200);
