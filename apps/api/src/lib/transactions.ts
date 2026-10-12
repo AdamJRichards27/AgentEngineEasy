@@ -1,4 +1,4 @@
-import { eq, and, ne, inArray } from "drizzle-orm";
+import { eq, and, ne, inArray, desc } from "drizzle-orm";
 import {
   db,
   offers,
@@ -12,12 +12,21 @@ import {
   amlVerifications,
   automationAttentionItems,
   automationTasks,
+  financialDisputes,
+  financialPaymentRequests,
+  financialReconciliations,
+  commissionCalculations,
+  riskExceptions,
+  OPEN_RISK_EXCEPTION_STATUSES,
 } from "@aee/db";
 import type { Transaction, Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
 import { initiateAmlIfNeeded } from "./aml.js";
+import { completeSatisfiedAutomationTasks } from "./automation/closureAutoComplete.js";
+import { MUST_COMPLETE_BEFORE_CLOSE_TASK_KEYS } from "./automation/closurePolicy.js";
+import { computeFundsReconciliation } from "./transactionFunds.js";
 
 const TRANSACTION_STEPS = [
   { stepKey: "ContractSigning", label: "Contract Signing", sequence: 1 },
@@ -711,7 +720,7 @@ export async function recordLegalRepresentatives(input: {
     .where(eq(transactions.id, transaction.id))
     .returning();
 
-  await logAudit({
+  const auditId = await logAudit({
     brokerageId: input.brokerageId,
     userId: input.userId,
     action: "transaction_legal_representatives_updated",
@@ -720,6 +729,24 @@ export async function recordLegalRepresentatives(input: {
     propertyId: transaction.propertyId,
     updatedValue: JSON.stringify(legalRepresentatives),
   });
+
+  try {
+    await completeSatisfiedAutomationTasks({
+      brokerageId: input.brokerageId,
+      propertyId: updated.propertyId,
+      transactionId: updated.id,
+      eventType: "transaction_legal_representatives_updated",
+      eventId: auditId != null ? String(auditId) : `transaction-legal-representatives:${updated.id}`,
+      correlationId: currentCorrelationId(),
+    });
+  } catch (err) {
+    logger.error("closure_auto_complete_failed", {
+      eventType: "transaction_legal_representatives_updated",
+      transactionId: updated.id,
+      brokerageId: input.brokerageId,
+      error: err,
+    });
+  }
 
   return updated;
 }
@@ -740,13 +767,20 @@ export class TransactionClosureBlockedError extends Error {
  * actually become unconditional, that every tracked condition was
  * resolved, that buyer AML/CTF verification had cleared, or that no open
  * WAE attention item / active WAE task remained outstanding for this
- * transaction — a genuine "close the file with real work still open" gap.
+ * transaction. R-F42 counts only the must-finish automation tasks (O2, C4,
+ * S1, S2, S3) and adds the approved financial and seller-AML blocks.
  * `force` (role-gated at the route layer to Brokerage Administrator, same
  * as this whole endpoint) remains available for a deliberate override, and
- * is always audited distinctly from an ordinary close.
+ * is always audited distinctly from an ordinary close. Settlement
+ * prerequisites are not changed here.
  */
 async function collectClosureBlockers(transaction: Transaction): Promise<string[]> {
   const blockers: string[] = [];
+  const [property] = await db
+    .select({ brokerageId: properties.brokerageId })
+    .from(properties)
+    .where(eq(properties.id, transaction.propertyId));
+  const brokerageId = property?.brokerageId ?? null;
 
   if (!transactionIsUnconditional(transaction)) {
     blockers.push("The transaction has not become unconditional yet.");
@@ -760,20 +794,10 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
     blockers.push(`${openConditions.length} contract condition(s) are still Pending.`);
   }
 
-  const buyerIds = Array.isArray(transaction.buyerPartyIds) ? (transaction.buyerPartyIds as number[]) : [];
-  if (buyerIds.length > 0) {
-    const buyerVerifications = await db
-      .select()
-      .from(amlVerifications)
-      .where(and(eq(amlVerifications.propertyId, transaction.propertyId), inArray(amlVerifications.partyId, buyerIds)));
-    const unresolved = buyerIds.filter((id) => {
-      const verification = buyerVerifications.find((row) => row.partyId === id);
-      return !verification || verification.status !== "Complete";
-    });
-    if (unresolved.length > 0) {
-      blockers.push(`AML/CTF verification is not complete for ${unresolved.length} buyer part${unresolved.length === 1 ? "y" : "ies"}.`);
-    }
-  }
+  const buyerAml = await incompleteAmlBlocker(transaction, partyIds(transaction.buyerPartyIds), "buyer");
+  if (buyerAml) blockers.push(buyerAml);
+  const sellerAml = await incompleteAmlBlocker(transaction, partyIds(transaction.sellerPartyIds), "seller");
+  if (sellerAml) blockers.push(sellerAml);
 
   const openAttentionItems = await db
     .select()
@@ -783,15 +807,145 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
     blockers.push(`${openAttentionItems.length} open attention item(s) require review.`);
   }
 
-  const activeTasks = await db
+  const activeMustFinish = await db
     .select()
     .from(automationTasks)
-    .where(and(eq(automationTasks.transactionId, transaction.id), eq(automationTasks.status, "ACTIVE"), eq(automationTasks.kind, "TASK")));
-  if (activeTasks.length > 0) {
-    blockers.push(`${activeTasks.length} active task(s) have not been completed.`);
+    .where(
+      and(
+        eq(automationTasks.transactionId, transaction.id),
+        eq(automationTasks.status, "ACTIVE"),
+        eq(automationTasks.kind, "TASK"),
+        inArray(automationTasks.taskKey, [...MUST_COMPLETE_BEFORE_CLOSE_TASK_KEYS]),
+        ...(brokerageId != null ? [eq(automationTasks.brokerageId, brokerageId)] : []),
+      ),
+    );
+  if (activeMustFinish.length > 0) {
+    blockers.push(`Must-finish task(s) still open: ${activeMustFinish.map((task) => task.title).join("; ")}.`);
+  }
+
+  if (!transaction.commissionCalculatedAt) {
+    blockers.push("Commission has not been calculated.");
+  }
+
+  const funds = computeFundsReconciliation(transaction);
+  if (funds.status !== "MATCHED") {
+    blockers.push(`Funds reconciliation is ${funds.status}, not MATCHED.`);
+  }
+
+  if (brokerageId != null) {
+    const openDisputes = await db
+      .select({ id: financialDisputes.id })
+      .from(financialDisputes)
+      .innerJoin(financialPaymentRequests, eq(financialDisputes.paymentRequestId, financialPaymentRequests.id))
+      .where(
+        and(
+          eq(financialDisputes.brokerageId, brokerageId),
+          eq(financialPaymentRequests.brokerageId, brokerageId),
+          eq(financialPaymentRequests.transactionId, transaction.id),
+          inArray(financialDisputes.status, ["OPEN", "UNDER_REVIEW"]),
+        ),
+      );
+    if (openDisputes.length > 0) {
+      blockers.push("An open financial dispute (FIN02) must be resolved before close.");
+    }
+
+    const discrepancy = await commissionDiscrepancyBlocker(transaction, brokerageId);
+    if (discrepancy) blockers.push(discrepancy);
+
+    const unassigned = await db
+      .select({ id: riskExceptions.id, ownerType: riskExceptions.ownerType, ownerUserId: riskExceptions.ownerUserId })
+      .from(riskExceptions)
+      .where(
+        and(
+          eq(riskExceptions.brokerageId, brokerageId),
+          eq(riskExceptions.transactionId, transaction.id),
+          inArray(riskExceptions.status, OPEN_RISK_EXCEPTION_STATUSES),
+          ne(riskExceptions.category, "FINANCIAL"),
+        ),
+      );
+    const needingOwner = unassigned.filter((row) => row.ownerUserId == null || row.ownerType === "UNASSIGNED_QUEUE");
+    if (needingOwner.length > 0) {
+      blockers.push(`${needingOwner.length} open non-financial exception(s) need an assigned owner.`);
+    }
   }
 
   return blockers;
+}
+
+function partyIds(value: unknown): number[] {
+  return Array.isArray(value) ? (value as number[]) : [];
+}
+
+async function incompleteAmlBlocker(transaction: Transaction, ids: number[], label: "buyer" | "seller"): Promise<string | null> {
+  if (ids.length === 0) return null;
+  const verifications = await db
+    .select()
+    .from(amlVerifications)
+    .where(and(eq(amlVerifications.propertyId, transaction.propertyId), inArray(amlVerifications.partyId, ids)));
+  const unresolved = ids.filter((id) => {
+    const verification = verifications.find((row) => row.partyId === id);
+    return !verification || verification.status !== "Complete";
+  });
+  if (unresolved.length === 0) return null;
+  return `AML/CTF verification is not complete for ${unresolved.length} ${label} part${unresolved.length === 1 ? "y" : "ies"}.`;
+}
+
+/**
+ * Detectable commission mismatch between the legacy transaction figures and
+ * a current Financial Engine calculation, or a legacy/calculation
+ * reconciliation row that already records a variance. An UNRECONCILED legacy
+ * flag with no numeric difference is not a detected mismatch.
+ */
+async function commissionDiscrepancyBlocker(transaction: Transaction, brokerageId: number): Promise<string | null> {
+  const message = "Commission does not reconcile between the transaction record and the Financial Engine.";
+  const calculations = await db
+    .select()
+    .from(commissionCalculations)
+    .where(and(eq(commissionCalculations.transactionId, transaction.id), eq(commissionCalculations.brokerageId, brokerageId)))
+    .orderBy(desc(commissionCalculations.calculationVersion));
+  const current = calculations.find((row) => row.state !== "SUPERSEDED");
+  if (current && transaction.grossCommissionCents != null) {
+    const legacyGst = transaction.gstCents ?? 0;
+    if (transaction.grossCommissionCents !== current.grossCommissionCents || legacyGst !== current.gstCents) {
+      return message;
+    }
+  }
+
+  const legacyRows = await db
+    .select()
+    .from(financialReconciliations)
+    .where(
+      and(
+        eq(financialReconciliations.brokerageId, brokerageId),
+        eq(financialReconciliations.recordType, "LEGACY_TRANSACTION_COMMISSION"),
+        eq(financialReconciliations.recordId, String(transaction.id)),
+      ),
+    );
+  if (legacyRows.some((row) => row.status === "VARIANCE" || row.status === "DISPUTED" || (row.differenceCents != null && row.differenceCents !== 0))) {
+    return message;
+  }
+
+  if (current) {
+    const calculationRows = await db
+      .select()
+      .from(financialReconciliations)
+      .where(
+        and(
+          eq(financialReconciliations.brokerageId, brokerageId),
+          eq(financialReconciliations.recordType, "COMMISSION_CALCULATION"),
+          eq(financialReconciliations.recordId, String(current.id)),
+        ),
+      );
+    if (
+      calculationRows.some(
+        (row) => row.status === "VARIANCE" || row.status === "DISPUTED" || (row.differenceCents != null && row.differenceCents !== 0),
+      )
+    ) {
+      return message;
+    }
+  }
+
+  return null;
 }
 
 /** Idempotent chokepoint — role-gated at the route layer (Brokerage Administrator), the final sign-off. */

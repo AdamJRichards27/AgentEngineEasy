@@ -15,6 +15,7 @@
 // zero active rules is one cheap, indexed, tenant-scoped SELECT
 // (getActiveRuleVersionsForTrigger) that returns no rows.
 import { AGENT_ENGINE_EASY_EVENT_TYPES, registerHandler } from "@aee/events";
+import { CLOSURE_AUTO_COMPLETE_EVENT_TYPES, handleClosureAutoComplete } from "./closureAutoComplete.js";
 import { handleAutomationDomainEvent } from "./engine.js";
 
 let registered = false;
@@ -23,6 +24,11 @@ export function registerAutomationEngine(): void {
   if (registered) return; // idempotent — safe to call more than once (e.g. in tests)
   for (const eventType of AGENT_ENGINE_EASY_EVENT_TYPES) {
     registerHandler(eventType, handleAutomationDomainEvent);
+  }
+  // After the engine, so a milestone that creates tasks can also complete
+  // the ones that milestone already proves. S1 and S3 are not in this list.
+  for (const eventType of CLOSURE_AUTO_COMPLETE_EVENT_TYPES) {
+    registerHandler(eventType, handleClosureAutoComplete);
   }
   registered = true;
 }

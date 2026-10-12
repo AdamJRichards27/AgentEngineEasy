@@ -195,9 +195,16 @@ tasksRouter.post("/:id/complete", requireAuth, async (req, res) => {
     return;
   }
 
-  const result = await completeAutomationTask({ brokerageId: user.brokerageId, taskId, userId: user.id });
+  // R-F42 manual S2 evidence is enforced in completeAutomationTask, after
+  // this R-F41 gate. A bare tick is a 400. S1 and S3 stay a plain completion.
+  const result = await completeAutomationTask({
+    brokerageId: user.brokerageId,
+    taskId,
+    userId: user.id,
+    manualEvidence: req.body?.manualEvidence,
+  });
   if (!result.ok) {
-    res.status(result.reason === "NOT_FOUND" ? 404 : 400).json({ error: result.reason });
+    res.status(result.reason === "NOT_FOUND" ? 404 : 400).json({ error: result.message ?? result.reason });
     return;
   }
   res.json({ task: result.task });

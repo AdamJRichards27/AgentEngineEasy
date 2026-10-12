@@ -284,8 +284,10 @@ test("closeTransaction reports every real blocker (unconditional, pending condit
     })
     .where(eq(transactions.id, transactionId));
 
-  // Manufacture blockers 4 and 5 directly -- a real open attention item and
-  // a real active task, exactly the shape the WAE catalogue would create.
+  // Manufacture blockers directly. R-F42 counts only must-finish tasks, so
+  // the OF-Y record-complete task still blocks and the OF-N settlement
+  // tracking task does not. Commission was never calculated on this
+  // forced-Settled row, so commission and funds (not MATCHED) also block.
   await db.insert(automationAttentionItems).values({
     brokerageId: A.brokerageId,
     propertyId,
@@ -298,9 +300,18 @@ test("closeTransaction reports every real blocker (unconditional, pending condit
     brokerageId: A.brokerageId,
     propertyId,
     transactionId,
+    taskKey: "CONFIRM_TRANSACTION_RECORD_COMPLETE",
+    kind: "TASK",
+    title: "Confirm the transaction record is complete",
+    status: "ACTIVE",
+  });
+  await db.insert(automationTasks).values({
+    brokerageId: A.brokerageId,
+    propertyId,
+    transactionId,
     taskKey: "PREPARE_SETTLEMENT_TRACKING",
     kind: "TASK",
-    title: "Manufactured for closure-blocker test coverage",
+    title: "Prepare the transaction for settlement tracking",
     status: "ACTIVE",
   });
 
@@ -310,12 +321,15 @@ test("closeTransaction reports every real blocker (unconditional, pending condit
         await closeTransaction({ transactionId, userId: A.agent.user.id, brokerageId: A.brokerageId });
       } catch (err) {
         assert.ok(err instanceof TransactionClosureBlockedError, "must throw the typed TransactionClosureBlockedError, not a generic Error");
-        assert.equal(err.blockers.length, 5, `expected all 5 blockers, got: ${JSON.stringify(err.blockers)}`);
+        assert.equal(err.blockers.length, 7, `expected 7 blockers, got: ${JSON.stringify(err.blockers)}`);
         assert.ok(err.blockers.some((b) => /not become unconditional/i.test(b)));
         assert.ok(err.blockers.some((b) => /condition\(s\) are still Pending/i.test(b)));
-        assert.ok(err.blockers.some((b) => /AML\/CTF verification is not complete/i.test(b)));
+        assert.ok(err.blockers.some((b) => /buyer part/i.test(b)));
         assert.ok(err.blockers.some((b) => /open attention item/i.test(b)));
-        assert.ok(err.blockers.some((b) => /active task/i.test(b)));
+        assert.ok(err.blockers.some((b) => /Confirm the transaction record is complete/.test(b)));
+        assert.ok(!err.blockers.some((b) => /settlement tracking/i.test(b)), "an OF-N task must not block close");
+        assert.ok(err.blockers.some((b) => /Commission has not been calculated/.test(b)));
+        assert.ok(err.blockers.some((b) => /not MATCHED/.test(b)));
         throw err;
       }
     },

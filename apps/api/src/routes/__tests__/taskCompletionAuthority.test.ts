@@ -9,7 +9,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { auditLogs, automationAttentionItems, automationTasks, db, entitlementGrants, growCommitments, users } from "@aee/db";
+import { auditLogs, automationAttentionItems, automationTasks, db, entitlementGrants, growCommitments, transactions, users } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import {
   createBrokerageWithUsers,
@@ -257,10 +257,34 @@ test("an Agent or Pit Crew completing S1, S2, or S3 is 403 and writes one denial
 });
 
 test("a Brokerage Administrator can complete S1, S2, and S3", async () => {
+  // R-F42: S2 is still a Brokerage Administrator sign-off, and a bare tick
+  // is rejected. The amount has to equal commission plus GST.
+  const gross = 100_000;
+  const gst = 10_000;
+  await db
+    .update(transactions)
+    .set({
+      grossCommissionCents: gross,
+      gstCents: gst,
+      commissionCalculatedAt: new Date("2026-10-01T00:00:00.000Z"),
+    })
+    .where(eq(transactions.id, transactionId));
+
   for (const taskKey of SIGNOFF_KEYS) {
     const task = await insertTask({ taskKey, transactionId });
-    const completed = await postJson(`/tasks/${task.id}/complete`, A.admin.cookie);
-    assert.equal(completed.status, 200, taskKey);
+    const requestBody =
+      taskKey === "PREPARE_COMMISSION_PROCESSING_CHECKLIST"
+        ? {
+            manualEvidence: {
+              amountCents: gross + gst,
+              date: "2026-10-01",
+              paymentMethod: "EFT",
+              reference: "R-F41-S2",
+            },
+          }
+        : undefined;
+    const completed = await postJson(`/tasks/${task.id}/complete`, A.admin.cookie, requestBody);
+    assert.equal(completed.status, 200, `${taskKey} ${await completed.clone().text()}`);
     const body = (await completed.json()) as { task: { status: string; taskKey: string } };
     assert.equal(body.task.status, "COMPLETED");
     assert.equal(body.task.taskKey, taskKey);
