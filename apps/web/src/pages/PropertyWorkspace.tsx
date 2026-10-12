@@ -1049,6 +1049,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
             error={transactionAction.isError ? apiErrorMessage(transactionAction.error, "Couldn't update the transaction. Try again.") : null}
             conditions={conditionsData?.conditions ?? []}
+            settlementConditions={conditionsData ? conditionsData.conditions : null}
             onAddCondition={(input) => addCondition.mutate(input)}
             addConditionError={addCondition.isError ? apiErrorMessage(addCondition.error, "Couldn't add that condition. Try again.") : null}
             onRescheduleCondition={(conditionId, newDueDate) => rescheduleCondition.mutate({ conditionId, newDueDate })}
@@ -1746,6 +1747,7 @@ function TransactionBlockView({
   onAction,
   error,
   conditions,
+  settlementConditions,
   onAddCondition,
   addConditionError,
   onRescheduleCondition,
@@ -1762,6 +1764,8 @@ function TransactionBlockView({
   onAction: (action: string, body?: Record<string, unknown>) => void;
   error: string | null;
   conditions: ConditionBlock[];
+  /** null while GET /transactions/:id/conditions has not returned. An empty list is loaded. */
+  settlementConditions: ReadonlyArray<{ status: string }> | null;
   onAddCondition: (input: Record<string, unknown>) => void;
   addConditionError: string | null;
   onRescheduleCondition: (conditionId: number, newDueDate: string | null) => void;
@@ -1779,7 +1783,10 @@ function TransactionBlockView({
   // calculation stay hidden unless the signed-in role is Brokerage
   // Administrator. Milestone text stays visible either way. `error` stays
   // below so a stale click still shows the server message, including a 403.
-  const actions = transactionPanelActionVisibility(transaction, viewerRole);
+  // R-F38 — Mark Settlement Completed stays on screen for an administrator
+  // and is disabled until the contract is unconditional. settlementConditions
+  // is the existing conditions GET; null means it has not loaded.
+  const actions = transactionPanelActionVisibility(transaction, viewerRole, settlementConditions);
 
   return (
     <div className="stack">
@@ -1869,12 +1876,20 @@ function TransactionBlockView({
             </>
           )}
           {actions.completeSettlement && (
-            <button className="btn btn-small" onClick={() => onAction("settlement-complete")}>
+            <button
+              className="btn btn-small"
+              onClick={() => {
+                if (actions.completeSettlementReason) return;
+                onAction("settlement-complete");
+              }}
+              disabled={actions.completeSettlementReason !== null}
+            >
               Mark Settlement Completed
             </button>
           )}
         </div>
       )}
+      {actions.completeSettlementReason && <p className="muted">{actions.completeSettlementReason}</p>}
 
       <div>
         Commission:{" "}
