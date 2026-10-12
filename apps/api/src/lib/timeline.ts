@@ -127,11 +127,12 @@ const TIMELINE_ENTRY_TYPES: Record<string, EntryTypeConfig> = {
   automation_reminder_created: { source: "audit_log", category: "Task", sensitive: false },
   automation_task_superseded: { source: "audit_log", category: "Task", sensitive: false },
   automation_reminder_superseded: { source: "audit_log", category: "Task", sensitive: false },
-  // TASK_COMPLETED exists in the canonical event registry but has zero
-  // publishers (completeAutomationTask() only calls logAudit — verified at
-  // #132 build time, #131 design doc §5) — sourced from auditLogs instead
-  // rather than adding an unrelated publish call to automation/tasks.ts.
+  // Manual completion stays on the audit row. R-F42 auto-completion also
+  // publishes TASK_COMPLETED; this timeline keeps the audit row so the same
+  // completion is not listed twice. Auto-complete evidence can include
+  // commission cents, so that action is sensitive.
   automation_task_completed: { source: "audit_log", category: "Task", sensitive: false },
+  automation_task_auto_completed: { source: "audit_log", category: "Task", sensitive: true },
   automation_attention_item_raised: { source: "audit_log", category: "Task", sensitive: false },
   automation_attention_item_resolved: { source: "audit_log", category: "Task", sensitive: false },
 
@@ -327,6 +328,7 @@ const SIMPLE_AUDIT_LABELS: Record<string, string> = {
   automation_task_superseded: "Task rescheduled",
   automation_reminder_superseded: "Reminder rescheduled",
   automation_task_completed: "Task completed",
+  automation_task_auto_completed: "Task auto-completed",
   automation_attention_item_raised: "Attention item raised",
   automation_attention_item_resolved: "Attention item resolved",
   // Agent Engine 2.0 — Property Launch & Campaign Coordination.
@@ -643,7 +645,10 @@ export async function getPropertyTimeline(
     // mirroring the exact redaction rule queries.ts's redact() already
     // applies to the Exceptions API so the Timeline can never leak the
     // same information through a second, less careful path.
-    const sensitive = (config?.sensitive ?? false) || linkedException?.requiresFinancialEntitlement === true;
+    const sensitive =
+      (config?.sensitive ?? false) ||
+      linkedException?.requiresFinancialEntitlement === true ||
+      (row.action === "automation_task_completed" && (row.updatedValue?.includes('"manual_commission_sign_off"') ?? false));
     const redact = sensitive && !canViewFinancials;
     return {
       id: `audit_log:${row.id}`,

@@ -119,9 +119,14 @@ tasksRouter.post("/:id/complete", requireAuth, async (req, res) => {
   const user = req.authedUser!;
   const taskId = readUuidParam(res, req.params.id, "task");
   if (taskId === null) return;
-  const result = await completeAutomationTask({ brokerageId: user.brokerageId, taskId, userId: user.id });
+  const result = await completeAutomationTask({
+    brokerageId: user.brokerageId,
+    taskId,
+    userId: user.id,
+    manualEvidence: req.body?.manualEvidence,
+  });
   if (!result.ok) {
-    res.status(result.reason === "NOT_FOUND" ? 404 : 400).json({ error: result.reason });
+    res.status(result.reason === "NOT_FOUND" ? 404 : 400).json({ error: result.message ?? result.reason });
     return;
   }
   res.json({ task: result.task });

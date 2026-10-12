@@ -31,13 +31,14 @@ export interface AuditLogOptions {
 
 // Ported pattern from Agent Engine Staging's lib/audit.ts — used across
 // every route that mutates something, feeds the Property Timeline.
-export async function logAudit(input: AuditLogInput, options: AuditLogOptions = {}): Promise<void> {
+export async function logAudit(input: AuditLogInput, options: AuditLogOptions = {}): Promise<number | null> {
   try {
     if (options.write) {
       await options.write(input);
-    } else {
-      await db.insert(auditLogs).values(input);
+      return null;
     }
+    const [row] = await db.insert(auditLogs).values(input).returning({ id: auditLogs.id });
+    return row?.id ?? null;
   } catch (err) {
     // Historical callers remain best-effort; transactional controls opt into
     // strict mode below so their source row and audit row commit together.
@@ -51,5 +52,6 @@ export async function logAudit(input: AuditLogInput, options: AuditLogOptions = 
       error: err,
     });
     if (options.strict) throw err;
+    return null;
   }
 }

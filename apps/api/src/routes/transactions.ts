@@ -362,10 +362,10 @@ transactionsRouter.post(
 );
 
 // Final sign-off — same Brokerage Administrator gate as agent-paid above.
-// #121: closeTransaction now enforces real closure preconditions
-// (unconditional, conditions resolved, buyer AML complete, no open
-// attention items/active tasks) and throws TransactionClosureBlockedError
-// with the specific list when blocked; `force: true` is a deliberate,
+// #121 / R-F42: closeTransaction enforces unconditional status, resolved
+// conditions, buyer and seller AML, no open attention items, and the
+// must-finish automation tasks, plus commission, funds, FIN02, and a
+// detectable commission discrepancy. `force: true` stays a deliberate,
 // audited override, never the default.
 transactionsRouter.post(
   "/:id/close",
