@@ -26,9 +26,9 @@ import { noteGrowPropertyIsolationRejection } from "./grow/isolationRejection.js
  */
 
 /**
- * `appraisals` has no brokerage_id. A row belongs to a brokerage only when
- * its property does. Updates cannot join, so the predicate is this
- * subquery in the WHERE.
+ * `appraisals.brokerage_id` is the property's brokerage (migration 0036).
+ * Updates cannot join, so the predicate is this subquery in the WHERE.
+ * Inserts copy the brokerage from the property row already loaded.
  */
 export function appraisalPropertyInBrokerage(brokerageId: number) {
   return sql`${appraisals.propertyId} in (select ${properties.id} from ${properties} where ${properties.brokerageId} = ${brokerageId})`;
@@ -66,7 +66,11 @@ export async function getOrCreateAppraisal(input: {
 
   const [appraisal] = await db
     .insert(appraisals)
-    .values({ propertyId: input.propertyId, shareToken: randomBytes(16).toString("hex") })
+    .values({
+      propertyId: input.propertyId,
+      brokerageId: property.brokerageId,
+      shareToken: randomBytes(16).toString("hex"),
+    })
     .returning();
 
   await logAudit({

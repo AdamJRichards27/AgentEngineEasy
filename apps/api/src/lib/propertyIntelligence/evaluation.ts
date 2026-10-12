@@ -44,11 +44,12 @@ import {
  * TENANT ISOLATION. Every query here takes brokerageId as a mandatory
  * argument and filters on it — including each CTE inside the one rule that
  * uses raw SQL, so no intermediate result set is ever tenant-mixed and then
- * narrowed afterwards. `appraisals` is the one source table with no
- * brokerage_id of its own (see packages/db/src/schema/appraisal.ts), so its
- * rule joins `properties` and filters properties.brokerageId. A brokerageId
- * always arrives from the server session; nothing here accepts one from a
- * client.
+ * narrowed afterwards. Migration 0036 stores appraisals.brokerage_id, kept
+ * equal to properties.brokerage_id. The stale-appraisal rule still joins
+ * `properties` and filters properties.brokerageId. Adding `brokerage_id =`
+ * on every E-9 read is still open, which is why E-9 stays partial. A
+ * brokerageId always arrives from the server session; nothing here accepts
+ * one from a client.
  *
  * NOTHING HERE CONTACTS ANYONE. These functions only read. They never write a
  * row, never publish an event, never call a provider, and never produce an
@@ -470,8 +471,9 @@ async function longOwnershipTenureCandidates(scope: EvaluationScope, limit: numb
 /* ---------------------------------------------------------------------
  * Rule 2 — stale appraisal follow-up (property-anchored).
  *
- * `appraisals` has no brokerage_id, so this is the one rule that reaches
- * tenant scope through a join on `properties` (see this module's header).
+ * Migration 0036 stores brokerage_id. This rule still reaches tenant scope
+ * through a join on `properties` (see this module's header). E-9 reads are
+ * not closed by the column alone.
  * -----------------------------------------------------------------*/
 
 const STALE_APPRAISAL_RULE_VERSION = 2;

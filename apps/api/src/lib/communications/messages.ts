@@ -243,8 +243,9 @@ export async function listRecentMessagesForBrokerage(
 
 export async function listParticipants(threadId: number, brokerageId: number): Promise<CommunicationParticipant[]> {
   await getThread(threadId, brokerageId); // tenant check
-  // communication_participants has no brokerage_id. The thread join is the
-  // tenant predicate, not only the getThread check above.
+  // Migration 0036 stores communication_participants.brokerage_id. This read
+  // still uses the thread join as the tenant predicate, not only the
+  // getThread check above. The direct column predicate is still open (E-9 partial).
   const rows = await db
     .select({ participant: communicationParticipants })
     .from(communicationParticipants)

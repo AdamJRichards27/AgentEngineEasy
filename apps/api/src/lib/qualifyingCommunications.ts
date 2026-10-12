@@ -36,13 +36,14 @@
 // key (message id or provider message id). The Hub does not copy itself
 // into grow_activities, so an unlinked pair stays two records.
 //
-// TENANCY (A3). communication_participants has no brokerage_id. Every
-// query joins the participant to its thread and the party, and filters
-// communication_threads.brokerage_id and parties.brokerage_id to the
-// caller's brokerage. communication_messages.brokerage_id is filtered as
-// well: a message stamped with this brokerage cannot qualify through
-// another brokerage's thread, and a foreign message cannot qualify
-// through this brokerage's thread.
+// TENANCY (A3). Migration 0036 stores communication_participants.brokerage_id.
+// These queries still join the participant to its thread and the party, and
+// filter communication_threads.brokerage_id and parties.brokerage_id to the
+// caller's brokerage. The direct participant predicate is still open (E-9
+// partial). communication_messages.brokerage_id is filtered as well: a
+// message stamped with this brokerage cannot qualify through another
+// brokerage's thread, and a foreign message cannot qualify through this
+// brokerage's thread.
 //
 // A message on a property the caller cannot see is not their contact,
 // same rule as grow_activities (visibleLinkedPropertySql). A null

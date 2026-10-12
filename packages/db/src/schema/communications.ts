@@ -41,7 +41,7 @@
 // is ever inserted, and routes/communications.ts + relationshipTimeline.ts
 // for the leftJoin-tolerant reads this requires downstream).
 
-import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uuid, uniqueIndex, index, check, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uuid, uniqueIndex, unique, index, check, foreignKey, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -141,6 +141,9 @@ export const communicationThreads = pgTable(
       "communication_threads_property_or_party_check",
       sql`property_id IS NOT NULL OR party_id IS NOT NULL`,
     ),
+    // E-9 migration 0036. communication_participants references
+    // (id, brokerage_id). id is already the primary key.
+    idBrokerageUq: unique("communication_threads_id_brokerage_uq").on(table.id, table.brokerageId),
   }),
 );
 
@@ -153,6 +156,10 @@ export const communicationParticipants = pgTable(
   {
     id: serial("id").primaryKey(),
     threadId: integer("thread_id").notNull().references(() => communicationThreads.id),
+    // E-9 migration 0036. Denormalised from communication_threads.brokerage_id.
+    // NOT NULL after backfill. communication_participants_thread_brokerage_fk
+    // keeps it equal to the parent thread. Writers set it from that thread.
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
     partyId: integer("party_id").references(() => parties.id),
 
     role: text("role").notNull(),
@@ -175,6 +182,20 @@ export const communicationParticipants = pgTable(
     // (manual-entry participants resolve to no party), so those rows are
     // simply not in the index.
     partyIdx: index("communication_participants_party_idx").on(table.partyId),
+    brokerageIdx: index("communication_participants_brokerage_idx").on(table.brokerageId),
+    threadBrokerageFk: foreignKey({
+      columns: [table.threadId, table.brokerageId],
+      foreignColumns: [communicationThreads.id, communicationThreads.brokerageId],
+      name: "communication_participants_thread_brokerage_fk",
+    }),
+    // party_id is nullable (manual entry). MATCH SIMPLE skips this check
+    // when party_id is null. When it is set, the party must share this
+    // row's brokerage.
+    partyBrokerageFk: foreignKey({
+      columns: [table.partyId, table.brokerageId],
+      foreignColumns: [parties.id, parties.brokerageId],
+      name: "communication_participants_party_brokerage_fk",
+    }),
   }),
 );
 

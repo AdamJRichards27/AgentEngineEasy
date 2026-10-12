@@ -1,16 +1,15 @@
 // E-9 read hardening — Contact 360 appraisal tenancy.
 //
-// getRelationshipTimeline selects appraisals for a contact. appraisals has no
-// brokerage_id of its own; the associated property does. These tests insert
-// the row the application writers refuse to create: party in brokerage A,
-// property in brokerage B. The timeline for A's contact must still show A's
-// own appraisal, and must not emit the foreign appraisal's id, property id,
-// opportunity id, address, price, or status event.
+// getRelationshipTimeline selects appraisals for a contact. Migration 0036
+// stores appraisals.brokerage_id from the property and rejects a party from
+// another brokerage. A same-brokerage appraisal still appears. The old
+// cross-tenant shape (party in A, property in B) is no longer storable.
 import { randomBytes } from "node:crypto";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { appraisals, db } from "@aee/db";
+import { eq } from "drizzle-orm";
+import { appraisals, db, properties } from "@aee/db";
 import { getRelationshipTimeline } from "../relationshipTimeline.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../routes/__tests__/testSupport.js";
 
@@ -75,10 +74,15 @@ test("a same-brokerage appraisal still appears on the Contact 360 timeline with 
   const ownPriceLow = "450000.00";
   const ownPriceHigh = "480000.00";
 
+  const [ownProperty] = await db
+    .select({ brokerageId: properties.brokerageId })
+    .from(properties)
+    .where(eq(properties.id, propertyId));
   const [appraisal] = await db
     .insert(appraisals)
     .values({
       propertyId,
+      brokerageId: ownProperty.brokerageId,
       partyId,
       status: "READY",
       priceRangeLow: ownPriceLow,
@@ -112,7 +116,7 @@ test("a same-brokerage appraisal still appears on the Contact 360 timeline with 
   assert.equal(text.includes(ownPriceHigh), false);
 });
 
-test("a cross-brokerage property appraisal linked to the contact's party does not appear on the Contact 360 timeline", async () => {
+test("a cross-brokerage property cannot be stored on this contact's appraisal, and the timeline keeps the same-brokerage row", async () => {
   const ownAddress = `14 Own Appraisal St ${suffix}`;
   const foreignAddress = `99 Foreign Brokerage Appraisal Lane ${suffix}`;
   const ownPropertyId = await createProperty(A.agent.cookie, ownAddress);
@@ -123,31 +127,41 @@ test("a cross-brokerage property appraisal linked to the contact's party does no
   const foreignPriceHigh = "9234567.75";
   const foreignOpportunityId = 2_100_000_000 + (Date.now() % 10_000);
 
+  const [ownProperty] = await db
+    .select({ brokerageId: properties.brokerageId })
+    .from(properties)
+    .where(eq(properties.id, ownPropertyId));
+  const [foreignProperty] = await db
+    .select({ brokerageId: properties.brokerageId })
+    .from(properties)
+    .where(eq(properties.id, foreignPropertyId));
+
   const [own] = await db
     .insert(appraisals)
     .values({
       propertyId: ownPropertyId,
+      brokerageId: ownProperty.brokerageId,
       partyId,
       status: "DRAFT",
       shareToken: randomBytes(16).toString("hex"),
     })
     .returning();
 
-  // The writers refuse this shape. Insert it directly so the read is what
-  // decides whether the foreign property leaks.
-  const [foreign] = await db
-    .insert(appraisals)
-    .values({
-      propertyId: foreignPropertyId,
-      partyId,
-      status: "SENT",
-      sentAt: new Date("2026-10-01T01:00:00.000Z"),
-      priceRangeLow: foreignPriceLow,
-      priceRangeHigh: foreignPriceHigh,
-      opportunityId: foreignOpportunityId,
-      shareToken: randomBytes(16).toString("hex"),
-    })
-    .returning();
+  await assert.rejects(
+    () =>
+      db.insert(appraisals).values({
+        propertyId: foreignPropertyId,
+        brokerageId: foreignProperty.brokerageId,
+        partyId,
+        status: "SENT",
+        sentAt: new Date("2026-10-01T01:00:00.000Z"),
+        priceRangeLow: foreignPriceLow,
+        priceRangeHigh: foreignPriceHigh,
+        opportunityId: foreignOpportunityId,
+        shareToken: randomBytes(16).toString("hex"),
+      }),
+    (err: unknown) => constraintViolation(err, "appraisals_party_brokerage_fk"),
+  );
 
   const timeline = await getRelationshipTimeline(A.brokerageId, partyId);
   const text = JSON.stringify(timeline);
@@ -158,12 +172,6 @@ test("a cross-brokerage property appraisal linked to the contact's party does no
   assert.equal(ownCreated.propertyLabel, ownAddress);
   assert.equal(ownCreated.sourceId, own.id);
 
-  const appraisalEvents = timeline.filter((event) => event.sourceType === "appraisal");
-  assert.equal(
-    appraisalEvents.some((event) => event.sourceId === foreign.id),
-    false,
-    "the foreign appraisal id must not be a timeline source id",
-  );
   assert.equal(
     timeline.some((event) => event.propertyId === foreignPropertyId),
     false,
@@ -174,12 +182,20 @@ test("a cross-brokerage property appraisal linked to the contact's party does no
     false,
     "the foreign appraisal opportunity id must not appear",
   );
-  assert.equal(
-    timeline.some((event) => event.type === "APPRAISAL_SENT" || event.id === `appraisal:${foreign.id}:SENT` || event.id === `appraisal:${foreign.id}:CREATED`),
-    false,
-    "a status event for the foreign appraisal must not be emitted",
-  );
   assert.equal(text.includes(foreignAddress), false, "the foreign property address must not appear");
   assert.equal(text.includes(foreignPriceLow), false, "the foreign price range low must not appear");
   assert.equal(text.includes(foreignPriceHigh), false, "the foreign price range high must not appear");
 });
+
+function constraintViolation(err: unknown, constraint: string): boolean {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    if (current instanceof Error) parts.push(current.message);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") parts.push(code);
+    current = (current as { cause?: unknown }).cause;
+  }
+  const text = parts.join(" ");
+  return text.includes(constraint) || text.includes("23503");
+}

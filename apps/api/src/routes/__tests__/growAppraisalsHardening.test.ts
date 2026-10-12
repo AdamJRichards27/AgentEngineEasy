@@ -346,10 +346,11 @@ test("typed, expected errors keep their own messages and statuses", async () => 
 /* ---------------------------------------------------------------------
  * E-9 A2 — bad-row tenancy on appraisal party/opportunity joins and writes.
  *
- * Each test seeds the bad row directly (a party_id or opportunity_id that
- * points into another brokerage), the same way the WP1 P1-2 owner test
- * above seeds a foreign ownerUserId. Same-brokerage behaviour is asserted
- * in the same test so the new predicate is shown not to drop a real contact.
+ * Migration 0036 rejects a party_id whose brokerage disagrees with the
+ * appraisal. Those cases assert the foreign-key rejection and that the
+ * stored party is unchanged. opportunity_id is still not a foreign key, so
+ * that bad row is still planted directly. Same-brokerage behaviour is
+ * asserted in the same test.
  * -----------------------------------------------------------------*/
 
 let e9Seq = 0;
@@ -357,6 +358,19 @@ let e9Seq = 0;
 function e9Tag() {
   e9Seq += 1;
   return `${suffix}-${e9Seq}`;
+}
+
+function constraintViolation(err: unknown, constraint: string): boolean {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    if (current instanceof Error) parts.push(current.message);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") parts.push(code);
+    current = (current as { cause?: unknown }).cause;
+  }
+  const text = parts.join(" ");
+  return text.includes(constraint) || text.includes("23503");
 }
 
 function frozen(row: unknown) {
@@ -459,16 +473,22 @@ test("E-9 A2: Rule E hides a foreign party's name, email and mobile, and still s
   assert.equal(followUp.status, 200, await followUp.text());
 
   const foreign = await insertForeignParty(tag);
-  const { appraisalId: badAppraisalId } = await createAppraisal(cookie, `8 Rule E Bad St ${tag}`);
-  await db
-    .update(appraisals)
-    .set({
-      partyId: foreign.id,
-      status: "FOLLOW_UP",
-      followUpAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
-      followUpNotes: "Do not surface this.",
-    })
-    .where(eq(appraisals.id, badAppraisalId));
+  const { appraisalId: badAppraisalId, partyId: badPartyId } = await createAppraisal(cookie, `8 Rule E Bad St ${tag}`);
+  await assert.rejects(
+    () =>
+      db
+        .update(appraisals)
+        .set({
+          partyId: foreign.id,
+          status: "FOLLOW_UP",
+          followUpAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+          followUpNotes: "Do not surface this.",
+        })
+        .where(eq(appraisals.id, badAppraisalId)),
+    (err: unknown) => constraintViolation(err, "appraisals_party_brokerage_fk"),
+  );
+  const [badRow] = await db.select().from(appraisals).where(eq(appraisals.id, badAppraisalId));
+  assert.equal(badRow.partyId, badPartyId);
 
   const today = await call("GET", "/today", cookie);
   assert.equal(today.status, 200, await today.clone().text());
@@ -533,24 +553,28 @@ test("E-9 A2: run handoff refuses a foreign party and still links a same-brokera
   assert.ok(ownLinks.some((link) => link.partyId === ownPartyId && link.role === "Seller"));
 
   const foreign = await insertForeignParty(tag);
-  const { appraisalId, propertyId } = await createAppraisal(cookie, `9 Handoff Bad St ${tag}`);
+  const { appraisalId, propertyId, partyId } = await createAppraisal(cookie, `9 Handoff Bad St ${tag}`);
   await moveToPresented(cookie, appraisalId);
   const won = await call("POST", `/appraisals/${appraisalId}/outcome`, cookie, { outcome: "WON", outcomeReason: "relationship" });
   assert.equal(won.status, 200, await won.text());
-  await db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId));
+  await assert.rejects(
+    () => db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId)),
+    (err: unknown) => constraintViolation(err, "appraisals_party_brokerage_fk"),
+  );
+  const [handoffRow] = await db.select().from(appraisals).where(eq(appraisals.id, appraisalId));
+  assert.equal(handoffRow.partyId, partyId);
   const linksBefore = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
 
   const handoff = await call("POST", `/appraisals/${appraisalId}/run-handoff`, cookie, {});
-  assert.equal(handoff.status, 404);
-  assert.equal(((await handoff.json()) as { error: string }).error, "Contact not found");
-
+  assert.equal(handoff.status, 200, await handoff.clone().text());
   const linksAfter = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
-  assert.deepEqual(
-    linksAfter.map((link) => ({ partyId: link.partyId, role: link.role })).sort((a, b) => a.partyId - b.partyId),
-    linksBefore.map((link) => ({ partyId: link.partyId, role: link.role })).sort((a, b) => a.partyId - b.partyId),
-  );
   assert.equal(
     linksAfter.some((link) => link.partyId === foreign.id),
+    false,
+  );
+  assert.ok(linksAfter.some((link) => link.partyId === partyId && link.role === "Seller"));
+  assert.equal(
+    linksBefore.some((link) => link.partyId === foreign.id),
     false,
   );
 });
@@ -578,17 +602,18 @@ test("E-9 A2: presentation generation keeps a same-brokerage contact name and om
   assert.ok(ownRendered.includes(`Prepared for: ${ownFirst} ${ownLast}`));
 
   const foreign = await insertForeignParty(tag);
-  await db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId));
-  const beforeForeign = new Set(storage.objects.keys());
-  const foreignPresentation = await call("POST", `/appraisals/${appraisalId}/presentation/generate`, cookie, {});
-  assert.equal(foreignPresentation.status, 200, await foreignPresentation.clone().text());
-  const foreignRendered = newStorageText(beforeForeign);
-  assert.ok(foreignRendered.includes("Prepared for: Valued client"));
-  assert.equal(foreignRendered.includes(foreign.displayName), false);
-  assert.equal(foreignRendered.includes(foreign.lastName), false);
-  assert.equal(foreignRendered.includes(foreign.email), false);
-  assert.equal(foreignRendered.includes(foreign.mobile), false);
-  assert.equal(foreignRendered.includes(foreign.firstName), false);
+  await assert.rejects(
+    () => db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId)),
+    (err: unknown) => constraintViolation(err, "appraisals_party_brokerage_fk"),
+  );
+  const [presentationRow] = await db.select().from(appraisals).where(eq(appraisals.id, appraisalId));
+  assert.equal(presentationRow.partyId, partyId);
+  assert.ok(ownRendered.includes(`Prepared for: ${ownFirst} ${ownLast}`));
+  assert.equal(ownRendered.includes(foreign.displayName), false);
+  assert.equal(ownRendered.includes(foreign.lastName), false);
+  assert.equal(ownRendered.includes(foreign.email), false);
+  assert.equal(ownRendered.includes(foreign.mobile), false);
+  assert.equal(ownRendered.includes(foreign.firstName), false);
 });
 
 test("E-9 A2: pipeline keeps the appraisal row when party_id is foreign, with no foreign name, and still names a same-brokerage contact", async () => {
@@ -615,7 +640,10 @@ test("E-9 A2: pipeline keeps the appraisal row when party_id is foreign, with no
   assert.equal(beforeRow.partyDisplayName, `${ownFirst} ${ownLast}`);
 
   const foreign = await insertForeignParty(tag);
-  await db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId));
+  await assert.rejects(
+    () => db.update(appraisals).set({ partyId: foreign.id }).where(eq(appraisals.id, appraisalId)),
+    (err: unknown) => constraintViolation(err, "appraisals_party_brokerage_fk"),
+  );
 
   const after = await call("GET", "/appraisals/pipeline", cookie);
   assert.equal(after.status, 200);
@@ -623,7 +651,7 @@ test("E-9 A2: pipeline keeps the appraisal row when party_id is foreign, with no
   const afterBody = JSON.parse(text) as { appraisals: Array<{ id: number; partyDisplayName: string | null }> };
   const afterRow = afterBody.appraisals.find((row) => row.id === appraisalId);
   assert.ok(afterRow, "the appraisal row itself still lists");
-  assert.equal(afterRow.partyDisplayName, null);
+  assert.equal(afterRow.partyDisplayName, `${ownFirst} ${ownLast}`);
   assert.equal(text.includes(foreign.displayName), false);
   assert.equal(text.includes(foreign.lastName), false);
   assert.equal(text.includes(foreign.email), false);

@@ -106,6 +106,7 @@ async function seedConversation(input: {
     .insert(communicationParticipants)
     .values({
       threadId: thread.id,
+      brokerageId,
       partyId,
       role: "Buyer",
       displayName: "Cara Reply",
@@ -420,6 +421,7 @@ test(
       .returning();
     await db.insert(communicationParticipants).values({
       threadId: thread.id,
+      brokerageId,
       role: "Buyer",
       displayName: "Pat Buyer",
       email: "pat.buyer@example.com",

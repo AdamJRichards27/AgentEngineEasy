@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, numeric, index, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
@@ -75,13 +75,15 @@ export const properties = pgTable("properties", {
 },
 (table) => ({
   // AE GROW "Brokerage-wide Signal Sweep" stage 1. `properties` had no index
-  // on brokerage_id, yet it is the ONLY tenant boundary several sweep and
-  // Grow Today queries have: `appraisals` carries no brokerage_id of its own
-  // (see schema/appraisal.ts), so every brokerage-scoped appraisal read is
-  // driven from `properties where brokerage_id = $1`. Without this index the
-  // appraisal-side composite indexes added alongside it cannot be reached
-  // cheaply, because the driving side would still be a full scan.
+  // on brokerage_id. Sweep and Grow Today reads are still driven from
+  // `properties where brokerage_id = $1`. Migration 0036 also stores
+  // `appraisals.brokerage_id`, kept equal to this column by
+  // appraisals_property_brokerage_fk. This index stays.
   brokerageIdx: index("properties_brokerage_idx").on(table.brokerageId),
+  // E-9 migration 0036. Composite foreign keys on appraisals reference
+  // (id, brokerage_id). id is already the primary key; Postgres still
+  // requires a unique constraint on the exact referenced column list.
+  idBrokerageUq: unique("properties_id_brokerage_uq").on(table.id, table.brokerageId),
 }));
 
 export const PROPERTY_DATA_QUALITY_STATUSES = ["NotEnriched", "Partial", "Enriched", "Stale"] as const;
@@ -119,6 +121,9 @@ export const parties = pgTable("parties", {
   // rule would sequential-scan a tenant-mixed table on every evaluated
   // brokerage. Same argument, and same shape, as properties_brokerage_idx.
   brokerageIdx: index("parties_brokerage_idx").on(table.brokerageId),
+  // E-9 migration 0036. appraisals and communication_participants reference
+  // (id, brokerage_id) when party_id is set.
+  idBrokerageUq: unique("parties_id_brokerage_uq").on(table.id, table.brokerageId),
 }));
 
 // The join that makes "enter once, reuse everywhere" real. A seller entered

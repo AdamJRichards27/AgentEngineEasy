@@ -1,10 +1,9 @@
-// E-9 read/write hardening without a brokerage_id column.
-//
-// appraisals belong to a brokerage only through properties. communication_participants
-// belong only through communication_threads. These tests plant the row the other
-// brokerage owns (an appraisal on B's property, a participant on B's thread) and
-// call each helper as brokerage A. A must get null / not found and must not write.
-// The same helpers still read and write A's own rows.
+// E-9 read/write hardening. Migration 0036 stores brokerage_id on appraisals
+// and communication_participants, copied from the parent property or thread.
+// These tests plant the row the other brokerage owns (an appraisal on B's
+// property, a participant on B's thread) and call each helper as brokerage A.
+// A must get null / not found and must not write. The same helpers still
+// read and write A's own rows.
 import { createHash, randomBytes } from "node:crypto";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +17,8 @@ import {
   communicationThreads,
   db,
   documents,
+  parties,
+  properties,
 } from "@aee/db";
 import { finaliseAppraisal, getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal } from "../appraisals.js";
 import {
@@ -128,6 +129,11 @@ async function createParty(cookie: string, propertyId: number, overrides: Record
 }
 
 async function insertAppraisal(propertyId: number, patch: Record<string, unknown> = {}) {
+  const [property] = await db
+    .select({ brokerageId: properties.brokerageId })
+    .from(properties)
+    .where(eq(properties.id, propertyId));
+  if (!property) throw new Error(`property ${propertyId} missing`);
   const [row] = await db
     .insert(appraisals)
     .values({
@@ -138,6 +144,7 @@ async function insertAppraisal(propertyId: number, patch: Record<string, unknown
       pricingCommentary: `foreign commentary ${suffix}`,
       shareToken: randomBytes(16).toString("hex"),
       ...patch,
+      brokerageId: property.brokerageId,
     })
     .returning();
   return row;
@@ -382,10 +389,20 @@ test("brokerage A cannot read a participant on brokerage B's thread, and its own
       createdByUserId: B.agent.user.id,
     })
     .returning();
+  const [foreignParty] = await db
+    .insert(parties)
+    .values({
+      brokerageId: B.brokerageId,
+      partyType: "Person",
+      firstName: "Bea",
+      lastName: `Foreign${suffix}`,
+    })
+    .returning();
   const [ownManual] = await db
     .insert(communicationParticipants)
     .values({
       threadId: ownThread.id,
+      brokerageId: ownThread.brokerageId,
       partyId: null,
       role: "Other",
       displayName: `Own Manual ${suffix}`,
@@ -399,6 +416,7 @@ test("brokerage A cannot read a participant on brokerage B's thread, and its own
     .insert(communicationParticipants)
     .values({
       threadId: ownThread.id,
+      brokerageId: ownThread.brokerageId,
       partyId,
       role: "Seller",
       displayName: `Own Party ${suffix}`,
@@ -410,7 +428,8 @@ test("brokerage A cannot read a participant on brokerage B's thread, and its own
     .insert(communicationParticipants)
     .values({
       threadId: foreignThread.id,
-      partyId,
+      brokerageId: foreignThread.brokerageId,
+      partyId: foreignParty.id,
       role: "Seller",
       displayName: foreignName,
       email: foreignEmail,

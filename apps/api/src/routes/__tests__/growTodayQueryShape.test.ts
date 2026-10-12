@@ -162,7 +162,7 @@ test("C-6 — qualifying Hub messages are one grouped aggregate, tenant-scoped t
   assert.match(query, /max\(/i, "last contact from the Hub is a database aggregate");
   assert.match(query, /group by/i, "one row per party, not one row per message");
   assert.match(query, /communication_participants/i, "the contact link is the participant row");
-  assert.match(query, /communication_threads/i, "participants have no brokerage_id, so the thread is the parent");
+  assert.match(query, /communication_threads/i, "the thread parent stays in the query (E-9 direct participant predicate is still open)");
   assert.match(query, /"parties"/i);
   assert.match(
     query,

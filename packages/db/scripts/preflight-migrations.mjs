@@ -14,6 +14,10 @@
  *   0025 unique open CREATE_GROW_COMMITMENT proposal per (brokerage, resource)
  *   0035 platform_owners / platform_owner_audit present when the journal
  *        when has already been passed (silent-skip hazard)
+ *   0036 appraisals / communication_participants tenant backfill: row
+ *        counts, missing parents, null parent brokerages, and party rows
+ *        that belong to another brokerage. Read-only. Does not add the
+ *        column.
  *
  * Usage: DATABASE_URL=... node scripts/preflight-migrations.mjs
  */
@@ -62,6 +66,66 @@ export function platformOwnerPreflightDecision(input) {
     };
   }
   return { outcome: "ok", message: "platform_owners and platform_owner_audit exist." };
+}
+
+/**
+ * Read-only decision for migration 0036. Counts are informational. Orphans,
+ * a null parent brokerage, a cross-tenant party, or a null brokerage_id
+ * after the column already exists are blocking. A missing parent is a stop,
+ * not a guessed brokerage.
+ */
+export function e9TenantPreflightDecision(input) {
+  if (input.appraisalsMissing && input.participantsMissing) {
+    return {
+      outcome: "skip",
+      message: "appraisals and communication_participants do not exist yet.",
+      lines: [],
+    };
+  }
+  const lines = [];
+  const blocking = [];
+  if (!input.appraisalsMissing) {
+    lines.push(`appraisals rows: ${input.appraisalRows}`);
+    if (input.appraisalOrphans > 0) {
+      blocking.push(`appraisals rows with no property parent: ${input.appraisalOrphans}`);
+    }
+    if (input.appraisalNullParentBrokerage > 0) {
+      blocking.push(`appraisals whose property brokerage_id is null: ${input.appraisalNullParentBrokerage}`);
+    }
+    if (input.appraisalPartyConflicts > 0) {
+      blocking.push(`appraisals whose party belongs to another brokerage: ${input.appraisalPartyConflicts}`);
+    }
+    if (input.appraisalBrokerageColumnPresent && input.appraisalNullBrokerage > 0) {
+      blocking.push(`appraisals.brokerage_id is null: ${input.appraisalNullBrokerage}`);
+    }
+  } else {
+    lines.push("appraisals table is missing");
+  }
+  if (!input.participantsMissing) {
+    lines.push(`communication_participants rows: ${input.participantRows}`);
+    if (input.participantOrphans > 0) {
+      blocking.push(`communication_participants rows with no thread parent: ${input.participantOrphans}`);
+    }
+    if (input.participantNullParentBrokerage > 0) {
+      blocking.push(`communication_participants whose thread brokerage_id is null: ${input.participantNullParentBrokerage}`);
+    }
+    if (input.participantPartyConflicts > 0) {
+      blocking.push(`communication_participants whose party belongs to another brokerage: ${input.participantPartyConflicts}`);
+    }
+    if (input.participantBrokerageColumnPresent && input.participantNullBrokerage > 0) {
+      blocking.push(`communication_participants.brokerage_id is null: ${input.participantNullBrokerage}`);
+    }
+  } else {
+    lines.push("communication_participants table is missing");
+  }
+  if (blocking.length > 0) {
+    return {
+      outcome: "fail",
+      message: `0036 would stop. ${blocking.join("; ")}. Fix those rows before db:migrate. Do not guess a brokerage.`,
+      lines,
+    };
+  }
+  return { outcome: "ok", message: "0036 tenant backfill preflight is clear.", lines };
 }
 
 function readPlatformOwnerJournalEntry() {
@@ -129,6 +193,100 @@ const checks = [
   },
 ];
 
+async function countQuery(client, sql) {
+  const { rows } = await client.query(sql);
+  return rows[0]?.count ?? 0;
+}
+
+async function columnExists(client, table, column) {
+  const { rows } = await client.query(
+    `select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = $1 and column_name = $2`,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
+export async function readE9TenantPreflight(client) {
+  const appraisalsMissing = !(await tableExists(client, "appraisals"));
+  const participantsMissing = !(await tableExists(client, "communication_participants"));
+  const input = {
+    appraisalsMissing,
+    participantsMissing,
+    appraisalRows: 0,
+    appraisalOrphans: 0,
+    appraisalNullParentBrokerage: 0,
+    appraisalPartyConflicts: 0,
+    appraisalBrokerageColumnPresent: false,
+    appraisalNullBrokerage: 0,
+    participantRows: 0,
+    participantOrphans: 0,
+    participantNullParentBrokerage: 0,
+    participantPartyConflicts: 0,
+    participantBrokerageColumnPresent: false,
+    participantNullBrokerage: 0,
+  };
+  if (!appraisalsMissing) {
+    input.appraisalRows = await countQuery(client, "select count(*)::int as count from appraisals");
+    input.appraisalOrphans = await countQuery(
+      client,
+      `select count(*)::int as count from appraisals a
+       left join properties p on p.id = a.property_id
+       where p.id is null`,
+    );
+    input.appraisalNullParentBrokerage = await countQuery(
+      client,
+      `select count(*)::int as count from appraisals a
+       join properties p on p.id = a.property_id
+       where p.brokerage_id is null`,
+    );
+    input.appraisalPartyConflicts = await countQuery(
+      client,
+      `select count(*)::int as count from appraisals a
+       join properties p on p.id = a.property_id
+       join parties y on y.id = a.party_id
+       where a.party_id is not null and y.brokerage_id <> p.brokerage_id`,
+    );
+    input.appraisalBrokerageColumnPresent = await columnExists(client, "appraisals", "brokerage_id");
+    if (input.appraisalBrokerageColumnPresent) {
+      input.appraisalNullBrokerage = await countQuery(
+        client,
+        "select count(*)::int as count from appraisals where brokerage_id is null",
+      );
+    }
+  }
+  if (!participantsMissing) {
+    input.participantRows = await countQuery(client, "select count(*)::int as count from communication_participants");
+    input.participantOrphans = await countQuery(
+      client,
+      `select count(*)::int as count from communication_participants cp
+       left join communication_threads t on t.id = cp.thread_id
+       where t.id is null`,
+    );
+    input.participantNullParentBrokerage = await countQuery(
+      client,
+      `select count(*)::int as count from communication_participants cp
+       join communication_threads t on t.id = cp.thread_id
+       where t.brokerage_id is null`,
+    );
+    input.participantPartyConflicts = await countQuery(
+      client,
+      `select count(*)::int as count from communication_participants cp
+       join communication_threads t on t.id = cp.thread_id
+       join parties y on y.id = cp.party_id
+       where cp.party_id is not null and y.brokerage_id <> t.brokerage_id`,
+    );
+    input.participantBrokerageColumnPresent = await columnExists(client, "communication_participants", "brokerage_id");
+    if (input.participantBrokerageColumnPresent) {
+      input.participantNullBrokerage = await countQuery(
+        client,
+        "select count(*)::int as count from communication_participants where brokerage_id is null",
+      );
+    }
+  }
+  return input;
+}
+
 async function tableExists(client, table) {
   const { rows } = await client.query("select to_regclass($1) as oid", [`public.${table}`]);
   return rows[0]?.oid !== null;
@@ -180,6 +338,17 @@ async function main() {
       console.log(`SKIP  0035  ${decision.message}`);
     } else {
       console.log(`OK    0035  ${decision.message}`);
+    }
+
+    const e9 = e9TenantPreflightDecision(await readE9TenantPreflight(client));
+    for (const line of e9.lines) console.log(`INFO  0036  ${line}`);
+    if (e9.outcome === "fail") {
+      blocking += 1;
+      console.error(`FAIL  0036  ${e9.message}`);
+    } else if (e9.outcome === "skip") {
+      console.log(`SKIP  0036  ${e9.message}`);
+    } else {
+      console.log(`OK    0036  ${e9.message}`);
     }
   } finally {
     await client.end();

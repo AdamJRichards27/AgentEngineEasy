@@ -137,6 +137,7 @@ export async function addParticipantFromParty(input: AddParticipantFromPartyInpu
     .insert(communicationParticipants)
     .values({
       threadId: input.threadId,
+      brokerageId: thread.brokerageId,
       partyId: party.id,
       role: input.role,
       displayName: partyDisplayName(party),
@@ -194,6 +195,7 @@ export async function addManualParticipant(input: AddManualParticipantInput): Pr
     .insert(communicationParticipants)
     .values({
       threadId: input.threadId,
+      brokerageId: thread.brokerageId,
       partyId: null,
       role: input.role,
       displayName: input.displayName,

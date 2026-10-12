@@ -1,9 +1,9 @@
-import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb, index, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { properties, parties } from "./property";
-import { users } from "./users";
+import { brokerages, users } from "./users";
 
 /**
  * AE GROW Priority 4 - Appraisal Workspace status lifecycle (directive Sec.6).
@@ -43,6 +43,11 @@ export const APPRAISAL_OUTCOME_REASONS = [
 export const appraisals = pgTable("appraisals", {
   id: serial("id").primaryKey(),
   propertyId: integer("property_id").notNull().references(() => properties.id),
+  // E-9 migration 0036. Denormalised from properties.brokerage_id. NOT NULL
+  // after backfill. appraisals_property_brokerage_fk keeps it equal to the
+  // parent property. Writers set it from that parent row, not from an
+  // unchecked caller argument.
+  brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
 
   // AE GROW Priority 4 - Appraisal Workspace (Grow -> Run). partyId /
   // opportunityId / ownerUserId / createdByUserId are additive and nullable
@@ -111,13 +116,11 @@ export const appraisals = pgTable("appraisals", {
   // AE GROW "Brokerage-wide Signal Sweep" stage 1. This table had NO indexes
   // besides its primary key and share_token.
   //
-  // NOTE ON SCOPING: `appraisals` deliberately carries no brokerage_id — it
-  // is tenant-scoped only through properties.property_id -> properties
-  // .brokerage_id (see this file's own header). So the brokerage-scoped
-  // sweep/Grow Today queries are joins driven from properties, and the
-  // useful appraisal-side index is therefore property-leading, not
-  // brokerage-leading. properties.brokerage_id is indexed by this same
-  // migration so the driving side of that join is cheap too.
+  // NOTE ON SCOPING: migration 0036 stores brokerage_id, kept equal to
+  // properties.brokerage_id by appraisals_property_brokerage_fk. The
+  // sweep and Grow Today queries stay property-leading joins. Do not drop
+  // the three property indexes below. appraisals_brokerage_idx is the
+  // brokerage-leading index for a direct tenant predicate.
   //
   // stale_previous_appraisal, FOLLOW_UP branch, and Grow Today Rule E
   // (appraisal follow-ups due) both read exactly status='FOLLOW_UP' with a
@@ -141,6 +144,20 @@ export const appraisals = pgTable("appraisals", {
   // above: party_id is nullable here (Stage A appraisals were property-keyed
   // only), so this index simply skips those rows.
   partyIdx: index("appraisals_party_idx").on(table.partyId),
+  brokerageIdx: index("appraisals_brokerage_idx").on(table.brokerageId),
+  propertyBrokerageFk: foreignKey({
+    columns: [table.propertyId, table.brokerageId],
+    foreignColumns: [properties.id, properties.brokerageId],
+    name: "appraisals_property_brokerage_fk",
+  }),
+  // party_id is nullable. Postgres MATCH SIMPLE skips this check when
+  // party_id is null. When it is set, parties.brokerage_id must equal
+  // this row's brokerage_id.
+  partyBrokerageFk: foreignKey({
+    columns: [table.partyId, table.brokerageId],
+    foreignColumns: [parties.id, parties.brokerageId],
+    name: "appraisals_party_brokerage_fk",
+  }),
 }));
 
 /**

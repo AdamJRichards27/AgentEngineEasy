@@ -7,11 +7,10 @@
 // Failed, draft, and queued messages do not count. A message stamped with
 // party_id but with no participant row does not count.
 //
-// A3/A4: communication_participants has no brokerage_id. The reads filter
-// communication_threads.brokerage_id and parties.brokerage_id. The bad-row
-// cases below are a foreign thread whose participant points at this
-// brokerage's party, and a home thread whose participant points at the
-// other brokerage's party. Neither may move recency or the coach count.
+// Migration 0036 stores communication_participants.brokerage_id from the
+// thread and rejects a party from another brokerage. The two mismatched
+// participant shapes are no longer storable. Their messages stay, with no
+// participant row, and still must not move recency or the coach count.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -167,9 +166,8 @@ before(async () => {
     withParticipant: true,
   });
 
-  // Foreign thread, participant points at the home party, message brokerage
-  // stamped as home. Dropping the thread predicate would treat this as a
-  // home contact from yesterday.
+  // 0036 refuses a participant whose party brokerage disagrees with the
+  // thread. The message is still inserted, without that participant.
   await insertMessage({
     threadBrokerageId: foreignId,
     messageBrokerageId: homeId,
@@ -179,11 +177,23 @@ before(async () => {
     status: "SENT",
     sentAt: yesterday,
     createdAt: yesterday,
-    withParticipant: true,
+    withParticipant: false,
   });
-  // Home thread, participant points at the foreign party. Dropping the
-  // party predicate would count it for home and would warm the foreign
-  // contact if the thread predicate were also dropped.
+  await assert.rejects(
+    () =>
+      insertMessage({
+        threadBrokerageId: foreignId,
+        messageBrokerageId: homeId,
+        partyId: badRowId,
+        channel: "EMAIL",
+        direction: "OUTBOUND",
+        status: "SENT",
+        sentAt: yesterday,
+        createdAt: yesterday,
+        withParticipant: true,
+      }),
+    (err: unknown) => constraintViolation(err, "communication_participants_party_brokerage_fk"),
+  );
   await insertMessage({
     threadBrokerageId: homeId,
     messageBrokerageId: homeId,
@@ -193,8 +203,23 @@ before(async () => {
     status: "SENT",
     sentAt: yesterday,
     createdAt: yesterday,
-    withParticipant: true,
+    withParticipant: false,
   });
+  await assert.rejects(
+    () =>
+      insertMessage({
+        threadBrokerageId: homeId,
+        messageBrokerageId: homeId,
+        partyId: foreignPartyId,
+        channel: "EMAIL",
+        direction: "OUTBOUND",
+        status: "SENT",
+        sentAt: yesterday,
+        createdAt: yesterday,
+        withParticipant: true,
+      }),
+    (err: unknown) => constraintViolation(err, "communication_participants_party_brokerage_fk"),
+  );
 });
 
 after(async () => {
@@ -334,6 +359,7 @@ async function insertMessage(input: {
   if (input.withParticipant) {
     await db.insert(communicationParticipants).values({
       threadId: thread.id,
+      brokerageId: input.threadBrokerageId,
       partyId: input.partyId,
       role: "Seller",
       displayName: input.channel,
@@ -354,4 +380,17 @@ async function insertMessage(input: {
     failedAt: input.failedAt ?? null,
     createdAt: input.createdAt,
   });
+}
+
+function constraintViolation(err: unknown, constraint: string): boolean {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    if (current instanceof Error) parts.push(current.message);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") parts.push(code);
+    current = (current as { cause?: unknown }).cause;
+  }
+  const text = parts.join(" ");
+  return text.includes(constraint) || text.includes("23503");
 }

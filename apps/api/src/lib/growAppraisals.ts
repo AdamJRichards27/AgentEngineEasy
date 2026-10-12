@@ -158,9 +158,10 @@ async function publishAppraisalEvent(eventType: AgentEngineEasyEventType, apprai
 }
 
 /** Tenant isolation: every Grow appraisal function resolves the row through
- * this helper first. `appraisals` has no brokerage_id, so the select
- * inner-joins `properties` and requires `properties.brokerage_id` in the
- * WHERE, not only in a later JavaScript comparison. */
+ * this helper first. Migration 0036 stores appraisals.brokerage_id. This
+ * select still inner-joins `properties` and requires `properties.brokerage_id`
+ * in the WHERE, not only in a later JavaScript comparison. The direct
+ * appraisals.brokerage_id predicate is still open (E-9 partial). */
 export async function assertAppraisalInBrokerage(appraisalId: number, brokerageId: number): Promise<Appraisal> {
   const [row] = await db
     .select({ appraisal: appraisals, propertyBrokerageId: properties.brokerageId })
