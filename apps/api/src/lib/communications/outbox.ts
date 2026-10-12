@@ -120,7 +120,10 @@ export interface ApplyMessageTransitionInput {
  * second copy of the same guardrails.
  */
 export async function applyMessageTransition(input: ApplyMessageTransitionInput): Promise<CommunicationMessage> {
-  const [existing] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, input.messageId));
+  const [existing] = await db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.id, input.messageId), eq(communicationMessages.brokerageId, input.brokerageId)));
   if (!existing || existing.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
   if (existing.version !== input.expectedVersion) throw new CommunicationConcurrencyError();
   if (!isValidCommunicationStatusTransition(existing.status as CommunicationMessageStatus, input.toStatus)) {
@@ -130,7 +133,13 @@ export async function applyMessageTransition(input: ApplyMessageTransitionInput)
   const [row] = await db
     .update(communicationMessages)
     .set({ status: input.toStatus, version: existing.version + 1, updatedAt: new Date(), ...input.patch })
-    .where(and(eq(communicationMessages.id, input.messageId), eq(communicationMessages.version, input.expectedVersion)))
+    .where(
+      and(
+        eq(communicationMessages.id, input.messageId),
+        eq(communicationMessages.brokerageId, input.brokerageId),
+        eq(communicationMessages.version, input.expectedVersion),
+      ),
+    )
     .returning();
   if (!row) throw new CommunicationConcurrencyError();
 
@@ -235,7 +244,10 @@ export interface QueueMessageResult {
 
 /** Steps 1-8 (and, for an immediately-dispatchable message, steps 9-13 via dispatchMessage). */
 export async function queueMessage(messageId: number, brokerageId: number, actorUserId: number, expectedVersion: number): Promise<QueueMessageResult> {
-  const [existing] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, messageId));
+  const [existing] = await db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.id, messageId), eq(communicationMessages.brokerageId, brokerageId)));
   if (!existing || existing.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   if (existing.status !== "DRAFT" && existing.status !== "APPROVED") {
     throw new CommunicationTransitionError(`Only a DRAFT or APPROVED message can be queued (this one is ${existing.status}).`);
@@ -294,7 +306,14 @@ export async function evaluateAndDispatchQueuedMessage(
   actorUserId: number | null,
   queuedMessage?: CommunicationMessage,
 ): Promise<QueueMessageResult> {
-  const queued = queuedMessage ?? (await db.select().from(communicationMessages).where(eq(communicationMessages.id, messageId)))[0];
+  const queued =
+    queuedMessage ??
+    (
+      await db
+        .select()
+        .from(communicationMessages)
+        .where(and(eq(communicationMessages.id, messageId), eq(communicationMessages.brokerageId, brokerageId)))
+    )[0];
   if (!queued || queued.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   if (queued.status !== "QUEUED") {
     throw new CommunicationTransitionError(`Only a QUEUED message can be evaluated for dispatch (this one is ${queued.status}).`);
@@ -377,7 +396,10 @@ export async function evaluateAndDispatchQueuedMessage(
 
 /** Steps 8-13 for a message already at QUEUED or RETRY_SCHEDULED — used both by queueMessage's immediate path and by dispatchDueMessages' sweep. */
 export async function dispatchMessage(messageId: number, brokerageId: number): Promise<CommunicationMessage> {
-  const [existing] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, messageId));
+  const [existing] = await db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.id, messageId), eq(communicationMessages.brokerageId, brokerageId)));
   if (!existing || existing.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   if (existing.status !== "QUEUED" && existing.status !== "RETRY_SCHEDULED") {
     throw new CommunicationTransitionError(`Only a QUEUED or RETRY_SCHEDULED message can be dispatched (this one is ${existing.status}).`);
