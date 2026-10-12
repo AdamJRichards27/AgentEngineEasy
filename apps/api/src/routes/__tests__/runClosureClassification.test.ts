@@ -6,7 +6,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
   amlVerifications,
@@ -15,6 +15,7 @@ import {
   commissionAgreements,
   commissionCalculations,
   domainEvents,
+  eventProcessingReceipts,
   financialDisputes,
   financialPaymentRequests,
   financialReconciliations,
@@ -150,8 +151,17 @@ before(async () => {
 });
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId, B?.brokerageId]);
+  const brokerageIds = [A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number");
+  if (brokerageIds.length > 0) {
+    const events = await db.select({ id: domainEvents.id }).from(domainEvents).where(inArray(domainEvents.brokerageId, brokerageIds));
+    const eventIds = events.map((event) => event.id);
+    if (eventIds.length > 0) {
+      await db.delete(eventProcessingReceipts).where(inArray(eventProcessingReceipts.eventId, eventIds));
+    }
+  }
+  await cleanupBrokerages(brokerageIds);
   if (server) {
+    server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }
 });
@@ -321,7 +331,7 @@ test("a clean close follows milestone auto-completion, and tasks that already mi
     lastName: "SellerSolicitor",
     email: `seller-solicitor-${suffix}@example.com`,
   });
-  assert.equal(sellerSolicitorRes.status, 201, await sellerSolicitorRes.text());
+  assert.equal(sellerSolicitorRes.status, 201, await sellerSolicitorRes.clone().text());
   const { party: sellerSolicitor } = await readJson<{ party: { id: number } }>(sellerSolicitorRes);
   const oneSide = await postJson(`/transactions/${transactionId}/legal-representatives`, A.agent.cookie, {
     sellerSolicitorPartyId: sellerSolicitor.id,
@@ -337,7 +347,7 @@ test("a clean close follows milestone auto-completion, and tasks that already mi
     lastName: "BuyerSolicitor",
     email: `buyer-solicitor-${suffix}@example.com`,
   });
-  assert.equal(buyerSolicitorRes.status, 201, await buyerSolicitorRes.text());
+  assert.equal(buyerSolicitorRes.status, 201, await buyerSolicitorRes.clone().text());
   const { party: buyerSolicitor } = await readJson<{ party: { id: number } }>(buyerSolicitorRes);
   const bothSides = await postJson(`/transactions/${transactionId}/legal-representatives`, A.agent.cookie, {
     buyerSolicitorPartyId: buyerSolicitor.id,
@@ -374,7 +384,7 @@ test("a clean close follows milestone auto-completion, and tasks that already mi
   assert.equal((await reloadTask(settlementTracking.id)).status, "COMPLETED");
 
   const settledRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
-  assert.equal(settledRes.status, 200, await settledRes.text());
+  assert.equal(settledRes.status, 200, await settledRes.clone().text());
   const { transaction: settled } = await readJson<{ transaction: { grossCommissionCents: number; gstCents: number } }>(settledRes);
   const expectedCents = settled.grossCommissionCents + settled.gstCents;
   for (const id of [missingInfo.id, settlementTime.id, reminder.id, internalSettlement.id]) {
@@ -412,8 +422,11 @@ test("a clean close follows milestone auto-completion, and tasks that already mi
   assert.equal((await reloadTask(lateContractDoc.id)).status, "ACTIVE");
   assert.equal((await reloadTask(lateContractDoc.id)).completedAt, null);
   assert.equal((await reloadTask(otherBrokerageTask.id)).status, "ACTIVE");
-  for (const id of [sellerAmlTask.id, ownersTask.id, launchTask.id, campaignTask.id]) {
-    assert.equal((await reloadTask(id)).status, "ACTIVE", "listing and seller AML already happened, so these rows are not rewritten");
+  // Buyer AML publishes AML_COMPLETED after this task exists, so the handler
+  // may complete it. Listing tasks have no second LISTING_LIVE, so they stay.
+  assert.equal((await reloadTask(sellerAmlTask.id)).status, "COMPLETED");
+  for (const id of [ownersTask.id, launchTask.id, campaignTask.id]) {
+    assert.equal((await reloadTask(id)).status, "ACTIVE", "an earlier listing milestone does not rewrite a task created afterwards");
   }
 
   const followupList = await getJson(`/tasks/by-property/${propertyId}`, A.agent.cookie);
@@ -465,7 +478,7 @@ test("final close honours the financial and seller-AML blocks, manual S2 evidenc
   });
   assert.equal(scheduled.status, 200, await scheduled.text());
   const settledRes = await postJson(`/transactions/${transactionId}/settlement-complete`, A.admin.cookie);
-  assert.equal(settledRes.status, 200, await settledRes.text());
+  assert.equal(settledRes.status, 200, await settledRes.clone().text());
   const { transaction: settled } = await readJson<{
     transaction: { grossCommissionCents: number; gstCents: number; commissionCalculatedAt: string };
   }>(settledRes);
