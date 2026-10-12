@@ -17,14 +17,16 @@
 // allowing it (Build Instructions §21: "never trust client-supplied ...
 // severity/resolution info").
 
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { z } from "zod";
-import { db, riskExceptionScanRuns } from "@aee/db";
-import { desc } from "drizzle-orm";
+import { db, riskExceptionScanRuns, riskExceptions } from "@aee/db";
+import { desc, eq } from "drizzle-orm";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import {
   acknowledgeException,
+  assertPropertyInBrokerage,
   startRemediation,
   markAwaitingExternal,
   resolveExceptionManually,
@@ -48,6 +50,67 @@ function actorFrom(user: AuthedUser): ActorRef {
 
 export function canViewFinancials(user: AuthedUser): boolean {
   return BROKERAGE_ADMIN_ROLES.includes(user.role);
+}
+
+// R-F43 — exception reads and lifecycle mutations are a Run surface, the
+// same as Launch, AML, Documents, Ready to List, and Go Live (R-F35b).
+// The check is requireEntitlement("run.access"): an unentitled caller gets
+// that helper's existing 403 and the handler does not run. Brokerage
+// membership is answered first, matching R-F41, so another brokerage stays
+// the existing 404 (the same body as a missing id) even when that caller
+// has no run.access. Applied inside the handler, not via Router.use() —
+// this router is mounted unprefixed. Ops health and the manual scan do
+// not operate on a transaction or a property and stay role-gated only.
+const requiresRunAccess = requireEntitlement("run.access");
+
+async function callerHasRunAccess(req: Request, res: Response): Promise<boolean> {
+  let allowed = false;
+  await requiresRunAccess(req, res, () => {
+    allowed = true;
+  });
+  return allowed;
+}
+
+type MissingExceptionBody = "detail" | "mutation";
+
+function respondMissingException(res: Response, kind: MissingExceptionBody): void {
+  if (kind === "detail") {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  res.status(404).json({ error: "Exception not found", reason: "NOT_FOUND" });
+}
+
+/** False when the response is already sent (404 or the entitlement 403). */
+async function allowExceptionInBrokerage(
+  req: Request,
+  res: Response,
+  exceptionId: string,
+  brokerageId: number,
+  missing: MissingExceptionBody,
+): Promise<boolean> {
+  // Same lookup as assertTenantAndLoad: id only, then compare brokerage, so
+  // a missing id and another brokerage stay indistinguishable.
+  const [row] = await db
+    .select({ brokerageId: riskExceptions.brokerageId })
+    .from(riskExceptions)
+    .where(eq(riskExceptions.id, exceptionId));
+  if (!row || row.brokerageId !== brokerageId) {
+    respondMissingException(res, missing);
+    return false;
+  }
+  return callerHasRunAccess(req, res);
+}
+
+/** False when the response is already sent (property 404 or the entitlement 403). */
+async function allowPropertyInBrokerage(req: Request, res: Response, propertyId: number, brokerageId: number): Promise<boolean> {
+  try {
+    await assertPropertyInBrokerage(propertyId, brokerageId);
+  } catch (err) {
+    if (handleRiskExceptionError(err, res)) return false;
+    throw err;
+  }
+  return callerHasRunAccess(req, res);
 }
 
 function statusForRiskExceptionError(reason: string): number {
@@ -89,6 +152,7 @@ exceptionsRouter.get("/properties/:propertyId/exceptions", requireAuth, async (r
     res.status(400).json({ error: parsed.error.flatten() });
     return;
   }
+  if (!(await allowPropertyInBrokerage(req, res, propertyId, user.brokerageId))) return;
   try {
     const result = await getPropertyExceptions(propertyId, user.brokerageId, canViewFinancials(user), {
       status: parsed.data.status?.split(","),
@@ -123,6 +187,7 @@ exceptionsRouter.get("/exceptions", requireAuth, async (req, res) => {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
   }
+  if (!(await callerHasRunAccess(req, res))) return;
   const restrictTo = await restrictedPropertyIdsFor(user);
   const filters: CrossPropertyExceptionFilters = {
     status: parsed.data.status?.split(","),
@@ -141,6 +206,7 @@ exceptionsRouter.get("/exceptions", requireAuth, async (req, res) => {
 
 exceptionsRouter.get("/exceptions/:id", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "detail"))) return;
   const result = await getExceptionDetail(req.params.id, user.brokerageId, canViewFinancials(user));
   // Deliberately identical 404 whether the row doesn't exist, belongs to
   // another tenant, or is financially redacted (Build Instructions §21:
@@ -158,6 +224,7 @@ exceptionsRouter.get("/exceptions/:id", requireAuth, async (req, res) => {
 
 exceptionsRouter.post("/exceptions/:id/acknowledge", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "mutation"))) return;
   try {
     const exception = await acknowledgeException(req.params.id, user.brokerageId, actorFrom(user));
     res.json({ exception });
@@ -169,6 +236,7 @@ exceptionsRouter.post("/exceptions/:id/acknowledge", requireAuth, async (req, re
 
 exceptionsRouter.post("/exceptions/:id/start-remediation", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "mutation"))) return;
   try {
     const exception = await startRemediation(req.params.id, user.brokerageId, actorFrom(user));
     res.json({ exception });
@@ -182,6 +250,7 @@ const noteSchema = z.object({ note: z.string().min(1).max(2000) });
 
 exceptionsRouter.post("/exceptions/:id/awaiting-external", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "mutation"))) return;
   const parsed = noteSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -198,6 +267,7 @@ exceptionsRouter.post("/exceptions/:id/awaiting-external", requireAuth, async (r
 
 exceptionsRouter.post("/exceptions/:id/resolve", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "mutation"))) return;
   const parsed = noteSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -216,6 +286,7 @@ const dismissSchema = z.object({ reason: z.string().min(1).max(2000) });
 
 exceptionsRouter.post("/exceptions/:id/dismiss", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "mutation"))) return;
   const parsed = dismissSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -238,6 +309,7 @@ const reassignSchema = z.object({
 
 exceptionsRouter.post("/exceptions/:id/reassign", requireAuth, async (req, res) => {
   const user = req.authedUser!;
+  if (!(await allowExceptionInBrokerage(req, res, req.params.id, user.brokerageId, "mutation"))) return;
   const parsed = reassignSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
