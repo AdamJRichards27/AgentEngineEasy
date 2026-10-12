@@ -1,10 +1,13 @@
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { and, eq } from "drizzle-orm";
 import { db, automationTasks, automationAttentionItems } from "@aee/db";
 import { logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { BROKERAGE_ADMIN_ROLES, requireAuth } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+import { logAudit } from "../lib/audit.js";
 import { completeAutomationTask } from "../lib/automation/tasks.js";
 import { resolveAttentionItem } from "../lib/automation/attentionItems.js";
+import { AUTOMATION_ATTENTION_REASON_CODES, AUTOMATION_TASK_KEYS, type AutomationTaskKey } from "../lib/automation/types.js";
 
 // #122 — agent-facing task/attention-item visibility. automationTasks and
 // automationAttentionItems previously had zero non-admin surface: the WAE
@@ -115,10 +118,83 @@ tasksRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
   res.json({ tasks, attentionItems });
 });
 
+// R-F41. Completion and resolution stay brokerage-scoped first, so another
+// brokerage is still the same 404 as a missing id. Run linkage is checked
+// after that: a transaction id, a Run catalogue task key (including the
+// property workflow in templates.ts that has no transaction), or a Run
+// attention reason. Anything else — a Grow commitment is a different route;
+// a task or item that is not one of those — keeps requireAuth only.
+// Settlement sign-off (S1, S2, S3 in SETTLEMENT_COMPLETED_ACTIONS) is
+// Brokerage Administrator only, after the entitlement check, with the same
+// denial-audit shape as settlement completion. No new override, and this
+// does not change what blocks close.
+const requiresRunAccess = requireEntitlement("run.access");
+
+const RUN_SIGNOFF_TASK_KEYS = [
+  "CONFIRM_TRANSACTION_RECORD_COMPLETE",
+  "PREPARE_COMMISSION_PROCESSING_CHECKLIST",
+  "RECORD_RETENTION_CLOSURE_CHECK",
+] as const satisfies readonly AutomationTaskKey[];
+
+const ROLE_NOT_PERMITTED = "ROLE_NOT_PERMITTED";
+const TASK_COMPLETE_DENIED = "automation_task_complete_denied";
+
+const RUN_TASK_KEYS: readonly string[] = AUTOMATION_TASK_KEYS;
+const RUN_ATTENTION_REASONS: readonly string[] = AUTOMATION_ATTENTION_REASON_CODES;
+
+function taskIsRunLinked(task: { transactionId: number | null; taskKey: string }): boolean {
+  return task.transactionId != null || RUN_TASK_KEYS.includes(task.taskKey);
+}
+
+function attentionIsRunLinked(item: { transactionId: number | null; reasonCode: string }): boolean {
+  return item.transactionId != null || RUN_ATTENTION_REASONS.includes(item.reasonCode);
+}
+
+function isRunSignOffTask(taskKey: string): boolean {
+  return (RUN_SIGNOFF_TASK_KEYS as readonly string[]).includes(taskKey);
+}
+
+async function callerHasRunAccess(req: Request, res: Response): Promise<boolean> {
+  let allowed = false;
+  await requiresRunAccess(req, res, () => {
+    allowed = true;
+  });
+  return allowed;
+}
+
 tasksRouter.post("/:id/complete", requireAuth, async (req, res) => {
   const user = req.authedUser!;
   const taskId = readUuidParam(res, req.params.id, "task");
   if (taskId === null) return;
+
+  const [task] = await db.select().from(automationTasks).where(eq(automationTasks.id, taskId));
+  if (!task || task.brokerageId !== user.brokerageId) {
+    res.status(404).json({ error: "NOT_FOUND" });
+    return;
+  }
+
+  if (taskIsRunLinked(task)) {
+    const allowed = await callerHasRunAccess(req, res);
+    if (!allowed) return;
+  }
+
+  if (isRunSignOffTask(task.taskKey) && !BROKERAGE_ADMIN_ROLES.includes(user.role)) {
+    // Same refusal shape as requireSettlementFundsAdmin: brokerage_id is
+    // set, and updatedValue carries only the actor role and the reason.
+    // The task title, notes, and request body are not stored. A failed
+    // audit insert stays a 403 (logAudit is best-effort).
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: TASK_COMPLETE_DENIED,
+      recordType: "automation_task",
+      recordId: task.id,
+      updatedValue: JSON.stringify({ actorRole: user.role, reason: ROLE_NOT_PERMITTED }),
+    });
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
   const result = await completeAutomationTask({ brokerageId: user.brokerageId, taskId, userId: user.id });
   if (!result.ok) {
     res.status(result.reason === "NOT_FOUND" ? 404 : 400).json({ error: result.reason });
@@ -131,6 +207,18 @@ tasksRouter.post("/attention-items/:id/resolve", requireAuth, async (req, res) =
   const user = req.authedUser!;
   const attentionItemId = readUuidParam(res, req.params.id, "attention item");
   if (attentionItemId === null) return;
+
+  const [existing] = await db.select().from(automationAttentionItems).where(eq(automationAttentionItems.id, attentionItemId));
+  if (!existing || existing.brokerageId !== user.brokerageId) {
+    res.status(404).json({ error: "Attention item not found in this brokerage." });
+    return;
+  }
+
+  if (attentionIsRunLinked(existing)) {
+    const allowed = await callerHasRunAccess(req, res);
+    if (!allowed) return;
+  }
+
   try {
     const item = await resolveAttentionItem({
       brokerageId: user.brokerageId,
