@@ -448,10 +448,10 @@ test("without run.access every newly gated route is denied and writes nothing; w
     const propertyRead = await call("GET", `/properties/${propertyId}`, cookie);
     assert.equal(propertyRead.status, 200);
 
+    // R-F43 — the brokerage exception list is a Run read. It was left open
+    // by R-F35b and is now the same entitlement 403.
     const exceptions = await call("GET", "/exceptions", cookie);
-    assert.equal(exceptions.status, 200, await exceptions.clone().text());
-    const exceptionsBody = (await exceptions.json()) as { error?: string; entitlementKey?: string };
-    assert.notEqual(exceptionsBody.entitlementKey, "run.access");
+    await assertNotEntitled(exceptions, "GET /exceptions");
 
     await setRunAccess(A.brokerageId, true);
 
