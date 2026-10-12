@@ -127,7 +127,10 @@ export interface CreateTemplateVersionInput {
 
 /** Clones an existing template row into a new DRAFT version — never edits a previous version's content in place. */
 export async function createTemplateVersion(input: CreateTemplateVersionInput): Promise<CommunicationTemplate> {
-  const [existing] = await db.select().from(communicationTemplates).where(eq(communicationTemplates.id, input.templateId));
+  const [existing] = await db
+    .select()
+    .from(communicationTemplates)
+    .where(and(eq(communicationTemplates.id, input.templateId), eq(communicationTemplates.brokerageId, input.brokerageId)));
   if (!existing || existing.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
 
   const [latest] = await db
@@ -178,7 +181,10 @@ export async function createTemplateVersion(input: CreateTemplateVersionInput): 
 
 /** DRAFT -> ACTIVE. Retires (ARCHIVED) any other ACTIVE row sharing this templateKey+brokerageId, so at most one version is ever live at a time. */
 export async function activateTemplate(templateId: number, brokerageId: number, userId: number): Promise<CommunicationTemplate> {
-  const [existing] = await db.select().from(communicationTemplates).where(eq(communicationTemplates.id, templateId));
+  const [existing] = await db
+    .select()
+    .from(communicationTemplates)
+    .where(and(eq(communicationTemplates.id, templateId), eq(communicationTemplates.brokerageId, brokerageId)));
   if (!existing || existing.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   if (existing.status !== "DRAFT") {
     throw new CommunicationTemplateError(`Only a DRAFT template can be activated (this one is ${existing.status}).`);
@@ -198,14 +204,18 @@ export async function activateTemplate(templateId: number, brokerageId: number, 
 
   const now = new Date();
   for (const prior of previouslyActive) {
-    await db.update(communicationTemplates).set({ status: "ARCHIVED", updatedAt: now }).where(eq(communicationTemplates.id, prior.id));
+    await db
+      .update(communicationTemplates)
+      .set({ status: "ARCHIVED", updatedAt: now })
+      .where(and(eq(communicationTemplates.id, prior.id), eq(communicationTemplates.brokerageId, brokerageId)));
   }
 
   const [row] = await db
     .update(communicationTemplates)
     .set({ status: "ACTIVE", activatedAt: now, updatedAt: now })
-    .where(eq(communicationTemplates.id, templateId))
+    .where(and(eq(communicationTemplates.id, templateId), eq(communicationTemplates.brokerageId, brokerageId)))
     .returning();
+  if (!row) throw new CommunicationTenancyError();
 
   await logAudit({
     userId,
@@ -219,15 +229,19 @@ export async function activateTemplate(templateId: number, brokerageId: number, 
 }
 
 export async function archiveTemplate(templateId: number, brokerageId: number, userId: number): Promise<CommunicationTemplate> {
-  const [existing] = await db.select().from(communicationTemplates).where(eq(communicationTemplates.id, templateId));
+  const [existing] = await db
+    .select()
+    .from(communicationTemplates)
+    .where(and(eq(communicationTemplates.id, templateId), eq(communicationTemplates.brokerageId, brokerageId)));
   if (!existing || existing.brokerageId !== brokerageId) throw new CommunicationTenancyError();
   if (existing.status === "ARCHIVED") return existing;
 
   const [row] = await db
     .update(communicationTemplates)
     .set({ status: "ARCHIVED", updatedAt: new Date() })
-    .where(eq(communicationTemplates.id, templateId))
+    .where(and(eq(communicationTemplates.id, templateId), eq(communicationTemplates.brokerageId, brokerageId)))
     .returning();
+  if (!row) throw new CommunicationTenancyError();
 
   await logAudit({
     userId,

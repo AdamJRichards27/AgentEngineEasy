@@ -250,7 +250,12 @@ export async function getRelationshipTimeline(
     partyAnchoredMessages,
     participantThreadLinks,
   ] = await Promise.all([
-    db.select().from(parties).where(eq(parties.id, partyId)).limit(1).then((rows) => rows[0] ?? null),
+    db
+      .select()
+      .from(parties)
+      .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
     // brokerageId is part of the SQL predicate, not only of the party guard below. Every index
     // on these tables LEADS with brokerage_id (grow_relationships_brokerage_party_idx,
     // grow_activities_brokerage_party_occurred_idx, grow_opportunities_brokerage_party_property_idx,

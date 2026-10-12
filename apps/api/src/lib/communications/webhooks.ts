@@ -315,7 +315,10 @@ interface ResolvedInboundReply {
 }
 
 async function threadForBrokerage(threadId: number, brokerageId: number): Promise<CommunicationThread | null> {
-  const [thread] = await db.select().from(communicationThreads).where(eq(communicationThreads.id, threadId));
+  const [thread] = await db
+    .select()
+    .from(communicationThreads)
+    .where(and(eq(communicationThreads.id, threadId), eq(communicationThreads.brokerageId, brokerageId)));
   if (!thread || thread.brokerageId !== brokerageId) return null;
   return thread;
 }
@@ -472,7 +475,10 @@ async function applyInboundMessage(input: InboundWebhookInput): Promise<WebhookE
 }
 
 async function findInboundMessageByIdempotencyKey(idempotencyKey: string, brokerageId: number): Promise<CommunicationMessage | null> {
-  const [existing] = await db.select().from(communicationMessages).where(eq(communicationMessages.idempotencyKey, idempotencyKey));
+  const [existing] = await db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.idempotencyKey, idempotencyKey), eq(communicationMessages.brokerageId, brokerageId)));
   if (!existing || existing.brokerageId !== brokerageId) return null;
   return existing;
 }

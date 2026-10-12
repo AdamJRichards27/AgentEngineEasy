@@ -68,6 +68,7 @@ export async function recordObservation(input: RecordObservationInput): Promise<
     .where(
       and(
         eq(propertyProviderObservations.propertyId, input.propertyId),
+        eq(propertyProviderObservations.brokerageId, input.brokerageId),
         eq(propertyProviderObservations.observationType, input.observationType),
         eq(propertyProviderObservations.provider, input.provider),
         eq(propertyProviderObservations.isCurrent, true),
@@ -94,7 +95,9 @@ export async function recordObservation(input: RecordObservationInput): Promise<
     await db
       .update(propertyProviderObservations)
       .set({ isCurrent: false, supersededByObservationId: inserted.id })
-      .where(eq(propertyProviderObservations.id, previousCurrent.id));
+      .where(
+        and(eq(propertyProviderObservations.id, previousCurrent.id), eq(propertyProviderObservations.brokerageId, input.brokerageId)),
+      );
   }
 
   if (input.observationType === "ownership") {

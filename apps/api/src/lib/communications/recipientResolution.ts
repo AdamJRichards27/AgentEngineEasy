@@ -49,10 +49,19 @@ export function partyDisplayName(party: Pick<Party, "partyType" | "firstName" | 
 
 /** Every party linked to a property, shaped as communication recipient candidates — the reuse target Section 11 requires. */
 export async function listRecipientCandidatesForProperty(propertyId: number, brokerageId: number): Promise<CandidateRecipient[]> {
-  const [property] = await db.select().from(properties).where(eq(properties.id, propertyId));
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
   if (!property || property.brokerageId !== brokerageId) throw new CommunicationTenancyError();
 
-  const links: PropertyPartyLink[] = await db.select().from(propertyParties).where(eq(propertyParties.propertyId, propertyId));
+  // property_parties has no brokerage_id. The property join is the tenant predicate.
+  const linkRows = await db
+    .select({ link: propertyParties })
+    .from(propertyParties)
+    .innerJoin(properties, and(eq(properties.id, propertyParties.propertyId), eq(properties.brokerageId, brokerageId)))
+    .where(eq(propertyParties.propertyId, propertyId));
+  const links: PropertyPartyLink[] = linkRows.map((row) => row.link);
   if (links.length === 0) return [];
 
   const partyIds = [...new Set(links.map((l) => l.partyId))];
@@ -112,10 +121,16 @@ export interface AddParticipantFromPartyInput {
 }
 
 export async function addParticipantFromParty(input: AddParticipantFromPartyInput): Promise<CommunicationParticipant> {
-  const [thread] = await db.select().from(communicationThreads).where(eq(communicationThreads.id, input.threadId));
+  const [thread] = await db
+    .select()
+    .from(communicationThreads)
+    .where(and(eq(communicationThreads.id, input.threadId), eq(communicationThreads.brokerageId, input.brokerageId)));
   if (!thread || thread.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
 
-  const [party] = await db.select().from(parties).where(eq(parties.id, input.partyId));
+  const [party] = await db
+    .select()
+    .from(parties)
+    .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, input.brokerageId)));
   if (!party || party.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
 
   const [row] = await db
@@ -169,7 +184,10 @@ export async function addManualParticipant(input: AddManualParticipantInput): Pr
     throw new Error("A manually-added recipient needs at least an email or a mobile number.");
   }
 
-  const [thread] = await db.select().from(communicationThreads).where(eq(communicationThreads.id, input.threadId));
+  const [thread] = await db
+    .select()
+    .from(communicationThreads)
+    .where(and(eq(communicationThreads.id, input.threadId), eq(communicationThreads.brokerageId, input.brokerageId)));
   if (!thread || thread.brokerageId !== input.brokerageId) throw new CommunicationTenancyError();
 
   const [row] = await db

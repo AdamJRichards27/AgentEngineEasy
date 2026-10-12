@@ -409,9 +409,9 @@ test("a clean close follows milestone auto-completion, and tasks that already mi
   assert.ok(blocked.body.blockers?.some((line) => /Confirm the transaction record is complete|CONFIRM_TRANSACTION_RECORD_COMPLETE/.test(line)));
   assert.ok(blocked.body.blockers?.some((line) => /RECORD_RETENTION_CLOSURE_CHECK/.test(line)));
 
-  const completeRecord = await postJson(`/tasks/${recordComplete.id}/complete`, A.agent.cookie);
+  const completeRecord = await postJson(`/tasks/${recordComplete.id}/complete`, A.admin.cookie);
   assert.equal(completeRecord.status, 200, await completeRecord.text());
-  const completeRetention = await postJson(`/tasks/${retention.id}/complete`, A.agent.cookie);
+  const completeRetention = await postJson(`/tasks/${retention.id}/complete`, A.admin.cookie);
   assert.equal(completeRetention.status, 200, await completeRetention.text());
 
   const closed = await closeAttempt(transactionId, A.admin.cookie);
@@ -630,9 +630,9 @@ test("final close honours the financial and seller-AML blocks, manual S2 evidenc
   const agentAttempt = await postJson(`/tasks/${commissionChecklist.id}/complete`, A.agent.cookie, {
     manualEvidence: { amountCents: expectedCents, date: "2026-10-01", paymentMethod: "EFT", reference: "EXT-AGENT" },
   });
-  assert.equal(agentAttempt.status, 400);
+  assert.equal(agentAttempt.status, 403);
   const agentBody = await readJson<{ error: string }>(agentAttempt);
-  assert.match(agentBody.error, /Brokerage Administrator/);
+  assert.equal(agentBody.error, "Forbidden");
   assert.equal((await reloadTask(commissionChecklist.id)).status, "ACTIVE");
 
   const wrongAmount = await postJson(`/tasks/${commissionChecklist.id}/complete`, A.admin.cookie, {
@@ -710,7 +710,7 @@ test("final close honours the financial and seller-AML blocks, manual S2 evidenc
     .set({ ownerType: "LISTING_AGENT", ownerUserId: A.agent.user.id })
     .where(eq(riskExceptions.id, unassigned.exception.id));
 
-  const completeRecord = await postJson(`/tasks/${recordComplete.id}/complete`, A.agent.cookie);
+  const completeRecord = await postJson(`/tasks/${recordComplete.id}/complete`, A.admin.cookie);
   assert.equal(completeRecord.status, 200, await completeRecord.text());
 
   const followup = await insertTask({
