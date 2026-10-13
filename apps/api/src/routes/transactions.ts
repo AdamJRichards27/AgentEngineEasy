@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, transactions, properties } from "@aee/db";
+import { db, transactions, properties, type Transaction } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
@@ -16,6 +16,7 @@ import {
   recordFundsReceived,
   recordAgentPaid,
   closeTransaction,
+  listTransactionClosureBlockers,
   recordLegalRepresentatives,
   TransactionClosureBlockedError,
 } from "../lib/transactions.js";
@@ -169,22 +170,27 @@ transactionsRouter.get("/by-property/:propertyId", requireAuth, requiresRunAcces
     return;
   }
   const transaction = await getTransactionByProperty(propertyId);
-  // R-F37 — sibling only. The transaction object itself is unchanged, and
-  // a missing transaction stays null on both fields.
-  res.json({
-    transaction,
-    fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
-  });
+  res.json(await transactionRead(transaction));
 });
 
 transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, id));
-  res.json({
+  res.json(await transactionRead(transaction));
+});
+
+/**
+ * R-F37 funds sibling, plus the R-F42 closure blockers `closeTransaction`
+ * would report. `closureBlockers` is null when there is no transaction.
+ * The transaction object itself is unchanged. This read does not close.
+ */
+async function transactionRead(transaction: Transaction | null | undefined) {
+  return {
     transaction,
     fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
-  });
-});
+    closureBlockers: transaction ? await listTransactionClosureBlockers(transaction) : null,
+  };
+}
 
 async function handle(fn: () => Promise<unknown>, res: Response): Promise<void> {
   try {
