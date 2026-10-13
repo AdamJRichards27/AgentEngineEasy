@@ -1,6 +1,6 @@
 # E-9 latent tenancy — design note
 
-**Status:** design note. Migration 0036 prepares the column, backfill, and constraints. It is not applied outside CI. E-9 stays **PARTIAL**. Nothing in this note closes E-9.
+**Status:** design note. #207 (E-9 A4, `b4d3ba3fc4ab2b9dbbdcda55ddfa31dc119867e1`) is merged and adds no migration. #211 (`20751469662d3268263f83f5ad6799feeccb49b7`) is merged: migration 0036 prepares the column, backfill, and constraints and is **not applied to any environment**. The #211 merge carried an approval-scope deviation recorded by the Owner, without a history rewrite. E-9 stays **PARTIAL**. Nothing in this note closes E-9.
 **Wave:** Grow Completion Program. This is not a new Priority 2, and it does not reopen historical Grow Priority 1 or historical Grow Priority 2 (Contact Intelligence, #30).
 **Staging tip verified for this note:** `5ee41952199ea877f0cabc5ce8e6e718050c5c34` (*Grow Appraisals list and Appraisal Workspace*, #167).
 **Post-merge CI:** run [37559800941](https://github.com/AdamJRichards27/AgentEngineEasy/actions/runs/37559800941) SUCCESS (event `push`, head = that tip).
