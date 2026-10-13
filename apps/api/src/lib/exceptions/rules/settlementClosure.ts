@@ -114,6 +114,7 @@ const F32_CLOSURE_CONDITIONS_UNRESOLVED: RiskRule = {
   ruleId: "F32_CLOSURE_BLOCKED_BY_UNRESOLVED_CONDITION",
   version: 1,
   category: "SETTLEMENT_CLOSURE",
+  scopeExitPolicy: "KEEP_OPEN",
   name: "Settlement completed but a blocking condition remains unresolved",
   description: "settlementCompletedAt is set, closedAt is null, and a transactionConditions row is still Pending — the condition-focused sibling of E28 (AML-focused) for the same post-settlement window.",
   triggerEventTypes: ["SETTLEMENT_COMPLETED"],
@@ -159,6 +160,7 @@ const F33_PREMATURE_CLOSURE_OVERRIDE: RiskRule = {
   ruleId: "F33_CLOSURE_ATTEMPTED_PREMATURELY",
   version: 1,
   category: "SETTLEMENT_CLOSURE",
+  scopeExitPolicy: "KEEP_OPEN",
   name: "Closure attempted prematurely (forced override used)",
   description: "auditLogs contains a transaction_closed_forced entry for this transaction — an authorised override was used to close it despite an unresolved requirement.",
   triggerEventTypes: ["TRANSACTION_CLOSED"],
@@ -203,6 +205,10 @@ const F34_CLOSED_WITH_CONTRADICTORY_BLOCKER: RiskRule = {
   ruleId: "F34_CLOSED_TRANSACTION_HAS_ACTIVE_BLOCKER",
   version: 1,
   category: "SETTLEMENT_CLOSURE",
+  scopeExitPolicy: "KEEP_OPEN",
+  // F34's scan window is closed transactions. Closing is not a scope exit;
+  // a later condition clear is still CONDITION_SATISFIED.
+  transactionCloseScope: "STAYS",
   name: "Closed transaction has a contradictory active blocker",
   description: "transactions.closedAt is set but a transactionConditions row is still Pending, or a required party's AML is incomplete — a data-integrity conflict.",
   triggerEventTypes: ["TRANSACTION_CLOSED"],

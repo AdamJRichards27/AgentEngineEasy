@@ -12,7 +12,7 @@ import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db, transactions, properties, propertyParties, amlVerifications, parties, type Property, type Transaction } from "@aee/db";
 import type { RiskRule } from "../registry.js";
 import type { RiskFinding } from "../types.js";
-import { dedupKey, resolveDefaultOwner, severityForDeadline } from "./shared.js";
+import { AFTER_APPRAISAL_STAGES, dedupKey, resolveDefaultOwner, severityForDeadline } from "./shared.js";
 
 interface AmlCandidate {
   property: Property;
@@ -78,6 +78,8 @@ const E_SELLER_AML: RiskRule = {
   ruleId: "E05_22_24_SELLER_AML_INCOMPLETE",
   version: 1,
   category: "AML_CTF",
+  scopeExitPolicy: "KEEP_OPEN",
+  stageRange: AFTER_APPRAISAL_STAGES,
   name: "Seller AML/CTF incomplete",
   description: "Combines catalogue #5, #22, and the seller half of #24: a required seller has no AML verification row, or one that hasn't reached Complete (excluding Review Required/Failed, which E26 covers with more specific guidance).",
   triggerEventTypes: ["READY_TO_LIST", "AML_REQUESTED"],
@@ -125,6 +127,7 @@ const E_BUYER_AML_EARLY: RiskRule = {
   ruleId: "E23_24_BUYER_AML_INCOMPLETE",
   version: 1,
   category: "AML_CTF",
+  scopeExitPolicy: "KEEP_OPEN",
   name: "Buyer AML/CTF incomplete (no settlement date yet)",
   description: "Combines catalogue #23 and the buyer half of #24. Active only before a settlement date exists — once one is set, E27 takes over with deadline-based severity so the same fact is never tracked by two rules at once.",
   triggerEventTypes: ["CONTRACT_SIGNED"],
@@ -177,6 +180,7 @@ const E27_BUYER_AML_NEAR_SETTLEMENT: RiskRule = {
   ruleId: "E27_BUYER_AML_APPROACHING_SETTLEMENT",
   version: 1,
   category: "AML_CTF",
+  scopeExitPolicy: "KEEP_OPEN",
   name: "Buyer AML/CTF incomplete as settlement approaches",
   description: "A settlement date is set and buyer AML/CTF is not yet Complete — deadline-based severity ladder culminating in CRITICAL at/after settlement.",
   triggerEventTypes: ["SETTLEMENT_SCHEDULED", "AML_COMPLETED"],
@@ -223,6 +227,7 @@ const E26_AML_PROVIDER_FAILED: RiskRule = {
   ruleId: "E26_AML_PROVIDER_REQUEST_FAILED_OR_REVIEW",
   version: 1,
   category: "AML_CTF",
+  scopeExitPolicy: "KEEP_OPEN",
   name: "AML/CTF provider request failed or requires review",
   description: "An amlVerifications row is Review Required or Failed and has not been resolved through the exception-resolution fields the AML domain already provides.",
   triggerEventTypes: ["AML_COMPLETED"],
@@ -269,6 +274,7 @@ const E28_CLOSURE_BLOCKED_BY_AML: RiskRule = {
   ruleId: "E28_CLOSURE_BLOCKED_BY_INCOMPLETE_AML",
   version: 1,
   category: "AML_CTF",
+  scopeExitPolicy: "KEEP_OPEN",
   name: "Closure blocked by incomplete AML/CTF",
   description: "Settlement completed but the transaction has not closed, and a required party's AML/CTF is still not Complete.",
   triggerEventTypes: ["SETTLEMENT_COMPLETED"],

@@ -6,8 +6,16 @@
 // ownership) every deterministic date/status comparison in this catalogue
 // needs, kept in one place so they're computed the same way everywhere.
 
-import type { Property } from "@aee/db";
+import { WORKFLOW_STAGES, type Property } from "@aee/db";
 import type { RiskExceptionOwnerType, RiskExceptionSeverity } from "../types.js";
+
+/** Stages a live-listing rule still scans. Appraisal and Ready to List are outside this window. */
+export const LISTED_ONWARD_STAGES: readonly string[] = WORKFLOW_STAGES.filter(
+  (stage) => stage !== "Appraisal" && stage !== "Ready to List",
+);
+
+/** Stages seller AML still scans. Appraisal is outside this window. */
+export const AFTER_APPRAISAL_STAGES: readonly string[] = WORKFLOW_STAGES.filter((stage) => stage !== "Appraisal");
 
 export function dedupKey(ruleId: string, brokerageId: number, scope: string | number): string {
   return `${ruleId}:${brokerageId}:${scope}`;

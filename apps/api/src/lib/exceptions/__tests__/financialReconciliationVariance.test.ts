@@ -198,9 +198,17 @@ test("FIN05: an amount-mismatch VARIANCE from a real mock payment-status webhook
   assert.equal(resolved!.id, opened!.id, "the SAME exception row resolves — not a second, separate row");
   assert.equal(resolved!.status, "RESOLVED");
   assert.equal(resolved!.resolutionMethod, "AUTO");
-  const evidence = resolved!.resolutionEvidence as Record<string, unknown> | null;
-  assert.equal(evidence?.kind, "RULE_CONDITION_CLEARED");
-  assert.equal(evidence?.ruleId, FIN05_RULE_ID);
+  const evidence = resolved!.resolutionEvidence as {
+    kind?: string;
+    ruleCode?: string;
+    ruleVersion?: number;
+    record?: { scope?: string; brokerageId?: number };
+  } | null;
+  assert.equal(evidence?.kind, "CONDITION_SATISFIED");
+  assert.equal(evidence?.ruleCode, FIN05_RULE_ID);
+  assert.equal(evidence?.ruleVersion, 1);
+  assert.equal(evidence?.record?.scope, "IN_SCOPE");
+  assert.equal(evidence?.record?.brokerageId, A.brokerageId);
 });
 
 test("FIN05: a matching mock payment-status event (no mismatch) never creates a risk exception", async () => {

@@ -4,7 +4,7 @@
 // Contract (sold), Settlement (settled), and Closed do not stay open solely
 // because those fields are empty: the scheduled sweep resolves the existing
 // row as SYSTEM / NO_LONGER_APPLICABLE and keeps it. Filling the fields
-// still resolves as RULE_CONDITION_CLEARED. No other rule grows this hook.
+// still resolves as CONDITION_SATISFIED. No other rule grows this hook.
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -183,7 +183,7 @@ describe("B08 v2 marketing-stage lifecycle", { concurrency: false }, () => {
       } else {
         assert.deepEqual(missing, {
           kind: "NO_LONGER_APPLICABLE",
-          ruleId: B08_RULE_ID,
+          ruleCode: B08_RULE_ID,
           ruleVersion: B08_RULE_VERSION,
           workflowStage: stage,
         });
@@ -297,9 +297,19 @@ describe("B08 v2 marketing-stage lifecycle", { concurrency: false }, () => {
     );
     assert.deepEqual(resolved.resolutionEvidence, {
       kind: "NO_LONGER_APPLICABLE",
-      ruleId: B08_RULE_ID,
+      ruleCode: B08_RULE_ID,
       ruleVersion: B08_RULE_VERSION,
-      workflowStage: "Contract",
+      record: {
+        brokerageId: A.brokerageId,
+        propertyId,
+        transactionId: null,
+        closedAt: null,
+        workflowStage: "Contract",
+        scope: "STAGE_EXIT",
+        sourceRecordType: "property",
+        sourceRecordId: String(propertyId),
+        dedupKey,
+      },
     });
 
     const transitions = await db
@@ -405,11 +415,18 @@ describe("B08 v2 marketing-stage lifecycle", { concurrency: false }, () => {
     const cleared = (await b08Rows(clearedId))[0]!;
     assert.equal(cleared.id, opened.id);
     assert.equal(cleared.status, "RESOLVED");
-    assert.deepEqual(cleared.resolutionEvidence, {
-      kind: "RULE_CONDITION_CLEARED",
-      ruleId: B08_RULE_ID,
-      ruleVersion: B08_RULE_VERSION,
-    });
+    const clearedEvidence = cleared.resolutionEvidence as {
+      kind: string;
+      ruleCode: string;
+      ruleVersion: number;
+      record: { scope: string; workflowStage: string | null; propertyId: number };
+    };
+    assert.equal(clearedEvidence.kind, "CONDITION_SATISFIED");
+    assert.equal(clearedEvidence.ruleCode, B08_RULE_ID);
+    assert.equal(clearedEvidence.ruleVersion, B08_RULE_VERSION);
+    assert.equal(clearedEvidence.record.scope, "IN_SCOPE");
+    assert.equal(clearedEvidence.record.workflowStage, "Listed");
+    assert.equal(clearedEvidence.record.propertyId, clearedId);
 
     const movedId = await createProperty(
       A.agent.cookie,
@@ -427,7 +444,7 @@ describe("B08 v2 marketing-stage lifecycle", { concurrency: false }, () => {
     assert.equal(moved.status, "RESOLVED");
     assert.equal(
       (moved.resolutionEvidence as { kind?: string }).kind,
-      "RULE_CONDITION_CLEARED",
+      "CONDITION_SATISFIED",
     );
   });
 
@@ -494,15 +511,13 @@ describe("B08 v2 marketing-stage lifecycle", { concurrency: false }, () => {
     const resolved = (await b08Rows(propertyId))[0]!;
     assert.equal(resolved.id, opened.id);
     assert.equal(resolved.status, "RESOLVED");
-    assert.equal(
-      (resolved.resolutionEvidence as { kind?: string; workflowStage?: string })
-        .kind,
-      "NO_LONGER_APPLICABLE",
-    );
-    assert.equal(
-      (resolved.resolutionEvidence as { workflowStage?: string }).workflowStage,
-      "Closed",
-    );
+    const evidence = resolved.resolutionEvidence as {
+      kind?: string;
+      record?: { workflowStage?: string; scope?: string };
+    };
+    assert.equal(evidence.kind, "NO_LONGER_APPLICABLE");
+    assert.equal(evidence.record?.scope, "STAGE_EXIT");
+    assert.equal(evidence.record?.workflowStage, "Closed");
   });
 
   test("B07 still opens on a closed property with a missing address field", async () => {
