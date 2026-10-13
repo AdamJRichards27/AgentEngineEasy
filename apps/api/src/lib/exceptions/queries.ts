@@ -7,7 +7,15 @@
 // in exactly one place, mirroring timeline.ts's own precedent.
 
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
-import { db, riskExceptions, riskExceptionTransitions, users, type RiskException } from "@aee/db";
+import {
+  db,
+  riskExceptions,
+  riskExceptionTransitions,
+  transactions,
+  users,
+  OPEN_RISK_EXCEPTION_STATUSES,
+  type RiskException,
+} from "@aee/db";
 import { assertPropertyInBrokerage } from "./model.js";
 
 export interface RedactedRiskException extends Omit<RiskException, "resolutionEvidence" | "metadata"> {
@@ -110,10 +118,36 @@ export interface CrossPropertyExceptionFilters {
 }
 
 export interface CrossPropertyExceptionPage {
-  exceptions: Array<RedactedRiskException & { propertyAddress: string | null; ownerName: string | null }>;
+  exceptions: Array<RedactedRiskException & { propertyAddress: string | null; ownerName: string | null; blocksClose: boolean }>;
   total: number;
   limit: number;
   offset: number;
+}
+
+/**
+ * Same owner rule as EXCEPTIONS_NEED_OWNER, plus a Settled transaction.
+ * Read-only. It does not assign an owner or change exception state.
+ */
+function exceptionBlocksClose(row: {
+  category: string;
+  status: string;
+  ownerUserId: number | null;
+  ownerType: string;
+  transactionId: number | null;
+}, settledTransactionIds: ReadonlySet<number>): boolean {
+  if (row.category === "FINANCIAL") return false;
+  if (row.transactionId == null || !settledTransactionIds.has(row.transactionId)) return false;
+  if (!(OPEN_RISK_EXCEPTION_STATUSES as readonly string[]).includes(row.status)) return false;
+  return row.ownerUserId == null || row.ownerType === "UNASSIGNED_QUEUE";
+}
+
+async function settledTransactionIds(transactionIds: number[]): Promise<Set<number>> {
+  if (transactionIds.length === 0) return new Set();
+  const rows = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(and(inArray(transactions.id, transactionIds), eq(transactions.status, "Settled")));
+  return new Set(rows.map((row) => row.id));
 }
 
 /**
@@ -167,6 +201,10 @@ export async function listBrokerageExceptions(
     return { exceptions: [], total: count, limit: filters.limit, offset: filters.offset };
   }
 
+  const settled = await settledTransactionIds([
+    ...new Set(rows.map((row) => row.transactionId).filter((id): id is number => id != null)),
+  ]);
+
   const { properties } = await import("@aee/db");
   const propertyIds = [...new Set(rows.map((r) => r.propertyId))];
   const ownerIds = [...new Set(rows.map((r) => r.ownerUserId).filter((id): id is number => id != null))];
@@ -185,6 +223,7 @@ export async function listBrokerageExceptions(
         ...visible,
         propertyAddress: property?.formattedAddress ?? null,
         ownerName: owner ? `${owner.firstName} ${owner.lastName}`.trim() : null,
+        blocksClose: exceptionBlocksClose(r, settled),
       };
     })
     .filter((r): r is NonNullable<typeof r> => r !== null);

@@ -89,6 +89,12 @@ export interface PcWorkItem {
   handoffAt: string | null;
   completedAt: string | null;
   version: number;
+  /**
+   * True when this EXCEPTION currently blocks close: open, non-financial,
+   * no owner, on a Settled transaction. Absent on launch items. Display
+   * only — claim, assign, and status transitions ignore it.
+   */
+  blocksClose?: boolean;
 }
 
 // Section 27: the 8 primary views, rendered as sections of one screen.

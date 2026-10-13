@@ -106,6 +106,8 @@ export interface PcWorkItem {
   handoffAt: string | null;
   completedAt: string | null;
   version: number;
+  /** Display only. Set on EXCEPTION cards that currently block close. */
+  blocksClose?: boolean;
 }
 
 export interface PcWorkspaceSummary {

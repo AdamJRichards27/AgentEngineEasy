@@ -5,7 +5,7 @@ import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 import { transactionPanelActionVisibility } from "../lib/transactionPanelActions";
-import { CLOSE_BLOCKED_REASON, closeTransactionDisabled, plainClosureBlocker, visibleClosureBlockers } from "../lib/closureBlockers";
+import { closeBlockedReason, closeTransactionDisabled, visibleClosureBlockerRows, type ClosureBlockerDetail } from "../lib/closureBlockers";
 import { fundsReconciliationLabel, type FundsReconciliationView } from "../lib/fundsReconciliation";
 import {
   type PropertyExceptionsResponse,
@@ -323,6 +323,17 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["property-workspace", propertyId] });
 
+  // One refresh for the closure list and the Close button. Every action that
+  // can clear a blocker (and funds / agent paid, which can finish a task)
+  // uses this instead of invalidating only its own list.
+  const invalidateCloseState = () => {
+    queryClient.invalidateQueries({ queryKey: ["transaction", propertyId] });
+    queryClient.invalidateQueries({ queryKey: ["tasks", propertyId] });
+    queryClient.invalidateQueries({ queryKey: ["property-exceptions", propertyId] });
+    queryClient.invalidateQueries({ queryKey: ["conditions"] });
+    queryClient.invalidateQueries({ queryKey: ["property-workspace", propertyId] });
+  };
+
   const readyToList = useMutation({
     mutationFn: () => apiFetch(`/properties/${propertyId}/ready-to-list`, { method: "POST" }),
     onSuccess: invalidate,
@@ -351,7 +362,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   // failed/flagged outcome.
   const retryAml = useMutation({
     mutationFn: (verificationId: number) => apiFetch(`/aml/${verificationId}/retry`, { method: "POST" }),
-    onSuccess: invalidate,
+    onSuccess: invalidateCloseState,
   });
 
   const resolveAmlException = useMutation({
@@ -359,7 +370,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
       apiFetch(`/aml/${verificationId}/resolve-exception`, { method: "POST", body: JSON.stringify({ notes }) }),
     onSuccess: (_data, variables) => {
       setExceptionNotes((prev) => ({ ...prev, [variables.verificationId]: "" }));
-      invalidate();
+      invalidateCloseState();
     },
   });
 
@@ -373,7 +384,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   // relies on apply here too.
   const requestAml = useMutation({
     mutationFn: (partyId: number) => apiFetch("/aml/request", { method: "POST", body: JSON.stringify({ propertyId, partyId }) }),
-    onSuccess: invalidate,
+    onSuccess: invalidateCloseState,
   });
 
   const addParty = useMutation({
@@ -460,6 +471,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         transaction: TransactionBlock | null;
         fundsReconciliation: FundsReconciliationView | null;
         closureBlockers: string[] | null;
+        closureBlockerDetails: ClosureBlockerDetail[] | null;
       }>(`/transactions/by-property/${propertyId}`),
   });
   const invalidateTransaction = () => queryClient.invalidateQueries({ queryKey: ["transaction", propertyId] });
@@ -500,10 +512,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const transactionAction = useMutation({
     mutationFn: ({ transactionId, action, body }: { transactionId: number; action: string; body?: Record<string, unknown> }) =>
       apiFetch(`/transactions/${transactionId}/${action}`, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
-    onSuccess: () => {
-      invalidateTransaction();
-      invalidate();
-    },
+    onSuccess: invalidateCloseState,
   });
 
   // Stage A (#114) — Appraisals. Additive/independent of workflowStage; an
@@ -526,22 +535,20 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     queryFn: () => apiFetch<{ conditions: ConditionBlock[] }>(`/transactions/${transactionData!.transaction!.id}/conditions`),
     enabled: !!transactionData?.transaction,
   });
-  const invalidateConditions = () => queryClient.invalidateQueries({ queryKey: ["conditions", transactionData?.transaction?.id] });
-
   const addCondition = useMutation({
     mutationFn: (input: Record<string, unknown>) =>
       apiFetch(`/transactions/${transactionData!.transaction!.id}/conditions`, { method: "POST", body: JSON.stringify(input) }),
-    onSuccess: invalidateConditions,
+    onSuccess: invalidateCloseState,
   });
   const rescheduleCondition = useMutation({
     mutationFn: ({ conditionId, newDueDate }: { conditionId: number; newDueDate: string | null }) =>
       apiFetch(`/transactions/conditions/${conditionId}/reschedule`, { method: "POST", body: JSON.stringify({ newDueDate }) }),
-    onSuccess: invalidateConditions,
+    onSuccess: invalidateCloseState,
   });
   const resolveConditionMut = useMutation({
     mutationFn: ({ conditionId, status, notes }: { conditionId: number; status: string; notes?: string }) =>
       apiFetch(`/transactions/conditions/${conditionId}/resolve`, { method: "POST", body: JSON.stringify({ status, notes }) }),
-    onSuccess: invalidateConditions,
+    onSuccess: invalidateCloseState,
   });
 
   // #122 — agent-facing WAE task/attention-item visibility.
@@ -549,15 +556,13 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     queryKey: ["tasks", propertyId],
     queryFn: () => apiFetch<{ tasks: AutomationTaskBlock[]; attentionItems: AttentionItemBlock[] }>(`/tasks/by-property/${propertyId}`),
   });
-  const invalidateTasks = () => queryClient.invalidateQueries({ queryKey: ["tasks", propertyId] });
-
   const completeTask = useMutation({
     mutationFn: (taskId: string) => apiFetch(`/tasks/${taskId}/complete`, { method: "POST" }),
-    onSuccess: invalidateTasks,
+    onSuccess: invalidateCloseState,
   });
   const resolveAttentionItemMut = useMutation({
     mutationFn: (itemId: string) => apiFetch(`/tasks/attention-items/${itemId}/resolve`, { method: "POST" }),
-    onSuccess: invalidateTasks,
+    onSuccess: invalidateCloseState,
   });
 
   // #145 — property-level Exception & Risk Engine panel (§16-18). This
@@ -570,35 +575,33 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
     queryKey: ["property-exceptions", propertyId],
     queryFn: () => apiFetch<PropertyExceptionsResponse>(`/properties/${propertyId}/exceptions`),
   });
-  const invalidateExceptions = () => queryClient.invalidateQueries({ queryKey: ["property-exceptions", propertyId] });
-
   const acknowledgeExceptionMut = useMutation({
     mutationFn: (id: string) => apiFetch(`/exceptions/${id}/acknowledge`, { method: "POST" }),
-    onSuccess: invalidateExceptions,
+    onSuccess: invalidateCloseState,
   });
   const startRemediationMut = useMutation({
     mutationFn: (id: string) => apiFetch(`/exceptions/${id}/start-remediation`, { method: "POST" }),
-    onSuccess: invalidateExceptions,
+    onSuccess: invalidateCloseState,
   });
   const awaitingExternalMut = useMutation({
     mutationFn: ({ id, note }: { id: string; note: string }) =>
       apiFetch(`/exceptions/${id}/awaiting-external`, { method: "POST", body: JSON.stringify({ note }) }),
-    onSuccess: invalidateExceptions,
+    onSuccess: invalidateCloseState,
   });
   const resolveExceptionMut = useMutation({
     mutationFn: ({ id, note }: { id: string; note: string }) =>
       apiFetch(`/exceptions/${id}/resolve`, { method: "POST", body: JSON.stringify({ note }) }),
-    onSuccess: invalidateExceptions,
+    onSuccess: invalidateCloseState,
   });
   const dismissExceptionMut = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) =>
       apiFetch(`/exceptions/${id}/dismiss`, { method: "POST", body: JSON.stringify({ reason }) }),
-    onSuccess: invalidateExceptions,
+    onSuccess: invalidateCloseState,
   });
   const reassignExceptionMut = useMutation({
     mutationFn: ({ id, ownerType, reason }: { id: string; ownerType: string; reason: string }) =>
       apiFetch(`/exceptions/${id}/reassign`, { method: "POST", body: JSON.stringify({ ownerType, ownerUserId: null, reason }) }),
-    onSuccess: invalidateExceptions,
+    onSuccess: invalidateCloseState,
   });
 
   // Agent Engine 2.0 — Property Launch & Campaign Coordination. `launch`
@@ -847,7 +850,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           rendered once there's something to show — an empty engine result
           adds no visual weight to a property with nothing open. */}
       {exceptionsData && exceptionsData.exceptions.length > 0 && (
-        <section className="card">
+        <section className="card" id="workspace-exceptions">
           <h2>Exceptions</h2>
           <p className="muted">
             {exceptionsData.summary.openCount} open
@@ -871,7 +874,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           action slot can't always capture (WAE-originated, not
           workflow-stage-derived). */}
       {(activeTasks.length > 0 || openAttentionItems.length > 0) && (
-        <section className="card">
+        <section className="card" id="workspace-tasks">
           <h2>Tasks & Attention</h2>
           <TasksAttentionBlock
             tasks={activeTasks}
@@ -892,7 +895,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 
       {/* Sellers — the property-workspace example in the staging brief
           shows the seller list front and centre, not tucked away. */}
-      <section className="card">
+      <section className="card" id="workspace-sellers">
         <h2>Sellers</h2>
         {sellers.length === 0 ? (
           <p className="muted">No sellers captured yet.</p>
@@ -952,6 +955,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           </ul>
         )}
 
+        <div id="workspace-parties">
         {others.length > 0 && (
           <>
             <h3>Other parties</h3>
@@ -1015,6 +1019,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             </ul>
           </>
         )}
+        </div>
 
         {!showAddParty ? (
           <button className="btn btn-secondary" onClick={() => setShowAddParty(true)}>
@@ -1049,6 +1054,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             transaction={transaction}
             fundsReconciliation={transactionData?.fundsReconciliation ?? null}
             closureBlockers={transactionData?.closureBlockers ?? null}
+            closureBlockerDetails={transactionData?.closureBlockerDetails ?? null}
             viewerRole={user?.role}
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
             error={transactionAction.isError ? apiErrorMessage(transactionAction.error, "Couldn't update the transaction. Try again.") : null}
@@ -1255,7 +1261,9 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           Stage G, Section 28). Self-gates on Brokerage Administrator
           internally (this component's own header comment explains why) —
           see components/FinancialSummarySection.tsx. */}
-      <FinancialSummarySection propertyId={propertyId} />
+      <div id="workspace-financial">
+        <FinancialSummarySection propertyId={propertyId} />
+      </div>
 
       {/* Ready to List / Go Live fallback controls — normally reached via
           the primary action above; kept here too so nothing is lost if the
@@ -1748,6 +1756,7 @@ function TransactionBlockView({
   transaction,
   fundsReconciliation,
   closureBlockers,
+  closureBlockerDetails,
   viewerRole,
   onAction,
   error,
@@ -1767,6 +1776,7 @@ function TransactionBlockView({
   fundsReconciliation: FundsReconciliationView | null;
   /** R-F42 blockers from the transaction read. Null when the read omitted them. */
   closureBlockers: readonly string[] | null;
+  closureBlockerDetails: readonly ClosureBlockerDetail[] | null;
   viewerRole: string | null | undefined;
   onAction: (action: string, body?: Record<string, unknown>) => void;
   error: string | null;
@@ -1794,7 +1804,7 @@ function TransactionBlockView({
   // and is disabled until the contract is unconditional. settlementConditions
   // is the existing conditions GET; null means it has not loaded.
   const actions = transactionPanelActionVisibility(transaction, viewerRole, settlementConditions);
-  const closeBlockers = visibleClosureBlockers(transaction.status, closureBlockers);
+  const closeBlockers = visibleClosureBlockerRows(transaction.status, closureBlockers, closureBlockerDetails);
   const closeDisabled = closeTransactionDisabled(transaction.status, closureBlockers);
 
   return (
@@ -1841,7 +1851,7 @@ function TransactionBlockView({
         )}
       </div>
 
-      <div>
+      <div id="transaction-unconditional">
         Unconditional:{" "}
         {transaction.unconditionalAt
           ? `became unconditional ${transaction.unconditionalAt}`
@@ -1900,7 +1910,7 @@ function TransactionBlockView({
       )}
       {actions.completeSettlementReason && <p className="muted">{actions.completeSettlementReason}</p>}
 
-      <div>
+      <div id="transaction-commission">
         Commission:{" "}
         {transaction.commissionCalculatedAt
           ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
@@ -1912,7 +1922,7 @@ function TransactionBlockView({
         )}
       </div>
 
-      <div className="inline-form">
+      <div className="inline-form" id="transaction-funds">
         <span>Funds received: {formatCents(transaction.fundsReceivedCents)}</span>
         {actions.recordFundsReceived && (
           <>
@@ -1944,10 +1954,12 @@ function TransactionBlockView({
 
       {closeBlockers.length > 0 && (
         <div>
-          <p className="muted">{CLOSE_BLOCKED_REASON}</p>
+          <p className="muted">{closeBlockedReason(viewerRole)}</p>
           <ul className="item-list">
             {closeBlockers.map((blocker, index) => (
-              <li key={`${index}-${blocker}`}>{plainClosureBlocker(blocker)}</li>
+              <li key={`${index}-${blocker.message}`}>
+                {blocker.href ? <a href={blocker.href}>{blocker.plain}</a> : blocker.plain}
+              </li>
             ))}
           </ul>
         </div>
@@ -2011,7 +2023,7 @@ function ConditionsBlock({
   };
 
   return (
-    <div>
+    <div id="transaction-conditions">
       <h3 style={{ marginBottom: "0.4rem" }}>Contract conditions</h3>
       {conditions.length === 0 ? (
         <p className="muted">No conditions tracked.</p>

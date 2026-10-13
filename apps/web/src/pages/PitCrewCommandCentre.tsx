@@ -72,7 +72,7 @@ import {
   type PitCrewEscalationSeverity,
   type PitCrewHandBackReasonCategory,
 } from "../lib/pitCrew";
-import { categoryLabel, formatDueDate, isOverdue, severityLabel, severityPillClass } from "../lib/riskExceptions";
+import { BLOCKS_CLOSE_LABEL, categoryLabel, formatDueDate, isOverdue, severityLabel, severityPillClass, showBlocksClosePill } from "../lib/riskExceptions";
 
 function pcKey(sourceType: string, sourceRecordId: string): string {
   return `${sourceType}:${sourceRecordId}`;
@@ -621,6 +621,7 @@ function PcItemCard({
       <div className="pc-item-header">
         <Link href={item.deepLink} className="pc-item-title">
           <span className={severityPillClass(item.severity)}>{severityLabel(item.severity)}</span>
+          {showBlocksClosePill(item) && <span className="pill pill-warning">{BLOCKS_CLOSE_LABEL}</span>}
           <strong>{item.title}</strong>
         </Link>
         <span className={pcStatusPillClass(item.pcStatus)}>{pcStatusLabel(item.pcStatus)}</span>

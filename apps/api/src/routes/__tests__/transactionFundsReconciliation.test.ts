@@ -70,6 +70,7 @@ interface ReconciliationBody {
     varianceCents: number | null;
   } | null;
   closureBlockers: string[] | null;
+  closureBlockerDetails: unknown[] | null;
 }
 
 async function setRunAccess(brokerageId: number, active: boolean): Promise<void> {
@@ -99,8 +100,11 @@ function assertSibling(
   assert.equal(body.transaction.id, transactionId);
   assert.equal("fundsReconciliation" in body.transaction, false);
   assert.equal("closureBlockers" in body.transaction, false);
+  assert.equal("closureBlockerDetails" in body.transaction, false);
   assert.ok(Array.isArray(body.closureBlockers));
-  assert.deepEqual(Object.keys(body).sort(), ["closureBlockers", "fundsReconciliation", "transaction"]);
+  assert.ok(Array.isArray(body.closureBlockerDetails));
+  assert.deepEqual(body.closureBlockerDetails.map((detail) => (detail as { message: string }).message), body.closureBlockers);
+  assert.deepEqual(Object.keys(body).sort(), ["closureBlockerDetails", "closureBlockers", "fundsReconciliation", "transaction"]);
   assert.deepEqual(body.fundsReconciliation, {
     status: expected.status,
     expectedCents: expected.expectedCents,
@@ -185,7 +189,8 @@ test("a property with no transaction returns null for both fields", async () => 
   assert.equal(body.transaction, null);
   assert.equal(body.fundsReconciliation, null);
   assert.equal(body.closureBlockers, null);
-  assert.deepEqual(Object.keys(body).sort(), ["closureBlockers", "fundsReconciliation", "transaction"]);
+  assert.equal(body.closureBlockerDetails, null);
+  assert.deepEqual(Object.keys(body).sort(), ["closureBlockerDetails", "closureBlockers", "fundsReconciliation", "transaction"]);
 });
 
 test("another brokerage is still 404 on both reads", async () => {
