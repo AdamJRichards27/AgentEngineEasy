@@ -253,6 +253,13 @@
       "when": 1791244800000,
       "tag": "0035_platform_owner_access",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791843836237,
+      "tag": "0036_e9_tenant_brokerage_id",
+      "breakpoints": true
     }
   ]
 }

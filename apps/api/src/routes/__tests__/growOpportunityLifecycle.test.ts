@@ -489,7 +489,13 @@ test("an active appraisal blocks manual changes, and a terminal appraisal does n
 
   const [appraisal] = await db
     .insert(appraisals)
-    .values({ propertyId, partyId: ids.ada, opportunityId: id, status: "DRAFT" })
+    .values({
+      propertyId,
+      brokerageId: A.brokerageId,
+      partyId: ids.ada,
+      opportunityId: id,
+      status: "DRAFT",
+    })
     .returning({ id: appraisals.id });
   await db.update(growOpportunities).set({ convertedAppraisalId: appraisal!.id, stage: "AppraisalBooked" }).where(eq(growOpportunities.id, id));
 

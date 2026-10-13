@@ -180,8 +180,9 @@ export const outboundConsentReads = {
 async function resolveRecipientPartyId(message: OutboundConsentLoadInput): Promise<number | null> {
   if (message.partyId != null) return message.partyId;
   if (message.recipientParticipantId == null) return null;
-  // Participants have no brokerage_id. A row counts only when it sits on
-  // this message's thread and that thread belongs to this brokerage.
+  // Migration 0036 stores communication_participants.brokerage_id. A row
+  // counts only when it sits on this message's thread and that thread
+  // belongs to this brokerage. The direct column predicate is still open.
   // A miss throws CommunicationTenancyError, so the send is refused
   // before the legacy no-party consent path.
   const [participant] = await db
