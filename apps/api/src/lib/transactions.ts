@@ -872,6 +872,14 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
   return blockers;
 }
 
+/**
+ * Read-only copy of the blockers `closeTransaction` reports. It does not
+ * write, and it does not apply the Settled check or the force override.
+ */
+export async function listTransactionClosureBlockers(transaction: Transaction): Promise<string[]> {
+  return collectClosureBlockers(transaction);
+}
+
 function partyIds(value: unknown): number[] {
   return Array.isArray(value) ? (value as number[]) : [];
 }

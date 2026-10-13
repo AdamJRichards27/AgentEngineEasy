@@ -5,6 +5,7 @@ import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 import { transactionPanelActionVisibility } from "../lib/transactionPanelActions";
+import { CLOSE_BLOCKED_REASON, closeTransactionDisabled, plainClosureBlocker, visibleClosureBlockers } from "../lib/closureBlockers";
 import { fundsReconciliationLabel, type FundsReconciliationView } from "../lib/fundsReconciliation";
 import {
   type PropertyExceptionsResponse,
@@ -455,9 +456,11 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const { data: transactionData } = useQuery({
     queryKey: ["transaction", propertyId],
     queryFn: () =>
-      apiFetch<{ transaction: TransactionBlock | null; fundsReconciliation: FundsReconciliationView | null }>(
-        `/transactions/by-property/${propertyId}`,
-      ),
+      apiFetch<{
+        transaction: TransactionBlock | null;
+        fundsReconciliation: FundsReconciliationView | null;
+        closureBlockers: string[] | null;
+      }>(`/transactions/by-property/${propertyId}`),
   });
   const invalidateTransaction = () => queryClient.invalidateQueries({ queryKey: ["transaction", propertyId] });
 
@@ -1045,6 +1048,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <TransactionBlockView
             transaction={transaction}
             fundsReconciliation={transactionData?.fundsReconciliation ?? null}
+            closureBlockers={transactionData?.closureBlockers ?? null}
             viewerRole={user?.role}
             onAction={(action, body) => transactionAction.mutate({ transactionId: transaction.id, action, body })}
             error={transactionAction.isError ? apiErrorMessage(transactionAction.error, "Couldn't update the transaction. Try again.") : null}
@@ -1743,6 +1747,7 @@ function OffersBlock({
 function TransactionBlockView({
   transaction,
   fundsReconciliation,
+  closureBlockers,
   viewerRole,
   onAction,
   error,
@@ -1760,6 +1765,8 @@ function TransactionBlockView({
 }: {
   transaction: TransactionBlock;
   fundsReconciliation: FundsReconciliationView | null;
+  /** R-F42 blockers from the transaction read. Null when the read omitted them. */
+  closureBlockers: readonly string[] | null;
   viewerRole: string | null | undefined;
   onAction: (action: string, body?: Record<string, unknown>) => void;
   error: string | null;
@@ -1787,6 +1794,8 @@ function TransactionBlockView({
   // and is disabled until the contract is unconditional. settlementConditions
   // is the existing conditions GET; null means it has not loaded.
   const actions = transactionPanelActionVisibility(transaction, viewerRole, settlementConditions);
+  const closeBlockers = visibleClosureBlockers(transaction.status, closureBlockers);
+  const closeDisabled = closeTransactionDisabled(transaction.status, closureBlockers);
 
   return (
     <div className="stack">
@@ -1933,11 +1942,29 @@ function TransactionBlockView({
         )}
       </div>
 
+      {closeBlockers.length > 0 && (
+        <div>
+          <p className="muted">{CLOSE_BLOCKED_REASON}</p>
+          <ul className="item-list">
+            {closeBlockers.map((blocker, index) => (
+              <li key={`${index}-${blocker}`}>{plainClosureBlocker(blocker)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div>
         {transaction.status === "Closed" ? (
           `Closed ${transaction.closedAt}`
         ) : (
-          <button className="btn btn-primary btn-small" onClick={() => onAction("close")} disabled={transaction.status !== "Settled"}>
+          <button
+            className="btn btn-primary btn-small"
+            onClick={() => {
+              if (closeDisabled) return;
+              onAction("close");
+            }}
+            disabled={closeDisabled}
+          >
             Close Transaction
           </button>
         )}

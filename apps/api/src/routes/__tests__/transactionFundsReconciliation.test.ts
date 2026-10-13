@@ -69,6 +69,7 @@ interface ReconciliationBody {
     receivedCents: number;
     varianceCents: number | null;
   } | null;
+  closureBlockers: string[] | null;
 }
 
 async function setRunAccess(brokerageId: number, active: boolean): Promise<void> {
@@ -97,7 +98,9 @@ function assertSibling(
   assert.ok(body.transaction);
   assert.equal(body.transaction.id, transactionId);
   assert.equal("fundsReconciliation" in body.transaction, false);
-  assert.deepEqual(Object.keys(body).sort(), ["fundsReconciliation", "transaction"]);
+  assert.equal("closureBlockers" in body.transaction, false);
+  assert.ok(Array.isArray(body.closureBlockers));
+  assert.deepEqual(Object.keys(body).sort(), ["closureBlockers", "fundsReconciliation", "transaction"]);
   assert.deepEqual(body.fundsReconciliation, {
     status: expected.status,
     expectedCents: expected.expectedCents,
@@ -181,7 +184,8 @@ test("a property with no transaction returns null for both fields", async () => 
   const body = await bodyOf<ReconciliationBody>(res);
   assert.equal(body.transaction, null);
   assert.equal(body.fundsReconciliation, null);
-  assert.deepEqual(Object.keys(body).sort(), ["fundsReconciliation", "transaction"]);
+  assert.equal(body.closureBlockers, null);
+  assert.deepEqual(Object.keys(body).sort(), ["closureBlockers", "fundsReconciliation", "transaction"]);
 });
 
 test("another brokerage is still 404 on both reads", async () => {
@@ -204,10 +208,17 @@ test("missing run.access is still 403 and does not return the reconciliation", a
     for (const path of [`/transactions/${transactionId}`, `/transactions/by-property/${propertyId}`]) {
       const res = await getJson(path, A.agent.cookie);
       assert.equal(res.status, 403, path);
-      const body = await bodyOf<{ error?: string; entitlementKey?: string; fundsReconciliation?: unknown; transaction?: unknown }>(res);
+      const body = await bodyOf<{
+        error?: string;
+        entitlementKey?: string;
+        fundsReconciliation?: unknown;
+        closureBlockers?: unknown;
+        transaction?: unknown;
+      }>(res);
       assert.equal(body.error, "Not entitled");
       assert.equal(body.entitlementKey, "run.access");
       assert.equal(body.fundsReconciliation, undefined);
+      assert.equal(body.closureBlockers, undefined);
       assert.equal(body.transaction, undefined);
     }
   } finally {
@@ -218,9 +229,14 @@ test("missing run.access is still 403 and does not return the reconciliation", a
 test("POST responses stay { transaction } and do not add fundsReconciliation", async () => {
   const signed = await postJson(`/transactions/${transactionId}/contract-signed`, A.agent.cookie);
   assert.equal(signed.status, 200);
-  const signedBody = await bodyOf<{ transaction: { id: number; fundsReconciliation?: unknown }; fundsReconciliation?: unknown }>(signed);
+  const signedBody = await bodyOf<{
+    transaction: { id: number; fundsReconciliation?: unknown };
+    fundsReconciliation?: unknown;
+    closureBlockers?: unknown;
+  }>(signed);
   assert.deepEqual(Object.keys(signedBody).sort(), ["transaction"]);
   assert.equal(signedBody.fundsReconciliation, undefined);
+  assert.equal(signedBody.closureBlockers, undefined);
   assert.equal("fundsReconciliation" in signedBody.transaction, false);
   assert.equal(signedBody.transaction.id, transactionId);
 
@@ -231,8 +247,12 @@ test("POST responses stay { transaction } and do not add fundsReconciliation", a
 
   const funds = await postJson(`/transactions/${transactionId}/funds-received`, A.admin.cookie, { amountCents: 1 });
   assert.equal(funds.status, 200);
-  const fundsBody = await bodyOf<{ transaction: { fundsReceivedCents: number; fundsReconciliation?: unknown } }>(funds);
+  const fundsBody = await bodyOf<{
+    transaction: { fundsReceivedCents: number; fundsReconciliation?: unknown };
+    closureBlockers?: unknown;
+  }>(funds);
   assert.deepEqual(Object.keys(fundsBody).sort(), ["transaction"]);
+  assert.equal(fundsBody.closureBlockers, undefined);
   assert.equal("fundsReconciliation" in fundsBody.transaction, false);
   assert.equal(fundsBody.transaction.fundsReceivedCents, 1);
 

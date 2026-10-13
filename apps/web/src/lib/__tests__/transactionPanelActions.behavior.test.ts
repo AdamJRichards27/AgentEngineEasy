@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
+import { CLOSE_BLOCKED_REASON, plainClosureBlocker } from "../closureBlockers.ts";
 
 const CLOSED_NOTE = "This transaction is closed — no further changes can be recorded.";
 const CONDITIONAL_REASON = "Settlement can be completed once the contract is unconditional";
@@ -22,6 +23,7 @@ interface PanelCondition {
 
 interface PanelQueryOptions {
   conditions?: PanelCondition[] | "unloaded";
+  closureBlockers?: string[] | null;
   fundsReconciliation?: {
     status: string;
     expectedCents: number | null;
@@ -317,6 +319,7 @@ function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | nu
       data: {
         transaction: row,
         ...(options?.fundsReconciliation !== undefined ? { fundsReconciliation: options.fundsReconciliation } : {}),
+        ...(options?.closureBlockers !== undefined ? { closureBlockers: options.closureBlockers } : {}),
       },
     },
     [`["property-timeline",${PROPERTY_ID}]`]: { ...ready, data: { timeline: [] } },
@@ -885,6 +888,80 @@ test("settlement completion stays hidden, with no conditional reason, until a se
   const section = transactionSection(render());
   assertSettlement(section, "hidden");
   assert.equal(buttons(section, "Schedule Settlement").length, 1);
+});
+
+const CLOSE_BLOCKER_LINES = [
+  "AML/CTF verification is not complete for 1 seller party.",
+  "Commission has not been calculated.",
+  "Funds reconciliation is NOT_RECEIVED, not MATCHED.",
+  "An open financial dispute (FIN02) must be resolved before close.",
+  "Commission does not reconcile between the transaction record and the Financial Engine.",
+];
+
+function settledRow() {
+  return transaction({
+    status: "Settled",
+    contractDate: "2026-10-01T00:00:00.000Z",
+    settlementCompletedAt: "2027-06-02T00:00:00.000Z",
+  });
+}
+
+test("the Transaction panel lists each close blocker and disables Close before the click", () => {
+  const blocked = install(settledRow(), "Brokerage Administrator", { closureBlockers: CLOSE_BLOCKER_LINES });
+  const section = transactionSection(blocked.render());
+  const text = normalized(section);
+  assert.equal(text.split(CLOSE_BLOCKED_REASON).length - 1, 1);
+  for (const blocker of CLOSE_BLOCKER_LINES) {
+    const plain = plainClosureBlocker(blocker);
+    assert.equal(text.split(plain).length - 1, 1, plain);
+  }
+  assert.equal(text.includes("FIN02"), false);
+  assert.equal(text.includes("NOT_RECEIVED"), false);
+  assert.equal(buttons(section, "Close Transaction").length, 1);
+  assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
+  click(buttons(section, "Close Transaction")[0]);
+  assert.equal(postedActions().includes("close"), false);
+
+  const open = install(settledRow(), "Brokerage Administrator", { closureBlockers: [] });
+  const openSection = transactionSection(open.render());
+  assert.equal(normalized(openSection).includes(CLOSE_BLOCKED_REASON), false);
+  assert.equal(buttons(openSection, "Close Transaction")[0]?.props?.disabled, false);
+  click(buttons(openSection, "Close Transaction")[0]);
+  assert.deepEqual(postedActions(), ["close"]);
+});
+
+test("close blockers stay listed, and Close stays disabled, before the transaction is Settled", () => {
+  const { render } = install(
+    transaction({ status: "UnderContract", contractDate: "2026-10-01T00:00:00.000Z" }),
+    "Agent",
+    { closureBlockers: ["Commission has not been calculated.", "A blocker the panel has not seen before."] },
+  );
+  const section = transactionSection(render());
+  const text = normalized(section);
+  assert.match(text, /Commission has not been calculated/);
+  assert.match(text, /A blocker the panel has not seen before/);
+  assert.match(text, new RegExp(CLOSE_BLOCKED_REASON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
+  click(buttons(section, "Close Transaction")[0]);
+  assert.equal(postedActions().includes("close"), false);
+});
+
+test("a closed transaction does not list close blockers", () => {
+  const { render } = install(
+    transaction({
+      status: "Closed",
+      contractDate: "2026-10-01T00:00:00.000Z",
+      settlementCompletedAt: "2027-06-02T00:00:00.000Z",
+      closedAt: "2027-07-01T00:00:00.000Z",
+    }),
+    "Brokerage Administrator",
+    { closureBlockers: ["Commission has not been calculated."] },
+  );
+  const section = transactionSection(render());
+  assert.equal(buttons(section, "Close Transaction").length, 0);
+  assert.equal(normalized(section).includes("Commission has not been calculated."), false);
+  assert.equal(normalized(section).includes(CLOSE_BLOCKED_REASON), false);
+  assert.match(normalized(section), /Closed 2027-07-01/);
 });
 
 for (const role of ["Agent", "Pit Crew"] as const) {
