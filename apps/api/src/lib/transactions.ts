@@ -21,6 +21,7 @@ import {
 } from "@aee/db";
 import type { Transaction, Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
+import { recheckExceptionsForRecord } from "./exceptions/engine.js";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
 import { initiateAmlIfNeeded } from "./aml.js";
@@ -742,6 +743,23 @@ export async function recordLegalRepresentatives(input: {
   } catch (err) {
     logger.error("closure_auto_complete_failed", {
       eventType: "transaction_legal_representatives_updated",
+      transactionId: updated.id,
+      brokerageId: input.brokerageId,
+      error: err,
+    });
+  }
+
+  try {
+    await recheckExceptionsForRecord({
+      brokerageId: input.brokerageId,
+      propertyId: updated.propertyId,
+      transactionId: updated.id,
+      kind: "LEGAL_REPRESENTATIVE",
+      correlationId: currentCorrelationId(),
+    });
+  } catch (err) {
+    logger.error("exception_recheck_failed", {
+      kind: "LEGAL_REPRESENTATIVE",
       transactionId: updated.id,
       brokerageId: input.brokerageId,
       error: err,

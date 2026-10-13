@@ -5,17 +5,21 @@
 //   - event-driven: a canonical domain event fires -> every rule that
 //     declares it in triggerEventTypes re-scans the event's brokerage
 //     immediately (handleExceptionDomainEvent, registered by bootstrap.ts).
+//     Legal-representative changes, transaction and settlement milestones,
+//     campaign/marketing changes, and transaction closure go further: they
+//     recheck only the relevant rules for the affected record and apply the
+//     same auto-resolution reasons as the sweep (recheckExceptionsForRecord).
+//     Every other event still only opens or updates; it does not resolve.
 //   - time-driven: a periodic sweep (runScheduledScan, invoked by
 //     bootstrap.ts's scheduler) walks every brokerage in bounded pages and
-//     runs every rule's scanBrokerage — this is also what performs
-//     auto-resolution (see below) and is the only path that catches a
+//     runs every rule's scanBrokerage. This remains the fallback for a
 //     condition whose clearing produced no canonical event.
 //
-// Both paths funnel through the exact same per-brokerage evaluation
-// (scanBrokerageForExceptions) and the exact same persistence entry point
+// Both paths funnel through the same per-rule evaluation
+// (applyRuleEvaluation) and the same persistence entry point
 // (model.ts's createOrUpdateException) — one detection function per rule,
-// one write path, so the two triggers can never silently drift apart from
-// each other (registry.ts's own module comment makes the same point about
+// one write path, so the triggers cannot silently drift apart
+// (registry.ts's own module comment makes the same point about
 // scanBrokerage itself).
 //
 // Auto-resolution and the "never treat absence of evidence as proof of
@@ -40,14 +44,81 @@ import { db, riskExceptions, riskExceptionScanRuns, brokerages, transactions, pr
 import { registerHandler, runWithCorrelationId, logger, incrementCounter, type DomainEvent, type AgentEngineEasyEventType } from "@aee/events";
 import {
   RISK_RULES,
+  getRuleById,
   getRulesForEventType,
   detectScopeExit,
   effectiveScopeExitPolicy,
   type RiskRule,
   type ScopeObservation,
 } from "./registry.js";
-import { createOrUpdateException, autoResolveException, recordEvaluationFailure, currentCorrelationId } from "./model.js";
+import { createOrUpdateException, autoResolveException, recordEvaluationFailure, currentCorrelationId, RiskExceptionError } from "./model.js";
 import { OPEN_RISK_EXCEPTION_STATUSES, type AutoResolutionRecordEvidence, type RiskFinding } from "./types.js";
+
+// B08 stays on the scheduled sweep. PR B owns that rule; this recheck must
+// not start resolving it from campaign events.
+const B08_RULE_ID = "B08_LISTING_LIVE_MISSING_CAMPAIGN_INFO";
+
+const TRANSACTION_LIFECYCLE_EVENTS = new Set<AgentEngineEasyEventType>([
+  "OFFER_RECEIVED",
+  "OFFER_ACCEPTED",
+  "CONTRACT_PREPARATION_STARTED",
+  "CONTRACT_SIGNED",
+  "CONTRACT_EXCHANGED",
+  "FINANCE_APPROVED",
+  "TRANSACTION_UNCONDITIONAL",
+  "SETTLEMENT_SCHEDULED",
+  "SETTLEMENT_COMPLETED",
+  "COMMISSION_CALCULATED",
+  "FUNDS_RECEIVED",
+  "AGENT_PAID",
+]);
+
+const CAMPAIGN_MARKETING_EVENTS = new Set<AgentEngineEasyEventType>([
+  "LAUNCH_PLAN_CREATED",
+  "LAUNCH_TEMPLATE_APPLIED",
+  "LAUNCH_TARGET_DATE_CHANGED",
+  "LAUNCH_DUE_DATES_CALCULATED",
+  "LAUNCH_DEFAULT_RESPONSIBILITY_ASSIGNED",
+  "CAMPAIGN_ITEM_ADDED",
+  "CAMPAIGN_ITEM_STATUS_CHANGED",
+  "CAMPAIGN_ITEM_BLOCKED",
+  "CAMPAIGN_ITEM_COMPLETED",
+  "CAMPAIGN_ITEM_EVIDENCE_ATTACHED",
+  "VENDOR_SELECTED",
+  "VENDOR_COST_RECORDED",
+  "VENDOR_APPROVAL_REQUESTED",
+  "VENDOR_APPROVAL_DECIDED",
+  "LAUNCH_BUDGET_SET",
+  "LAUNCH_BUDGET_EXCEEDED",
+  "PORTAL_DESTINATION_ADDED",
+  "PORTAL_SUBMISSION_RECORDED",
+  "PORTAL_SUBMISSION_FAILED",
+  "MARKET_READY_EVALUATED",
+  "MARKET_READY_OVERRIDDEN",
+  "LAUNCH_PAUSED",
+  "LAUNCH_CANCELLED",
+  "MARKETING_INVOICE_RECORDED",
+  "MARKETING_PAYMENT_RECONCILED",
+]);
+
+const MARKETING_FINANCIAL_EVENTS = new Set<AgentEngineEasyEventType>(["MARKETING_INVOICE_RECORDED", "MARKETING_PAYMENT_RECONCILED"]);
+
+const TRANSACTION_LIFECYCLE_CATEGORIES = new Set(["CONTRACT_CONDITIONS", "OFFERS", "SETTLEMENT_CLOSURE", "AML_CTF"]);
+
+export type ImmediateRecheckKind = "LEGAL_REPRESENTATIVE" | "TRANSACTION_LIFECYCLE" | "CAMPAIGN_MARKETING" | "TRANSACTION_CLOSURE";
+
+export function immediateRecheckKindForEvent(eventType: AgentEngineEasyEventType): ImmediateRecheckKind | null {
+  if (eventType === "TRANSACTION_CLOSED") return "TRANSACTION_CLOSURE";
+  if (TRANSACTION_LIFECYCLE_EVENTS.has(eventType)) return "TRANSACTION_LIFECYCLE";
+  if (CAMPAIGN_MARKETING_EVENTS.has(eventType)) return "CAMPAIGN_MARKETING";
+  return null;
+}
+
+interface AffectedRecord {
+  brokerageId: number;
+  propertyId: number;
+  transactionId: number | null;
+}
 
 // ---------------------------------------------------------------------
 // Event-driven dispatch.
@@ -65,6 +136,21 @@ import { OPEN_RISK_EXCEPTION_STATUSES, type AutoResolutionRecordEvidence, type R
  */
 export async function handleExceptionDomainEvent(event: DomainEvent): Promise<void> {
   if (!event.brokerageId) return; // no canonical event today omits it, but nothing enforces that at the type level — fail closed rather than guess
+  const kind = immediateRecheckKindForEvent(event.eventType);
+  if (kind) {
+    if (event.propertyId == null) return; // a record recheck with no property would have to guess which row changed
+    await recheckExceptionsForRecord({
+      brokerageId: event.brokerageId,
+      propertyId: event.propertyId,
+      transactionId: event.transactionId,
+      kind,
+      eventType: event.eventType,
+      correlationId: event.correlationId,
+      causationId: event.id,
+    });
+    return;
+  }
+
   const rules = getRulesForEventType(event.eventType);
   if (rules.length === 0) return;
   incrementCounter("exceptions_scan_total", { trigger: "EVENT_DRIVEN" });
@@ -85,21 +171,147 @@ export async function handleExceptionDomainEvent(event: DomainEvent): Promise<vo
   }
 }
 
+export interface RecheckExceptionsForRecordInput {
+  brokerageId: number;
+  propertyId: number;
+  transactionId?: number | null;
+  kind: ImmediateRecheckKind;
+  eventType?: AgentEngineEasyEventType | null;
+  correlationId?: string;
+  causationId?: string | null;
+}
+
 /**
- * Persists every current finding for one rule/brokerage. Deliberately does
- * NOT auto-resolve on the event-driven path — a single rule's fresh finding
- * set is only complete evidence for THAT rule, and auto-resolution here
- * would be correct in principle but is intentionally left to the scheduled
- * sweep (scanBrokerageForExceptions) so that every rule's auto-resolution
- * check happens against a full pass, in one place, with one consistent
- * "did this rule itself just run cleanly" guard — avoiding two independent
- * auto-resolution code paths that could diverge.
+ * Re-evaluates the rules that can change for one record and applies the
+ * sweep's resolution reasons. The scheduled scan stays the fallback: this
+ * does not take the scan lock and does not write a scan-run row.
+ *
+ * Brokerage isolation: the property and, when given, the transaction must
+ * belong to brokerageId. A mismatch throws NOT_FOUND and writes nothing.
+ * Financial visibility is unchanged — this path does not read exceptions
+ * back out to a caller, and rows keep requiresFinancialEntitlement.
+ */
+export async function recheckExceptionsForRecord(input: RecheckExceptionsForRecordInput): Promise<void> {
+  const record: AffectedRecord = {
+    brokerageId: input.brokerageId,
+    propertyId: input.propertyId,
+    transactionId: input.transactionId ?? null,
+  };
+  await assertRecordInBrokerage(record);
+
+  const openRows = await db
+    .select()
+    .from(riskExceptions)
+    .where(and(eq(riskExceptions.brokerageId, record.brokerageId), eq(riskExceptions.propertyId, record.propertyId), inArray(riskExceptions.status, [...OPEN_RISK_EXCEPTION_STATUSES])));
+  const openForRecord = openRows.filter((exception) => exceptionMatchesRecord(exception, record));
+  const rules = rulesForImmediateRecheck(input.kind, input.eventType ?? null, openForRecord.map((exception) => exception.ruleId));
+  if (rules.length === 0) return;
+
+  incrementCounter("exceptions_scan_total", { trigger: "EVENT_DRIVEN" });
+  const now = new Date();
+  const correlationId = input.correlationId ?? currentCorrelationId();
+  for (const rule of rules) {
+    const openForRule = openForRecord.filter((exception) => exception.ruleId === rule.ruleId);
+    try {
+      const findings = (await rule.scanBrokerage(record.brokerageId, now)).filter((finding) => findingMatchesRecord(finding, record));
+      await applyRuleEvaluation({
+        rule,
+        brokerageId: record.brokerageId,
+        correlationId,
+        causationId: input.causationId ?? null,
+        findings,
+        openForRule,
+        resolve: true,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("exceptions_rule_threw_event_driven", { ruleId: rule.ruleId, brokerageId: record.brokerageId, error: message });
+      for (const exception of openForRule) {
+        await recordEvaluationFailure(exception.id, record.brokerageId, message).catch((e) =>
+          logger.error("exceptions_record_evaluation_failure_failed", { exceptionId: exception.id, brokerageId: record.brokerageId, error: e instanceof Error ? e.message : String(e) }),
+        );
+      }
+    }
+  }
+}
+
+function rulesForImmediateRecheck(kind: ImmediateRecheckKind, eventType: AgentEngineEasyEventType | null, openRuleIds: string[]): RiskRule[] {
+  const selected = new Map<string, RiskRule>();
+  const add = (rule: RiskRule | undefined) => {
+    if (!rule || rule.ruleId === B08_RULE_ID) return;
+    selected.set(rule.ruleId, rule);
+  };
+
+  if (kind === "LEGAL_REPRESENTATIVE") {
+    add(getRuleById("D15_CONTRACT_MISSING_LEGAL_REPRESENTATIVES"));
+    return [...selected.values()];
+  }
+
+  if (kind === "TRANSACTION_LIFECYCLE") {
+    for (const rule of RISK_RULES) {
+      if (TRANSACTION_LIFECYCLE_CATEGORIES.has(rule.category)) add(rule);
+    }
+    return [...selected.values()];
+  }
+
+  if (kind === "CAMPAIGN_MARKETING") {
+    for (const rule of RISK_RULES) {
+      if (rule.category === "LAUNCH_CAMPAIGN") add(rule);
+    }
+    if (eventType && MARKETING_FINANCIAL_EVENTS.has(eventType)) {
+      for (const rule of getRulesForEventType(eventType)) add(rule);
+    }
+    return [...selected.values()];
+  }
+
+  for (const rule of getRulesForEventType("TRANSACTION_CLOSED")) add(rule);
+  for (const ruleId of openRuleIds) add(getRuleById(ruleId));
+  return [...selected.values()];
+}
+
+async function assertRecordInBrokerage(record: AffectedRecord): Promise<void> {
+  const [property] = await db.select({ id: properties.id, brokerageId: properties.brokerageId }).from(properties).where(eq(properties.id, record.propertyId));
+  if (!property || property.brokerageId !== record.brokerageId) {
+    throw new RiskExceptionError("NOT_FOUND", "Property not found");
+  }
+  if (record.transactionId == null) return;
+  const [transaction] = await db.select({ id: transactions.id, propertyId: transactions.propertyId }).from(transactions).where(eq(transactions.id, record.transactionId));
+  if (!transaction || transaction.propertyId !== record.propertyId) {
+    throw new RiskExceptionError("NOT_FOUND", "Transaction not found");
+  }
+}
+
+function findingMatchesRecord(finding: RiskFinding, record: AffectedRecord): boolean {
+  if (finding.propertyId !== record.propertyId) return false;
+  if (record.transactionId == null || finding.transactionId == null) return true;
+  return finding.transactionId === record.transactionId;
+}
+
+function exceptionMatchesRecord(exception: RiskException, record: AffectedRecord): boolean {
+  if (exception.brokerageId !== record.brokerageId || exception.propertyId !== record.propertyId) return false;
+  if (record.transactionId == null || exception.transactionId == null) return true;
+  return exception.transactionId === record.transactionId;
+}
+
+/**
+ * Persists findings for events that are not an immediate record recheck.
+ * Those events still do not auto-resolve; the scheduled sweep is the
+ * fallback. Immediate rechecks use the same applyRuleEvaluation with
+ * resolve enabled, so the reason recorded cannot drift from the sweep.
  */
 async function evaluateRuleForBrokerage(rule: RiskRule, brokerageId: number, now: Date, correlationId: string, causationId: string | null): Promise<void> {
   const findings = await rule.scanBrokerage(brokerageId, now);
-  for (const finding of findings) {
-    await createOrUpdateException(finding, brokerageId, finding.propertyId, finding.transactionId, correlationId, causationId);
-  }
+  // Events outside the immediate-recheck set still do not auto-resolve.
+  // The scheduled sweep is the evidence for those clears.
+  await applyRuleEvaluation({
+    rule,
+    brokerageId,
+    correlationId,
+    causationId,
+    findings,
+    openForRule: [],
+    resolve: false,
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -357,80 +569,104 @@ async function scanBrokerageForExceptionsInner(brokerageId: number, summary: Sca
       continue; // absence of evidence from a failed evaluation is never treated as proof the condition cleared
     }
 
-    const matchedDedupKeys = new Set(findings.map((f) => f.dedupKey));
-    for (const finding of findings) {
-      const result = await createOrUpdateException(finding, brokerageId, finding.propertyId, finding.transactionId, correlationId, null);
-      if (result.outcome === "CREATED" || result.outcome === "NEW_OCCURRENCE" || result.outcome === "REOPENED") {
-        summary.exceptionsCreated += 1;
-      } else if (result.outcome === "UPDATED_STILL_OPEN") {
-        summary.exceptionsUpdated += 1;
-      }
-    }
+    await applyRuleEvaluation({
+      rule,
+      brokerageId,
+      correlationId,
+      causationId: null,
+      findings,
+      openForRule,
+      resolve: true,
+      summary,
+    });
+  }
+}
 
-    const unresolved = openForRule.filter((exception) => !matchedDedupKeys.has(exception.dedupKey));
-    const scopeByExceptionId = await loadScopeObservations(unresolved);
-    for (const exception of unresolved) {
-      const scope = scopeByExceptionId.get(exception.id);
-      if (!scope) continue;
-      // B08 v2 is the only rule with this hook. It returns
-      // NO_LONGER_APPLICABLE when the property has left the marketing
-      // window with campaign fields still empty, and null when the absence
-      // is a real clear (fields filled), including a clear that happens to
-      // coincide with leaving that window. A throw is not evidence the
-      // condition cleared — that one exception stays open. Other rules use
-      // the scope-exit policy below.
-      if (rule.resolutionEvidenceWhenAbsent) {
-        try {
-          const override = await rule.resolutionEvidenceWhenAbsent(exception);
-          if (override) {
-            await autoResolveException(exception.id, brokerageId, override);
-            summary.exceptionsAutoResolved += 1;
-            continue;
-          }
-        } catch (err) {
-          summary.errors += 1;
-          const message = err instanceof Error ? err.message : String(err);
-          logger.error("exceptions_absent_finding_explanation_failed", { ruleId: rule.ruleId, exceptionId: exception.id, brokerageId, error: message });
-          await recordEvaluationFailure(exception.id, brokerageId, message).catch((e) =>
-            logger.error("exceptions_record_evaluation_failure_failed", {
-              exceptionId: exception.id,
-              brokerageId,
-              error: e instanceof Error ? e.message : String(e),
-            }),
-          );
+async function applyRuleEvaluation(input: {
+  rule: RiskRule;
+  brokerageId: number;
+  correlationId: string;
+  causationId: string | null;
+  findings: RiskFinding[];
+  openForRule: RiskException[];
+  resolve: boolean;
+  summary?: ScanSummary;
+}): Promise<void> {
+  const matchedDedupKeys = new Set(input.findings.map((finding) => finding.dedupKey));
+  for (const finding of input.findings) {
+    const result = await createOrUpdateException(finding, input.brokerageId, finding.propertyId, finding.transactionId, input.correlationId, input.causationId);
+    if (!input.summary) continue;
+    if (result.outcome === "CREATED" || result.outcome === "NEW_OCCURRENCE" || result.outcome === "REOPENED") {
+      input.summary.exceptionsCreated += 1;
+    } else if (result.outcome === "UPDATED_STILL_OPEN") {
+      input.summary.exceptionsUpdated += 1;
+    }
+  }
+  if (!input.resolve) return;
+
+  const unresolved = input.openForRule.filter((exception) => !matchedDedupKeys.has(exception.dedupKey));
+  const scopeByExceptionId = await loadScopeObservations(unresolved);
+  for (const exception of unresolved) {
+    const scope = scopeByExceptionId.get(exception.id);
+    if (!scope) continue;
+    // B08 v2 is the only rule with this hook. It returns
+    // NO_LONGER_APPLICABLE when the property has left the marketing
+    // window with campaign fields still empty, and null when the absence
+    // is a real clear (fields filled), including a clear that happens to
+    // coincide with leaving that window. A throw is not evidence the
+    // condition cleared — that one exception stays open. Other rules use
+    // the scope-exit policy below. The event recheck does not select B08.
+    if (input.rule.resolutionEvidenceWhenAbsent) {
+      try {
+        const override = await input.rule.resolutionEvidenceWhenAbsent(exception);
+        if (override) {
+          await autoResolveException(exception.id, input.brokerageId, override);
+          if (input.summary) input.summary.exceptionsAutoResolved += 1;
           continue;
         }
-        await autoResolveException(exception.id, brokerageId, {
-          kind: "CONDITION_SATISFIED",
-          ruleCode: rule.ruleId,
-          ruleVersion: rule.version,
-          record: resolutionRecord(exception, scope, "IN_SCOPE"),
-        });
-        summary.exceptionsAutoResolved += 1;
+      } catch (err) {
+        if (input.summary) input.summary.errors += 1;
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error("exceptions_absent_finding_explanation_failed", { ruleId: input.rule.ruleId, exceptionId: exception.id, brokerageId: input.brokerageId, error: message });
+        await recordEvaluationFailure(exception.id, input.brokerageId, message).catch((e) =>
+          logger.error("exceptions_record_evaluation_failure_failed", {
+            exceptionId: exception.id,
+            brokerageId: input.brokerageId,
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        );
         continue;
       }
-      const scopeExit = detectScopeExit(rule, scope);
-      if (scopeExit) {
-        // Leaving the scan window is not the condition clearing. Pinned
-        // rules stay open, owned, and attributed to the same brokerage.
-        if (effectiveScopeExitPolicy(rule) === "KEEP_OPEN") continue;
-        await autoResolveException(exception.id, brokerageId, {
-          kind: "NO_LONGER_APPLICABLE",
-          ruleCode: rule.ruleId,
-          ruleVersion: rule.version,
-          record: resolutionRecord(exception, scope, scopeExit),
-        });
-        summary.exceptionsAutoResolved += 1;
-        continue;
-      }
-      await autoResolveException(exception.id, brokerageId, {
+      await autoResolveException(exception.id, input.brokerageId, {
         kind: "CONDITION_SATISFIED",
-        ruleCode: rule.ruleId,
-        ruleVersion: rule.version,
+        ruleCode: input.rule.ruleId,
+        ruleVersion: input.rule.version,
         record: resolutionRecord(exception, scope, "IN_SCOPE"),
       });
-      summary.exceptionsAutoResolved += 1;
+      if (input.summary) input.summary.exceptionsAutoResolved += 1;
+      continue;
     }
+    const scopeExit = detectScopeExit(input.rule, scope);
+    if (scopeExit) {
+      // Leaving the scan window is not the condition clearing. Pinned
+      // rules stay open, owned, and attributed to the same brokerage.
+      if (effectiveScopeExitPolicy(input.rule) === "KEEP_OPEN") continue;
+      await autoResolveException(exception.id, input.brokerageId, {
+        kind: "NO_LONGER_APPLICABLE",
+        ruleCode: input.rule.ruleId,
+        ruleVersion: input.rule.version,
+        record: resolutionRecord(exception, scope, scopeExit),
+      });
+      if (input.summary) input.summary.exceptionsAutoResolved += 1;
+      continue;
+    }
+    await autoResolveException(exception.id, input.brokerageId, {
+      kind: "CONDITION_SATISFIED",
+      ruleCode: input.rule.ruleId,
+      ruleVersion: input.rule.version,
+      record: resolutionRecord(exception, scope, "IN_SCOPE"),
+    });
+    if (input.summary) input.summary.exceptionsAutoResolved += 1;
   }
 }
 
@@ -493,6 +729,9 @@ export function registerExceptionEventHandlers(): void {
   for (const rule of RISK_RULES) {
     for (const eventType of rule.triggerEventTypes) seen.add(eventType);
   }
+  for (const eventType of TRANSACTION_LIFECYCLE_EVENTS) seen.add(eventType);
+  for (const eventType of CAMPAIGN_MARKETING_EVENTS) seen.add(eventType);
+  seen.add("TRANSACTION_CLOSED");
   for (const eventType of seen) {
     if (registeredEventTypes.has(eventType)) continue;
     registerHandler(eventType, handleExceptionDomainEvent);
