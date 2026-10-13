@@ -30,6 +30,7 @@ import {
   type IngestDocumentVersionInput,
 } from "./documentStorage.js";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
+import { documentOnProperty, propertyDocumentInBrokerage } from "./documentTenancy.js";
 
 const esignProvider = createESignProvider();
 
@@ -180,7 +181,10 @@ export async function populateDocumentPackage(packageId: number, brokerageId: nu
       : null,
   };
 
-  const packageDocuments = await db.select().from(documents).where(eq(documents.packageId, packageId));
+  const packageDocuments = await db
+    .select()
+    .from(documents)
+    .where(and(eq(documents.packageId, packageId), propertyDocumentInBrokerage(brokerageId)));
   const skipped: PopulateResult["skipped"] = [];
 
   for (const doc of packageDocuments) {
@@ -238,10 +242,13 @@ export async function populateDocumentPackage(packageId: number, brokerageId: nu
         },
         updatedAt: new Date(),
       })
-      .where(eq(documents.id, doc.id));
+      .where(and(eq(documents.id, doc.id), propertyDocumentInBrokerage(brokerageId)));
   }
 
-  const refreshedDocuments = await db.select().from(documents).where(eq(documents.packageId, packageId));
+  const refreshedDocuments = await db
+    .select()
+    .from(documents)
+    .where(and(eq(documents.packageId, packageId), propertyDocumentInBrokerage(brokerageId)));
   const allGenerated = refreshedDocuments.length > 0 && refreshedDocuments.every((d) => d.status === "Generated" || d.status === "Signed");
 
   const [updatedPackage] = await db
@@ -296,7 +303,13 @@ export async function sendPackageForSignature(input: {
   const packageDocuments = await db
     .select()
     .from(documents)
-    .where(and(eq(documents.packageId, input.packageId), eq(documents.status, "Generated")));
+    .where(
+      and(
+        eq(documents.packageId, input.packageId),
+        eq(documents.status, "Generated"),
+        propertyDocumentInBrokerage(input.brokerageId),
+      ),
+    );
 
   const links = await db
     .select()
@@ -377,27 +390,35 @@ export interface DocumentContentResult {
 }
 
 /**
- * Loads a document's stored content, scoped to the caller's brokerage —
- * previously a raw, unscoped `db.select` + object-storage read directly in
- * the route (the most severe of the confirmed cross-tenant IDOR findings:
- * real signed contract/agreement content, readable by any authenticated
- * user from any brokerage). The id+brokerageId join below is the same
- * single query used to fetch the document at all, so a cross-tenant
- * documentId comes back `null` — identical to the pre-existing "not
- * generated yet" case (`!doc.objectStorageKey`) the route already handled.
- * Only a genuine object-storage read failure (key present, tenant already
- * verified) still throws.
+ * Loads a document's stored content, scoped to the caller's brokerage.
+ * Property-backed rows (brokerage_id NULL) match through the parent
+ * property or transaction inside the storage predicate. `"absent"` is a
+ * foreign or missing id. `null` is an owned document that has no stored
+ * bytes yet. Only a genuine object-storage read failure still throws.
  */
-export async function getDocumentContent(documentId: number, brokerageId: number): Promise<DocumentContentResult | null> {
+export async function getDocumentContent(
+  documentId: number,
+  brokerageId: number,
+): Promise<DocumentContentResult | "absent" | null> {
   const stored = await getStoredDocumentContent(documentId, brokerageId);
-  if (!stored) return null;
-  return {
-    content: stored.bytes,
-    contentType: stored.contentType,
-    displayFilename: stored.displayFilename,
-    versionId: stored.version?.id ?? null,
-    propertyId: stored.document.propertyId,
-  };
+  if (stored) {
+    return {
+      content: stored.bytes,
+      contentType: stored.contentType,
+      displayFilename: stored.displayFilename,
+      versionId: stored.version?.id ?? null,
+      propertyId: stored.document.propertyId,
+    };
+  }
+  // Own row with no bytes stays distinguishable for the owner ("no stored
+  // content"). A foreign id and a missing id both miss this predicate, so
+  // the route can return one bare 404 with no filename, size, or existence cue.
+  const [owned] = await db
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), propertyDocumentInBrokerage(brokerageId)))
+    .limit(1);
+  return owned ? null : "absent";
 }
 
 export interface PackageByPropertyResult {
@@ -422,7 +443,12 @@ export async function getPackageByProperty(propertyId: number, brokerageId: numb
     .where(and(eq(documentPackages.propertyId, propertyId), eq(properties.brokerageId, brokerageId)));
   if (!row) return { documentPackage: null, documents: [], signatureRequest: null };
 
-  const packageDocuments = await db.select().from(documents).where(eq(documents.packageId, row.documentPackage.id));
+  const packageDocuments = await db
+    .select()
+    .from(documents)
+    .where(
+      and(eq(documents.packageId, row.documentPackage.id), propertyDocumentInBrokerage(brokerageId)),
+    );
   const [signatureRequest] = await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, row.documentPackage.id));
   return { documentPackage: row.documentPackage, documents: packageDocuments, signatureRequest: signatureRequest ?? null };
 }
@@ -527,7 +553,10 @@ export async function processEsignWebhook(
       .from(documentPackages)
       .where(eq(documentPackages.id, signatureRequest.packageId));
     const packageDocuments = docPackage
-      ? await tx.select().from(documents).where(eq(documents.packageId, docPackage.id))
+      ? await tx
+          .select()
+          .from(documents)
+          .where(and(eq(documents.packageId, docPackage.id), documentOnProperty(docPackage.propertyId)))
       : [];
 
     let completedDocumentKey = signatureRequest.completedDocumentKey;
@@ -721,6 +750,7 @@ export async function processEsignWebhook(
         .where(
           and(
             eq(documents.packageId, updated.packageId),
+            documentOnProperty(docPackage.propertyId),
             inArray(
               documents.id,
               packageDocuments.map((d) => d.id),

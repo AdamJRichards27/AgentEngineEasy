@@ -171,6 +171,7 @@ test("documents: every :id route rejects a malformed id (there was no guard at a
     { method: "POST", path: "/api/documents/{id}/versions", body: {} },
     { method: "POST", path: "/api/documents/{id}/signed-download", body: {} },
     { method: "POST", path: "/api/documents/{id}/quarantine", body: {} },
+    { method: "DELETE", path: "/api/documents/{id}" },
     { method: "GET", path: "/api/documents/packages/by-property/{id}" },
   ]);
 });

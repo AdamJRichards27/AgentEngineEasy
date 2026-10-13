@@ -6,7 +6,6 @@ import {
   auditLogs,
   documentObjectVersions,
   documents,
-  properties,
   type Document,
   type DocumentObjectVersion,
 } from "@aee/db";
@@ -19,6 +18,11 @@ import {
   type ReadinessResult as ProviderReadinessResult,
 } from "@aee/integration-object-storage";
 import { logAudit } from "./audit.js";
+import {
+  documentInBrokerage,
+  documentMatchesVersionBrokerage,
+  propertyDocumentInBrokerage,
+} from "./documentTenancy.js";
 
 const DEFAULT_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_ESIGN_MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
@@ -520,37 +524,40 @@ function validateDocumentBytes(
   };
 }
 
+function ingestionAccess(input: { source: string; metadata?: Record<string, unknown> }): LogicalDocumentOwner | undefined {
+  return input.source === "telephony" ? logicalDocumentOwner(input.metadata) ?? undefined : undefined;
+}
+
+/**
+ * R-F44. The brokerage predicate is in this WHERE, not a check after the row
+ * is loaded. Property-backed documents (brokerage_id NULL) match through the
+ * parent property or transaction. Logical documents match brokerage_id only
+ * when the caller also names that logical owner — a propertyless row is not
+ * visible on the generic property path.
+ */
+function documentAccessWhere(documentId: number, brokerageId: number, access?: LogicalDocumentOwner) {
+  if (access) {
+    return and(
+      eq(documents.id, documentId),
+      eq(documents.brokerageId, brokerageId),
+      eq(documents.brokerageId, access.brokerageId),
+      eq(documents.logicalOwnerType, access.kind),
+      eq(documents.logicalOwnerId, access.ownerId),
+      isNull(documents.propertyId),
+    );
+  }
+  return and(eq(documents.id, documentId), propertyDocumentInBrokerage(brokerageId));
+}
+
 async function loadDocumentInBrokerage(
   documentId: number,
   brokerageId: number,
   access?: LogicalDocumentOwner,
 ): Promise<Document | null> {
-  if (access) {
-    const [row] = await db
-      .select({ document: documents })
-      .from(documents)
-      .where(
-        and(
-          eq(documents.id, documentId),
-          eq(documents.brokerageId, brokerageId),
-          eq(documents.brokerageId, access.brokerageId),
-          eq(documents.logicalOwnerType, access.kind),
-          eq(documents.logicalOwnerId, access.ownerId),
-          isNull(documents.propertyId),
-        ),
-      );
-    return row?.document ?? null;
-  }
   const [row] = await db
     .select({ document: documents })
     .from(documents)
-    .innerJoin(properties, eq(documents.propertyId, properties.id))
-    .where(
-      and(
-        eq(documents.id, documentId),
-        eq(properties.brokerageId, brokerageId),
-      ),
-    );
+    .where(documentAccessWhere(documentId, brokerageId, access));
   return row?.document ?? null;
 }
 
@@ -570,9 +577,7 @@ async function validateDocumentVersionIngestionInput(
   const document = await loadDocumentInBrokerage(
     input.documentId,
     input.brokerageId,
-    input.source === "telephony"
-      ? logicalDocumentOwner(input.metadata) ?? undefined
-      : undefined,
+    ingestionAccess(input),
   );
   if (!document) {
     throw new DocumentStorageError(
@@ -654,6 +659,11 @@ async function versionForKey(
         eq(documentObjectVersions.documentId, documentId),
         eq(documentObjectVersions.brokerageId, brokerageId),
         eq(documentObjectVersions.storageObjectKey, storageObjectKey),
+        sql`exists (
+          select 1 from ${documents}
+          where ${documents.id} = ${documentObjectVersions.documentId}
+          and ${documentInBrokerage(brokerageId)}
+        )`,
       ),
     )
     .limit(1);
@@ -730,7 +740,12 @@ async function finalizePendingVersion(input: {
     const [currentDocument] = await tx
       .select()
       .from(documents)
-      .where(eq(documents.id, currentVersion.documentId));
+      .where(
+        and(
+          eq(documents.id, currentVersion.documentId),
+          documentInBrokerage(currentVersion.brokerageId),
+        ),
+      );
     if (!currentDocument) {
       throw new DocumentStorageError(
         "DOCUMENT_UNAVAILABLE",
@@ -777,7 +792,12 @@ async function finalizePendingVersion(input: {
         },
         updatedAt: new Date(),
       })
-      .where(eq(documents.id, currentVersion.documentId));
+      .where(
+        and(
+          eq(documents.id, currentVersion.documentId),
+          documentInBrokerage(currentVersion.brokerageId),
+        ),
+      );
     await tx.insert(auditLogs).values({
       brokerageId: activeVersion.brokerageId,
       userId: input.actorUserId ?? null,
@@ -808,7 +828,7 @@ export async function ingestDocumentVersion(
     const [lockedDocument] = await tx
       .select()
       .from(documents)
-      .where(eq(documents.id, input.documentId))
+      .where(documentAccessWhere(input.documentId, input.brokerageId, ingestionAccess(input)))
       .limit(1);
     if (!lockedDocument) {
       throw new DocumentStorageError(
@@ -1046,11 +1066,10 @@ export async function ingestDocumentVersionBatch(
     const [row] = await tx
       .select({ document: documents })
       .from(documents)
-      .innerJoin(properties, eq(documents.propertyId, properties.id))
       .where(
         and(
           eq(documents.id, input.documentId),
-          eq(properties.brokerageId, input.brokerageId),
+          propertyDocumentInBrokerage(input.brokerageId),
         ),
       );
     if (!row?.document) {
@@ -1324,7 +1343,12 @@ export async function ingestDocumentVersionBatch(
     const [currentDocument] = await tx
       .select()
       .from(documents)
-      .where(eq(documents.id, activeVersion.documentId));
+      .where(
+        and(
+          eq(documents.id, activeVersion.documentId),
+          documentInBrokerage(activeVersion.brokerageId),
+        ),
+      );
     if (!currentDocument) {
       throw new DocumentStorageError(
         "DOCUMENT_UNAVAILABLE",
@@ -1345,7 +1369,12 @@ export async function ingestDocumentVersionBatch(
         },
         updatedAt: new Date(),
       })
-      .where(eq(documents.id, activeVersion.documentId));
+      .where(
+        and(
+          eq(documents.id, activeVersion.documentId),
+          documentInBrokerage(activeVersion.brokerageId),
+        ),
+      );
     await tx.insert(auditLogs).values({
       brokerageId: pending.input.brokerageId,
       userId: pending.input.actorUserId ?? null,
@@ -1695,7 +1724,7 @@ export async function redeemDocumentSignedDownload(
     .select({ document: documents, version: documentObjectVersions })
     .from(documentObjectVersions)
     .innerJoin(documents, eq(documentObjectVersions.documentId, documents.id))
-    .where(eq(documentObjectVersions.id, versionId));
+    .where(and(eq(documentObjectVersions.id, versionId), documentMatchesVersionBrokerage()));
   if (
     !row ||
     row.version.objectStatus !== "Active" ||

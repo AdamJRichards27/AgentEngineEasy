@@ -28,6 +28,7 @@ import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 import { getPropertyTimeline } from "../lib/timeline.js";
 import { getAppraisalByProperty } from "../lib/appraisals.js";
 import { goLiveProperty } from "../lib/goLive.js";
+import { propertyDocumentInBrokerage } from "../lib/documentTenancy.js";
 
 export const propertiesRouter = Router();
 
@@ -406,7 +407,10 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     .from(documentPackages)
     .where(and(eq(documentPackages.propertyId, id), eq(documentPackages.purpose, "ReadyToList")));
   const packageDocuments = docPackage
-    ? await db.select().from(documents).where(eq(documents.packageId, docPackage.id))
+    ? await db
+        .select()
+        .from(documents)
+        .where(and(eq(documents.packageId, docPackage.id), propertyDocumentInBrokerage(user.brokerageId)))
     : [];
   // Phase 5: signature status + whether commission terms have been
   // captured yet, so the workspace can offer "generate"/"send"/"resolve

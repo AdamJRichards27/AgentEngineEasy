@@ -1,4 +1,5 @@
 import { eq, and, inArray } from "drizzle-orm";
+import { documentOnProperty } from "./documentTenancy.js";
 import {
   db,
   properties,
@@ -72,7 +73,12 @@ export async function refreshReadyToListSteps(propertyId: number): Promise<void>
   // Phase 5: AgencyAgreement tracks its own document within the package
   // (generated → sent → signed) separately from RequiredDocuments, which
   // tracks the package as a whole — see the comment on each StepUpdate below.
-  const packageDocuments = docPackage ? await db.select().from(documents).where(eq(documents.packageId, docPackage.id)) : [];
+  const packageDocuments = docPackage
+    ? await db
+        .select()
+        .from(documents)
+        .where(and(eq(documents.packageId, docPackage.id), documentOnProperty(propertyId)))
+    : [];
   const agencyAgreementDoc = packageDocuments.find((d) => d.documentType === "AgencyAgreement");
 
   const steps = await db.select().from(workflowSteps).where(eq(workflowSteps.workflowId, workflow.id));

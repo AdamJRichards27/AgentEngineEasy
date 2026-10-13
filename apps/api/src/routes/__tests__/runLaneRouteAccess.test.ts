@@ -329,12 +329,13 @@ test("without run.access every newly gated route is denied and writes nothing; w
       { method: "POST", path: `/documents/${missingId}/versions`, label: "POST /documents/:documentId/versions" },
       { method: "POST", path: `/documents/${missingId}/signed-download`, label: "POST /documents/:documentId/signed-download" },
       { method: "POST", path: `/documents/${missingId}/quarantine`, label: "POST /documents/:documentId/quarantine" },
+      { method: "DELETE", path: `/documents/${missingId}`, label: "DELETE /documents/:documentId" },
       { method: "GET", path: `/documents/packages/by-property/${propertyId}`, label: "GET /documents/packages/by-property/:propertyId" },
       { method: "POST", path: `/properties/${propertyId}/ready-to-list`, label: "POST /properties/:id/ready-to-list" },
       { method: "POST", path: `/properties/${propertyId}/go-live`, label: "POST /properties/:id/go-live" },
     ];
 
-    assert.equal(denied.length, 39, "every newly gated route is in the denial list");
+    assert.equal(denied.length, 40, "every newly gated route is in the denial list");
     for (const entry of denied) {
       await assertNotEntitled(await call(entry.method, entry.path, cookie, entry.body), entry.label);
     }

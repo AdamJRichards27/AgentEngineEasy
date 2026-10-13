@@ -2,7 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import multer from "multer";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, properties } from "@aee/db";
+import { db, documents, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
@@ -15,6 +15,7 @@ import {
   quarantineDocument,
   redeemDocumentSignedDownload,
 } from "../lib/documentStorage.js";
+import { propertyDocumentInBrokerage } from "../lib/documentTenancy.js";
 import {
   upsertAgencyAgreementTerms,
   getAgencyAgreementTerms,
@@ -324,6 +325,10 @@ documentsRouter.get("/:documentId/content", requireAuth, requiresRunAccess, asyn
   const user = req.authedUser!;
   try {
     const result = await getDocumentContent(documentId, user.brokerageId);
+    if (result === "absent") {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
     if (!result) {
       res.status(404).json({ error: "No stored content for this document" });
       return;
@@ -405,12 +410,11 @@ documentsRouter.post(
       });
     } catch (error) {
       if (error instanceof DocumentStorageError) {
-        const status =
-          error.code === "DOCUMENT_NOT_FOUND"
-            ? 404
-            : error.code === "DOCUMENT_TOO_LARGE"
-              ? 413
-              : 400;
+        if (error.code === "DOCUMENT_NOT_FOUND") {
+          res.status(404).json({ error: "Not found" });
+          return;
+        }
+        const status = error.code === "DOCUMENT_TOO_LARGE" ? 413 : 400;
         res.status(status).json({ error: error.message, code: error.code });
         return;
       }
@@ -442,7 +446,7 @@ documentsRouter.post("/:documentId/signed-download", requireAuth, requiresRunAcc
     });
   } catch (error) {
     if (error instanceof DocumentStorageError) {
-      res.status(404).json({ error: "Stored document could not be found" });
+      res.status(404).json({ error: "Not found" });
       return;
     }
     throw error;
@@ -470,11 +474,29 @@ documentsRouter.post("/:documentId/quarantine", requireAuth, requiresRunAccess, 
     res.json({ version });
   } catch (error) {
     if (error instanceof DocumentStorageError) {
-      res.status(404).json({ error: "Stored document could not be found" });
+      res.status(404).json({ error: "Not found" });
       return;
     }
     throw error;
   }
+});
+
+// There is no document-delete product. This route exists so a document id
+// is answered here, with run.access, instead of falling through to a later
+// admin-only router. The brokerage predicate runs in SQL (parent property
+// or transaction, or brokerage_id when the row is property-backed and the
+// column is set). Owned, foreign, and missing ids all return the same 404
+// and the row is left in place.
+documentsRouter.delete("/:documentId", requireAuth, requiresRunAccess, async (req, res) => {
+  const documentId = readIdParam(res, req.params.documentId, "document");
+  if (documentId === null) return;
+  const user = req.authedUser!;
+  await db
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), propertyDocumentInBrokerage(user.brokerageId)))
+    .limit(1);
+  res.status(404).json({ error: "Not found" });
 });
 
 documentsRouter.get("/packages/by-property/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
