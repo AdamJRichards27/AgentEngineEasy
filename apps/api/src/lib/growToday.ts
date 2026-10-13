@@ -1220,6 +1220,7 @@ async function loadGrowTodayFirstRun(
       .innerJoin(properties, eq(appraisals.propertyId, properties.id))
       .where(
         and(
+          eq(appraisals.brokerageId, brokerageId),
           eq(properties.brokerageId, brokerageId),
           visibleRequiredPropertySql(appraisals.propertyId, restrictToPropertyIds),
         ),
@@ -1388,6 +1389,7 @@ export async function getGrowTodaySummary(
       .innerJoin(parties, and(eq(appraisals.partyId, parties.id), eq(parties.brokerageId, brokerageId)))
       .where(
         and(
+          eq(appraisals.brokerageId, brokerageId),
           eq(properties.brokerageId, brokerageId),
           eq(appraisals.status, "FOLLOW_UP"),
           visibleRequiredPropertySql(appraisals.propertyId, restrictToPropertyIds),

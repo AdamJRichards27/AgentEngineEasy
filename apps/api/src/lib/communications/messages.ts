@@ -244,8 +244,8 @@ export async function listRecentMessagesForBrokerage(
 export async function listParticipants(threadId: number, brokerageId: number): Promise<CommunicationParticipant[]> {
   await getThread(threadId, brokerageId); // tenant check
   // Migration 0036 stores communication_participants.brokerage_id. This read
-  // still uses the thread join as the tenant predicate, not only the
-  // getThread check above. The direct column predicate is still open (E-9 partial).
+  // filters that column and still uses the thread join as a tenant predicate,
+  // not only the getThread check above.
   const rows = await db
     .select({ participant: communicationParticipants })
     .from(communicationParticipants)
@@ -253,7 +253,7 @@ export async function listParticipants(threadId: number, brokerageId: number): P
       communicationThreads,
       and(eq(communicationThreads.id, communicationParticipants.threadId), eq(communicationThreads.brokerageId, brokerageId)),
     )
-    .where(eq(communicationParticipants.threadId, threadId));
+    .where(and(eq(communicationParticipants.threadId, threadId), eq(communicationParticipants.brokerageId, brokerageId)));
   return rows.map((row) => row.participant);
 }
 
@@ -334,7 +334,13 @@ export async function createDraftMessage(input: CreateDraftMessageInput): Promis
         communicationThreads,
         and(eq(communicationThreads.id, communicationParticipants.threadId), eq(communicationThreads.brokerageId, input.brokerageId)),
       )
-      .where(and(eq(communicationParticipants.id, input.recipientParticipantId), eq(communicationParticipants.threadId, input.threadId)));
+      .where(
+        and(
+          eq(communicationParticipants.id, input.recipientParticipantId),
+          eq(communicationParticipants.threadId, input.threadId),
+          eq(communicationParticipants.brokerageId, input.brokerageId),
+        ),
+      );
     if (!row) throw new CommunicationTenancyError();
     const participant = row.participant;
     recipientDisplayName = participant.displayName;

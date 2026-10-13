@@ -251,11 +251,9 @@ test("I-1/I-3: the Contact 360 read path never issues an unbounded `properties` 
     }
   }
 
-  // `appraisals` is the deliberate exception and is NOT asserted above: it carries no
-  // brokerage_id column at all (packages/db/src/schema/appraisal.ts) and is tenant-scoped
-  // transitively through propertyId -> properties.brokerageId, so there is no brokerage column
-  // to push into its predicate. Its lookup stays keyed on partyId and still needs an
-  // appraisals(party_id) index, which belongs to Wave 1's single batched migration.
+  // `appraisals` is not in the I-3 list above. Those five tables are indexed
+  // brokerage_id-first. The appraisal read keeps the property join and also
+  // filters appraisals.brokerage_id. Its party lookup still uses appraisals_party_idx.
 
   // Behaviour contract: the label the unbounded scan used to produce is still produced.
   const labelled = result.timeline.filter((e) => e.propertyId === aPropertyId);

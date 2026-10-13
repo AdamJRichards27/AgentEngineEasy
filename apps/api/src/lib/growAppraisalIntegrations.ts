@@ -24,7 +24,7 @@ import {
   noteGrowMarketCompetitionIsolationRejection,
   noteGrowPartyIsolationRejection,
 } from "./grow/isolationRejection.js";
-import { appraisalPropertyInBrokerage } from "./appraisals.js";
+import { appraisalInBrokerage } from "./appraisals.js";
 import { enforceAppraisalPricingRule } from "./appraisalFinaliseGuard.js";
 import {
   appraisalChildInBrokerage,
@@ -368,7 +368,7 @@ export async function generateAppraisalPresentation(
   const [updatedPresentation] = await db
     .update(appraisals)
     .set({ presentationDocumentId: documentId, updatedAt: new Date() })
-    .where(and(eq(appraisals.id, appraisal.id), appraisalPropertyInBrokerage(input.brokerageId)))
+    .where(and(eq(appraisals.id, appraisal.id), appraisalInBrokerage(input.brokerageId)))
     .returning({ id: appraisals.id });
   if (!updatedPresentation) {
     await noteGrowAppraisalIsolationRejection(appraisal.id, input.brokerageId);

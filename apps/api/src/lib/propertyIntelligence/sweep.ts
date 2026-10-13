@@ -721,7 +721,7 @@ async function sweepBrokerage(brokerageId: number, sweepRunId: string, summary: 
  * change no source timestamp can express: time itself passing, which is what
  * moves a tenure or overdue band.
  */
-async function probeBrokerage(brokerageId: number, now: Date): Promise<{
+export async function probeBrokerage(brokerageId: number, now: Date): Promise<{
   marks: Record<string, string | null>;
   hasDueExpiry: boolean;
 }> {
@@ -738,7 +738,7 @@ async function probeBrokerage(brokerageId: number, now: Date): Promise<{
       (select max(updated_at) from grow_relationships where brokerage_id = ${brokerageId})::text as grow_relationships,
       (select max(updated_at) from grow_opportunities where brokerage_id = ${brokerageId})::text as grow_opportunities,
       (select max(recorded_at) from grow_activities where brokerage_id = ${brokerageId})::text as grow_activities,
-      (select max(a.updated_at) from appraisals a join properties p on p.id = a.property_id where p.brokerage_id = ${brokerageId})::text as appraisals,
+      (select max(a.updated_at) from appraisals a join properties p on p.id = a.property_id where p.brokerage_id = ${brokerageId} and a.brokerage_id = ${brokerageId})::text as appraisals,
       (select max(retrieved_at) from property_provider_observations where brokerage_id = ${brokerageId})::text as property_provider_observations,
       (select count(*) from grow_opportunity_signals
         where brokerage_id = ${brokerageId} and status = 'Active' and expires_at is not null and expires_at < ${nowIso})::int as due_expiry

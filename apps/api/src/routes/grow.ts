@@ -112,8 +112,9 @@ function opportunityLifecycleAuditValue(row: {
 }
 
 /** A linked appraisal that is not WON, LOST, DEFERRED or ARCHIVED. The join
- * is tenant-scoped through the property, because appraisals have no brokerage id. */
-async function opportunityHasActiveAppraisal(
+ * keeps the property brokerage predicate, and appraisals.brokerage_id is
+ * filtered directly as well. */
+export async function opportunityHasActiveAppraisal(
   brokerageId: number,
   opportunityId: number,
   convertedAppraisalId: number | null,
@@ -126,7 +127,7 @@ async function opportunityHasActiveAppraisal(
     .select({ status: appraisals.status })
     .from(appraisals)
     .innerJoin(properties, eq(appraisals.propertyId, properties.id))
-    .where(and(eq(properties.brokerageId, brokerageId), link));
+    .where(and(eq(appraisals.brokerageId, brokerageId), eq(properties.brokerageId, brokerageId), link));
   return rows.some((row) => !appraisalLifecycleClosed(row.status));
 }
 
