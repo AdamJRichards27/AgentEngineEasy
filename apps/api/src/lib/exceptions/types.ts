@@ -99,21 +99,40 @@ export type ResolutionEvidence =
   | { kind: "WORKFLOW_SUCCEEDED"; automationExecutionId: string }
   | { kind: "APPROVAL_DECIDED"; automationActionId: string; decision: string }
   | { kind: "MANUAL"; note: string; recordedByUserId: number }
-  // The engine's own scheduled/event-driven re-evaluation: this rule's
-  // scanBrokerage ran successfully this pass and no longer found this
-  // dedup key among its current findings. This is only ever recorded when
-  // the evaluation itself SUCCEEDED (engine.ts never auto-resolves on a
-  // failed evaluation — absence of evidence from a failure is never proof
-  // of completion, Build Instructions §3), so a clean pass finding nothing
-  // is itself authoritative: the rule re-derived the current truth from
-  // live domain state and it no longer matches.
+  // Historical automatic resolutions written before scope-exit evidence.
+  // Kept so existing jsonb rows still type-check. The scheduled scan no
+  // longer writes this kind: a new automatic resolution is either
+  // CONDITION_SATISFIED or NO_LONGER_APPLICABLE.
   | { kind: "RULE_CONDITION_CLEARED"; ruleId: string; ruleVersion: number }
-  // The scheduled sweep confirmed this exception's rule no longer applies
-  // because the source record left the rule's stage window, while the
-  // underlying fields are still empty. This is not proof the condition was
-  // fixed. Stored in the existing resolution_evidence jsonb column — no
-  // new column and no migration. B08 v2 is the only rule that records it.
-  | { kind: "NO_LONGER_APPLICABLE"; ruleId: string; ruleVersion: number; workflowStage: string };
+  // Automatic resolution. `kind` is the specific reason. `ruleCode` is the
+  // registry ruleId and `ruleVersion` is the version that decided. `record`
+  // is the row-level evidence (brokerage, property, transaction, stage,
+  // source) stored in the existing resolution_evidence jsonb column.
+  // NO_LONGER_APPLICABLE covers a scope exit, including B08 leaving the
+  // active marketing stages with campaign fields still empty.
+  | {
+      kind: "CONDITION_SATISFIED" | "NO_LONGER_APPLICABLE";
+      ruleCode: string;
+      ruleVersion: number;
+      record: AutoResolutionRecordEvidence;
+    };
+
+// Why an automatic resolution was recorded, and the record it was judged
+// against. IN_SCOPE means the transaction was still open and the property
+// was still inside the rule's stage window, so absence from a successful
+// scan is the condition itself clearing. TRANSACTION_CLOSED and STAGE_EXIT
+// are scope exits: they are never stored as CONDITION_SATISFIED.
+export interface AutoResolutionRecordEvidence {
+  brokerageId: number;
+  propertyId: number;
+  transactionId: number | null;
+  closedAt: string | null;
+  workflowStage: string | null;
+  scope: "IN_SCOPE" | "TRANSACTION_CLOSED" | "STAGE_EXIT";
+  sourceRecordType: string;
+  sourceRecordId: string;
+  dedupKey: string;
+}
 
 // What one rule evaluation pass found for one source record. The engine
 // (engine.ts) turns this into a risk_exceptions row via model.ts's

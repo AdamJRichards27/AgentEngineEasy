@@ -263,9 +263,11 @@ test("Proof D: dead-lettered integration command creates a risk exception at AT_
   assert.equal(resolved!.id, opened!.id);
   assert.equal(resolved!.status, "RESOLVED");
   assert.equal(resolved!.resolutionMethod, "AUTO");
-  const evidence = resolved!.resolutionEvidence as Record<string, unknown> | null;
-  assert.equal(evidence?.kind, "RULE_CONDITION_CLEARED");
-  assert.equal(evidence?.ruleId, H01_RULE_ID);
+  const evidence = resolved!.resolutionEvidence as { kind?: string; ruleCode?: string; ruleVersion?: number; record?: { scope?: string } } | null;
+  assert.equal(evidence?.kind, "CONDITION_SATISFIED");
+  assert.equal(evidence?.ruleCode, H01_RULE_ID);
+  assert.equal(evidence?.ruleVersion, 1);
+  assert.equal(evidence?.record?.scope, "IN_SCOPE");
 });
 
 test("no duplicate risk exception across repeated scan passes for the same still-dead-lettered command", async () => {

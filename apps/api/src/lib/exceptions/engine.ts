@@ -23,19 +23,31 @@
 // result for one brokerage is the complete, authoritative set of every
 // CURRENTLY true occurrence of that rule's condition. So after a
 // SUCCESSFUL scan, any exception this rule has open for that brokerage
-// whose dedup key is NOT in that result set has had its condition verified
-// cleared — that is genuine authoritative evidence, not an inference from
-// silence. The critical safeguard is the word SUCCESSFUL: if scanBrokerage
+// whose dedup key is NOT in that result set is a candidate for automatic
+// resolution. That is only CONDITION_SATISFIED when the record is still
+// inside the rule's scan window. If the transaction has closed or the
+// property has left the rule's stage range, the absence is a scope exit:
+// FINANCIAL, AML/CTF, compliance, security, and F32–F34 stay open with
+// their owner and brokerage; every other rule is resolved as
+// NO_LONGER_APPLICABLE and is never recorded as the condition having
+// cleared. The critical safeguard is the word SUCCESSFUL: if scanBrokerage
 // throws, this file records an EVALUATION_FAILED transition against every
 // exception that rule currently has open and does NOT touch their status —
 // a failed evaluation proves nothing about whether the condition cleared.
 
 import { and, desc, eq, gt, inArray } from "drizzle-orm";
-import { db, riskExceptions, riskExceptionScanRuns, brokerages, type RiskException } from "@aee/db";
+import { db, riskExceptions, riskExceptionScanRuns, brokerages, transactions, properties, type RiskException } from "@aee/db";
 import { registerHandler, runWithCorrelationId, logger, incrementCounter, type DomainEvent, type AgentEngineEasyEventType } from "@aee/events";
-import { RISK_RULES, getRulesForEventType, type RiskRule } from "./registry.js";
+import {
+  RISK_RULES,
+  getRulesForEventType,
+  detectScopeExit,
+  effectiveScopeExitPolicy,
+  type RiskRule,
+  type ScopeObservation,
+} from "./registry.js";
 import { createOrUpdateException, autoResolveException, recordEvaluationFailure, currentCorrelationId } from "./model.js";
-import { OPEN_RISK_EXCEPTION_STATUSES, type ResolutionEvidence, type RiskFinding } from "./types.js";
+import { OPEN_RISK_EXCEPTION_STATUSES, type AutoResolutionRecordEvidence, type RiskFinding } from "./types.js";
 
 // ---------------------------------------------------------------------
 // Event-driven dispatch.
@@ -355,22 +367,26 @@ async function scanBrokerageForExceptionsInner(brokerageId: number, summary: Sca
       }
     }
 
-    for (const exception of openForRule) {
-      if (matchedDedupKeys.has(exception.dedupKey)) continue; // still true this pass — createOrUpdateException already refreshed it above
-      let evidence: ResolutionEvidence = {
-        kind: "RULE_CONDITION_CLEARED",
-        ruleId: rule.ruleId,
-        ruleVersion: rule.version,
-      };
-      // B08 v2 is the only rule that sets resolutionEvidenceWhenAbsent.
-      // It substitutes NO_LONGER_APPLICABLE when the property has left the
-      // marketing window with campaign fields still empty. Every other
-      // rule keeps RULE_CONDITION_CLEARED. A throw is not evidence the
-      // condition cleared — that one exception stays open.
+    const unresolved = openForRule.filter((exception) => !matchedDedupKeys.has(exception.dedupKey));
+    const scopeByExceptionId = await loadScopeObservations(unresolved);
+    for (const exception of unresolved) {
+      const scope = scopeByExceptionId.get(exception.id);
+      if (!scope) continue;
+      // B08 v2 is the only rule with this hook. It returns
+      // NO_LONGER_APPLICABLE when the property has left the marketing
+      // window with campaign fields still empty, and null when the absence
+      // is a real clear (fields filled), including a clear that happens to
+      // coincide with leaving that window. A throw is not evidence the
+      // condition cleared — that one exception stays open. Other rules use
+      // the scope-exit policy below.
       if (rule.resolutionEvidenceWhenAbsent) {
         try {
           const override = await rule.resolutionEvidenceWhenAbsent(exception);
-          if (override) evidence = override;
+          if (override) {
+            await autoResolveException(exception.id, brokerageId, override);
+            summary.exceptionsAutoResolved += 1;
+            continue;
+          }
         } catch (err) {
           summary.errors += 1;
           const message = err instanceof Error ? err.message : String(err);
@@ -384,11 +400,85 @@ async function scanBrokerageForExceptionsInner(brokerageId: number, summary: Sca
           );
           continue;
         }
+        await autoResolveException(exception.id, brokerageId, {
+          kind: "CONDITION_SATISFIED",
+          ruleCode: rule.ruleId,
+          ruleVersion: rule.version,
+          record: resolutionRecord(exception, scope, "IN_SCOPE"),
+        });
+        summary.exceptionsAutoResolved += 1;
+        continue;
       }
-      await autoResolveException(exception.id, brokerageId, evidence);
+      const scopeExit = detectScopeExit(rule, scope);
+      if (scopeExit) {
+        // Leaving the scan window is not the condition clearing. Pinned
+        // rules stay open, owned, and attributed to the same brokerage.
+        if (effectiveScopeExitPolicy(rule) === "KEEP_OPEN") continue;
+        await autoResolveException(exception.id, brokerageId, {
+          kind: "NO_LONGER_APPLICABLE",
+          ruleCode: rule.ruleId,
+          ruleVersion: rule.version,
+          record: resolutionRecord(exception, scope, scopeExit),
+        });
+        summary.exceptionsAutoResolved += 1;
+        continue;
+      }
+      await autoResolveException(exception.id, brokerageId, {
+        kind: "CONDITION_SATISFIED",
+        ruleCode: rule.ruleId,
+        ruleVersion: rule.version,
+        record: resolutionRecord(exception, scope, "IN_SCOPE"),
+      });
       summary.exceptionsAutoResolved += 1;
     }
   }
+}
+
+async function loadScopeObservations(exceptions: RiskException[]): Promise<Map<string, ScopeObservation>> {
+  const out = new Map<string, ScopeObservation>();
+  if (exceptions.length === 0) return out;
+
+  const transactionIds = [...new Set(exceptions.map((exception) => exception.transactionId).filter((id): id is number => id != null))];
+  const propertyIds = [...new Set(exceptions.map((exception) => exception.propertyId))];
+  const transactionRows = transactionIds.length
+    ? await db.select({ id: transactions.id, closedAt: transactions.closedAt }).from(transactions).where(inArray(transactions.id, transactionIds))
+    : [];
+  const propertyRows = propertyIds.length
+    ? await db.select({ id: properties.id, workflowStage: properties.workflowStage }).from(properties).where(inArray(properties.id, propertyIds))
+    : [];
+  const transactionById = new Map(transactionRows.map((row) => [row.id, row]));
+  const propertyById = new Map(propertyRows.map((row) => [row.id, row]));
+
+  for (const exception of exceptions) {
+    const transaction = exception.transactionId == null ? undefined : transactionById.get(exception.transactionId);
+    const property = propertyById.get(exception.propertyId);
+    out.set(exception.id, {
+      transactionId: exception.transactionId,
+      transactionPresent: exception.transactionId == null || transaction != null,
+      closedAt: transaction?.closedAt ?? null,
+      propertyPresent: property != null,
+      workflowStage: property?.workflowStage ?? null,
+    });
+  }
+  return out;
+}
+
+function resolutionRecord(
+  exception: RiskException,
+  scope: ScopeObservation,
+  scopeKind: AutoResolutionRecordEvidence["scope"],
+): AutoResolutionRecordEvidence {
+  return {
+    brokerageId: exception.brokerageId,
+    propertyId: exception.propertyId,
+    transactionId: exception.transactionId,
+    closedAt: scope.closedAt ? scope.closedAt.toISOString() : null,
+    workflowStage: scope.workflowStage,
+    scope: scopeKind,
+    sourceRecordType: exception.sourceRecordType,
+    sourceRecordId: exception.sourceRecordId,
+    dedupKey: exception.dedupKey,
+  };
 }
 
 // ---------------------------------------------------------------------

@@ -165,7 +165,20 @@ test("AT_RISK scenario: a live listing missing required address fields is detect
   const resolved = await fetchException(detected!.id);
   assert.equal(resolved.status, "RESOLVED");
   assert.equal(resolved.resolutionMethod, "AUTO");
-  assert.deepEqual(resolved.resolutionEvidence, { kind: "RULE_CONDITION_CLEARED", ruleId: "B07_LISTING_LIVE_MISSING_REQUIRED_INFO", ruleVersion: 1 });
+  assert.equal(resolved.resolvedByUserId, null);
+  const evidence = resolved.resolutionEvidence as {
+    kind: string;
+    ruleCode: string;
+    ruleVersion: number;
+    record: { scope: string; propertyId: number; brokerageId: number; workflowStage: string | null };
+  };
+  assert.equal(evidence.kind, "CONDITION_SATISFIED");
+  assert.equal(evidence.ruleCode, "B07_LISTING_LIVE_MISSING_REQUIRED_INFO");
+  assert.equal(evidence.ruleVersion, 1);
+  assert.equal(evidence.record.scope, "IN_SCOPE");
+  assert.equal(evidence.record.propertyId, propertyId);
+  assert.equal(evidence.record.brokerageId, A.brokerageId);
+  assert.equal(evidence.record.workflowStage, "Listed");
 });
 
 // ---------------------------------------------------------------------

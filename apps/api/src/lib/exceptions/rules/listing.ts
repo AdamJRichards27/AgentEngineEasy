@@ -19,12 +19,13 @@ import { and, eq, inArray, ne } from "drizzle-orm";
 import { db, properties, documentPackages, signatureRequests, type RiskException } from "@aee/db";
 import type { RiskRule } from "../registry.js";
 import type { ResolutionEvidence, RiskFinding } from "../types.js";
-import { dedupKey, escalatesAtFor, resolveDefaultOwner, severityForDeadline } from "./shared.js";
+import { LISTED_ONWARD_STAGES, dedupKey, escalatesAtFor, resolveDefaultOwner, severityForDeadline } from "./shared.js";
 
 const B6_LISTING_PREP_OVERDUE: RiskRule = {
   ruleId: "B06_SIGNED_AGREEMENT_LISTING_PREP_OVERDUE",
   version: 1,
   category: "LISTING",
+  stageRange: ["Ready to List"],
   name: "Listing preparation overdue after agreement signed",
   description: "The Ready to List signature package completed but the property has not progressed to Listed within the expected preparation window.",
   triggerEventTypes: ["AGENCY_AGREEMENT_SIGNED"],
@@ -84,6 +85,7 @@ const B7_LISTING_LIVE_INFO_MISSING: RiskRule = {
   ruleId: "B07_LISTING_LIVE_MISSING_REQUIRED_INFO",
   version: 1,
   category: "LISTING",
+  stageRange: LISTED_ONWARD_STAGES,
   name: "Listing is live with required information missing",
   description:
     "The property has progressed to Listed (or beyond) but suburb, state, or postcode is still missing. Scoped to Listed-onward; appraisalAgreement.ts's A04 covers the same completeness check at the earlier Ready to List stage, so the two never describe the same lifecycle moment.",
@@ -158,24 +160,24 @@ function missingCampaignFields(property: CampaignFieldSource): string[] {
 }
 
 /**
- * Evidence for an open B08 row that this pass did not re-detect.
- * Null keeps the engine default (RULE_CONDITION_CLEARED): the property is
- * still inside the marketing window, or the campaign fields are now
- * present, so the absence is a real clear. NO_LONGER_APPLICABLE is only
- * for a property outside that window whose pre-marketing fields are still
- * empty — the exception is preserved, not dismissed, and not described as
- * fixed.
+ * Decision for an open B08 row that this pass did not re-detect.
+ * Null means the engine records CONDITION_SATISFIED: the property is still
+ * inside the marketing window, or the campaign fields are now present, so
+ * the absence is a real clear — including when the fields were filled in
+ * the same pass that left the window. NO_LONGER_APPLICABLE is only for a
+ * property outside that window whose pre-marketing fields are still empty.
+ * The engine stores that decision with the row-level record evidence.
  */
 export function b08EvidenceWhenAbsent(
   property: CampaignFieldSource & { workflowStage: string },
   ruleVersion: number = B08_RULE_VERSION,
-): ResolutionEvidence | null {
+): { kind: "NO_LONGER_APPLICABLE"; ruleCode: string; ruleVersion: number; workflowStage: string } | null {
   const inMarketingWindow = (B08_ACTIVE_MARKETING_STAGES as readonly string[]).includes(property.workflowStage);
   if (inMarketingWindow) return null;
   if (missingCampaignFields(property).length === 0) return null;
   return {
     kind: "NO_LONGER_APPLICABLE",
-    ruleId: B08_RULE_ID,
+    ruleCode: B08_RULE_ID,
     ruleVersion,
     workflowStage: property.workflowStage,
   };
@@ -240,7 +242,24 @@ const B8_LISTING_MISSING_CAMPAIGN_INFO: RiskRule = {
       .from(properties)
       .where(and(eq(properties.id, openException.propertyId), eq(properties.brokerageId, openException.brokerageId)));
     if (!property) return null;
-    return b08EvidenceWhenAbsent(property, B8_LISTING_MISSING_CAMPAIGN_INFO.version);
+    const decision = b08EvidenceWhenAbsent(property, B8_LISTING_MISSING_CAMPAIGN_INFO.version);
+    if (!decision) return null;
+    return {
+      kind: "NO_LONGER_APPLICABLE",
+      ruleCode: decision.ruleCode,
+      ruleVersion: decision.ruleVersion,
+      record: {
+        brokerageId: openException.brokerageId,
+        propertyId: openException.propertyId,
+        transactionId: openException.transactionId,
+        closedAt: null,
+        workflowStage: decision.workflowStage,
+        scope: "STAGE_EXIT",
+        sourceRecordType: openException.sourceRecordType,
+        sourceRecordId: openException.sourceRecordId,
+        dedupKey: openException.dedupKey,
+      },
+    };
   },
 };
 

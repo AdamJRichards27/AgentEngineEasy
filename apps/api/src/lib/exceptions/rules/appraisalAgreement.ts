@@ -132,6 +132,7 @@ const A4_SIGNED_AGREEMENT_LISTING_INFO_MISSING: RiskRule = {
   ruleId: "A04_SIGNED_AGREEMENT_MISSING_LISTING_INFO",
   version: 1,
   category: "APPRAISAL_AGREEMENT",
+  stageRange: ["Ready to List"],
   name: "Signed agreement missing required listing information",
   description:
     "The Agency Agreement is signed and the property is at Ready to List, but suburb, state, or postcode is still missing — required before the listing can safely go live (state \"drives document rules\", per property.ts's own column comment). Scoped to Ready to List only; listing.ts's B07 covers the same completeness check once the property has actually gone Listed, so the two never describe the same lifecycle moment.",
