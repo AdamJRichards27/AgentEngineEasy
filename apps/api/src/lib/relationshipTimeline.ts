@@ -286,16 +286,16 @@ export async function getRelationshipTimeline(
       .select()
       .from(growCommitments)
       .where(and(eq(growCommitments.partyId, partyId), eq(growCommitments.brokerageId, brokerageId))),
-    // Migration 0036 stores appraisals.brokerage_id. This read still inner-joins
-    // properties and requires that property's brokerage_id, so a party_id match
-    // whose property sits in another brokerage cannot emit the appraisal event.
-    // The direct appraisals.brokerage_id predicate is still open (E-9 partial).
-    // appraisals_party_idx still serves the party_id predicate.
+    // Migration 0036 stores appraisals.brokerage_id. This read inner-joins
+    // properties and requires both appraisals.brokerage_id and that property's
+    // brokerage_id, so a party_id match whose property sits in another
+    // brokerage cannot emit the appraisal event. appraisals_party_idx still
+    // serves the party_id predicate. The property-leading indexes stay.
     db
       .select({ appraisal: appraisals })
       .from(appraisals)
       .innerJoin(properties, eq(properties.id, appraisals.propertyId))
-      .where(and(eq(appraisals.partyId, partyId), eq(properties.brokerageId, brokerageId)))
+      .where(and(eq(appraisals.partyId, partyId), eq(appraisals.brokerageId, brokerageId), eq(properties.brokerageId, brokerageId)))
       .then((rows) => rows.map((row) => row.appraisal)),
     // AE GROW Priority 5 Remediation — Property Intelligence. brokerageId is filtered directly
     // here (the column is right there on this table), same reasoning as the
@@ -316,9 +316,9 @@ export async function getRelationshipTimeline(
     // AE GROW Priority 3, path 2 (part 1/2) — property-first threads where this contact is
     // nonetheless a listed participant (e.g. a buyer on a property-anchored thread).
     // Migration 0036 stores communication_participants.brokerage_id. This read
-    // still inner-joins communication_threads and filters that brokerage_id.
-    // The direct participant predicate is still open (E-9 partial). The
-    // second hop below re-checks the thread before loading messages.
+    // inner-joins communication_threads and filters that brokerage_id, and
+    // also filters communication_participants.brokerage_id. The second hop
+    // below re-checks the thread before loading messages.
     db
       .select({ threadId: communicationParticipants.threadId })
       .from(communicationParticipants)
@@ -326,17 +326,17 @@ export async function getRelationshipTimeline(
         communicationThreads,
         and(eq(communicationThreads.id, communicationParticipants.threadId), eq(communicationThreads.brokerageId, brokerageId)),
       )
-      .where(eq(communicationParticipants.partyId, partyId)),
+      .where(and(eq(communicationParticipants.partyId, partyId), eq(communicationParticipants.brokerageId, brokerageId))),
   ]);
 
   const events: GrowTimelineEvent[] = [];
 
   // Tenant isolation: the party itself is the gate. Source queries above carry brokerageId
-  // in SQL. Appraisals and communication participants now store brokerage_id (0036),
-  // and these two reads still scope through the parent join: properties.brokerage_id
-  // and communication_threads.brokerage_id. The direct child predicate is still open
-  // (E-9 partial). A partyId collision across brokerages is not something this function
-  // trusts on its own — nothing is trusted until the party itself belongs to the caller's brokerage.
+  // in SQL. Appraisals and communication participants store brokerage_id (0036), and
+  // these two reads filter that column and still scope through the parent join:
+  // properties.brokerage_id and communication_threads.brokerage_id. A partyId
+  // collision across brokerages is not something this function trusts on its own —
+  // nothing is trusted until the party itself belongs to the caller's brokerage.
   // Callers MUST check this themselves before calling, but as a second line of defence this
   // function refuses to produce any events for a cross-tenant party.
   if (!party || party.brokerageId !== brokerageId) {

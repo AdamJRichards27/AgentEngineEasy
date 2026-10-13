@@ -11,18 +11,17 @@
 // called (see coaching/responseBuilder.ts and orchestrator.ts's askCopilot).
 //
 // Tenant isolation: every fetch function takes brokerageId as its first
-// argument and scopes its query by it directly (or, for `appraisals` — which
-// carries no brokerageId column of its own — via an inner join to
-// `properties.brokerageId`, the same pattern lib/growToday.ts already uses
-// for the exact same table). None of these functions accept a client-
-// supplied tenant filter. An optional restrictToPropertyIds argument is the
-// caller's own restrictedPropertyIdsFor result (null, the default, leaves
-// the brokerage-wide query unchanged) and is not a tenant selector.
+// argument and scopes its query by it directly (or, for `appraisals`, via
+// appraisals.brokerage_id and an inner join to `properties.brokerageId`,
+// the same pattern lib/growToday.ts already uses for the exact same table).
+// None of these functions accept a client-supplied tenant filter. An
+// optional restrictToPropertyIds argument is the caller's own
+// restrictedPropertyIdsFor result (null, the default, leaves the
+// brokerage-wide query unchanged) and is not a tenant selector.
 // fetchActivityRows also reads qualifying communication_messages (C-6).
 // That query filters communication_threads.brokerage_id,
-// communication_messages.brokerage_id, and parties.brokerage_id —
-// communication_participants has no brokerage column, so the party join
-// is what scopes the participant. See lib/qualifyingCommunications.ts.
+// communication_messages.brokerage_id, parties.brokerage_id, and
+// communication_participants.brokerage_id. See lib/qualifyingCommunications.ts.
 //
 // Bounding: every list is capped by one of the *_ROW_CAP constants below
 // before it reaches a compute function, and every compute function reports
@@ -369,9 +368,8 @@ const APPRAISAL_SELECT_COLUMNS = {
   outcome: appraisals.outcome,
 } as const;
 
-// appraisals carries no brokerageId column of its own — tenant scoping is
-// via an inner join to properties.brokerageId, exactly mirroring
-// growToday.ts's own appraisal query.
+// Tenant scoping is appraisals.brokerage_id plus an inner join to
+// properties.brokerageId, exactly mirroring growToday.ts's own appraisal query.
 export async function fetchAppraisalsCreatedInPeriod(
   brokerageId: number,
   period: ResolvedPeriod,
@@ -382,6 +380,7 @@ export async function fetchAppraisalsCreatedInPeriod(
     .from(appraisals)
     .innerJoin(properties, eq(appraisals.propertyId, properties.id))
     .where(and(
+      eq(appraisals.brokerageId, brokerageId),
       eq(properties.brokerageId, brokerageId),
       gte(appraisals.createdAt, period.start),
       lt(appraisals.createdAt, period.end),
@@ -409,6 +408,7 @@ export async function fetchStaleAppraisals(
     .from(appraisals)
     .innerJoin(properties, eq(appraisals.propertyId, properties.id))
     .where(and(
+      eq(appraisals.brokerageId, brokerageId),
       eq(properties.brokerageId, brokerageId),
       lt(appraisals.updatedAt, staleThreshold),
       notInArray(appraisals.status, [...APPRAISAL_TERMINAL_STATUSES]),

@@ -45,11 +45,10 @@ import {
  * argument and filters on it — including each CTE inside the one rule that
  * uses raw SQL, so no intermediate result set is ever tenant-mixed and then
  * narrowed afterwards. Migration 0036 stores appraisals.brokerage_id, kept
- * equal to properties.brokerage_id. The stale-appraisal rule still joins
- * `properties` and filters properties.brokerageId. Adding `brokerage_id =`
- * on every E-9 read is still open, which is why E-9 stays partial. A
- * brokerageId always arrives from the server session; nothing here accepts
- * one from a client.
+ * equal to properties.brokerage_id. The stale-appraisal rule joins
+ * `properties`, filters properties.brokerageId, and also filters
+ * appraisals.brokerageId. A brokerageId always arrives from the server
+ * session; nothing here accepts one from a client.
  *
  * NOTHING HERE CONTACTS ANYONE. These functions only read. They never write a
  * row, never publish an event, never call a provider, and never produce an
@@ -471,9 +470,9 @@ async function longOwnershipTenureCandidates(scope: EvaluationScope, limit: numb
 /* ---------------------------------------------------------------------
  * Rule 2 — stale appraisal follow-up (property-anchored).
  *
- * Migration 0036 stores brokerage_id. This rule still reaches tenant scope
- * through a join on `properties` (see this module's header). E-9 reads are
- * not closed by the column alone.
+ * Migration 0036 stores brokerage_id. This rule filters appraisals.brokerage_id
+ * and still reaches tenant scope through a join on `properties` (see this
+ * module's header). The column alone does not close E-9.
  * -----------------------------------------------------------------*/
 
 const STALE_APPRAISAL_RULE_VERSION = 2;
@@ -496,6 +495,7 @@ async function staleAppraisalCandidates(scope: EvaluationScope, limit: number, a
     .innerJoin(properties, eq(appraisals.propertyId, properties.id))
     .where(
       and(
+        eq(appraisals.brokerageId, brokerageId),
         eq(properties.brokerageId, brokerageId),
         or(
           and(eq(appraisals.status, "FOLLOW_UP"), isNotNull(appraisals.followUpAt), lte(appraisals.followUpAt, cutoff)),

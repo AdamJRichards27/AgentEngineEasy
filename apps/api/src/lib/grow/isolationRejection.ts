@@ -116,14 +116,16 @@ export async function noteGrowCommitmentIsolationRejection(id: number, brokerage
   noteGrowRejection(elsewhere);
 }
 
-/** Appraisals have no brokerage column; tenancy is the linked property's. */
+/** The row exists in another brokerage. appraisals.brokerage_id matches the
+ * linked property under appraisals_property_brokerage_fk, so the direct
+ * inequality is the same "elsewhere" check. The property join stays. */
 export async function noteGrowAppraisalIsolationRejection(appraisalId: number, brokerageId: number): Promise<void> {
   if (!isPositiveIntegerId(appraisalId)) return;
   const [elsewhere] = await db
     .select({ id: appraisals.id })
     .from(appraisals)
     .innerJoin(properties, eq(properties.id, appraisals.propertyId))
-    .where(and(eq(appraisals.id, appraisalId), ne(properties.brokerageId, brokerageId)))
+    .where(and(eq(appraisals.id, appraisalId), ne(appraisals.brokerageId, brokerageId)))
     .limit(1);
   noteGrowRejection(elsewhere);
 }

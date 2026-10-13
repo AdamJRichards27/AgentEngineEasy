@@ -391,6 +391,7 @@ async function resolveInboundReply(input: InboundWebhookInput): Promise<Resolved
     .innerJoin(communicationThreads, eq(communicationThreads.id, communicationParticipants.threadId))
     .where(
       and(
+        eq(communicationParticipants.brokerageId, input.brokerageId),
         eq(communicationThreads.brokerageId, input.brokerageId),
         destinationEquals(participantColumn, destinationChannel, input.destination),
       ),

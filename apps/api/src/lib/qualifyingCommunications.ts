@@ -37,13 +37,12 @@
 // into grow_activities, so an unlinked pair stays two records.
 //
 // TENANCY (A3). Migration 0036 stores communication_participants.brokerage_id.
-// These queries still join the participant to its thread and the party, and
-// filter communication_threads.brokerage_id and parties.brokerage_id to the
-// caller's brokerage. The direct participant predicate is still open (E-9
-// partial). communication_messages.brokerage_id is filtered as well: a
-// message stamped with this brokerage cannot qualify through another
-// brokerage's thread, and a foreign message cannot qualify through this
-// brokerage's thread.
+// These queries join the participant to its thread and the party, and filter
+// communication_participants.brokerage_id, communication_threads.brokerage_id,
+// and parties.brokerage_id to the caller's brokerage. communication_messages.brokerage_id
+// is filtered as well: a message stamped with this brokerage cannot qualify
+// through another brokerage's thread, and a foreign message cannot qualify
+// through this brokerage's thread.
 //
 // A message on a property the caller cannot see is not their contact,
 // same rule as grow_activities (visibleLinkedPropertySql). A null
@@ -125,8 +124,8 @@ export interface LastQualifyingContact {
  * The party-id bind is one JSON array expanded server-side, the same shape
  * as Grow Today's activity aggregate, so the statement text does not grow
  * with the batch and no id is concatenated into SQL. communication_participants
- * (party_id) is the index for that predicate; the thread and party brokerage
- * predicates sit on the joined parents.
+ * (party_id) is the index for that predicate. The participant, thread, and
+ * party brokerage predicates sit on this query together.
  */
 export async function fetchLastQualifyingContactByParty(
   brokerageId: number,
@@ -160,6 +159,7 @@ export async function fetchLastQualifyingContactByParty(
     .innerJoin(parties, eq(parties.id, communicationParticipants.partyId))
     .where(
       and(
+        eq(communicationParticipants.brokerageId, brokerageId),
         eq(communicationThreads.brokerageId, brokerageId),
         eq(parties.brokerageId, brokerageId),
         eq(communicationMessages.brokerageId, brokerageId),
@@ -206,9 +206,8 @@ export interface QualifyingCommunicationActivityRow {
  * one row per message, oldest first, capped by `limit`.
  *
  * EXISTS (rather than a join) keeps one message as one activity when the
- * thread has several participants. The EXISTS still joins parties and
- * requires parties.brokerage_id, because the participant table cannot
- * carry that predicate itself.
+ * thread has several participants. The EXISTS joins parties, requires
+ * parties.brokerage_id, and filters communication_participants.brokerage_id.
  */
 export async function fetchQualifyingCommunicationActivityRows(
   brokerageId: number,
@@ -244,6 +243,7 @@ export async function fetchQualifyingCommunicationActivityRows(
             .where(
               and(
                 eq(communicationParticipants.threadId, communicationThreads.id),
+                eq(communicationParticipants.brokerageId, brokerageId),
                 eq(parties.brokerageId, brokerageId),
                 isNotNull(communicationParticipants.partyId),
               ),

@@ -1,11 +1,11 @@
 # E-9 migration 0036 — tenant columns
 
-**Status:** merged as [#211](https://github.com/AdamJRichards27/AgentEngineEasy/pull/211) (`20751469662d3268263f83f5ad6799feeccb49b7`). Migration 0036 is prepared and is **not applied to any environment**. E-9 stays **PARTIAL**.
+**Status:** merged as [#211](https://github.com/AdamJRichards27/AgentEngineEasy/pull/211) (`20751469662d3268263f83f5ad6799feeccb49b7`). Migration 0036 is applied on the Replit dev heliumdb only, at 14:18 AEST on 13 Oct, under the Owner's Option A (`REPLIT_SYNC_20751469_2026-10-13.md`). It is not applied to any pilot or production DB. Direct `brokerage_id` predicates on the listed appraisal and communication-participant reads and updates are in this change, pending merge. E-9 stays **PARTIAL** until that merge, a Replit dev sync to that tip, and a live OA-4-style re-check.
 **Owner act:** OA-E9-1 approves preparing and opening this migration PR only. It does not approve apply, and it does not close E-9. The #211 merge carried an approval-scope deviation recorded by the Owner, without a history rewrite.
 **#207:** E-9 A4 is merged as [#207](https://github.com/AdamJRichards27/AgentEngineEasy/pull/207) (`b4d3ba3fc4ab2b9dbbdcda55ddfa31dc119867e1`). It puts tenant predicates in SQL for appraisal child tables and parent-by-id lookups. No schema change and no migration. It does not close E-9.
 **Design source:** [`AE_GROW_E9_LATENT_TENANCY_NOTE.md`](./AE_GROW_E9_LATENT_TENANCY_NOTE.md) (#171). No separate 0036 planning draft was in the repo. The decisions below are that note's recommended remediation, labelled D-1..D-9 for this migration.
 
-Do not run `db:migrate` against staging, pilot, or production. CI's clean-database check is not an environment apply. Migration 0036 is not applied to any environment.
+Do not run `db:migrate` against staging, pilot, or production. CI's clean-database check is not an environment apply. Migration 0036 is applied on the Replit dev heliumdb only, 13 Oct 14:18 AEST; not applied to any pilot or production DB.
 
 ## Decisions
 
@@ -19,9 +19,9 @@ Do not run `db:migrate` against staging, pilot, or production. CI's clean-databa
 | D-6 | Decision 4 | When `party_id` is not null, `appraisals_party_brokerage_fk` and `communication_participants_party_brokerage_fk` require `parties.brokerage_id` to match. A null `party_id` (manual participant, property-only appraisal) is allowed. |
 | D-7 | Decision 6 | Existing property, thread, and party indexes stay, including `appraisals_property_follow_up_idx`, `appraisals_property_deferred_outcome_idx`, and `appraisals_property_updated_at_idx`. `appraisals_brokerage_idx` and `communication_participants_brokerage_idx` are the brokerage-leading indexes for a direct tenant predicate. |
 | D-8 | Checklist 4 | Inserts set `brokerage_id` from the parent row already loaded for the tenancy check. |
-| D-9 | Decision 7 | #211 is this migration file, merged at `20751469662d3268263f83f5ad6799feeccb49b7`. Apply on a named database is a later Owner act. That merge did not apply it to any environment. |
+| D-9 | Decision 7 | #211 is this migration file, merged at `20751469662d3268263f83f5ad6799feeccb49b7`. That merge did not apply it. A later Owner act applied 0036 on the Replit dev heliumdb only, at 14:18 AEST on 13 Oct (`REPLIT_SYNC_20751469_2026-10-13.md`). It is not applied to any pilot or production DB. |
 
-Reads listed in the design note already join the parent brokerage (#177, #178, #193, #207 at `b4d3ba3fc4ab2b9dbbdcda55ddfa31dc119867e1`). They do not all add `brokerage_id =` on the child yet. That is why E-9 stays **PARTIAL**. #211 is merged. Migration 0036 is prepared and is not applied to any environment. The #211 merge carried an approval-scope deviation recorded by the Owner, without a history rewrite.
+Reads listed in the design note already join the parent brokerage (#177, #178, #193, #207 at `b4d3ba3fc4ab2b9dbbdcda55ddfa31dc119867e1`). This change adds `brokerage_id =` on the child at those reads and updates and keeps the parent join. That code is pending merge. E-9 stays **PARTIAL** until that merge, a Replit dev sync to that tip, and a live OA-4-style re-check. #211 is merged. The #211 merge carried an approval-scope deviation recorded by the Owner, without a history rewrite.
 
 Parent unique constraints `properties_id_brokerage_uq`, `parties_id_brokerage_uq`, and `communication_threads_id_brokerage_uq` exist only so Postgres can target `(id, brokerage_id)`. They add no column.
 

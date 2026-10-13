@@ -117,10 +117,11 @@ export const appraisals = pgTable("appraisals", {
   // besides its primary key and share_token.
   //
   // NOTE ON SCOPING: migration 0036 stores brokerage_id, kept equal to
-  // properties.brokerage_id by appraisals_property_brokerage_fk. The
-  // sweep and Grow Today queries stay property-leading joins. Do not drop
-  // the three property indexes below. appraisals_brokerage_idx is the
-  // brokerage-leading index for a direct tenant predicate.
+  // properties.brokerage_id by appraisals_property_brokerage_fk. Reads and
+  // updates filter appraisals.brokerage_id directly and keep the property
+  // join or subquery. Do not drop the three property indexes below.
+  // appraisals_brokerage_idx is the brokerage-leading index for that
+  // direct tenant predicate.
   //
   // stale_previous_appraisal, FOLLOW_UP branch, and Grow Today Rule E
   // (appraisal follow-ups due) both read exactly status='FOLLOW_UP' with a

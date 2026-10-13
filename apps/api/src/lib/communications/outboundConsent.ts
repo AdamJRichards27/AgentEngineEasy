@@ -181,10 +181,9 @@ async function resolveRecipientPartyId(message: OutboundConsentLoadInput): Promi
   if (message.partyId != null) return message.partyId;
   if (message.recipientParticipantId == null) return null;
   // Migration 0036 stores communication_participants.brokerage_id. A row
-  // counts only when it sits on this message's thread and that thread
-  // belongs to this brokerage. The direct column predicate is still open.
-  // A miss throws CommunicationTenancyError, so the send is refused
-  // before the legacy no-party consent path.
+  // counts only when that column, this message's thread, and the thread's
+  // brokerage all match. A miss throws CommunicationTenancyError, so the
+  // send is refused before the legacy no-party consent path.
   const [participant] = await db
     .select({ partyId: communicationParticipants.partyId })
     .from(communicationParticipants)
@@ -193,6 +192,7 @@ async function resolveRecipientPartyId(message: OutboundConsentLoadInput): Promi
       and(
         eq(communicationParticipants.id, message.recipientParticipantId),
         eq(communicationParticipants.threadId, message.threadId),
+        eq(communicationParticipants.brokerageId, message.brokerageId),
         eq(communicationThreads.id, message.threadId),
         eq(communicationThreads.brokerageId, message.brokerageId),
       ),
