@@ -429,6 +429,7 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
       // first row at version 0, not the schema default of 1, so a client
       // that observed no row can pass expectedVersion 0.
       version: overlay?.version ?? 0,
+      blocksClose: exc.blocksClose,
     };
   });
 

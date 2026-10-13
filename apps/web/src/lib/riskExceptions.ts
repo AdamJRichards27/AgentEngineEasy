@@ -10,6 +10,18 @@
 // _OWNER_TYPES) — kept in sync with those by hand, since the frontend
 // doesn't share a package with the backend.
 
+export const BLOCKS_CLOSE_LABEL = "Blocks close";
+
+/**
+ * Read-only label. True only for an exception the server marked, or for a
+ * row with no source type that carries the same flag. Launch items never
+ * qualify, even if a flag is copied onto them.
+ */
+export function showBlocksClosePill(item: { sourceType?: string; blocksClose?: boolean | null }): boolean {
+  if (item.sourceType != null && item.sourceType !== "EXCEPTION") return false;
+  return item.blocksClose === true;
+}
+
 export interface RiskExceptionRow {
   id: string;
   brokerageId: number;
@@ -41,6 +53,8 @@ export interface RiskExceptionRow {
   lastDetectedAt: string;
   requiresFinancialEntitlement: boolean;
   redacted: boolean;
+  /** Set on the cross-property list. Absent means this row was not checked. */
+  blocksClose?: boolean;
 }
 
 export interface CrossPropertyRiskExceptionRow extends RiskExceptionRow {

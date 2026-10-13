@@ -769,3 +769,55 @@ test("launch item follow-on actions render and post the card sourceType and id",
     clearGlobals();
   }
 });
+
+test("Blocks close shows only on an exception the server marked, and flags-off actions stay off", () => {
+  const blocking = item({
+    sourceRecordId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa01",
+    title: "Unowned settlement exception",
+    blocksClose: true,
+    ownerType: "UNASSIGNED_QUEUE",
+    ownerUserId: null,
+    category: "SETTLEMENT_CLOSURE",
+  });
+  const owned = item({
+    sourceRecordId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa02",
+    title: "Owned settlement exception",
+    ownerType: "LISTING_AGENT",
+    ownerUserId: 4,
+    category: "SETTLEMENT_CLOSURE",
+  });
+  const launch = item({
+    sourceType: "LAUNCH_ITEM",
+    sourceRecordId: LAUNCH_ITEM_ID,
+    title: "Floor plan upload",
+    blocksClose: true,
+    category: "LAUNCH_CAMPAIGN",
+  });
+  const payload = workspace({
+    transactionCoordination: [blocking, owned],
+    launchCoordination: [launch],
+    handedBack: [],
+    escalated: [],
+  });
+  const before = JSON.stringify(payload);
+  const flagsOff = install(payload, false);
+  let tree = openTab(flagsOff.render, "Transactions");
+  const blockingCard = itemCard(tree, "Unowned settlement exception");
+  const ownedCard = itemCard(tree, "Owned settlement exception");
+  assert.ok(blockingCard);
+  assert.ok(ownedCard);
+  assert.equal(normalized(blockingCard).includes("Blocks close"), true);
+  assert.equal(normalized(ownedCard).includes("Blocks close"), false);
+  assert.equal(buttonExact(blockingCard, "Hand back…"), undefined);
+  assert.equal(buttonExact(blockingCard, "Escalate…"), undefined);
+  assert.ok(buttonExact(blockingCard, "Claim"));
+  assert.equal(tabButton(tree, "Handedback"), undefined);
+  assert.equal(tabButton(tree, "Escalated"), undefined);
+
+  tree = openTab(flagsOff.render, "Launch");
+  const launchCard = itemCard(tree, "Floor plan upload");
+  assert.ok(launchCard);
+  assert.equal(normalized(launchCard).includes("Blocks close"), false);
+  assert.ok(buttonExact(launchCard, "Claim"));
+  assert.equal(JSON.stringify(payload), before);
+});

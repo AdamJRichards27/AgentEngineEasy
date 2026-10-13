@@ -762,6 +762,46 @@ export class TransactionClosureBlockedError extends Error {
 }
 
 /**
+ * Stable codes for the sentences `collectClosureBlockers` already returns.
+ * The 409 `blockers` array stays those sentences. `closureBlockerDetails`
+ * is an additive sibling on the transaction GETs only.
+ */
+export const CLOSURE_BLOCKER_CODES = [
+  "NOT_UNCONDITIONAL",
+  "CONDITIONS_PENDING",
+  "AML_SELLER",
+  "AML_BUYER",
+  "ATTENTION_OPEN",
+  "MUST_FINISH_TASKS",
+  "COMMISSION_NOT_CALCULATED",
+  "FUNDS_NOT_MATCHED",
+  "FINANCIAL_DISPUTE_OPEN",
+  "COMMISSION_DISCREPANCY",
+  "EXCEPTIONS_NEED_OWNER",
+] as const;
+
+export type ClosureBlockerCode = (typeof CLOSURE_BLOCKER_CODES)[number];
+
+export interface ClosureBlockerDetail {
+  code: ClosureBlockerCode;
+  /** Byte-identical to the matching entry in `closureBlockers`. */
+  message: string;
+  count?: number;
+  /** Task ids, exception ids, or the funds reconciliation status. */
+  refs?: string[];
+}
+
+interface CollectedClosureBlockers {
+  messages: string[];
+  details: ClosureBlockerDetail[];
+}
+
+function addClosureBlocker(collected: CollectedClosureBlockers, detail: ClosureBlockerDetail): void {
+  collected.messages.push(detail.message);
+  collected.details.push(detail);
+}
+
+/**
  * Stage H (#121) — closure preconditions. Closure previously only checked
  * `status === "Settled"`; it did not check that the transaction had
  * actually become unconditional, that every tracked condition was
@@ -774,8 +814,8 @@ export class TransactionClosureBlockedError extends Error {
  * is always audited distinctly from an ordinary close. Settlement
  * prerequisites are not changed here.
  */
-async function collectClosureBlockers(transaction: Transaction): Promise<string[]> {
-  const blockers: string[] = [];
+async function collectClosureBlockers(transaction: Transaction): Promise<CollectedClosureBlockers> {
+  const collected: CollectedClosureBlockers = { messages: [], details: [] };
   const [property] = await db
     .select({ brokerageId: properties.brokerageId })
     .from(properties)
@@ -783,7 +823,10 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
   const brokerageId = property?.brokerageId ?? null;
 
   if (!transactionIsUnconditional(transaction)) {
-    blockers.push("The transaction has not become unconditional yet.");
+    addClosureBlocker(collected, {
+      code: "NOT_UNCONDITIONAL",
+      message: "The transaction has not become unconditional yet.",
+    });
   }
 
   const openConditions = await db
@@ -791,20 +834,32 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
     .from(transactionConditions)
     .where(and(eq(transactionConditions.transactionId, transaction.id), eq(transactionConditions.status, "Pending")));
   if (openConditions.length > 0) {
-    blockers.push(`${openConditions.length} contract condition(s) are still Pending.`);
+    addClosureBlocker(collected, {
+      code: "CONDITIONS_PENDING",
+      message: `${openConditions.length} contract condition(s) are still Pending.`,
+      count: openConditions.length,
+    });
   }
 
   const buyerAml = await incompleteAmlBlocker(transaction, partyIds(transaction.buyerPartyIds), "buyer");
-  if (buyerAml) blockers.push(buyerAml);
+  if (buyerAml) {
+    addClosureBlocker(collected, { code: "AML_BUYER", message: buyerAml.message, count: buyerAml.count });
+  }
   const sellerAml = await incompleteAmlBlocker(transaction, partyIds(transaction.sellerPartyIds), "seller");
-  if (sellerAml) blockers.push(sellerAml);
+  if (sellerAml) {
+    addClosureBlocker(collected, { code: "AML_SELLER", message: sellerAml.message, count: sellerAml.count });
+  }
 
   const openAttentionItems = await db
     .select()
     .from(automationAttentionItems)
     .where(and(eq(automationAttentionItems.transactionId, transaction.id), eq(automationAttentionItems.status, "OPEN")));
   if (openAttentionItems.length > 0) {
-    blockers.push(`${openAttentionItems.length} open attention item(s) require review.`);
+    addClosureBlocker(collected, {
+      code: "ATTENTION_OPEN",
+      message: `${openAttentionItems.length} open attention item(s) require review.`,
+      count: openAttentionItems.length,
+    });
   }
 
   const activeMustFinish = await db
@@ -820,16 +875,28 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
       ),
     );
   if (activeMustFinish.length > 0) {
-    blockers.push(`Must-finish task(s) still open: ${activeMustFinish.map((task) => task.title).join("; ")}.`);
+    addClosureBlocker(collected, {
+      code: "MUST_FINISH_TASKS",
+      message: `Must-finish task(s) still open: ${activeMustFinish.map((task) => task.title).join("; ")}.`,
+      count: activeMustFinish.length,
+      refs: activeMustFinish.map((task) => task.id),
+    });
   }
 
   if (!transaction.commissionCalculatedAt) {
-    blockers.push("Commission has not been calculated.");
+    addClosureBlocker(collected, {
+      code: "COMMISSION_NOT_CALCULATED",
+      message: "Commission has not been calculated.",
+    });
   }
 
   const funds = computeFundsReconciliation(transaction);
   if (funds.status !== "MATCHED") {
-    blockers.push(`Funds reconciliation is ${funds.status}, not MATCHED.`);
+    addClosureBlocker(collected, {
+      code: "FUNDS_NOT_MATCHED",
+      message: `Funds reconciliation is ${funds.status}, not MATCHED.`,
+      refs: [funds.status],
+    });
   }
 
   if (brokerageId != null) {
@@ -846,11 +913,16 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
         ),
       );
     if (openDisputes.length > 0) {
-      blockers.push("An open financial dispute (FIN02) must be resolved before close.");
+      addClosureBlocker(collected, {
+        code: "FINANCIAL_DISPUTE_OPEN",
+        message: "An open financial dispute (FIN02) must be resolved before close.",
+      });
     }
 
     const discrepancy = await commissionDiscrepancyBlocker(transaction, brokerageId);
-    if (discrepancy) blockers.push(discrepancy);
+    if (discrepancy) {
+      addClosureBlocker(collected, { code: "COMMISSION_DISCREPANCY", message: discrepancy });
+    }
 
     const unassigned = await db
       .select({ id: riskExceptions.id, ownerType: riskExceptions.ownerType, ownerUserId: riskExceptions.ownerUserId })
@@ -865,11 +937,16 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
       );
     const needingOwner = unassigned.filter((row) => row.ownerUserId == null || row.ownerType === "UNASSIGNED_QUEUE");
     if (needingOwner.length > 0) {
-      blockers.push(`${needingOwner.length} open non-financial exception(s) need an assigned owner.`);
+      addClosureBlocker(collected, {
+        code: "EXCEPTIONS_NEED_OWNER",
+        message: `${needingOwner.length} open non-financial exception(s) need an assigned owner.`,
+        count: needingOwner.length,
+        refs: needingOwner.map((row) => row.id),
+      });
     }
   }
 
-  return blockers;
+  return collected;
 }
 
 /**
@@ -877,14 +954,30 @@ async function collectClosureBlockers(transaction: Transaction): Promise<string[
  * write, and it does not apply the Settled check or the force override.
  */
 export async function listTransactionClosureBlockers(transaction: Transaction): Promise<string[]> {
-  return collectClosureBlockers(transaction);
+  return (await collectClosureBlockers(transaction)).messages;
+}
+
+/**
+ * The string list plus stable codes and ids. `closureBlockers` stays the
+ * string list `closeTransaction` puts on the 409. This read does not close.
+ */
+export async function readTransactionClosureBlockers(transaction: Transaction): Promise<{
+  closureBlockers: string[];
+  closureBlockerDetails: ClosureBlockerDetail[];
+}> {
+  const collected = await collectClosureBlockers(transaction);
+  return { closureBlockers: collected.messages, closureBlockerDetails: collected.details };
 }
 
 function partyIds(value: unknown): number[] {
   return Array.isArray(value) ? (value as number[]) : [];
 }
 
-async function incompleteAmlBlocker(transaction: Transaction, ids: number[], label: "buyer" | "seller"): Promise<string | null> {
+async function incompleteAmlBlocker(
+  transaction: Transaction,
+  ids: number[],
+  label: "buyer" | "seller",
+): Promise<{ message: string; count: number } | null> {
   if (ids.length === 0) return null;
   const verifications = await db
     .select()
@@ -895,7 +988,10 @@ async function incompleteAmlBlocker(transaction: Transaction, ids: number[], lab
     return !verification || verification.status !== "Complete";
   });
   if (unresolved.length === 0) return null;
-  return `AML/CTF verification is not complete for ${unresolved.length} ${label} part${unresolved.length === 1 ? "y" : "ies"}.`;
+  return {
+    count: unresolved.length,
+    message: `AML/CTF verification is not complete for ${unresolved.length} ${label} part${unresolved.length === 1 ? "y" : "ies"}.`,
+  };
 }
 
 /**
@@ -969,7 +1065,7 @@ export async function closeTransaction(input: {
     throw new Error(`Transaction ${transaction.id} cannot be closed before settlement is completed.`);
   }
 
-  const blockers = await collectClosureBlockers(transaction);
+  const blockers = (await collectClosureBlockers(transaction)).messages;
   if (blockers.length > 0 && !input.force) {
     throw new TransactionClosureBlockedError(blockers);
   }

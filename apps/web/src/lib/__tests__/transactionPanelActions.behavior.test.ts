@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { CLOSE_BLOCKED_REASON, plainClosureBlocker } from "../closureBlockers.ts";
+import { CLOSE_BLOCKED_REASON, CLOSE_BLOCKED_REASON_FOR_OTHERS, plainClosureBlocker, type ClosureBlockerDetail } from "../closureBlockers.ts";
 
 const CLOSED_NOTE = "This transaction is closed — no further changes can be recorded.";
 const CONDITIONAL_REASON = "Settlement can be completed once the contract is unconditional";
@@ -21,9 +21,55 @@ interface PanelCondition {
   resolvedAt: string | null;
 }
 
+interface PanelTask {
+  id: string;
+  kind: "TASK" | "REMINDER";
+  title: string;
+  detail: string | null;
+  assignedRole: string | null;
+  dueAt: string | null;
+  status: string;
+}
+
+interface PanelException {
+  id: string;
+  brokerageId: number;
+  propertyId: number;
+  transactionId: number | null;
+  ruleId: string;
+  ruleVersion: number;
+  category: string;
+  severity: string;
+  title: string;
+  problemDescription: string;
+  businessImpact: string;
+  detectedCause: string;
+  ownerType: string;
+  ownerUserId: number | null;
+  reassignmentCount: number;
+  detectedAt: string;
+  dueAt: string | null;
+  escalatesAt: string | null;
+  status: string;
+  recommendedAction: string;
+  resolutionRequirements: string;
+  dismissible: boolean;
+  resolvedAt: string | null;
+  resolvedByUserId: number | null;
+  resolutionMethod: string | null;
+  dismissalReason: string | null;
+  occurrenceCount: number;
+  lastDetectedAt: string;
+  requiresFinancialEntitlement: boolean;
+  redacted: boolean;
+}
+
 interface PanelQueryOptions {
   conditions?: PanelCondition[] | "unloaded";
   closureBlockers?: string[] | null;
+  closureBlockerDetails?: ClosureBlockerDetail[] | null;
+  tasks?: PanelTask[];
+  exceptions?: PanelException[];
   fundsReconciliation?: {
     status: string;
     expectedCents: number | null;
@@ -167,7 +213,11 @@ const virtualMocks: Plugin = {
     }
     if (id === "\0tx-query") {
       return `
-        export const useQueryClient = () => ({ invalidateQueries() {} });
+        export const useQueryClient = () => ({
+          invalidateQueries(filter) {
+            globalThis.__txInvalidated.push(filter && filter.queryKey);
+          },
+        });
         export const useQuery = (options) => {
           const key = JSON.stringify(options.queryKey);
           const table = globalThis.__txQueries || {};
@@ -190,6 +240,17 @@ const virtualMocks: Plugin = {
               if (input && typeof input.action === "string" && globalThis.__txScriptedError) {
                 globalThis.__txShownError = globalThis.__txScriptedError;
                 globalThis.__txShownVariables = input;
+                return;
+              }
+              if (typeof options.onSuccess === "function") options.onSuccess(undefined, input);
+              if (globalThis.__txClearBlockersOnSuccess) {
+                const table = globalThis.__txQueries || {};
+                for (const key of Object.keys(table)) {
+                  if (key.indexOf('["transaction",') === 0 && table[key] && table[key].data) {
+                    table[key].data.closureBlockers = [];
+                    table[key].data.closureBlockerDetails = [];
+                  }
+                }
               }
             },
           };
@@ -320,6 +381,7 @@ function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | nu
         transaction: row,
         ...(options?.fundsReconciliation !== undefined ? { fundsReconciliation: options.fundsReconciliation } : {}),
         ...(options?.closureBlockers !== undefined ? { closureBlockers: options.closureBlockers } : {}),
+        ...(options?.closureBlockerDetails !== undefined ? { closureBlockerDetails: options.closureBlockerDetails } : {}),
       },
     },
     [`["property-timeline",${PROPERTY_ID}]`]: { ...ready, data: { timeline: [] } },
@@ -331,8 +393,14 @@ function queriesFor(row: ReturnType<typeof transaction>, viewerRole: string | nu
             data: { conditions: options?.conditions ?? DEFAULT_CONDITIONS },
           },
         }),
-    [`["tasks",${PROPERTY_ID}]`]: { ...ready, data: { tasks: [], attentionItems: [] } },
-    [`["property-exceptions",${PROPERTY_ID}]`]: { ...ready, data: { exceptions: [], summary: { openCount: 0, highestSeverity: null } } },
+    [`["tasks",${PROPERTY_ID}]`]: { ...ready, data: { tasks: options?.tasks ?? [], attentionItems: [] } },
+    [`["property-exceptions",${PROPERTY_ID}]`]: {
+      ...ready,
+      data: {
+        exceptions: options?.exceptions ?? [],
+        summary: { openCount: options?.exceptions?.length ?? 0, highestSeverity: null, byStatus: {} },
+      },
+    },
     [`["property-launch",${PROPERTY_ID}]`]: { ...ready, data: { launch: null } },
     // useSession() reads ["session"]. The query mock returns this object as
     // the query result and does not apply `select`, so `data` is the user.
@@ -364,6 +432,8 @@ function install(
     __txHooks: hooks,
     __txQueries: queriesFor(row, viewerRole, options),
     __txCalls: [] as unknown[],
+    __txInvalidated: [] as unknown[],
+    __txClearBlockersOnSuccess: false,
     __txShownError: null,
     __txShownVariables: undefined,
     __txScriptedError: null,
@@ -940,7 +1010,8 @@ test("close blockers stay listed, and Close stays disabled, before the transacti
   const text = normalized(section);
   assert.match(text, /Commission has not been calculated/);
   assert.match(text, /A blocker the panel has not seen before/);
-  assert.match(text, new RegExp(CLOSE_BLOCKED_REASON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(text, new RegExp(CLOSE_BLOCKED_REASON_FOR_OTHERS.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(text.includes(CLOSE_BLOCKED_REASON), false);
   assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
   click(buttons(section, "Close Transaction")[0]);
   assert.equal(postedActions().includes("close"), false);
@@ -983,3 +1054,233 @@ for (const role of ["Agent", "Pit Crew"] as const) {
     assert.match(normalized(section), /not yet calculated/);
   });
 }
+
+const CLOSE_REFRESH_KEYS = [
+  ["transaction", PROPERTY_ID],
+  ["tasks", PROPERTY_ID],
+  ["property-exceptions", PROPERTY_ID],
+  ["conditions"],
+  ["property-workspace", PROPERTY_ID],
+];
+
+function invalidatedKeys(): unknown[] {
+  return (globalThis as { __txInvalidated?: unknown[] }).__txInvalidated ?? [];
+}
+
+function clearInvalidated(): void {
+  (globalThis as { __txInvalidated?: unknown[] }).__txInvalidated = [];
+}
+
+function armBlockerClear(): void {
+  (globalThis as { __txClearBlockersOnSuccess?: boolean }).__txClearBlockersOnSuccess = true;
+}
+
+function sectionByHeading(tree: unknown, title: string): ElementNode | undefined {
+  return findAll(tree, (element) => {
+    if (element.type !== "section") return false;
+    const heading = findAll(element, (child) => child.type === "h2")[0];
+    return textContent(heading).trim() === title;
+  })[0];
+}
+
+function elementIds(tree: unknown): Set<string> {
+  return new Set(
+    findAll(tree, (element) => typeof element.props?.id === "string").map((element) => String(element.props?.id)),
+  );
+}
+
+function panelException(id: string, title: string): PanelException {
+  return {
+    id,
+    brokerageId: 1,
+    propertyId: PROPERTY_ID,
+    transactionId: TRANSACTION_ID,
+    ruleId: "TEST",
+    ruleVersion: 1,
+    category: "SETTLEMENT_CLOSURE",
+    severity: "ATTENTION",
+    title,
+    problemDescription: "Needs an owner.",
+    businessImpact: "Close stays blocked.",
+    detectedCause: "No owner.",
+    ownerType: "UNASSIGNED_QUEUE",
+    ownerUserId: null,
+    reassignmentCount: 0,
+    detectedAt: "2026-10-01T00:00:00.000Z",
+    dueAt: null,
+    escalatesAt: null,
+    status: "OPEN",
+    recommendedAction: "Assign an owner.",
+    resolutionRequirements: "An owner is assigned.",
+    dismissible: false,
+    resolvedAt: null,
+    resolvedByUserId: null,
+    resolutionMethod: null,
+    dismissalReason: null,
+    occurrenceCount: 1,
+    lastDetectedAt: "2026-10-01T00:00:00.000Z",
+    requiresFinancialEntitlement: false,
+    redacted: false,
+  };
+}
+
+test("each close blocker links to the section that clears it", () => {
+  const details: ClosureBlockerDetail[] = [
+    { code: "NOT_UNCONDITIONAL", message: "The transaction has not become unconditional yet." },
+    { code: "CONDITIONS_PENDING", message: "1 contract condition(s) are still Pending.", count: 1 },
+    { code: "AML_SELLER", message: "AML/CTF verification is not complete for 1 seller party.", count: 1 },
+    { code: "AML_BUYER", message: "AML/CTF verification is not complete for 1 buyer party.", count: 1 },
+    { code: "ATTENTION_OPEN", message: "1 open attention item(s) require review.", count: 1 },
+    {
+      code: "MUST_FINISH_TASKS",
+      message: "Must-finish task(s) still open: Confirm the transaction record is complete.",
+      refs: ["task-1"],
+    },
+    { code: "COMMISSION_NOT_CALCULATED", message: "Commission has not been calculated." },
+    { code: "FUNDS_NOT_MATCHED", message: "Funds reconciliation is NOT_RECEIVED, not MATCHED.", refs: ["NOT_RECEIVED"] },
+    { code: "FINANCIAL_DISPUTE_OPEN", message: "An open financial dispute (FIN02) must be resolved before close." },
+    {
+      code: "COMMISSION_DISCREPANCY",
+      message: "Commission does not reconcile between the transaction record and the Financial Engine.",
+    },
+    {
+      code: "EXCEPTIONS_NEED_OWNER",
+      message: "1 open non-financial exception(s) need an assigned owner.",
+      count: 1,
+      refs: ["ex-1"],
+    },
+    { code: "FUTURE_BLOCKER", message: "A blocker the panel has not seen before." },
+  ];
+  const { render } = install(settledRow(), "Brokerage Administrator", {
+    closureBlockers: details.map((detail) => detail.message),
+    closureBlockerDetails: details,
+    tasks: [
+      {
+        id: "task-1",
+        kind: "TASK",
+        title: "Confirm the transaction record is complete",
+        detail: null,
+        assignedRole: null,
+        dueAt: null,
+        status: "ACTIVE",
+      },
+    ],
+    exceptions: [panelException("ex-1", "Needs an owner")],
+  });
+  const tree = render();
+  const section = transactionSection(tree);
+  const links = findAll(section, (element) => element.type === "a" && typeof element.props?.href === "string");
+  const hrefs = links.map((link) => String(link.props?.href));
+  assert.deepEqual(hrefs, [
+    "#transaction-unconditional",
+    "#transaction-conditions",
+    "#workspace-sellers",
+    "#workspace-parties",
+    "#workspace-tasks",
+    "#workspace-tasks",
+    "#transaction-commission",
+    "#transaction-funds",
+    "#workspace-financial",
+    "#transaction-commission",
+    "#workspace-exceptions",
+  ]);
+  const ids = elementIds(tree);
+  for (const href of hrefs) {
+    assert.equal(ids.has(href.slice(1)), true, href);
+  }
+  assert.equal(normalized(section).includes("A blocker the panel has not seen before."), true);
+  assert.equal(
+    links.some((link) => textContent(link).includes("A blocker the panel has not seen before.")),
+    false,
+  );
+});
+
+test("resolving a condition, completing a task, or reassigning an exception refetches and re-enables Close", () => {
+  const condition = install(settledRow(), "Brokerage Administrator", {
+    closureBlockers: ["1 contract condition(s) are still Pending."],
+    closureBlockerDetails: [{ code: "CONDITIONS_PENDING", message: "1 contract condition(s) are still Pending.", count: 1 }],
+  });
+  armBlockerClear();
+  let section = transactionSection(condition.render());
+  assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, true);
+  const resolve = findAll(section, (element) => element.type === "select" && textContent(element).includes("Resolve as"))[0];
+  change(resolve, "Satisfied");
+  assert.deepEqual(invalidatedKeys(), CLOSE_REFRESH_KEYS);
+  section = transactionSection(condition.render());
+  assert.equal(buttons(section, "Close Transaction")[0]?.props?.disabled, false);
+
+  clearInvalidated();
+  const task = install(settledRow(), "Brokerage Administrator", {
+    closureBlockers: ["Must-finish task(s) still open: Confirm the transaction record is complete."],
+    closureBlockerDetails: [
+      {
+        code: "MUST_FINISH_TASKS",
+        message: "Must-finish task(s) still open: Confirm the transaction record is complete.",
+        refs: ["task-1"],
+      },
+    ],
+    tasks: [
+      {
+        id: "task-1",
+        kind: "TASK",
+        title: "Confirm the transaction record is complete",
+        detail: null,
+        assignedRole: null,
+        dueAt: null,
+        status: "ACTIVE",
+      },
+    ],
+  });
+  armBlockerClear();
+  let taskTree = task.render();
+  assert.equal(buttons(transactionSection(taskTree), "Close Transaction")[0]?.props?.disabled, true);
+  click(buttons(sectionByHeading(taskTree, "Tasks & Attention"), "Mark Complete")[0]);
+  assert.deepEqual(invalidatedKeys(), CLOSE_REFRESH_KEYS);
+  taskTree = task.render();
+  assert.equal(buttons(transactionSection(taskTree), "Close Transaction")[0]?.props?.disabled, false);
+
+  clearInvalidated();
+  const exception = install(settledRow(), "Brokerage Administrator", {
+    closureBlockers: ["1 open non-financial exception(s) need an assigned owner."],
+    closureBlockerDetails: [
+      {
+        code: "EXCEPTIONS_NEED_OWNER",
+        message: "1 open non-financial exception(s) need an assigned owner.",
+        count: 1,
+        refs: ["ex-1"],
+      },
+    ],
+    exceptions: [panelException("ex-1", "Needs an owner")],
+  });
+  armBlockerClear();
+  let exceptionTree = exception.render();
+  assert.equal(buttons(transactionSection(exceptionTree), "Close Transaction")[0]?.props?.disabled, true);
+  const card = findAll(exceptionTree, (element) => element.type === "li" && textContent(element).includes("Needs an owner"))[0];
+  const owner = findAll(card, (element) => element.type === "select" && textContent(element).includes("Reassign to"))[0];
+  change(owner, "LISTING_AGENT");
+  exceptionTree = exception.render();
+  const reason = findAll(
+    findAll(exceptionTree, (element) => element.type === "li" && textContent(element).includes("Needs an owner"))[0],
+    (element) => element.type === "input" && element.props?.placeholder === "Reason for reassignment",
+  )[0];
+  change(reason, "Give it an owner");
+  exceptionTree = exception.render();
+  const reassignCard = findAll(exceptionTree, (element) => element.type === "li" && textContent(element).includes("Needs an owner"))[0];
+  click(buttons(reassignCard, "Reassign")[0]);
+  assert.deepEqual(invalidatedKeys(), CLOSE_REFRESH_KEYS);
+  exceptionTree = exception.render();
+  assert.equal(buttons(transactionSection(exceptionTree), "Close Transaction")[0]?.props?.disabled, false);
+});
+
+test("recording funds and marking the agent paid refresh tasks and exceptions", () => {
+  const { render } = install(settledRow(), "Brokerage Administrator", { closureBlockers: [] });
+  let section = transactionSection(render());
+  change(fundsAmountInput(section), "10");
+  section = transactionSection(render());
+  click(buttons(section, "Record Funds Received")[0]);
+  assert.deepEqual(invalidatedKeys(), CLOSE_REFRESH_KEYS);
+  clearInvalidated();
+  section = transactionSection(render());
+  click(buttons(section, "Mark Agent Paid")[0]);
+  assert.deepEqual(invalidatedKeys(), CLOSE_REFRESH_KEYS);
+});

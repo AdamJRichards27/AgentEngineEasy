@@ -16,7 +16,7 @@ import {
   recordFundsReceived,
   recordAgentPaid,
   closeTransaction,
-  listTransactionClosureBlockers,
+  readTransactionClosureBlockers,
   recordLegalRepresentatives,
   TransactionClosureBlockedError,
 } from "../lib/transactions.js";
@@ -182,13 +182,17 @@ transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactio
 /**
  * R-F37 funds sibling, plus the R-F42 closure blockers `closeTransaction`
  * would report. `closureBlockers` is null when there is no transaction.
- * The transaction object itself is unchanged. This read does not close.
+ * `closureBlockerDetails` is the same list with stable codes and ids.
+ * The transaction object itself is unchanged. Close still returns the
+ * string list on 409 and does not return the details. This read does not close.
  */
 async function transactionRead(transaction: Transaction | null | undefined) {
+  const closure = transaction ? await readTransactionClosureBlockers(transaction) : null;
   return {
     transaction,
     fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
-    closureBlockers: transaction ? await listTransactionClosureBlockers(transaction) : null,
+    closureBlockers: closure ? closure.closureBlockers : null,
+    closureBlockerDetails: closure ? closure.closureBlockerDetails : null,
   };
 }
 

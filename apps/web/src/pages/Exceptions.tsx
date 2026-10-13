@@ -23,6 +23,8 @@ import {
   statusLabel,
   formatDueDate,
   isOverdue,
+  BLOCKS_CLOSE_LABEL,
+  showBlocksClosePill,
 } from "../lib/riskExceptions";
 
 interface ScanRun {
@@ -182,6 +184,7 @@ export default function Exceptions() {
                 <li key={e.id}>
                   <Link href={`/properties/${e.propertyId}`}>
                     <span className={severityPillClass(e.severity)}>{severityLabel(e.severity)}</span>{" "}
+                    {showBlocksClosePill(e) && <span className="pill pill-warning">{BLOCKS_CLOSE_LABEL}</span>}{" "}
                     <strong>{e.title}</strong> — {e.propertyAddress ?? `Property #${e.propertyId}`}
                   </Link>
                   <div className="muted">
