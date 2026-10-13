@@ -8,17 +8,20 @@
 // code, user-authored SQL, unrestricted scripts, raw AI prompts as
 // detection rules, arbitrary webhooks, unvalidated expressions" requires.
 //
-// Every rule implements ONE method — scanBrokerage(brokerageId, now) — that
-// returns the RiskFinding[] for every currently-true occurrence of that
-// rule's condition within one tenant. The periodic sweep (engine.ts) calls
-// this for every rule, for every brokerage, in bounded batches. A rule that
-// also declares triggerEventTypes gets evaluated immediately when one of
-// those domain events fires, by calling this same scanBrokerage for just
-// that event's brokerage — one detection function per rule, not two, so
-// the event-driven and time-driven paths can never silently drift apart
-// from each other.
+// Every rule implements ONE detection method — scanBrokerage(brokerageId,
+// now) — that returns the RiskFinding[] for every currently-true occurrence
+// of that rule's condition within one tenant. The periodic sweep (engine.ts)
+// calls this for every rule, for every brokerage, in bounded batches. A rule
+// that also declares triggerEventTypes gets evaluated immediately when one
+// of those domain events fires, by calling this same scanBrokerage for just
+// that event's brokerage — one detection function per rule, not two, so the
+// event-driven and time-driven paths can never silently drift apart from
+// each other. B08 also sets the optional resolutionEvidenceWhenAbsent hook
+// so a listing that has left the marketing window is recorded as no longer
+// applicable instead of as a cleared condition. No other rule sets it.
+import type { RiskException } from "@aee/db";
 import type { AgentEngineEasyEventType } from "@aee/events";
-import type { RiskExceptionCategory, RiskFinding } from "./types.js";
+import type { ResolutionEvidence, RiskExceptionCategory, RiskFinding } from "./types.js";
 
 export interface RiskRule {
   ruleId: string;
@@ -31,6 +34,16 @@ export interface RiskRule {
   // event-driven list). Empty for a purely time-driven rule.
   triggerEventTypes: AgentEngineEasyEventType[];
   scanBrokerage(brokerageId: number, now: Date): Promise<RiskFinding[]>;
+  /**
+   * Optional. When a successful scan did not return this still-open
+   * exception, return evidence to store instead of the default
+   * RULE_CONDITION_CLEARED. Return null to keep that default (the
+   * condition itself cleared). Throw to refuse auto-resolution of this
+   * one exception — a failed explanation is not proof of completion.
+   * Only B08 implements this. Every other rule leaves it unset, so their
+   * auto-resolution evidence is unchanged.
+   */
+  resolutionEvidenceWhenAbsent?(openException: RiskException): Promise<ResolutionEvidence | null>;
 }
 
 import { APPRAISAL_AGREEMENT_RULES } from "./rules/appraisalAgreement.js";

@@ -1,20 +1,24 @@
 // Agent Engine 2.0 — Exception & Risk Engine (Priority 4).
-// Category B — Listing (Build Instructions §10.B, rules 6-9). #8 is
+// Category B — Listing (Build Instructions §10.B, rules 6-9). #8 (v2) is
 // implemented against properties.salesMethod/priceDisplay/campaignStartDate/
 // campaignEndDate — the Stage C "Listing preparation" columns (see
 // property.ts's own comment on them), which the live Property Workspace
 // already surfaces as a non-blocking prompt when missing. This rule doesn't
-// change that UI behaviour; it gives the same condition a durable, tenant-
-// visible, escalating record instead of only an ephemeral page prompt.
+// change that UI behaviour. While the property is still being marketed
+// (Listed or Under Offer) it gives the same condition a durable, tenant-
+// visible record. Sold (Contract), settled (Settlement), and closed
+// (Closed) properties are outside that window: an empty campaign record
+// there is resolved by the scheduled sweep as NO_LONGER_APPLICABLE, and
+// the historical row is kept.
 // #9 remains deferred: no field anywhere in property.ts, workflow.ts, or
 // commerce.ts tracks the underlying condition it describes (Build
 // Instructions §10: "record exact missing dependency rather than
 // approximating").
 
-import { and, eq, ne } from "drizzle-orm";
-import { db, properties, documentPackages, signatureRequests } from "@aee/db";
+import { and, eq, inArray, ne } from "drizzle-orm";
+import { db, properties, documentPackages, signatureRequests, type RiskException } from "@aee/db";
 import type { RiskRule } from "../registry.js";
-import type { RiskFinding } from "../types.js";
+import type { ResolutionEvidence, RiskFinding } from "../types.js";
 import { dedupKey, escalatesAtFor, resolveDefaultOwner, severityForDeadline } from "./shared.js";
 
 const B6_LISTING_PREP_OVERDUE: RiskRule = {
@@ -127,27 +131,73 @@ const B7_LISTING_LIVE_INFO_MISSING: RiskRule = {
   },
 };
 
+// B08 v2. Campaign / sales-method fields are pre-marketing information.
+// They are an active finding only while the property is still being
+// marketed. Inclusive upper bound is Under Offer: Contract is sold,
+// Settlement is settled, and Closed is closed. Empty fields on those
+// completed stages are historical, not an open exception. B06 and B07
+// are unchanged — address completeness (B07) still applies after sale.
+export const B08_RULE_ID = "B08_LISTING_LIVE_MISSING_CAMPAIGN_INFO";
+export const B08_RULE_VERSION = 2;
+export const B08_ACTIVE_MARKETING_STAGES = ["Listed", "Under Offer"] as const;
+
+type CampaignFieldSource = {
+  salesMethod: string | null;
+  priceDisplay: string | null;
+  campaignStartDate: Date | null;
+  campaignEndDate: Date | null;
+};
+
+function missingCampaignFields(property: CampaignFieldSource): string[] {
+  const missing: string[] = [];
+  if (!property.salesMethod) missing.push("sales method");
+  if (!property.priceDisplay) missing.push("price display");
+  if (!property.campaignStartDate) missing.push("campaign start date");
+  if (!property.campaignEndDate) missing.push("campaign end date");
+  return missing;
+}
+
+/**
+ * Evidence for an open B08 row that this pass did not re-detect.
+ * Null keeps the engine default (RULE_CONDITION_CLEARED): the property is
+ * still inside the marketing window, or the campaign fields are now
+ * present, so the absence is a real clear. NO_LONGER_APPLICABLE is only
+ * for a property outside that window whose pre-marketing fields are still
+ * empty — the exception is preserved, not dismissed, and not described as
+ * fixed.
+ */
+export function b08EvidenceWhenAbsent(
+  property: CampaignFieldSource & { workflowStage: string },
+  ruleVersion: number = B08_RULE_VERSION,
+): ResolutionEvidence | null {
+  const inMarketingWindow = (B08_ACTIVE_MARKETING_STAGES as readonly string[]).includes(property.workflowStage);
+  if (inMarketingWindow) return null;
+  if (missingCampaignFields(property).length === 0) return null;
+  return {
+    kind: "NO_LONGER_APPLICABLE",
+    ruleId: B08_RULE_ID,
+    ruleVersion,
+    workflowStage: property.workflowStage,
+  };
+}
+
 const B8_LISTING_MISSING_CAMPAIGN_INFO: RiskRule = {
-  ruleId: "B08_LISTING_LIVE_MISSING_CAMPAIGN_INFO",
-  version: 1,
+  ruleId: B08_RULE_ID,
+  version: B08_RULE_VERSION,
   category: "LISTING",
   name: "Listing is live with no campaign or sales-method information",
   description:
-    "The property has progressed to Listed (or beyond) but salesMethod, priceDisplay, or the campaign start/end dates are still missing. Softer signal than B07 (marketing/descriptive fields, not the legal address fields required for document generation) — ATTENTION rather than AT_RISK.",
+    "The property is in an active marketing stage (Listed or Under Offer) but salesMethod, priceDisplay, or the campaign start/end dates are still missing. Softer signal than B07 (marketing/descriptive fields, not the legal address fields required for document generation) — ATTENTION rather than AT_RISK. Once the property is sold (Contract), settled (Settlement), or closed (Closed), an empty campaign record is no longer an active exception.",
   triggerEventTypes: ["LISTING_LIVE"],
   async scanBrokerage(brokerageId, now) {
     const rows = await db
       .select()
       .from(properties)
-      .where(and(eq(properties.brokerageId, brokerageId), ne(properties.workflowStage, "Appraisal"), ne(properties.workflowStage, "Ready to List")));
+      .where(and(eq(properties.brokerageId, brokerageId), inArray(properties.workflowStage, [...B08_ACTIVE_MARKETING_STAGES])));
 
     const findings: RiskFinding[] = [];
     for (const property of rows) {
-      const missing: string[] = [];
-      if (!property.salesMethod) missing.push("sales method");
-      if (!property.priceDisplay) missing.push("price display");
-      if (!property.campaignStartDate) missing.push("campaign start date");
-      if (!property.campaignEndDate) missing.push("campaign end date");
+      const missing = missingCampaignFields(property);
       if (missing.length === 0) continue;
       const owner = resolveDefaultOwner(property, false);
       findings.push({
@@ -158,14 +208,14 @@ const B8_LISTING_MISSING_CAMPAIGN_INFO: RiskRule = {
         title: "Live listing is missing campaign or sales-method information",
         problemDescription: `This listing is live but is missing: ${missing.join(", ")}.`,
         businessImpact: "Missing campaign/sales-method details leave marketing materials and buyer-facing pages incomplete.",
-        detectedCause: "properties.workflowStage is Listed or later and one or more of salesMethod/priceDisplay/campaignStartDate/campaignEndDate is null.",
+        detectedCause: "properties.workflowStage is Listed or Under Offer and one or more of salesMethod/priceDisplay/campaignStartDate/campaignEndDate is null.",
         ...owner,
         propertyId: property.id,
         transactionId: null,
         dueAt: null,
         escalatesAt: null,
         recommendedAction: "Complete the missing campaign and sales-method details for this listing.",
-        resolutionRequirements: "properties.salesMethod, priceDisplay, campaignStartDate, and campaignEndDate are all recorded.",
+        resolutionRequirements: "properties.salesMethod, priceDisplay, campaignStartDate, and campaignEndDate are all recorded, or the property leaves the active marketing stages (Listed, Under Offer).",
         dismissible: false,
         sourceRecordType: "property",
         sourceRecordId: String(property.id),
@@ -176,6 +226,21 @@ const B8_LISTING_MISSING_CAMPAIGN_INFO: RiskRule = {
       });
     }
     return findings;
+  },
+  async resolutionEvidenceWhenAbsent(openException: RiskException): Promise<ResolutionEvidence | null> {
+    const [property] = await db
+      .select({
+        brokerageId: properties.brokerageId,
+        workflowStage: properties.workflowStage,
+        salesMethod: properties.salesMethod,
+        priceDisplay: properties.priceDisplay,
+        campaignStartDate: properties.campaignStartDate,
+        campaignEndDate: properties.campaignEndDate,
+      })
+      .from(properties)
+      .where(and(eq(properties.id, openException.propertyId), eq(properties.brokerageId, openException.brokerageId)));
+    if (!property) return null;
+    return b08EvidenceWhenAbsent(property, B8_LISTING_MISSING_CAMPAIGN_INFO.version);
   },
 };
 

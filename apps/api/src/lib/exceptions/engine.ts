@@ -35,7 +35,7 @@ import { db, riskExceptions, riskExceptionScanRuns, brokerages, type RiskExcepti
 import { registerHandler, runWithCorrelationId, logger, incrementCounter, type DomainEvent, type AgentEngineEasyEventType } from "@aee/events";
 import { RISK_RULES, getRulesForEventType, type RiskRule } from "./registry.js";
 import { createOrUpdateException, autoResolveException, recordEvaluationFailure, currentCorrelationId } from "./model.js";
-import { OPEN_RISK_EXCEPTION_STATUSES, type RiskFinding } from "./types.js";
+import { OPEN_RISK_EXCEPTION_STATUSES, type ResolutionEvidence, type RiskFinding } from "./types.js";
 
 // ---------------------------------------------------------------------
 // Event-driven dispatch.
@@ -357,11 +357,35 @@ async function scanBrokerageForExceptionsInner(brokerageId: number, summary: Sca
 
     for (const exception of openForRule) {
       if (matchedDedupKeys.has(exception.dedupKey)) continue; // still true this pass — createOrUpdateException already refreshed it above
-      await autoResolveException(exception.id, brokerageId, {
+      let evidence: ResolutionEvidence = {
         kind: "RULE_CONDITION_CLEARED",
         ruleId: rule.ruleId,
         ruleVersion: rule.version,
-      });
+      };
+      // B08 v2 is the only rule that sets resolutionEvidenceWhenAbsent.
+      // It substitutes NO_LONGER_APPLICABLE when the property has left the
+      // marketing window with campaign fields still empty. Every other
+      // rule keeps RULE_CONDITION_CLEARED. A throw is not evidence the
+      // condition cleared — that one exception stays open.
+      if (rule.resolutionEvidenceWhenAbsent) {
+        try {
+          const override = await rule.resolutionEvidenceWhenAbsent(exception);
+          if (override) evidence = override;
+        } catch (err) {
+          summary.errors += 1;
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error("exceptions_absent_finding_explanation_failed", { ruleId: rule.ruleId, exceptionId: exception.id, brokerageId, error: message });
+          await recordEvaluationFailure(exception.id, brokerageId, message).catch((e) =>
+            logger.error("exceptions_record_evaluation_failure_failed", {
+              exceptionId: exception.id,
+              brokerageId,
+              error: e instanceof Error ? e.message : String(e),
+            }),
+          );
+          continue;
+        }
+      }
+      await autoResolveException(exception.id, brokerageId, evidence);
       summary.exceptionsAutoResolved += 1;
     }
   }
