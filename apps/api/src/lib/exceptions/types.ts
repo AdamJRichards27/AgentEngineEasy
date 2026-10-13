@@ -107,7 +107,13 @@ export type ResolutionEvidence =
   // of completion, Build Instructions §3), so a clean pass finding nothing
   // is itself authoritative: the rule re-derived the current truth from
   // live domain state and it no longer matches.
-  | { kind: "RULE_CONDITION_CLEARED"; ruleId: string; ruleVersion: number };
+  | { kind: "RULE_CONDITION_CLEARED"; ruleId: string; ruleVersion: number }
+  // The scheduled sweep confirmed this exception's rule no longer applies
+  // because the source record left the rule's stage window, while the
+  // underlying fields are still empty. This is not proof the condition was
+  // fixed. Stored in the existing resolution_evidence jsonb column — no
+  // new column and no migration. B08 v2 is the only rule that records it.
+  | { kind: "NO_LONGER_APPLICABLE"; ruleId: string; ruleVersion: number; workflowStage: string };
 
 // What one rule evaluation pass found for one source record. The engine
 // (engine.ts) turns this into a risk_exceptions row via model.ts's
