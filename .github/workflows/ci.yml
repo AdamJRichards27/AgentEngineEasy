@@ -1,6 +1,8 @@
 name: CI
 
 # Foundation Remediation Stage 3.2 — continuous integration gate.
+# Re-saved so Actions re-registers this workflow after a startup_failure
+# with zero jobs (synthetic path BuildFailed). No job, env, or step changes.
 #
 # Runs on every pull request and on every push to staging or main. Installs
 # the declared Node.js and pnpm versions from a committed lockfile, then
