@@ -38,6 +38,7 @@ const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
+const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -323,6 +324,7 @@ function SidebarLayout({
 
 function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boolean }) {
   const [location] = useLocation();
+  const minimalShell = shouldRenderMinimalShell(useMinimalUx());
   // AE GROW Pilot Readiness WP5 — a page that fails to render shows a
   // contained fallback here (sidebar stays usable); navigating away resets it.
   return (
@@ -341,7 +343,7 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/pit-crew" component={PitCrewCommandCentre} />
           <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
           <Route path="/grow/appraisals" component={GrowAppraisals} />
-          <Route path="/grow" component={Grow} />
+          <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id" component={Grow} />
           <Route path="/grow/import" component={GrowImport} />
           <Route path="/settings" component={Settings} />

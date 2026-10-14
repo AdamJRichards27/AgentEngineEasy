@@ -960,3 +960,9 @@
 }
 .ae-minimal .am-mobile-nav a.is-current { color: #C44F17; font-weight: 600; }
 .ae-minimal .am-mobile-nav { grid-template-columns: repeat(auto-fit, minmax(68px, 1fr)); }
+.ae-minimal .am-today { min-width: 0; }
+.ae-minimal .am-empty-note { margin: 0 0 12px; color: var(--am-muted); font-size: 13px; line-height: 1.5; }
+.ae-minimal a.am-primary-action { text-decoration: none; color: #212121; }
+.ae-minimal a.am-row-open { text-decoration: none; color: var(--am-muted); }
+.ae-minimal a.am-appraisal-link { text-decoration: none; color: inherit; }
+.ae-minimal .am-call-time.is-overdue { color: var(--am-red); }
