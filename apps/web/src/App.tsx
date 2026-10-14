@@ -1,4 +1,5 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Switch, Route, Link, Redirect, useLocation } from "wouter";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
@@ -6,6 +7,12 @@ import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
 import { buildProductNavLinks, navLinkIsActive, resolveLandingRoute } from "./lib/productNav";
+import {
+  selectMinimalUxVariant,
+  shouldOfferMinimalView,
+  shouldRenderMinimalShell,
+  useMinimalUx,
+} from "./lib/minimalUx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OwnerContextBanner } from "./components/OwnerContextBanner";
 import type { SessionUser } from "./lib/session";
@@ -30,6 +37,7 @@ const Settings = lazy(() => import("./pages/Settings"));
 const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 const Owner = lazy(() => import("./pages/Owner"));
+const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -104,12 +112,10 @@ export default function App() {
           <div className="app-loading">Loading…</div>
         ) : probe === "api-unreachable" ? (
           <ApiUnreachable onRetry={retryProbe} />
-        ) : !isSignedIn ? (
+        ) : !isSignedIn || !user ? (
           <Redirect to="/login" replace />
         ) : (
-          <div className="app-shell">
-            <SidebarLayout user={user ?? undefined} entitlements={entitlements} onSignOut={() => void logout()} />
-          </div>
+          <AuthenticatedExperience user={user} entitlements={entitlements} onSignOut={() => void logout()} />
         )}
       </Route>
       </Switch>
@@ -144,14 +150,106 @@ function ApiUnreachable({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function SidebarLayout({
+function AuthenticatedExperience({
   user,
   entitlements,
   onSignOut,
 }: {
-  user: SessionUser | undefined;
+  user: SessionUser;
   entitlements: string[];
   onSignOut: () => void;
+}) {
+  const ux = useMinimalUx();
+  const queryClient = useQueryClient();
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const ownerWithoutContext = !!user.platformOwner && user.ownerSelectedBrokerageId == null;
+
+  async function selectVariant(variant: "classic" | "minimal") {
+    setSwitching(true);
+    setSwitchError(null);
+    try {
+      await selectMinimalUxVariant(variant);
+    } catch {
+      setSwitchError("Couldn't switch views. You're still on this view.");
+    } finally {
+      try {
+        await queryClient.invalidateQueries({ queryKey: ["session"], exact: true });
+      } catch {
+        // The cookie is already stored. The next session read corrects the shell.
+      }
+      setSwitching(false);
+    }
+  }
+
+  const page = (
+    <>
+      {user?.platformOwner && <OwnerContextBanner user={user} />}
+      {!ownerWithoutContext && (!user.firstName?.trim() || !user.lastName?.trim()) && (
+        <section className="card" role="status">
+          <h2>Complete your profile</h2>
+          <p>Add your first and last name so your brokerage can see who you are.</p>
+          <Link href="/settings" className="btn btn-primary btn-small">
+            Add your name
+          </Link>
+        </section>
+      )}
+      <AuthenticatedRoutes ownerWithoutContext={ownerWithoutContext} />
+    </>
+  );
+
+  if (shouldRenderMinimalShell(ux)) {
+    return (
+      <Suspense fallback={<div className="app-loading">Loading…</div>}>
+        <MinimalShell
+          user={user}
+          entitlements={entitlements}
+          onSignOut={onSignOut}
+          onClassicView={() => void selectVariant("classic")}
+          switching={switching}
+          switchError={switchError}
+        >
+          {page}
+        </MinimalShell>
+      </Suspense>
+    );
+  }
+
+  return (
+    <div className="app-shell" data-ae-ux="classic">
+      <SidebarLayout
+        user={user}
+        entitlements={entitlements}
+        onSignOut={onSignOut}
+        showMinimalView={shouldOfferMinimalView(ux)}
+        onMinimalView={() => void selectVariant("minimal")}
+        switching={switching}
+        switchError={switchError}
+      >
+        {page}
+      </SidebarLayout>
+    </div>
+  );
+}
+
+function SidebarLayout({
+  user,
+  entitlements,
+  onSignOut,
+  showMinimalView,
+  onMinimalView,
+  switching,
+  switchError,
+  children,
+}: {
+  user: SessionUser;
+  entitlements: string[];
+  onSignOut: () => void;
+  showMinimalView: boolean;
+  onMinimalView: () => void;
+  switching: boolean;
+  switchError: string | null;
+  children: React.ReactNode;
 }) {
   const [location] = useLocation();
 
@@ -203,6 +301,11 @@ function SidebarLayout({
               {user?.brokerageName ? ` · ${user.brokerageName}` : ""}
             </span>
           </div>
+          {showMinimalView && (
+            <button type="button" className="app-sidebar-signout" onClick={onMinimalView} disabled={switching}>
+              Minimal view
+            </button>
+          )}
           <button className="app-sidebar-signout" onClick={onSignOut}>
             Sign out
           </button>
@@ -210,48 +313,45 @@ function SidebarLayout({
       </nav>
       <div className="app-content">
         <main>
-          {user?.platformOwner && <OwnerContextBanner user={user} />}
-          {!ownerWithoutContext && (!user?.firstName?.trim() || !user?.lastName?.trim()) && (
-            <section className="card" role="status">
-              <h2>Complete your profile</h2>
-              <p>Add your first and last name so your brokerage can see who you are.</p>
-              <Link href="/settings" className="btn btn-primary btn-small">
-                Add your name
-              </Link>
-            </section>
-          )}
-          {/* AE GROW Pilot Readiness WP5 — a page that fails to render shows a
-              contained fallback here (sidebar stays usable); navigating away
-              resets it. */}
-          <ErrorBoundary label="this page" resetKey={location}>
-            <Suspense fallback={<div className="app-loading">Loading…</div>}>
-              {ownerWithoutContext && location !== "/owner" ? <Redirect to="/owner" replace /> : <Switch>
-                <Route path="/owner" component={Owner} />
-                <Route path="/" component={Home} />
-                <Route path="/today" component={CommandCentre} />
-                <Route path="/properties" component={PropertiesList} />
-                <Route path="/properties/start" component={StartProperty} />
-                <Route path="/properties/:id" component={PropertyWorkspace} />
-                <Route path="/exceptions" component={Exceptions} />
-                <Route path="/communications" component={CommunicationsHub} />
-                <Route path="/financial" component={FinancialOperations} />
-                <Route path="/pit-crew" component={PitCrewCommandCentre} />
-                <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
-                <Route path="/grow/appraisals" component={GrowAppraisals} />
-                <Route path="/grow" component={Grow} />
-                <Route path="/grow/contacts/:id" component={Grow} />
-                <Route path="/grow/import" component={GrowImport} />
-                <Route path="/settings" component={Settings} />
-                <Route path="/settings/integrations" component={SettingsIntegrations} />
-                <Route path="/settings/users" component={SettingsUsers} />
-                <Route>
-                  <p>Page not found.</p>
-                </Route>
-              </Switch>}
-            </Suspense>
-          </ErrorBoundary>
+          {switchError && <p role="alert">{switchError}</p>}
+          {children}
         </main>
       </div>
     </>
+  );
+}
+
+function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boolean }) {
+  const [location] = useLocation();
+  // AE GROW Pilot Readiness WP5 — a page that fails to render shows a
+  // contained fallback here (sidebar stays usable); navigating away resets it.
+  return (
+    <ErrorBoundary label="this page" resetKey={location}>
+      <Suspense fallback={<div className="app-loading">Loading…</div>}>
+        {ownerWithoutContext && location !== "/owner" ? <Redirect to="/owner" replace /> : <Switch>
+          <Route path="/owner" component={Owner} />
+          <Route path="/" component={Home} />
+          <Route path="/today" component={CommandCentre} />
+          <Route path="/properties" component={PropertiesList} />
+          <Route path="/properties/start" component={StartProperty} />
+          <Route path="/properties/:id" component={PropertyWorkspace} />
+          <Route path="/exceptions" component={Exceptions} />
+          <Route path="/communications" component={CommunicationsHub} />
+          <Route path="/financial" component={FinancialOperations} />
+          <Route path="/pit-crew" component={PitCrewCommandCentre} />
+          <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
+          <Route path="/grow/appraisals" component={GrowAppraisals} />
+          <Route path="/grow" component={Grow} />
+          <Route path="/grow/contacts/:id" component={Grow} />
+          <Route path="/grow/import" component={GrowImport} />
+          <Route path="/settings" component={Settings} />
+          <Route path="/settings/integrations" component={SettingsIntegrations} />
+          <Route path="/settings/users" component={SettingsUsers} />
+          <Route>
+            <p>Page not found.</p>
+          </Route>
+        </Switch>}
+      </Suspense>
+    </ErrorBoundary>
   );
 }
