@@ -35,6 +35,42 @@ async function notify(
   await run(config.alert, replacements);
 }
 
+/**
+ * Re-reads what is actually stored remotely: downloads the artifact and its manifest
+ * through the configured download command, requires the downloaded manifest to be
+ * byte-identical to the one written locally, and re-checks the artifact SHA-256 and
+ * byte length against it. Throws (failing the run loudly) on any mismatch.
+ */
+async function verifyUploadedBackup(
+  config: BackupConfig,
+  run: CommandRunner,
+  runDirectory: string,
+  name: string,
+  localManifestPath: string,
+): Promise<{ bytes: number; sha256: string }> {
+  const verifyDirectory = path.join(runDirectory, "verify");
+  await mkdir(verifyDirectory, { recursive: true, mode: 0o700 });
+  const artifact = path.join(verifyDirectory, name);
+  const manifest = `${artifact}.sha256.json`;
+  try {
+    await run(config.download, { source: remoteUri(config.destination, name), destination: artifact, object: name });
+    await run(config.download, {
+      source: remoteUri(config.destination, `${name}.sha256.json`),
+      destination: manifest,
+      object: `${name}.sha256.json`,
+    });
+    const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
+    if (!remoteManifest.equals(localManifest)) {
+      throw new Error("manifest stored remotely differs from the manifest written for this run");
+    }
+    const verified = await verifyManifest(artifact, manifest);
+    return { bytes: verified.bytes, sha256: verified.sha256 };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Post-upload verification failed for ${name}: ${reason}`, { cause: error });
+  }
+}
+
 export interface PruneResult {
   deleted: number;
   failed: number;
@@ -151,6 +187,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       destination: remoteUri(config.destination, path.basename(manifest)),
       object: path.basename(manifest),
     });
+    // Never prune (or report success) on the strength of an upload command's exit code alone.
+    const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, name, manifest);
     const pruneResult = await prune(config, dependencies.run, now, name, log, runId);
     log({
       timestamp: new Date().toISOString(),
@@ -159,6 +197,9 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
+      verified: true,
+      verifiedBytes: verified.bytes,
+      sha256: verified.sha256,
       pruned: pruneResult.deleted,
       pruneFailed: pruneResult.failed,
       pruneProtected: pruneResult.protectedByGuard,
