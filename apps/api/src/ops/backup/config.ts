@@ -48,10 +48,20 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   if (!DURABLE_DESTINATION_SCHEMES.has(destinationUrl.protocol) || !destinationUrl.hostname) {
     throw new Error("BACKUP_DESTINATION must use supported durable object-store scheme: s3, gs, or azblob");
   }
-  const documentDirectory = path.resolve(required(env, "BACKUP_DOCUMENT_DIRECTORY"));
+  const documentSource = (env.BACKUP_DOCUMENT_SOURCE?.trim() || "directory").toLowerCase();
+  if (documentSource !== "directory" && documentSource !== "object-storage") {
+    throw new Error("BACKUP_DOCUMENT_SOURCE must be directory or object-storage");
+  }
+  if (documentSource === "object-storage" && env.OBJECT_STORAGE_PROVIDER?.trim().toLowerCase() !== "s3") {
+    throw new Error("BACKUP_DOCUMENT_SOURCE=object-storage requires OBJECT_STORAGE_PROVIDER=s3");
+  }
   const stagingDirectory = path.resolve(required(env, "BACKUP_STAGING_DIRECTORY"));
-  if (documentDirectory === stagingDirectory || documentDirectory.startsWith(stagingDirectory + path.sep)) {
-    throw new Error("BACKUP_STAGING_DIRECTORY must not contain the live document directory");
+  let documentDirectory: string | undefined;
+  if (documentSource === "directory") {
+    documentDirectory = path.resolve(required(env, "BACKUP_DOCUMENT_DIRECTORY"));
+    if (documentDirectory === stagingDirectory || documentDirectory.startsWith(stagingDirectory + path.sep)) {
+      throw new Error("BACKUP_STAGING_DIRECTORY must not contain the live document directory");
+    }
   }
   const retentionDays = Number(required(env, "BACKUP_RETENTION_DAYS"));
   if (!Number.isInteger(retentionDays) || retentionDays < 1) {
@@ -83,7 +93,8 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   }
   return {
     databaseUrl: required(env, "DATABASE_URL"),
-    documentDirectory,
+    documentSource,
+    ...(documentDirectory ? { documentDirectory } : {}),
     restoreDatabaseUrl: required(env, "BACKUP_RESTORE_DATABASE_URL"),
     restoreDocumentDirectory,
     restoreRoot,
