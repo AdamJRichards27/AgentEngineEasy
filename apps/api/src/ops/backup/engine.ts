@@ -233,8 +233,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     const documentsArchive = path.join(runDirectory, "documents.tar");
     await dependencies.run({
       executable: "tar",
-      args: ["--create", "--file", documentsArchive, "--directory", config.documentDirectory, "."],
-    }, undefined, "archive");
+      args: ["--create", "--file", documentsArchive, "--directory", documentSourceDirectory, "."],
+    });
     await chmod(documentsArchive, 0o600);
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run({
@@ -293,9 +293,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
-      verified: true,
-      verifiedBytes: verified.bytes,
-      sha256: verified.sha256,
+      documentSource: config.documentSource ?? "directory",
+      documents: documentCount,
       pruned,
       durationMs: Date.now() - started,
     });
