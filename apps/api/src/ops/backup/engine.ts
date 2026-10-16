@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { artifactName, retentionCandidates, verifyManifest, writeManifest } from "./artifacts.js";
+import { DEFAULT_MIN_RETAINED_BACKUPS, artifactName, planRetention, verifyManifest, writeManifest } from "./artifacts.js";
 import { assertRestoreTargetIsEmpty, readDatabaseInventory, validateDatabaseInventory } from "./database.js";
 import { compareDocumentKeys, documentInventory, prepareEmptyRestoreDirectory } from "./documents.js";
 import type {
@@ -35,7 +35,20 @@ async function notify(
   await run(config.alert, replacements);
 }
 
-async function prune(config: BackupConfig, run: CommandRunner, now: Date): Promise<number> {
+export interface PruneResult {
+  deleted: number;
+  failed: number;
+  protectedByGuard: number;
+}
+
+async function prune(
+  config: BackupConfig,
+  run: CommandRunner,
+  now: Date,
+  protectedArtifact: string,
+  log: (entry: OperationLog) => void,
+  runId: string,
+): Promise<PruneResult> {
   const listing = await run(config.list, { destination: config.destination });
   let objects: unknown;
   try {
@@ -53,15 +66,36 @@ async function prune(config: BackupConfig, run: CommandRunner, now: Date): Promi
   );
   if (valid.length !== objects.length) throw new Error("Backup list command returned malformed objects");
   const cutoff = new Date(now.valueOf() - config.retentionDays * 86_400_000);
-  const candidates = retentionCandidates(valid, cutoff);
-  for (const object of candidates) {
-    await run(config.remove, {
-      destination: config.destination,
-      object: object.key,
-      remote: remoteUri(config.destination, object.key),
-    });
+  const plan = planRetention(valid, cutoff, {
+    minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS,
+    protectedArtifact,
+  });
+  let deleted = 0;
+  let failed = 0;
+  for (const object of plan.delete) {
+    try {
+      await run(config.remove, {
+        destination: config.destination,
+        object: object.key,
+        remote: remoteUri(config.destination, object.key),
+      });
+      deleted += 1;
+    } catch (error) {
+      // A delete refused by Object Lock / retention policy is expected and must not
+      // fail a backup that was stored successfully; it is logged loudly instead.
+      failed += 1;
+      log({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        operation: "backup",
+        event: "prune_delete_failed",
+        runId,
+        object: object.key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
-  return candidates.length;
+  return { deleted, failed, protectedByGuard: plan.protectedByGuard.length };
 }
 
 export async function createBackup(config: BackupConfig, dependencies: EngineDependencies): Promise<string> {
@@ -117,7 +151,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       destination: remoteUri(config.destination, path.basename(manifest)),
       object: path.basename(manifest),
     });
-    const pruned = await prune(config, dependencies.run, now);
+    const pruneResult = await prune(config, dependencies.run, now, name, log, runId);
     log({
       timestamp: new Date().toISOString(),
       level: "info",
@@ -125,7 +159,9 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
-      pruned,
+      pruned: pruneResult.deleted,
+      pruneFailed: pruneResult.failed,
+      pruneProtected: pruneResult.protectedByGuard,
       durationMs: Date.now() - started,
     });
     return name;
