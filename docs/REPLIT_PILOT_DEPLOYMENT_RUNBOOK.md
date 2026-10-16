@@ -326,10 +326,17 @@ yet publish) the deployment:
 
 1. In the Replit UI, open the Deployments pane for this Repl.
 2. Confirm the deployment target with the Project Owner **before** publishing. The `[deployment]`
-   section currently in `.replit` names `autoscale`; §11 sets out why this application needs a
-   single, always-on instance instead, and why scale-to-zero or more than one replica changes its
-   behaviour. Treat the target as a deployment-configuration decision to be confirmed, not a
-   cost/latency preference — and do not change `.replit` as part of following this runbook.
+   section currently in `.replit` names `autoscale`, which **conflicts with this application's
+   requirement** (§11): the API must run as a single, always-on instance. Autoscale can scale to
+   zero when idle (silently stopping every in-process scheduler) and can run more than one
+   instance (multiplying per-process limiters, sweeps and alerts). **Do not publish with
+   `autoscale`.** The intended target is a single always-on instance (Replit's Reserved VM
+   deployment type, one machine, never sleeping). Confirm the exact `deploymentTarget` value, the
+   machine size, the publishing region/geography (it is locked after first publish) and the monthly
+   price in the Replit Deployments UI before publishing; this repository has not verified them.
+   Changing `.replit` is a deployment-configuration change that needs separate Project Owner
+   approval and is deliberately **not** done by this runbook or by documentation changes; until it
+   is approved and made, treat the `autoscale` value as a known defect, not as the plan.
 3. Set every Secret from §3 in the deployment's own Secrets (Replit deployments have their own
    Secrets store, separate from the Repl's development Secrets — confirm both are set correctly
    and do not assume one implies the other).
@@ -441,6 +448,11 @@ Two consequences follow:
   roughly N times the documented limit, every counter resets on every restart or redeploy, and the
   same condition can page N times inside one cooldown window.
 
+**Status of the checked-in configuration.** `.replit` currently says `deploymentTarget =
+"autoscale"`. That does not satisfy this section. Until the Project Owner approves and makes the
+change to a single always-on target (§8 step 2), no pilot or production publish may rely on this
+repository's `.replit` deployment block.
+
 **What to confirm with the Project Owner**, before publishing: that the deployment runs as a
 single, always-on instance with no scale-to-zero and no horizontal replicas, and that the
 consequences above are accepted for the duration of the pilot. If the answer is more than one
@@ -461,7 +473,11 @@ engineering work, not a configuration change.
   be delivered; a hung alert transport cannot keep the process alive past it).
 
 The second behaviour assumes the deployment **restarts the process automatically** on a non-zero
-exit. Confirm that the chosen deployment target does so — with the always-on, single-instance
+exit. Whether a Reserved VM restarts a crashed (exit code 1) process has **not been verified**:
+Replit's documentation describes restart behaviour for autoscale but this repository holds no
+evidence for the always-on target. Confirm it in a throwaway, non-production deployment (force an
+exit, confirm the process returns and `/api/health/ready` recovers) and keep an external uptime
+probe as the backstop. Confirm that the chosen deployment target does so — with the always-on, single-instance
 configuration above, an exit that is not followed by a restart is a full outage, and every
 in-process scheduler in §11 stops with it.
 
