@@ -51,64 +51,43 @@ async function notify(
   await run(config.alert, replacements);
 }
 
-/** Alert payloads carry a fixed reason code and counts only (never object keys, provider text or identifiers). */
-async function safeAlert(
+/**
+ * Re-reads what is actually stored remotely: downloads the artifact and its manifest
+ * through the configured download command, requires the downloaded manifest to be
+ * byte-identical to the one written locally, and re-checks the artifact SHA-256 and
+ * byte length against it. Throws (failing the run loudly) on any mismatch.
+ */
+async function verifyUploadedBackup(
   config: BackupConfig,
   run: CommandRunner,
-  log: (entry: OperationLog) => void,
-  runId: string,
-  status: string,
-  error: string,
-): Promise<void> {
+  runDirectory: string,
+  name: string,
+  localManifestPath: string,
+): Promise<{ bytes: number; sha256: string }> {
+  const verifyDirectory = path.join(runDirectory, "verify");
+  await mkdir(verifyDirectory, { recursive: true, mode: 0o700 });
+  const artifact = path.join(verifyDirectory, name);
+  const manifest = `${artifact}.sha256.json`;
   try {
-    await notify(config, run, { operation: "backup", status, error, runId });
-  } catch (alertError) {
-    log({
-      timestamp: new Date().toISOString(),
-      level: "error",
-      operation: "backup",
-      event: "alert_failed",
-      runId,
-      error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
+    await run(config.download, { source: remoteUri(config.destination, name), destination: artifact, object: name });
+    await run(config.download, {
+      source: remoteUri(config.destination, `${name}.sha256.json`),
+      destination: manifest,
+      object: `${name}.sha256.json`,
     });
+    const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
+    if (!remoteManifest.equals(localManifest)) {
+      throw new Error("manifest stored remotely differs from the manifest written for this run");
+    }
+    const verified = await verifyManifest(artifact, manifest);
+    return { bytes: verified.bytes, sha256: verified.sha256 };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Post-upload verification failed for ${name}: ${reason}`, { cause: error });
   }
 }
 
-/** Fixed (non-dynamic) alert text per failing stage: a reason code plus a constant label. */
-const ALERT_REASONS: Record<string, string> = {
-  preflight: "preflight_failed: backup configuration refused",
-  prepare: "prepare_failed: backup could not be prepared",
-  tier_upload: "tier_upload_failed: upload to a backup tier failed",
-  verify: "verify_failed: Post-upload verification failed",
-  prune: "prune_failed: retention pruning failed",
-};
-
-/** Thrown when a non-empty backup listing contains no recognisable backup key (see `assessListing`). */
-export class PruneListUnexpectedError extends Error {
-  constructor(
-    readonly listed: number,
-    readonly recognised: number,
-    readonly unrecognisedBackupLike: number = 0,
-  ) {
-    super("prune_list_unexpected: backup listing contains no recognisable backup keys, or backup-named keys in an unrecognised shape");
-    this.name = "PruneListUnexpectedError";
-  }
-}
-
-export interface PruneResult {
-  deleted: number;
-  failed: number;
-  protectedByGuard: number;
-}
-
-async function prune(
-  config: BackupConfig,
-  run: CommandRunner,
-  now: Date,
-  protectedArtifact: string,
-  log: (entry: OperationLog) => void,
-  runId: string,
-): Promise<PruneResult> {
+async function prune(config: BackupConfig, run: CommandRunner, now: Date): Promise<number> {
   const listing = await run(config.list, { destination: config.destination });
   let objects: unknown;
   try {
@@ -249,42 +228,19 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await chmod(artifact, 0o600);
     const manifest = await writeManifest(artifact, now.toISOString());
 
-    // Tiered layout is active when a tier policy is configured (the production loader always sets one):
-    // the same bytes are written once per applicable tier (daily always, weekly on Sunday, monthly on the
-    // 1st; UTC). A config without a tier policy keeps the original flat layout.
-    stage = "tier_upload";
-    const tiers: Tier[] = config.tierPolicy ? tiersFor(now) : [];
-    const manifestName = path.basename(manifest);
-    const targets = tiers.length
-      ? tiers.map((tier) => ({ artifact: tierKey(tier, name), manifest: tierKey(tier, manifestName) }))
-      : [{ artifact: name, manifest: manifestName }];
-    for (const target of targets) {
-      await dependencies.run(config.upload, {
-        source: artifact,
-        destination: remoteUri(config.destination, target.artifact),
-        object: target.artifact,
-      });
-      await dependencies.run(config.upload, {
-        source: manifest,
-        destination: remoteUri(config.destination, target.manifest),
-        object: target.manifest,
-      });
-    }
-    stage = "prune";
-    const pruneEnabled = config.prune !== false;
-    const pruneResult = pruneEnabled
-      ? await prune(config, dependencies.run, now, name, log, runId)
-      : { deleted: 0, failed: 0, protectedByGuard: 0 };
-    if (pruneResult.failed > 0) {
-      await safeAlert(
-        config,
-        dependencies.run,
-        log,
-        runId,
-        "prune_delete_refused",
-        `prune_delete_refused: ${pruneResult.failed} delete(s) refused`,
-      );
-    }
+    await dependencies.run(config.upload, {
+      source: artifact,
+      destination: remoteUri(config.destination, name),
+      object: name,
+    });
+    await dependencies.run(config.upload, {
+      source: manifest,
+      destination: remoteUri(config.destination, path.basename(manifest)),
+      object: path.basename(manifest),
+    });
+    // Never prune (or report success) on the strength of an upload command's exit code alone.
+    const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, name, manifest);
+    const pruned = await prune(config, dependencies.run, now);
     log({
       timestamp: new Date().toISOString(),
       level: "info",
@@ -292,13 +248,10 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
-      tiersWritten: tiers,
-      prune: pruneEnabled ? "on" : "off",
-      pruned: pruneResult.deleted,
-      pruneFailed: pruneResult.failed,
-      pruneProtected: pruneResult.protectedByGuard,
-      documentSource: config.documentSource ?? "directory",
-      documents: documentCount,
+      verified: true,
+      verifiedBytes: verified.bytes,
+      sha256: verified.sha256,
+      pruned,
       durationMs: Date.now() - started,
     });
     return name;
