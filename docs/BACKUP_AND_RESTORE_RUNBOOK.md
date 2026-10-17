@@ -48,9 +48,21 @@ it has run against a real provider.
 - **#224 prune safeguard.** Pruning keeps the newest `BACKUP_MIN_RETAINED_COUNT` (default 7,
   optional) *recoverable* backups (artifact **and** manifest present) and the artifact created by
   the current run, regardless of age or `BACKUP_RETENTION_DAYS`; it deletes nothing when no
-  recoverable backup exists; it removes an artifact together with its manifest (artifact first). A
-  delete refused by Object Lock/retention is logged as `prune_delete_failed` (level `error`) and
-  does not fail a backup that was stored. Operators must still alert on `prune_delete_failed`.
+  recoverable backup exists. An artifact and its manifest are **one recoverability unit** (D-3, local
+  R12 change): units are deleted one at a time, artifact first, and the manifest is deleted **only
+  after its artifact delete was confirmed successful in the same run**. Any artifact delete that is
+  refused (Object Lock/retention), times out or has an unknown outcome leaves the manifest in place,
+  is logged as `prune_delete_failed` (level `error`), **stops pruning for the run** (`prune_stopped`),
+  and raises one `prune_delete_refused` alert; the backup that was just stored and verified is still
+  reported as successful. Before the first delete the run uploads a durable intent record
+  `deletion-records/<runId>.intent.json` (every planned unit); if that upload fails nothing is deleted
+  and the run fails with `prune_failed`. After the last delete it uploads
+  `deletion-records/<runId>.outcome.json` with a per-unit status (`deleted`,
+  `artifact_delete_failed_manifest_preserved`, `manifest_delete_failed_artifact_deleted`,
+  `not_attempted_pruning_stopped`). The records contain object keys only and live outside the tier
+  folders; they are never pruned by this code. Retrying is idempotent: refused units remain whole and
+  are planned again next run. Operators must alert on `prune_delete_failed` and `prune_stopped`.
+  Not yet evidenced against a real provider or Object Lock.
 - **#225 post-upload verification.** After upload the run downloads the artifact and manifest,
   requires the stored manifest to equal the one written for the run, and re-checks SHA-256 and byte
   length. **Every tier copy written by the run** (daily, weekly, monthly) is verified, and all
