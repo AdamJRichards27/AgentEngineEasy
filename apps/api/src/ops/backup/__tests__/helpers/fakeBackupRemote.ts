@@ -48,6 +48,8 @@ export interface FakeRemoteOptions {
   applyRemovals?: boolean;
   /** Message thrown by refused deletes (default "AccessDenied: object lock"). */
   removeError?: string;
+  /** Enable pruning (production default is OFF since D-2; tests that exercise pruning opt in explicitly). */
+  prune?: boolean;
   /** Extra BackupConfig fields (tier policy, prune switch, vault mode, ...). */
   configOverrides?: Partial<BackupConfig>;
 }
@@ -87,6 +89,7 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
     ...(options.minRetainedBackups === undefined ? {} : { minRetainedBackups: options.minRetainedBackups }),
     encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
     download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
+    ...(options.prune === undefined ? {} : { prune: options.prune }),
     ...(options.configOverrides ?? {}),
   };
   const calls: string[] = [];

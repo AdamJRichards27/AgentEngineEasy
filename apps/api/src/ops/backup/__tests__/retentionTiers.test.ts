@@ -252,7 +252,7 @@ test("T9 config: tier defaults 7/4/12, validation, BACKUP_PRUNE and vault-mode r
     TIERS.map((t) => base.tierPolicy![t].keep),
     [7, 4, 12],
   );
-  assert.equal(base.prune, true, "default unchanged from #224 (default-off is a separate, unapproved patch)");
+  assert.equal(base.prune, false, "D-2: pruning is default OFF; BACKUP_PRUNE=on is required");
   assert.equal(base.vaultMode, false);
   const custom = loadProductionBackupConfig(envFor({ BACKUP_TIER_DAILY_KEEP: "9", BACKUP_TIER_MONTHLY_DAYS: "400" }));
   assert.equal(custom.tierPolicy!.daily.keep, 9);
@@ -265,9 +265,9 @@ test("T9 config: tier defaults 7/4/12, validation, BACKUP_PRUNE and vault-mode r
   assert.equal(loadProductionBackupConfig(envFor({ BACKUP_PRUNE: "ON" })).prune, true);
   assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_PRUNE: "maybe" })), /BACKUP_PRUNE must be exactly on or off/);
   assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_VAULT_MODE: "yes" })), /BACKUP_VAULT_MODE must be exactly true or false/);
-  // Vault mode: prune must be explicitly off; on (explicit or implicit) is rejected.
+  // Vault mode: explicit on is rejected; unset is fine now that pruning defaults off (D-2).
   assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_VAULT_MODE: "true", BACKUP_PRUNE: "on" })), /prohibited in vault mode/);
-  assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_VAULT_MODE: "true" })), /prohibited in vault mode/);
+  assert.equal(loadProductionBackupConfig(envFor({ BACKUP_VAULT_MODE: "true" })).prune, false);
   const vault = loadProductionBackupConfig(envFor({ BACKUP_VAULT_MODE: "true", BACKUP_PRUNE: "off" }));
   assert.equal(vault.vaultMode, true);
   assert.equal(vault.prune, false);
@@ -275,7 +275,7 @@ test("T9 config: tier defaults 7/4/12, validation, BACKUP_PRUNE and vault-mode r
 
 // ---- T10 ------------------------------------------------------------------------------------
 test("T10 engine: prune off never runs list or remove, and uploads to all three tiers on a Sunday-the-1st", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [1, 2, 3].flatMap((n) => backup("daily", n)),
     now: NOW,
     configOverrides: { tierPolicy: { daily: { keep: 1, retentionDays: 1 }, weekly: { keep: 1, retentionDays: 1 }, monthly: { keep: 1, retentionDays: 1 } }, prune: false },
@@ -297,7 +297,7 @@ test("T10 engine: prune off never runs list or remove, and uploads to all three 
 });
 
 test("T10b engine: vault mode with pruning enabled is refused before any command runs; with prune off it works", async () => {
-  const refused = await createFakeRemote({ now: NOW, configOverrides: { vaultMode: true, prune: true, tierPolicy: DEFAULT_TIER_POLICY } });
+  const refused = await createFakeRemote({ prune: true, now: NOW, configOverrides: { vaultMode: true, prune: true, tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await assert.rejects(refused.createBackup(), /prohibited in vault mode/);
     assert.ok(!refused.calls.some((c) => c === "upload" || c.startsWith("upload:") || c === "list" || c.startsWith("remove")));
@@ -306,13 +306,13 @@ test("T10b engine: vault mode with pruning enabled is refused before any command
   } finally {
     await refused.cleanup();
   }
-  const implicit = await createFakeRemote({ now: NOW, configOverrides: { vaultMode: true, tierPolicy: DEFAULT_TIER_POLICY } });
+  const implicit = await createFakeRemote({ prune: true, now: NOW, configOverrides: { vaultMode: true, tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await assert.rejects(implicit.createBackup(), /prohibited in vault mode/);
   } finally {
     await implicit.cleanup();
   }
-  const ok = await createFakeRemote({ now: NOW, configOverrides: { vaultMode: true, prune: false, tierPolicy: DEFAULT_TIER_POLICY } });
+  const ok = await createFakeRemote({ prune: true, now: NOW, configOverrides: { vaultMode: true, prune: false, tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await ok.createBackup();
     assert.ok(!ok.calls.some((c) => c === "list" || c.startsWith("remove")));
@@ -332,7 +332,7 @@ function assertNoIdentifiers(payload: unknown): void {
 
 test("T13 alert payloads carry only reason codes and counts, never identifiers or raw provider text", async () => {
   // (a) a document inventory failure names a customer document key in its local error message.
-  const doc = await createFakeRemote({ now: NOW, documentKeys: [SENTINEL], configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const doc = await createFakeRemote({ prune: true, now: NOW, documentKeys: [SENTINEL], configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await assert.rejects(doc.createBackup(), /Document integrity failed/);
     assert.equal(doc.alerts.length, 1);
@@ -342,7 +342,7 @@ test("T13 alert payloads carry only reason codes and counts, never identifiers o
     await doc.cleanup();
   }
   // (b) a refused delete whose provider message carries a bucket name, an ARN and an S3 URI.
-  const refused = await createFakeRemote({
+  const refused = await createFakeRemote({ prune: true,
     seed: [1, 2, 3].flatMap((n) => backup("daily", n)),
     now: NOW,
     failRemove: true,
@@ -365,7 +365,7 @@ test("T13 alert payloads carry only reason codes and counts, never identifiers o
 
 // ---- T14 ------------------------------------------------------------------------------------
 test("T14 a refused artifact delete fails nothing, is counted once, preserves the manifest and stops pruning (D-3)", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [1, 2].flatMap((n) => backup("daily", n)),
     now: NOW,
     failRemove: true,
@@ -386,7 +386,7 @@ test("T14 a refused artifact delete fails nothing, is counted once, preserves th
 
 // ---- T15 ------------------------------------------------------------------------------------
 test("T15 a weekly upload failure after the daily upload succeeded fails loudly, alerts once and prunes nothing", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [1, 2, 3].flatMap((n) => backup("daily", n)),
     now: NOW,
     failUpload: /^weekly\//,
@@ -407,7 +407,7 @@ test("T15 a weekly upload failure after the daily upload succeeded fails loudly,
 
 // ---- restore tier path -----------------------------------------------------------------------
 test("restore reads from the tier folder when --tier is given and from the legacy root otherwise", async () => {
-  const remote = await createFakeRemote({ now: NOW });
+  const remote = await createFakeRemote({ prune: true, now: NOW });
   try {
     const seen: string[] = [];
     const run = async (command: { executable: string }, replacements: Record<string, string> = {}) => {

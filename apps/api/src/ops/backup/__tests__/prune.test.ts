@@ -119,6 +119,7 @@ async function runEngine(
     retentionDays,
     minRetainedBackups: minRetained,
     failRemove,
+    prune: true,
     now: new Date("2026-03-01T00:00:00Z"),
   });
   try {

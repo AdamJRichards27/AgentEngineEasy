@@ -20,7 +20,7 @@ function backup(day: number, withManifest = true): RemoteObject[] {
  */
 
 test("NEW: verification (download artifact + manifest) completes before the first list/remove", async () => {
-  const remote = await createFakeRemote({ seed: [1, 2, 3, 4].flatMap((d) => backup(d)), retentionDays: 1, minRetainedBackups: 1 });
+  const remote = await createFakeRemote({ prune: true, seed: [1, 2, 3, 4].flatMap((d) => backup(d)), retentionDays: 1, minRetainedBackups: 1 });
   try {
     const name = await remote.createBackup();
     const after = remote.calls.slice(remote.calls.lastIndexOf(`upload:${name}.sha256.json`) + 1);
@@ -35,7 +35,7 @@ test("NEW: verification (download artifact + manifest) completes before the firs
 });
 
 test("NEW: a failed verification never prunes even when every older backup is expired", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [1, 2, 3, 4].flatMap((d) => backup(d)),
     retentionDays: 1,
     minRetainedBackups: 1,
@@ -54,7 +54,7 @@ test("NEW: a failed verification never prunes even when every older backup is ex
 });
 
 test("NEW: the just-uploaded backup is never pruned when the live listing includes it", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [1, 2, 3].flatMap((d) => backup(d)),
     retentionDays: 1,
     minRetainedBackups: 1,
@@ -70,7 +70,7 @@ test("NEW: the just-uploaded backup is never pruned when the live listing includ
 });
 
 test("NEW: a refused delete fails nothing, stops pruning after the first uncertain result and the run still reports verified: true", async () => {
-  const remote = await createFakeRemote({ seed: [1, 2].flatMap((d) => backup(d)), retentionDays: 1, minRetainedBackups: 1, failRemove: true });
+  const remote = await createFakeRemote({ prune: true, seed: [1, 2].flatMap((d) => backup(d)), retentionDays: 1, minRetainedBackups: 1, failRemove: true });
   try {
     await remote.createBackup();
     const done = remote.logs.find((l) => l.event === "completed");
@@ -91,7 +91,7 @@ function tierBackup(tier: string, day: number): RemoteObject[] {
 }
 
 test("T11 tiered: every tier copy is downloaded and verified before the first list, and only removes follow the list", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [1, 2, 3, 4].flatMap((d) => tierBackup("daily", d)),
     now: new Date("2026-03-01T00:00:00Z"), // Sunday the 1st: daily + weekly + monthly
     configOverrides: tiered,
@@ -115,7 +115,7 @@ test("T11 tiered: every tier copy is downloaded and verified before the first li
 
 test("T12 tiered negative: a corrupted copy in ANY tier prevents list and remove and raises exactly one verify_failed alert", async () => {
   for (const bad of TIERS) {
-    const remote = await createFakeRemote({
+    const remote = await createFakeRemote({ prune: true,
       seed: [1, 2, 3, 4].flatMap((d) => tierBackup("daily", d)),
       now: new Date("2026-03-01T00:00:00Z"),
       configOverrides: tiered,

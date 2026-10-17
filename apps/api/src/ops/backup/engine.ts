@@ -363,8 +363,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
     // Vault mode forbids pruning: refuse before doing any work rather than discover it at prune time.
     stage = "preflight";
-    if (config.vaultMode && config.prune !== false) {
-      throw new Error("Pruning is prohibited in vault mode (BACKUP_PRUNE must be off)");
+    if (config.vaultMode && config.prune === true) {
+      throw new Error("Pruning is prohibited in vault mode (BACKUP_PRUNE must not be on)");
     }
     stage = "prepare";
     const dump = path.join(runDirectory, "database.dump");
@@ -446,7 +446,21 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     stage = "verify";
     const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, targets, manifest);
     stage = "prune";
-    const pruneEnabled = config.prune !== false;
+    // D-2: default OFF. Only an explicit `true` may reach any list/delete operation.
+    const pruneEnabled = config.prune === true;
+    const pruneStatus = pruneEnabled ? "enabled" : config.pruneSource === "explicit" ? "disabled_explicit" : "disabled_default";
+    log({
+      timestamp: new Date().toISOString(),
+      level: "info",
+      operation: "backup",
+      event: pruneEnabled ? "prune_enabled" : "prune_disabled",
+      runId,
+      pruneStatus,
+      source: config.pruneSource ?? (config.prune === undefined ? "default" : "explicit"),
+      message: pruneEnabled
+        ? "pruning is ENABLED (BACKUP_PRUNE=on): expired backups will be deleted after verification, artifact first"
+        : "pruning is DISABLED: no backup is listed or deleted by this run; set BACKUP_PRUNE=on to enable retention pruning (not valid with BACKUP_VAULT_MODE=true)",
+    });
     const pruneResult = pruneEnabled
       ? await prune(config, dependencies.run, now, name, log, runId, runDirectory)
       : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0 };
@@ -471,6 +485,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       documents: documentCount,
       tiersWritten: tiers,
       prune: pruneEnabled ? "on" : "off",
+      pruneStatus,
       verified: true,
       verifiedBytes: verified.bytes,
       sha256: verified.sha256,

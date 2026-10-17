@@ -39,7 +39,7 @@ test("L2 assessListing does not recognise absolute, s3://, wrongly-prefixed or u
 
 // ---- L3 positive: documented contract is pruned normally --------------------------------------
 test("L3 destination-relative listing (documented contract) is accepted and pruned as before", async () => {
-  const remote = await createFakeRemote({ seed: eight("daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const remote = await createFakeRemote({ prune: true, seed: eight("daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await remote.createBackup();
     assert.equal(remote.removed.length, 2, "oldest of 8 daily backups (artifact + manifest) is pruned");
@@ -52,8 +52,8 @@ test("L3 destination-relative listing (documented contract) is accepted and prun
 });
 
 test("L3b an empty listing is not 'unexpected' (fresh destination) and a legacy flat listing is accepted", async () => {
-  const empty = await createFakeRemote({ seed: [], now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
-  const flat = await createFakeRemote({ seed: eight(""), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const empty = await createFakeRemote({ prune: true, seed: [], now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const flat = await createFakeRemote({ prune: true, seed: eight(""), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await empty.createBackup();
     assert.equal(empty.removed.length, 0);
@@ -75,7 +75,7 @@ for (const [label, prefix] of [
   ["s3:// URI with the tier directly under the bucket", "s3://my-bucket/daily/"],
 ] as const) {
   test(`L4 ${label} listing fails the run visibly, deletes nothing, alerts with code and counts only`, async () => {
-    const remote = await createFakeRemote({ seed: eight(prefix), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+    const remote = await createFakeRemote({ prune: true, seed: eight(prefix), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
     try {
       await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
       assert.deepEqual(remote.removed, [], "nothing deleted");
@@ -101,7 +101,7 @@ for (const [label, prefix] of [
 }
 
 test("L5 with prune off the listing is never inspected (no list, no unexpected-format failure)", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: eight("s3://my-bucket/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY, prune: false },
   });
   try {
@@ -114,9 +114,9 @@ test("L5 with prune off the listing is never inspected (no list, no unexpected-f
 });
 
 test("L6 last-recoverable-backup protection is preserved: one recoverable backup, or none, deletes nothing", async () => {
-  const one = await createFakeRemote({ seed: old("daily/", 1), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const one = await createFakeRemote({ prune: true, seed: old("daily/", 1), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   // Only an orphan artifact (no manifest) is listed: zero recoverable backups in the listing.
-  const none = await createFakeRemote({ seed: old("daily/", 2).slice(0, 1), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const none = await createFakeRemote({ prune: true, seed: old("daily/", 2).slice(0, 1), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await one.createBackup();
     assert.deepEqual(one.removed, []);
@@ -130,7 +130,7 @@ test("L6 last-recoverable-backup protection is preserved: one recoverable backup
 
 test("L7 mixed listing (recognised keys + backup-named keys in another shape) fails visibly, deletes nothing, alerts with counts only", async () => {
   const seed = [...eight("daily/"), ...eight("ae-backups/prod/daily/")];
-  const remote = await createFakeRemote({ seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const remote = await createFakeRemote({ prune: true, seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
     assert.deepEqual(remote.removed, [], "nothing deleted");
@@ -150,7 +150,7 @@ test("L7b hidden-manifest mixed listing (the hazard): without the safeguard the 
     const [artifact, manifest] = old("daily/", n) as [RemoteObject, RemoteObject];
     return n <= 3 ? [artifact, { ...manifest, key: `s3://my-bucket/${manifest.key}` }] : [artifact, manifest];
   });
-  const remote = await createFakeRemote({ seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const remote = await createFakeRemote({ prune: true, seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
     assert.deepEqual(remote.removed, []);
@@ -162,7 +162,7 @@ test("L7b hidden-manifest mixed listing (the hazard): without the safeguard the 
 
 test("L7c unrelated foreign objects alongside recognised keys are NOT flagged (no new assumption about destination contents)", async () => {
   const seed = [...eight("daily/"), { key: "notes.txt", lastModified: "2025-01-01T00:00:00Z" }, { key: "other/readme.md", lastModified: "2025-01-01T00:00:00Z" }];
-  const remote = await createFakeRemote({ seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const remote = await createFakeRemote({ prune: true, seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await remote.createBackup();
     assert.equal(remote.alerts.length, 0);
@@ -178,7 +178,7 @@ test("L7d assessListing reports backup-named unrecognised keys separately from f
 });
 
 test("L8 a non-empty listing of only unrelated keys is treated as unexpected (documented contract: list returns the destination's backup objects)", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: [{ key: "notes.txt", lastModified: "2025-01-01T00:00:00Z" }], now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY },
   });
   try {

@@ -20,6 +20,7 @@ function config(root: string): BackupConfig {
     stagingDirectory: path.join(root, "staging"),
     destination: "durable://vault/backups",
     retentionDays: 30,
+    prune: true,
     encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
     download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
   };
