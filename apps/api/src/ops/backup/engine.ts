@@ -88,8 +88,9 @@ export class PruneListUnexpectedError extends Error {
   constructor(
     readonly listed: number,
     readonly recognised: number,
+    readonly unrecognisedBackupLike: number = 0,
   ) {
-    super("prune_list_unexpected: backup listing contains no recognisable backup keys");
+    super("prune_list_unexpected: backup listing contains no recognisable backup keys, or backup-named keys in an unrecognised shape");
     this.name = "PruneListUnexpectedError";
   }
 }
@@ -127,7 +128,10 @@ async function prune(
   // Fail visibly (never silently prune nothing) when the adapter's key format is not the documented
   // destination-relative contract. Nothing has been deleted at this point.
   const assessment = assessListing(valid);
-  if (assessment.listed > 0 && assessment.recognised === 0) {
+  // A listing that mixes recognised keys with backup-named keys in another shape would make the planner
+  // under-count (e.g. a hidden manifest turns a recoverable backup into an "orphan artifact"), so it is
+  // refused too. Unrelated foreign objects (non-backup names) are not counted and do not trigger this.
+  if ((assessment.listed > 0 && assessment.recognised === 0) || assessment.unrecognisedBackupLike > 0) {
     log({
       timestamp: new Date().toISOString(),
       level: "error",
@@ -136,8 +140,9 @@ async function prune(
       runId,
       listed: assessment.listed,
       recognised: assessment.recognised,
+      unrecognisedBackupLike: assessment.unrecognisedBackupLike,
     });
-    throw new PruneListUnexpectedError(assessment.listed, assessment.recognised);
+    throw new PruneListUnexpectedError(assessment.listed, assessment.recognised, assessment.unrecognisedBackupLike);
   }
   const plan = planTierRetention(
     valid,
@@ -311,7 +316,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     // Local log keeps the full text; the alert carries only a fixed reason code.
     const reason =
       error instanceof PruneListUnexpectedError
-        ? `prune_list_unexpected: listing had ${error.listed} entries, ${error.recognised} recognised`
+        ? `prune_list_unexpected: listing had ${error.listed} entries, ${error.recognised} recognised${error.recognised > 0 ? `, ${error.unrecognisedBackupLike} backup-named unrecognised` : ""}`
         : (ALERT_REASONS[stage] ?? "backup_failed: backup failed");
     await safeAlert(config, dependencies.run, log, runId, "failed", reason);
     throw error;
