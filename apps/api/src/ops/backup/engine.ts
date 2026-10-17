@@ -1,7 +1,18 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_MIN_RETAINED_BACKUPS, artifactName, planRetention, verifyManifest, writeManifest } from "./artifacts.js";
+import {
+  DEFAULT_MIN_RETAINED_BACKUPS,
+  DEFAULT_TIER_POLICY,
+  artifactName,
+  planTierRetention,
+  sanitizeErrorText,
+  tierKey,
+  tiersFor,
+  verifyManifest,
+  writeManifest,
+  type Tier,
+} from "./artifacts.js";
 import { assertRestoreTargetIsEmpty, readDatabaseInventory, validateDatabaseInventory } from "./database.js";
 import { compareDocumentKeys, documentInventory, prepareEmptyRestoreDirectory } from "./documents.js";
 import type {
@@ -24,7 +35,8 @@ function defaultLog(entry: OperationLog): void {
 }
 
 function remoteUri(destination: string, name: string): string {
-  return `${destination}/${encodeURIComponent(name)}`;
+  // Encode each path segment but keep "/" so tier folders (daily/, weekly/, monthly/) stay folders.
+  return `${destination}/${name.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 async function notify(
@@ -33,6 +45,29 @@ async function notify(
   replacements: Record<string, string>,
 ): Promise<void> {
   await run(config.alert, replacements);
+}
+
+/** Alert payloads carry a fixed reason code and counts only (never object keys, provider text or identifiers). */
+async function safeAlert(
+  config: BackupConfig,
+  run: CommandRunner,
+  log: (entry: OperationLog) => void,
+  runId: string,
+  status: string,
+  error: string,
+): Promise<void> {
+  try {
+    await notify(config, run, { operation: "backup", status, error, runId });
+  } catch (alertError) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "alert_failed",
+      runId,
+      error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
+    });
+  }
 }
 
 export interface PruneResult {
@@ -65,11 +100,13 @@ async function prune(
       typeof (item as RemoteObject).lastModified === "string",
   );
   if (valid.length !== objects.length) throw new Error("Backup list command returned malformed objects");
-  const cutoff = new Date(now.valueOf() - config.retentionDays * 86_400_000);
-  const plan = planRetention(valid, cutoff, {
-    minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS,
-    protectedArtifact,
-  });
+  const plan = planTierRetention(
+    valid,
+    now,
+    config.tierPolicy ?? DEFAULT_TIER_POLICY,
+    { retentionDays: config.retentionDays, minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS },
+    { protectedArtifact },
+  );
   let deleted = 0;
   let failed = 0;
   for (const object of plan.delete) {
@@ -95,7 +132,7 @@ async function prune(
       });
     }
   }
-  return { deleted, failed, protectedByGuard: plan.protectedByGuard.length };
+  return { deleted, failed, protectedByGuard: plan.protectedByGuard };
 }
 
 export async function createBackup(config: BackupConfig, dependencies: EngineDependencies): Promise<string> {
@@ -106,8 +143,15 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
   const runDirectory = path.join(config.stagingDirectory, `backup-${runId}`);
   const name = artifactName(now);
   const artifact = path.join(runDirectory, name);
+  let stage = "prepare";
   try {
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    // Vault mode forbids pruning: refuse before doing any work rather than discover it at prune time.
+    stage = "preflight";
+    if (config.vaultMode && config.prune !== false) {
+      throw new Error("Pruning is prohibited in vault mode (BACKUP_PRUNE must be off)");
+    }
+    stage = "prepare";
     const dump = path.join(runDirectory, "database.dump");
     await dependencies.run({
       executable: "pg_dump",
@@ -141,17 +185,42 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await chmod(artifact, 0o600);
     const manifest = await writeManifest(artifact, now.toISOString());
 
-    await dependencies.run(config.upload, {
-      source: artifact,
-      destination: remoteUri(config.destination, name),
-      object: name,
-    });
-    await dependencies.run(config.upload, {
-      source: manifest,
-      destination: remoteUri(config.destination, path.basename(manifest)),
-      object: path.basename(manifest),
-    });
-    const pruneResult = await prune(config, dependencies.run, now, name, log, runId);
+    // Tiered layout is active when a tier policy is configured (the production loader always sets one):
+    // the same bytes are written once per applicable tier (daily always, weekly on Sunday, monthly on the
+    // 1st; UTC). A config without a tier policy keeps the original flat layout.
+    stage = "tier_upload";
+    const tiers: Tier[] = config.tierPolicy ? tiersFor(now) : [];
+    const manifestName = path.basename(manifest);
+    const targets = tiers.length
+      ? tiers.map((tier) => ({ artifact: tierKey(tier, name), manifest: tierKey(tier, manifestName) }))
+      : [{ artifact: name, manifest: manifestName }];
+    for (const target of targets) {
+      await dependencies.run(config.upload, {
+        source: artifact,
+        destination: remoteUri(config.destination, target.artifact),
+        object: target.artifact,
+      });
+      await dependencies.run(config.upload, {
+        source: manifest,
+        destination: remoteUri(config.destination, target.manifest),
+        object: target.manifest,
+      });
+    }
+    stage = "prune";
+    const pruneEnabled = config.prune !== false;
+    const pruneResult = pruneEnabled
+      ? await prune(config, dependencies.run, now, name, log, runId)
+      : { deleted: 0, failed: 0, protectedByGuard: 0 };
+    if (pruneResult.failed > 0) {
+      await safeAlert(
+        config,
+        dependencies.run,
+        log,
+        runId,
+        "prune_delete_refused",
+        `prune_delete_refused: ${pruneResult.failed} delete(s) refused`,
+      );
+    }
     log({
       timestamp: new Date().toISOString(),
       level: "info",
@@ -159,6 +228,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
+      tiersWritten: tiers,
+      prune: pruneEnabled ? "on" : "off",
       pruned: pruneResult.deleted,
       pruneFailed: pruneResult.failed,
       pruneProtected: pruneResult.protectedByGuard,
@@ -176,25 +247,20 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       error: message,
       durationMs: Date.now() - started,
     });
-    try {
-      await notify(config, dependencies.run, { operation: "backup", status: "failed", error: message, runId });
-    } catch (alertError) {
-      log({
-        timestamp: new Date().toISOString(),
-        level: "error",
-        operation: "backup",
-        event: "alert_failed",
-        runId,
-        error: alertError instanceof Error ? alertError.message : String(alertError),
-      });
-    }
+    // Local log keeps the full text; the alert carries only a fixed reason code.
+    await safeAlert(config, dependencies.run, log, runId, "failed", `${stage}_failed`);
     throw error;
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
   }
 }
 
-export interface RestoreRequest { artifact: string; confirmDisposable: boolean; }
+export interface RestoreRequest {
+  artifact: string;
+  confirmDisposable: boolean;
+  /** Tier folder to restore from. Omitted = legacy flat layout (backups written before tiering). */
+  tier?: Tier;
+}
 
 function databaseIdentity(databaseUrl: string): string {
   let parsed: URL;
@@ -233,15 +299,16 @@ export async function restoreBackup(
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
     const artifact = path.join(runDirectory, name);
     const manifest = `${artifact}.sha256.json`;
+    const remoteName = request.tier ? tierKey(request.tier, name) : name;
     await dependencies.run(config.download, {
-      source: remoteUri(config.destination, name),
+      source: remoteUri(config.destination, remoteName),
       destination: artifact,
-      object: name,
+      object: remoteName,
     });
     await dependencies.run(config.download, {
-      source: remoteUri(config.destination, `${name}.sha256.json`),
+      source: remoteUri(config.destination, `${remoteName}.sha256.json`),
       destination: manifest,
-      object: `${name}.sha256.json`,
+      object: `${remoteName}.sha256.json`,
     });
     await verifyManifest(artifact, manifest);
     const payload = path.join(runDirectory, "payload.tar");
