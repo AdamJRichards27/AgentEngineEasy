@@ -16,6 +16,9 @@ import {
   writeManifest,
   type Tier,
 } from "./artifacts.js";
+import {
+  newRunMarker, safeRemoveRunDirectory, startHeartbeat, sweepStaging, updateRunMarker, writeRunMarker,
+} from "./stagingSweep.js";
 import { assertRestoreTargetIsEmpty, readDatabaseInventory, validateDatabaseInventory } from "./database.js";
 import { stageObjectStorageDocuments, type DocumentObjectReader } from "./objectDocuments.js";
 import { compareDocumentKeys, documentInventory, prepareEmptyRestoreDirectory } from "./documents.js";
@@ -310,6 +313,29 @@ async function prune(
   return { deleted, failed, protectedByGuard: plan.protectedByGuard, stopped, manifestsPreserved };
 }
 
+async function runStagingSweep(config: BackupConfig, log: (entry: OperationLog) => void, runId: string): Promise<void> {
+  const mode = config.stagingSweep ?? "off";
+  if (mode === "off") return;
+  try {
+    const report = await sweepStaging({
+      stagingDirectory: config.stagingDirectory,
+      mode,
+      minAgeMs: (config.stagingSweepMinAgeHours ?? 24) * 3_600_000,
+    });
+    log({
+      timestamp: new Date().toISOString(), level: "info", operation: "backup", event: "staging_sweep", runId,
+      mode, counts: report.counts,
+      ambiguous: report.entries.filter((e) => e.decision === "ambiguous").map((e) => `${e.name}: ${e.reason}`),
+      artifactsRetained: report.entries.filter((e) => e.decision === "artifact_retained" || e.decision === "would_retain_artifact").map((e) => e.name),
+    });
+  } catch (error) {
+    log({
+      timestamp: new Date().toISOString(), level: "error", operation: "backup", event: "staging_sweep_failed", runId,
+      mode, error: sanitizeErrorText(error instanceof Error ? error.message : String(error)),
+    });
+  }
+}
+
 export async function createBackup(config: BackupConfig, dependencies: EngineDependencies): Promise<string> {
   const now = dependencies.now?.() ?? new Date();
   const runId = randomBytes(8).toString("hex");
@@ -319,8 +345,13 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
   const name = artifactName(now);
   const artifact = path.join(runDirectory, name);
   let stage = "prepare";
+  let stopHeartbeat: () => void = () => undefined;
   try {
+    // D-5: optional stale-staging sweep BEFORE this run's own directory exists (off by default). Never fatal.
+    await runStagingSweep(config, log, runId);
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    await writeRunMarker(runDirectory, newRunMarker(runId, "backup", new Date()));
+    stopHeartbeat = startHeartbeat(runDirectory);
     // Vault mode forbids pruning: refuse before doing any work rather than discover it at prune time.
     stage = "preflight";
     assertIsolationNotBypassed(config);
@@ -380,6 +411,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await dependencies.run(config.encryption, { input: payload, output: artifact, kmsProfile: config.encryptionKmsProfile }, "encrypt");
     await chmod(artifact, 0o600);
     const manifest = await writeManifest(artifact, now.toISOString());
+    await updateRunMarker(runDirectory, { state: "encrypted" });
 
     // Tiered layout is active when a tier policy is configured (the production loader always sets one):
     // the same bytes are written once per applicable tier (daily always, weekly on Sunday, monthly on the
@@ -406,6 +438,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     // tier copy is re-downloaded and verified BEFORE the first list/remove can run.
     stage = "verify";
     const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, targets, manifest);
+    await updateRunMarker(runDirectory, { state: "uploaded_verified" });
     stage = "prune";
     // D-2: default OFF. Only an explicit `true` may reach any list/delete operation.
     const pruneEnabled = config.prune === true;
@@ -477,7 +510,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await safeAlert(config, dependencies.run, log, runId, "failed", reason);
     throw error;
   } finally {
-    await rm(runDirectory, { recursive: true, force: true });
+    stopHeartbeat();
+    await safeRemoveRunDirectory(runDirectory);
   }
 }
 
@@ -532,8 +566,11 @@ export async function restoreBackup(
   const started = Date.now();
   const runDirectory = path.join(config.stagingDirectory, `restore-${runId}`);
   let stage = "prepare";
+  let stopHeartbeat: () => void = () => undefined;
   try {
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    await writeRunMarker(runDirectory, newRunMarker(runId, "restore", new Date()));
+    stopHeartbeat = startHeartbeat(runDirectory);
     const artifact = path.join(runDirectory, name);
     const manifest = `${artifact}.sha256.json`;
     const remoteName = request.tier !== undefined ? tierKey(request.tier, name) : name;

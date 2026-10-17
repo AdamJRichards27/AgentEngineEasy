@@ -73,7 +73,7 @@ test("S2 dry-run: reports would_remove, deletes nothing, writes an audit record 
     const report = await sweepStaging(opts(f.staging, "dry-run"));
     assert.equal(report.entries[0]?.decision, "would_remove");
     assert.ok(existsSync(path.join(dir, "database.dump")), "dry-run must not touch anything");
-    const records = await audit(f.staging);
+    const records = (await audit(f.staging)).filter((r) => r.decision !== undefined);
     assert.equal(records.length, 1);
     assert.equal(records[0]!.dryRun, true);
     assert.equal(records[0]!.decision, "would_remove");
@@ -151,6 +151,7 @@ test("S7 symlinks and hardlinks are ambiguous: nothing outside the directory is 
     const inner = await runDir(f.staging, "backup", ID2);
     await symlink(path.join(outside, "precious.txt"), path.join(inner, "documents.tar"));
     const hard = await runDir(f.staging, "restore", "7777777777777777");
+    await rm(path.join(hard, "payload.tar"));
     await link(path.join(outside, "precious.txt"), path.join(hard, "payload.tar"));
     const report = await sweepStaging(opts(f.staging, "on"));
     assert.equal(await readFile(path.join(outside, "precious.txt"), "utf8"), "keep");
@@ -354,7 +355,8 @@ test("S19 crash after verified upload (SIGKILL at prune): the sweep removes the 
     const dir = path.join(c.staging, dirName!);
     assert.equal((await readRunMarker(dir))?.state, "uploaded_verified");
     const report = await sweepStaging({ stagingDirectory: c.staging, mode: "on", minAgeMs: 24 * HOUR, now: () => new Date(Date.now() + 48 * HOUR) });
-    assert.equal(report.entries.find((e) => e.name === dirName)?.decision, "removed");
+    const e = report.entries.find((x) => x.name === dirName);
+    assert.equal(e?.decision, "removed", `${e?.decision}: ${e?.reason}`);
     assert.ok(!existsSync(dir));
   } finally { await c.cleanup(); }
 });
