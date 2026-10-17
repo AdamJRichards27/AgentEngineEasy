@@ -45,7 +45,7 @@ async function notify(
   run: CommandRunner,
   replacements: Record<string, string>,
 ): Promise<void> {
-  await run(config.alert, replacements);
+  await run(config.alert, replacements, "alert");
 }
 
 /** Alert payloads carry a fixed reason code and counts only (never object keys, provider text or identifiers). */
@@ -92,8 +92,8 @@ async function verifyUploadedBackup(
     const artifact = path.join(verifyDirectory, name);
     const manifest = `${artifact}.sha256.json`;
     try {
-      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact });
-      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest });
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact }, "verify_download");
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest }, "verify_download");
       const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
       if (!remoteManifest.equals(localManifest)) {
         throw new Error("manifest stored remotely differs from the manifest written for this run");
@@ -144,7 +144,7 @@ async function prune(
   log: (entry: OperationLog) => void,
   runId: string,
 ): Promise<PruneResult> {
-  const listing = await run(config.list, { destination: config.destination });
+  const listing = await run(config.list, { destination: config.destination }, "list");
   let objects: unknown;
   try {
     objects = JSON.parse(listing.stdout);
@@ -194,7 +194,7 @@ async function prune(
         destination: config.destination,
         object: object.key,
         remote: remoteUri(config.destination, object.key),
-      });
+      }, "delete");
       deleted += 1;
     } catch (error) {
       // A delete refused by Object Lock / retention policy is expected and must not
@@ -235,7 +235,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await dependencies.run({
       executable: "pg_dump",
       args: ["--format=custom", "--no-owner", "--no-privileges", "--file", dump, config.databaseUrl],
-    });
+    }, undefined, "database");
     await chmod(dump, 0o600);
 
     const inventory = await readDatabaseInventory(dependencies.run, config.databaseUrl);
@@ -252,15 +252,15 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await dependencies.run({
       executable: "tar",
       args: ["--create", "--file", documentsArchive, "--directory", config.documentDirectory, "."],
-    });
+    }, undefined, "archive");
     await chmod(documentsArchive, 0o600);
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run({
       executable: "tar",
       args: ["--create", "--file", payload, "--directory", runDirectory, "database.dump", "inventory.json", "documents.tar"],
-    });
+    }, undefined, "archive");
     await chmod(payload, 0o600);
-    await dependencies.run(config.encryption, { input: payload, output: artifact, kmsProfile: config.encryptionKmsProfile });
+    await dependencies.run(config.encryption, { input: payload, output: artifact, kmsProfile: config.encryptionKmsProfile }, "encrypt");
     await chmod(artifact, 0o600);
     const manifest = await writeManifest(artifact, now.toISOString());
 
@@ -278,12 +278,12 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
         source: artifact,
         destination: remoteUri(config.destination, target.artifact),
         object: target.artifact,
-      });
+      }, "upload");
       await dependencies.run(config.upload, {
         source: manifest,
         destination: remoteUri(config.destination, target.manifest),
         object: target.manifest,
-      });
+      }, "upload");
     }
     // Never prune (or report success) on the strength of an upload command's exit code alone: every
     // tier copy is re-downloaded and verified BEFORE the first list/remove can run.
@@ -397,12 +397,12 @@ export async function restoreBackup(
         source: remoteUri(config.destination, remoteName),
         destination: artifact,
         object: remoteName,
-      });
+      }, "restore_download");
       await dependencies.run(config.restoreDownload ?? config.download, {
         source: remoteUri(config.destination, `${remoteName}.sha256.json`),
         destination: manifest,
         object: `${remoteName}.sha256.json`,
-      });
+      }, "restore_download");
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
       if (!request.tier) throw error; // no-tier restore behaviour is unchanged
@@ -415,12 +415,12 @@ export async function restoreBackup(
     await verifyManifest(artifact, manifest);
     stage = "decrypt_and_restore";
     const payload = path.join(runDirectory, "payload.tar");
-    await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile });
+    await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile }, "decrypt");
     await assertRestoreTargetIsEmpty(dependencies.run, config.restoreDatabaseUrl);
     await dependencies.run({
       executable: "tar",
       args: ["--extract", "--file", payload, "--directory", runDirectory],
-    });
+    }, undefined, "archive");
     const expected = JSON.parse(await readFile(path.join(runDirectory, "inventory.json"), "utf8")) as DatabaseInventory;
     await dependencies.run({
       executable: "pg_restore",
@@ -434,7 +434,7 @@ export async function restoreBackup(
         config.restoreDatabaseUrl,
         path.join(runDirectory, "database.dump"),
       ],
-    });
+    }, undefined, "database");
     const actual = await readDatabaseInventory(dependencies.run, config.restoreDatabaseUrl);
     validateDatabaseInventory(expected, actual);
 
@@ -454,7 +454,7 @@ export async function restoreBackup(
     await dependencies.run({
       executable: "tar",
       args: ["--extract", "--file", path.join(runDirectory, "documents.tar"), "--directory", targetDocuments],
-    });
+    }, undefined, "archive");
     const documentComparison = compareDocumentKeys(actual.documentKeys, await documentInventory(targetDocuments));
     if (documentComparison.missing.length || documentComparison.orphaned.length) {
       throw new Error(

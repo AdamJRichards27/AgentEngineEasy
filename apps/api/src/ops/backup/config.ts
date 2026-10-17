@@ -1,6 +1,7 @@
 import path from "node:path";
 import { DEFAULT_TIER_POLICY, TIERS, type TierPolicy } from "./artifacts.js";
-import type { BackupConfig, CommandSpec } from "./types.js";
+import { patternsOverlap } from "./commands.js";
+import type { BackupConfig, BackupOperation, CommandSpec, EnvIsolationPolicy } from "./types.js";
 
 const DURABLE_DESTINATION_SCHEMES = new Set(["s3:", "gs:", "azblob:"]);
 
@@ -73,6 +74,59 @@ function optionalIdentityCommands(env: NodeJS.ProcessEnv): Pick<BackupConfig, "v
   return { ...(verifyDownload ? { verifyDownload } : {}), ...(restoreDownload ? { restoreDownload } : {}) };
 }
 
+const ENV_OPERATIONS: Array<[BackupOperation, string]> = [
+  ["database", "DATABASE"], ["encrypt", "ENCRYPT"], ["upload", "UPLOAD"], ["verify_download", "VERIFY_DOWNLOAD"],
+  ["list", "LIST"], ["delete", "DELETE"], ["alert", "ALERT"], ["decrypt", "DECRYPT"], ["restore_download", "RESTORE_DOWNLOAD"],
+];
+
+function allowList(env: NodeJS.ProcessEnv, name: string): string[] {
+  const raw = env[name]?.trim();
+  if (!raw) return [];
+  const entries = raw.split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (entry === "*") throw new Error(`${name} must not allow every variable`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*\*?$/.test(entry)) {
+      throw new Error(`${name} entries must be environment variable names, optionally ending in * for a prefix`);
+    }
+  }
+  return entries;
+}
+
+/**
+ * Command-level environment isolation. OFF unless BACKUP_ENV_ISOLATION=true (legacy behaviour otherwise).
+ * When on, each operation's child gets the fixed base variables + BACKUP_ENV_COMMON_ALLOW + its own
+ * BACKUP_ENV_<OPERATION>_ALLOW. Per-operation allowlists must not overlap, so no credential variable can be
+ * admitted to two operations (this is what keeps writers away from restore/decrypt credentials and the
+ * verifier away from write/delete credentials). Only names are inspected; values are never read here.
+ */
+function envIsolation(env: NodeJS.ProcessEnv): EnvIsolationPolicy | undefined {
+  if (!strictBoolean(env, "BACKUP_ENV_ISOLATION")) return undefined;
+  const operations = { archive: [] } as unknown as Record<BackupOperation, string[]>;
+  for (const [operation, suffix] of ENV_OPERATIONS) operations[operation] = allowList(env, `BACKUP_ENV_${suffix}_ALLOW`);
+  const common = allowList(env, "BACKUP_ENV_COMMON_ALLOW");
+  for (let i = 0; i < ENV_OPERATIONS.length; i += 1) {
+    for (let j = i + 1; j < ENV_OPERATIONS.length; j += 1) {
+      const [a] = ENV_OPERATIONS[i];
+      const [b] = ENV_OPERATIONS[j];
+      for (const left of operations[a]) {
+        for (const right of operations[b]) {
+          if (patternsOverlap(left, right)) {
+            throw new Error(`Environment isolation: ${a} and ${b} allowlists overlap on "${left}" / "${right}"; a variable may be allowed to only one backup operation`);
+          }
+        }
+      }
+    }
+  }
+  for (const [operation] of ENV_OPERATIONS) {
+    for (const entry of operations[operation]) {
+      if (common.some((shared) => patternsOverlap(shared, entry))) {
+        throw new Error(`Environment isolation: "${entry}" is in both BACKUP_ENV_COMMON_ALLOW and a per-operation allowlist`);
+      }
+    }
+  }
+  return { common, operations };
+}
+
 export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env): BackupConfig {
   if (env.BACKUP_ENVIRONMENT !== "production") {
     throw new Error("BACKUP_ENVIRONMENT must explicitly equal production; no local backup fallback is permitted");
@@ -131,6 +185,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   if (!restoreDocumentDirectory.startsWith(restoreRoot + path.sep)) {
     throw new Error("BACKUP_RESTORE_DOCUMENT_DIRECTORY must be inside BACKUP_RESTORE_ROOT");
   }
+  const isolation = envIsolation(env);
   return {
     databaseUrl: required(env, "DATABASE_URL"),
     documentDirectory,
@@ -154,5 +209,6 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     list: requirePlaceholders("BACKUP_LIST_COMMAND", command(env, "BACKUP_LIST_COMMAND"), ["destination"]),
     remove: requirePlaceholders("BACKUP_DELETE_COMMAND", command(env, "BACKUP_DELETE_COMMAND"), ["object"]),
     alert: requirePlaceholders("BACKUP_ALERT_COMMAND", command(env, "BACKUP_ALERT_COMMAND"), ["operation", "error"]),
+    ...(isolation ? { envIsolation: isolation } : {}),
   };
 }
