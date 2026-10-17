@@ -40,6 +40,12 @@ export interface FakeRemoteOptions {
   failList?: boolean;
   /** Make the alert command fail. */
   failAlert?: boolean;
+  /** Refuse (throw on) deletes only for object keys matching this pattern (e.g. artifacts but not manifests). */
+  failRemovePattern?: RegExp;
+  /** Ambiguous delete: the object IS removed remotely but the command still reports failure (e.g. timeout after the request landed). */
+  removeThenThrow?: RegExp;
+  /** Make `list` reflect removals (a real bucket). Default false keeps the original fixed-listing behaviour. */
+  applyRemovals?: boolean;
   /** Message thrown by refused deletes (default "AccessDenied: object lock"). */
   removeError?: string;
   /** Extra BackupConfig fields (tier policy, prune switch, vault mode, ...). */
@@ -54,6 +60,8 @@ export interface FakeRemote {
   uploaded: Map<string, Buffer>;
   /** Objects removed through the delete command. */
   removed: string[];
+  /** Mutable delete-fault controls (initialised from the options); lets a test lift a refusal between runs. */
+  controls: { failRemove?: boolean; failRemovePattern?: RegExp; removeThenThrow?: RegExp };
   config: BackupConfig;
   run: CommandRunner;
   /** Run the real createBackup() against this fake remote. */
@@ -87,6 +95,11 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
   const uploaded = new Map<string, Buffer>();
   const removed: string[] = [];
   const seed = options.seed ?? [];
+  const controls: FakeRemote["controls"] = {
+    failRemove: options.failRemove,
+    failRemovePattern: options.failRemovePattern,
+    removeThenThrow: options.removeThenThrow,
+  };
 
   const run: CommandRunner = async (command, replacements = {}) => {
     const object = replacements.object;
@@ -124,11 +137,15 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
         const live: RemoteObject[] = options.listIncludesUploads
           ? [...uploaded.keys()].map((key) => ({ key, lastModified: (options.now ?? new Date("2026-03-01T00:00:00Z")).toISOString() }))
           : [];
-        return { stdout: JSON.stringify([...seed, ...live]), stderr: "" };
+        const all = [...seed, ...live];
+        const visible = options.applyRemovals ? all.filter((o) => !removed.includes(o.key)) : all;
+        return { stdout: JSON.stringify(visible), stderr: "" };
       }
       case "remove":
-        if (options.failRemove) throw new Error(options.removeError ?? "AccessDenied: object lock");
+        if (controls.failRemove) throw new Error(options.removeError ?? "AccessDenied: object lock");
+        if (controls.failRemovePattern?.test(object!)) throw new Error(options.removeError ?? "AccessDenied: object lock");
         removed.push(object!);
+        if (controls.removeThenThrow?.test(object!)) throw new Error("RequestTimeout: delete outcome unknown");
         return { stdout: "", stderr: "" };
       case "alert":
         alerts.push(replacements);
@@ -140,7 +157,7 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
   };
 
   return {
-    calls, logs, alerts, uploaded, removed, config, run,
+    calls, logs, alerts, uploaded, removed, controls, config, run,
     createBackup: async () => {
       return createBackup(config, {
         run,
