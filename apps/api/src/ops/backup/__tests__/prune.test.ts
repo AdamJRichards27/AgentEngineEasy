@@ -153,7 +153,8 @@ test("a prune delete refused by Object Lock is logged loudly but does not fail t
   assert.ok(name.startsWith("aee-protected-"));
   assert.deepEqual(removed, []);
   const failures = logs.filter((l) => l.event === "prune_delete_failed");
-  assert.equal(failures.length, 2);
+  assert.equal(failures.length, 1, "D-3: pruning stops at the first refused delete (was: every object attempted)");
   assert.equal(failures[0]?.level, "error");
-  assert.equal(logs.find((l) => l.event === "completed")?.pruneFailed, 2);
+  assert.equal(logs.find((l) => l.event === "completed")?.pruneFailed, 1);
+  assert.ok(logs.some((l) => l.event === "prune_stopped"));
 });

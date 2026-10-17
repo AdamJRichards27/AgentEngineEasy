@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   DEFAULT_MIN_RETAINED_BACKUPS,
   DEFAULT_TIER_POLICY,
+  MANIFEST_SUFFIX,
   artifactName,
   assessListing,
   planTierRetention,
@@ -96,6 +97,64 @@ export interface PruneResult {
   deleted: number;
   failed: number;
   protectedByGuard: number;
+  /** True when pruning halted after a delete failed or was uncertain. */
+  stopped: boolean;
+  /** Manifests deliberately kept because their artifact could not be confirmed deleted. */
+  manifestsPreserved: number;
+}
+
+interface PruneUnit {
+  artifact?: RemoteObject;
+  manifest?: RemoteObject;
+}
+
+type PruneUnitStatus =
+  | "deleted"
+  | "artifact_delete_failed_manifest_preserved"
+  | "manifest_delete_failed_artifact_deleted"
+  | "not_attempted_pruning_stopped";
+
+interface PruneUnitOutcome {
+  artifact: string | null;
+  manifest: string | null;
+  status: PruneUnitStatus;
+  error?: string;
+}
+
+/**
+ * Groups planned deletions into recoverability units: an artifact together with its own manifest (same folder,
+ * name + ".sha256.json"). A manifest with no planned artifact is its own unit (orphan manifest, nothing to protect).
+ * The just-uploaded artifact and its manifest are never part of a unit (defence in depth over the planner).
+ */
+function buildPruneUnits(objects: RemoteObject[], protectedArtifact: string): PruneUnit[] {
+  const units = new Map<string, PruneUnit>();
+  const order: string[] = [];
+  for (const object of objects) {
+    const base = object.key.endsWith(MANIFEST_SUFFIX) ? object.key.slice(0, -MANIFEST_SUFFIX.length) : object.key;
+    const basename = base.slice(base.lastIndexOf("/") + 1);
+    if (basename === protectedArtifact) continue;
+    let unit = units.get(base);
+    if (!unit) {
+      unit = {};
+      units.set(base, unit);
+      order.push(base);
+    }
+    if (object.key.endsWith(MANIFEST_SUFFIX)) unit.manifest = object;
+    else unit.artifact = object;
+  }
+  return order.map((key) => units.get(key)!);
+}
+
+async function storeDeletionRecord(
+  config: BackupConfig,
+  run: CommandRunner,
+  runDirectory: string,
+  key: string,
+  record: Record<string, unknown>,
+): Promise<void> {
+  const local = path.join(runDirectory, path.posix.basename(key));
+  await writeFile(local, JSON.stringify(record) + "\n", { mode: 0o600 });
+  await run(config.upload, { source: local, destination: remoteUri(config.destination, key), object: key }, "upload");
 }
 
 async function prune(
@@ -105,6 +164,7 @@ async function prune(
   protectedArtifact: string,
   log: (entry: OperationLog) => void,
   runId: string,
+  runDirectory: string,
 ): Promise<PruneResult> {
   const listing = await run(config.list, { destination: config.destination }, "list");
   let objects: unknown;
@@ -148,32 +208,105 @@ async function prune(
     { retentionDays: config.retentionDays, minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS },
     { protectedArtifact },
   );
+  // D-3: an artifact and its manifest are ONE recoverability unit. Group the plan into units (artifact first)
+  // and never touch a manifest unless its own artifact delete was confirmed in this run.
+  const units = buildPruneUnits(plan.delete, protectedArtifact);
+  if (units.length === 0) return { deleted: 0, failed: 0, protectedByGuard: plan.protectedByGuard, stopped: false, manifestsPreserved: 0 };
+  // Durable intent BEFORE any destructive operation. If it cannot be stored, nothing is deleted (fail closed).
+  const recordPrefix = `deletion-records/${runId}`;
+  await storeDeletionRecord(config, run, runDirectory, `${recordPrefix}.intent.json`, {
+    version: 1,
+    kind: "prune-intent",
+    runId,
+    createdAt: new Date().toISOString(),
+    protectedArtifact,
+    units: units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null })),
+  });
+  const outcomes: PruneUnitOutcome[] = units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null, status: "not_attempted_pruning_stopped" }));
   let deleted = 0;
   let failed = 0;
-  for (const object of plan.delete) {
-    try {
-      await run(config.remove, {
-        destination: config.destination,
-        object: object.key,
-        remote: remoteUri(config.destination, object.key),
-      }, "delete");
+  let manifestsPreserved = 0;
+  let stopped = false;
+  const fail = (object: string, error: unknown, event: string): void => {
+    failed += 1;
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event,
+      runId,
+      object,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  };
+  for (let index = 0; index < units.length && !stopped; index += 1) {
+    const unit = units[index]!;
+    const outcome = outcomes[index]!;
+    // Artifact first. Any throw (refused by Object Lock/retention, timeout, ambiguous) means the artifact may
+    // still exist, so its manifest MUST be preserved and pruning stops: the result is not trustworthy.
+    if (unit.artifact) {
+      try {
+        await run(config.remove, {
+          destination: config.destination,
+          object: unit.artifact.key,
+          remote: remoteUri(config.destination, unit.artifact.key),
+        }, "delete");
+      } catch (error) {
+        fail(unit.artifact.key, error, "prune_delete_failed");
+        outcome.status = "artifact_delete_failed_manifest_preserved";
+        outcome.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+        if (unit.manifest) manifestsPreserved += 1;
+        stopped = true;
+        break;
+      }
       deleted += 1;
-    } catch (error) {
-      // A delete refused by Object Lock / retention policy is expected and must not
-      // fail a backup that was stored successfully; it is logged loudly instead.
-      failed += 1;
-      log({
-        timestamp: new Date().toISOString(),
-        level: "error",
-        operation: "backup",
-        event: "prune_delete_failed",
-        runId,
-        object: object.key,
-        error: error instanceof Error ? error.message : String(error),
-      });
     }
+    if (unit.manifest) {
+      try {
+        await run(config.remove, {
+          destination: config.destination,
+          object: unit.manifest.key,
+          remote: remoteUri(config.destination, unit.manifest.key),
+        }, "delete");
+        deleted += 1;
+      } catch (error) {
+        fail(unit.manifest.key, error, "prune_delete_failed");
+        outcome.status = "manifest_delete_failed_artifact_deleted";
+        outcome.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+        stopped = true;
+        break;
+      }
+    }
+    outcome.status = "deleted";
   }
-  return { deleted, failed, protectedByGuard: plan.protectedByGuard };
+  if (stopped) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "prune_stopped",
+      runId,
+      deleted,
+      failed,
+      manifestsPreserved,
+      unitsNotAttempted: outcomes.filter((o) => o.status === "not_attempted_pruning_stopped").length,
+    });
+  }
+  // Outcome record after the last destructive operation. A failure to store it is itself a visible failure
+  // (counted and logged) but cannot undo deletions that already happened; the intent record remains.
+  try {
+    await storeDeletionRecord(config, run, runDirectory, `${recordPrefix}.outcome.json`, {
+      version: 1,
+      kind: "prune-outcome",
+      runId,
+      completedAt: new Date().toISOString(),
+      stopped,
+      units: outcomes,
+    });
+  } catch (error) {
+    fail(`${recordPrefix}.outcome.json`, error, "prune_outcome_record_failed");
+  }
+  return { deleted, failed, protectedByGuard: plan.protectedByGuard, stopped, manifestsPreserved };
 }
 
 export async function createBackup(config: BackupConfig, dependencies: EngineDependencies): Promise<string> {
@@ -274,8 +407,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     stage = "prune";
     const pruneEnabled = config.prune !== false;
     const pruneResult = pruneEnabled
-      ? await prune(config, dependencies.run, now, name, log, runId)
-      : { deleted: 0, failed: 0, protectedByGuard: 0 };
+      ? await prune(config, dependencies.run, now, name, log, runId, runDirectory)
+      : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0 };
     if (pruneResult.failed > 0) {
       await safeAlert(
         config,
@@ -295,7 +428,16 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       artifact: name,
       documentSource: config.documentSource ?? "directory",
       documents: documentCount,
-      pruned,
+      tiersWritten: tiers,
+      prune: pruneEnabled ? "on" : "off",
+      verified: true,
+      verifiedBytes: verified.bytes,
+      sha256: verified.sha256,
+      pruned: pruneResult.deleted,
+      pruneFailed: pruneResult.failed,
+      pruneProtected: pruneResult.protectedByGuard,
+      pruneStopped: pruneResult.stopped,
+      manifestsPreserved: pruneResult.manifestsPreserved,
       durationMs: Date.now() - started,
     });
     return name;

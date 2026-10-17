@@ -120,7 +120,11 @@ test("M7 retry is idempotent and never damages recoverability; the last verified
     for (const a of artifacts) assert.ok(listed.includes(`${a}.sha256.json`), `${a} keeps its manifest`);
     assert.ok(artifacts.length >= 2, "keep floor of 2 recoverable backups still honoured");
     // every removed manifest had its artifact removed first
-    for (const m of r.removed.filter(isManifest)) assert.ok(r.removed.indexOf(m.slice(0, -".sha256.json".length)) !== -1 && r.removed.indexOf(m.slice(0, -".sha256.json".length)) < r.removed.indexOf(m));
+    const removedNow: string[] = [...r.removed];
+    for (const m of removedNow.filter(isManifest)) {
+      const a = m.slice(0, -".sha256.json".length);
+      assert.ok(removedNow.indexOf(a) !== -1 && removedNow.indexOf(a) < removedNow.indexOf(m));
+    }
     // third run: nothing left to prune, no error, no duplicate damage
     const before = r.removed.length;
     await r.createBackup();

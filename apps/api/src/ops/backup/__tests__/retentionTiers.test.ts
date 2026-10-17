@@ -364,7 +364,7 @@ test("T13 alert payloads carry only reason codes and counts, never identifiers o
 });
 
 // ---- T14 ------------------------------------------------------------------------------------
-test("T14 a refused delete is isolated per object, fails nothing, and is counted (Patch C behaviour NOT included)", async () => {
+test("T14 a refused artifact delete fails nothing, is counted once, preserves the manifest and stops pruning (D-3)", async () => {
   const remote = await createFakeRemote({
     seed: [1, 2].flatMap((n) => backup("daily", n)),
     now: NOW,
@@ -374,9 +374,10 @@ test("T14 a refused delete is isolated per object, fails nothing, and is counted
   try {
     await remote.createBackup();
     const failures = remote.logs.filter((l: OperationLog) => l.event === "prune_delete_failed");
-    assert.equal(failures.length, 2, "artifact AND manifest each attempted (artifact-first-skip is Patch C, unapproved)");
+    assert.equal(failures.length, 1, "only the artifact delete is attempted; its manifest is preserved and pruning stops (D-3)");
+    assert.ok(!(failures[0]!.object as string).endsWith(".sha256.json"));
     assert.ok((failures[0]!.object as string).startsWith("daily/"));
-    assert.equal(remote.logs.find((l) => l.event === "completed")?.pruneFailed, 2);
+    assert.equal(remote.logs.find((l) => l.event === "completed")?.pruneFailed, 1);
     assert.deepEqual(remote.removed, []);
   } finally {
     await remote.cleanup();
