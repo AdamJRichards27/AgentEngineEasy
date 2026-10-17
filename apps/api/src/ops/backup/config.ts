@@ -99,6 +99,47 @@ function allowList(env: NodeJS.ProcessEnv, name: string): string[] {
  * admitted to two operations (this is what keeps writers away from restore/decrypt credentials and the
  * verifier away from write/delete credentials). Only names are inspected; values are never read here.
  */
+/**
+ * Variables that let a process discover credentials or identities from files, metadata endpoints or agents
+ * (config/credential file paths, role/token sources, SSH agent, kubeconfig...). Env isolation never passes them
+ * unless named; these rules also stop them being shared with every operation or swept in by a prefix.
+ * Names that only locate the home directory must use BACKUP_ENV_HOME instead.
+ */
+const HOME_LOCATORS = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "XDG_*"];
+const CREDENTIAL_DISCOVERY = [
+  ...HOME_LOCATORS,
+  "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
+  "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_*", "AWS_EC2_METADATA_*", "AWS_SSO_*", "AWS_CA_BUNDLE",
+  "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_*", "AZURE_*", "KUBECONFIG", "PGPASSFILE", "PGSERVICEFILE", "PGSYSCONFDIR",
+  "SSH_AUTH_SOCK", "NETRC", "CURL_HOME", "GNUPGHOME", "DOCKER_CONFIG",
+];
+const SECRET_LOOKING = /(SECRET|TOKEN|PASSWORD|PASSWD|KEY|CREDENTIAL|SESSION|PRIVATE|URL|DSN)/i;
+
+function discoveryMatch(entry: string): string | undefined {
+  return CREDENTIAL_DISCOVERY.find((pattern) => patternsOverlap(pattern, entry));
+}
+
+function assertAllowlistNames(common: string[], operations: Record<BackupOperation, string[]>): void {
+  for (const entry of common) {
+    if (entry.endsWith("*")) throw new Error(`Environment isolation: BACKUP_ENV_COMMON_ALLOW entry "${entry}" is a prefix; the shared allowlist accepts exact names only`);
+    if (!/^[A-Z][A-Z0-9_]*$/.test(entry)) throw new Error(`Environment isolation: BACKUP_ENV_COMMON_ALLOW entry "${entry}" must be an upper-case variable name (shared allowlist)`);
+    if (SECRET_LOOKING.test(entry)) throw new Error(`Environment isolation: BACKUP_ENV_COMMON_ALLOW entry "${entry}" looks like a secret or connection string; the shared allowlist is for non-secret settings only`);
+    if (discoveryMatch(entry)) throw new Error(`Environment isolation: BACKUP_ENV_COMMON_ALLOW entry "${entry}" is a credential-discovery variable and may not be shared with every operation`);
+  }
+  for (const [operation, entries] of Object.entries(operations)) {
+    for (const entry of entries) {
+      const hit = discoveryMatch(entry);
+      if (!hit) continue;
+      if (HOME_LOCATORS.some((pattern) => patternsOverlap(pattern, entry))) {
+        throw new Error(`Environment isolation: ${operation} allowlist entry "${entry}" would pass a home-directory locator; use BACKUP_ENV_HOME instead (credential-discovery)`);
+      }
+      if (entry.endsWith("*")) {
+        throw new Error(`Environment isolation: ${operation} allowlist prefix "${entry}" could admit credential-discovery variables (matches ${hit}); list exact names instead`);
+      }
+    }
+  }
+}
+
 function envIsolation(env: NodeJS.ProcessEnv): EnvIsolationPolicy | undefined {
   if (!strictBoolean(env, "BACKUP_ENV_ISOLATION")) return undefined;
   const operations = { archive: [] } as unknown as Record<BackupOperation, string[]>;
@@ -124,7 +165,50 @@ function envIsolation(env: NodeJS.ProcessEnv): EnvIsolationPolicy | undefined {
       }
     }
   }
-  return { common, operations };
+  assertAllowlistNames(common, operations);
+  const home = env.BACKUP_ENV_HOME?.trim();
+  if (home && !path.isAbsolute(home)) throw new Error("BACKUP_ENV_HOME must be an absolute path");
+  return { common, operations, ...(home ? { homeDirectory: home } : {}) };
+}
+
+const sameCommand = (a: CommandSpec | undefined, b: CommandSpec | undefined): boolean =>
+  !!a && !!b && a.executable === b.executable && a.args.length === b.args.length && a.args.every((arg, i) => arg === b.args[i]);
+
+/**
+ * BACKUP_ENV_ISOLATION_REQUIRED=true: production must not run with partial isolation. Everything the policy depends on
+ * must be configured, otherwise loading fails (fail closed) naming what is missing.
+ */
+function assertIsolationRequirements(env: NodeJS.ProcessEnv, config: BackupConfig): void {
+  const required = strictBoolean(env, "BACKUP_ENV_ISOLATION_REQUIRED");
+  if (!required) return;
+  const policy = config.envIsolation;
+  if (!policy) throw new Error("BACKUP_ENV_ISOLATION=true is required when BACKUP_ENV_ISOLATION_REQUIRED=true");
+  const missing: string[] = [];
+  if (!policy.homeDirectory) missing.push("BACKUP_ENV_HOME (explicit home directory for children)");
+  const needed: BackupOperation[] = ["database", "restore_database", "encrypt", "upload", "verify_download", "alert", "decrypt", "restore_download"];
+  const pruning = config.prune === true;
+  if (pruning) needed.push("list", "delete");
+  for (const operation of needed) {
+    if ((policy.operations[operation] ?? []).length === 0) missing.push(`${operation} allowlist (BACKUP_ENV_${operation.toUpperCase()}_ALLOW)`);
+  }
+  if (!config.verifyDownload) missing.push("BACKUP_VERIFY_DOWNLOAD_COMMAND (the verifier must not fall back to the writer download)");
+  if (!config.restoreDownload) missing.push("BACKUP_RESTORE_DOWNLOAD_COMMAND (restore must not fall back to the writer download)");
+  if (missing.length > 0) throw new Error(`Environment isolation is required but incomplete: missing ${missing.join("; ")}`);
+  if (!pruning) {
+    for (const operation of ["list", "delete"] as BackupOperation[]) {
+      if ((policy.operations[operation] ?? []).length > 0) {
+        throw new Error(`Environment isolation: pruning is off, so the ${operation} allowlist must be empty (no delete-capable credentials may be provisioned to a backup that does not prune)`);
+      }
+    }
+  }
+  const verify = config.verifyDownload;
+  for (const [label, other] of [["upload", config.upload], ["delete", config.remove], ["list", config.list], ["writer download", config.download]] as Array<[string, CommandSpec]>) {
+    if (sameCommand(verify, other)) throw new Error(`Environment isolation: the verifier command must differ from the ${label} command`);
+  }
+  const restore = config.restoreDownload;
+  for (const [label, other] of [["upload", config.upload], ["delete", config.remove], ["verifier", verify], ["writer download", config.download]] as Array<[string, CommandSpec | undefined]>) {
+    if (sameCommand(restore, other)) throw new Error(`Environment isolation: the restore command must differ from the ${label} command`);
+  }
 }
 
 export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env): BackupConfig {
@@ -198,7 +282,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     throw new Error("BACKUP_RESTORE_DOCUMENT_DIRECTORY must be inside BACKUP_RESTORE_ROOT");
   }
   const isolation = envIsolation(env);
-  return {
+  const config: BackupConfig = {
     databaseUrl: required(env, "DATABASE_URL"),
     documentSource,
     ...(documentDirectory ? { documentDirectory } : {}),
@@ -224,5 +308,8 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     remove: requirePlaceholders("BACKUP_DELETE_COMMAND", command(env, "BACKUP_DELETE_COMMAND"), ["object"]),
     alert: requirePlaceholders("BACKUP_ALERT_COMMAND", command(env, "BACKUP_ALERT_COMMAND"), ["operation", "error"]),
     ...(isolation ? { envIsolation: isolation } : {}),
+    ...(strictBoolean(env, "BACKUP_ENV_ISOLATION_REQUIRED") ? { envIsolationRequired: true } : {}),
   };
+  assertIsolationRequirements(env, config);
+  return config;
 }

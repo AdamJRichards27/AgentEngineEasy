@@ -94,7 +94,8 @@ test("E3 pure: each operation's child env contains its own sentinel, base vars a
   const p = policy();
   for (const op of operations) {
     const env = buildChildEnv(op, p, ambient);
-    for (const base of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "SENTINEL_REGION"]) assert.ok(base in env, `${op} keeps ${base}`);
+    for (const base of ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ", "SENTINEL_REGION"]) assert.ok(base in env, `${op} keeps ${base}`);
+    assert.ok(!("HOME" in env) && !("USERPROFILE" in env), `${op}: HOME is no longer inherited (explicit BACKUP_ENV_HOME only)`);
     for (const [name, owners] of Object.entries(owner)) {
       assert.equal(name in env, owners.includes(op), `${op}: ${name} ${owners.includes(op) ? "present" : "absent"}`);
     }

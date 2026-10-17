@@ -45,6 +45,7 @@ const iso = {
 };
 const requiredExtras = {
   BACKUP_ENV_ISOLATION_REQUIRED: "true",
+  BACKUP_PRUNE: "off", // explicit so this file is independent of the pruning default (D-2 is a separate branch)
   BACKUP_ENV_HOME: "/var/empty/aee-backup-home",
   BACKUP_VERIFY_DOWNLOAD_COMMAND: JSON.stringify(["vget", "{source}", "{destination}"]),
   BACKUP_RESTORE_DOWNLOAD_COMMAND: JSON.stringify(["rget", "{source}", "{destination}"]),
@@ -132,7 +133,7 @@ test("H6 REQUIRED mode is fail-closed: refuses to load when isolation is off or 
 });
 
 test("H7 REQUIRED mode: list/delete credentials exist only when pruning is on, and must exist then", () => {
-  // pruning off (default): any list/delete allowlist is refused -> no delete-capable credential is provisioned to the backup process
+  // pruning off: any list/delete allowlist is refused -> no delete-capable credential is provisioned to the backup process
   assert.throws(load(iso, requiredExtras, { BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }), /pruning is off.*delete/);
   assert.throws(load(iso, requiredExtras, { BACKUP_ENV_LIST_ALLOW: "SENTINEL_LIST_KEY" }), /pruning is off.*list/);
   // pruning on: both required
@@ -151,7 +152,7 @@ test("H8 REQUIRED mode: the verifier must have its own download command, distinc
 });
 
 test("H9 engine fails closed: createBackup and restoreBackup refuse to run any command when isolation is required but the runner is unscoped", async () => {
-  const remote = await createFakeRemote({ prune: true, configOverrides: { envIsolationRequired: true } });
+  const remote = await createFakeRemote({ configOverrides: { envIsolationRequired: true } });
   try {
     await assert.rejects(remote.createBackup(), /isolation is required/);
     assert.deepEqual(remote.calls.filter((c) => c !== "alert" && !c.startsWith("alert")), [], "no command ran before the refusal");

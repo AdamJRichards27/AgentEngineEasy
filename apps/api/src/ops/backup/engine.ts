@@ -322,6 +322,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
     // Vault mode forbids pruning: refuse before doing any work rather than discover it at prune time.
     stage = "preflight";
+    assertIsolationNotBypassed(config);
     if (config.vaultMode && config.prune === true) {
       throw new Error("Pruning is prohibited in vault mode (BACKUP_PRUNE must not be on)");
     }
@@ -505,11 +506,19 @@ function safeRemoteArtifact(value: string): string {
   return value;
 }
 
+/** Fail closed: when isolation is required the config must carry a policy (so the scoped runner is used). */
+function assertIsolationNotBypassed(config: BackupConfig): void {
+  if (config.envIsolationRequired && !config.envIsolation) {
+    throw new Error("Environment isolation is required (BACKUP_ENV_ISOLATION_REQUIRED=true) but no isolation policy is configured; refusing to run any command");
+  }
+}
+
 export async function restoreBackup(
   config: BackupConfig,
   request: RestoreRequest,
   dependencies: EngineDependencies,
 ): Promise<void> {
+  assertIsolationNotBypassed(config);
   if (!request.confirmDisposable) throw new Error("Restore requires explicit disposable-database confirmation");
   if (databaseIdentity(config.restoreDatabaseUrl) === databaseIdentity(config.databaseUrl)) {
     throw new Error("Refusing restore because configured source and target database identities are equivalent");
