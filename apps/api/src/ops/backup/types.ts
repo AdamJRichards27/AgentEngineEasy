@@ -35,6 +35,10 @@ export interface BackupConfig {
   decryption: CommandSpec;
   upload: CommandSpec;
   download: CommandSpec;
+  /** Optional read-only verifier download (Package B). Undefined = falls back to `download`. */
+  verifyDownload?: CommandSpec;
+  /** Optional restricted restore download (Package B). Undefined = falls back to `download`. */
+  restoreDownload?: CommandSpec;
   list: CommandSpec;
   remove: CommandSpec;
   alert: CommandSpec;

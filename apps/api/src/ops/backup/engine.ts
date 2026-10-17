@@ -64,20 +64,25 @@ async function verifyUploadedBackup(
   name: string,
   localManifestPath: string,
 ): Promise<{ bytes: number; sha256: string }> {
-  const verifyDirectory = path.join(runDirectory, "verify");
-  await mkdir(verifyDirectory, { recursive: true, mode: 0o700 });
-  const artifact = path.join(verifyDirectory, name);
-  const manifest = `${artifact}.sha256.json`;
-  try {
-    await run(config.download, { source: remoteUri(config.destination, name), destination: artifact, object: name });
-    await run(config.download, {
-      source: remoteUri(config.destination, `${name}.sha256.json`),
-      destination: manifest,
-      object: `${name}.sha256.json`,
-    });
-    const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
-    if (!remoteManifest.equals(localManifest)) {
-      throw new Error("manifest stored remotely differs from the manifest written for this run");
+  let result: { bytes: number; sha256: string } | undefined;
+  for (const [index, target] of targets.entries()) {
+    const verifyDirectory = path.join(runDirectory, "verify", String(index));
+    await mkdir(verifyDirectory, { recursive: true, mode: 0o700 });
+    const name = path.posix.basename(target.artifact);
+    const artifact = path.join(verifyDirectory, name);
+    const manifest = `${artifact}.sha256.json`;
+    try {
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact });
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest });
+      const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
+      if (!remoteManifest.equals(localManifest)) {
+        throw new Error("manifest stored remotely differs from the manifest written for this run");
+      }
+      const verified = await verifyManifest(artifact, manifest);
+      result = { bytes: verified.bytes, sha256: verified.sha256 };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Post-upload verification failed for ${target.artifact}: ${reason}`, { cause: error });
     }
     const verified = await verifyManifest(artifact, manifest);
     return { bytes: verified.bytes, sha256: verified.sha256 };
@@ -326,12 +331,12 @@ export async function restoreBackup(
     const remoteName = request.tier ? tierKey(request.tier, name) : name;
     stage = "download";
     try {
-      await dependencies.run(config.download, {
+      await dependencies.run(config.restoreDownload ?? config.download, {
         source: remoteUri(config.destination, remoteName),
         destination: artifact,
         object: remoteName,
       });
-      await dependencies.run(config.download, {
+      await dependencies.run(config.restoreDownload ?? config.download, {
         source: remoteUri(config.destination, `${remoteName}.sha256.json`),
         destination: manifest,
         object: `${remoteName}.sha256.json`,
