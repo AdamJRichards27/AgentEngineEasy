@@ -302,7 +302,7 @@ test("T10b engine: vault mode with pruning enabled is refused before any command
     await assert.rejects(refused.createBackup(), /prohibited in vault mode/);
     assert.ok(!refused.calls.some((c) => c === "upload" || c.startsWith("upload:") || c === "list" || c.startsWith("remove")));
     assert.equal(refused.alerts.length, 1);
-    assert.equal(refused.alerts[0]!.error, "preflight_failed");
+    assert.match(refused.alerts[0]!.error!, /^preflight_failed: /);
   } finally {
     await refused.cleanup();
   }
@@ -336,7 +336,7 @@ test("T13 alert payloads carry only reason codes and counts, never identifiers o
   try {
     await assert.rejects(doc.createBackup(), /Document integrity failed/);
     assert.equal(doc.alerts.length, 1);
-    assert.equal(doc.alerts[0]!.error, "prepare_failed");
+    assert.match(doc.alerts[0]!.error!, /^prepare_failed: /);
     assertNoIdentifiers(doc.alerts);
   } finally {
     await doc.cleanup();
@@ -397,7 +397,7 @@ test("T15 a weekly upload failure after the daily upload succeeded fails loudly,
     assert.ok(!remote.calls.includes("list"));
     assert.deepEqual(remote.removed, []);
     assert.equal(remote.alerts.length, 1);
-    assert.equal(remote.alerts[0]!.error, "tier_upload_failed");
+    assert.match(remote.alerts[0]!.error!, /^tier_upload_failed: /);
     assert.equal(remote.logs.find((l) => l.event === "failed")?.level, "error");
   } finally {
     await remote.cleanup();
