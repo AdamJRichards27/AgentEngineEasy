@@ -188,7 +188,13 @@ export function assessListing(objects: RemoteObject[]): { listed: number; recogn
   return { listed: objects.length, recognised, unrecognisedBackupLike };
 }
 
+/** Strict allowlist check (exact, case-sensitive string match; no coercion, trimming or decoding). */
+export function isTier(value: unknown): value is Tier {
+  return typeof value === "string" && (TIERS as readonly string[]).includes(value);
+}
+
 export function tierKey(tier: Tier, name: string): string {
+  if (!isTier(tier)) throw new Error("Invalid backup tier");
   return `${tier}/${name}`;
 }
 
