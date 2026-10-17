@@ -1,4 +1,5 @@
 import path from "node:path";
+import { DEFAULT_TIER_POLICY, TIERS, type TierPolicy } from "./artifacts.js";
 import type { BackupConfig, CommandSpec } from "./types.js";
 
 const DURABLE_DESTINATION_SCHEMES = new Set(["s3:", "gs:", "azblob:"]);
@@ -32,6 +33,32 @@ function requirePlaceholders(name: string, spec: CommandSpec, placeholders: stri
     }
   }
   return spec;
+}
+
+function strictBoolean(env: NodeJS.ProcessEnv, name: string): boolean | undefined {
+  const raw = env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new Error(`${name} must be exactly true or false`);
+}
+
+function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+function tierPolicy(env: NodeJS.ProcessEnv): TierPolicy {
+  const policy = { daily: { ...DEFAULT_TIER_POLICY.daily }, weekly: { ...DEFAULT_TIER_POLICY.weekly }, monthly: { ...DEFAULT_TIER_POLICY.monthly } };
+  for (const tier of TIERS) {
+    const upper = tier.toUpperCase();
+    policy[tier].keep = positiveInteger(env, `BACKUP_TIER_${upper}_KEEP`, policy[tier].keep);
+    policy[tier].retentionDays = positiveInteger(env, `BACKUP_TIER_${upper}_DAYS`, policy[tier].retentionDays);
+  }
+  return policy;
 }
 
 export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env): BackupConfig {
@@ -72,6 +99,17 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   if (!Number.isInteger(minRetainedBackups) || minRetainedBackups < 1) {
     throw new Error("BACKUP_MIN_RETAINED_COUNT must be a positive integer");
   }
+  // Pruning needs list+delete rights and is incompatible with a write-once vault. The switch keeps the
+  // #224 behaviour (on) unless set; in vault mode it must be switched off explicitly (fail closed).
+  const vaultMode = strictBoolean(env, "BACKUP_VAULT_MODE") ?? false;
+  const pruneRaw = env.BACKUP_PRUNE?.trim().toLowerCase();
+  if (pruneRaw !== undefined && pruneRaw !== "" && pruneRaw !== "on" && pruneRaw !== "off") {
+    throw new Error("BACKUP_PRUNE must be exactly on or off");
+  }
+  const prune = pruneRaw === "off" ? false : true;
+  if (vaultMode && prune) {
+    throw new Error("BACKUP_PRUNE=off is required when BACKUP_VAULT_MODE=true; pruning is prohibited in vault mode");
+  }
   if (env.BACKUP_ENCRYPTION_AUTHENTICATED !== "true") {
     throw new Error("BACKUP_ENCRYPTION_AUTHENTICATED must explicitly equal true");
   }
@@ -104,6 +142,9 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     destination: destination.replace(/\/+$/, ""),
     retentionDays,
     minRetainedBackups,
+    tierPolicy: tierPolicy(env),
+    prune,
+    vaultMode,
     encryption: requirePlaceholders("BACKUP_ENCRYPT_COMMAND", command(env, "BACKUP_ENCRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     decryption: requirePlaceholders("BACKUP_DECRYPT_COMMAND", command(env, "BACKUP_DECRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     upload: requirePlaceholders("BACKUP_UPLOAD_COMMAND", command(env, "BACKUP_UPLOAD_COMMAND"), ["source", "destination"]),
