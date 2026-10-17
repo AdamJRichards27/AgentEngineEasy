@@ -52,6 +52,13 @@ export function buildChildEnv(
   if (policy.homeDirectory) {
     scoped.HOME = policy.homeDirectory;
     scoped.USERPROFILE = policy.homeDirectory;
+    // Windows also derives a home from HOMEDRIVE+HOMEPATH. A child's OS injects the REAL values when absent
+    // (observed on NITRO), so a Windows-style BACKUP_ENV_HOME also sets them.
+    const drive = /^([A-Za-z]:)([\\/].*)?$/.exec(policy.homeDirectory);
+    if (drive) {
+      scoped.HOMEDRIVE = drive[1];
+      scoped.HOMEPATH = drive[2] ?? "\\";
+    }
   }
   return scoped;
 }

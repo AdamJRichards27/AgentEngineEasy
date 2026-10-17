@@ -58,7 +58,7 @@ const DISCOVERY = {
   XDG_CONFIG_HOME: "/home/x/.config", XDG_DATA_HOME: "/x", XDG_CACHE_HOME: "/x", AWS_CONFIG_FILE: "/home/x/.aws/config",
   AWS_SHARED_CREDENTIALS_FILE: "/home/x/.aws/credentials", AWS_PROFILE: "prod", AWS_WEB_IDENTITY_TOKEN_FILE: "/x", AWS_ROLE_ARN: "arn:inert",
   PGPASSFILE: "/home/x/.pgpass", PGSERVICEFILE: "/x", GOOGLE_APPLICATION_CREDENTIALS: "/x", KUBECONFIG: "/x", SSH_AUTH_SOCK: "/x",
-  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/x", AWS_EC2_METADATA_SERVICE_ENDPOINT: "http://x", NETRC: "/x", APPDATA: "C:\\x", HOMEDRIVE: "C:",
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/x", AWS_EC2_METADATA_SERVICE_ENDPOINT: "http://x", NETRC: "/x", APPDATA: "C:\\x", HOMEDRIVE: "Z:", HOMEPATH: "\\ambient-sentinel",
 };
 const ambient: NodeJS.ProcessEnv = {
   PATH: "/usr/bin:/bin", HOME: "/home/ambient-user", USERPROFILE: "C:\\Users\\ambient", TMPDIR: "/tmp", SENTINEL_REGION: "r",
@@ -91,7 +91,16 @@ test("H3 credential-discovery variables in the parent never reach any child, for
   const dump: CommandSpec = { executable: process.execPath, args: ["-e", "process.stdout.write(JSON.stringify(Object.keys(process.env)))"] };
   for (const op of ALL_OPS) {
     const names = JSON.parse((await run(dump, {}, op)).stdout) as string[];
-    for (const n of Object.keys(DISCOVERY)) assert.ok(!names.includes(n), `${op} child lacks ${n}`);
+    for (const n of Object.keys(DISCOVERY)) {
+      // Windows injects its own HOMEDRIVE/HOMEPATH into every child whatever the parent passes (observed on NITRO), so
+      // there the assertion is that the AMBIENT sentinel never arrives, not that the name is absent.
+      if (process.platform === "win32" && (n === "HOMEDRIVE" || n === "HOMEPATH")) continue;
+      assert.ok(!names.includes(n), `${op} child lacks ${n}`);
+    }
+  }
+  if (process.platform === "win32") {
+    const seen = JSON.parse((await run({ executable: process.execPath, args: ["-e", "process.stdout.write(JSON.stringify([process.env.HOMEDRIVE,process.env.HOMEPATH]))"] }, {}, "upload")).stdout) as string[];
+    assert.ok(seen[0] !== "Z:" && seen[1] !== "\\ambient-sentinel", "ambient HOMEDRIVE/HOMEPATH sentinels never reach the child");
   }
 });
 
@@ -192,4 +201,14 @@ test("H11 (combined with D-2) REQUIRED mode with BACKUP_PRUNE unset needs no lis
   assert.equal(cfg.prune, false);
   assert.equal(cfg.envIsolationRequired, true);
   assert.throws(load(iso, noPrune, { BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }), /pruning is off.*delete/);
+});
+
+test("H12 a Windows-style BACKUP_ENV_HOME also sets HOMEDRIVE/HOMEPATH (pure; platform independent)", () => {
+  const p = load(iso)().envIsolation!;
+  const env = buildChildEnv("upload", { ...p, homeDirectory: "C:\\aee\\home" }, ambient);
+  assert.equal(env.HOMEDRIVE, "C:");
+  assert.equal(env.HOMEPATH, "\\aee\\home");
+  assert.equal(env.USERPROFILE, "C:\\aee\\home");
+  const posix = buildChildEnv("upload", { ...p, homeDirectory: "/var/empty/h" }, ambient);
+  assert.ok(!("HOMEDRIVE" in posix) && !("HOMEPATH" in posix));
 });

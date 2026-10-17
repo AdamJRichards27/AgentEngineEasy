@@ -262,6 +262,10 @@ its own command adapter**:
   home locators (`HOME`, `XDG_*`, ...) can be on no list. `BACKUP_ENV_COMMON_ALLOW` accepts exact,
   upper-case, non-secret-looking names only (no prefixes; names containing SECRET, TOKEN, PASSWORD, KEY,
   CREDENTIAL, SESSION, PRIVATE, URL or DSN are refused).
+- **Windows limitation (observed on NITRO, Node 24).** The OS adds its own `HOMEDRIVE`, `HOMEPATH`, `USERPROFILE`, `USERNAME`,
+  `LOGONSERVER`, `TEMP` and `SYSTEMDRIVE` to every child process whatever the parent passes, so environment scrubbing cannot hide the
+  real user profile from a child on Windows. A Windows-style `BACKUP_ENV_HOME` (for example `C:\aee\home`) overrides
+  `USERPROFILE`, `HOMEDRIVE` and `HOMEPATH`; the rest cannot be removed. Treat Windows hosts as weaker evidence for home isolation.
 - **Restore database scope.** `BACKUP_ENV_RESTORE_DATABASE_ALLOW` is a separate allowlist for the restore
   target's `psql`/`pg_restore`; it may not overlap `BACKUP_ENV_DATABASE_ALLOW`, so restore-only database
   settings are not available to backup operations (and vice versa).
