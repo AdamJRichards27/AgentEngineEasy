@@ -22,17 +22,19 @@ const LEAKY = [/ae-backups/, /prod\//, /s3:\/\//, /aee-protected/, /my-bucket/];
 
 // ---- L1 unit: assessListing -------------------------------------------------------------------
 test("L1 assessListing counts destination-relative tier keys and legacy flat keys as recognised", () => {
-  assert.deepEqual(assessListing([]), { listed: 0, recognised: 0 });
-  assert.deepEqual(assessListing(old("daily/", 1)), { listed: 2, recognised: 2 });
-  assert.deepEqual(assessListing(old("", 1)), { listed: 2, recognised: 2 });
-  assert.deepEqual(assessListing([...old("weekly/", 1), ...old("monthly/", 2)]), { listed: 4, recognised: 4 });
+  assert.deepEqual(assessListing([]), { listed: 0, recognised: 0, unrecognisedBackupLike: 0 });
+  assert.deepEqual(assessListing(old("daily/", 1)), { listed: 2, recognised: 2, unrecognisedBackupLike: 0 });
+  assert.deepEqual(assessListing(old("", 1)), { listed: 2, recognised: 2, unrecognisedBackupLike: 0 });
+  assert.deepEqual(assessListing([...old("weekly/", 1), ...old("monthly/", 2)]), { listed: 4, recognised: 4, unrecognisedBackupLike: 0 });
 });
 
 test("L2 assessListing does not recognise absolute, s3://, wrongly-prefixed or unknown-tier keys", () => {
   for (const prefix of ["ae-backups/prod/daily/", "/daily/", "s3://my-bucket/ae-backups/prod/daily/", "durable://vault/backups/daily/", "yearly/", "daily/sub/"]) {
-    assert.deepEqual(assessListing(old(prefix, 1)), { listed: 2, recognised: 0 }, prefix);
+    const a = assessListing(old(prefix, 1));
+    assert.equal(a.recognised, 0, prefix);
+    assert.equal(a.listed, 2, prefix);
   }
-  assert.deepEqual(assessListing([{ key: "notes.txt", lastModified: "2025-01-01T00:00:00Z" }]), { listed: 1, recognised: 0 });
+  assert.deepEqual(assessListing([{ key: "notes.txt", lastModified: "2025-01-01T00:00:00Z" }]), { listed: 1, recognised: 0, unrecognisedBackupLike: 0 });
 });
 
 // ---- L3 positive: documented contract is pruned normally --------------------------------------
@@ -126,17 +128,53 @@ test("L6 last-recoverable-backup protection is preserved: one recoverable backup
   }
 });
 
-test("L7 mixed listing (some recognised keys, some absolute) is NOT flagged (documented limitation); absolute keys are never deleted", async () => {
+test("L7 mixed listing (recognised keys + backup-named keys in another shape) fails visibly, deletes nothing, alerts with counts only", async () => {
   const seed = [...eight("daily/"), ...eight("ae-backups/prod/daily/")];
+  const remote = await createFakeRemote({ seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  try {
+    await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
+    assert.deepEqual(remote.removed, [], "nothing deleted");
+    assert.equal(remote.alerts.length, 1);
+    assert.equal(remote.alerts[0]!.error, "prune_list_unexpected: listing had 32 entries, 16 recognised, 16 backup-named unrecognised");
+    for (const pattern of LEAKY) assert.doesNotMatch(JSON.stringify(remote.alerts), pattern);
+    assert.ok(!remote.logs.some((l) => l.event === "completed"));
+  } finally {
+    await remote.cleanup();
+  }
+});
+
+test("L7b hidden-manifest mixed listing (the hazard): without the safeguard the planner would delete a recoverable artifact; now nothing is deleted", async () => {
+  // Backups 1..3 have their manifest listed in s3:// form. A planner that ignored those keys would see
+  // three 'orphan artifacts' and delete them although their manifests exist (floor of 7 violated).
+  const seed = [1, 2, 3, 4, 5, 6, 7, 8].flatMap((n) => {
+    const [artifact, manifest] = old("daily/", n) as [RemoteObject, RemoteObject];
+    return n <= 3 ? [artifact, { ...manifest, key: `s3://my-bucket/${manifest.key}` }] : [artifact, manifest];
+  });
+  const remote = await createFakeRemote({ seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  try {
+    await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
+    assert.deepEqual(remote.removed, []);
+    assert.equal(remote.alerts[0]!.error, "prune_list_unexpected: listing had 16 entries, 13 recognised, 3 backup-named unrecognised");
+  } finally {
+    await remote.cleanup();
+  }
+});
+
+test("L7c unrelated foreign objects alongside recognised keys are NOT flagged (no new assumption about destination contents)", async () => {
+  const seed = [...eight("daily/"), { key: "notes.txt", lastModified: "2025-01-01T00:00:00Z" }, { key: "other/readme.md", lastModified: "2025-01-01T00:00:00Z" }];
   const remote = await createFakeRemote({ seed, now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await remote.createBackup();
     assert.equal(remote.alerts.length, 0);
-    assert.ok(remote.removed.length > 0);
-    assert.ok(remote.removed.every((k) => k.startsWith("daily/")), "only recognised destination-relative keys are deleted");
+    assert.ok(remote.removed.length > 0 && remote.removed.every((k) => k.startsWith("daily/")));
   } finally {
     await remote.cleanup();
   }
+});
+
+test("L7d assessListing reports backup-named unrecognised keys separately from foreign ones", () => {
+  const mixed = [...old("daily/", 1), ...old("s3://b/daily/", 2), { key: "notes.txt", lastModified: "2025-01-01T00:00:00Z" }];
+  assert.deepEqual(assessListing(mixed), { listed: 5, recognised: 2, unrecognisedBackupLike: 2 });
 });
 
 test("L8 a non-empty listing of only unrelated keys is treated as unexpected (documented contract: list returns the destination's backup objects)", async () => {

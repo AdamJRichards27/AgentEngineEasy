@@ -159,6 +159,7 @@ export function tiersFor(now: Date): Tier[] {
   return tiers;
 }
 
+const BACKUP_BASENAME = /^aee-protected-\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.enc(?:\.sha256\.json)?$/;
 const TIER_KEY = /^(daily|weekly|monthly)\/(aee-protected-\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.enc(?:\.sha256\.json)?)$/;
 
 /** Strict parser for tiered object keys. Returns null for anything that is not exactly `<tier>/<backup object name>`. */
@@ -174,11 +175,17 @@ export function parseBackupKey(key: string): { tier: Tier; name: string; manifes
  * zero recognised keys means the list adapter is returning keys in a different shape (bucket-absolute,
  * `s3://...`, wrong prefix, ...); pruning on it would silently delete nothing, so the caller must fail.
  */
-export function assessListing(objects: RemoteObject[]): { listed: number; recognised: number } {
-  const recognised = objects.filter(
-    (object) => parseBackupKey(object.key) !== null || (!object.key.includes("/") && object.key.startsWith(ARTIFACT_PREFIX)),
+export function assessListing(objects: RemoteObject[]): { listed: number; recognised: number; unrecognisedBackupLike: number } {
+  const isRecognised = (object: RemoteObject): boolean =>
+    parseBackupKey(object.key) !== null || (!object.key.includes("/") && object.key.startsWith(ARTIFACT_PREFIX));
+  const recognised = objects.filter(isRecognised).length;
+  // "Backup-like but unrecognised": the basename is a backup artifact/manifest name that this code writes,
+  // yet the key is not in a recognised shape (absolute, s3://, unknown folder, ...). Foreign objects whose
+  // basename is not a backup name are NOT counted, so no assumption is made about what else lives in the destination.
+  const unrecognisedBackupLike = objects.filter(
+    (object) => !isRecognised(object) && BACKUP_BASENAME.test(object.key.slice(object.key.lastIndexOf("/") + 1)),
   ).length;
-  return { listed: objects.length, recognised };
+  return { listed: objects.length, recognised, unrecognisedBackupLike };
 }
 
 export function tierKey(tier: Tier, name: string): string {
