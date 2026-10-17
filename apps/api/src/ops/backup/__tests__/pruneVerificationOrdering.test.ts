@@ -25,7 +25,9 @@ test("NEW: verification (download artifact + manifest) completes before the firs
     const name = await remote.createBackup();
     const after = remote.calls.slice(remote.calls.lastIndexOf(`upload:${name}.sha256.json`) + 1);
     assert.deepEqual(after.slice(0, 3), [`download:${name}`, `download:${name}.sha256.json`, "list"]);
-    assert.ok(after.slice(3).every((c) => c.startsWith("remove:")), "only removes follow the list");
+    // D-3: the durable deletion-intent/outcome records are uploaded around the removes; nothing else may follow the list.
+    assert.ok(after.slice(3).every((c) => c.startsWith("remove:") || c.startsWith("upload:deletion-records/")), "only removes (and deletion records) follow the list");
+    assert.ok(after[3]!.startsWith("upload:deletion-records/") && after[3]!.endsWith(".intent.json"), "intent record precedes the first remove");
     assert.ok(remote.removed.length > 0, "expired backups are actually pruned after a verified upload");
   } finally {
     await remote.cleanup();
@@ -67,13 +69,14 @@ test("NEW: the just-uploaded backup is never pruned when the live listing includ
   }
 });
 
-test("NEW: a delete failure is isolated per object and the run still reports verified: true", async () => {
+test("NEW: a refused delete fails nothing, stops pruning after the first uncertain result and the run still reports verified: true", async () => {
   const remote = await createFakeRemote({ seed: [1, 2].flatMap((d) => backup(d)), retentionDays: 1, minRetainedBackups: 1, failRemove: true });
   try {
     await remote.createBackup();
     const done = remote.logs.find((l) => l.event === "completed");
     assert.equal(done?.verified, true);
-    assert.equal(done?.pruneFailed, 2);
+    assert.equal(done?.pruneFailed, 1, "D-3: pruning stops at the first refused delete (was: every object attempted)");
+    assert.equal(done?.pruneStopped, true);
   } finally {
     await remote.cleanup();
   }
@@ -102,7 +105,8 @@ test("T11 tiered: every tier copy is downloaded and verified before the first li
     const before = after.slice(0, listAt);
     const expectedDownloads = TIERS.flatMap((t) => [`download:${t}/${name}`, `download:${t}/${name}.sha256.json`]);
     assert.deepEqual(before, expectedDownloads, "all 3 tier copies verified (artifact + manifest) before list");
-    assert.ok(after.slice(listAt + 1).every((c) => c.startsWith("remove:")));
+    assert.ok(after.slice(listAt + 1).every((c) => c.startsWith("remove:") || c.startsWith("upload:deletion-records/")));
+    assert.ok(after[listAt + 1]!.startsWith("upload:deletion-records/") && after[listAt + 1]!.endsWith(".intent.json"), "intent record precedes the first remove");
     assert.ok(remote.removed.length > 0 && remote.removed.every((k) => k.startsWith("daily/")));
   } finally {
     await remote.cleanup();
