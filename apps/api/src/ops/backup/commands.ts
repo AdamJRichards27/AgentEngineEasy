@@ -12,9 +12,13 @@ function substitute(value: string, replacements: Record<string, string>): string
   });
 }
 
-/** Fixed non-secret variables every isolated child receives (process location, temp dirs, locale, Windows basics). */
+/**
+ * Fixed non-secret variables every isolated child receives (process location, temp dirs, locale, Windows basics).
+ * HOME/USERPROFILE are deliberately NOT here: they are the root of credential discovery (~/.aws, ~/.pgpass, ...).
+ * A child only gets a home directory when policy.homeDirectory (BACKUP_ENV_HOME) is configured.
+ */
 const BASE_ALLOW = [
-  "PATH", "HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LANGUAGE", "LC_*",
+  "PATH", "TMPDIR", "TMP", "TEMP", "TZ", "LANG", "LANGUAGE", "LC_*",
   "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
 ];
 
@@ -44,6 +48,10 @@ export function buildChildEnv(
   const scoped: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(baseEnv)) {
     if (value !== undefined && allow.some((pattern) => matches(pattern, name))) scoped[name] = value;
+  }
+  if (policy.homeDirectory) {
+    scoped.HOME = policy.homeDirectory;
+    scoped.USERPROFILE = policy.homeDirectory;
   }
   return scoped;
 }

@@ -27,6 +27,12 @@ export interface EnvIsolationPolicy {
   /** Extra non-secret variables every operation may receive (e.g. AWS_REGION). */
   common: string[];
   operations: Record<BackupOperation, string[]>;
+  /**
+   * The only HOME/USERPROFILE a child sees. When absent, children receive NO home directory at all (the parent's
+   * HOME is never inherited), so ~/.aws, ~/.pgpass, ~/.config etc. are not discovered via the environment.
+   * Environment-only: a child can still read files the OS user may read.
+   */
+  homeDirectory?: string;
 }
 
 export interface BackupConfig {
@@ -70,6 +76,8 @@ export interface BackupConfig {
   alert: CommandSpec;
   /** Command-level environment isolation. Undefined = legacy behaviour (full process.env to every child). */
   envIsolation?: EnvIsolationPolicy;
+  /** BACKUP_ENV_ISOLATION_REQUIRED=true: the engine refuses to run any command without a complete envIsolation policy. */
+  envIsolationRequired?: boolean;
 }
 
 export interface CommandResult {

@@ -241,8 +241,8 @@ its own command adapter**:
   `BACKUP_DOWNLOAD_COMMAND`, i.e. the original behaviour.
 - **Command-level environment isolation** (`BACKUP_ENV_ISOLATION=true`; default off). Without it,
   every child command inherits the entire process environment, so a command flag alone does not
-  separate credentials. With it, each child receives only: a fixed non-secret base (`PATH`, `HOME`,
-  `USERPROFILE`, `TMPDIR`/`TMP`/`TEMP`, `TZ`, `LANG`, `LANGUAGE`, `LC_*`, and the Windows basics
+  separate credentials. With it, each child receives only: a fixed non-secret base (`PATH`,
+  `TMPDIR`/`TMP`/`TEMP`, `TZ`, `LANG`, `LANGUAGE`, `LC_*`, and the Windows basics
   `SystemRoot`, `WINDIR`, `COMSPEC`, `PATHEXT`), the variables in `BACKUP_ENV_COMMON_ALLOW`
   (non-secret shared settings such as a region), and its own operation's list. Each list is
   comma-separated names; a trailing `*` makes a prefix. Operations and variables:
@@ -253,6 +253,27 @@ its own command adapter**:
   credential variable cannot be admitted to both a writer and a restore/verifier operation.
   Database URLs are passed as arguments, not environment variables, and are no longer inherited by
   adapters when isolation is on. Only variable **names** are inspected; values are never logged.
+- **Home directory and credential discovery (local R12 hardening).** The parent's `HOME`/`USERPROFILE` is
+  never inherited. Children get a home only when `BACKUP_ENV_HOME` (absolute path, ideally an empty
+  directory) is set; they then see exactly that value. Credential-discovery variables (`XDG_*`,
+  `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
+  `AWS_CONTAINER_*`, `AWS_EC2_METADATA_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `KUBECONFIG`, `PGPASSFILE`,
+  `SSH_AUTH_SOCK`, ...) can never go on the shared list or be swept in by a prefix such as `AWS_*`;
+  home locators (`HOME`, `XDG_*`, ...) can be on no list. `BACKUP_ENV_COMMON_ALLOW` accepts exact,
+  upper-case, non-secret-looking names only (no prefixes; names containing SECRET, TOKEN, PASSWORD, KEY,
+  CREDENTIAL, SESSION, PRIVATE, URL or DSN are refused).
+- **Restore database scope.** `BACKUP_ENV_RESTORE_DATABASE_ALLOW` is a separate allowlist for the restore
+  target's `psql`/`pg_restore`; it may not overlap `BACKUP_ENV_DATABASE_ALLOW`, so restore-only database
+  settings are not available to backup operations (and vice versa).
+- **Fail-closed production mode: `BACKUP_ENV_ISOLATION_REQUIRED=true`.** Loading the configuration fails
+  (and the engine refuses to run any command if a policy is somehow absent) unless: `BACKUP_ENV_ISOLATION=true`;
+  `BACKUP_ENV_HOME` is set; non-empty allowlists exist for database, restore_database, encrypt, upload,
+  verify_download, alert, decrypt and restore_download (plus list and delete only when `BACKUP_PRUNE=on`);
+  `BACKUP_VERIFY_DOWNLOAD_COMMAND` and `BACKUP_RESTORE_DOWNLOAD_COMMAND` are set and differ from the writer,
+  delete, list and each other. With pruning off, the list and delete allowlists must be **empty**, so no
+  delete-capable credential is provisioned to a backup that does not prune. Note the engine can only
+  prove the *environment* the verifier receives; whether its credentials lack delete rights is an IAM policy
+  property that must be tested against the real provider.
 - With isolation on and an operation that has no allowlist (for example a verifier that falls back to
   the writer download command), that command receives only the base environment and will fail to
   authenticate rather than borrow another identity's credentials.
