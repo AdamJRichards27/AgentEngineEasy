@@ -20,7 +20,7 @@ const seed = [1, 2, 3, 4].flatMap((n) => backup("daily", n));
 const noDeleteActivity = (calls: string[]): boolean => !calls.some((c) => c === "list" || c.startsWith("remove") || c.startsWith("upload:deletion-records/"));
 
 test("P1 config: BACKUP_PRUNE unset or blank defaults to OFF and reports the default as the source", () => {
-  for (const extra of [{}, { BACKUP_PRUNE: "" }, { BACKUP_PRUNE: "   " }]) {
+  for (const extra of [{}, { BACKUP_PRUNE: "" }, { BACKUP_PRUNE: "   " }] as Array<Record<string, string>>) {
     const config = loadProductionBackupConfig(productionEnv(extra));
     assert.equal(config.prune, false);
     assert.equal(config.pruneSource, "default");
