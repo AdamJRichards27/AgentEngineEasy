@@ -126,3 +126,136 @@ export function planRetention(
   }
   return { delete: result, retained, protectedByGuard: guarded.sort() };
 }
+
+
+// ---------------------------------------------------------------------------------------------
+// Tiered retention (Package A). Backups are written under `<destination>/<tier>/<name>`.
+// Keys with no tier folder ("legacy" flat layout written before tiering) keep being pruned by
+// the original flat `planRetention` so existing backups age out exactly as before.
+// ---------------------------------------------------------------------------------------------
+
+export type Tier = "daily" | "weekly" | "monthly";
+export const TIERS: readonly Tier[] = ["daily", "weekly", "monthly"];
+
+export interface TierRule {
+  /** Newest recoverable backups of this tier that are never pruned. */
+  keep: number;
+  /** Backups younger than this many days are never pruned. */
+  retentionDays: number;
+}
+export type TierPolicy = Record<Tier, TierRule>;
+
+export const DEFAULT_TIER_POLICY: TierPolicy = {
+  daily: { keep: 7, retentionDays: 14 },
+  weekly: { keep: 4, retentionDays: 35 },
+  monthly: { keep: 12, retentionDays: 395 },
+};
+
+/** Tiers a backup taken at `now` belongs to (UTC): always daily, weekly on Sunday, monthly on the 1st. */
+export function tiersFor(now: Date): Tier[] {
+  const tiers: Tier[] = ["daily"];
+  if (now.getUTCDay() === 0) tiers.push("weekly");
+  if (now.getUTCDate() === 1) tiers.push("monthly");
+  return tiers;
+}
+
+const BACKUP_BASENAME = /^aee-protected-\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.enc(?:\.sha256\.json)?$/;
+const TIER_KEY = /^(daily|weekly|monthly)\/(aee-protected-\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.enc(?:\.sha256\.json)?)$/;
+
+/** Strict parser for tiered object keys. Returns null for anything that is not exactly `<tier>/<backup object name>`. */
+export function parseBackupKey(key: string): { tier: Tier; name: string; manifest: boolean } | null {
+  const match = TIER_KEY.exec(key);
+  if (!match) return null;
+  return { tier: match[1] as Tier, name: match[2]!, manifest: match[2]!.endsWith(MANIFEST_SUFFIX) };
+}
+
+/**
+ * Listing self-check. `recognised` counts listed keys that are exactly `<tier>/<backup object name>`
+ * (the layout this code writes) or a legacy flat `aee-protected-*` key. A non-empty listing with
+ * zero recognised keys means the list adapter is returning keys in a different shape (bucket-absolute,
+ * `s3://...`, wrong prefix, ...); pruning on it would silently delete nothing, so the caller must fail.
+ */
+export function assessListing(objects: RemoteObject[]): { listed: number; recognised: number; unrecognisedBackupLike: number } {
+  const isRecognised = (object: RemoteObject): boolean =>
+    parseBackupKey(object.key) !== null || (!object.key.includes("/") && object.key.startsWith(ARTIFACT_PREFIX));
+  const recognised = objects.filter(isRecognised).length;
+  // "Backup-like but unrecognised": the basename is a backup artifact/manifest name that this code writes,
+  // yet the key is not in a recognised shape (absolute, s3://, unknown folder, ...). Foreign objects whose
+  // basename is not a backup name are NOT counted, so no assumption is made about what else lives in the destination.
+  const unrecognisedBackupLike = objects.filter(
+    (object) => !isRecognised(object) && BACKUP_BASENAME.test(object.key.slice(object.key.lastIndexOf("/") + 1)),
+  ).length;
+  return { listed: objects.length, recognised, unrecognisedBackupLike };
+}
+
+export function tierKey(tier: Tier, name: string): string {
+  return `${tier}/${name}`;
+}
+
+export interface TierRetentionPlan {
+  /** Full object keys that may be deleted, artifact before manifest within each backup. */
+  delete: RemoteObject[];
+  /** Per-tier / legacy retained recoverable artifact names. */
+  retained: Record<string, string[]>;
+  /** Number of expired candidates kept because of a safeguard. */
+  protectedByGuard: number;
+}
+
+/**
+ * Plans pruning independently per tier (and for legacy flat keys). Guarantees, per group:
+ * everything `planRetention` guarantees (newest `keep` recoverable backups survive, nothing is
+ * deleted when no recoverable backup exists, the just-uploaded artifact survives, unrelated and
+ * bad-timestamp objects are untouched) PLUS: no object is ever deleted because of another tier's
+ * contents, and keys in an unknown folder or with a malformed tiered name are never deleted.
+ */
+export function planTierRetention(
+  objects: RemoteObject[],
+  now: Date,
+  policy: TierPolicy,
+  legacy: { retentionDays: number; minRetained: number },
+  options: { protectedArtifact?: string } = {},
+): TierRetentionPlan {
+  const result: RemoteObject[] = [];
+  const retained: Record<string, string[]> = {};
+  let guarded = 0;
+  const cutoffFor = (days: number): Date => new Date(now.valueOf() - days * 86_400_000);
+  for (const tier of TIERS) {
+    const group: RemoteObject[] = [];
+    for (const object of objects) {
+      const parsed = parseBackupKey(object.key);
+      if (parsed?.tier === tier) group.push({ key: parsed.name, lastModified: object.lastModified });
+    }
+    const rule = policy[tier];
+    const plan = planRetention(group, cutoffFor(rule.retentionDays), {
+      minRetained: rule.keep,
+      protectedArtifact: options.protectedArtifact,
+    });
+    retained[tier] = plan.retained;
+    guarded += plan.protectedByGuard.length;
+    for (const object of plan.delete) result.push({ key: tierKey(tier, object.key), lastModified: object.lastModified });
+  }
+  const flat = objects.filter((object) => !object.key.includes("/"));
+  const legacyPlan = planRetention(flat, cutoffFor(legacy.retentionDays), {
+    minRetained: legacy.minRetained,
+    protectedArtifact: options.protectedArtifact,
+  });
+  retained.legacy = legacyPlan.retained;
+  guarded += legacyPlan.protectedByGuard.length;
+  result.push(...legacyPlan.delete);
+  return { delete: result, retained, protectedByGuard: guarded };
+}
+
+/**
+ * Sanitises provider/command error text before it is placed in an alert: drops anything that could
+ * identify a bucket, account, key or request (URIs, ARNs, long ids) and caps the length.
+ */
+export function sanitizeErrorText(value: string): string {
+  return value
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<uri>")
+    .replace(/\barn:[^\s,;"']+/gi, "<arn>")
+    .replace(/\baee-protected-[A-Za-z0-9._-]+/g, "<backup-object>")
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, "<id>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}

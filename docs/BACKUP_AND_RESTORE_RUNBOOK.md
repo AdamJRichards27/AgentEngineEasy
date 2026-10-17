@@ -26,7 +26,13 @@ Run the existing scripts, not ad-hoc replacement commands:
 ```sh
 pnpm --filter @aee/api backup:run
 pnpm --filter @aee/api backup:restore -- --artifact=<artifact-name> --confirm-disposable
+pnpm --filter @aee/api backup:restore -- --artifact=<artifact-name> --tier=daily|weekly|monthly --confirm-disposable
 ```
+
+Backups written after tiering are restored with `--tier=` naming the folder they were written to
+(the manifest is stored inside the same folder). Omit `--tier` only for legacy flat backups written
+before tiering; behaviour without `--tier` is unchanged. If a tier restore cannot download the
+artifact, the error names the tier and reminds you to check `--tier`.
 
 Both scripts require `BACKUP_ENVIRONMENT=production`; this is a deliberate explicit
 production-operation guard, not permission to restore into production. Configure the
@@ -78,6 +84,57 @@ invent this scheduler. The scheduler contract is:
 4. Assign and record accountable owners for scheduler operation, object-store access/KMS
    administration, and alert receiver response. **Those external accountable owners are
    currently unassigned.**
+
+## Tiered retention, pruning and the list-command contract
+
+**Layout.** Each run writes the same encrypted artifact and manifest once per applicable tier
+under `<BACKUP_DESTINATION>/<tier>/`: `daily/` always, `weekly/` on Sundays (UTC) and `monthly/`
+on the 1st (UTC). Backups written before tiering sit flat at the destination root ("legacy").
+
+**Settings** (all optional; defaults shown):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BACKUP_TIER_DAILY_KEEP` / `_DAYS` | 7 / 14 | newest recoverable backups never pruned / minimum age in days |
+| `BACKUP_TIER_WEEKLY_KEEP` / `_DAYS` | 4 / 35 | as above |
+| `BACKUP_TIER_MONTHLY_KEEP` / `_DAYS` | 12 / 395 | as above |
+| `BACKUP_MIN_RETAINED_COUNT` | 7 | floor for legacy flat backups only (aged out with `BACKUP_RETENTION_DAYS`) |
+| `BACKUP_PRUNE` | on (blank = on in this build) | exactly `on` or `off`; any other value fails startup |
+| `BACKUP_VAULT_MODE` | false | exactly `true` or `false`; with `true`, `BACKUP_PRUNE=off` is mandatory or the run is refused before any work |
+
+Retention is a *floor*: a backup is deleted only when it is both outside the newest `KEEP` of its
+tier **and** older than its `DAYS` window, so more than `KEEP` copies normally survive (with the
+defaults, about 15 daily, 5 weekly, 13 monthly at steady state). A backup counts as recoverable only
+when both its artifact and manifest exist. The newest recoverable backups, the artifact uploaded by the
+current run, and everything in an unknown folder or with an unparseable name are never deleted.
+
+**`BACKUP_LIST_COMMAND` output contract.** The adapter receives `{destination}` and must print, on
+stdout, one JSON array whose elements are `{"key": <string>, "lastModified": <ISO-8601 string>}`.
+`key` must be **relative to `BACKUP_DESTINATION`** — no scheme, bucket or base prefix — and use `/`
+as separator, e.g. `daily/aee-protected-20260301T000000Z-0123456789ab.tar.enc` and its
+`.sha256.json` manifest. Example adapter response for destination `s3://example-bucket/backups`:
+
+```json
+[
+  {"key": "daily/aee-protected-20260301T000000Z-0123456789ab.tar.enc",             "lastModified": "2026-03-01T00:05:12Z"},
+  {"key": "daily/aee-protected-20260301T000000Z-0123456789ab.tar.enc.sha256.json", "lastModified": "2026-03-01T00:05:13Z"},
+  {"key": "weekly/aee-protected-20260301T000000Z-0123456789ab.tar.enc",            "lastModified": "2026-03-01T00:05:14Z"}
+]
+```
+
+This example documents the shape the code expects. It does **not** establish that any real cloud
+provider CLI or adapter produces this shape; an adapter that strips the bucket/prefix and converts
+timestamps must be written and verified by the operator. If a non-empty listing contains **no**
+recognisable backup key (for example bucket-absolute keys or `s3://...` URIs), the run fails with
+`prune_list_unexpected`, deletes nothing, and sends a count-only alert
+(`prune_list_unexpected: listing had N entries, 0 recognised`) instead of silently pruning nothing.
+A listing mixing recognised and unrecognised keys is not flagged; unrecognised keys are never deleted.
+An empty listing is accepted (fresh destination). Treat this alert as a configuration fault in the
+list adapter, not as a backup failure: the new backup was already uploaded.
+
+**Alerts** carry only a fixed reason code and counts (for example `prune_delete_refused: 2 delete(s)
+refused`, `restore_failed: restore failed during download`). Object names, bucket names and raw
+provider output stay in the local operation log only.
 
 ## Restore preflight and disposable-only procedure
 
