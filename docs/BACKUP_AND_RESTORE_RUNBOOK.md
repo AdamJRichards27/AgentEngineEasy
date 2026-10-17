@@ -163,13 +163,17 @@ invent this scheduler. The scheduler contract is:
    failure. Invoke `BACKUP_ALERT_COMMAND` on failure and create an operational record.
 3. Verify that the artifact and its `.sha256.json` manifest are present in the configured
    durable destination. Retention is enforced by the script from
-   `BACKUP_RETENTION_DAYS`; the owner must periodically verify object-store lifecycle
+   `BACKUP_RETENTION_DAYS` **only when `BACKUP_PRUNE=on` (default off; with pruning off nothing is ever deleted and storage grows until pruning is deliberately enabled)**; the owner must periodically verify object-store lifecycle
    policy does not contradict that setting.
 4. Assign and record accountable owners for scheduler operation, object-store access/KMS
    administration, and alert receiver response. **Those external accountable owners are
    currently unassigned.**
 
 ## Tiered retention, pruning and the list-command contract
+
+**Pruning is default OFF (D-2, local R12 change).** With `BACKUP_PRUNE` unset or `off` a run uploads and verifies
+but never lists or deletes anything, so the list-command contract below is not exercised until pruning is enabled
+(validate it in a non-production destination before enabling). Enabling pruning in production is a separate owner decision.
 
 **Layout.** Each run writes the same encrypted artifact and manifest once per applicable tier
 under `<BACKUP_DESTINATION>/<tier>/`: `daily/` always, `weekly/` on Sundays (UTC) and `monthly/`
@@ -183,8 +187,8 @@ on the 1st (UTC). Backups written before tiering sit flat at the destination roo
 | `BACKUP_TIER_WEEKLY_KEEP` / `_DAYS` | 4 / 35 | as above |
 | `BACKUP_TIER_MONTHLY_KEEP` / `_DAYS` | 12 / 395 | as above |
 | `BACKUP_MIN_RETAINED_COUNT` | 7 | floor for legacy flat backups only (aged out with `BACKUP_RETENTION_DAYS`) |
-| `BACKUP_PRUNE` | on (blank = on in this build) | exactly `on` or `off`; any other value fails startup |
-| `BACKUP_VAULT_MODE` | false | exactly `true` or `false`; with `true`, `BACKUP_PRUNE=off` is mandatory or the run is refused before any work |
+| `BACKUP_PRUNE` | **off** (unset/blank = off) | exactly `on` to enable pruning; `off` = explicit off; any other value fails startup. Each run logs `prune_disabled` or `prune_enabled` and `pruneStatus` (`disabled_default`, `disabled_explicit`, `enabled`) in the `completed` event |
+| `BACKUP_VAULT_MODE` | false | exactly `true` or `false`; with `true`, `BACKUP_PRUNE=on` is refused (config error); unset/off is fine |
 
 Retention is a *floor*: a backup is deleted only when it is both outside the newest `KEEP` of its
 tier **and** older than its `DAYS` window, so more than `KEEP` copies normally survive (with the
