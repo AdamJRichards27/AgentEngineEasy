@@ -329,3 +329,21 @@ Delivery makes at most three bounded in-process attempts. Cooldown/deduplication
 process-local, and there is no durable alert outbox. A successful HTTP response is not
 proof that a human received or acknowledged the alert. External delivery and acknowledgement
 have **not yet been evidenced**.
+
+## Stale staging sweep (D-5, local R13 - production policy NOT approved)
+
+Every backup/restore run directory in `BACKUP_STAGING_DIRECTORY` carries a `.run.json` marker (runId, kind, pid, host,
+uid, heartbeat, state). A run killed by OOM/power loss leaves its directory, including plaintext dumps. The sweep is
+**off by default**: `BACKUP_STAGING_SWEEP=off|dry-run|on` (invalid value = startup error), `BACKUP_STAGING_SWEEP_MIN_AGE_HOURS`
+(1-720, default 24). `pnpm --filter api backup:sweep` runs it on demand; with `on`/`dry-run` set, every backup also sweeps first (never fatal).
+
+A directory is removed only if: name and marker agree, owned by the current user on this host, heartbeat older than the
+minimum age, the pid is not alive, and it contains no symlinks, hardlinks or unrecognised files. Anything else is
+reported `ambiguous` and left alone (including directories from versions without markers). A backup directory whose
+encrypted artifact was not verified as uploaded keeps the artifact and manifest (it may be the only recoverable copy)
+while the plaintext beside it is overwritten and removed. Decisions are appended to `sweep-audit.jsonl` in the staging
+root (no file contents); if the audit cannot be written nothing is deleted.
+
+Limits: overwrite-before-unlink is best effort and not a guarantee on SSD, copy-on-write or journalled filesystems or
+snapshots; use an encrypted staging volume. Ownership checks use uid and are skipped on Windows, where the marker's host and pid
+checks apply. Retained unverified artifacts are never deleted automatically (Owner decision needed).

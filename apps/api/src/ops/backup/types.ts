@@ -61,6 +61,10 @@ export interface BackupConfig {
   prune?: boolean;
   /** Where the prune setting came from (operator status output only): unset/blank env = "default". */
   pruneSource?: "default" | "explicit";
+  /** D-5 stale staging sweep: off (default) | dry-run | on. Destructive only when "on". */
+  stagingSweep?: "off" | "dry-run" | "on";
+  /** Minimum heartbeat age (hours) before a staging run directory may be swept. Default 24. */
+  stagingSweepMinAgeHours?: number;
   /** Write-once vault (S3 Object Lock / lifecycle expiry). Pruning is prohibited in vault mode. */
   vaultMode?: boolean;
   encryption: CommandSpec;

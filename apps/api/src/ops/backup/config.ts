@@ -262,6 +262,17 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   if (vaultMode && prune) {
     throw new Error("BACKUP_PRUNE must not be on when BACKUP_VAULT_MODE=true; pruning is prohibited in vault mode");
   }
+  // D-5: the stale-staging sweep is OFF unless deliberately enabled; invalid values are startup errors.
+  const sweepRaw = env.BACKUP_STAGING_SWEEP?.trim().toLowerCase();
+  if (sweepRaw !== undefined && sweepRaw !== "" && sweepRaw !== "off" && sweepRaw !== "dry-run" && sweepRaw !== "on") {
+    throw new Error("BACKUP_STAGING_SWEEP must be exactly off, dry-run or on");
+  }
+  const stagingSweep: "off" | "dry-run" | "on" = sweepRaw === "on" || sweepRaw === "dry-run" ? sweepRaw : "off";
+  const sweepAgeRaw = env.BACKUP_STAGING_SWEEP_MIN_AGE_HOURS?.trim();
+  const stagingSweepMinAgeHours = sweepAgeRaw === undefined || sweepAgeRaw === "" ? 24 : Number(sweepAgeRaw);
+  if (!/^\d+$/.test(sweepAgeRaw ?? "0") || !Number.isInteger(stagingSweepMinAgeHours) || stagingSweepMinAgeHours < 1 || stagingSweepMinAgeHours > 720) {
+    throw new Error("BACKUP_STAGING_SWEEP_MIN_AGE_HOURS must be an integer from 1 to 720");
+  }
   if (env.BACKUP_ENCRYPTION_AUTHENTICATED !== "true") {
     throw new Error("BACKUP_ENCRYPTION_AUTHENTICATED must explicitly equal true");
   }
@@ -298,6 +309,8 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     tierPolicy: tierPolicy(env),
     prune,
     pruneSource,
+    stagingSweep,
+    stagingSweepMinAgeHours,
     vaultMode,
     encryption: requirePlaceholders("BACKUP_ENCRYPT_COMMAND", command(env, "BACKUP_ENCRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     decryption: requirePlaceholders("BACKUP_DECRYPT_COMMAND", command(env, "BACKUP_DECRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
