@@ -30,7 +30,14 @@ export interface EnvIsolationPolicy {
 
 export interface BackupConfig {
   databaseUrl: string;
-  documentDirectory: string;
+  /**
+   * Where production document bytes live. "directory" (default, previous behaviour) archives
+   * `documentDirectory`; "object-storage" reads every database-referenced document key from the
+   * configured S3-compatible provider (OBJECT_STORAGE_*).
+   */
+  documentSource?: "directory" | "object-storage";
+  /** Required when documentSource is "directory"; unused for "object-storage". */
+  documentDirectory?: string;
   restoreDatabaseUrl: string;
   restoreDocumentDirectory: string;
   restoreRoot: string;

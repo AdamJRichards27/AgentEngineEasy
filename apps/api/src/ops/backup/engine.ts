@@ -15,6 +15,7 @@ import {
   type Tier,
 } from "./artifacts.js";
 import { assertRestoreTargetIsEmpty, readDatabaseInventory, validateDatabaseInventory } from "./database.js";
+import { stageObjectStorageDocuments, type DocumentObjectReader } from "./objectDocuments.js";
 import { compareDocumentKeys, documentInventory, prepareEmptyRestoreDirectory } from "./documents.js";
 import type {
   BackupConfig,
@@ -28,6 +29,8 @@ export interface EngineDependencies {
   run: CommandRunner;
   now?: () => Date;
   log?: (entry: OperationLog) => void;
+  /** Required when config.documentSource is "object-storage". */
+  documentProvider?: DocumentObjectReader;
 }
 
 function defaultLog(entry: OperationLog): void {
@@ -239,19 +242,39 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await chmod(dump, 0o600);
 
     const inventory = await readDatabaseInventory(dependencies.run, config.databaseUrl);
-    const files = await documentInventory(config.documentDirectory);
-    const documentComparison = compareDocumentKeys(inventory.documentKeys, files);
-    if (documentComparison.missing.length || documentComparison.orphaned.length) {
-      throw new Error(
-        `Document integrity failed before backup: ${documentComparison.missing.length} missing, ${documentComparison.orphaned.length} orphaned`,
+    let documentSourceDirectory: string;
+    let documentCount: number;
+    if (config.documentSource === "object-storage") {
+      if (!dependencies.documentProvider) {
+        throw new Error("Object-storage document backup requires a configured object storage provider");
+      }
+      // Every database-referenced key must be readable and checksum-valid; orphans cannot be
+      // enumerated without a list operation and are not part of this check.
+      documentSourceDirectory = path.join(runDirectory, "documents-src");
+      const staged = await stageObjectStorageDocuments(
+        dependencies.documentProvider,
+        inventory.documentKeys,
+        documentSourceDirectory,
       );
+      documentCount = staged.count;
+    } else {
+      if (!config.documentDirectory) throw new Error("BACKUP_DOCUMENT_DIRECTORY is required for directory document backups");
+      documentSourceDirectory = config.documentDirectory;
+      const files = await documentInventory(documentSourceDirectory);
+      const documentComparison = compareDocumentKeys(inventory.documentKeys, files);
+      if (documentComparison.missing.length || documentComparison.orphaned.length) {
+        throw new Error(
+          `Document integrity failed before backup: ${documentComparison.missing.length} missing, ${documentComparison.orphaned.length} orphaned`,
+        );
+      }
+      documentCount = files.length;
     }
     const inventoryPath = path.join(runDirectory, "inventory.json");
     await writeFile(inventoryPath, JSON.stringify(inventory) + "\n", { mode: 0o600 });
     const documentsArchive = path.join(runDirectory, "documents.tar");
     await dependencies.run({
       executable: "tar",
-      args: ["--create", "--file", documentsArchive, "--directory", config.documentDirectory, "."],
+      args: ["--create", "--file", documentsArchive, "--directory", documentSourceDirectory, "."],
     }, undefined, "archive");
     await chmod(documentsArchive, 0o600);
     const payload = path.join(runDirectory, "payload.tar");
@@ -311,6 +334,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
+      documentSource: config.documentSource ?? "directory",
+      documents: documentCount,
       tiersWritten: tiers,
       prune: pruneEnabled ? "on" : "off",
       verified: true,
@@ -439,7 +464,7 @@ export async function restoreBackup(
     validateDatabaseInventory(expected, actual);
 
     const targetDocuments = path.resolve(config.restoreDocumentDirectory);
-    if (targetDocuments === path.resolve(config.documentDirectory)) {
+    if (config.documentDirectory && targetDocuments === path.resolve(config.documentDirectory)) {
       throw new Error("Refusing to restore documents over the live document directory");
     }
     const staging = path.resolve(config.stagingDirectory);
