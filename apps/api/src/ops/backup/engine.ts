@@ -71,6 +71,44 @@ async function safeAlert(
   }
 }
 
+/**
+ * Re-reads what is actually stored remotely, for EVERY tier copy written by this run: downloads the
+ * artifact and its manifest through the configured download command, requires the downloaded manifest
+ * to be byte-identical to the one written locally, and re-checks the artifact SHA-256 and byte length
+ * against it. Throws (failing the run loudly) on any mismatch.
+ */
+async function verifyUploadedBackup(
+  config: BackupConfig,
+  run: CommandRunner,
+  runDirectory: string,
+  targets: Array<{ artifact: string; manifest: string }>,
+  localManifestPath: string,
+): Promise<{ bytes: number; sha256: string }> {
+  let result: { bytes: number; sha256: string } | undefined;
+  for (const [index, target] of targets.entries()) {
+    const verifyDirectory = path.join(runDirectory, "verify", String(index));
+    await mkdir(verifyDirectory, { recursive: true, mode: 0o700 });
+    const name = path.posix.basename(target.artifact);
+    const artifact = path.join(verifyDirectory, name);
+    const manifest = `${artifact}.sha256.json`;
+    try {
+      await run(config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact });
+      await run(config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest });
+      const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
+      if (!remoteManifest.equals(localManifest)) {
+        throw new Error("manifest stored remotely differs from the manifest written for this run");
+      }
+      const verified = await verifyManifest(artifact, manifest);
+      result = { bytes: verified.bytes, sha256: verified.sha256 };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Post-upload verification failed for ${target.artifact}: ${reason}`, { cause: error });
+    }
+  }
+  if (!result) throw new Error("Post-upload verification failed: no uploaded copy was verified");
+  return result;
+}
+
 /** Fixed (non-dynamic) alert text per failing stage: a reason code plus a constant label. */
 const ALERT_REASONS: Record<string, string> = {
   preflight: "preflight_failed: backup configuration refused",
@@ -247,6 +285,10 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
         object: target.manifest,
       });
     }
+    // Never prune (or report success) on the strength of an upload command's exit code alone: every
+    // tier copy is re-downloaded and verified BEFORE the first list/remove can run.
+    stage = "verify";
+    const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, targets, manifest);
     stage = "prune";
     const pruneEnabled = config.prune !== false;
     const pruneResult = pruneEnabled
@@ -271,6 +313,9 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       artifact: name,
       tiersWritten: tiers,
       prune: pruneEnabled ? "on" : "off",
+      verified: true,
+      verifiedBytes: verified.bytes,
+      sha256: verified.sha256,
       pruned: pruneResult.deleted,
       pruneFailed: pruneResult.failed,
       pruneProtected: pruneResult.protectedByGuard,
