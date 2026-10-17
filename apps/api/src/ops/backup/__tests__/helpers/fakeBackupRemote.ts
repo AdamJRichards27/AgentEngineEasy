@@ -34,6 +34,16 @@ export interface FakeRemoteOptions {
   failDownload?: RegExp;
   /** Document keys reported by the database inventory (psql). */
   documentKeys?: string[];
+  /** Make uploads of matching object keys fail (simulates a tier upload outage). */
+  failUpload?: RegExp;
+  /** Make the list command fail. */
+  failList?: boolean;
+  /** Make the alert command fail. */
+  failAlert?: boolean;
+  /** Message thrown by refused deletes (default "AccessDenied: object lock"). */
+  removeError?: string;
+  /** Extra BackupConfig fields (tier policy, prune switch, vault mode, ...). */
+  configOverrides?: Partial<BackupConfig>;
 }
 
 export interface FakeRemote {
@@ -69,6 +79,7 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
     ...(options.minRetainedBackups === undefined ? {} : { minRetainedBackups: options.minRetainedBackups }),
     encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
     download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
+    ...(options.configOverrides ?? {}),
   };
   const calls: string[] = [];
   const logs: OperationLog[] = [];
@@ -95,6 +106,7 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
         await copyFile(replacements.input!, replacements.output!);
         return { stdout: "", stderr: "" };
       case "upload":
+        if (options.failUpload?.test(object!)) throw new Error("upload refused");
         uploaded.set(object!, await readFile(replacements.source!));
         options.afterUpload?.(uploaded, object!);
         return { stdout: "", stderr: "" };
@@ -106,17 +118,19 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
         return { stdout: "", stderr: "" };
       }
       case "list": {
+        if (options.failList) throw new Error("list refused");
         const live: RemoteObject[] = options.listIncludesUploads
           ? [...uploaded.keys()].map((key) => ({ key, lastModified: (options.now ?? new Date("2026-03-01T00:00:00Z")).toISOString() }))
           : [];
         return { stdout: JSON.stringify([...seed, ...live]), stderr: "" };
       }
       case "remove":
-        if (options.failRemove) throw new Error("AccessDenied: object lock");
+        if (options.failRemove) throw new Error(options.removeError ?? "AccessDenied: object lock");
         removed.push(object!);
         return { stdout: "", stderr: "" };
       case "alert":
         alerts.push(replacements);
+        if (options.failAlert) throw new Error("alert transport down");
         return { stdout: "", stderr: "" };
       default:
         throw new Error(`unexpected ${command.executable}`);
