@@ -35,10 +35,15 @@ Consistency: the database dump and the document read happen in the same run, but
 transaction. Documents written between the two steps can cause a reported mismatch; re-run rather
 than ignore it.
 
-### Phase A changes (open pull requests; verify merge status before relying on them)
+### PH-7 changes (unmerged; verify merge status before relying on them)
 
-These describe behaviour that exists **only after the named PR is merged**. Until then the
-previous behaviour in the rest of this document applies.
+These describe behaviour that exists **only after the named change is merged**. Until then the
+previous behaviour in the rest of this document applies. **Draft status (2026-10-17):** #224–#228
+are draft/on hold. #228 is Package A (tiered retention and the listing safeguards, stacked on #224);
+the "Package B" items (separate verifier/restore download commands and command-level environment
+isolation) exist only in a local, unpublished integration branch and have no PR yet. This section
+describes the intended integrated behaviour (Packages A + B + C + D) and is not evidence that any of
+it has run against a real provider.
 
 - **#224 prune safeguard.** Pruning keeps the newest `BACKUP_MIN_RETAINED_COUNT` (default 7,
   optional) *recoverable* backups (artifact **and** manifest present) and the artifact created by
@@ -48,15 +53,24 @@ previous behaviour in the rest of this document applies.
   does not fail a backup that was stored. Operators must still alert on `prune_delete_failed`.
 - **#225 post-upload verification.** After upload the run downloads the artifact and manifest,
   requires the stored manifest to equal the one written for the run, and re-checks SHA-256 and byte
-  length. A mismatch or unreadable object fails the run (error log plus `BACKUP_ALERT_COMMAND`) and
-  skips pruning. Completion logs then include `verified: true`.
+  length. **Every tier copy written by the run** (daily, weekly, monthly) is verified, and all
+  verification happens **before the first list or delete command** can run. A mismatch or unreadable
+  object fails the run (error log plus `BACKUP_ALERT_COMMAND`) and skips pruning. Completion logs
+  then include `verified: true`.
 - **#226 object-storage documents.** Set `BACKUP_DOCUMENT_SOURCE=object-storage` (requires
   `OBJECT_STORAGE_PROVIDER=s3`; `BACKUP_DOCUMENT_DIRECTORY` is then not used). The run reads every
   `documents.object_storage_key` through the application's existing object-storage provider
   (`OBJECT_STORAGE_*`, size and SHA-256 verified on read) into the same `documents.tar` layout, so
   restore is unchanged. Give the backup job a **read-only** storage identity (GetObject/HeadObject).
-  Missing, unreadable or corrupt objects fail the run with counts. Orphan objects (present in
-  storage but not in the database) cannot be detected because the provider has no list operation.
+  Missing, unreadable, corrupt or unsafe (path-escaping) keys fail the run with counts before
+  anything is uploaded or pruned. Object-storage documents work with tiered layout and `--tier`
+  restore unchanged. Orphan objects (present in storage but not in the database) cannot be
+  detected because the provider has no list operation. The storage-read credentials
+  (`OBJECT_STORAGE_*`) are read **in the backup process itself** through the application's
+  provider, not by a child command, so command-level environment isolation (below) does not scope
+  them: run the backup job under a dedicated read-only storage identity.
+- **Package B identity separation (local, not yet a PR).** Three optional/opt-in controls; see
+  "Identity separation" below.
 
 ### Known gaps that remain (unchanged by Phase A)
 
@@ -64,6 +78,8 @@ previous behaviour in the rest of this document applies.
   named owners exist yet (see below). The database recovery point is the last successful daily run
   (up to 24 hours of data loss), and document recovery depends on the storage provider's own
   versioning/replication, which this repository does not configure or verify.
+- Environment isolation is **off by default**; until an operator enables it, every command adapter
+  inherits the full process environment (the original behaviour).
 - Restoring documents writes them to the **disposable restore directory only**. Returning bytes to
   a bucket is a separate, owner-approved manual step: upload with the original keys, then confirm
   each object's SHA-256 against `document_object_versions` before pointing any service at it.
@@ -99,6 +115,9 @@ following through the deployment's owner-controlled secret/configuration system:
 - `BACKUP_ENCRYPTION_AUTHENTICATED=true` and a non-secret
   `BACKUP_ENCRYPTION_KMS_PROFILE=kms:<profile>`. The owner controls the KMS key/profile,
   encryption command implementation, access policy, rotation, and recovery access.
+- Optional identity-separation settings (see "Identity separation"):
+  `BACKUP_VERIFY_DOWNLOAD_COMMAND`, `BACKUP_RESTORE_DOWNLOAD_COMMAND`, `BACKUP_ENV_ISOLATION` and
+  the `BACKUP_ENV_*` allowlists.
 - JSON-array command adapters: `BACKUP_ENCRYPT_COMMAND` and
   `BACKUP_DECRYPT_COMMAND` (must accept `{input}`, `{output}`, `{kmsProfile}`),
   `BACKUP_UPLOAD_COMMAND`/`BACKUP_DOWNLOAD_COMMAND` (must accept `{source}` and
@@ -115,8 +134,8 @@ following through the deployment's owner-controlled secret/configuration system:
 
 The scripts create a custom-format PostgreSQL dump, inventory database rows/tenant/document
 keys, archive documents with `tar`, package the payload, encrypt it, generate a SHA-256
-manifest, upload artifact plus manifest, (once #225 is merged) re-download and verify both, and
-prune retained artifacts. They do not embed
+manifest, upload artifact plus manifest to each applicable tier folder, (once #225 is merged)
+re-download and verify every tier copy, and only then prune retained artifacts per tier. They do not embed
 cloud credentials, select a KMS, or create a scheduler.
 
 ## Daily external scheduler contract
@@ -181,9 +200,49 @@ timestamps must be written and verified by the operator. If a non-empty listing 
 recognisable backup key (for example bucket-absolute keys or `s3://...` URIs), the run fails with
 `prune_list_unexpected`, deletes nothing, and sends a count-only alert
 (`prune_list_unexpected: listing had N entries, 0 recognised`) instead of silently pruning nothing.
-A listing mixing recognised and unrecognised keys is not flagged; unrecognised keys are never deleted.
-An empty listing is accepted (fresh destination). Treat this alert as a configuration fault in the
+A listing that mixes recognised keys with **backup-named keys in an unrecognised shape** (for
+example one bucket-absolute or `s3://` key whose name looks like a backup artifact or manifest) is
+**also refused**: the run fails with `prune_list_unexpected`, deletes nothing and alerts with counts
+(`prune_list_unexpected: listing had N entries, M recognised, K backup-named unrecognised`). Foreign
+objects whose names are not backup artifact/manifest names are ignored and never deleted. An empty
+listing is accepted (fresh destination). Legacy flat backups (written before tiering) are only aged
+out down to `BACKUP_MIN_RETAINED_COUNT` (default 7) and then remain; they are not migrated into tiers. Treat this alert as a configuration fault in the
 list adapter, not as a backup failure: the new backup was already uploaded.
+
+### Identity separation (Package B; local, not yet a PR)
+
+The design uses three separate identities. Configure each as a **separate credential reachable only by
+its own command adapter**:
+
+| Identity | Commands it should run | Must be able to | Must not be able to |
+|---|---|---|---|
+| Writer | encrypt, upload (and list/delete if pruning is on) | write the destination; encrypt with KMS | read back for restore, decrypt |
+| Verifier | `BACKUP_VERIFY_DOWNLOAD_COMMAND` | read artifact + manifest | write, delete, decrypt |
+| Restore | `BACKUP_RESTORE_DOWNLOAD_COMMAND`, decrypt | read, decrypt (disposable environment only) | write or delete backups |
+
+- `BACKUP_VERIFY_DOWNLOAD_COMMAND` (post-upload verification) and `BACKUP_RESTORE_DOWNLOAD_COMMAND`
+  (restore) are optional and take `{source}`/`{destination}`. If either is unset the run falls back to
+  `BACKUP_DOWNLOAD_COMMAND`, i.e. the original behaviour.
+- **Command-level environment isolation** (`BACKUP_ENV_ISOLATION=true`; default off). Without it,
+  every child command inherits the entire process environment, so a command flag alone does not
+  separate credentials. With it, each child receives only: a fixed non-secret base (`PATH`, `HOME`,
+  `USERPROFILE`, `TMPDIR`/`TMP`/`TEMP`, `TZ`, `LANG`, `LANGUAGE`, `LC_*`, and the Windows basics
+  `SystemRoot`, `WINDIR`, `COMSPEC`, `PATHEXT`), the variables in `BACKUP_ENV_COMMON_ALLOW`
+  (non-secret shared settings such as a region), and its own operation's list. Each list is
+  comma-separated names; a trailing `*` makes a prefix. Operations and variables:
+  `BACKUP_ENV_DATABASE_ALLOW` (`pg_dump`/`psql`/`pg_restore`), `_ENCRYPT_`, `_UPLOAD_`,
+  `_VERIFY_DOWNLOAD_`, `_LIST_`, `_DELETE_`, `_ALERT_`, `_DECRYPT_`, `_RESTORE_DOWNLOAD_` (all
+  `BACKUP_ENV_<OPERATION>_ALLOW`). `tar` receives the base only. Startup fails if any two operations'
+  allowlists overlap, if a list is `*`, or if an entry also appears in `BACKUP_ENV_COMMON_ALLOW`, so a
+  credential variable cannot be admitted to both a writer and a restore/verifier operation.
+  Database URLs are passed as arguments, not environment variables, and are no longer inherited by
+  adapters when isolation is on. Only variable **names** are inspected; values are never logged.
+- With isolation on and an operation that has no allowlist (for example a verifier that falls back to
+  the writer download command), that command receives only the base environment and will fail to
+  authenticate rather than borrow another identity's credentials.
+- Isolation separates **environment variables only**. It does not isolate files (for example shared
+  credential files under `HOME`), instance metadata, or IAM roles; enforce least privilege in the
+  object-store/KMS policies themselves. Not yet evidenced against any real provider.
 
 **Alerts** carry only a fixed reason code and counts (for example `prune_delete_refused: 2 delete(s)
 refused`, `restore_failed: restore failed during download`). Object names, bucket names and raw
@@ -204,7 +263,8 @@ Before every restore:
    are empty; confirm no live service points at either target.
 3. Confirm the KMS owner has authorised decryption and the restore operator has no need
    to copy secrets into logs or tickets.
-4. Run the restore command above. It downloads artifact and manifest, verifies SHA-256
+4. Run the restore command above (add `--tier=` for tiered backups). It downloads artifact and manifest
+   (through `BACKUP_RESTORE_DOWNLOAD_COMMAND` when set), verifies SHA-256
    integrity before decryption, extracts with `tar`, restores with `pg_restore
    --exit-on-error`, validates table/row/tenant/document inventory, and verifies restored
    document keys.

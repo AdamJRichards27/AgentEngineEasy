@@ -160,7 +160,9 @@ rotation/alert on readiness failure; do not restart-loop solely for a dependency
 
 > See `docs/BACKUP_AND_RESTORE_RUNBOOK.md` ("Production architecture and what the backup covers")
 > for the current coverage table and the `BACKUP_DOCUMENT_SOURCE=object-storage` option added by
-> PR #226. The statement below remains true for the checked-in baseline without that option.
+> PR #226 (unmerged; it backs up only objects referenced by the database, cannot detect orphan
+> objects, and expects a dedicated read-only storage identity for the backup job). The statement
+> below remains true for the checked-in baseline without that option.
 
 The existing backup scripts and their documented local document-directory archive are not, by
 themselves, a backup of private S3 document bytes. The provider/storage owner must provide and
