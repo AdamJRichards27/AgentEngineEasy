@@ -11,6 +11,7 @@ export interface CommandSpec {
  */
 export type BackupOperation =
   | "database"
+  | "restore_database"
   | "archive"
   | "encrypt"
   | "upload"

@@ -591,7 +591,7 @@ export async function restoreBackup(
     stage = "decrypt_and_restore";
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile }, "decrypt");
-    await assertRestoreTargetIsEmpty(dependencies.run, config.restoreDatabaseUrl);
+    await assertRestoreTargetIsEmpty(dependencies.run, config.restoreDatabaseUrl, "restore_database");
     await dependencies.run({
       executable: "tar",
       args: ["--extract", "--file", payload, "--directory", runDirectory],
@@ -609,8 +609,8 @@ export async function restoreBackup(
         config.restoreDatabaseUrl,
         path.join(runDirectory, "database.dump"),
       ],
-    }, undefined, "database");
-    const actual = await readDatabaseInventory(dependencies.run, config.restoreDatabaseUrl);
+    }, undefined, "restore_database");
+    const actual = await readDatabaseInventory(dependencies.run, config.restoreDatabaseUrl, "restore_database");
     validateDatabaseInventory(expected, actual);
 
     const targetDocuments = path.resolve(config.restoreDocumentDirectory);

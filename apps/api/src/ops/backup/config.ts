@@ -75,7 +75,7 @@ function optionalIdentityCommands(env: NodeJS.ProcessEnv): Pick<BackupConfig, "v
 }
 
 const ENV_OPERATIONS: Array<[BackupOperation, string]> = [
-  ["database", "DATABASE"], ["encrypt", "ENCRYPT"], ["upload", "UPLOAD"], ["verify_download", "VERIFY_DOWNLOAD"],
+  ["database", "DATABASE"], ["restore_database", "RESTORE_DATABASE"], ["encrypt", "ENCRYPT"], ["upload", "UPLOAD"], ["verify_download", "VERIFY_DOWNLOAD"],
   ["list", "LIST"], ["delete", "DELETE"], ["alert", "ALERT"], ["decrypt", "DECRYPT"], ["restore_download", "RESTORE_DOWNLOAD"],
 ];
 
