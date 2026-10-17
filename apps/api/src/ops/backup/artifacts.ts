@@ -168,6 +168,19 @@ export function parseBackupKey(key: string): { tier: Tier; name: string; manifes
   return { tier: match[1] as Tier, name: match[2]!, manifest: match[2]!.endsWith(MANIFEST_SUFFIX) };
 }
 
+/**
+ * Listing self-check. `recognised` counts listed keys that are exactly `<tier>/<backup object name>`
+ * (the layout this code writes) or a legacy flat `aee-protected-*` key. A non-empty listing with
+ * zero recognised keys means the list adapter is returning keys in a different shape (bucket-absolute,
+ * `s3://...`, wrong prefix, ...); pruning on it would silently delete nothing, so the caller must fail.
+ */
+export function assessListing(objects: RemoteObject[]): { listed: number; recognised: number } {
+  const recognised = objects.filter(
+    (object) => parseBackupKey(object.key) !== null || (!object.key.includes("/") && object.key.startsWith(ARTIFACT_PREFIX)),
+  ).length;
+  return { listed: objects.length, recognised };
+}
+
 export function tierKey(tier: Tier, name: string): string {
   return `${tier}/${name}`;
 }

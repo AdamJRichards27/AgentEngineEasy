@@ -5,6 +5,7 @@ import {
   DEFAULT_MIN_RETAINED_BACKUPS,
   DEFAULT_TIER_POLICY,
   artifactName,
+  assessListing,
   planTierRetention,
   sanitizeErrorText,
   tierKey,
@@ -79,6 +80,17 @@ const ALERT_REASONS: Record<string, string> = {
   prune: "prune_failed: retention pruning failed",
 };
 
+/** Thrown when a non-empty backup listing contains no recognisable backup key (see `assessListing`). */
+export class PruneListUnexpectedError extends Error {
+  constructor(
+    readonly listed: number,
+    readonly recognised: number,
+  ) {
+    super("prune_list_unexpected: backup listing contains no recognisable backup keys");
+    this.name = "PruneListUnexpectedError";
+  }
+}
+
 export interface PruneResult {
   deleted: number;
   failed: number;
@@ -109,6 +121,21 @@ async function prune(
       typeof (item as RemoteObject).lastModified === "string",
   );
   if (valid.length !== objects.length) throw new Error("Backup list command returned malformed objects");
+  // Fail visibly (never silently prune nothing) when the adapter's key format is not the documented
+  // destination-relative contract. Nothing has been deleted at this point.
+  const assessment = assessListing(valid);
+  if (assessment.listed > 0 && assessment.recognised === 0) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "prune_list_unexpected",
+      runId,
+      listed: assessment.listed,
+      recognised: assessment.recognised,
+    });
+    throw new PruneListUnexpectedError(assessment.listed, assessment.recognised);
+  }
   const plan = planTierRetention(
     valid,
     now,
@@ -257,7 +284,11 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       durationMs: Date.now() - started,
     });
     // Local log keeps the full text; the alert carries only a fixed reason code.
-    await safeAlert(config, dependencies.run, log, runId, "failed", ALERT_REASONS[stage] ?? "backup_failed: backup failed");
+    const reason =
+      error instanceof PruneListUnexpectedError
+        ? `prune_list_unexpected: listing had ${error.listed} entries, ${error.recognised} recognised`
+        : (ALERT_REASONS[stage] ?? "backup_failed: backup failed");
+    await safeAlert(config, dependencies.run, log, runId, "failed", reason);
     throw error;
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
@@ -304,22 +335,35 @@ export async function restoreBackup(
   const log = dependencies.log ?? defaultLog;
   const started = Date.now();
   const runDirectory = path.join(config.stagingDirectory, `restore-${runId}`);
+  let stage = "prepare";
   try {
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
     const artifact = path.join(runDirectory, name);
     const manifest = `${artifact}.sha256.json`;
     const remoteName = request.tier ? tierKey(request.tier, name) : name;
-    await dependencies.run(config.download, {
-      source: remoteUri(config.destination, remoteName),
-      destination: artifact,
-      object: remoteName,
-    });
-    await dependencies.run(config.download, {
-      source: remoteUri(config.destination, `${remoteName}.sha256.json`),
-      destination: manifest,
-      object: `${remoteName}.sha256.json`,
-    });
+    stage = "download";
+    try {
+      await dependencies.run(config.download, {
+        source: remoteUri(config.destination, remoteName),
+        destination: artifact,
+        object: remoteName,
+      });
+      await dependencies.run(config.download, {
+        source: remoteUri(config.destination, `${remoteName}.sha256.json`),
+        destination: manifest,
+        object: `${remoteName}.sha256.json`,
+      });
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      if (!request.tier) throw error; // no-tier restore behaviour is unchanged
+      throw new Error(
+        `Restore could not download the artifact and manifest from the "${request.tier}" tier. Check that the artifact name is correct and was written to that tier (--tier=${request.tier}); the manifest lives inside the tier folder, so a different tier or omitting --tier (legacy flat layout) will not find it. Underlying error: ${cause}`,
+        { cause: error },
+      );
+    }
+    stage = "verify";
     await verifyManifest(artifact, manifest);
+    stage = "decrypt_and_restore";
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile });
     await assertRestoreTargetIsEmpty(dependencies.run, config.restoreDatabaseUrl);
@@ -392,7 +436,13 @@ export async function restoreBackup(
       durationMs: Date.now() - started,
     });
     try {
-      await notify(config, dependencies.run, { operation: "restore", status: "failed", error: message, runId });
+      // Local log keeps the full text; the alert carries only a fixed reason code and stage.
+      await notify(config, dependencies.run, {
+        operation: "restore",
+        status: "failed",
+        error: `restore_failed: restore failed during ${stage}`,
+        runId,
+      });
     } catch (alertError) {
       log({
         timestamp: new Date().toISOString(),
@@ -400,7 +450,7 @@ export async function restoreBackup(
         operation: "restore",
         event: "alert_failed",
         runId,
-        error: alertError instanceof Error ? alertError.message : String(alertError),
+        error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
       });
     }
     throw error;
