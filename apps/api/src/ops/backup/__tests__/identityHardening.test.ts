@@ -185,3 +185,11 @@ test("H10 verifier cannot exercise delete: a delete-capable command run as verif
     assert.throws(load(iso, { BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DEL_*", BACKUP_ENV_VERIFY_DOWNLOAD_ALLOW: "SENTINEL_DEL_X" }), /overlap/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("H11 (combined with D-2) REQUIRED mode with BACKUP_PRUNE unset needs no list/delete credentials and refuses them", () => {
+  const { BACKUP_PRUNE: _p, ...noPrune } = requiredExtras;
+  const cfg = load(iso, noPrune)();
+  assert.equal(cfg.prune, false);
+  assert.equal(cfg.envIsolationRequired, true);
+  assert.throws(load(iso, noPrune, { BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }), /pruning is off.*delete/);
+});
