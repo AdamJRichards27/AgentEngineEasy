@@ -10,6 +10,7 @@ import {
   planTierRetention,
   sanitizeErrorText,
   tierKey,
+  isTier,
   tiersFor,
   verifyManifest,
   writeManifest,
@@ -523,6 +524,8 @@ export async function restoreBackup(
   if (databaseIdentity(config.restoreDatabaseUrl) === databaseIdentity(config.databaseUrl)) {
     throw new Error("Refusing restore because configured source and target database identities are equivalent");
   }
+  // Independent of CLI validation: only an absent tier (legacy flat layout) or an exact allowlisted tier is accepted.
+  if (request.tier !== undefined && !isTier(request.tier)) throw new Error("Restore tier must be daily, weekly or monthly");
   const name = safeRemoteArtifact(request.artifact);
   const runId = randomBytes(8).toString("hex");
   const log = dependencies.log ?? defaultLog;
@@ -533,7 +536,7 @@ export async function restoreBackup(
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
     const artifact = path.join(runDirectory, name);
     const manifest = `${artifact}.sha256.json`;
-    const remoteName = request.tier ? tierKey(request.tier, name) : name;
+    const remoteName = request.tier !== undefined ? tierKey(request.tier, name) : name;
     stage = "download";
     try {
       await dependencies.run(config.restoreDownload ?? config.download, {
@@ -548,7 +551,7 @@ export async function restoreBackup(
       }, "restore_download");
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
-      if (!request.tier) throw error; // no-tier restore behaviour is unchanged
+      if (request.tier === undefined) throw error; // no-tier restore behaviour is unchanged
       throw new Error(
         `Restore could not download the artifact and manifest from the "${request.tier}" tier. Check that the artifact name is correct and was written to that tier (--tier=${request.tier}); the manifest lives inside the tier folder, so a different tier or omitting --tier (legacy flat layout) will not find it. Underlying error: ${cause}`,
         { cause: error },
