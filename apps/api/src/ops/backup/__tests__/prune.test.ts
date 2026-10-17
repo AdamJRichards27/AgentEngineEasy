@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { test } from "node:test";
 import { planRetention } from "../artifacts.js";
-import { runCommand } from "../commands.js";
 import { loadProductionBackupConfig } from "../config.js";
-import { createBackup } from "../engine.js";
-import type { BackupConfig, CommandSpec, OperationLog, RemoteObject } from "../types.js";
+import { createFakeRemote } from "./helpers/fakeBackupRemote.js";
+import type { OperationLog, RemoteObject } from "../types.js";
 
 const hex = (n: number): string => n.toString(16).padStart(12, "0");
 function backup(day: number, withManifest = true): RemoteObject[] {
@@ -105,77 +101,34 @@ test("BACKUP_MIN_RETAINED_COUNT defaults to 7 and rejects invalid values", () =>
   }
 });
 
-function engineConfig(root: string, retentionDays: number, minRetainedBackups: number): BackupConfig {
-  const spec = (executable: string): CommandSpec => ({ executable, args: [] });
-  return {
-    databaseUrl: "postgresql://source.invalid/aee",
-    documentDirectory: path.join(root, "documents"),
-    restoreDatabaseUrl: "postgresql://restore.invalid/aee_restore",
-    restoreDocumentDirectory: path.join(root, "restore-root", "documents"),
-    restoreRoot: path.join(root, "restore-root"),
-    restoreEnvironmentId: "restore-drill-01",
-    encryptionKmsProfile: "kms:production-backup",
-    stagingDirectory: path.join(root, "staging"),
-    destination: "durable://vault/backups",
-    retentionDays,
-    minRetainedBackups,
-    encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
-    download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
-  };
-}
 
+/**
+ * Engine-level tests run the REAL createBackup() against the shared fake remote
+ * (helpers/fakeBackupRemote.ts), which implements upload/download/list/delete so that
+ * post-upload verification (engine.ts verifyUploadedBackup) really passes before prune runs.
+ * Assertions below are unchanged from the original #224 tests.
+ */
 async function runEngine(
   remoteListing: RemoteObject[],
   retentionDays: number,
   minRetained: number,
   failRemove = false,
 ): Promise<{ removed: string[]; logs: OperationLog[]; name: string }> {
-  const root = await mkdtemp(path.join(tmpdir(), "aee-prune-"));
-  const removed: string[] = [];
-  const logs: OperationLog[] = [];
-  const remote = new Map<string, Buffer>();
+  const remote = await createFakeRemote({
+    seed: remoteListing,
+    retentionDays,
+    minRetainedBackups: minRetained,
+    failRemove,
+    now: new Date("2026-03-01T00:00:00Z"),
+  });
   try {
-    await mkdir(path.join(root, "documents"), { recursive: true });
-    const name = await createBackup(engineConfig(root, retentionDays, minRetained), {
-      now: () => new Date("2026-03-01T00:00:00Z"),
-      log: (entry) => logs.push(entry),
-      run: async (command: CommandSpec, replacements: Record<string, string> = {}) => {
-        switch (command.executable) {
-          case "pg_dump":
-            await writeFile(command.args[command.args.indexOf("--file") + 1]!, "dump");
-            return { stdout: "", stderr: "" };
-          case "psql":
-            return { stdout: JSON.stringify({ tenantCount: 1, recordCounts: {}, documentKeys: [] }), stderr: "" };
-          case "tar":
-            return runCommand(command);
-          case "encrypt":
-            await copyFile(replacements.input!, replacements.output!);
-            return { stdout: "", stderr: "" };
-          case "upload":
-            remote.set(replacements.destination!, await readFile(replacements.source!));
-            return { stdout: "", stderr: "" };
-          case "download": {
-            const content = remote.get(replacements.source!);
-            if (!content) throw new Error(`missing remote object ${replacements.source}`);
-            await writeFile(replacements.destination!, content);
-            return { stdout: "", stderr: "" };
-          }
-          case "list":
-            return { stdout: JSON.stringify(remoteListing), stderr: "" };
-          case "remove":
-            if (failRemove) throw new Error("AccessDenied: object lock");
-            removed.push(replacements.object!);
-            return { stdout: "", stderr: "" };
-          default:
-            throw new Error(`unexpected ${command.executable}`);
-        }
-      },
-    });
-    return { removed, logs, name };
+    const name = await remote.createBackup();
+    return { removed: remote.removed, logs: remote.logs, name };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await remote.cleanup();
   }
 }
+
 
 test("createBackup with BACKUP_RETENTION_DAYS=1 still keeps the minimum recoverable backups", async () => {
   const listing = [1, 2, 3, 4].flatMap((d) => backup(d));
