@@ -70,6 +70,7 @@ for (const [label, prefix] of [
   ["bucket-absolute key", "ae-backups/prod/daily/"],
   ["s3:// URI", "s3://my-bucket/ae-backups/prod/daily/"],
   ["leading-slash key", "/daily/"],
+  ["s3:// URI with the tier directly under the bucket", "s3://my-bucket/daily/"],
 ] as const) {
   test(`L4 ${label} listing fails the run visibly, deletes nothing, alerts with code and counts only`, async () => {
     const remote = await createFakeRemote({ seed: eight(prefix), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
