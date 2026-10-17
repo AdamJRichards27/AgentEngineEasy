@@ -70,6 +70,15 @@ async function safeAlert(
   }
 }
 
+/** Fixed (non-dynamic) alert text per failing stage: a reason code plus a constant label. */
+const ALERT_REASONS: Record<string, string> = {
+  preflight: "preflight_failed: backup configuration refused",
+  prepare: "prepare_failed: backup could not be prepared",
+  tier_upload: "tier_upload_failed: upload to a backup tier failed",
+  verify: "verify_failed: Post-upload verification failed",
+  prune: "prune_failed: retention pruning failed",
+};
+
 export interface PruneResult {
   deleted: number;
   failed: number;
@@ -248,7 +257,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       durationMs: Date.now() - started,
     });
     // Local log keeps the full text; the alert carries only a fixed reason code.
-    await safeAlert(config, dependencies.run, log, runId, "failed", `${stage}_failed`);
+    await safeAlert(config, dependencies.run, log, runId, "failed", ALERT_REASONS[stage] ?? "backup_failed: backup failed");
     throw error;
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
