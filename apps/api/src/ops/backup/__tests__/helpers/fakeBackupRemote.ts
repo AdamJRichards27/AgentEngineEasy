@@ -110,7 +110,9 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
         uploaded.set(object!, await readFile(replacements.source!));
         options.afterUpload?.(uploaded, object!);
         return { stdout: "", stderr: "" };
-      case "download": {
+      case "download":
+      case "verify-download":
+      case "restore-download": {
         if (options.failDownload?.test(object!)) throw new Error("NoSuchKey");
         const content = uploaded.get(object!);
         if (!content) throw new Error(`missing remote object ${object}`);

@@ -92,8 +92,8 @@ async function verifyUploadedBackup(
     const artifact = path.join(verifyDirectory, name);
     const manifest = `${artifact}.sha256.json`;
     try {
-      await run(config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact });
-      await run(config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest });
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact });
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest });
       const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
       if (!remoteManifest.equals(localManifest)) {
         throw new Error("manifest stored remotely differs from the manifest written for this run");
@@ -393,12 +393,12 @@ export async function restoreBackup(
     const remoteName = request.tier ? tierKey(request.tier, name) : name;
     stage = "download";
     try {
-      await dependencies.run(config.download, {
+      await dependencies.run(config.restoreDownload ?? config.download, {
         source: remoteUri(config.destination, remoteName),
         destination: artifact,
         object: remoteName,
       });
-      await dependencies.run(config.download, {
+      await dependencies.run(config.restoreDownload ?? config.download, {
         source: remoteUri(config.destination, `${remoteName}.sha256.json`),
         destination: manifest,
         object: `${remoteName}.sha256.json`,

@@ -25,6 +25,11 @@ function command(env: NodeJS.ProcessEnv, name: string): CommandSpec {
   return { executable, args };
 }
 
+function optionalCommand(env: NodeJS.ProcessEnv, name: string, placeholders: string[]): CommandSpec | undefined {
+  if (!env[name]?.trim()) return undefined;
+  return requirePlaceholders(name, command(env, name), placeholders);
+}
+
 function requirePlaceholders(name: string, spec: CommandSpec, placeholders: string[]): CommandSpec {
   const serialized = [spec.executable, ...spec.args].join("\0");
   for (const placeholder of placeholders) {
@@ -59,6 +64,13 @@ function tierPolicy(env: NodeJS.ProcessEnv): TierPolicy {
     policy[tier].retentionDays = positiveInteger(env, `BACKUP_TIER_${upper}_DAYS`, policy[tier].retentionDays);
   }
   return policy;
+}
+
+/** Package B: optional separate download commands so verifier and restore can run under their own storage identities. */
+function optionalIdentityCommands(env: NodeJS.ProcessEnv): Pick<BackupConfig, "verifyDownload" | "restoreDownload"> {
+  const verifyDownload = optionalCommand(env, "BACKUP_VERIFY_DOWNLOAD_COMMAND", ["source", "destination"]);
+  const restoreDownload = optionalCommand(env, "BACKUP_RESTORE_DOWNLOAD_COMMAND", ["source", "destination"]);
+  return { ...(verifyDownload ? { verifyDownload } : {}), ...(restoreDownload ? { restoreDownload } : {}) };
 }
 
 export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env): BackupConfig {
@@ -138,6 +150,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     decryption: requirePlaceholders("BACKUP_DECRYPT_COMMAND", command(env, "BACKUP_DECRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     upload: requirePlaceholders("BACKUP_UPLOAD_COMMAND", command(env, "BACKUP_UPLOAD_COMMAND"), ["source", "destination"]),
     download: requirePlaceholders("BACKUP_DOWNLOAD_COMMAND", command(env, "BACKUP_DOWNLOAD_COMMAND"), ["source", "destination"]),
+    ...optionalIdentityCommands(env),
     list: requirePlaceholders("BACKUP_LIST_COMMAND", command(env, "BACKUP_LIST_COMMAND"), ["destination"]),
     remove: requirePlaceholders("BACKUP_DELETE_COMMAND", command(env, "BACKUP_DELETE_COMMAND"), ["object"]),
     alert: requirePlaceholders("BACKUP_ALERT_COMMAND", command(env, "BACKUP_ALERT_COMMAND"), ["operation", "error"]),
