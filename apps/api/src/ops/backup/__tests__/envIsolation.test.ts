@@ -133,7 +133,7 @@ test("E5 real child processes: the environment the OS gives each child matches i
 });
 
 test("E6 engine: every backup child process is tagged with the right operation (no untagged calls)", async () => {
-  const remote = await createFakeRemote({ seed: [], listIncludesUploads: true, configOverrides: { verifyDownload: { executable: "verify-download", args: [] } } });
+  const remote = await createFakeRemote({ seed: [], listIncludesUploads: true, prune: true, configOverrides: { verifyDownload: { executable: "verify-download", args: [] } } });
   const seen: Array<[string, BackupOperation | undefined]> = [];
   try {
     await createBackup(remote.config, {
@@ -155,7 +155,7 @@ test("E6 engine: every backup child process is tagged with the right operation (
 });
 
 test("E7 engine: restore children are tagged restore_download then decrypt, never a writer operation", async () => {
-  const remote = await createFakeRemote({ seed: [], listIncludesUploads: true, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY, restoreDownload: { executable: "restore-download", args: [] } } });
+  const remote = await createFakeRemote({ seed: [], listIncludesUploads: true, prune: true, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY, restoreDownload: { executable: "restore-download", args: [] } } });
   const seen: Array<[string, BackupOperation | undefined]> = [];
   try {
     await remote.createBackup();

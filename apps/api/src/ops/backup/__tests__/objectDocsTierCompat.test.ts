@@ -22,7 +22,7 @@ function provider(objects: Record<string, string>, corrupt: string[] = []) {
 }
 
 async function remoteFor(keys: string[]) {
-  return createFakeRemote({
+  return createFakeRemote({ prune: true,
     seed: [], listIncludesUploads: true, now: SUNDAY_THE_FIRST, documentKeys: keys,
     configOverrides: {
       documentSource: "object-storage", documentDirectory: undefined, tierPolicy: DEFAULT_TIER_POLICY,

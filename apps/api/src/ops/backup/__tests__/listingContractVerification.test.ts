@@ -18,7 +18,7 @@ function seed(prefix: string): RemoteObject[] {
 }
 
 test("V1 unexpected listing: every tier copy is verified (downloaded) before the list is requested, and nothing is removed", async () => {
-  const remote = await createFakeRemote({ seed: seed("s3://my-bucket/ae-backups/daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const remote = await createFakeRemote({ prune: true, seed: seed("s3://my-bucket/ae-backups/daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
     const listAt = remote.calls.indexOf("list");
@@ -35,7 +35,7 @@ test("V1 unexpected listing: every tier copy is verified (downloaded) before the
 });
 
 test("V2 failed verification still wins: no list, no remove, verify_failed alert (not prune_list_unexpected)", async () => {
-  const remote = await createFakeRemote({
+  const remote = await createFakeRemote({ prune: true,
     seed: seed("s3://my-bucket/ae-backups/daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY },
     afterUpload: (uploaded, object) => {
       if (object.startsWith("daily/") && object.endsWith(".tar.enc")) uploaded.set(object, Buffer.from("tampered"));
@@ -53,7 +53,7 @@ test("V2 failed verification still wins: no list, no remove, verify_failed alert
 });
 
 test("V3 expected listing on the integrated base still prunes only after verification", async () => {
-  const remote = await createFakeRemote({ seed: seed("daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
+  const remote = await createFakeRemote({ prune: true, seed: seed("daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await remote.createBackup();
     const firstRemove = remote.calls.findIndex((c) => c.startsWith("remove:"));

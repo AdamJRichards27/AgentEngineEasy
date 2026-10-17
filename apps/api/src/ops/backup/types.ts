@@ -50,8 +50,10 @@ export interface BackupConfig {
   minRetainedBackups?: number;
   /** Per-tier keep/age policy (7 daily / 4 weekly / 12 monthly by default). */
   tierPolicy?: TierPolicy;
-  /** Whether the engine prunes after a verified upload. Undefined = on (unchanged #224 behaviour). */
+  /** Whether the engine prunes after a verified upload. Default OFF (D-2): only `true` enables destructive pruning. */
   prune?: boolean;
+  /** Where the prune setting came from (operator status output only): unset/blank env = "default". */
+  pruneSource?: "default" | "explicit";
   /** Write-once vault (S3 Object Lock / lifecycle expiry). Pruning is prohibited in vault mode. */
   vaultMode?: boolean;
   encryption: CommandSpec;

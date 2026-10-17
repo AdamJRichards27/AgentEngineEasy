@@ -172,9 +172,11 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   if (pruneRaw !== undefined && pruneRaw !== "" && pruneRaw !== "on" && pruneRaw !== "off") {
     throw new Error("BACKUP_PRUNE must be exactly on or off");
   }
-  const prune = pruneRaw === "off" ? false : true;
+  // D-2: pruning is destructive, so it is OFF unless an operator deliberately sets BACKUP_PRUNE=on.
+  const prune = pruneRaw === "on";
+  const pruneSource: "default" | "explicit" = pruneRaw === undefined || pruneRaw === "" ? "default" : "explicit";
   if (vaultMode && prune) {
-    throw new Error("BACKUP_PRUNE=off is required when BACKUP_VAULT_MODE=true; pruning is prohibited in vault mode");
+    throw new Error("BACKUP_PRUNE must not be on when BACKUP_VAULT_MODE=true; pruning is prohibited in vault mode");
   }
   if (env.BACKUP_ENCRYPTION_AUTHENTICATED !== "true") {
     throw new Error("BACKUP_ENCRYPTION_AUTHENTICATED must explicitly equal true");
@@ -211,6 +213,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     minRetainedBackups,
     tierPolicy: tierPolicy(env),
     prune,
+    pruneSource,
     vaultMode,
     encryption: requirePlaceholders("BACKUP_ENCRYPT_COMMAND", command(env, "BACKUP_ENCRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     decryption: requirePlaceholders("BACKUP_DECRYPT_COMMAND", command(env, "BACKUP_DECRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
