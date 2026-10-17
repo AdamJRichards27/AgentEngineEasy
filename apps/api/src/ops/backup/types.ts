@@ -5,6 +5,29 @@ export interface CommandSpec {
   args: string[];
 }
 
+/**
+ * Backup child-process operations. When environment isolation is enabled each operation's child process
+ * receives ONLY the fixed non-secret base variables plus that operation's own allowlist (PH-7 env isolation).
+ */
+export type BackupOperation =
+  | "database"
+  | "archive"
+  | "encrypt"
+  | "upload"
+  | "verify_download"
+  | "list"
+  | "delete"
+  | "alert"
+  | "decrypt"
+  | "restore_download";
+
+/** Per-operation allowlists of environment variable names; a trailing `*` makes an entry a prefix. */
+export interface EnvIsolationPolicy {
+  /** Extra non-secret variables every operation may receive (e.g. AWS_REGION). */
+  common: string[];
+  operations: Record<BackupOperation, string[]>;
+}
+
 export interface BackupConfig {
   databaseUrl: string;
   /**
@@ -42,6 +65,8 @@ export interface BackupConfig {
   list: CommandSpec;
   remove: CommandSpec;
   alert: CommandSpec;
+  /** Command-level environment isolation. Undefined = legacy behaviour (full process.env to every child). */
+  envIsolation?: EnvIsolationPolicy;
 }
 
 export interface CommandResult {
@@ -52,6 +77,8 @@ export interface CommandResult {
 export type CommandRunner = (
   command: CommandSpec,
   replacements?: Record<string, string>,
+  /** Which backup operation this child process performs; selects its scoped environment when isolation is on. */
+  operation?: BackupOperation,
 ) => Promise<CommandResult>;
 
 export interface DatabaseInventory {
