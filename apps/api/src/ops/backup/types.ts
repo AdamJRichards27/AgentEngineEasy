@@ -78,9 +78,10 @@ export interface BackupConfig {
   list: CommandSpec;
   remove: CommandSpec;
   /**
-   * D-9 optional post-delete verification (BACKUP_DELETE_VERIFY_COMMAND). Runs after each delete command under the
-   * read-only `list` identity and must exit 0 ONLY when the object (every version and any delete marker) is
-   * permanently gone. Undefined = a delete is recorded as `deleted_unverified`, never as verified.
+   * D-9 post-delete verifier (BACKUP_DELETE_VERIFY_COMMAND). MANDATORY when `prune` is true (the loader and the engine
+   * both refuse otherwise, before any destructive operation). Runs after each delete under the read-only `list`
+   * identity and must exit 0 and print {"class":"absent","verified":true} ONLY when no version and no delete marker of
+   * the object remains. Any other outcome is "not verified": the manifest is kept, pruning stops and an alert is sent.
    */
   deleteVerify?: CommandSpec;
   alert: CommandSpec;

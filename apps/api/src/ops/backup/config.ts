@@ -1,3 +1,4 @@
+import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_TIER_POLICY, TIERS, type TierPolicy } from "./artifacts.js";
 import { patternsOverlap } from "./commands.js";
@@ -178,6 +179,57 @@ const sameCommand = (a: CommandSpec | undefined, b: CommandSpec | undefined): bo
  * BACKUP_ENV_ISOLATION_REQUIRED=true: production must not run with partial isolation. Everything the policy depends on
  * must be configured, otherwise loading fails (fail closed) naming what is missing.
  */
+const NOOP_EXECUTABLES = new Set(["true", "false", ":", "echo", "printf", "cat", "test", "[", "exit", "sleep", "yes", "pwd", "date", "env", "id", "whoami", "cmd", "rem"]);
+const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "fish", "cmd", "powershell", "pwsh"]);
+const executableName = (executable: string): string => path.basename(executable).toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
+
+function resolvesToExecutable(executable: string): "ok" | "not_found" | "not_executable" {
+  const isExecutableFile = (file: string): boolean => {
+    try {
+      if (!statSync(file).isFile()) return false;
+      accessSync(file, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (executable.includes("/") || executable.includes("\\")) return isExecutableFile(executable) ? "ok" : "not_executable";
+  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD").split(";") : [""];
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    for (const ext of extensions) if (isExecutableFile(path.join(dir, executable + ext))) return "ok";
+  }
+  return "not_found";
+}
+
+/**
+ * D-9 fail-closed rule: pruning may only be enabled with a delete verifier that is configured, distinct from every other
+ * storage command, takes the object, is not an obvious no-op and (when `checkExecutable`) resolves to a real executable.
+ * Called by the config loader (startup) and, without the filesystem check, by the engine before any destructive step.
+ * A static check cannot prove the verifier is correct: the engine ALSO requires every delete to be confirmed by the
+ * verifier's own output (see engine.ts) and stops pruning on anything else.
+ */
+export function assertDeleteVerifierForPrune(config: BackupConfig, options: { checkExecutable?: boolean } = {}): void {
+  if (config.prune !== true) return;
+  const verifier = config.deleteVerify;
+  if (!verifier) throw new Error("BACKUP_PRUNE=on requires BACKUP_DELETE_VERIFY_COMMAND (a version-aware delete verifier); a delete command's success is never proof of permanent deletion");
+  for (const [label, other] of [["delete", config.remove], ["list", config.list], ["upload", config.upload], ["download", config.download], ["verifier download", config.verifyDownload], ["restore download", config.restoreDownload], ["alert", config.alert]] as Array<[string, CommandSpec | undefined]>) {
+    if (sameCommand(verifier, other)) throw new Error(`BACKUP_DELETE_VERIFY_COMMAND: the verification command must differ from the ${label} command`);
+  }
+  const serialized = [verifier.executable, ...verifier.args].join("\0");
+  if (options.checkExecutable && !serialized.includes("{object}") && !serialized.includes("{remote}")) throw new Error("BACKUP_DELETE_VERIFY_COMMAND must include the {object} placeholder");
+  const name = executableName(verifier.executable);
+  const shellBody = SHELLS.has(name) ? verifier.args.filter((a) => !a.startsWith("-")).join(" ").replace(/\{(object|remote)\}/g, "").trim().toLowerCase() : undefined;
+  const trivialShell = shellBody !== undefined && (shellBody === "" || /^(true|false|:|exit( \d+)?|echo\b.*|printf\b.*)?\s*(#.*)?$/.test(shellBody));
+  if (NOOP_EXECUTABLES.has(name) || trivialShell) {
+    throw new Error(`BACKUP_DELETE_VERIFY_COMMAND "${name}" is an obvious no-op and cannot verify a deletion`);
+  }
+  if (options.checkExecutable) {
+    const found = resolvesToExecutable(verifier.executable);
+    if (found === "not_executable") throw new Error(`BACKUP_DELETE_VERIFY_COMMAND executable "${verifier.executable}" is not an executable file`);
+    if (found === "not_found") throw new Error(`BACKUP_DELETE_VERIFY_COMMAND executable "${verifier.executable}" was not found on PATH`);
+  }
+}
+
 function assertIsolationRequirements(env: NodeJS.ProcessEnv, config: BackupConfig): void {
   const required = strictBoolean(env, "BACKUP_ENV_ISOLATION_REQUIRED");
   if (!required) return;
@@ -293,7 +345,10 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     throw new Error("BACKUP_RESTORE_DOCUMENT_DIRECTORY must be inside BACKUP_RESTORE_ROOT");
   }
   const isolation = envIsolation(env);
-  const deleteVerify = optionalCommand(env, "BACKUP_DELETE_VERIFY_COMMAND", ["object"]);
+  const deleteVerify = env.BACKUP_DELETE_VERIFY_COMMAND?.trim() ? command(env, "BACKUP_DELETE_VERIFY_COMMAND") : undefined;
+  if (deleteVerify && !prune && !([deleteVerify.executable, ...deleteVerify.args].join("\0").match(/\{(object|remote)\}/))) {
+    throw new Error("BACKUP_DELETE_VERIFY_COMMAND must include the {object} placeholder");
+  }
   if (sameCommand(deleteVerify, command(env, "BACKUP_DELETE_COMMAND"))) {
     throw new Error("BACKUP_DELETE_VERIFY_COMMAND: the verification command must differ from the delete command");
   }
@@ -328,6 +383,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     ...(isolation ? { envIsolation: isolation } : {}),
     ...(strictBoolean(env, "BACKUP_ENV_ISOLATION_REQUIRED") ? { envIsolationRequired: true } : {}),
   };
+  assertDeleteVerifierForPrune(config, { checkExecutable: true });
   assertIsolationRequirements(env, config);
   return config;
 }

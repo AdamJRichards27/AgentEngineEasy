@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { DEFAULT_TIER_POLICY, type Tier } from "../artifacts.js";
 import { loadProductionBackupConfig } from "../config.js";
 import { createFakeRemote } from "./helpers/fakeBackupRemote.js";
-import { productionEnv } from "./helpers/productionEnv.js";
+import { PRUNE_ENABLE_ENV, productionEnv } from "./helpers/productionEnv.js";
 import type { RemoteObject } from "../types.js";
 
 // PH-7 R12 P1 / D-2: pruning is default OFF and only runs on deliberate operator opt-in (BACKUP_PRUNE=on).
@@ -29,7 +29,7 @@ test("P1 config: BACKUP_PRUNE unset or blank defaults to OFF and reports the def
 
 test("P2 config: explicit on enables (case-insensitive), explicit off stays off, both report explicit", () => {
   for (const v of ["on", "ON", " On "]) {
-    const c = loadProductionBackupConfig(productionEnv({ BACKUP_PRUNE: v }));
+    const c = loadProductionBackupConfig(productionEnv({ ...PRUNE_ENABLE_ENV, BACKUP_PRUNE: v }));
     assert.equal(c.prune, true);
     assert.equal(c.pruneSource, "explicit");
   }

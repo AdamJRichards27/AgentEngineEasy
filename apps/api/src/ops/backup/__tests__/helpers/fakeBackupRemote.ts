@@ -56,7 +56,9 @@ export interface FakeRemoteOptions {
    * versioned or Object Lock bucket, where the delete command exits 0 but the data is still there).
    * `verifyFails` makes the verifier itself fail (transport error / no permission).
    */
-  verifyDelete?: { stillPresent?: RegExp; fails?: boolean };
+  verifyDelete?: { stillPresent?: RegExp; fails?: boolean; /** raw stdout the verifier prints on exit 0 (default: the verified-absent JSON line) */ stdout?: string; /** verify_class= text carried by the failure message */ errorClass?: string };
+  /** R19: do NOT auto-install a verifier when pruning is on (to prove the engine fails closed without one). */
+  omitVerifier?: boolean;
   /** Extra BackupConfig fields (tier policy, prune switch, vault mode, ...). */
   configOverrides?: Partial<BackupConfig>;
 }
@@ -102,6 +104,10 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
     ...(options.verifyDelete ? { deleteVerify: spec("verify-delete") } : {}),
     ...(options.configOverrides ?? {}),
   };
+  // R19: pruning needs a verifier. Tests that merely exercise pruning get an implicit one that is NOT recorded in the
+  // call trail (so their expectations are unchanged); tests of the verifier itself pass `verifyDelete` explicitly.
+  const implicitVerifier = config.prune === true && !config.deleteVerify && !options.omitVerifier;
+  if (implicitVerifier) config.deleteVerify = spec("verify-delete");
   const calls: string[] = [];
   const logs: OperationLog[] = [];
   const alerts: Array<Record<string, string>> = [];
@@ -116,9 +122,11 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
 
   const operations: string[] = [];
   const run: CommandRunner = async (command, replacements = {}, operation) => {
-    operations.push(`${command.executable}:${operation ?? "-"}`);
     const object = replacements.object;
-    calls.push(object ? `${command.executable}:${object}` : command.executable);
+    if (!(implicitVerifier && command.executable === "verify-delete")) {
+      operations.push(`${command.executable}:${operation ?? "-"}`);
+      calls.push(object ? `${command.executable}:${object}` : command.executable);
+    }
     switch (command.executable) {
       case "pg_dump":
         await writeFile(command.args[command.args.indexOf("--file") + 1]!, "dump");
@@ -163,11 +171,11 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
         if (controls.removeThenThrow?.test(object!)) throw new Error("RequestTimeout: delete outcome unknown");
         return { stdout: "", stderr: "" };
       case "verify-delete":
-        if (options.verifyDelete?.fails) throw new Error("verifier unavailable");
+        if (options.verifyDelete?.fails) throw new Error(`verifier unavailable verify_class=${options.verifyDelete.errorClass ?? "inconclusive"}`);
         if (!removed.includes(object!) || options.verifyDelete?.stillPresent?.test(object!)) {
-          throw new Error("still present: version or delete marker remains");
+          throw new Error(`still present: version or delete marker remains verify_class=${options.verifyDelete?.errorClass ?? "delete_marker_retained"}`);
         }
-        return { stdout: "", stderr: "" };
+        return { stdout: options.verifyDelete?.stdout ?? '{"verifier":"fake","class":"absent","verified":true,"versions":0,"deleteMarkers":0}\n', stderr: "" };
       case "alert":
         alerts.push(replacements);
         if (options.failAlert) throw new Error("alert transport down");

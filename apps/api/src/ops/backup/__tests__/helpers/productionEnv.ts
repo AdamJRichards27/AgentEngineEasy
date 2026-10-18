@@ -1,4 +1,13 @@
 // Minimal valid production backup environment for config tests (copy of the T9 fixture).
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** R19: the exact configuration fragment that enables pruning: BACKUP_PRUNE=on plus a real, resolvable verifier. */
+export const PRUNE_ENABLE_ENV: Record<string, string> = {
+  BACKUP_PRUNE: "on",
+  BACKUP_DELETE_VERIFY_COMMAND: JSON.stringify([process.execPath, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../verifiers/verifyDeleteMc.mjs"), "--alias", "l", "{remote}"]),
+};
+
 export function productionEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const command = JSON.stringify(["tool", "{input}", "{output}", "{kmsProfile}"]);
   return {
