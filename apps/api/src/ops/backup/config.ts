@@ -293,6 +293,10 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     throw new Error("BACKUP_RESTORE_DOCUMENT_DIRECTORY must be inside BACKUP_RESTORE_ROOT");
   }
   const isolation = envIsolation(env);
+  const deleteVerify = optionalCommand(env, "BACKUP_DELETE_VERIFY_COMMAND", ["object"]);
+  if (sameCommand(deleteVerify, command(env, "BACKUP_DELETE_COMMAND"))) {
+    throw new Error("BACKUP_DELETE_VERIFY_COMMAND: the verification command must differ from the delete command");
+  }
   const config: BackupConfig = {
     databaseUrl: required(env, "DATABASE_URL"),
     documentSource,
@@ -319,6 +323,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     ...optionalIdentityCommands(env),
     list: requirePlaceholders("BACKUP_LIST_COMMAND", command(env, "BACKUP_LIST_COMMAND"), ["destination"]),
     remove: requirePlaceholders("BACKUP_DELETE_COMMAND", command(env, "BACKUP_DELETE_COMMAND"), ["object"]),
+    ...(deleteVerify ? { deleteVerify } : {}),
     alert: requirePlaceholders("BACKUP_ALERT_COMMAND", command(env, "BACKUP_ALERT_COMMAND"), ["operation", "error"]),
     ...(isolation ? { envIsolation: isolation } : {}),
     ...(strictBoolean(env, "BACKUP_ENV_ISOLATION_REQUIRED") ? { envIsolationRequired: true } : {}),

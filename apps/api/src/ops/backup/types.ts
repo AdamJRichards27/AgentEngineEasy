@@ -77,6 +77,12 @@ export interface BackupConfig {
   restoreDownload?: CommandSpec;
   list: CommandSpec;
   remove: CommandSpec;
+  /**
+   * D-9 optional post-delete verification (BACKUP_DELETE_VERIFY_COMMAND). Runs after each delete command under the
+   * read-only `list` identity and must exit 0 ONLY when the object (every version and any delete marker) is
+   * permanently gone. Undefined = a delete is recorded as `deleted_unverified`, never as verified.
+   */
+  deleteVerify?: CommandSpec;
   alert: CommandSpec;
   /** Command-level environment isolation. Undefined = legacy behaviour (full process.env to every child). */
   envIsolation?: EnvIsolationPolicy;
