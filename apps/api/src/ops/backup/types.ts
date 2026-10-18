@@ -14,6 +14,8 @@ export interface BackupConfig {
   stagingDirectory: string;
   destination: string;
   retentionDays: number;
+  /** Newest recoverable backups that are never pruned. Defaults to 7. */
+  minRetainedBackups?: number;
   encryption: CommandSpec;
   decryption: CommandSpec;
   upload: CommandSpec;

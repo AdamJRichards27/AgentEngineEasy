@@ -57,6 +57,11 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   if (!Number.isInteger(retentionDays) || retentionDays < 1) {
     throw new Error("BACKUP_RETENTION_DAYS must be a positive integer");
   }
+  const minRetainedRaw = env.BACKUP_MIN_RETAINED_COUNT?.trim();
+  const minRetainedBackups = minRetainedRaw === undefined || minRetainedRaw === "" ? 7 : Number(minRetainedRaw);
+  if (!Number.isInteger(minRetainedBackups) || minRetainedBackups < 1) {
+    throw new Error("BACKUP_MIN_RETAINED_COUNT must be a positive integer");
+  }
   if (env.BACKUP_ENCRYPTION_AUTHENTICATED !== "true") {
     throw new Error("BACKUP_ENCRYPTION_AUTHENTICATED must explicitly equal true");
   }
@@ -87,6 +92,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
     stagingDirectory,
     destination: destination.replace(/\/+$/, ""),
     retentionDays,
+    minRetainedBackups,
     encryption: requirePlaceholders("BACKUP_ENCRYPT_COMMAND", command(env, "BACKUP_ENCRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     decryption: requirePlaceholders("BACKUP_DECRYPT_COMMAND", command(env, "BACKUP_DECRYPT_COMMAND"), ["input", "output", "kmsProfile"]),
     upload: requirePlaceholders("BACKUP_UPLOAD_COMMAND", command(env, "BACKUP_UPLOAD_COMMAND"), ["source", "destination"]),
