@@ -347,3 +347,17 @@ root (no file contents); if the audit cannot be written nothing is deleted.
 Limits: overwrite-before-unlink is best effort and not a guarantee on SSD, copy-on-write or journalled filesystems or
 snapshots; use an encrypted staging volume. Ownership checks use uid and are skipped on Windows, where the marker's host and pid
 checks apply. Retained unverified artifacts are never deleted automatically (Owner decision needed).
+
+### Operating `backup:sweep` (R15 operator command)
+
+`BACKUP_STAGING_SWEEP` stays **off by default**; an invalid value is a startup error. Nothing here enables the sweep.
+
+- **Console output needs `LOG_LEVEL=info`.** The command logs through the shared structured logger, one JSON line per run on
+  stdout: `staging_sweep_disabled` (mode off, nothing read or changed), `staging_sweep` with `mode=dry-run` (decisions only)
+  or `mode=on` (decisions applied), each with `counts`. At `LOG_LEVEL=warn` or `error` these info lines are dropped, so a
+  disabled, dry-run or completed sweep prints nothing and exits 0.
+- **Failures exit with code 1** and write one `staging_sweep_failed` line to stderr (shown at every log level). This covers a
+  complete failure (bad staging path or config, filesystem error; only the error code is logged for filesystem errors) and a
+  sweep that completed but had per-directory errors (`reason=completed_with_errors`, `errorCount`).
+- **`sweep-audit.jsonl` in the staging root is the complete record** of sweep decisions. Console output truncates arrays
+  such as `entries` at 20 items and masks quoted paths in per-directory error reasons; the audit file keeps the full list and raw text.
