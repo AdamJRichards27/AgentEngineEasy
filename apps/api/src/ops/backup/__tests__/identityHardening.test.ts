@@ -7,6 +7,7 @@ import { buildChildEnv, createScopedRunner } from "../commands.js";
 import { loadProductionBackupConfig } from "../config.js";
 import { createBackup, restoreBackup } from "../engine.js";
 import type { BackupOperation, CommandSpec } from "../types.js";
+import { PRUNE_ENABLE_ENV } from "./helpers/productionEnv.js";
 import { createFakeRemote } from "./helpers/fakeBackupRemote.js";
 
 // PH-7 R12 P3 identity hardening. ENVIRONMENT-VARIABLE scope only: none of this isolates files,
@@ -51,7 +52,7 @@ const requiredExtras = {
   BACKUP_RESTORE_DOWNLOAD_COMMAND: JSON.stringify(["rget", "{source}", "{destination}"]),
 };
 const load = (...extras: Array<Record<string, string>>) => () => loadProductionBackupConfig(baseEnv(Object.assign({}, ...extras)));
-const loadWithPrune = (extra: Record<string, string> = {}) => load(iso, requiredExtras, { BACKUP_PRUNE: "on", BACKUP_ENV_LIST_ALLOW: "SENTINEL_LIST_KEY", BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }, extra);
+const loadWithPrune = (extra: Record<string, string> = {}) => load(iso, requiredExtras, { ...PRUNE_ENABLE_ENV, BACKUP_ENV_LIST_ALLOW: "SENTINEL_LIST_KEY", BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }, extra);
 const ALL_OPS: BackupOperation[] = ["database", "restore_database", "archive", "encrypt", "upload", "verify_download", "list", "delete", "alert", "decrypt", "restore_download"];
 
 const DISCOVERY = {
@@ -146,8 +147,8 @@ test("H7 REQUIRED mode: list/delete credentials exist only when pruning is on, a
   assert.throws(load(iso, requiredExtras, { BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }), /pruning is off.*delete/);
   assert.throws(load(iso, requiredExtras, { BACKUP_ENV_LIST_ALLOW: "SENTINEL_LIST_KEY" }), /pruning is off.*list/);
   // pruning on: both required
-  assert.throws(load(iso, requiredExtras, { BACKUP_PRUNE: "on", BACKUP_ENV_LIST_ALLOW: "SENTINEL_LIST_KEY" }), /incomplete[\s\S]*delete/);
-  assert.throws(load(iso, requiredExtras, { BACKUP_PRUNE: "on", BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }), /incomplete[\s\S]*list/);
+  assert.throws(load(iso, requiredExtras, { ...PRUNE_ENABLE_ENV, BACKUP_ENV_LIST_ALLOW: "SENTINEL_LIST_KEY" }), /incomplete[\s\S]*delete/);
+  assert.throws(load(iso, requiredExtras, { ...PRUNE_ENABLE_ENV, BACKUP_ENV_DELETE_ALLOW: "SENTINEL_DELETE_KEY" }), /incomplete[\s\S]*list/);
   assert.equal(loadWithPrune()().prune, true);
 });
 

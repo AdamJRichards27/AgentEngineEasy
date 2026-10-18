@@ -27,18 +27,13 @@ const base = { seed: seed6, now: NOW, listIncludesUploads: true, applyRemovals: 
 const cfg = { tierPolicy: POLICY, prune: true };
 const completed = (r: FakeRemote): any => r.logs.find((l) => l.event === "completed")!;
 
-test("DV1 default (no verification command): successful deletes are recorded deleted_unverified, never as verified", async () => {
-  const r = await createFakeRemote({ ...base, configOverrides: cfg });
+test("DV1 (R19, supersedes the R18 deleted_unverified case) no verification command: pruning is refused before any delete; an unverified status is never emitted", async () => {
+  const r = await createFakeRemote({ ...base, omitVerifier: true, configOverrides: cfg });
   try {
-    await r.createBackup();
-    const out = rec(r, `deletion-records/${runId(r)}.outcome.json`);
-    assert.equal(out.deleteVerification, "none");
-    assert.ok(out.units.length > 0 && out.units.every((u: any) => u.status === "deleted_unverified"));
-    const c = completed(r);
-    assert.equal(c.prunedVerified, 0);
-    assert.equal(c.prunedUnverified, 10);
-    assert.equal(c.pruned, 10, "existing counter still means: delete commands that reported success");
-    assert.equal(calls(r, "verify-delete").length, 0);
+    await assert.rejects(() => r.createBackup(), /BACKUP_PRUNE=on requires BACKUP_DELETE_VERIFY_COMMAND/);
+    assert.equal(calls(r, "remove").length, 0);
+    assert.equal(r.calls.filter((c) => c === "list").length, 0);
+    assert.ok(!r.uploaded.has(`deletion-records/${r.logs[0]?.runId}.outcome.json`));
   } finally { await r.cleanup(); }
 });
 
@@ -51,7 +46,6 @@ test("DV2 verification command configured and passing: units are deleted_verifie
     assert.ok(out.units.every((u: any) => u.status === "deleted_verified"));
     const c = completed(r);
     assert.equal(c.prunedVerified, 10);
-    assert.equal(c.prunedUnverified, 0);
     const trail = r.calls.filter((x) => x.startsWith("remove:") || x.startsWith("verify-delete:"));
     for (let i = 0; i < trail.length; i += 2) {
       assert.ok(trail[i]!.startsWith("remove:") && trail[i + 1] === trail[i]!.replace("remove:", "verify-delete:"), "each delete is immediately verified");

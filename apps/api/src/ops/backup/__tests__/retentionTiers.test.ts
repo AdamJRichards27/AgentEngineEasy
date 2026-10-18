@@ -12,6 +12,7 @@ import {
 } from "../artifacts.js";
 import { loadProductionBackupConfig } from "../config.js";
 import { restoreBackup } from "../engine.js";
+import { PRUNE_ENABLE_ENV } from "./helpers/productionEnv.js";
 import { createFakeRemote } from "./helpers/fakeBackupRemote.js";
 import type { OperationLog, RemoteObject } from "../types.js";
 
@@ -262,7 +263,7 @@ test("T9 config: tier defaults 7/4/12, validation, BACKUP_PRUNE and vault-mode r
     assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_TIER_DAILY_DAYS: bad })), /BACKUP_TIER_DAILY_DAYS/);
   }
   assert.equal(loadProductionBackupConfig(envFor({ BACKUP_PRUNE: "off" })).prune, false);
-  assert.equal(loadProductionBackupConfig(envFor({ BACKUP_PRUNE: "ON" })).prune, true);
+  assert.equal(loadProductionBackupConfig(envFor({ ...PRUNE_ENABLE_ENV, BACKUP_PRUNE: "ON" })).prune, true);
   assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_PRUNE: "maybe" })), /BACKUP_PRUNE must be exactly on or off/);
   assert.throws(() => loadProductionBackupConfig(envFor({ BACKUP_VAULT_MODE: "yes" })), /BACKUP_VAULT_MODE must be exactly true or false/);
   // Vault mode: explicit on is rejected; unset is fine now that pruning defaults off (D-2).
@@ -353,7 +354,7 @@ test("T13 alert payloads carry only reason codes and counts, never identifiers o
     await refused.createBackup();
     assert.equal(refused.alerts.length, 1, "one alert per run, not per object");
     assert.equal(refused.alerts[0]!.status, "prune_delete_refused");
-    assert.match(refused.alerts[0]!.error!, /^prune_delete_refused: \d+ delete\(s\) refused$/);
+    assert.match(refused.alerts[0]!.error!, /^prune_delete_refused: \d+ delete\(s\) refused or not verified( \(class: [a-z_]+\))?$/);
     assertNoIdentifiers(refused.alerts);
   } finally {
     await refused.cleanup();

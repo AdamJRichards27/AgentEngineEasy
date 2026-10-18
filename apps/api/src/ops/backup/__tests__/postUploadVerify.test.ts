@@ -21,6 +21,7 @@ function config(root: string): BackupConfig {
     destination: "durable://vault/backups",
     retentionDays: 30,
     prune: true,
+    deleteVerify: spec("verify-delete"), // D-9: pruning requires a verifier (never invoked here: nothing is deletable)
     encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
     download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
   };
