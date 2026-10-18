@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -133,6 +133,7 @@ async function runEngine(
   const root = await mkdtemp(path.join(tmpdir(), "aee-prune-"));
   const removed: string[] = [];
   const logs: OperationLog[] = [];
+  const remote = new Map<string, Buffer>();
   try {
     await mkdir(path.join(root, "documents"), { recursive: true });
     const name = await createBackup(engineConfig(root, retentionDays, minRetained), {
@@ -151,7 +152,14 @@ async function runEngine(
             await copyFile(replacements.input!, replacements.output!);
             return { stdout: "", stderr: "" };
           case "upload":
+            remote.set(replacements.destination!, await readFile(replacements.source!));
             return { stdout: "", stderr: "" };
+          case "download": {
+            const content = remote.get(replacements.source!);
+            if (!content) throw new Error(`missing remote object ${replacements.source}`);
+            await writeFile(replacements.destination!, content);
+            return { stdout: "", stderr: "" };
+          }
           case "list":
             return { stdout: JSON.stringify(remoteListing), stderr: "" };
           case "remove":
