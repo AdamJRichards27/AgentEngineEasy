@@ -1,8 +1,27 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { artifactName, retentionCandidates, verifyManifest, writeManifest } from "./artifacts.js";
+import { assertDeleteVerifierForPrune } from "./config.js";
+import {
+  DEFAULT_MIN_RETAINED_BACKUPS,
+  DEFAULT_TIER_POLICY,
+  MANIFEST_SUFFIX,
+  artifactName,
+  assessListing,
+  planTierRetention,
+  sanitizeErrorText,
+  tierKey,
+  isTier,
+  tiersFor,
+  verifyManifest,
+  writeManifest,
+  type Tier,
+} from "./artifacts.js";
+import {
+  newRunMarker, safeRemoveRunDirectory, startHeartbeat, sweepStaging, updateRunMarker, writeRunMarker,
+} from "./stagingSweep.js";
 import { assertRestoreTargetIsEmpty, readDatabaseInventory, validateDatabaseInventory } from "./database.js";
+import { stageObjectStorageDocuments, type DocumentObjectReader } from "./objectDocuments.js";
 import { compareDocumentKeys, documentInventory, prepareEmptyRestoreDirectory } from "./documents.js";
 import type {
   BackupConfig,
@@ -16,6 +35,8 @@ export interface EngineDependencies {
   run: CommandRunner;
   now?: () => Date;
   log?: (entry: OperationLog) => void;
+  /** Required when config.documentSource is "object-storage". */
+  documentProvider?: DocumentObjectReader;
 }
 
 function defaultLog(entry: OperationLog): void {
@@ -24,7 +45,8 @@ function defaultLog(entry: OperationLog): void {
 }
 
 function remoteUri(destination: string, name: string): string {
-  return `${destination}/${encodeURIComponent(name)}`;
+  // Encode each path segment but keep "/" so tier folders (daily/, weekly/, monthly/) stay folders.
+  return `${destination}/${name.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 async function notify(
@@ -32,11 +54,236 @@ async function notify(
   run: CommandRunner,
   replacements: Record<string, string>,
 ): Promise<void> {
-  await run(config.alert, replacements);
+  await run(config.alert, replacements, "alert");
 }
 
-async function prune(config: BackupConfig, run: CommandRunner, now: Date): Promise<number> {
-  const listing = await run(config.list, { destination: config.destination });
+/** Alert payloads carry a fixed reason code and counts only (never object keys, provider text or identifiers). */
+async function safeAlert(
+  config: BackupConfig,
+  run: CommandRunner,
+  log: (entry: OperationLog) => void,
+  runId: string,
+  status: string,
+  error: string,
+): Promise<void> {
+  try {
+    await notify(config, run, { operation: "backup", status, error, runId });
+  } catch (alertError) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "alert_failed",
+      runId,
+      error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
+    });
+  }
+}
+
+/**
+ * Re-reads what is actually stored remotely, for EVERY tier copy written by this run: downloads the
+ * artifact and its manifest through the configured download command, requires the downloaded manifest
+ * to be byte-identical to the one written locally, and re-checks the artifact SHA-256 and byte length
+ * against it. Throws (failing the run loudly) on any mismatch.
+ */
+async function verifyUploadedBackup(
+  config: BackupConfig,
+  run: CommandRunner,
+  runDirectory: string,
+  targets: Array<{ artifact: string; manifest: string }>,
+  localManifestPath: string,
+): Promise<{ bytes: number; sha256: string }> {
+  let result: { bytes: number; sha256: string } | undefined;
+  for (const [index, target] of targets.entries()) {
+    const verifyDirectory = path.join(runDirectory, "verify", String(index));
+    await mkdir(verifyDirectory, { recursive: true, mode: 0o700 });
+    const name = path.posix.basename(target.artifact);
+    const artifact = path.join(verifyDirectory, name);
+    const manifest = `${artifact}.sha256.json`;
+    try {
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.artifact), destination: artifact, object: target.artifact }, "verify_download");
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, target.manifest), destination: manifest, object: target.manifest }, "verify_download");
+      const [remoteManifest, localManifest] = await Promise.all([readFile(manifest), readFile(localManifestPath)]);
+      if (!remoteManifest.equals(localManifest)) {
+        throw new Error("manifest stored remotely differs from the manifest written for this run");
+      }
+      const verified = await verifyManifest(artifact, manifest);
+      result = { bytes: verified.bytes, sha256: verified.sha256 };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Post-upload verification failed for ${target.artifact}: ${reason}`, { cause: error });
+    }
+  }
+  if (!result) throw new Error("Post-upload verification failed: no uploaded copy was verified");
+  return result;
+}
+
+/** Fixed (non-dynamic) alert text per failing stage: a reason code plus a constant label. */
+const ALERT_REASONS: Record<string, string> = {
+  preflight: "preflight_failed: backup configuration refused",
+  prepare: "prepare_failed: backup could not be prepared",
+  tier_upload: "tier_upload_failed: upload to a backup tier failed",
+  verify: "verify_failed: Post-upload verification failed",
+  prune: "prune_failed: retention pruning failed",
+};
+
+/** Thrown when a non-empty backup listing contains no recognisable backup key (see `assessListing`). */
+export class PruneListUnexpectedError extends Error {
+  constructor(
+    readonly listed: number,
+    readonly recognised: number,
+    readonly unrecognisedBackupLike: number = 0,
+  ) {
+    super("prune_list_unexpected: backup listing contains no recognisable backup keys, or backup-named keys in an unrecognised shape");
+    this.name = "PruneListUnexpectedError";
+  }
+}
+
+export interface PruneResult {
+  deleted: number;
+  failed: number;
+  protectedByGuard: number;
+  /** True when pruning halted after a delete failed or was uncertain. */
+  stopped: boolean;
+  /** Manifests deliberately kept because their artifact could not be confirmed deleted. */
+  manifestsPreserved: number;
+  /** Deletes the delete command reported done AND the verifier confirmed permanently absent (class "absent"). */
+  verified: number;
+  /** Delete commands that exited 0, verified or not. NOT proof of deletion; operator context only. */
+  accepted: number;
+  /** Verifier classes of failed verifications this run (for the alert). */
+  failureClasses?: string[];
+}
+
+interface PruneUnit {
+  artifact?: RemoteObject;
+  manifest?: RemoteObject;
+}
+
+type PruneUnitStatus =
+  /** Every delete in the unit was confirmed permanent by the verification command. */
+  | "deleted_verified"
+  /** LEGACY (R18 outcome records, version 2, written when no verifier was configured). Never emitted since R19: with pruning on a verifier is mandatory. Kept so old records still parse. */
+  | "deleted_unverified"
+  | "artifact_delete_failed_manifest_preserved"
+  /** The artifact delete command exited 0 but verification failed: the artifact may still exist, so the manifest is kept. */
+  | "artifact_delete_not_verified_manifest_preserved"
+  | "manifest_delete_failed_artifact_deleted"
+  | "manifest_delete_not_verified_artifact_deleted"
+  | "not_attempted_pruning_stopped";
+
+interface PruneUnitOutcome {
+  artifact: string | null;
+  manifest: string | null;
+  status: PruneUnitStatus;
+  error?: string;
+  /** Verifier class (e.g. delete_marker_retained, governance_locked, malformed_output) when verification failed. Additive field. */
+  verifierClass?: string;
+}
+
+/**
+ * Groups planned deletions into recoverability units: an artifact together with its own manifest (same folder,
+ * name + ".sha256.json"). A manifest with no planned artifact is its own unit (orphan manifest, nothing to protect).
+ * The just-uploaded artifact and its manifest are never part of a unit (defence in depth over the planner).
+ */
+function buildPruneUnits(objects: RemoteObject[], protectedArtifact: string): PruneUnit[] {
+  const units = new Map<string, PruneUnit>();
+  const order: string[] = [];
+  for (const object of objects) {
+    const base = object.key.endsWith(MANIFEST_SUFFIX) ? object.key.slice(0, -MANIFEST_SUFFIX.length) : object.key;
+    const basename = base.slice(base.lastIndexOf("/") + 1);
+    if (basename === protectedArtifact) continue;
+    let unit = units.get(base);
+    if (!unit) {
+      unit = {};
+      units.set(base, unit);
+      order.push(base);
+    }
+    if (object.key.endsWith(MANIFEST_SUFFIX)) unit.manifest = object;
+    else unit.artifact = object;
+  }
+  return order.map((key) => units.get(key)!);
+}
+
+/** The delete command exited 0 but the verification command did not confirm permanent deletion (or could not run). */
+class DeleteNotVerifiedError extends Error {
+  constructor(message: string, readonly verifierClass: string) {
+    super(`delete not verified (verifier class ${verifierClass}): ${message}`);
+    this.name = "DeleteNotVerifiedError";
+  }
+}
+
+const VERIFIER_CLASS = /verify_class=([a-z_]+)/;
+
+/**
+ * The verifier contract: exit 0 AND a stdout JSON line {"class":"absent","verified":true} (any version / delete-marker
+ * count present must be 0). Anything else - empty or malformed output, another class, contradictory fields - is NOT a
+ * verified deletion. Returns undefined when the output confirms permanent absence, otherwise the reason.
+ */
+function verifierRejection(stdout: string): { verifierClass: string; reason: string } | undefined {
+  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return { verifierClass: "malformed_output", reason: "verifier exited 0 but printed no verdict" };
+  let verdict: unknown;
+  try {
+    verdict = JSON.parse(lines[lines.length - 1]!);
+  } catch {
+    return { verifierClass: "malformed_output", reason: "verifier verdict is not JSON" };
+  }
+  if (typeof verdict !== "object" || verdict === null || Array.isArray(verdict)) return { verifierClass: "malformed_output", reason: "verifier verdict is not a JSON object" };
+  const v = verdict as Record<string, unknown>;
+  if (v.class !== "absent") return { verifierClass: typeof v.class === "string" && /^[a-z_]+$/.test(v.class) ? v.class : "malformed_output", reason: `verifier reported class ${JSON.stringify(v.class)}, not absent` };
+  if (v.verified !== true) return { verifierClass: "malformed_output", reason: "verifier verdict is class absent without verified=true" };
+  if ((v.versions !== undefined && v.versions !== 0) || (v.deleteMarkers !== undefined && v.deleteMarkers !== 0)) {
+    return { verifierClass: "malformed_output", reason: "verifier verdict claims absent but reports retained versions or delete markers" };
+  }
+  return undefined;
+}
+
+/**
+ * Runs the delete command, then the mandatory verifier. A delete command's success is only "the provider accepted the
+ * request": on a versioned or Object Lock bucket it may just add a delete marker. There is no unverified outcome: the
+ * verifier must be configured BEFORE the delete command runs, and only a verifier verdict of "absent" returns.
+ * Throws the delete command's own error when refused, or DeleteNotVerifiedError for every other outcome (including a
+ * missing verifier, a failing verifier and malformed output).
+ */
+async function deleteObject(config: BackupConfig, run: CommandRunner, key: string, counters: { accepted: number }): Promise<void> {
+  if (!config.deleteVerify) throw new DeleteNotVerifiedError("no BACKUP_DELETE_VERIFY_COMMAND configured; refusing to delete", "no_verifier");
+  const replacements = { destination: config.destination, object: key, remote: remoteUri(config.destination, key) };
+  await run(config.remove, replacements, "delete");
+  counters.accepted += 1;
+  let stdout: string;
+  try {
+    ({ stdout } = await run(config.deleteVerify, replacements, "list"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DeleteNotVerifiedError(message, VERIFIER_CLASS.exec(message)?.[1] ?? "verifier_failed");
+  }
+  const rejection = verifierRejection(stdout ?? "");
+  if (rejection) throw new DeleteNotVerifiedError(rejection.reason, rejection.verifierClass);
+}
+
+async function storeDeletionRecord(
+  config: BackupConfig,
+  run: CommandRunner,
+  runDirectory: string,
+  key: string,
+  record: Record<string, unknown>,
+): Promise<void> {
+  const local = path.join(runDirectory, path.posix.basename(key));
+  await writeFile(local, JSON.stringify(record) + "\n", { mode: 0o600 });
+  await run(config.upload, { source: local, destination: remoteUri(config.destination, key), object: key }, "upload");
+}
+
+async function prune(
+  config: BackupConfig,
+  run: CommandRunner,
+  now: Date,
+  protectedArtifact: string,
+  log: (entry: OperationLog) => void,
+  runId: string,
+  runDirectory: string,
+): Promise<PruneResult> {
+  const listing = await run(config.list, { destination: config.destination }, "list");
   let objects: unknown;
   try {
     objects = JSON.parse(listing.stdout);
@@ -52,16 +299,159 @@ async function prune(config: BackupConfig, run: CommandRunner, now: Date): Promi
       typeof (item as RemoteObject).lastModified === "string",
   );
   if (valid.length !== objects.length) throw new Error("Backup list command returned malformed objects");
-  const cutoff = new Date(now.valueOf() - config.retentionDays * 86_400_000);
-  const candidates = retentionCandidates(valid, cutoff);
-  for (const object of candidates) {
-    await run(config.remove, {
-      destination: config.destination,
-      object: object.key,
-      remote: remoteUri(config.destination, object.key),
+  // Fail visibly (never silently prune nothing) when the adapter's key format is not the documented
+  // destination-relative contract. Nothing has been deleted at this point.
+  const assessment = assessListing(valid);
+  // A listing that mixes recognised keys with backup-named keys in another shape would make the planner
+  // under-count (e.g. a hidden manifest turns a recoverable backup into an "orphan artifact"), so it is
+  // refused too. Unrelated foreign objects (non-backup names) are not counted and do not trigger this.
+  if ((assessment.listed > 0 && assessment.recognised === 0) || assessment.unrecognisedBackupLike > 0) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "prune_list_unexpected",
+      runId,
+      listed: assessment.listed,
+      recognised: assessment.recognised,
+      unrecognisedBackupLike: assessment.unrecognisedBackupLike,
+    });
+    throw new PruneListUnexpectedError(assessment.listed, assessment.recognised, assessment.unrecognisedBackupLike);
+  }
+  const plan = planTierRetention(
+    valid,
+    now,
+    config.tierPolicy ?? DEFAULT_TIER_POLICY,
+    { retentionDays: config.retentionDays, minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS },
+    { protectedArtifact },
+  );
+  // D-3: an artifact and its manifest are ONE recoverability unit. Group the plan into units (artifact first)
+  // and never touch a manifest unless its own artifact delete was confirmed in this run.
+  const units = buildPruneUnits(plan.delete, protectedArtifact);
+  if (units.length === 0) return { deleted: 0, failed: 0, protectedByGuard: plan.protectedByGuard, stopped: false, manifestsPreserved: 0, verified: 0, accepted: 0 };
+  // Durable intent BEFORE any destructive operation. If it cannot be stored, nothing is deleted (fail closed).
+  const recordPrefix = `deletion-records/${runId}`;
+  await storeDeletionRecord(config, run, runDirectory, `${recordPrefix}.intent.json`, {
+    version: 1,
+    kind: "prune-intent",
+    runId,
+    createdAt: new Date().toISOString(),
+    protectedArtifact,
+    units: units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null })),
+  });
+  const outcomes: PruneUnitOutcome[] = units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null, status: "not_attempted_pruning_stopped" }));
+  let deleted = 0;
+  const counters = { accepted: 0 };
+  let failed = 0;
+  let manifestsPreserved = 0;
+  let verified = 0;
+  let stopped = false;
+  const fail = (object: string, error: unknown, event: string): void => {
+    failed += 1;
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event,
+      runId,
+      object,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  };
+  // One delete. Returns true when the object counts as deleted; false after recording a refusal or an
+  // unverified delete (the caller then stops pruning and sets the unit status).
+  const attempt = async (key: string): Promise<{ ok: true } | { ok: false; notVerified: boolean }> => {
+    try {
+      await deleteObject(config, run, key, counters);
+      deleted += 1;
+      verified += 1;
+      return { ok: true };
+    } catch (error) {
+      const notVerified = error instanceof DeleteNotVerifiedError;
+      fail(key, error, notVerified ? "prune_delete_not_verified" : "prune_delete_failed");
+      outcomes[currentIndex]!.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+      if (error instanceof DeleteNotVerifiedError) outcomes[currentIndex]!.verifierClass = error.verifierClass;
+      return { ok: false, notVerified };
+    }
+  };
+  let currentIndex = 0;
+  for (let index = 0; index < units.length && !stopped; index += 1) {
+    currentIndex = index;
+    const unit = units[index]!;
+    const outcome = outcomes[index]!;
+    // Artifact first. Any throw (refused by Object Lock/retention, timeout, ambiguous) or an unverified delete
+    // means the artifact may still exist, so its manifest MUST be preserved and pruning stops.
+    if (unit.artifact) {
+      const result = await attempt(unit.artifact.key);
+      if (!result.ok) {
+        outcome.status = result.notVerified ? "artifact_delete_not_verified_manifest_preserved" : "artifact_delete_failed_manifest_preserved";
+        if (unit.manifest) manifestsPreserved += 1;
+        stopped = true;
+        break;
+      }
+    }
+    if (unit.manifest) {
+      const result = await attempt(unit.manifest.key);
+      if (!result.ok) {
+        outcome.status = result.notVerified ? "manifest_delete_not_verified_artifact_deleted" : "manifest_delete_failed_artifact_deleted";
+        stopped = true;
+        break;
+      }
+    }
+    outcome.status = "deleted_verified";
+  }
+  if (stopped) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "prune_stopped",
+      runId,
+      deleted,
+      failed,
+      manifestsPreserved,
+      unitsNotAttempted: outcomes.filter((o) => o.status === "not_attempted_pruning_stopped").length,
     });
   }
-  return candidates.length;
+  // Outcome record after the last destructive operation. A failure to store it is itself a visible failure
+  // (counted and logged) but cannot undo deletions that already happened; the intent record remains.
+  try {
+    await storeDeletionRecord(config, run, runDirectory, `${recordPrefix}.outcome.json`, {
+      version: 2,
+      kind: "prune-outcome",
+      runId,
+      completedAt: new Date().toISOString(),
+      deleteVerification: "command",
+      stopped,
+      units: outcomes,
+    });
+  } catch (error) {
+    fail(`${recordPrefix}.outcome.json`, error, "prune_outcome_record_failed");
+  }
+  return { deleted, failed, protectedByGuard: plan.protectedByGuard, stopped, manifestsPreserved, verified, accepted: counters.accepted, failureClasses: outcomes.flatMap((o) => (o.verifierClass ? [o.verifierClass] : [])) };
+}
+
+async function runStagingSweep(config: BackupConfig, log: (entry: OperationLog) => void, runId: string): Promise<void> {
+  const mode = config.stagingSweep ?? "off";
+  if (mode === "off") return;
+  try {
+    const report = await sweepStaging({
+      stagingDirectory: config.stagingDirectory,
+      mode,
+      minAgeMs: (config.stagingSweepMinAgeHours ?? 24) * 3_600_000,
+    });
+    log({
+      timestamp: new Date().toISOString(), level: "info", operation: "backup", event: "staging_sweep", runId,
+      mode, counts: report.counts,
+      ambiguous: report.entries.filter((e) => e.decision === "ambiguous").map((e) => `${e.name}: ${e.reason}`),
+      artifactsRetained: report.entries.filter((e) => e.decision === "artifact_retained" || e.decision === "would_retain_artifact").map((e) => e.name),
+    });
+  } catch (error) {
+    log({
+      timestamp: new Date().toISOString(), level: "error", operation: "backup", event: "staging_sweep_failed", runId,
+      mode, error: sanitizeErrorText(error instanceof Error ? error.message : String(error)),
+    });
+  }
 }
 
 export async function createBackup(config: BackupConfig, dependencies: EngineDependencies): Promise<string> {
@@ -72,52 +462,132 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
   const runDirectory = path.join(config.stagingDirectory, `backup-${runId}`);
   const name = artifactName(now);
   const artifact = path.join(runDirectory, name);
+  let stage = "prepare";
+  let stopHeartbeat: () => void = () => undefined;
   try {
+    // D-5: optional stale-staging sweep BEFORE this run's own directory exists (off by default). Never fatal.
+    await runStagingSweep(config, log, runId);
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    await writeRunMarker(runDirectory, newRunMarker(runId, "backup", new Date()));
+    stopHeartbeat = startHeartbeat(runDirectory);
+    // Vault mode forbids pruning: refuse before doing any work rather than discover it at prune time.
+    stage = "preflight";
+    assertIsolationNotBypassed(config);
+    if (config.vaultMode && config.prune === true) {
+      throw new Error("Pruning is prohibited in vault mode (BACKUP_PRUNE must not be on)");
+    }
+    // D-9: pruning needs a configured, distinct verifier. Refuse before any pg_dump, upload, list or delete.
+    assertDeleteVerifierForPrune(config);
+    stage = "prepare";
     const dump = path.join(runDirectory, "database.dump");
     await dependencies.run({
       executable: "pg_dump",
       args: ["--format=custom", "--no-owner", "--no-privileges", "--file", dump, config.databaseUrl],
-    });
+    }, undefined, "database");
     await chmod(dump, 0o600);
 
     const inventory = await readDatabaseInventory(dependencies.run, config.databaseUrl);
-    const files = await documentInventory(config.documentDirectory);
-    const documentComparison = compareDocumentKeys(inventory.documentKeys, files);
-    if (documentComparison.missing.length || documentComparison.orphaned.length) {
-      throw new Error(
-        `Document integrity failed before backup: ${documentComparison.missing.length} missing, ${documentComparison.orphaned.length} orphaned`,
+    let documentSourceDirectory: string;
+    let documentCount: number;
+    if (config.documentSource === "object-storage") {
+      if (!dependencies.documentProvider) {
+        throw new Error("Object-storage document backup requires a configured object storage provider");
+      }
+      // Every database-referenced key must be readable and checksum-valid; orphans cannot be
+      // enumerated without a list operation and are not part of this check.
+      documentSourceDirectory = path.join(runDirectory, "documents-src");
+      const staged = await stageObjectStorageDocuments(
+        dependencies.documentProvider,
+        inventory.documentKeys,
+        documentSourceDirectory,
       );
+      documentCount = staged.count;
+    } else {
+      if (!config.documentDirectory) throw new Error("BACKUP_DOCUMENT_DIRECTORY is required for directory document backups");
+      documentSourceDirectory = config.documentDirectory;
+      const files = await documentInventory(documentSourceDirectory);
+      const documentComparison = compareDocumentKeys(inventory.documentKeys, files);
+      if (documentComparison.missing.length || documentComparison.orphaned.length) {
+        throw new Error(
+          `Document integrity failed before backup: ${documentComparison.missing.length} missing, ${documentComparison.orphaned.length} orphaned`,
+        );
+      }
+      documentCount = files.length;
     }
     const inventoryPath = path.join(runDirectory, "inventory.json");
     await writeFile(inventoryPath, JSON.stringify(inventory) + "\n", { mode: 0o600 });
     const documentsArchive = path.join(runDirectory, "documents.tar");
     await dependencies.run({
       executable: "tar",
-      args: ["--create", "--file", documentsArchive, "--directory", config.documentDirectory, "."],
-    });
+      args: ["--create", "--file", documentsArchive, "--directory", documentSourceDirectory, "."],
+    }, undefined, "archive");
     await chmod(documentsArchive, 0o600);
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run({
       executable: "tar",
       args: ["--create", "--file", payload, "--directory", runDirectory, "database.dump", "inventory.json", "documents.tar"],
-    });
+    }, undefined, "archive");
     await chmod(payload, 0o600);
-    await dependencies.run(config.encryption, { input: payload, output: artifact, kmsProfile: config.encryptionKmsProfile });
+    await dependencies.run(config.encryption, { input: payload, output: artifact, kmsProfile: config.encryptionKmsProfile }, "encrypt");
     await chmod(artifact, 0o600);
     const manifest = await writeManifest(artifact, now.toISOString());
+    await updateRunMarker(runDirectory, { state: "encrypted" });
 
-    await dependencies.run(config.upload, {
-      source: artifact,
-      destination: remoteUri(config.destination, name),
-      object: name,
+    // Tiered layout is active when a tier policy is configured (the production loader always sets one):
+    // the same bytes are written once per applicable tier (daily always, weekly on Sunday, monthly on the
+    // 1st; UTC). A config without a tier policy keeps the original flat layout.
+    stage = "tier_upload";
+    const tiers: Tier[] = config.tierPolicy ? tiersFor(now) : [];
+    const manifestName = path.basename(manifest);
+    const targets = tiers.length
+      ? tiers.map((tier) => ({ artifact: tierKey(tier, name), manifest: tierKey(tier, manifestName) }))
+      : [{ artifact: name, manifest: manifestName }];
+    for (const target of targets) {
+      await dependencies.run(config.upload, {
+        source: artifact,
+        destination: remoteUri(config.destination, target.artifact),
+        object: target.artifact,
+      }, "upload");
+      await dependencies.run(config.upload, {
+        source: manifest,
+        destination: remoteUri(config.destination, target.manifest),
+        object: target.manifest,
+      }, "upload");
+    }
+    // Never prune (or report success) on the strength of an upload command's exit code alone: every
+    // tier copy is re-downloaded and verified BEFORE the first list/remove can run.
+    stage = "verify";
+    const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, targets, manifest);
+    await updateRunMarker(runDirectory, { state: "uploaded_verified" });
+    stage = "prune";
+    // D-2: default OFF. Only an explicit `true` may reach any list/delete operation.
+    const pruneEnabled = config.prune === true;
+    const pruneStatus = pruneEnabled ? "enabled" : config.pruneSource === "explicit" ? "disabled_explicit" : "disabled_default";
+    log({
+      timestamp: new Date().toISOString(),
+      level: "info",
+      operation: "backup",
+      event: pruneEnabled ? "prune_enabled" : "prune_disabled",
+      runId,
+      pruneStatus,
+      source: config.pruneSource ?? (config.prune === undefined ? "default" : "explicit"),
+      message: pruneEnabled
+        ? "pruning is ENABLED (BACKUP_PRUNE=on): expired backups will be deleted after verification, artifact first"
+        : "pruning is DISABLED: no backup is listed or deleted by this run; set BACKUP_PRUNE=on to enable retention pruning (not valid with BACKUP_VAULT_MODE=true)",
     });
-    await dependencies.run(config.upload, {
-      source: manifest,
-      destination: remoteUri(config.destination, path.basename(manifest)),
-      object: path.basename(manifest),
-    });
-    const pruned = await prune(config, dependencies.run, now);
+    const pruneResult = pruneEnabled
+      ? await prune(config, dependencies.run, now, name, log, runId, runDirectory)
+      : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0, verified: 0, accepted: 0 };
+    if (pruneResult.failed > 0) {
+      await safeAlert(
+        config,
+        dependencies.run,
+        log,
+        runId,
+        "prune_delete_refused",
+        `prune_delete_refused: ${pruneResult.failed} delete(s) refused or not verified${pruneResult.failureClasses?.length ? ` (class: ${[...new Set(pruneResult.failureClasses)].join(",")})` : ""}`,
+      );
+    }
     log({
       timestamp: new Date().toISOString(),
       level: "info",
@@ -125,7 +595,23 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       event: "completed",
       runId,
       artifact: name,
-      pruned,
+      documentSource: config.documentSource ?? "directory",
+      documents: documentCount,
+      tiersWritten: tiers,
+      prune: pruneEnabled ? "on" : "off",
+      pruneStatus,
+      verified: true,
+      verifiedBytes: verified.bytes,
+      sha256: verified.sha256,
+      // DEPRECATED alias of prunedVerified: counts ONLY deletions the verifier confirmed permanently absent (R19). It can
+      // under-count but never over-count. deleteCommandsAccepted = delete commands that exited 0 (NOT proof of deletion).
+      pruned: pruneResult.verified,
+      prunedVerified: pruneResult.verified,
+      deleteCommandsAccepted: pruneResult.accepted,
+      pruneFailed: pruneResult.failed,
+      pruneProtected: pruneResult.protectedByGuard,
+      pruneStopped: pruneResult.stopped,
+      manifestsPreserved: pruneResult.manifestsPreserved,
       durationMs: Date.now() - started,
     });
     return name;
@@ -140,25 +626,25 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       error: message,
       durationMs: Date.now() - started,
     });
-    try {
-      await notify(config, dependencies.run, { operation: "backup", status: "failed", error: message, runId });
-    } catch (alertError) {
-      log({
-        timestamp: new Date().toISOString(),
-        level: "error",
-        operation: "backup",
-        event: "alert_failed",
-        runId,
-        error: alertError instanceof Error ? alertError.message : String(alertError),
-      });
-    }
+    // Local log keeps the full text; the alert carries only a fixed reason code.
+    const reason =
+      error instanceof PruneListUnexpectedError
+        ? `prune_list_unexpected: listing had ${error.listed} entries, ${error.recognised} recognised${error.recognised > 0 ? `, ${error.unrecognisedBackupLike} backup-named unrecognised` : ""}`
+        : (ALERT_REASONS[stage] ?? "backup_failed: backup failed");
+    await safeAlert(config, dependencies.run, log, runId, "failed", reason);
     throw error;
   } finally {
-    await rm(runDirectory, { recursive: true, force: true });
+    stopHeartbeat();
+    await safeRemoveRunDirectory(runDirectory);
   }
 }
 
-export interface RestoreRequest { artifact: string; confirmDisposable: boolean; }
+export interface RestoreRequest {
+  artifact: string;
+  confirmDisposable: boolean;
+  /** Tier folder to restore from. Omitted = legacy flat layout (backups written before tiering). */
+  tier?: Tier;
+}
 
 function databaseIdentity(databaseUrl: string): string {
   let parsed: URL;
@@ -179,42 +665,69 @@ function safeRemoteArtifact(value: string): string {
   return value;
 }
 
+/** Fail closed: when isolation is required the config must carry a policy (so the scoped runner is used). */
+function assertIsolationNotBypassed(config: BackupConfig): void {
+  if (config.envIsolationRequired && !config.envIsolation) {
+    throw new Error("Environment isolation is required (BACKUP_ENV_ISOLATION_REQUIRED=true) but no isolation policy is configured; refusing to run any command");
+  }
+}
+
 export async function restoreBackup(
   config: BackupConfig,
   request: RestoreRequest,
   dependencies: EngineDependencies,
 ): Promise<void> {
+  assertIsolationNotBypassed(config);
   if (!request.confirmDisposable) throw new Error("Restore requires explicit disposable-database confirmation");
   if (databaseIdentity(config.restoreDatabaseUrl) === databaseIdentity(config.databaseUrl)) {
     throw new Error("Refusing restore because configured source and target database identities are equivalent");
   }
+  // Independent of CLI validation: only an absent tier (legacy flat layout) or an exact allowlisted tier is accepted.
+  if (request.tier !== undefined && !isTier(request.tier)) throw new Error("Restore tier must be daily, weekly or monthly");
   const name = safeRemoteArtifact(request.artifact);
   const runId = randomBytes(8).toString("hex");
   const log = dependencies.log ?? defaultLog;
   const started = Date.now();
   const runDirectory = path.join(config.stagingDirectory, `restore-${runId}`);
+  let stage = "prepare";
+  let stopHeartbeat: () => void = () => undefined;
   try {
     await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    await writeRunMarker(runDirectory, newRunMarker(runId, "restore", new Date()));
+    stopHeartbeat = startHeartbeat(runDirectory);
     const artifact = path.join(runDirectory, name);
     const manifest = `${artifact}.sha256.json`;
-    await dependencies.run(config.download, {
-      source: remoteUri(config.destination, name),
-      destination: artifact,
-      object: name,
-    });
-    await dependencies.run(config.download, {
-      source: remoteUri(config.destination, `${name}.sha256.json`),
-      destination: manifest,
-      object: `${name}.sha256.json`,
-    });
+    const remoteName = request.tier !== undefined ? tierKey(request.tier, name) : name;
+    stage = "download";
+    try {
+      await dependencies.run(config.restoreDownload ?? config.download, {
+        source: remoteUri(config.destination, remoteName),
+        destination: artifact,
+        object: remoteName,
+      }, "restore_download");
+      await dependencies.run(config.restoreDownload ?? config.download, {
+        source: remoteUri(config.destination, `${remoteName}.sha256.json`),
+        destination: manifest,
+        object: `${remoteName}.sha256.json`,
+      }, "restore_download");
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      if (request.tier === undefined) throw error; // no-tier restore behaviour is unchanged
+      throw new Error(
+        `Restore could not download the artifact and manifest from the "${request.tier}" tier. Check that the artifact name is correct and was written to that tier (--tier=${request.tier}); the manifest lives inside the tier folder, so a different tier or omitting --tier (legacy flat layout) will not find it. Underlying error: ${cause}`,
+        { cause: error },
+      );
+    }
+    stage = "verify";
     await verifyManifest(artifact, manifest);
+    stage = "decrypt_and_restore";
     const payload = path.join(runDirectory, "payload.tar");
-    await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile });
-    await assertRestoreTargetIsEmpty(dependencies.run, config.restoreDatabaseUrl);
+    await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile }, "decrypt");
+    await assertRestoreTargetIsEmpty(dependencies.run, config.restoreDatabaseUrl, "restore_database");
     await dependencies.run({
       executable: "tar",
       args: ["--extract", "--file", payload, "--directory", runDirectory],
-    });
+    }, undefined, "archive");
     const expected = JSON.parse(await readFile(path.join(runDirectory, "inventory.json"), "utf8")) as DatabaseInventory;
     await dependencies.run({
       executable: "pg_restore",
@@ -228,12 +741,12 @@ export async function restoreBackup(
         config.restoreDatabaseUrl,
         path.join(runDirectory, "database.dump"),
       ],
-    });
-    const actual = await readDatabaseInventory(dependencies.run, config.restoreDatabaseUrl);
+    }, undefined, "restore_database");
+    const actual = await readDatabaseInventory(dependencies.run, config.restoreDatabaseUrl, "restore_database");
     validateDatabaseInventory(expected, actual);
 
     const targetDocuments = path.resolve(config.restoreDocumentDirectory);
-    if (targetDocuments === path.resolve(config.documentDirectory)) {
+    if (config.documentDirectory && targetDocuments === path.resolve(config.documentDirectory)) {
       throw new Error("Refusing to restore documents over the live document directory");
     }
     const staging = path.resolve(config.stagingDirectory);
@@ -248,7 +761,7 @@ export async function restoreBackup(
     await dependencies.run({
       executable: "tar",
       args: ["--extract", "--file", path.join(runDirectory, "documents.tar"), "--directory", targetDocuments],
-    });
+    }, undefined, "archive");
     const documentComparison = compareDocumentKeys(actual.documentKeys, await documentInventory(targetDocuments));
     if (documentComparison.missing.length || documentComparison.orphaned.length) {
       throw new Error(
@@ -280,7 +793,13 @@ export async function restoreBackup(
       durationMs: Date.now() - started,
     });
     try {
-      await notify(config, dependencies.run, { operation: "restore", status: "failed", error: message, runId });
+      // Local log keeps the full text; the alert carries only a fixed reason code and stage.
+      await notify(config, dependencies.run, {
+        operation: "restore",
+        status: "failed",
+        error: `restore_failed: restore failed during ${stage}`,
+        runId,
+      });
     } catch (alertError) {
       log({
         timestamp: new Date().toISOString(),
@@ -288,7 +807,7 @@ export async function restoreBackup(
         operation: "restore",
         event: "alert_failed",
         runId,
-        error: alertError instanceof Error ? alertError.message : String(alertError),
+        error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
       });
     }
     throw error;

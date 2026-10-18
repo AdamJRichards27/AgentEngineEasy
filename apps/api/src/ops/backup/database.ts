@@ -1,4 +1,4 @@
-import type { CommandRunner, DatabaseInventory } from "./types.js";
+import type { BackupOperation, CommandRunner, DatabaseInventory } from "./types.js";
 
 const INVENTORY_SQL = String.raw`
 WITH table_counts AS (
@@ -24,11 +24,12 @@ SELECT jsonb_build_object(
 export async function readDatabaseInventory(
   runner: CommandRunner,
   databaseUrl: string,
+  operation: BackupOperation = "database",
 ): Promise<DatabaseInventory> {
   const result = await runner({
     executable: "psql",
     args: ["--no-psqlrc", "--tuples-only", "--no-align", "--set=ON_ERROR_STOP=1", "--dbname", databaseUrl, "--command", INVENTORY_SQL],
-  });
+  }, undefined, operation);
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.stdout.trim());
@@ -48,7 +49,7 @@ export async function readDatabaseInventory(
 }
 
 /** A destructive restore must only start with no user tables in public. */
-export async function assertRestoreTargetIsEmpty(runner: CommandRunner, databaseUrl: string): Promise<void> {
+export async function assertRestoreTargetIsEmpty(runner: CommandRunner, databaseUrl: string, operation: BackupOperation = "database"): Promise<void> {
   const result = await runner({
     executable: "psql",
     args: [
@@ -61,7 +62,7 @@ export async function assertRestoreTargetIsEmpty(runner: CommandRunner, database
       "--command",
       "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE';",
     ],
-  });
+  }, undefined, operation);
   const count = Number(result.stdout.trim());
   if (!Number.isInteger(count) || count < 0) throw new Error("Restore target preflight did not return a table count");
   if (count !== 0) throw new Error(`Restore target preflight refused populated database with ${count} public tables`);

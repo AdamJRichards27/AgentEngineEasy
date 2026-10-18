@@ -269,8 +269,8 @@ test("encrypted artifact round trip archives and restores database metadata and 
     }
   };
   try {
-    await mkdir(path.join(backupConfig.documentDirectory, "signed"), { recursive: true });
-    await writeFile(path.join(backupConfig.documentDirectory, "signed", "contract.pdf"), "signed document");
+    await mkdir(path.join(backupConfig.documentDirectory!, "signed"), { recursive: true });
+    await writeFile(path.join(backupConfig.documentDirectory!, "signed", "contract.pdf"), "signed document");
     const artifact = await createBackup(backupConfig, {
       run: runner,
       now: () => new Date("2026-01-02T03:04:05.000Z"),
