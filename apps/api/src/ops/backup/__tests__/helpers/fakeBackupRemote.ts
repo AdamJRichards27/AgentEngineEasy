@@ -50,6 +50,13 @@ export interface FakeRemoteOptions {
   removeError?: string;
   /** Enable pruning (production default is OFF since D-2; tests that exercise pruning opt in explicitly). */
   prune?: boolean;
+  /**
+   * D-9: configure a post-delete verification command. A verify of an object passes only if the delete command
+   * removed it AND it does not match `verifyStillPresent` (models a delete marker / surviving version on a
+   * versioned or Object Lock bucket, where the delete command exits 0 but the data is still there).
+   * `verifyFails` makes the verifier itself fail (transport error / no permission).
+   */
+  verifyDelete?: { stillPresent?: RegExp; fails?: boolean };
   /** Extra BackupConfig fields (tier policy, prune switch, vault mode, ...). */
   configOverrides?: Partial<BackupConfig>;
 }
@@ -62,6 +69,8 @@ export interface FakeRemote {
   uploaded: Map<string, Buffer>;
   /** Objects removed through the delete command. */
   removed: string[];
+  /** Backup operation (scoped-environment selector) passed with every command, in order. */
+  operations: string[];
   /** Mutable delete-fault controls (initialised from the options); lets a test lift a refusal between runs. */
   controls: { failRemove?: boolean; failRemovePattern?: RegExp; removeThenThrow?: RegExp };
   config: BackupConfig;
@@ -90,6 +99,7 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
     encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
     download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
     ...(options.prune === undefined ? {} : { prune: options.prune }),
+    ...(options.verifyDelete ? { deleteVerify: spec("verify-delete") } : {}),
     ...(options.configOverrides ?? {}),
   };
   const calls: string[] = [];
@@ -104,7 +114,9 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
     removeThenThrow: options.removeThenThrow,
   };
 
-  const run: CommandRunner = async (command, replacements = {}) => {
+  const operations: string[] = [];
+  const run: CommandRunner = async (command, replacements = {}, operation) => {
+    operations.push(`${command.executable}:${operation ?? "-"}`);
     const object = replacements.object;
     calls.push(object ? `${command.executable}:${object}` : command.executable);
     switch (command.executable) {
@@ -150,6 +162,12 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
         removed.push(object!);
         if (controls.removeThenThrow?.test(object!)) throw new Error("RequestTimeout: delete outcome unknown");
         return { stdout: "", stderr: "" };
+      case "verify-delete":
+        if (options.verifyDelete?.fails) throw new Error("verifier unavailable");
+        if (!removed.includes(object!) || options.verifyDelete?.stillPresent?.test(object!)) {
+          throw new Error("still present: version or delete marker remains");
+        }
+        return { stdout: "", stderr: "" };
       case "alert":
         alerts.push(replacements);
         if (options.failAlert) throw new Error("alert transport down");
@@ -160,7 +178,7 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
   };
 
   return {
-    calls, logs, alerts, uploaded, removed, controls, config, run,
+    calls, logs, alerts, uploaded, removed, operations, controls, config, run,
     createBackup: async () => {
       return createBackup(config, {
         run,

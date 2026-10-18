@@ -105,6 +105,10 @@ export interface PruneResult {
   stopped: boolean;
   /** Manifests deliberately kept because their artifact could not be confirmed deleted. */
   manifestsPreserved: number;
+  /** Deletes the delete command reported done AND the verification command confirmed permanent. */
+  verified: number;
+  /** Deletes only the delete command's exit status vouches for (no verification command configured). */
+  unverified: number;
 }
 
 interface PruneUnit {
@@ -113,9 +117,15 @@ interface PruneUnit {
 }
 
 type PruneUnitStatus =
-  | "deleted"
+  /** Every delete in the unit was confirmed permanent by the verification command. */
+  | "deleted_verified"
+  /** The delete command exited 0 but nothing verified it (a delete marker or retained version may remain). */
+  | "deleted_unverified"
   | "artifact_delete_failed_manifest_preserved"
+  /** The artifact delete command exited 0 but verification failed: the artifact may still exist, so the manifest is kept. */
+  | "artifact_delete_not_verified_manifest_preserved"
   | "manifest_delete_failed_artifact_deleted"
+  | "manifest_delete_not_verified_artifact_deleted"
   | "not_attempted_pruning_stopped";
 
 interface PruneUnitOutcome {
@@ -147,6 +157,32 @@ function buildPruneUnits(objects: RemoteObject[], protectedArtifact: string): Pr
     else unit.artifact = object;
   }
   return order.map((key) => units.get(key)!);
+}
+
+/** The delete command exited 0 but the verification command did not confirm permanent deletion (or could not run). */
+class DeleteNotVerifiedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeleteNotVerifiedError";
+  }
+}
+
+/**
+ * Runs the delete command, then (when configured) the verification command. A delete command's success is only
+ * "the provider accepted the request": on a versioned or Object Lock bucket it may just add a delete marker.
+ * Returns whether the deletion was independently verified. Throws the delete command's own error when refused, or
+ * DeleteNotVerifiedError when verification fails for any reason (including the verifier itself failing).
+ */
+async function deleteObject(config: BackupConfig, run: CommandRunner, key: string): Promise<"verified" | "unverified"> {
+  const replacements = { destination: config.destination, object: key, remote: remoteUri(config.destination, key) };
+  await run(config.remove, replacements, "delete");
+  if (!config.deleteVerify) return "unverified";
+  try {
+    await run(config.deleteVerify, replacements, "list");
+  } catch (error) {
+    throw new DeleteNotVerifiedError(error instanceof Error ? error.message : String(error));
+  }
+  return "verified";
 }
 
 async function storeDeletionRecord(
@@ -215,7 +251,7 @@ async function prune(
   // D-3: an artifact and its manifest are ONE recoverability unit. Group the plan into units (artifact first)
   // and never touch a manifest unless its own artifact delete was confirmed in this run.
   const units = buildPruneUnits(plan.delete, protectedArtifact);
-  if (units.length === 0) return { deleted: 0, failed: 0, protectedByGuard: plan.protectedByGuard, stopped: false, manifestsPreserved: 0 };
+  if (units.length === 0) return { deleted: 0, failed: 0, protectedByGuard: plan.protectedByGuard, stopped: false, manifestsPreserved: 0, verified: 0, unverified: 0 };
   // Durable intent BEFORE any destructive operation. If it cannot be stored, nothing is deleted (fail closed).
   const recordPrefix = `deletion-records/${runId}`;
   await storeDeletionRecord(config, run, runDirectory, `${recordPrefix}.intent.json`, {
@@ -230,6 +266,8 @@ async function prune(
   let deleted = 0;
   let failed = 0;
   let manifestsPreserved = 0;
+  let verified = 0;
+  let unverified = 0;
   let stopped = false;
   const fail = (object: string, error: unknown, event: string): void => {
     failed += 1;
@@ -243,45 +281,48 @@ async function prune(
       error: error instanceof Error ? error.message : String(error),
     });
   };
+  // One delete. Returns true when the object counts as deleted; false after recording a refusal or an
+  // unverified delete (the caller then stops pruning and sets the unit status).
+  const attempt = async (key: string): Promise<{ ok: true } | { ok: false; notVerified: boolean }> => {
+    try {
+      const result = await deleteObject(config, run, key);
+      deleted += 1;
+      if (result === "verified") verified += 1;
+      else unverified += 1;
+      return { ok: true };
+    } catch (error) {
+      const notVerified = error instanceof DeleteNotVerifiedError;
+      fail(key, error, notVerified ? "prune_delete_not_verified" : "prune_delete_failed");
+      outcomes[currentIndex]!.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+      return { ok: false, notVerified };
+    }
+  };
+  let currentIndex = 0;
   for (let index = 0; index < units.length && !stopped; index += 1) {
+    currentIndex = index;
     const unit = units[index]!;
     const outcome = outcomes[index]!;
-    // Artifact first. Any throw (refused by Object Lock/retention, timeout, ambiguous) means the artifact may
-    // still exist, so its manifest MUST be preserved and pruning stops: the result is not trustworthy.
+    const before = { verified, unverified };
+    // Artifact first. Any throw (refused by Object Lock/retention, timeout, ambiguous) or an unverified delete
+    // means the artifact may still exist, so its manifest MUST be preserved and pruning stops.
     if (unit.artifact) {
-      try {
-        await run(config.remove, {
-          destination: config.destination,
-          object: unit.artifact.key,
-          remote: remoteUri(config.destination, unit.artifact.key),
-        }, "delete");
-      } catch (error) {
-        fail(unit.artifact.key, error, "prune_delete_failed");
-        outcome.status = "artifact_delete_failed_manifest_preserved";
-        outcome.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+      const result = await attempt(unit.artifact.key);
+      if (!result.ok) {
+        outcome.status = result.notVerified ? "artifact_delete_not_verified_manifest_preserved" : "artifact_delete_failed_manifest_preserved";
         if (unit.manifest) manifestsPreserved += 1;
         stopped = true;
         break;
       }
-      deleted += 1;
     }
     if (unit.manifest) {
-      try {
-        await run(config.remove, {
-          destination: config.destination,
-          object: unit.manifest.key,
-          remote: remoteUri(config.destination, unit.manifest.key),
-        }, "delete");
-        deleted += 1;
-      } catch (error) {
-        fail(unit.manifest.key, error, "prune_delete_failed");
-        outcome.status = "manifest_delete_failed_artifact_deleted";
-        outcome.error = sanitizeErrorText(error instanceof Error ? error.message : String(error));
+      const result = await attempt(unit.manifest.key);
+      if (!result.ok) {
+        outcome.status = result.notVerified ? "manifest_delete_not_verified_artifact_deleted" : "manifest_delete_failed_artifact_deleted";
         stopped = true;
         break;
       }
     }
-    outcome.status = "deleted";
+    outcome.status = verified - before.verified > 0 && unverified - before.unverified === 0 ? "deleted_verified" : "deleted_unverified";
   }
   if (stopped) {
     log({
@@ -300,17 +341,18 @@ async function prune(
   // (counted and logged) but cannot undo deletions that already happened; the intent record remains.
   try {
     await storeDeletionRecord(config, run, runDirectory, `${recordPrefix}.outcome.json`, {
-      version: 1,
+      version: 2,
       kind: "prune-outcome",
       runId,
       completedAt: new Date().toISOString(),
+      deleteVerification: config.deleteVerify ? "command" : "none",
       stopped,
       units: outcomes,
     });
   } catch (error) {
     fail(`${recordPrefix}.outcome.json`, error, "prune_outcome_record_failed");
   }
-  return { deleted, failed, protectedByGuard: plan.protectedByGuard, stopped, manifestsPreserved };
+  return { deleted, failed, protectedByGuard: plan.protectedByGuard, stopped, manifestsPreserved, verified, unverified };
 }
 
 async function runStagingSweep(config: BackupConfig, log: (entry: OperationLog) => void, runId: string): Promise<void> {
@@ -457,7 +499,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     });
     const pruneResult = pruneEnabled
       ? await prune(config, dependencies.run, now, name, log, runId, runDirectory)
-      : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0 };
+      : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0, verified: 0, unverified: 0 };
     if (pruneResult.failed > 0) {
       await safeAlert(
         config,
@@ -483,7 +525,11 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       verified: true,
       verifiedBytes: verified.bytes,
       sha256: verified.sha256,
+      // `pruned` = deletes the delete command reported done (kept for compatibility); it is NOT proof of permanent
+      // deletion. Use prunedVerified (confirmed by BACKUP_DELETE_VERIFY_COMMAND) vs prunedUnverified.
       pruned: pruneResult.deleted,
+      prunedVerified: pruneResult.verified,
+      prunedUnverified: pruneResult.unverified,
       pruneFailed: pruneResult.failed,
       pruneProtected: pruneResult.protectedByGuard,
       pruneStopped: pruneResult.stopped,

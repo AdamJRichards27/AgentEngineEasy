@@ -82,7 +82,7 @@ test("M4 durable deletion-intent record is uploaded BEFORE the first delete; out
     assert.equal(intent.units.length, 5);
     const outcome = rec(r, outcomeKey);
     assert.equal(outcome.stopped, false);
-    assert.ok(outcome.units.every((u: any) => u.status === "deleted"));
+    assert.ok(outcome.units.every((u: any) => u.status === "deleted_unverified"));
   } finally { await r.cleanup(); }
 });
 
