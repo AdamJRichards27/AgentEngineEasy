@@ -237,7 +237,7 @@ function setValue(tree: unknown, id: string, value: string) {
 const POSTED_ACTIVITY_TYPES = ["call", "meeting", "note"] as const;
 
 test("the client posts only note, call, and meeting", () => {
-  const source = readFileSync(new URL("../../pages/Grow.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../grow/GrowActivityLog.tsx", import.meta.url), "utf8");
   const start = source.indexOf("function useAddGrowNote");
   const end = source.indexOf("export function GrowContactActivityLog");
   assert.ok(start > 0 && end > start);

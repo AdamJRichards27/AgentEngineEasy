@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { formatGeneratedAt } from "../commandCentre.ts";
@@ -54,6 +54,13 @@ function pageSource(name: string): string {
   return readFileSync(new URL(`../../pages/${name}`, import.meta.url), "utf8");
 }
 
+function growModuleSources(): Array<[string, string]> {
+  const dir = new URL("../../grow/", import.meta.url);
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".ts") || name.endsWith(".tsx"))
+    .map((name) => [name, readFileSync(new URL(name, dir), "utf8")]);
+}
+
 test("G-3: the shared copy names two screens, two paths, and two purposes", () => {
   assert.equal(GROW_TODAY_PATH, "/grow");
   assert.equal(RUN_COMMAND_CENTRE_PATH, "/today");
@@ -87,18 +94,25 @@ test("G-3: the shared copy names two screens, two paths, and two purposes", () =
 });
 
 test("G-3: the two pages no longer sell one Daily Command Centre", () => {
-  for (const name of ["Grow.tsx", "CommandCentre.tsx"]) {
-    const source = pageSource(name);
+  const growToday = readFileSync(new URL("../../grow/GrowToday.tsx", import.meta.url), "utf8");
+  const surfaces: Array<[string, string]> = [
+    ["Grow.tsx", pageSource("Grow.tsx")],
+    ["CommandCentre.tsx", pageSource("CommandCentre.tsx")],
+    ...growModuleSources(),
+  ];
+  for (const [name, source] of surfaces) {
     assert.equal(source.includes(SHARED_INTERNAL_NAME), false, name);
     assert.equal(source.includes(OLD_GROW_PITCH), false, name);
     assert.equal(source.includes(OLD_COMMAND_CENTRE_PITCH), false, name);
     assert.equal(source.includes("here's what needs your attention"), false, name);
+    if (name !== "CommandCentre.tsx") {
+      assert.equal(source.includes('queryKey: ["command-centre"]'), false, name);
+    }
   }
-  assert.match(pageSource("Grow.tsx"), /growTodayCrossLink/);
+  assert.match(growToday, /growTodayCrossLink/);
   assert.match(pageSource("CommandCentre.tsx"), /commandCentreCrossLink/);
-  assert.match(pageSource("Grow.tsx"), /queryKey: \["grow-today"\]/);
+  assert.match(growToday, /queryKey: \["grow-today"\]/);
   assert.match(pageSource("CommandCentre.tsx"), /queryKey: \["command-centre"\]/);
-  assert.equal(pageSource("Grow.tsx").includes('queryKey: ["command-centre"]'), false);
   assert.equal(pageSource("CommandCentre.tsx").includes('queryKey: ["grow-today"]'), false);
 });
 
