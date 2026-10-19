@@ -10,6 +10,7 @@ import { GrowRateLimitError } from "../lib/ai/growRateLimiter.js";
 import { AiDailyCapExceededError, getAiUsageSnapshot } from "../lib/ai/dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
+import { isRestoredEnvironmentOutboundBlockedError } from "../lib/outboundGuard.js";
 
 export const aiRouter = Router();
 
@@ -139,6 +140,8 @@ aiRouter.post("/ask", requireAuth, async (req, res) => {
       });
       return;
     }
+    // WS4-11 D-AI: a restored environment's refusal is a deliberate 503 (middlewares/errorHandler.ts), not a 500.
+    if (isRestoredEnvironmentOutboundBlockedError(err)) throw err;
     logger.error("ai_ask_route_failed", { error: err });
     res.status(500).json({ error: "The AI Copilot could not answer that right now. Try again in a moment." });
   }

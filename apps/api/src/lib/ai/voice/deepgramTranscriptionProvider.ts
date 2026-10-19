@@ -62,7 +62,7 @@ export class DeepgramTranscriptionProvider implements TranscriptionProvider {
 
   async transcribe(request: TranscriptionRequest): Promise<TranscriptionResponse> {
     // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-    assertOutboundAllowed("voice_transcription");
+    assertOutboundAllowed("voice_transcription", this.name);
     const start = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);

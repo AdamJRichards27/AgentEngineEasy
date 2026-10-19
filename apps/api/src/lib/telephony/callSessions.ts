@@ -30,6 +30,7 @@ import {
 import { resolveRecordingPermission } from "./consent.js";
 import { SandboxTelephonyProvider } from "./sandboxProvider.js";
 import type { TelephonyProvider } from "./provider.js";
+import { assertOutboundAllowed } from "../outboundGuard.js";
 import { CallConsentEligibilityError, evaluateOutboundCallEligibility } from "./eligibility.js";
 import { evaluateRecordingGates, recordingEvidenceSummary } from "./recordingGates.js";
 
@@ -364,6 +365,9 @@ export async function confirmCallSession(input: ConfirmCallSessionInput): Promis
     // Hold the same transaction-scoped lock through the adapter claim so a
     // concurrent cancel/webhook cannot observe DIAL_REQUESTED and race this
     // single outbound request.
+    // WS4-11: in a restored environment only the in-process sandbox (or an allow-listed adapter) may dial
+    // (lib/outboundGuard.ts); a refusal rolls this transaction back, so the claim above is undone.
+    assertOutboundAllowed("telephony", telephonyProvider.name);
     const dialResult = await telephonyProvider.dial({
       callSessionId: claimed.id,
       brokerageId: claimed.brokerageId,

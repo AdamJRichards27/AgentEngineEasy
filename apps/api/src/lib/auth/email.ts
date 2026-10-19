@@ -230,5 +230,5 @@ export function getAuthEmailProvider(): AuthEmailProvider {
   // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
   // Outside a restored environment the very same sandbox object is returned (identity is part of the contract).
   if (!restoredEnvironmentMode().restored) return sandboxAuthEmailProvider;
-  return guardOutboundProvider("auth_email", sandboxAuthEmailProvider, ["sendInvitation", "sendPasswordReset", "sendAdministratorSuccession"]);
+  return guardOutboundProvider("auth_email", sandboxAuthEmailProvider, ["sendInvitation", "sendPasswordReset", "sendAdministratorSuccession"], (p) => p.name);
 }

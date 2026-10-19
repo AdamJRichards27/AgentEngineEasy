@@ -20,7 +20,7 @@ export class AnthropicAiProvider implements AiProvider {
 
   async generate(request: AiProviderRequest): Promise<AiProviderResponse> {
     // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-    assertOutboundAllowed("ai_provider");
+    assertOutboundAllowed("ai_provider", this.name);
     const start = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);

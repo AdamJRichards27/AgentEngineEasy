@@ -1,15 +1,17 @@
-// WS4-09: request paths driven over real HTTP against createApp() with AEE_RESTORED_ENVIRONMENT on. Each must answer
-// 503 { code: "RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED" } (via middlewares/errorHandler.ts) and nothing may leave the
-// process (fetch / http(s) / sockets spied; loopback + test DB pass). Switch-off controls show the same paths send.
+// WS4-09 + WS4-11: request paths driven over real HTTP against createApp() with AEE_RESTORED_ENVIRONMENT on.
+// fetch / http(s) / sockets are spied (loopback + test DB pass; anything else recorded and refused). Blocks answer
+// 503 { code: "RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED" }; password reset answers an identical 202 for every address
+// (no email, no account-existence oracle); in-process sandbox/mock providers keep working (D-MOCK).
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { installOutboundSpies } from "./fixtures/outboundSpies.js";
 
 process.env.ALLOW_DEV_AUTH = "true";
 const spies = installOutboundSpies();
-const { db, communicationMessages, users, invitations, passwordResetTokens } = await import("@aee/db");
+const { db, communicationMessages, users, invitations, passwordResetTokens, entitlementGrants } = await import("@aee/db");
+const { invalidateEntitlementCache } = await import("../entitlements/resolver.js");
 const { createBrokerageWithUsers, createListedProperty, cleanupBrokerages } = await import("../../routes/__tests__/testSupport.js");
 type Login = Awaited<ReturnType<typeof createBrokerageWithUsers>>;
 
@@ -57,33 +59,121 @@ after(async () => {
     await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));
   }
 });
-beforeEach(() => { spies.reset(); });
+const AI_ENV = ["AI_PROVIDER", "AI_FALLBACK_PROVIDER", "LIVE_AI_PROVIDER_APPROVED", "ANTHROPIC_API_KEY", "AI_RETRY_LIMIT", "AI_DAILY_CAP_ENFORCED", "AI_DAILY_LIMIT_PER_USER", "AI_DAILY_LIMIT_PER_BROKERAGE", "AEE_RESTORED_ENV_OUTBOUND_ALLOW"];
+const clearAiEnv = () => { for (const k of AI_ENV) delete process.env[k]; };
+beforeEach(() => { spies.reset(); clearAiEnv(); });
 
-test("POST /api/auth/password-reset/request (existing user): 503 blocked, no reset email; control 202 + sandbox send", async () => {
+
+// ---------- D-AI ----------
+const anthropicEnv = () => Object.assign(process.env, {
+  AI_PROVIDER: "anthropic", AI_FALLBACK_PROVIDER: "mock", LIVE_AI_PROVIDER_APPROVED: "true", ANTHROPIC_API_KEY: "test-only-not-a-key", AI_RETRY_LIMIT: "0",
+  // A live provider requires configured usage limits (lib/ai/usageLimits.ts); "off" is an explicit decision.
+  AI_DAILY_CAP_ENFORCED: "true", AI_DAILY_LIMIT_PER_USER: "off", AI_DAILY_LIMIT_PER_BROKERAGE: "off",
+});
+const ask = (cookie: string, body: Record<string, unknown> = {}) => post("/api/ai/ask", { question: "How am I tracking?", contextType: null, contextId: null, ...body }, cookie);
+async function grantGrowAi(brokerageId: number) {
+  for (const entitlementKey of ["grow.access", "grow.ai.use"]) {
+    await db.insert(entitlementGrants).values({ brokerageId, entitlementKey, granteeType: "brokerage", granteeId: brokerageId, sourceType: "manual", status: "Active" });
+  }
+  invalidateEntitlementCache(brokerageId);
+}
+
+test("D-AI: POST /api/ai/ask with a network AI provider in a restored env → 503 RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED (not 500), nothing sent", async () => {
+  on(); anthropicEnv();
+  await expect503(await ask(A.agent.cookie), "ai_provider"); // RUN Copilot path: no entitlement grant needed
+  await grantGrowAi(A.brokerageId); // minimal fixture for the Grow-scoped path (grow.access + grow.ai.use)
+  await expect503(await ask(A.agent.cookie, { contextType: "grow" }), "ai_provider");
+});
+
+test("D-AI/D-MOCK: mock AI answers 200 in a restored env (UAT); allow-listed Anthropic and the switch-off control reach the network", async () => {
+  on();
+  const m = await ask(A.agent.cookie);
+  assert.equal(m.status, 200, await m.clone().text());
+  assert.equal(spies.sends.length, 0);
+  anthropicEnv(); process.env.AEE_RESTORED_ENV_OUTBOUND_ALLOW = "ai_provider:anthropic";
+  await ask(A.agent.cookie);
+  assert.ok(spies.sends.some((s) => s.target.includes("api.anthropic.com")), "allow-listed: the spy saw the Anthropic call");
+  spies.reset(); delete process.env.AEE_RESTORED_ENV_OUTBOUND_ALLOW; off();
+  await ask(A.agent.cookie);
+  assert.ok(spies.sends.some((s) => s.target.includes("api.anthropic.com")), "control: the spy saw the Anthropic call");
+});
+
+// ---------- D-PR ----------
+const RESET = "/api/auth/password-reset/request";
+async function tokenCount(): Promise<number> {
+  const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(passwordResetTokens);
+  return r!.n;
+}
+async function timed(email: string): Promise<{ status: number; body: string; ms: number }> {
+  const t0 = process.hrtime.bigint();
+  const res = await post(RESET, { email });
+  const body = await res.text();
+  return { status: res.status, body, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
+}
+const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]!; };
+
+test("D-PR: restored env — reset answers an identical 202 for an existing and an unknown account; no email, no token, no timing oracle", async () => {
   const email = await import("../auth/email.js");
   email.__clearSandboxAuthEmailLog();
+  const tokensBefore = await tokenCount();
   on();
-  await expect503(await post("/api/auth/password-reset/request", { email: A.admin.user.email }), "auth_email");
+  const known = A.admin.user.email;
+  const unknown = `ws4-11-nobody-${Date.now()}@example.com`;
+  const k = await timed(known);
+  const u = await timed(unknown);
+  assert.equal(k.status, 202, k.body);
+  assert.equal(u.status, 202, u.body);
+  assert.equal(k.body, u.body, "byte-identical bodies");
+  assert.deepEqual(JSON.parse(k.body), { message: "If that email address has an account, a reset link has been sent." });
+  assert.equal(email.__getSandboxAuthEmailLog().length, 0, "no email in a restored env");
+  assert.equal(await tokenCount(), tokensBefore, "no reset token row in a restored env");
+  assert.equal(spies.sends.length, 0);
+  // Timing: alternate 15 rounds; medians must be within 15 ms of each other (the restored path touches no DB).
+  const kt: number[] = []; const ut: number[] = [];
+  for (let i = 0; i < 15; i++) { kt.push((await timed(known)).ms); ut.push((await timed(unknown)).ms); }
+  const diff = Math.abs(median(kt) - median(ut));
+  console.log(JSON.stringify({ ws4_11_reset_timing_ms: { known_median: median(kt), unknown_median: median(ut), diff } }));
+  assert.ok(diff < 15, `median timing difference ${diff} ms`);
   assert.equal(email.__getSandboxAuthEmailLog().length, 0);
+  // Control: switch off → the existing account gets the same 202 body and a sandbox reset email.
   off();
-  assert.equal((await post("/api/auth/password-reset/request", { email: A.admin.user.email })).status, 202);
+  const c = await timed(known);
+  assert.equal(c.status, 202);
+  assert.equal(c.body, k.body);
   assert.equal(email.__getSandboxAuthEmailLog().length, 1);
 });
 
-test("POST /api/auth/admin/invitations: 503 blocked, no invitation email", async () => {
+// ---------- D-INV ----------
+const invitationRows = (addr: string) => db.select().from(invitations).where(and(eq(invitations.brokerageId, A.brokerageId), eq(invitations.email, addr)));
+
+test("D-INV: restored env — invitation refused 503 BEFORE any row is written; a prior pending invitation is not revoked", async () => {
   const email = await import("../auth/email.js");
-  email.__clearSandboxAuthEmailLog();
+  const fresh = `ws4-11-invitee-${Date.now()}@example.com`;
   on();
-  await expect503(await post("/api/auth/admin/invitations", { email: `ws409-invitee-${Date.now()}@example.com`, role: "Agent" }, A.admin.cookie), "auth_email");
+  email.__clearSandboxAuthEmailLog();
+  await expect503(await post("/api/auth/admin/invitations", { email: fresh, role: "Agent" }, A.admin.cookie), "auth_email");
+  assert.equal((await invitationRows(fresh)).length, 0, "zero invitation rows inserted");
   assert.equal(email.__getSandboxAuthEmailLog().length, 0);
+  // A re-invite must not revoke the existing pending invitation either.
+  const prior = `ws4-11-prior-${Date.now()}@example.com`;
+  off();
+  const c = await post("/api/auth/admin/invitations", { email: prior, role: "Agent" }, A.admin.cookie);
+  assert.equal(c.status, 201, await c.clone().text());
+  const before = await invitationRows(prior);
+  assert.equal(before.length, 1);
+  on();
+  await expect503(await post("/api/auth/admin/invitations", { email: prior, role: "Agent" }, A.admin.cookie), "auth_email");
+  const afterRows = await invitationRows(prior);
+  assert.equal(afterRows.length, 1, "no new row");
+  assert.deepEqual(afterRows[0], before[0], "prior invitation untouched (not revoked)");
 });
 
-test("POST /api/financial/ops/dispatch-outbox (manual dispatch): 503 blocked; control 200", async () => {
+// ---------- D-MOCK over HTTP ----------
+test("D-MOCK: manual financial dispatch runs in a restored env (sandbox mandate adapter is in-process): 200, nothing sent", async () => {
   on();
-  await expect503(await post("/api/financial/ops/dispatch-outbox", {}, A.admin.cookie), "financial_payment_dispatch");
-  off();
   const res = await post("/api/financial/ops/dispatch-outbox", {}, A.admin.cookie);
   assert.equal(res.status, 200, await res.text());
+  assert.equal(spies.sends.length, 0);
 });
 
 async function draftEmail(cookie: string): Promise<{ id: number; version: number }> {
@@ -98,19 +188,16 @@ async function draftEmail(cookie: string): Promise<{ id: number; version: number
   return (await d.json()) as { id: number; version: number };
 }
 
-test("POST /api/communications/messages/:id/send (inline dispatch): 503 blocked, message left QUEUED (never SENDING/SENT); control SENT", async () => {
+test("D-MOCK: communications send through the in-process sandbox in a restored env → SENT, nothing leaves the process", async () => {
   const draft = await draftEmail(A.agent.cookie);
   on();
-  await expect503(await post(`/api/communications/messages/${draft.id}/send`, { expectedVersion: draft.version }, A.agent.cookie), "communications_email");
+  const res = await post(`/api/communications/messages/${draft.id}/send`, { expectedVersion: draft.version }, A.agent.cookie);
+  const text = await res.text();
+  assert.equal(res.status, 200, text);
+  assert.equal((JSON.parse(text) as { message: { status: string } }).message.status, "SENT");
   const [row] = await db.select().from(communicationMessages).where(and(eq(communicationMessages.id, draft.id), eq(communicationMessages.brokerageId, A.brokerageId)));
-  assert.equal(row!.status, "QUEUED");
-  assert.equal(row!.sentAt, null);
-  off();
-  const draft2 = await draftEmail(A.agent.cookie);
-  const res = await post(`/api/communications/messages/${draft2.id}/send`, { expectedVersion: draft2.version }, A.agent.cookie);
-  const body = (await res.json()) as { message: { status: string } };
-  assert.equal(res.status, 200);
-  assert.equal(body.message.status, "SENT");
+  assert.equal(row!.status, "SENT");
+  assert.equal(spies.sends.length, 0);
 });
 
 test("global error handler maps the block to 503 + code without alerting (unit)", async () => {

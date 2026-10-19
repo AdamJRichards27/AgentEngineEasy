@@ -401,8 +401,10 @@ export interface DispatchSweepResult {
  * never lets one entry's error stop the sweep.
  */
 export async function dispatchPendingPaymentOutbox(limit = 20): Promise<DispatchSweepResult> {
-  // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-  assertOutboundAllowed("financial_payment_dispatch");
+  // WS4-09/11: in a restored environment the sweep runs only when the mandate adapter is in-process (the
+  // sandbox) or allow-listed (lib/outboundGuard.ts). Checked before touching the outbox, so a refused network
+  // adapter never turns into per-entry provider failures, attempt counts or retry schedules.
+  assertOutboundAllowed("mandate_payments", mandatePaymentProvider.name);
   const due = await db
     .select()
     .from(financialPaymentOutbox)

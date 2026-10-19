@@ -34,7 +34,7 @@ import { documentOnProperty, propertyDocumentInBrokerage } from "./documentTenan
 import { guardOutboundProvider } from "./outboundGuard.js";
 
 // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-export const esignProvider = guardOutboundProvider("esign", createESignProvider(), ["createEnvelope"]);
+export const esignProvider = guardOutboundProvider("esign", createESignProvider(), ["createEnvelope"], (p) => p.kind);
 
 async function partyName(partyId: number): Promise<string> {
   const [p] = await db.select().from(parties).where(eq(parties.id, partyId));

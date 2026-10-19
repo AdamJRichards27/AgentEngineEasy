@@ -2,12 +2,16 @@ import { eq, and, sql } from "drizzle-orm";
 import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
 import type { AmlVerification, Party } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
-import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
+import { createAMLProvider, HttpAMLProvider, MockAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 import { guardOutboundProvider } from "./outboundGuard.js";
 
-// WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-export const amlProvider = guardOutboundProvider("aml", createAMLProvider(), ["requestVerification"]);
+/** WS4-11: the package adapters carry no name, so the seam names them (anything else is unclassified = network). */
+export function amlProviderId(p: object): string {
+  return p instanceof MockAMLProvider ? "mock" : p instanceof HttpAMLProvider ? "http" : "unclassified";
+}
+// WS4-09/11: in a restored environment only the in-process mock or an allow-listed adapter sends (lib/outboundGuard.ts).
+export const amlProvider = guardOutboundProvider("aml", createAMLProvider(), ["requestVerification"], amlProviderId);
 
 // Placeholder pricing pending a real vendor contract — Phase 6 ("Payments")
 // is what actually charges a stored payment method for this ServiceOrder;

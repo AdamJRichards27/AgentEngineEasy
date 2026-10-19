@@ -98,7 +98,7 @@ type AlertTransport = (url: string, token: string, envelope: AlertEnvelope) => P
 const recentlyDispatched = new Map<string, number>();
 let transport: AlertTransport = async (url, token, envelope) => {
   // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-  if (outboundBlocked("operational_alerts")) throw new Error(RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED);
+  if (outboundBlocked("operational_alerts", "webhook")) throw new Error(RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
@@ -153,7 +153,7 @@ export function assertOperationalAlertsConfigured(): void {
 
 export async function dispatchOperationalAlert(input: OperationalAlertInput): Promise<OperationalAlertResult> {
   // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-  const blocked = outboundBlocked("operational_alerts");
+  const blocked = outboundBlocked("operational_alerts", "webhook");
   if (blocked) return { status: "blocked", code: blocked.code, reason: blocked.reason };
   if (process.env.OPERATIONAL_ALERTS_ENABLED !== "true" || process.env.OPERATIONAL_ALERTS_PROVIDER !== "webhook") {
     return { status: "disabled" };

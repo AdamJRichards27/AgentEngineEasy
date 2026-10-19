@@ -13,4 +13,4 @@ import { createMandatePaymentProvider } from "@aee/integration-mandate-payments"
 import { guardOutboundProvider } from "../outboundGuard.js";
 
 // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-export const mandatePaymentProvider = guardOutboundProvider("mandate_payments", createMandatePaymentProvider(), ["scheduleDebit", "cancelScheduledDebit", "reverseDebit"]);
+export const mandatePaymentProvider = guardOutboundProvider("mandate_payments", createMandatePaymentProvider(), ["scheduleDebit", "cancelScheduledDebit", "reverseDebit"], (p) => p.name);

@@ -27,7 +27,7 @@ let cachedProvider: BillingProvider | null = null;
 // If BILLING_PROVIDER=stripe is set without a secret key, we never throw at boot; we log and
 // fall back to the Mock provider so the app stays usable and Grow checkout stays demoable.
 // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
-const guardBilling = (p: BillingProvider): BillingProvider => guardOutboundProvider("billing", p, ["createCheckoutSession", "cancelSubscription"]);
+const guardBilling = (p: BillingProvider): BillingProvider => guardOutboundProvider("billing", p, ["createCheckoutSession", "cancelSubscription"], (b) => b.name);
 
 export function getBillingProvider(): BillingProvider {
   if (cachedProvider) return cachedProvider;
