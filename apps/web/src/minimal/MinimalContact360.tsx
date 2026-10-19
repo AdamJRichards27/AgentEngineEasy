@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowContact360 } from "../lib/growContact360";
+import { MinimalGrowSections } from "./MinimalGrowSections";
 import { buildMinimalContactModel, formatContactDate, type MinimalContactModel } from "./minimalContactModel";
 
 // AE Minimal A Contact 360 (read-only). Data is the existing GET /grow/contacts/:partyId, under the same
@@ -37,6 +38,7 @@ export default function MinimalContact360() {
 export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry?: () => void }) {
   return (
     <div className="am-contact" data-ae-contact="minimal">
+      <MinimalGrowSections current="contacts" />
       <Link href="/grow" className="am-back-link">
         ← Back to Today
       </Link>
@@ -55,6 +57,7 @@ export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry
 export function MinimalContact360View({ model }: { model: MinimalContactModel }) {
   return (
     <div className="am-contact" data-ae-contact="minimal">
+      <MinimalGrowSections current="contacts" />
       <Link href="/grow" className="am-back-link">
         ← Back to Today
       </Link>

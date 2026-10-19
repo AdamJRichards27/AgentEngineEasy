@@ -7,6 +7,7 @@ import { useEntitlements, useSession } from "../lib/session";
 import { GROW_TODAY_PURPOSE, growTodayCrossLink, growTodayHeading } from "../lib/todaySurfaces";
 import { formatMinimalHeaderDate } from "../lib/minimalUx";
 import { buildMinimalTodayModel, type MinimalTodayCard } from "./minimalTodayModel";
+import { MinimalGrowSections } from "./MinimalGrowSections";
 
 // AE Minimal A Today. The list is GET /grow/today. Channel buttons and the
 // prototype's side cards are not part of this screen.
@@ -23,6 +24,7 @@ export default function MinimalToday() {
 
   return (
     <div className="am-today" data-ae-today="minimal">
+      <MinimalGrowSections current="today" />
       <div className="am-welcome">
         <div>
           <div className="am-eyebrow">{dateLabel}</div>
