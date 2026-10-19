@@ -107,6 +107,11 @@ export interface DatabaseInventory {
   tenantCount: number;
   recordCounts: Record<string, number>;
   documentKeys: string[];
+  /**
+   * drizzle.__drizzle_migrations evidence: row count and an md5 digest over the ordered hashes (no secrets).
+   * null = the journal table does not exist; undefined = artifact predates this field (not validated).
+   */
+  migrationJournal?: { count: number; digest: string } | null;
 }
 
 export interface ArtifactManifest {

@@ -308,7 +308,7 @@ Before every restore:
 4. Run the restore command above (add `--tier=` for tiered backups). It downloads artifact and manifest
    (through `BACKUP_RESTORE_DOWNLOAD_COMMAND` when set), verifies SHA-256
    integrity before decryption, extracts with `tar`, restores with `pg_restore
-   --exit-on-error`, validates table/row/tenant/document inventory, and verifies restored
+   --exit-on-error`, validates table/row/tenant/document inventory and the drizzle migration journal (row count + digest; artifacts created before this check are not journal-validated), and verifies restored
    document keys.
 5. Record artifact name, restore environment id, table/tenant/document validation result,
    duration, and any discrepancy. Destroy or reset the disposable restore environment

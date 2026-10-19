@@ -1,6 +1,6 @@
 import type { BackupOperation, CommandRunner, DatabaseInventory } from "./types.js";
 
-const INVENTORY_SQL = String.raw`
+export const INVENTORY_SQL = String.raw`
 WITH table_counts AS (
   SELECT jsonb_object_agg(table_name, row_count) AS counts
   FROM (
@@ -10,6 +10,21 @@ WITH table_counts AS (
     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     ORDER BY table_name
   ) c
+), migration_journal AS (
+  -- Schema-level recoverability evidence: the drizzle journal lives in schema "drizzle", which the
+  -- public-table counts above never see. NULL when the journal table does not exist (push-managed DB).
+  -- The table is only referenced inside query_to_xml's text argument, so it is never parsed when absent.
+  SELECT CASE
+    WHEN to_regclass('drizzle.__drizzle_migrations') IS NULL THEN NULL::jsonb
+    ELSE (
+      SELECT jsonb_build_object('count', (x)[1]::text::bigint, 'digest', coalesce((x)[2]::text, ''))
+      FROM (
+        SELECT xpath('/row/*/text()', query_to_xml(
+          'SELECT count(*) AS c, coalesce(md5(string_agg(hash, '','' ORDER BY id)), '''') AS d FROM drizzle.__drizzle_migrations',
+          false, true, '')) AS x
+      ) j
+    )
+  END AS journal
 ), document_keys AS (
   SELECT coalesce(jsonb_agg(object_storage_key ORDER BY object_storage_key), '[]'::jsonb) AS keys
   FROM documents WHERE object_storage_key IS NOT NULL
@@ -17,9 +32,17 @@ WITH table_counts AS (
 SELECT jsonb_build_object(
   'tenantCount', (SELECT count(*) FROM brokerages),
   'recordCounts', coalesce((SELECT counts FROM table_counts), '{}'::jsonb),
-  'documentKeys', (SELECT keys FROM document_keys)
+  'documentKeys', (SELECT keys FROM document_keys),
+  'migrationJournal', (SELECT journal FROM migration_journal)
 )::text;
 `;
+
+function isMigrationJournalShape(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "object") return false;
+  const journal = value as { count?: unknown; digest?: unknown };
+  return Number.isInteger(journal.count) && typeof journal.digest === "string";
+}
 
 export async function readDatabaseInventory(
   runner: CommandRunner,
@@ -41,7 +64,8 @@ export async function readDatabaseInventory(
     !Number.isInteger(value.tenantCount) ||
     !value.recordCounts ||
     typeof value.recordCounts !== "object" ||
-    !Array.isArray(value.documentKeys)
+    !Array.isArray(value.documentKeys) ||
+    !isMigrationJournalShape(value.migrationJournal)
   ) {
     throw new Error("Database inventory JSON has an invalid shape");
   }
@@ -78,6 +102,17 @@ export function validateDatabaseInventory(expected: DatabaseInventory, actual: D
     .filter((name) => expected.recordCounts[name] !== actual.recordCounts[name])
     .map((name) => `${name}:${expected.recordCounts[name] ?? "missing"}!=${actual.recordCounts[name] ?? "missing"}`);
   if (mismatches.length) throw new Error(`Record-count validation failed: ${mismatches.join(", ")}`);
+  // Artifacts created before this field existed carry no journal evidence (undefined): nothing to compare.
+  // Any artifact that recorded one (including "no journal table" = null) must restore to the identical journal.
+  if (expected.migrationJournal !== undefined) {
+    const was = expected.migrationJournal;
+    const now = actual.migrationJournal ?? null;
+    if (was === null ? now !== null : now === null || was.count !== now.count || was.digest !== now.digest) {
+      throw new Error(
+        `Migration journal validation failed: expected ${was === null ? "no journal" : `${was.count} rows`}, restored ${now === null ? "no journal" : `${now.count} rows`}${was && now && was.count === now.count ? " with a different journal digest" : ""}`,
+      );
+    }
+  }
   const expectedKeys = [...expected.documentKeys].sort();
   const actualKeys = [...actual.documentKeys].sort();
   if (JSON.stringify(expectedKeys) !== JSON.stringify(actualKeys)) {
