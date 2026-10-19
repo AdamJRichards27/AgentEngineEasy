@@ -1,3 +1,5 @@
+import { growTabLabel, growWorkspaceEntryState } from "../lib/growWorkspace";
+
 // AE Minimal A accessibility helpers (WS1). Pure, so they test without a DOM.
 // In a client-routed app a link click changes the page without moving focus,
 // so a keyboard or screen-reader user stays on the old link. After each route
@@ -41,4 +43,22 @@ export function focusMinimalMain(doc: DocLike): "heading" | "main" | "none" {
     return "main";
   }
   return "none";
+}
+
+interface ReadyDocLike {
+  querySelector: (selector: string) => { getClientRects?: () => ArrayLike<unknown>; isConnected?: boolean } | null;
+}
+
+/** The new page has rendered: no Suspense loading line in main, and a visible <h1>. */
+export function minimalPageReady(doc: ReadyDocLike): boolean {
+  if (doc.querySelector(`#${MINIMAL_MAIN_ID} .app-loading`)) return false;
+  const heading = doc.querySelector(`#${MINIMAL_MAIN_ID} h1`);
+  if (!heading || heading.isConnected === false) return false;
+  return typeof heading.getClientRects === "function" ? heading.getClientRects().length > 0 : false;
+}
+
+/** Breadcrumb page and announcement: on /grow, the Grow section rather than "Grow" again. */
+export function minimalPageLabel(pathname: string, search: string, crumbPage: string): string {
+  if (pathname !== "/grow") return crumbPage;
+  return growTabLabel(growWorkspaceEntryState(search).tab);
 }

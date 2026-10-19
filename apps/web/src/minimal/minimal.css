@@ -1026,7 +1026,7 @@
 }
 
 /* WS1 accessibility: skip link, screen-reader-only text, programmatic focus targets. */
-.ae-minimal .am-skip-link { position: absolute; z-index: 30; top: 8px; left: 8px; padding: 10px 14px; border-radius: 8px; color: #FFFFFF; background: #333333; font-size: 13px; font-weight: 600; text-decoration: none; transform: translateY(-160%); transition: transform .12s ease; }
+.ae-minimal .am-skip-link { position: fixed; z-index: 1000; top: 8px; left: 8px; padding: 10px 14px; border-radius: 8px; color: #FFFFFF; background: #333333; font-size: 13px; font-weight: 600; text-decoration: none; transform: translateY(-200%); }
 .ae-minimal .am-skip-link:focus { transform: translateY(0); outline: 3px solid #C44F17; outline-offset: 2px; }
 .ae-minimal .am-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .ae-minimal [tabindex="-1"]:focus { outline: none; }

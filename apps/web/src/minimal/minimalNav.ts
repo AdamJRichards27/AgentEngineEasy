@@ -9,7 +9,11 @@ import { buildProductNavLinks, type NavContext, type NavLink } from "../lib/prod
 
 export const RUN_ACCESS = "run.access";
 
-/** Run screens: their APIs require run.access (Home and Run Today summarise Run work). */
+/**
+ * Run screens, hidden without run.access (Owner D5). UI gating only: exceptions,
+ * financial and pit-crew APIs enforce run.access, but GET/POST /properties and
+ * /home/summary do not today (server follow-up, outside WS1).
+ */
 export const MINIMAL_RUN_PATHS: readonly string[] = [
   "/",
   "/today",

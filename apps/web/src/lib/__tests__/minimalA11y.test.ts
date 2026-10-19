@@ -61,7 +61,7 @@ test("shell: skip link first, focusable main, labelled landmarks, live announcem
 });
 
 test("css: skip link hidden until focused, sr-only utility exists", () => {
-  assert.match(css, /\.ae-minimal \.am-skip-link \{[^}]*position: absolute;[^}]*\}/);
+  assert.match(css, /\.ae-minimal \.am-skip-link \{[^}]*position: fixed;[^}]*\}/);
   assert.match(css, /\.ae-minimal \.am-skip-link:focus \{[^}]*\}/);
   assert.match(css, /\.ae-minimal \.am-sr-only \{[^}]*clip: rect\(0 0 0 0\)[^}]*\}/);
   assert.match(css, /\.ae-minimal \[tabindex="-1"\]:focus \{ outline: none; \}/);
@@ -73,4 +73,48 @@ test("screens: loading states are announced and role chips read as roles", () =>
   const contacts = read("../../minimal/MinimalContacts.tsx");
   assert.doesNotMatch(contacts, /<span className="am-chip-row" aria-label="Roles">/, "aria-label on a plain span is not read");
   assert.match(contacts, /<span className="am-sr-only">Roles: <\/span>/);
+});
+
+// ── Fixes from the real-API browser pass (19 Oct) ─────────────────────────
+// 1. Focus stayed on <body> after a click into a not-yet-loaded page: the
+//    lazy chunk was still loading (Suspense fallback) or the old heading was
+//    still in the DOM, so focus landed on an element that then went away.
+//    The shell now waits until the page is ready and the heading is rendered.
+test("page readiness: no loading fallback and a rendered heading", async () => {
+  const { minimalPageReady } = await import("../../minimal/minimalA11y");
+  const visibleH1 = { getClientRects: () => [{}], isConnected: true };
+  const hiddenH1 = { getClientRects: () => [], isConnected: true };
+  const doc = (h1: unknown, loading: boolean) => ({
+    querySelector: (s: string) => (s === "#ae-main-workspace h1" ? h1 : s === "#ae-main-workspace .app-loading" ? (loading ? {} : null) : null),
+  });
+  assert.equal(minimalPageReady(doc(visibleH1, false) as never), true);
+  assert.equal(minimalPageReady(doc(visibleH1, true) as never), false, "Suspense fallback still showing");
+  assert.equal(minimalPageReady(doc(hiddenH1, false) as never), false, "a hidden (suspended) heading is not ready");
+  assert.equal(minimalPageReady(doc(null, false) as never), false);
+});
+
+test("shell retries focus until it sticks on the new page", () => {
+  assert.match(shell, /minimalPageReady\(document\)/);
+  assert.match(shell, /document\.activeElement/);
+});
+
+// 2. On /grow the breadcrumb and the announcement said "Grow / Grow" for every
+//    section. The page part is now the Grow section (Today, Contacts, …).
+test("breadcrumb page names the Grow section on /grow", async () => {
+  const { minimalPageLabel } = await import("../../minimal/minimalA11y");
+  assert.equal(minimalPageLabel("/grow", "?tab=contacts", "Grow"), "Contacts");
+  assert.equal(minimalPageLabel("/grow", "", "Grow"), "Today");
+  assert.equal(minimalPageLabel("/grow/contacts/4", "", "Contact"), "Contact");
+  assert.equal(minimalPageLabel("/settings", "", "Settings"), "Settings");
+  assert.match(shell, /minimalPageLabel\(location, search, crumb\.page\)/);
+});
+
+// 3. The skip link sat under the staging banner and slid in: it must be fixed,
+//    on top, and fully visible on its first focus.
+test("skip link is fixed above everything and shows without a transition", () => {
+  const rule = /\.ae-minimal \.am-skip-link \{([^}]*)\}/.exec(css);
+  assert.ok(rule);
+  assert.match(rule[1], /position: fixed;/);
+  assert.match(rule[1], /z-index: 1000;/);
+  assert.doesNotMatch(rule[1], /transition/);
 });
