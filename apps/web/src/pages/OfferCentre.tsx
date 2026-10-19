@@ -104,6 +104,7 @@ export function BuyerList(props: {
           <tr>
             <th>Buyer</th>
             <th>Property</th>
+            <th>Offers</th>
             <th>Linked</th>
           </tr>
         </thead>
@@ -116,6 +117,7 @@ export function BuyerList(props: {
                   {row.propertyAddress}
                 </Link>
               </td>
+              <td>{row.offerCount}</td>
               <td>{formatDate(row.linkedAt) ?? "—"}</td>
             </tr>
           ))}

@@ -26,6 +26,7 @@ const RAW = {
   propertyId: 42,
   propertyAddress: "1 Buyer St, Testville",
   linkedAt: "2026-10-19T00:00:00.000Z",
+  offerCount: 3,
   email: "amy@example.com",
   mobile: "0411111111",
   residentialAddress: "9 Home Rd",
@@ -41,7 +42,7 @@ test("buildBuyerListPath: property filter and paging", async () => {
 
 test("toBuyerView keeps names-only whitelist", async () => {
   const { toBuyerView } = await lib();
-  assert.deepEqual(Object.keys(toBuyerView(RAW as never)).sort(), ["buyerName", "linkId", "linkedAt", "propertyAddress", "propertyId"]);
+  assert.deepEqual(Object.keys(toBuyerView(RAW as never)).sort(), ["buyerName", "linkId", "linkedAt", "offerCount", "propertyAddress", "propertyId"]);
 });
 
 test("BuyerList renders names and property links, no PII, no actions", async () => {
@@ -51,6 +52,8 @@ test("BuyerList renders names and property links, no PII, no actions", async () 
   assert.match(html, /Amy Buyer/);
   assert.match(html, /href="\/properties\/42"/);
   assert.match(html, /1 Buyer St, Testville/);
+  assert.match(html, /<th>Offers<\/th>/);
+  assert.match(html, /<td>3<\/td>/);
   assert.match(html, /Showing 1–1 of 1/);
   assert.equal(/amy@example\.com|0411111111|9 Home Rd/.test(html), false);
   assert.equal(/<button[^>]*>(Accept|Decline|Withdraw|Delete|Edit)/.test(html), false);

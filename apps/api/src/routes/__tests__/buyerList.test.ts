@@ -112,7 +112,7 @@ test("names only: no email, mobile, address, or entity fields", async () => {
   const raw = await (await get("/offers/buyers", A.admin.cookie)).text();
   assert.equal(/@example\.com|0411111111|"email"|"mobile"|residentialAddress|entityDetails|shareToken/i.test(raw), false);
   const body = JSON.parse(raw) as BuyerBody;
-  assert.deepEqual(Object.keys(body.buyers[0]).sort(), ["buyerName", "linkId", "linkedAt", "partyId", "propertyAddress", "propertyId"]);
+  assert.deepEqual(Object.keys(body.buyers[0]).sort(), ["buyerName", "linkId", "linkedAt", "offerCount", "partyId", "propertyAddress", "propertyId"]);
 });
 
 test("tenant isolation: B sees only its own buyer, and A never sees B's mis-linked party", async () => {
@@ -162,4 +162,25 @@ test("requires authentication and run.access", async () => {
     await setRunAccess(A.brokerageId, true);
   }
   assert.equal((await get("/offers/buyers", A.agent.cookie)).status, 200);
+});
+
+// #34 slice 5 — offerCount: offers by this buyer party on this linked
+// property. Counted through the same brokerage-scoped property.
+test("offerCount counts this buyer's offers on that property only", async () => {
+  const before3 = (await (await get("/offers/buyers", A.agent.cookie)).json()) as BuyerBody;
+  const amy = before3.buyers.find((b) => b.buyerName === "Amy Buyer")!;
+  assert.equal(amy.offerCount, 1);
+  assert.ok(before3.buyers.every((b) => b.offerCount === 1));
+  const res = await fetch(`${baseUrl}/api/offers/by-property/${p1}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.agent.cookie },
+    body: JSON.stringify({ offerPriceCents: 55_000_000, buyerPartyId: amy.partyId }),
+  });
+  assert.equal(res.status, 201);
+  const after3 = (await (await get("/offers/buyers", A.agent.cookie)).json()) as BuyerBody;
+  assert.equal(after3.buyers.length, 3, "a second offer reuses the existing Buyer link");
+  assert.equal(after3.buyers.find((b) => b.partyId === amy.partyId)!.offerCount, 2);
+  assert.equal(after3.buyers.find((b) => b.buyerName === "Ben Buyer")!.offerCount, 1);
+  const bBody = (await (await get("/offers/buyers", B.agent.cookie)).json()) as BuyerBody;
+  assert.equal(bBody.buyers[0].offerCount, 1, "B's count ignores A's offers");
 });

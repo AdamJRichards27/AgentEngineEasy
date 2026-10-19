@@ -239,6 +239,8 @@ export interface BuyerListRow {
   propertyId: number;
   propertyAddress: string;
   linkedAt: Date;
+  /** Offers by this buyer party on this linked property (#34 slice 5). */
+  offerCount: number;
 }
 
 export async function listBuyersForBrokerage(input: {
@@ -262,6 +264,9 @@ export async function listBuyersForBrokerage(input: {
       propertyId: propertyParties.propertyId,
       propertyAddress: properties.formattedAddress,
       linkedAt: propertyParties.createdAt,
+      // Scoped through the link's own property, which the WHERE clause
+      // already restricts to the caller's brokerage.
+      offerCount: sql<number>`(select count(*)::int from ${offers} where ${offers.buyerPartyId} = ${propertyParties.partyId} and ${offers.propertyId} = ${propertyParties.propertyId})`,
     })
     .from(propertyParties)
     .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
@@ -288,6 +293,7 @@ export async function listBuyersForBrokerage(input: {
         propertyId: row.propertyId,
         propertyAddress: row.propertyAddress,
         linkedAt: row.linkedAt,
+        offerCount: row.offerCount,
       };
     }),
     total: count,

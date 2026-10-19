@@ -99,6 +99,7 @@ export interface BuyerListApiRow {
   propertyId: number;
   propertyAddress: string;
   linkedAt: string;
+  offerCount: number;
 }
 
 export interface BuyerListResponse {
@@ -114,6 +115,7 @@ export interface BuyerView {
   propertyId: number;
   propertyAddress: string;
   linkedAt: string;
+  offerCount: number;
 }
 
 export interface BuyerListFilters {
@@ -136,6 +138,7 @@ export function toBuyerView(row: BuyerListApiRow): BuyerView {
     propertyId: row.propertyId,
     propertyAddress: row.propertyAddress,
     linkedAt: row.linkedAt,
+    offerCount: row.offerCount,
   };
 }
 
