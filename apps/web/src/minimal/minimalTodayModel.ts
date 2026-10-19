@@ -1,4 +1,5 @@
 import { appraisalWorkspacePath } from "../lib/appraisalUi";
+import { growTodayCrossLink, type TodaySurfaceCrossLink } from "../lib/todaySurfaces";
 import {
   growFirstRunIncomplete,
   growFirstRunSteps,
@@ -70,6 +71,8 @@ export interface MinimalTodayModel {
   noGrowData: boolean;
   caughtUp: boolean;
   setupSteps: MinimalTodaySetupStep[];
+  /** Link to Run Today (Command Centre); null without run.access (Owner D5). */
+  runCrossLink: TodaySurfaceCrossLink | null;
 }
 
 const NAVIGATION_ORDER: GrowTodayActionButton["action"][] = [
@@ -81,6 +84,8 @@ const NAVIGATION_ORDER: GrowTodayActionButton["action"][] = [
 export function minimalTodayDestination(
   action: GrowTodayAction,
   prefer?: "view_contact" | "view_appraisal" | "view_property",
+  /** Owner D5: property links open the Run workspace, so they need run.access. Fails closed. */
+  runAccess = false,
 ): MinimalTodayLink | null {
   const order = prefer
     ? [prefer, ...NAVIGATION_ORDER.filter((kind) => kind !== prefer)]
@@ -95,13 +100,19 @@ export function minimalTodayDestination(
       return { href: appraisalWorkspacePath(button.appraisalId), label: "Open appraisal" };
     }
     if (button.action === "view_property") {
+      if (!runAccess) continue;
       return { href: `/properties/${button.propertyId}`, label: "Open property" };
     }
   }
   return null;
 }
 
-function card(action: GrowTodayAction, now: Date, prefer?: "view_contact" | "view_appraisal" | "view_property"): MinimalTodayCard {
+function card(
+  action: GrowTodayAction,
+  now: Date,
+  runAccess: boolean,
+  prefer?: "view_contact" | "view_appraisal" | "view_property",
+): MinimalTodayCard {
   const due = action.dueAt ? new Date(action.dueAt) : null;
   const overdue = due !== null && !Number.isNaN(due.getTime()) && due.getTime() < now.getTime();
   const nextStep = action.recommendedAction.trim();
@@ -118,7 +129,7 @@ function card(action: GrowTodayAction, now: Date, prefer?: "view_contact" | "vie
     whenLabel: overdue ? "Overdue" : (formatWhen(action.dueAt) ?? "No date"),
     overdue,
     kindLabel: actionTypeLabel(action.type),
-    destination: minimalTodayDestination(action, prefer),
+    destination: minimalTodayDestination(action, prefer, runAccess),
     contactabilityNote: contactabilityNotice(action),
     rankLine: rankSummaryLine(action),
     unlinkedNote: unlinkedContactNotice(action),
@@ -153,14 +164,15 @@ export function buildMinimalTodayModel(
   now: Date,
   hasEntitlement: (key: string) => boolean = () => false,
 ): MinimalTodayModel {
+  const runAccess = hasEntitlement("run.access");
   const actions = summary.priorityActions;
   const heroAction = actions[0] ?? null;
   const rest = heroAction ? actions.slice(1) : [];
-  const signals = rest.filter((action) => action.type === "property_intelligence_signal").map((action) => card(action, now));
+  const signals = rest.filter((action) => action.type === "property_intelligence_signal").map((action) => card(action, now, runAccess));
   const comingUpAction = rest.find((action) => action.type === "appraisal_follow_up") ?? null;
   const also = rest
     .filter((action) => action.type !== "property_intelligence_signal" && action !== comingUpAction)
-    .map((action) => card(action, now));
+    .map((action) => card(action, now, runAccess));
   return {
     queueLabel:
       actions.length === 0
@@ -168,11 +180,11 @@ export function buildMinimalTodayModel(
         : actions.length === 1
           ? "1 priority action"
           : `1 of ${actions.length} priority actions`,
-    hero: heroAction ? card(heroAction, now) : null,
+    hero: heroAction ? card(heroAction, now, runAccess) : null,
     alsoOnYourDay: also,
     agendaSummary: agendaSummary(also),
     signals,
-    comingUp: comingUpAction ? card(comingUpAction, now, "view_appraisal") : null,
+    comingUp: comingUpAction ? card(comingUpAction, now, runAccess, "view_appraisal") : null,
     counts: [
       { label: "Priority actions", value: summary.counts.priorityActions },
       { label: DUE_TODAY_COUNT_LABEL, value: summary.counts.followUpsDue },
@@ -183,6 +195,7 @@ export function buildMinimalTodayModel(
     noGrowData: !summary.hasAnyGrowData,
     caughtUp: summary.hasAnyGrowData && actions.length === 0,
     setupSteps: setupSteps(summary, hasEntitlement),
+    runCrossLink: runAccess ? growTodayCrossLink : null,
   };
 }
 

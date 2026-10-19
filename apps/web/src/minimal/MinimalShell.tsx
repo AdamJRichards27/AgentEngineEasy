@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import type { SessionUser } from "../lib/session";
-import { buildProductNavLinks } from "../lib/productNav";
+import { buildMinimalNavLinks } from "./minimalNav";
 import { formatMinimalHeaderDate, minimalBreadcrumb, minimalNavIsCurrent } from "../lib/minimalUx";
 import gear from "./brand/AE_Gear_Orange_Large.png";
 import wordmarkDark from "./brand/AE_Wordmark_Dark.png";
@@ -36,7 +36,9 @@ export default function MinimalShell({
 }) {
   const [location] = useLocation();
   const ownerWithoutContext = !!user.platformOwner && user.ownerSelectedBrokerageId == null;
-  const links = ownerWithoutContext ? [] : buildProductNavLinks({ role: user.role, entitlements });
+  const links = ownerWithoutContext ? [] : buildMinimalNavLinks({ role: user.role, entitlements });
+  // Start property stays a sidebar-only entry, as before; the mobile bar keeps the main sections.
+  const mobileLinks = links.filter((link) => link.path !== "/properties/start");
   if (user.platformOwner) links.unshift({ path: "/owner", label: "Platform Owner" });
   const crumb = minimalBreadcrumb(location, links);
   const dateLabel = formatMinimalHeaderDate(new Date());
@@ -69,14 +71,6 @@ export default function MinimalShell({
                 </Link>
               );
             })}
-            {!ownerWithoutContext && (
-              <Link href="/properties/start" className="am-nav-button">
-                <span className="am-nav-glyph">
-                  <MinimalNavIcon path="/properties/start" />
-                </span>
-                <span>Start property</span>
-              </Link>
-            )}
           </nav>
           <div className="am-sidebar-spacer" />
           <div className="am-user">
@@ -123,7 +117,7 @@ export default function MinimalShell({
         </main>
       </div>
       <nav className="am-mobile-nav" aria-label="Mobile navigation">
-        {links.map((link) => {
+        {mobileLinks.map((link) => {
           const current = minimalNavIsCurrent(location, link.path);
           return (
             <Link

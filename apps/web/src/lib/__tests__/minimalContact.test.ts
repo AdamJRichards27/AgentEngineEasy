@@ -33,7 +33,7 @@ test("model only rearranges the Contact 360 payload", () => {
 });
 
 test("only Active property links; unlinked row has no href", () => {
-  const m = buildMinimalContactModel(base);
+  const m = buildMinimalContactModel(base, { runAccess: true });
   assert.equal(m.properties.length, 2);
   assert.equal(m.properties[0].href, "/properties/3");
   assert.equal(m.properties[1].href, null);

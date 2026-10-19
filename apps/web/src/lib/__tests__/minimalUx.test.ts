@@ -112,7 +112,10 @@ test("the shell is flag-gated, lazy, and does not invent Run, Pit Crew, or local
   assert.equal(shell.includes("My Momentum"), false);
   assert.equal(shell.includes("Alex Morgan"), false);
   assert.equal(shell.includes("fictional"), false);
-  assert.match(shell, /buildProductNavLinks/);
+  // Owner D5: the shell's links are the central product nav, filtered for run.access (minimalRunGating.test.ts).
+  assert.match(shell, /buildMinimalNavLinks/);
+  const nav = readFileSync(new URL("../../minimal/minimalNav.ts", import.meta.url), "utf8");
+  assert.match(nav, /buildProductNavLinks\(ctx\)/);
 });
 
 function stripKeyframes(css: string): string {

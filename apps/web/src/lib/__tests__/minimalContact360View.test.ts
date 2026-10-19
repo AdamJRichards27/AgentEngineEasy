@@ -90,7 +90,7 @@ test("notes and communication preferences are display only: no inputs, buttons, 
 });
 
 test("navigation: back to Today, property links, and the full record escape hatch", () => {
-  const l = links(MinimalContact360View({ model: buildMinimalContactModel(full) }));
+  const l = links(MinimalContact360View({ model: buildMinimalContactModel(full, { runAccess: true }) }));
   assert.deepEqual(l, ["/grow", "/properties/3", "/grow/contacts/9?view=full"]);
 });
 

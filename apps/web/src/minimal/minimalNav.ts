@@ -1,0 +1,31 @@
+import { buildProductNavLinks, type NavContext, type NavLink } from "../lib/productNav";
+
+// AE Minimal A sidebar and mobile bar links (Owner D5): Run is linked subject
+// to permissions. Every Run surface is shown only with the exact run.access
+// entitlement, on top of the product nav's own role rules (Financial, Pit
+// Crew). Fails closed: no entitlement list means no Run links. Access is
+// still enforced server-side by requireEntitlement("run.access"); this only
+// stops the shell offering screens the brokerage has not got.
+
+export const RUN_ACCESS = "run.access";
+
+/** Run screens: their APIs require run.access (Home and Run Today summarise Run work). */
+export const MINIMAL_RUN_PATHS: readonly string[] = [
+  "/",
+  "/today",
+  "/properties",
+  "/properties/start",
+  "/exceptions",
+  "/financial",
+  "/pit-crew",
+];
+
+export function minimalHasRunAccess(entitlements: readonly string[] | null | undefined): boolean {
+  return Array.isArray(entitlements) && entitlements.includes(RUN_ACCESS);
+}
+
+export function buildMinimalNavLinks(ctx: NavContext): NavLink[] {
+  const links = [...buildProductNavLinks(ctx), { path: "/properties/start", label: "Start property" }];
+  if (minimalHasRunAccess(ctx.entitlements)) return links;
+  return links.filter((link) => !MINIMAL_RUN_PATHS.includes(link.path));
+}

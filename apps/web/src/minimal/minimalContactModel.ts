@@ -64,7 +64,9 @@ export interface MinimalContactModel {
 
 const MAX_NOTES = 5;
 
-export function buildMinimalContactModel(input: Contact360Input): MinimalContactModel {
+/** Owner D5: property links open the Run workspace, so they need run.access. Default fails closed. */
+export function buildMinimalContactModel(input: Contact360Input, opts: { runAccess?: boolean } = {}): MinimalContactModel {
+  const runAccess = opts.runAccess === true;
   const name = input.contact.displayName.trim() || "Unnamed contact";
   const days = input.intelligence.daysSinceLastInteraction;
   return {
@@ -85,7 +87,7 @@ export function buildMinimalContactModel(input: Contact360Input): MinimalContact
         key: p.relationshipId,
         label: p.propertyAddress ?? "Not linked to a property",
         relationship: p.relationshipType,
-        href: p.propertyId == null ? null : `/properties/${p.propertyId}`,
+        href: p.propertyId == null || !runAccess ? null : `/properties/${p.propertyId}`,
         primary: p.isPrimary,
       })),
     openOpportunityCount: input.opportunities.filter((o) => o.status === "Open").length,

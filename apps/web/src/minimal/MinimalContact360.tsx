@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowContact360 } from "../lib/growContact360";
+import { useEntitlements } from "../lib/session";
 import { MinimalGrowSections } from "./MinimalGrowSections";
 import { buildMinimalContactModel, formatContactDate, type MinimalContactModel } from "./minimalContactModel";
 
@@ -12,6 +13,7 @@ import { buildMinimalContactModel, formatContactDate, type MinimalContactModel }
 
 export default function MinimalContact360() {
   const params = useParams<{ id: string }>();
+  const { hasEntitlement } = useEntitlements();
   const partyId = /^\d+$/.test(params.id ?? "") ? Number(params.id) : null;
   const detail = useQuery<GrowContact360>({
     queryKey: ["grow-contact", partyId],
@@ -32,7 +34,7 @@ export default function MinimalContact360() {
     );
   }
   if (!detail.data) return null;
-  return <MinimalContact360View model={buildMinimalContactModel(detail.data)} />;
+  return <MinimalContact360View model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })} />;
 }
 
 export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry?: () => void }) {

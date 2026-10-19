@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowTodaySummary } from "../lib/growToday";
 import { useEntitlements, useSession } from "../lib/session";
-import { GROW_TODAY_PURPOSE, growTodayCrossLink, growTodayHeading } from "../lib/todaySurfaces";
+import { GROW_TODAY_PURPOSE, growTodayHeading } from "../lib/todaySurfaces";
 import { formatMinimalHeaderDate } from "../lib/minimalUx";
 import { buildMinimalTodayModel, formatMinimalAsOf, type MinimalTodayCard } from "./minimalTodayModel";
 import { MinimalGrowSections } from "./MinimalGrowSections";
@@ -170,17 +170,19 @@ function TodayBody({
                 <RecordLink card={model.comingUp} />
               </section>
             ) : null}
-            <section className="am-rail-section">
-              <div className="am-rail-heading">
-                <h3>Property delivery</h3>
-              </div>
-              <Link href={growTodayCrossLink.href} className="am-appraisal-link">
-                <div>
-                  <div className="am-appraisal-name">{growTodayCrossLink.label}</div>
-                  <div className="am-appraisal-time">{growTodayCrossLink.distinction}</div>
+            {model.runCrossLink ? (
+              <section className="am-rail-section">
+                <div className="am-rail-heading">
+                  <h3>Property delivery</h3>
                 </div>
-              </Link>
-            </section>
+                <Link href={model.runCrossLink.href} className="am-appraisal-link">
+                  <div>
+                    <div className="am-appraisal-name">{model.runCrossLink.label}</div>
+                    <div className="am-appraisal-time">{model.runCrossLink.distinction}</div>
+                  </div>
+                </Link>
+              </section>
+            ) : null}
           </aside>
         </div>
       ) : null}
