@@ -114,11 +114,15 @@ async function buildNoticeSentFixture(label: string): Promise<Fixture> {
   return { transactionId, paymentRequestId: paymentRequest.id, idempotencyKey: `schedule-debit:${paymentRequest.id}` };
 }
 
-/** Inserts the SCHEDULE_DEBIT row exactly as scheduleDebitForPaymentRequest does (PENDING, due now). */
+/**
+ * Inserts the SCHEDULE_DEBIT row as scheduleDebitForPaymentRequest does (PENDING, due), except nextAttemptAt is set
+ * 1s in the past: the column default is the DB's now() (microseconds) while the sweep compares against a JS Date
+ * (milliseconds), so a sweep in the same millisecond as the insert can miss a "due now" row (seen in the targeted run).
+ */
 async function insertDueOutboxRow(f: Fixture) {
   const [row] = await db
     .insert(financialPaymentOutbox)
-    .values({ brokerageId: A.brokerageId, paymentRequestId: f.paymentRequestId, action: "SCHEDULE_DEBIT", status: "PENDING", idempotencyKey: f.idempotencyKey })
+    .values({ brokerageId: A.brokerageId, paymentRequestId: f.paymentRequestId, action: "SCHEDULE_DEBIT", status: "PENDING", idempotencyKey: f.idempotencyKey, nextAttemptAt: new Date(Date.now() - 1_000) })
     .returning();
   return row;
 }
