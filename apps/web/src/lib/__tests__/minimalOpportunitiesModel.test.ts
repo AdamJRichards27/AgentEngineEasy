@@ -96,4 +96,5 @@ test("Market Activity is a deferred, labelled notice", () => {
 test("flag-gated view selector", () => {
   assert.equal(selectOpportunitiesView(false), "classic");
   assert.equal(selectOpportunitiesView(true), "minimal");
+  assert.equal(selectOpportunitiesView(true, "view=full"), "classic");
 });
