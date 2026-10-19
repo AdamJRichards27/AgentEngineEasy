@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowContact360 } from "../lib/growContact360";
-import { buildMinimalContactModel, type MinimalContactModel } from "./minimalContactModel";
+import { buildMinimalContactModel, formatContactDate, type MinimalContactModel } from "./minimalContactModel";
 
 // AE Minimal A Contact 360 (read-only). Data is the existing GET /grow/contacts/:partyId, under the same
 // react-query key as the classic detail. Nothing here writes: notes are the contact's existing "note"
@@ -88,7 +88,7 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
           <dt>Last interaction</dt>
           <dd>{model.lastTouchLabel}</dd>
           <dt>Next commitment</dt>
-          <dd>{model.followUp ? `${model.followUp.label} · ${new Date(model.followUp.dueAt).toLocaleDateString()}` : "None scheduled"}</dd>
+          <dd>{model.followUp ? `${model.followUp.label} · ${formatContactDate(model.followUp.dueAt)}` : "None scheduled"}</dd>
           <dt>Open opportunities</dt>
           <dd>{model.openOpportunityCount}</dd>
         </dl>
@@ -144,8 +144,8 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
             {model.notes.map((n) => (
               <li key={n.id} className="am-agenda-row">
                 <div>
-                  <div className="am-agenda-sub">{new Date(n.occurredAt).toLocaleDateString()}</div>
-                  <p className="am-agenda-title">{n.text}</p>
+                  <div className="am-agenda-sub">{formatContactDate(n.occurredAt)}</div>
+                  <p className="am-contact-note">{n.text}</p>
                 </div>
               </li>
             ))}
