@@ -6,11 +6,12 @@ import { useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiFetch } from "../lib/api";
-import { formatCents, formatDate } from "../lib/financial";
+import { formatCents } from "../lib/financial";
 import {
   OFFER_CENTRE_STATUSES,
   fetchBuyerList,
   fetchOfferCentre,
+  formatOfferCentreDate,
   offerCentreEmptyMessage,
   offerCentreErrorText,
   offerCentreRegionState,
@@ -25,6 +26,25 @@ import {
   type OfferCentreView,
 } from "../lib/offerCentre";
 
+// R-05 follow-up — a later page can come back empty (rows removed since the
+// count, or a stale offset). Say so and offer a way back to page 1.
+function EmptyLaterPage(props: { kind: OfferCentreKind; onFirst?: () => void }) {
+  return (
+    <div>
+      <p className="empty-state" role="status">
+        No {props.kind} on this page.
+      </p>
+      <button
+        type="button"
+        className="btn btn-secondary btn-small"
+        onClick={props.onFirst}
+      >
+        Back to first page
+      </button>
+    </div>
+  );
+}
+
 export function OfferCentreList(props: {
   rows: OfferCentreView[];
   total: number;
@@ -33,8 +53,11 @@ export function OfferCentreList(props: {
   onPrev?: () => void;
   onNext?: () => void;
   filtered?: boolean;
+  onFirst?: () => void;
 }) {
   const paging = offerCentrePaging(props);
+  if (props.rows.length === 0 && props.offset > 0)
+    return <EmptyLaterPage kind="offers" onFirst={props.onFirst} />;
   if (props.rows.length === 0)
     return (
       <p className="empty-state" role="status">
@@ -68,7 +91,7 @@ export function OfferCentreList(props: {
                   {row.status}
                 </span>
               </td>
-              <td>{formatDate(row.createdAt) ?? "—"}</td>
+              <td>{formatOfferCentreDate(row.createdAt) ?? "—"}</td>
             </tr>
           ))}
         </tbody>
@@ -104,8 +127,11 @@ export function BuyerList(props: {
   onPrev?: () => void;
   onNext?: () => void;
   filtered?: boolean;
+  onFirst?: () => void;
 }) {
   const paging = offerCentrePaging(props);
+  if (props.rows.length === 0 && props.offset > 0)
+    return <EmptyLaterPage kind="buyers" onFirst={props.onFirst} />;
   if (props.rows.length === 0)
     return (
       <p className="empty-state" role="status">
@@ -133,7 +159,7 @@ export function BuyerList(props: {
                 </Link>
               </td>
               <td>{row.offerCount}</td>
-              <td>{formatDate(row.linkedAt) ?? "—"}</td>
+              <td>{formatOfferCentreDate(row.linkedAt) ?? "—"}</td>
             </tr>
           ))}
         </tbody>
@@ -312,6 +338,7 @@ export default function OfferCentre() {
             limit={buyers.data?.limit ?? 25}
             offset={buyers.data?.offset ?? 0}
             filtered={propertyId !== ""}
+            onFirst={() => setBuyerPage(0)}
             onPrev={() => setBuyerPage((p) => Math.max(0, p - 1))}
             onNext={() => setBuyerPage((p) => p + 1)}
           />
@@ -330,6 +357,7 @@ export default function OfferCentre() {
             limit={offers.data?.limit ?? 25}
             offset={offers.data?.offset ?? 0}
             filtered={status !== "" || propertyId !== ""}
+            onFirst={() => setPage(0)}
             onPrev={() => setPage((p) => Math.max(0, p - 1))}
             onNext={() => setPage((p) => p + 1)}
           />

@@ -180,3 +180,21 @@ export function offerCentreErrorText(
   const reference = error instanceof ApiError ? formatSupportReference(error.correlationId) : undefined;
   return reference ? { message, reference } : { message };
 }
+
+// R-05 follow-up — Offer-Centre-only date formatting: en-AU, always in
+// Australia/Brisbane (UTC+10, no daylight saving), so a date never shifts
+// with the viewer's browser time zone. lib/financial.ts formatDate is shared
+// with other pages and is intentionally left unchanged.
+const OFFER_CENTRE_DATE_FORMAT = new Intl.DateTimeFormat("en-AU", {
+  timeZone: "Australia/Brisbane",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
+
+export function formatOfferCentreDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return OFFER_CENTRE_DATE_FORMAT.format(date);
+}
