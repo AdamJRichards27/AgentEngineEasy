@@ -89,3 +89,56 @@ export function offerStatusPillClass(status: string): string {
 export function fetchOfferCentre(filters: OfferCentreFilters): Promise<OfferCentreResponse> {
   return apiFetch<OfferCentreResponse>(buildOfferCentrePath(filters));
 }
+
+// #34 slice 4 — Buyers tab over GET /api/offers/buyers. Names only; the
+// view whitelist drops anything else a future API field might add.
+export interface BuyerListApiRow {
+  linkId: number;
+  partyId: number;
+  buyerName: string | null;
+  propertyId: number;
+  propertyAddress: string;
+  linkedAt: string;
+}
+
+export interface BuyerListResponse {
+  buyers: BuyerListApiRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BuyerView {
+  linkId: number;
+  buyerName: string | null;
+  propertyId: number;
+  propertyAddress: string;
+  linkedAt: string;
+}
+
+export interface BuyerListFilters {
+  propertyId: string;
+  page: number;
+}
+
+export function buildBuyerListPath(filters: BuyerListFilters): string {
+  const params = new URLSearchParams();
+  if (filters.propertyId) params.set("propertyId", filters.propertyId);
+  params.set("limit", String(OFFER_CENTRE_PAGE_SIZE));
+  params.set("offset", String(Math.max(0, filters.page) * OFFER_CENTRE_PAGE_SIZE));
+  return `/offers/buyers?${params.toString()}`;
+}
+
+export function toBuyerView(row: BuyerListApiRow): BuyerView {
+  return {
+    linkId: row.linkId,
+    buyerName: row.buyerName,
+    propertyId: row.propertyId,
+    propertyAddress: row.propertyAddress,
+    linkedAt: row.linkedAt,
+  };
+}
+
+export function fetchBuyerList(filters: BuyerListFilters): Promise<BuyerListResponse> {
+  return apiFetch<BuyerListResponse>(buildBuyerListPath(filters));
+}
