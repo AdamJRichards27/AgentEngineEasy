@@ -2,6 +2,7 @@ import { Link } from "wouter";
 import type { GrowOpportunityManualStage } from "@aee/domain";
 import {
   MARKET_ACTIVITY_DEFERRED,
+  MINIMAL_OPPORTUNITIES_CLASSIC_HREF,
   type MinimalOpportunityRow,
   type PipelineColumn,
   opportunityActions,
@@ -109,6 +110,9 @@ export function MinimalOpportunitiesView(p: MinimalOpportunitiesViewProps) {
           <p>Your pipeline from AE records: who, why, and the next step.</p>
         </div>
         <div className="am-data-actions">
+          <Link href={MINIMAL_OPPORTUNITIES_CLASSIC_HREF} className="am-data-button am-ws2-classic-link">
+            Classic view
+          </Link>
           <button type="button" className="am-data-button" aria-pressed={p.showClosed} onClick={p.onToggleClosed}>
             Show closed
           </button>
