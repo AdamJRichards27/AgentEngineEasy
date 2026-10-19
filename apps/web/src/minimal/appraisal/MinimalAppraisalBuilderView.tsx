@@ -13,6 +13,7 @@ import {
   type ComparableForm,
   type CompetitionForm,
   type RangeDraft,
+  parseMoney,
   rangeIsSaved,
   rangeValidation,
 } from "./appraisalBuilderModel";
@@ -271,28 +272,41 @@ function stepRangeBody(p: BuilderViewProps, pricingLocked: boolean) {
           {p.workspace.marketCompetition.length === 1 ? "" : "s"}
         </p>
       </div>
-      <div className="ae-appraisal-range-inputs">
-        {field("Low", p.rangeDraft.low, (v) => p.on.setRange({ low: v }), { disabled: pricingLocked, required: true })}
-        {field("High", p.rangeDraft.high, (v) => p.on.setRange({ high: v }), { disabled: pricingLocked, required: true })}
+      <div className="ae-appraisal-range-entry">
+        <div className="ae-appraisal-range-inputs">
+          {field("Low range ($)", p.rangeDraft.low, (v) => p.on.setRange({ low: v }), { disabled: pricingLocked, required: true })}
+          <span aria-hidden="true">to</span>
+          {field("High range ($)", p.rangeDraft.high, (v) => p.on.setRange({ high: v }), { disabled: pricingLocked, required: true })}
+        </div>
+        <p className={`ae-appraisal-range-validation${invalid ? " is-error" : ""}`} aria-live="polite">
+          {invalid ?? `${money(String(parseMoney(p.rangeDraft.low)))} – ${money(String(parseMoney(p.rangeDraft.high)))} · low ≤ high`}
+        </p>
+        {field("Why does this range fit the evidence?", p.rangeDraft.commentary, (v) => p.on.setRange({ commentary: v }), {
+          disabled: pricingLocked,
+          required: true,
+          multiline: true,
+          hint: `At least ${RANGE_RATIONALE_MIN} characters, from your evidence.`,
+        })}
+        <div className="ae-appraisal-range-actions">
+          <button type="button" className="ae-appraisal-button" disabled={pricingLocked || p.busy || invalid !== null || saved} onClick={p.on.saveRange}>
+            {saved ? "Range saved" : "Save range"}
+          </button>
+          <button
+            type="button"
+            id="ae-builder-approve"
+            className={`ae-appraisal-button ${p.attest.rangeApproved ? "is-selected" : "is-primary"}`}
+            disabled={pricingLocked || p.busy || invalid !== null || !saved || p.attest.rangeApproved}
+            onClick={() => p.on.setAttest({ rangeApproved: true })}
+          >
+            {p.attest.rangeApproved ? "Range approved" : "Approve agent-prepared range"}
+          </button>
+          <span>{p.attest.rangeApproved ? "Agent approval is current." : saved ? "This range stays preliminary until you approve it." : "Save the range, then approve it."}</span>
+        </div>
       </div>
-      {field("Why this range", p.rangeDraft.commentary, (v) => p.on.setRange({ commentary: v }), {
-        disabled: pricingLocked,
-        required: true,
-        multiline: true,
-        hint: `At least ${RANGE_RATIONALE_MIN} characters, from your evidence.`,
-      })}
-      {invalid ? <p className="ae-appraisal-range-validation">{invalid}</p> : null}
-      <div className="ae-appraisal-range-actions">
-        <button type="button" className="ae-appraisal-button" disabled={pricingLocked || p.busy || invalid !== null || saved} onClick={p.on.saveRange}>
-          {saved ? "Range saved" : "Save range"}
-        </button>
-        {checkbox(
-          "ae-builder-approve",
-          "Approve range — I prepared this range myself and it is not a formal valuation.",
-          p.attest.rangeApproved,
-          pricingLocked || invalid !== null || !saved,
-          (v) => p.on.setAttest({ rangeApproved: v }),
-        )}
+      <div className="ae-appraisal-preliminary-note">
+        <span>
+          <strong>Not a formal valuation.</strong> The range is agent-prepared market advice. Nothing is sent from this step.
+        </span>
       </div>
     </div>
   );

@@ -109,7 +109,7 @@ test("builder: step 5 approve box stays disabled until the range is valid and sa
   const unsaved = MinimalAppraisalBuilderView(
     builderProps({ state: { step: 5, highestStep: 5 }, rangeDraft: { low: "1150000", high: "1250000", commentary: "Three Park Rd sales support this." } }),
   );
-  const approve = (tree: unknown) => all(tree, (e) => e.type === "input" && e.props?.id === "ae-builder-approve")[0];
+  const approve = (tree: unknown) => all(tree, (e) => e.type === "button" && e.props?.id === "ae-builder-approve")[0];
   assert.equal(approve(unsaved).props?.disabled, true);
   assert.equal(button(unsaved, "Save range")?.props?.disabled, false);
 
@@ -121,7 +121,9 @@ test("builder: step 5 approve box stays disabled until the range is valid and sa
     }),
   );
   assert.equal(approve(saved).props?.disabled, false);
+  assert.equal(text(approve(saved)), "Approve agent-prepared range");
   assert.equal(button(saved, "Range saved")?.props?.disabled, true);
+  assert.match(text(saved), /\$1,150,000 – \$1,250,000 · low ≤ high/);
 });
 
 test("builder: step 6 shows the disclaimer and builds the preview through the existing route", () => {

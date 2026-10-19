@@ -1,12 +1,18 @@
 /* AE Minimal A Opportunities board (WS2). Uses the minimal.css tokens; scoped
    under .ae-minimal so nothing applies while AE_MINIMAL_UX_ENABLED is OFF. */
-.ae-minimal .am-ws2-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 1fr); gap: 14px; overflow-x: auto; padding-bottom: 8px; }
+.ae-minimal .am-ws2-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; padding-bottom: 8px; }
 .ae-minimal .am-ws2-column { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px; border: 1px solid var(--am-line); border-radius: 8px; background: var(--am-wash); }
 .ae-minimal .am-ws2-column h2 { display: flex; align-items: center; justify-content: space-between; margin: 0; }
 .ae-minimal .am-ws2-column .am-data-card h3 { margin: 8px 0 0; font-size: 14px; font-weight: 600; }
 .ae-minimal .am-ws2-lost-form { display: flex; flex-direction: column; gap: 8px; width: 100%; }
 .ae-minimal .am-ws2-lost-form textarea { min-height: 64px; width: 100%; }
 .ae-minimal .am-ws2-market-deferred { margin-bottom: 14px; }
+/* Card actions wrap inside the narrow column (stage select, Mark lost, Close). */
+.ae-minimal .am-ws2-column .am-data-card { min-width: 0; }
+.ae-minimal .am-ws2-column .am-data-card-footer,
+.ae-minimal .am-ws2-column .am-card-actions { display: flex; flex: 1 1 100%; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ae-minimal .am-ws2-column .am-data-card-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.ae-minimal .am-ws2-locked { margin: 0; color: var(--am-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 @media (max-width: 720px) {
-  .ae-minimal .am-ws2-board { grid-auto-flow: row; grid-auto-columns: auto; }
+  .ae-minimal .am-ws2-board { grid-template-columns: minmax(0, 1fr); }
 }

@@ -40,7 +40,7 @@ function cardActions(p: MinimalOpportunitiesViewProps, id: number) {
   const row = p.rowsById.get(id);
   if (!row || !p.canManage) return null;
   const actions = opportunityActions(row);
-  if (actions.lockedReason) return <p className="am-empty-note">{actions.lockedReason}</p>;
+  if (actions.lockedReason) return <p className="am-ws2-locked">{actions.lockedReason}</p>;
   const pending = p.pendingId === id;
   if (p.lostDraft && p.lostDraft.id === id) {
     return (
