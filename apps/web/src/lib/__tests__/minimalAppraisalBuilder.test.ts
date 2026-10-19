@@ -4,6 +4,7 @@
 // keeps no browser drafts. Attestations (steps 2, 4, range approval) are
 // UI-only gates (feasibility D7) and are not stored.
 import assert from "node:assert/strict";
+import * as builderModel from "../../minimal/appraisal/appraisalBuilderModel";
 import test from "node:test";
 import {
   MINIMAL_APPRAISAL_STEPS,
@@ -51,7 +52,6 @@ function workspace(overrides: Partial<BuilderWorkspace["appraisal"]> = {}, extra
 function ctx(ws: BuilderWorkspace, over: Partial<BuilderContext> = {}): BuilderContext {
   return {
     workspace: ws,
-    attest: { propertyFactsConfirmed: false, competitionReviewed: false, rangeApproved: false },
     rangeDraft: rangeDraftFrom(ws.appraisal),
     ...over,
   };
@@ -89,13 +89,8 @@ test("step 1 passes for a server appraisal with a property", () => {
   assert.equal(builderStepGate(1, ctx(workspace())), null);
 });
 
-test("step 2 needs the agent to confirm the property facts (UI attestation)", () => {
-  const ws = workspace();
-  assert.match(builderStepGate(2, ctx(ws)) ?? "", /confirm/i);
-  assert.equal(
-    builderStepGate(2, ctx(ws, { attest: { propertyFactsConfirmed: true, competitionReviewed: false, rangeApproved: false } })),
-    null,
-  );
+test("D7: step 2 is a review step with no browser-only attestation gate", () => {
+  assert.equal(builderStepGate(2, ctx(workspace())), null);
 });
 
 test("step 3 needs at least one sold comparable on the server", () => {
@@ -103,16 +98,11 @@ test("step 3 needs at least one sold comparable on the server", () => {
   assert.equal(builderStepGate(3, ctx(workspace({}, { comparableSales: [comp] }))), null);
 });
 
-test("step 4 needs the competition review attestation, even with no listings", () => {
-  const ws = workspace();
-  assert.match(builderStepGate(4, ctx(ws)) ?? "", /competition/i);
-  assert.equal(
-    builderStepGate(4, ctx(ws, { attest: { propertyFactsConfirmed: true, competitionReviewed: true, rangeApproved: false } })),
-    null,
-  );
+test("D7: step 4 is a review step with no browser-only attestation gate, even with no listings", () => {
+  assert.equal(builderStepGate(4, ctx(workspace())), null);
 });
 
-test("step 5: valid range, 20+ character rationale, saved to the server, then agent approval", () => {
+test("D7: step 5 needs a valid range and 20+ character rationale saved to the server, and no browser approval", () => {
   const empty = workspace();
   assert.match(builderStepGate(5, ctx(empty)) ?? "", /range/i);
 
@@ -121,11 +111,15 @@ test("step 5: valid range, 20+ character rationale, saved to the server, then ag
   assert.match(builderStepGate(5, ctx(empty, { rangeDraft: draft })) ?? "", /save/i);
 
   const saved = workspace({ priceRangeLow: "1150000.00", priceRangeHigh: "1250000.00", pricingCommentary: draft.commentary });
-  assert.match(builderStepGate(5, ctx(saved, { rangeDraft: draft })) ?? "", /approve/i);
-  assert.equal(
-    builderStepGate(5, ctx(saved, { rangeDraft: draft, attest: { propertyFactsConfirmed: true, competitionReviewed: true, rangeApproved: true } })),
-    null,
-  );
+  assert.equal(builderStepGate(5, ctx(saved, { rangeDraft: draft })), null);
+});
+
+test("D7: the model keeps no attestation state and no gate asks to confirm or approve", () => {
+  assert.equal((builderModel as Record<string, unknown>).NO_ATTESTATIONS, undefined);
+  const full = workspace({ priceRangeLow: "1150000.00", priceRangeHigh: "1250000.00", pricingCommentary: "Three recent sales on Park Rd support this.", presentationDocumentId: 9 }, { comparableSales: [comp] });
+  for (let n = 1; n <= 7; n++) assert.equal(builderStepGate(n, ctx(full)), null, `step ${n}`);
+  for (let n = 1; n <= 7; n++) assert.doesNotMatch(builderStepGate(n, ctx(workspace())) ?? "", /confirm|approv|attest/i, `step ${n}`);
+  assert.doesNotMatch(MINIMAL_APPRAISAL_STEPS.map((s) => s.summary).join(" "), /confirm|approv/i);
 });
 
 test("step 6 needs the presentation document to exist on the server", () => {
@@ -139,8 +133,8 @@ test("continue moves forward one step only when the gate passes, and records the
   assert.equal(s1.message, null);
   assert.equal(s1.state.step, 2);
   assert.equal(s1.state.highestStep, 2);
-  const blocked = continueBuilder(s1.state, ctx(ws));
-  assert.equal(blocked.state.step, 2);
+  const blocked = continueBuilder({ step: 3, highestStep: 3 }, ctx(ws));
+  assert.equal(blocked.state.step, 3);
   assert.ok(blocked.message);
   const last = continueBuilder({ step: 7, highestStep: 7 }, ctx(ws));
   assert.equal(last.state.step, 7);
@@ -165,8 +159,8 @@ test("read-only appraisals (finished or finalised) can be reviewed without the g
 
 test("a viewer without the manage entitlement browses the steps without the gates", () => {
   const ws = workspace();
-  assert.ok(continueBuilder({ step: 2, highestStep: 2 }, ctx(ws)).message);
-  assert.equal(continueBuilder({ step: 2, highestStep: 2 }, ctx(ws), { reviewOnly: true }).state.step, 3);
+  assert.ok(continueBuilder({ step: 3, highestStep: 3 }, ctx(ws)).message);
+  assert.equal(continueBuilder({ step: 3, highestStep: 3 }, ctx(ws), { reviewOnly: true }).state.step, 4);
 });
 
 test("parseMoney accepts en-AU money text and rejects nonsense", () => {

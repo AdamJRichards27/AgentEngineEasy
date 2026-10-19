@@ -4,10 +4,10 @@ import { appraisalStatusLabel } from "../../lib/growAppraisals";
 import { SAVE_DUE_FOLLOW_UP_LABEL } from "../../lib/growTerms";
 import {
   APPRAISAL_BUILDER_DISCLAIMER,
+  BUILDER_NO_ATTESTATIONS_NOTE,
   MINIMAL_APPRAISAL_STEPS,
   MINIMAL_APPRAISAL_STEP_COUNT,
   RANGE_RATIONALE_MIN,
-  type BuilderAttestations,
   type BuilderState,
   type BuilderWorkspace,
   type ComparableForm,
@@ -33,7 +33,6 @@ export interface BuilderHandlers {
   continueStep(): void;
   back(): void;
   goTo(step: number): void;
-  setAttest(patch: Partial<BuilderAttestations>): void;
   setRange(patch: Partial<RangeDraft>): void;
   saveRange(): void;
   setComparable(patch: Partial<ComparableForm>): void;
@@ -61,7 +60,6 @@ export interface BuilderViewProps {
   workspace: BuilderWorkspace;
   subject: BuilderSubject;
   state: BuilderState;
-  attest: BuilderAttestations;
   rangeDraft: RangeDraft;
   narrativeDraft: string;
   comparableForm: ComparableForm;
@@ -72,6 +70,8 @@ export interface BuilderViewProps {
   busy: boolean;
   /** grow.opportunities.manage — the entitlement the write routes require. */
   canWrite: boolean;
+  /** run.access (D5): the subject property link opens the Run property workspace. */
+  runAccess: boolean;
   on: BuilderHandlers;
 }
 
@@ -94,12 +94,11 @@ function field(label: string, value: string, onChange: (v: string) => void, opts
   );
 }
 
-function checkbox(id: string, label: string, checked: boolean, disabled: boolean, onChange: (v: boolean) => void) {
+function reviewOnlyNote(text: string) {
   return (
-    <label className="ae-appraisal-review-confirm" htmlFor={id}>
-      <input id={id} type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span>{label}</span>
-    </label>
+    <p className="ae-appraisal-fineprint" role="note">
+      {text} Nothing on this step is recorded as an attestation.
+    </p>
   );
 }
 
@@ -146,13 +145,7 @@ function stepEnrichBody(p: BuilderViewProps, locked: boolean) {
           <dd>{p.subject.location ?? "Not recorded"}</dd>
         </div>
       </dl>
-      {checkbox(
-        "ae-builder-facts",
-        "I have checked the property facts for this appraisal.",
-        p.attest.propertyFactsConfirmed,
-        locked,
-        (v) => p.on.setAttest({ propertyFactsConfirmed: v }),
-      )}
+      {reviewOnlyNote("Check these facts against your own records before you rely on them.")}
     </div>
   );
 }
@@ -249,13 +242,7 @@ function stepCompetitionBody(p: BuilderViewProps, locked: boolean) {
           Add listing
         </button>
       </fieldset>
-      {checkbox(
-        "ae-builder-competition",
-        "I have reviewed the current competition. Asking prices are not sold evidence.",
-        p.attest.competitionReviewed,
-        locked,
-        (v) => p.on.setAttest({ competitionReviewed: v }),
-      )}
+      {reviewOnlyNote("Asking prices are not sold evidence.")}
     </div>
   );
 }
@@ -291,16 +278,7 @@ function stepRangeBody(p: BuilderViewProps, pricingLocked: boolean) {
           <button type="button" className="ae-appraisal-button" disabled={pricingLocked || p.busy || invalid !== null || saved} onClick={p.on.saveRange}>
             {saved ? "Range saved" : "Save range"}
           </button>
-          <button
-            type="button"
-            id="ae-builder-approve"
-            className={`ae-appraisal-button ${p.attest.rangeApproved ? "is-selected" : "is-primary"}`}
-            disabled={pricingLocked || p.busy || invalid !== null || !saved || p.attest.rangeApproved}
-            onClick={() => p.on.setAttest({ rangeApproved: true })}
-          >
-            {p.attest.rangeApproved ? "Range approved" : "Approve agent-prepared range"}
-          </button>
-          <span>{p.attest.rangeApproved ? "Agent approval is current." : saved ? "This range stays preliminary until you approve it." : "Save the range, then approve it."}</span>
+          <span>{saved ? "Saved in AE. This range stays agent-prepared and preliminary." : "Save the range and explanation before continuing."}</span>
         </div>
       </div>
       <div className="ae-appraisal-preliminary-note">
@@ -500,7 +478,7 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
             </div>
             <strong>{p.subject.address}</strong>
             <p>{p.subject.location ?? "Location not recorded"}</p>
-            <Link href={p.subject.propertyHref}>Open property</Link>
+            <Link href={p.subject.propertyHref}>{p.runAccess ? "Open in Run" : "Open property"}</Link>
           </section>
           <section className="ae-appraisal-context-card">
             <div className="ae-appraisal-context-heading">
@@ -511,11 +489,7 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
           </section>
           <section className="ae-appraisal-context-card ae-appraisal-context-summary">
             <div className="ae-appraisal-context-heading">
-              <h3>Agent decisions</h3>
-            </div>
-            <div>
-              <span>Property facts checked</span>
-              <strong>{p.attest.propertyFactsConfirmed ? "Yes" : "Pending"}</strong>
+              <h3>Saved in AE</h3>
             </div>
             <div>
               <span>Sold evidence</span>
@@ -528,13 +502,17 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
               </strong>
             </div>
             <div>
-              <span>Agent approval</span>
-              <strong>{p.attest.rangeApproved ? "Approved" : "Pending"}</strong>
+              <span>Current listings</span>
+              <strong>{p.workspace.marketCompetition.length}</strong>
+            </div>
+            <div>
+              <span>Document preview</span>
+              <strong>{a.presentationDocumentId != null ? "Built" : "Not built"}</strong>
             </div>
           </section>
           <section className="ae-appraisal-context-card ae-appraisal-provenance-card">
             <p>{APPRAISAL_BUILDER_DISCLAIMER}</p>
-            <p>Confirmations on this page are not stored. If you leave and come back, confirm them again.</p>
+            <p>{BUILDER_NO_ATTESTATIONS_NOTE}</p>
           </section>
         </aside>
       </div>

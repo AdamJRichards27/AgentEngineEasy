@@ -7,8 +7,6 @@ import type { AppraisalListRow } from "../../lib/appraisalUi";
 import {
   EMPTY_COMPARABLE_FORM,
   EMPTY_COMPETITION_FORM,
-  NO_ATTESTATIONS,
-  type BuilderAttestations,
   type BuilderState,
   type BuilderWorkspace,
   type ComparableForm,
@@ -60,7 +58,6 @@ export default function MinimalAppraisalBuilder() {
   });
 
   const [state, setState] = useState<BuilderState>(initialBuilderState);
-  const [attest, setAttestState] = useState<BuilderAttestations>(NO_ATTESTATIONS);
   const [rangeEdit, setRangeEdit] = useState<RangeDraft | null>(null);
   const [narrativeEdit, setNarrativeEdit] = useState<string | null>(null);
   const [comparableForm, setComparableForm] = useState<ComparableForm>(EMPTY_COMPARABLE_FORM);
@@ -172,7 +169,6 @@ export default function MinimalAppraisalBuilder() {
         contactHref: ws.appraisal.partyId != null ? `/grow/contacts/${ws.appraisal.partyId}` : null,
       }}
       state={state}
-      attest={attest}
       rangeDraft={rangeDraft}
       narrativeDraft={narrativeDraft}
       comparableForm={comparableForm}
@@ -182,9 +178,10 @@ export default function MinimalAppraisalBuilder() {
       notice={notice}
       busy={busy}
       canWrite={canWrite}
+      runAccess={hasEntitlement("run.access")}
       on={{
         continueStep: () => {
-          const next = continueBuilder(state, { workspace: ws, attest, rangeDraft }, { reviewOnly: !canWrite });
+          const next = continueBuilder(state, { workspace: ws, rangeDraft }, { reviewOnly: !canWrite });
           setNotice(null);
           setMessage(next.message);
           setState(next.state);
@@ -198,10 +195,7 @@ export default function MinimalAppraisalBuilder() {
           setMessage(null);
           setState(goToBuilderStep(state, n));
         },
-        setAttest: (p) => setAttestState((cur) => ({ ...cur, ...p })),
         setRange: (p) => {
-          // Any edit withdraws the agent's approval of the previous range.
-          setAttestState((cur) => ({ ...cur, rangeApproved: false }));
           setRangeEdit({ ...rangeDraft, ...p });
         },
         saveRange: () => {

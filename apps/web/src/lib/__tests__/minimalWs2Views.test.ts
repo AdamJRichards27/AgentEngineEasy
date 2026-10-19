@@ -9,7 +9,6 @@ import { MinimalAppraisalBuilderView, type BuilderViewProps } from "../../minima
 import {
   EMPTY_COMPARABLE_FORM,
   EMPTY_COMPETITION_FORM,
-  NO_ATTESTATIONS,
   type BuilderWorkspace,
 } from "../../minimal/appraisal/appraisalBuilderModel";
 import { MinimalPropertiesView, type MinimalPropertiesViewProps } from "../../minimal/properties/MinimalPropertiesView";
@@ -53,7 +52,6 @@ function builderProps(over: Partial<BuilderViewProps> = {}): BuilderViewProps {
     workspace: ws(),
     subject: { address: "7 Park Rd, Milton QLD 4064", location: "Milton QLD 4064", propertyHref: "/properties/7", contactName: "Jo Smith", contactHref: "/grow/contacts/3" },
     state: { step: 1, highestStep: 1 },
-    attest: NO_ATTESTATIONS,
     rangeDraft: { low: "", high: "", commentary: "" },
     narrativeDraft: "",
     comparableForm: EMPTY_COMPARABLE_FORM,
@@ -63,6 +61,7 @@ function builderProps(over: Partial<BuilderViewProps> = {}): BuilderViewProps {
     notice: null,
     busy: false,
     canWrite: true,
+    runAccess: false,
     on,
     ...over,
   };
@@ -82,8 +81,7 @@ test("builder: step 2 states plainly that no property-data provider is connected
   const tree = MinimalAppraisalBuilderView(builderProps({ state: { step: 2, highestStep: 2 } }));
   assert.match(text(tree), /No property-data provider is connected/);
   assert.doesNotMatch(text(tree), /Pricefinder|simulat/i);
-  const box = all(tree, (e) => e.type === "input" && e.props?.type === "checkbox")[0];
-  assert.equal(box.props?.checked, false);
+  assert.equal(all(tree, (e) => e.type === "input" && e.props?.type === "checkbox").length, 0);
 });
 
 test("builder: gate message is announced as an alert", () => {
@@ -105,13 +103,12 @@ test("builder: step 3 lists server comparables with en-AU money and a remove con
   assert.match(text(tree), /coordinates/);
 });
 
-test("builder: step 5 approve box stays disabled until the range is valid and saved", () => {
+test("builder: step 5 saves the range to the server; there is no browser-only approve control (D7)", () => {
   const unsaved = MinimalAppraisalBuilderView(
     builderProps({ state: { step: 5, highestStep: 5 }, rangeDraft: { low: "1150000", high: "1250000", commentary: "Three Park Rd sales support this." } }),
   );
-  const approve = (tree: unknown) => all(tree, (e) => e.type === "button" && e.props?.id === "ae-builder-approve")[0];
-  assert.equal(approve(unsaved).props?.disabled, true);
   assert.equal(button(unsaved, "Save range")?.props?.disabled, false);
+  assert.equal(all(unsaved, (e) => e.props?.id === "ae-builder-approve").length, 0);
 
   const saved = MinimalAppraisalBuilderView(
     builderProps({
@@ -120,10 +117,23 @@ test("builder: step 5 approve box stays disabled until the range is valid and sa
       rangeDraft: { low: "1150000", high: "1250000", commentary: "Three Park Rd sales support this." },
     }),
   );
-  assert.equal(approve(saved).props?.disabled, false);
-  assert.equal(text(approve(saved)), "Approve agent-prepared range");
   assert.equal(button(saved, "Range saved")?.props?.disabled, true);
   assert.match(text(saved), /\$1,150,000 – \$1,250,000 · low ≤ high/);
+  assert.match(text(saved), /Saved in AE/);
+});
+
+test("builder D7: no step renders a browser-only attestation, and the page says nothing here is a recorded attestation", () => {
+  const full = ws(
+    { priceRangeLow: "1150000.00", priceRangeHigh: "1250000.00", pricingCommentary: "Three Park Rd sales support this.", presentationDocumentId: 9 },
+  );
+  for (let step = 1; step <= 7; step++) {
+    const tree = MinimalAppraisalBuilderView(builderProps({ state: { step, highestStep: 7 }, workspace: full }));
+    assert.equal(all(tree, (e) => e.type === "input" && e.props?.type === "checkbox").length, 0, `step ${step} checkbox`);
+    assert.equal(buttons(tree).filter((b) => /approv|confirm|attest/i.test(text(b))).length, 0, `step ${step} approve button`);
+    const out = text(tree);
+    assert.doesNotMatch(out, /Agent approval|Range approved|Property facts checked|confirm them again/i, `step ${step} copy`);
+    assert.match(out, /records no attestations or approvals/, `step ${step} disclosure`);
+  }
 });
 
 test("builder: step 6 shows the disclaimer and builds the preview through the existing route", () => {
@@ -166,6 +176,7 @@ function propsFor(over: Partial<MinimalPropertiesViewProps> = {}): MinimalProper
     chooser: null,
     pendingPropertyId: null,
     canCreateAppraisal: true,
+    runAccess: false,
     onSearch: noop, onCreateAppraisal: noop, onChooseContact: noop, onCancelChooser: noop, onRetry: noop,
     ...over,
   };
@@ -180,6 +191,24 @@ test("properties: cards show stage, appraisal link and open opportunity count", 
   assert.ok(links(tree).some((l) => l.href === "/grow/appraisals/9" && /Presented/.test(l.text)));
   const actions = all(tree, (e) => e.type === "button" && e.props?.className === "am-property-appraisal-action").map(text);
   assert.deepEqual(actions, ["Create Appraisal", "Open Appraisal"]);
+});
+
+test("properties D5: the property link opens Run only for users with Run access", () => {
+  const withRun = MinimalPropertiesView(propsFor({ runAccess: true }));
+  const cards = all(withRun, (e) => e.type === "article");
+  assert.deepEqual(links(cards[0]).filter((l) => l.href === "/properties/1").map((l) => l.text), ["Open in Run"]);
+  const without = MinimalPropertiesView(propsFor({ runAccess: false }));
+  const plain = all(without, (e) => e.type === "article");
+  assert.deepEqual(links(plain[0]).filter((l) => l.href === "/properties/1").map((l) => l.text), ["Details"]);
+  assert.doesNotMatch(text(without), /\bRun\b/);
+});
+
+test("builder D5: the subject property link opens Run only with Run access", () => {
+  const withRun = MinimalAppraisalBuilderView(builderProps({ runAccess: true }));
+  assert.ok(links(withRun).some((l) => l.href === "/properties/7" && l.text === "Open in Run"));
+  const without = MinimalAppraisalBuilderView(builderProps({ runAccess: false }));
+  assert.ok(links(without).some((l) => l.href === "/properties/7" && l.text === "Open property"));
+  assert.ok(!links(without).some((l) => /Run/.test(l.text)));
 });
 
 test("properties: Create Appraisal is hidden without the manage entitlement", () => {
