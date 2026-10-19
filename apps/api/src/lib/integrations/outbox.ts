@@ -87,7 +87,12 @@ export async function dispatchCommand(outboxId: string): Promise<IntegrationOutb
 }
 
 async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutboxRow> {
-  const [dispatching] = await db.update(integrationOutbox).set({ status: "DISPATCHING", updatedAt: new Date() }).where(eq(integrationOutbox.id, outboxId)).returning();
+  // F-02 claim lock: the claim is atomic and conditional. dispatchCommand's status check above is
+  // only an early, non-authoritative read. A concurrent dispatcher (another sweep, or an on-demand
+  // dispatch) that already claimed the row makes this UPDATE match zero rows (Postgres re-checks
+  // the predicate after the row lock is released), so the loser stops before adapter.send.
+  const [dispatching] = await db.update(integrationOutbox).set({ status: "DISPATCHING", updatedAt: new Date() }).where(and(eq(integrationOutbox.id, outboxId), or(eq(integrationOutbox.status, "PENDING"), eq(integrationOutbox.status, "RETRY_SCHEDULED")))).returning();
+  if (!dispatching) throw new IntegrationError("INVALID_STATUS", "Command was claimed by another dispatcher.");
   const attemptNumber = dispatching.attempts + 1;
   logger.info("integration_outbox_dispatch_attempt_started", { outboxId, attemptNumber, capability: dispatching.capability, connectionId: dispatching.connectionId, brokerageId: dispatching.brokerageId });
 

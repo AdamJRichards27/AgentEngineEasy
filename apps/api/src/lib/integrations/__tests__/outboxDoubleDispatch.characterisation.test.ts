@@ -1,4 +1,4 @@
-// F-02 — CHARACTERISATION ONLY (no production change). Integrations outbox
+// F-02 — characterisation (d38cbb33), flipped to [F-02 FIXED] by the claim lock in outbox.ts (F-02b). Integrations outbox
 // double-dispatch race in outbox.ts (dispatchCommand / dispatchCommandInner).
 //
 // The gap: dispatchCommand reads the row and checks its status
@@ -11,8 +11,8 @@
 // (outbox_id, attempt_number)), and the last writer decides the final
 // status.
 //
-// "[F-02 GAP] CURRENT:" tests pin today's behaviour. A claim-lock fix MUST
-// flip them; each says what the INTENDED result is. "[F-02 LOCK]" tests pin
+// At d38cbb33, "[F-02 GAP] CURRENT:" tests pinned the race. On F-02b they are
+// replaced by "[F-02 FIXED]" tests asserting the INTENDED result. "[F-02 LOCK]" tests pin
 // behaviour a fix must keep.
 //
 // Deterministic interleaving (same approach as F-01, no sleeps or timing
@@ -190,8 +190,14 @@ async function readState(outboxId: string) {
   return { row, attempts: attempts.map((a) => ({ attemptNumber: a.attemptNumber, status: a.status })) };
 }
 
-/** Both dispatchers pass the status check and then block on the row lock; release them, and both reach adapter.send. */
-async function raceTwo(outboxId: string, idempotencyKey: string, startFirst: () => Promise<unknown>, startSecond: () => Promise<unknown>) {
+// ---------------------------------------------------------------------
+// [F-02 FIXED] with the claim lock. These replace the [F-02 GAP] CURRENT
+// tests of d38cbb33, using the same harness and interleavings: the second
+// dispatcher now loses the conditional claim and never reaches the provider.
+// ---------------------------------------------------------------------
+
+/** Both dispatchers pass the early status read and queue on the row lock; after release only the claim winner reaches adapter.send. */
+async function raceTwoClaim(outboxId: string, idempotencyKey: string, startFirst: () => Promise<unknown>, startSecond: () => Promise<unknown>) {
   const gate = gateSendFor(idempotencyKey);
   const lock = await holdRowLock(outboxId);
   let first: Promise<unknown>;
@@ -200,105 +206,83 @@ async function raceTwo(outboxId: string, idempotencyKey: string, startFirst: () 
     first = startFirst();
     await lock.waitForBlocked(1);
     second = startSecond();
+    second.catch(() => undefined);
     await lock.waitForBlocked(2);
   } finally {
     await lock.release();
   }
-  await gate.arrived(2);
+  await gate.arrived(1);
   return { gate, first: first!, second: second! };
 }
 
-// ---------------------------------------------------------------------
-// [F-02 GAP] CURRENT behaviour.
-// ---------------------------------------------------------------------
+/** The loser must be refused BEFORE the provider. Without the claim lock it would instead park at the send gate; fail fast in that case rather than time out. */
+async function expectClaimLost(second: Promise<unknown>, gate: { arrived: (n: number) => Promise<void> }): Promise<void> {
+  const outcome = await Promise.race([
+    second.then(() => "resolved", (err: any) => (err?.reason === "INVALID_STATUS" ? "refused" : `rejected:${err?.reason ?? err}`)),
+    gate.arrived(2).then(() => "second-send"),
+  ]);
+  assert.equal(outcome, "refused", "the losing dispatcher must get INVALID_STATUS and never reach adapter.send");
+}
 
-test("[F-02 GAP] CURRENT: two concurrent dispatchCommand calls on one PENDING command both send it and both record attempt #1 (INTENDED: exactly one claim and send; the loser gets INVALID_STATUS or a no-op)", async () => {
+test("[F-02 FIXED] two concurrent dispatchCommand calls: exactly one claim and send; the loser gets INVALID_STATUS (was: double send, two attempt #1 rows)", async () => {
   const cmd = await enqueuePastDue("two-direct", {});
-  const { gate, first, second } = await raceTwo(cmd.id, cmd.idempotencyKey, () => dispatchCommand(cmd.id), () => dispatchCommand(cmd.id));
-
-  for (const call of gate.calls) {
-    call.before.resolve();
-    await call.ran.promise;
-    call.after.resolve();
-  }
-  const [r1, r2] = (await Promise.all([first, second])) as Array<{ status: string }>;
-
-  assert.equal(gate.calls.length, 2, "CURRENT: the provider is called twice for one command and one idempotency key");
-  assert.deepEqual(gate.calls.map((c) => c.outcome), ["SENT", "SENT"]);
+  const { gate, first, second } = await raceTwoClaim(cmd.id, cmd.idempotencyKey, () => dispatchCommand(cmd.id), () => dispatchCommand(cmd.id));
+  await expectClaimLost(second, gate);
+  gate.calls[0].before.resolve();
+  gate.calls[0].after.resolve();
+  const r1 = (await first) as { status: string };
   assert.equal(r1.status, "SENT");
-  assert.equal(r2.status, "SENT");
+  assert.equal(gate.calls.length, 1, "the provider is called once");
   const state = await readState(cmd.id);
-  assert.deepEqual(state.attempts, [
-    { attemptNumber: 1, status: "SENT" },
-    { attemptNumber: 1, status: "SENT" },
-  ], "CURRENT: two attempt rows that both claim to be attempt #1");
+  assert.deepEqual(state.attempts, [{ attemptNumber: 1, status: "SENT" }]);
   assert.equal(state.row.status, "SENT");
-  assert.equal(state.row.attempts, 1, "CURRENT: the counter says 1 attempt although the provider saw 2");
+  assert.equal(state.row.attempts, 1);
 });
 
-test("[F-02 GAP] CURRENT: the due-outbox sweep and an on-demand dispatch race on one command; both send (INTENDED: the sweep skips a command another dispatcher has claimed)", async () => {
+test("[F-02 FIXED] sweep vs on-demand dispatch: the sweep wins the claim and the on-demand dispatch is refused before the provider (was: both send)", async () => {
   const cmd = await enqueuePastDue("sweep-vs-direct", {});
-  const { gate, first, second } = await raceTwo(cmd.id, cmd.idempotencyKey, () => dispatchDueOutbox(SWEEP_NOW), () => dispatchCommand(cmd.id));
-
-  for (const call of gate.calls) {
-    call.before.resolve();
-    await call.ran.promise;
-    call.after.resolve();
-  }
-  const [sweep, direct] = (await Promise.all([first, second])) as [{ dispatchedCount: number; errorCount: number }, { status: string }];
-
-  assert.deepEqual(sweep, { dispatchedCount: 1, errorCount: 0 }, "the sweep (scoped by now=2000-01-01) saw only this file's command");
-  assert.equal(direct.status, "SENT");
-  assert.equal(gate.calls.length, 2, "CURRENT: double send");
-  const state = await readState(cmd.id);
-  assert.equal(state.attempts.length, 2);
-  assert.ok(state.attempts.every((a) => a.attemptNumber === 1));
+  const { gate, first, second } = await raceTwoClaim(cmd.id, cmd.idempotencyKey, () => dispatchDueOutbox(SWEEP_NOW), () => dispatchCommand(cmd.id));
+  await expectClaimLost(second, gate);
+  gate.calls[0].before.resolve();
+  gate.calls[0].after.resolve();
+  const sweep = (await first) as { dispatchedCount: number; errorCount: number };
+  assert.deepEqual(sweep, { dispatchedCount: 1, errorCount: 0 });
+  assert.equal(gate.calls.length, 1);
+  assert.deepEqual((await readState(cmd.id)).attempts, [{ attemptNumber: 1, status: "SENT" }]);
 });
 
-test("[F-02 GAP] CURRENT: lost update. A provider-ACCEPTED command ends RETRY_SCHEDULED because the failing dispatcher writes last, and the next dispatch sends it a THIRD time (INTENDED: a SENT outcome is final, and only one dispatcher ever writes)", async () => {
-  // mock portal: the first call for a key is RATE_LIMITED (retryable), the second is SENT.
+test("[F-02 FIXED] no lost update: a rate-limited first attempt is retried once and ends SENT with attempts #1 FAILED, #2 SENT (was: SENT overwritten to RETRY_SCHEDULED, then a 3rd send)", async () => {
   const cmd = await enqueuePastDue("lost-update", { __forceRateLimit: true });
-  const { gate, first, second } = await raceTwo(cmd.id, cmd.idempotencyKey, () => dispatchCommand(cmd.id), () => dispatchCommand(cmd.id));
+  const { gate, first, second } = await raceTwoClaim(cmd.id, cmd.idempotencyKey, () => dispatchCommand(cmd.id), () => dispatchCommand(cmd.id));
+  await expectClaimLost(second, gate);
+  gate.calls[0].before.resolve();
+  await gate.calls[0].ran.promise;
+  assert.equal(gate.calls[0].outcome, "FAILED:RATE_LIMITED");
+  gate.calls[0].after.resolve();
+  const r1 = (await first) as { status: string; attempts: number };
+  assert.equal(r1.status, "RETRY_SCHEDULED");
+  assert.equal(r1.attempts, 1);
 
-  const [callA, callB] = gate.calls;
-  // Provider order: A then B. A gets attempt 1 (RATE_LIMITED); B gets attempt 2 (SENT).
-  callA.before.resolve();
-  await callA.ran.promise;
-  callB.before.resolve();
-  await callB.ran.promise;
-  assert.deepEqual([callA.outcome, callB.outcome], ["FAILED:RATE_LIMITED", "SENT"]);
-
-  // DB write order: B (SENT) first, then A (RETRY_SCHEDULED) LAST.
-  const firstSettled = Promise.race([first.then(() => "first"), second.then(() => "second")]);
-  callB.after.resolve();
-  const winner = await firstSettled;
-  callA.after.resolve();
-  await Promise.all([first, second]);
-  assert.ok(winner === "first" || winner === "second");
-
-  const state = await readState(cmd.id);
-  assert.deepEqual(state.attempts, [
-    { attemptNumber: 1, status: "SENT" },
-    { attemptNumber: 1, status: "FAILED" },
-  ], "CURRENT: both attempts are recorded as #1");
-  assert.equal(state.row.status, "RETRY_SCHEDULED", "CURRENT: the accepted command is overwritten to RETRY_SCHEDULED by the last writer");
-  assert.equal(state.row.dispatchedAt instanceof Date, true, "dispatchedAt from the SENT write survives under a RETRY_SCHEDULED status");
-
-  // The next (here: direct) dispatch sends it again: a third provider call.
+  // The scheduled retry (driven directly here) is the only further provider call.
   restoreSend?.();
   restoreSend = null;
-  let thirdCalls = 0;
+  let retryCalls = 0;
   mockPortalAdapter.send = async (capability, payload, ctx) => {
-    if (ctx.idempotencyKey === cmd.idempotencyKey) thirdCalls++;
+    if (ctx.idempotencyKey === cmd.idempotencyKey) retryCalls++;
     return originalSend.call(mockPortalAdapter, capability, payload, ctx);
   };
   restoreSend = () => {
     mockPortalAdapter.send = originalSend;
   };
   const again = await dispatchCommand(cmd.id);
-  assert.equal(thirdCalls, 1, "CURRENT: a third provider call for one logical command");
+  assert.equal(retryCalls, 1);
   assert.equal(again.status, "SENT");
   assert.equal(again.attempts, 2);
+  assert.deepEqual((await readState(cmd.id)).attempts, [
+    { attemptNumber: 1, status: "FAILED" },
+    { attemptNumber: 2, status: "SENT" },
+  ]);
+  await assert.rejects(dispatchCommand(cmd.id), (err: any) => err?.reason === "INVALID_STATUS");
 });
 
 // ---------------------------------------------------------------------
