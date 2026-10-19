@@ -15,6 +15,7 @@
 
 import { logger } from "@aee/events";
 import { registerExceptionEventHandlers, runScheduledScan, type RunScanResult } from "./engine.js";
+import { notifyScanFailure } from "./scanFailureAlert.js";
 
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
@@ -31,6 +32,7 @@ const SCAN_INTERVAL_MS = 15 * 60 * 1000;
  * One scheduled tick, with explicit observability. A successful scan that finds nothing logs nothing
  * elsewhere, so without these lines a healthy tick is indistinguishable from a dead timer. Logging only:
  * the scan itself, its locking and its failure semantics are unchanged. `run` is injectable for tests.
+ * WS4: failures (thrown, or completed with summary.errors > 0) are also handed to scanFailureAlert.ts's sink.
  */
 export async function runScheduledScanTick(run: (trigger: "SCHEDULED") => Promise<RunScanResult> = runScheduledScan): Promise<void> {
   const startedAtMs = Date.now();
@@ -39,11 +41,31 @@ export async function runScheduledScanTick(run: (trigger: "SCHEDULED") => Promis
     const result = await run("SCHEDULED");
     if (result.ok) {
       logger.info("exception_engine_scheduled_scan_tick_succeeded", { durationMs: Date.now() - startedAtMs, ...result.summary });
+      // WS4: a scan that completed but recorded per-rule errors is reported to the (pluggable, default no-op) sink.
+      if (result.summary.errors > 0) {
+        notifyScanFailure({
+          kind: "scan_completed_with_errors",
+          trigger: "SCHEDULED",
+          occurredAt: new Date().toISOString(),
+          durationMs: Date.now() - startedAtMs,
+          scanRunId: result.summary.scanRunId,
+          errors: result.summary.errors,
+        });
+      }
     } else {
       logger.info("exception_engine_scheduled_scan_tick_skipped", { durationMs: Date.now() - startedAtMs, reason: result.skippedReason });
     }
   } catch (err) {
     logger.error("exception_engine_scheduled_scan_failed", { error: err, durationMs: Date.now() - startedAtMs });
+    // WS4: a thrown scheduled scan is reported to the (pluggable, default no-op) sink; never rethrows.
+    notifyScanFailure({
+      kind: "scan_threw",
+      trigger: "SCHEDULED",
+      occurredAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAtMs,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+    });
   }
 }
 
