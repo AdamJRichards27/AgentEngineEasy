@@ -16,6 +16,7 @@
 import { logger } from "@aee/events";
 import { registerExceptionEventHandlers, runScheduledScan, type RunScanResult } from "./engine.js";
 import { notifyScanFailure } from "./scanFailureAlert.js";
+import { scanSchedulersOffSwitch, SCAN_SCHEDULERS_OFF_SWITCH_ENV } from "../scanSchedulerOffSwitch.js";
 
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
@@ -74,6 +75,22 @@ export interface RegisterExceptionEngineOptions {
   startScheduler?: boolean;
 }
 
+export type SchedulerStartDecision = { start: true } | { start: false; reason: "off_switch" | "option" | "test_env" };
+
+/**
+ * WS4: whether the scan timer should start. AEE_DISABLE_SCAN_SCHEDULERS (see ../scanSchedulerOffSwitch.ts) wins over
+ * everything, including an explicit startScheduler: true. Otherwise unchanged: the option if given, else
+ * NODE_ENV !== "test".
+ */
+export function resolveExceptionSchedulerStart(
+  options: RegisterExceptionEngineOptions = {},
+  env: Record<string, string | undefined> = process.env,
+): SchedulerStartDecision {
+  if (scanSchedulersOffSwitch(env).disabled) return { start: false, reason: "off_switch" };
+  if (options.startScheduler !== undefined) return options.startScheduler ? { start: true } : { start: false, reason: "option" };
+  return env.NODE_ENV !== "test" ? { start: true } : { start: false, reason: "test_env" };
+}
+
 /**
  * Call once at boot, after configureEvents() and alongside
  * registerAutomationEngine() (apps/api/src/index.ts). Idempotent — safe to
@@ -86,8 +103,18 @@ export function registerExceptionEngine(options: RegisterExceptionEngineOptions 
 
   registerExceptionEventHandlers();
 
-  const startScheduler = options.startScheduler ?? process.env.NODE_ENV !== "test";
-  if (!startScheduler) return;
+  const decision = resolveExceptionSchedulerStart(options);
+  if (!decision.start) {
+    // Logged only for the WS4 off-switch, so existing default/test boots produce exactly the same log lines as before.
+    if (decision.reason === "off_switch") {
+      logger.info("exception_engine_scheduler_disabled", {
+        reason: decision.reason,
+        offSwitchEnv: SCAN_SCHEDULERS_OFF_SWITCH_ENV,
+        offSwitch: scanSchedulersOffSwitch().reason,
+      });
+    }
+    return;
+  }
 
   intervalHandle = setInterval(() => {
     void runScheduledScanTick();

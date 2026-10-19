@@ -1,6 +1,7 @@
 import { logger } from "@aee/events";
 import { dispatchOperationalAlert } from "../operationalAlerts.js";
 import { runSignalSweep, sweepConfig, type RunSignalSweepResult } from "./sweep.js";
+import { scanSchedulersOffSwitch, SCAN_SCHEDULERS_OFF_SWITCH_ENV } from "../scanSchedulerOffSwitch.js";
 
 /**
  * AE GROW "Brokerage-wide Signal Sweep" stage 1 — boot-time wiring.
@@ -69,15 +70,37 @@ export interface RegisterSignalSweepOptions {
   startScheduler?: boolean;
 }
 
+export type SignalSweepStartDecision = { start: true } | { start: false; reason: "off_switch" | "option" | "sweep_disabled_or_test_env" };
+
+/**
+ * WS4: whether the sweep timer should start. AEE_DISABLE_SCAN_SCHEDULERS (see ../scanSchedulerOffSwitch.ts) wins over
+ * everything, including an explicit startScheduler: true. Otherwise unchanged: the option if given, else
+ * GROW_SIGNAL_SWEEP_ENABLED !== "false" (the same rule as sweepConfig().enabled) and NODE_ENV !== "test".
+ */
+export function resolveSignalSweepStart(
+  options: RegisterSignalSweepOptions = {},
+  env: Record<string, string | undefined> = process.env,
+): SignalSweepStartDecision {
+  if (scanSchedulersOffSwitch(env).disabled) return { start: false, reason: "off_switch" };
+  if (options.startScheduler !== undefined) return options.startScheduler ? { start: true } : { start: false, reason: "option" };
+  const enabled = env.GROW_SIGNAL_SWEEP_ENABLED !== "false";
+  return enabled && env.NODE_ENV !== "test" ? { start: true } : { start: false, reason: "sweep_disabled_or_test_env" };
+}
+
 /** Call once at boot, alongside registerExceptionEngine() (apps/api/src/index.ts). Idempotent. */
 export function registerSignalSweep(options: RegisterSignalSweepOptions = {}): void {
   if (registered) return;
   registered = true;
 
   const config = sweepConfig();
-  const startScheduler = options.startScheduler ?? (config.enabled && process.env.NODE_ENV !== "test");
-  if (!startScheduler) {
-    logger.info("property_signal_sweep_scheduler_disabled", { enabled: config.enabled, nodeEnv: process.env.NODE_ENV ?? null });
+  const decision = resolveSignalSweepStart(options);
+  if (!decision.start) {
+    logger.info("property_signal_sweep_scheduler_disabled", {
+      enabled: config.enabled,
+      nodeEnv: process.env.NODE_ENV ?? null,
+      reason: decision.reason,
+      ...(decision.reason === "off_switch" ? { offSwitchEnv: SCAN_SCHEDULERS_OFF_SWITCH_ENV, offSwitch: scanSchedulersOffSwitch().reason } : {}),
+    });
     return;
   }
 
