@@ -184,7 +184,8 @@ export function MinimalContactsView(p: MinimalContactsViewProps) {
                   </span>
                   <span className="am-contact-row-meta">
                     {row.roleChips.length > 0 ? (
-                      <span className="am-chip-row" aria-label="Roles">
+                      <span className="am-chip-row">
+                        <span className="am-sr-only">Roles: </span>
                         {row.roleChips.map((r) => (
                           <span key={r} className="am-chip">
                             {r}

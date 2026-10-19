@@ -1,5 +1,6 @@
-import type { ReactNode } from "react";
-import { Link, useLocation } from "wouter";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Link, useLocation, useSearch } from "wouter";
+import { focusMinimalMain, minimalRouteKey, shouldMoveMinimalFocus } from "./minimalA11y";
 import type { SessionUser } from "../lib/session";
 import { buildMinimalNavLinks } from "./minimalNav";
 import { formatMinimalHeaderDate, minimalBreadcrumb, minimalNavIsCurrent } from "../lib/minimalUx";
@@ -35,6 +36,10 @@ export default function MinimalShell({
   children: ReactNode;
 }) {
   const [location] = useLocation();
+  const search = useSearch();
+  const routeKey = minimalRouteKey(location, search);
+  const lastRouteKey = useRef<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
   const ownerWithoutContext = !!user.platformOwner && user.ownerSelectedBrokerageId == null;
   const links = ownerWithoutContext ? [] : buildMinimalNavLinks({ role: user.role, entitlements });
   // Start property stays a sidebar-only entry, as before; the mobile bar keeps the main sections.
@@ -42,9 +47,36 @@ export default function MinimalShell({
   if (user.platformOwner) links.unshift({ path: "/owner", label: "Platform Owner" });
   const crumb = minimalBreadcrumb(location, links);
   const dateLabel = formatMinimalHeaderDate(new Date());
+  const pageName = crumb.page === crumb.section ? crumb.section : `${crumb.section}, ${crumb.page}`;
+
+  // After a client-side route change, move focus to the new page's heading and
+  // announce it. Pages are lazy chunks, so wait (up to ~1s) for the heading.
+  useEffect(() => {
+    const previous = lastRouteKey.current;
+    lastRouteKey.current = routeKey;
+    if (!shouldMoveMinimalFocus(previous, routeKey)) return;
+    setAnnouncement(pageName);
+    let frames = 0;
+    let handle = 0;
+    const tryFocus = () => {
+      const hasHeading = document.querySelector("#ae-main-workspace h1") !== null;
+      if (hasHeading || frames >= 60) {
+        focusMinimalMain(document);
+        return;
+      }
+      frames += 1;
+      handle = window.requestAnimationFrame(tryFocus);
+    };
+    handle = window.requestAnimationFrame(tryFocus);
+    return () => window.cancelAnimationFrame(handle);
+  }, [routeKey, pageName]);
 
   return (
     <div className="ae-minimal" data-ae-ux="minimal">
+      <a className="am-skip-link" href="#ae-main-workspace">Skip to main content</a>
+      <p className="am-sr-only" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </p>
       <div className="am-shell">
         <aside className="am-sidebar" aria-label="Primary navigation">
           <div className="am-brand" role="img" aria-label="Agent Engine">
@@ -54,7 +86,7 @@ export default function MinimalShell({
             </span>
           </div>
           <p className="am-nav-label">Your workspace</p>
-          <nav className="am-nav">
+          <nav className="am-nav" aria-label="Primary">
             {links.map((link) => {
               const current = minimalNavIsCurrent(location, link.path);
               return (
@@ -88,16 +120,16 @@ export default function MinimalShell({
             </div>
           </div>
         </aside>
-        <main className="am-main" id="ae-main-workspace">
+        <main className="am-main" id="ae-main-workspace" tabIndex={-1}>
           <header className="am-topbar">
             <div className="am-mobile-brand">
               <img src={wordmarkDark} alt="Agent Engine" />
             </div>
-            <div className="am-breadcrumb">
+            <nav className="am-breadcrumb" aria-label="Breadcrumb">
               <strong>{crumb.section}</strong>
-              <span> / </span>
-              {crumb.page}
-            </div>
+              <span aria-hidden="true"> / </span>
+              <span aria-current="page">{crumb.page}</span>
+            </nav>
             <div className="am-top-right">
               <span className="am-date">{dateLabel}</span>
               <button type="button" className="am-classic-switch" onClick={onClassicView} disabled={switching}>

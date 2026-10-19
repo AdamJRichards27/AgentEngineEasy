@@ -32,7 +32,7 @@ export default function MinimalToday() {
         </div>
       </div>
 
-      {today.isLoading ? <p className="am-empty-note">Loading today's priorities…</p> : null}
+      {today.isLoading ? <p className="am-empty-note" role="status">Loading today's priorities…</p> : null}
       {today.isError ? (
         <div className="am-rail-section" role="alert">
           <p className="am-switch-error">{apiErrorMessage(today.error, "Couldn't load Today.")}</p>

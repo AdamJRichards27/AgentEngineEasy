@@ -24,7 +24,7 @@ export default function MinimalContact360() {
   if (partyId === null) {
     return <MinimalContactMessage text="That couldn't be found — it may have been removed." />;
   }
-  if (detail.isLoading) return <p className="am-empty-note">Loading contact…</p>;
+  if (detail.isLoading) return <p className="am-empty-note" role="status">Loading contact…</p>;
   if (detail.isError) {
     return (
       <MinimalContactMessage
