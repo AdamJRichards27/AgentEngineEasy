@@ -101,16 +101,16 @@ async function safeAlert(
 }
 
 /**
- * Re-reads what is actually stored remotely: downloads the artifact and its manifest
- * through the configured download command, requires the downloaded manifest to be
- * byte-identical to the one written locally, and re-checks the artifact SHA-256 and
- * byte length against it. Throws (failing the run loudly) on any mismatch.
+ * Re-reads what is actually stored remotely, for EVERY tier copy written by this run: downloads the
+ * artifact and its manifest through the configured download command, requires the downloaded manifest
+ * to be byte-identical to the one written locally, and re-checks the artifact SHA-256 and byte length
+ * against it. Throws (failing the run loudly) on any mismatch.
  */
 async function verifyUploadedBackup(
   config: BackupConfig,
   run: CommandRunner,
   runDirectory: string,
-  name: string,
+  targets: Array<{ artifact: string; manifest: string }>,
   localManifestPath: string,
 ): Promise<{ bytes: number; sha256: string }> {
   let result: { bytes: number; sha256: string } | undefined;
@@ -651,7 +651,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await dependencies.run({
       executable: "tar",
       args: ["--create", "--file", documentsArchive, "--directory", documentSourceDirectory, "."],
-    });
+    }, undefined, "archive");
     await chmod(documentsArchive, 0o600);
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run({
