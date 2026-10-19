@@ -1,7 +1,10 @@
+import { runCli } from "./cli.js";
 import { createScopedRunner, runCommand } from "./commands.js";
-import { loadProductionBackupConfig } from "./config.js";
-import { restoreBackup } from "./engine.js";
-import { parseRestoreArgs } from "./restoreArgs.js";
 
-const config = loadProductionBackupConfig();
-await restoreBackup(config, parseRestoreArgs(process.argv.slice(2)), { run: config.envIsolation ? createScopedRunner(config.envIsolation) : runCommand });
+// Exit codes and output: CLI-SPEC.md (0 ok, 1 failed, 64 usage, 69 preflight, 70 internal, 78 config; 75 reserved).
+process.exitCode = await runCli("restore", {
+  argv: process.argv.slice(2),
+  env: process.env,
+  runFor: (config) => (config.envIsolation ? createScopedRunner(config.envIsolation) : runCommand),
+  bootstrapRun: runCommand,
+});

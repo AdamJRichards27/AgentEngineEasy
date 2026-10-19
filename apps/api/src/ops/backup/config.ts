@@ -387,3 +387,7 @@ export function loadProductionBackupConfig(env: NodeJS.ProcessEnv = process.env)
   assertIsolationRequirements(env, config);
   return config;
 }
+/** Parses BACKUP_ALERT_COMMAND on its own (CLI-SPEC §5, R29b): lets a refused config still raise an alert. */
+export function loadAlertCommand(env: NodeJS.ProcessEnv = process.env): CommandSpec {
+  return requirePlaceholders("BACKUP_ALERT_COMMAND", command(env, "BACKUP_ALERT_COMMAND"), ["operation", "error"]);
+}

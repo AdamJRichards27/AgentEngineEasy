@@ -1,10 +1,12 @@
 import { createObjectStorageProvider } from "@aee/integration-object-storage";
-import { runCommand } from "./commands.js";
-import { loadProductionBackupConfig } from "./config.js";
-import { createBackup } from "./engine.js";
+import { runCli } from "./cli.js";
+import { createScopedRunner, runCommand } from "./commands.js";
 
-const config = loadProductionBackupConfig();
-await createBackup(config, {
-  run: runCommand,
-  ...(config.documentSource === "object-storage" ? { documentProvider: createObjectStorageProvider() } : {}),
+// Exit codes and output: CLI-SPEC.md (0 ok, 1 failed, 64 usage, 69 preflight, 70 internal, 78 config; 75 reserved).
+process.exitCode = await runCli("backup", {
+  argv: process.argv.slice(2),
+  env: process.env,
+  runFor: (config) => (config.envIsolation ? createScopedRunner(config.envIsolation) : runCommand),
+  bootstrapRun: runCommand,
+  documentProvider: () => createObjectStorageProvider(),
 });

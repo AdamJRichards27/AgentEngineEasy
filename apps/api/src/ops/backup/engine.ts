@@ -12,6 +12,7 @@ import {
   artifactName,
   assessListing,
   planTierRetention,
+  redactSecrets,
   sanitizeErrorText,
   tierKey,
   isTier,
@@ -62,6 +63,31 @@ async function notify(
   replacements: Record<string, string>,
 ): Promise<void> {
   await run(config.alert, replacements, "alert");
+}
+
+/** Alert payloads carry a fixed reason code and counts only (never object keys, provider text or identifiers). */
+async function safeAlert(
+  config: BackupConfig,
+  run: CommandRunner,
+  log: (entry: OperationLog) => void,
+  runId: string,
+  status: string,
+  error: string,
+): Promise<boolean> {
+  try {
+    await notify(config, run, { operation: "backup", status, error, runId });
+    return true;
+  } catch (alertError) {
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "backup",
+      event: "alert_failed",
+      runId,
+      error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
+    });
+    return false;
+  }
 }
 
 /**
@@ -724,7 +750,14 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     });
     return name;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    // Local log keeps the full text with credentials redacted (CLI-SPEC §3, R29b); the alert carries only a fixed
+    // reason code. The alert is attempted first so the failed record can say whether it was delivered.
+    const message = redactSecrets(error instanceof Error ? error.message : String(error));
+    const reason =
+      error instanceof PruneListUnexpectedError
+        ? `prune_list_unexpected: listing had ${error.listed} entries, ${error.recognised} recognised${error.recognised > 0 ? `, ${error.unrecognisedBackupLike} backup-named unrecognised` : ""}`
+        : (ALERT_REASONS[stage] ?? "backup_failed: backup failed");
+    const alertDelivered = await safeAlert(config, dependencies.run, log, runId, "failed", reason);
     log({
       timestamp: new Date().toISOString(),
       level: "error",
@@ -733,14 +766,9 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       runId,
       stage,
       error: message,
+      alertDelivered,
       durationMs: Date.now() - started,
     });
-    // Local log keeps the full text; the alert carries only a fixed reason code.
-    const reason =
-      error instanceof PruneListUnexpectedError
-        ? `prune_list_unexpected: listing had ${error.listed} entries, ${error.recognised} recognised${error.recognised > 0 ? `, ${error.unrecognisedBackupLike} backup-named unrecognised` : ""}`
-        : (ALERT_REASONS[stage] ?? "backup_failed: backup failed");
-    await safeAlert(config, dependencies.run, log, runId, "failed", reason);
     throw error;
   } finally {
     stopHeartbeat();
@@ -891,24 +919,18 @@ export async function restoreBackup(
       durationMs: Date.now() - started,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log({
-      timestamp: new Date().toISOString(),
-      level: "error",
-      operation: "restore",
-      event: "failed",
-      runId,
-      error: message,
-      durationMs: Date.now() - started,
-    });
+    // Local log keeps the full text with credentials redacted (R29b); the alert carries only a fixed reason code and
+    // stage, and is attempted first so the failed record can say whether it was delivered.
+    const message = redactSecrets(error instanceof Error ? error.message : String(error));
+    let alertDelivered = false;
     try {
-      // Local log keeps the full text; the alert carries only a fixed reason code and stage.
       await notify(config, dependencies.run, {
         operation: "restore",
         status: "failed",
         error: `restore_failed: restore failed during ${stage}`,
         runId,
       });
+      alertDelivered = true;
     } catch (alertError) {
       log({
         timestamp: new Date().toISOString(),
@@ -919,6 +941,17 @@ export async function restoreBackup(
         error: sanitizeErrorText(alertError instanceof Error ? alertError.message : String(alertError)),
       });
     }
+    log({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      operation: "restore",
+      event: "failed",
+      runId,
+      stage,
+      error: message,
+      alertDelivered,
+      durationMs: Date.now() - started,
+    });
     throw error;
   } finally {
     await rm(runDirectory, { recursive: true, force: true });

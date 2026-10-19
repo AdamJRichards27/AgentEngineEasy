@@ -479,6 +479,18 @@ export function planTierRetention(
 }
 
 /**
+ * Local-log / CLI redaction (CLI-SPEC §3, R29b): strips credentials embedded in URLs and `password=` / `secret=` /
+ * `token=` values, keeps line structure (so an opt-in debug stack stays readable) and bounds the length. Unlike
+ * `sanitizeErrorText` it keeps variable names, so config errors still name the variable (never its value).
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[credentials-redacted]@")
+    .replace(/((?:pass(?:word)?|secret|token|api[_-]?key)=)([^\s&"']+)/gi, "$1[redacted]")
+    .slice(0, 4_000);
+}
+
+/**
  * Sanitises provider/command error text before it is placed in an alert: drops anything that could
  * identify a bucket, account, key or request (URIs, ARNs, long ids) and caps the length.
  */
