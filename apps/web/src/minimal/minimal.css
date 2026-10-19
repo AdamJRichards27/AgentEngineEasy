@@ -980,5 +980,7 @@
 .ae-minimal .am-facts dt { color: var(--am-muted); }
 .ae-minimal .am-facts dd { margin: 0; color: var(--am-ink); }
 .ae-minimal .am-contact .am-rail-section h2 { margin: 0 0 8px; }
+.ae-minimal .am-contact .am-agenda { margin: 0; padding: 0; list-style: none; }
+.ae-minimal .am-contact .am-contact-note { margin: 3px 0 0; color: var(--am-ink); font-size: 12px; font-weight: 400; line-height: 1.5; overflow-wrap: anywhere; }
 .ae-minimal .am-contact .am-agenda-row { grid-template-columns: minmax(0, 1fr); min-height: 0; }
 @media (max-width: 640px) { .ae-minimal .am-facts { grid-template-columns: 1fr; } }

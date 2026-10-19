@@ -5,6 +5,7 @@ import { Link } from "wouter";
 import type { GrowContactability } from "../contactability";
 import {
   buildMinimalContactModel,
+  formatContactDate,
   selectContact360View,
   type Contact360Input,
 } from "../../minimal/minimalContactModel";
@@ -124,4 +125,11 @@ test("Grow.tsx imports the extracted types and no longer declares them", () => {
   const grow = readFileSync(new URL("../../pages/Grow.tsx", import.meta.url), "utf8");
   assert.match(grow, /from "\.\.\/lib\/growContact360"/);
   assert.equal(/^interface GrowContact360/m.test(grow), false);
+});
+
+test("dates use fixed en-AU wording, never the browser locale, and bad dates do not throw", () => {
+  assert.equal(formatContactDate("2026-10-25T12:00:00Z"), "25 Oct 2026");
+  assert.equal(formatContactDate("not-a-date"), "Unknown date");
+  const t = text(MinimalContact360View({ model: buildMinimalContactModel(full) }));
+  assert.ok(t.includes("25 Oct 2026"));
 });

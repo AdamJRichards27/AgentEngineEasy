@@ -37,6 +37,12 @@ export function selectContact360View(minimalShell: boolean, search: string): "mi
   return params.get("view") === "full" ? "classic" : "minimal";
 }
 
+/** Fixed en-AU (e.g. "25 Oct 2026") so the date never depends on the browser locale (headless/US browsers showed 10/25/2026). */
+export function formatContactDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "Unknown date" : new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(d);
+}
+
 export interface MinimalContactModel {
   id: number;
   title: string;
