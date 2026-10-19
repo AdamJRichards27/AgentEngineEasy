@@ -14,6 +14,7 @@ import {
   resolveCreateAppraisal,
 } from "./minimalPropertiesModel";
 import { MinimalPropertiesView, type MinimalPropertiesViewProps, type PropertyChooser } from "./MinimalPropertiesView";
+import "./properties.css";
 
 // AE Minimal A Properties page, rendered only inside the Minimal shell
 // (selectPropertiesView; AE_MINIMAL_UX_ENABLED default OFF). Existing routes only:

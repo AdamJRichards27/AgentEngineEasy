@@ -513,3 +513,18 @@
   .ae-minimal .ae-appraisal-workspace *::before,
   .ae-minimal .ae-appraisal-workspace *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* WS2 accessibility pass (19 Oct 2026), deliberate deviations from the ported
+   UX styles above, for UX/Owner review:
+   - visually hidden text keeps the stepper's accessible names matching their
+     visible labels (WCAG 2.5.3);
+   - white on #EA580C is 3.56:1, below AA for 14px text (1.4.3). The primary
+     button uses #C44F17 (4.69:1), the same focus/hover orange minimal.css uses;
+   - the decorative "01 / 07" counter (1.81:1) is aria-hidden and uses the
+     muted ink (#74716E, 4.8:1);
+   - the focused step heading gets a visible focus ring. */
+.ae-minimal .ae-appraisal-vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.ae-minimal .ae-appraisal-button.is-primary { border-color: #C44F17; background: #C44F17; }
+.ae-minimal .ae-appraisal-button.is-primary:hover { border-color: #A9420F; background: #A9420F; }
+.ae-minimal .ae-appraisal-step-count { color: var(--app-muted); }
+.ae-minimal #ae-appraisal-step-title:focus-visible { outline: 3px solid #C44F17; outline-offset: 3px; border-radius: 3px; }

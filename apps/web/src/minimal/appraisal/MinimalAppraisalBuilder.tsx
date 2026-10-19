@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../../lib/api";
@@ -58,6 +58,16 @@ export default function MinimalAppraisalBuilder() {
   });
 
   const [state, setState] = useState<BuilderState>(initialBuilderState);
+  // Keyboard and screen-reader users land on the new step's heading, not on
+  // the Continue button that stayed in place (a11y pass, 19 Oct 2026).
+  const firstStep = useRef(true);
+  useEffect(() => {
+    if (firstStep.current) {
+      firstStep.current = false;
+      return;
+    }
+    if (typeof document !== "undefined") document.getElementById("ae-appraisal-step-title")?.focus();
+  }, [state.step]);
   const [rangeEdit, setRangeEdit] = useState<RangeDraft | null>(null);
   const [narrativeEdit, setNarrativeEdit] = useState<string | null>(null);
   const [comparableForm, setComparableForm] = useState<ComparableForm>(EMPTY_COMPARABLE_FORM);

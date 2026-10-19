@@ -117,10 +117,11 @@ export function MinimalPropertiesView(p: MinimalPropertiesViewProps) {
             {p.chooser && p.chooser.propertyId === card.id ? (
               <fieldset className="am-data-inline" aria-label="Choose the contact for this appraisal">
                 <legend>Who is this appraisal for?</legend>
-                {p.chooser.choices.map((c) => (
+                {p.chooser.choices.map((c, i) => (
                   <button
                     key={c.partyId}
                     type="button"
+                    autoFocus={i === 0}
                     className="am-data-button is-quiet"
                     disabled={p.pendingPropertyId === card.id}
                     onClick={() => p.onChooseContact(card.id, c.partyId)}

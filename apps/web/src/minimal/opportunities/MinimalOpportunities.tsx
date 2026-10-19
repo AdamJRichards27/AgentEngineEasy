@@ -7,6 +7,7 @@ import {
   type LifecycleCommand,
   type MinimalOpportunityRow,
   buildPipelineBoard,
+  lifecycleAnnouncement,
   lifecycleBody,
 } from "./minimalOpportunitiesModel";
 import { MinimalOpportunitiesView, type LostDraft } from "./MinimalOpportunitiesView";
@@ -25,6 +26,7 @@ export default function MinimalOpportunities() {
   const [lostDraft, setLostDraft] = useState<LostDraft | null>(null);
   const [actionError, setActionError] = useState<{ id: number; text: string } | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
 
   const list = useQuery<{ opportunities: MinimalOpportunityRow[]; total: number }>({
     queryKey: ["minimal-opportunities"],
@@ -40,9 +42,12 @@ export default function MinimalOpportunities() {
     onMutate: (vars) => {
       setPendingId(vars.id);
       setActionError(null);
+      setAnnouncement(null);
     },
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       setLostDraft(null);
+      const row = list.data?.opportunities.find((r) => r.id === vars.id);
+      setAnnouncement(lifecycleAnnouncement(row?.contactName, vars.command));
       void queryClient.invalidateQueries({ queryKey: ["minimal-opportunities"] });
       void queryClient.invalidateQueries({ queryKey: ["minimal-property-opportunities"] });
       void queryClient.invalidateQueries({ queryKey: ["grow-today"] });
@@ -64,6 +69,7 @@ export default function MinimalOpportunities() {
       showClosed={showClosed}
       lostDraft={lostDraft}
       pendingId={pendingId}
+      announcement={announcement}
       onToggleClosed={() => setShowClosed((v) => !v)}
       onStage={(id, stage) => lifecycle.mutate({ id, command: { kind: "stage", stage } })}
       onStartLost={(id) => setLostDraft({ id, reason: "" })}

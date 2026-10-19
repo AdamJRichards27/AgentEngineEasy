@@ -69,7 +69,7 @@ function builderProps(over: Partial<BuilderViewProps> = {}): BuilderViewProps {
 
 test("builder: seven-step stepper, only reached steps are clickable", () => {
   const tree = MinimalAppraisalBuilderView(builderProps({ state: { step: 2, highestStep: 3 } }));
-  const steps = buttons(tree).filter((b) => String(b.props?.["aria-label"] ?? "").startsWith("Step "));
+  const steps = buttons(tree).filter((b) => text(b).startsWith("Step "));
   assert.equal(steps.length, 7);
   assert.deepEqual(steps.map((s) => Boolean(s.props?.disabled)), [false, false, false, true, true, true, true]);
   assert.equal(steps[1].props?.["aria-current"], "step");
@@ -245,7 +245,7 @@ const opp = (id: number, over: Partial<MinimalOpportunityRow> = {}): MinimalOppo
 function oppProps(rows: MinimalOpportunityRow[], over: Partial<MinimalOpportunitiesViewProps> = {}): MinimalOpportunitiesViewProps {
   return {
     board: buildPipelineBoard(rows), rowsById: new Map(rows.map((r) => [r.id, r])), total: rows.length,
-    loading: false, error: null, actionError: null, canManage: true, showClosed: false, lostDraft: null, pendingId: null,
+    loading: false, error: null, actionError: null, canManage: true, showClosed: false, lostDraft: null, pendingId: null, announcement: null,
     onToggleClosed: noop, onStage: noop, onStartLost: noop, onLostReason: noop, onConfirmLost: noop, onCancelLost: noop, onClose: noop, onRetry: noop,
     ...over,
   };
@@ -289,4 +289,57 @@ test("opportunities: read-only viewers see no lifecycle controls; truncation is 
   const tree = MinimalOpportunitiesView(oppProps([opp(1)], { canManage: false, total: 140 }));
   assert.equal(button(tree, "Close"), undefined);
   assert.match(text(tree), /Showing the latest 1 of 140/);
+});
+
+// Accessibility and keyboard pass (19 Oct 2026): findings from axe-core and a
+// keyboard walk against the real API, pinned here before the fixes.
+
+test("a11y builder: stepper names include their visible text (WCAG 2.5.3) and keep aria-current", () => {
+  const tree = MinimalAppraisalBuilderView(builderProps({ state: { step: 2, highestStep: 3 } }));
+  const steps = all(tree, (e) => e.type === "nav")[0];
+  const stepButtons = buttons(steps);
+  assert.equal(stepButtons.length, 7);
+  for (const b of stepButtons) assert.equal(b.props?.["aria-label"], undefined);
+  assert.deepEqual(stepButtons.map((b) => text(b)), [
+    "Step 1: Property", "Step 2: Enrich", "Step 3: Sold comps", "Step 4: Competition", "Step 5: Range", "Step 6: Preview", "Step 7: Save",
+  ]);
+  assert.equal(stepButtons[1].props?.["aria-current"], "step");
+});
+
+test("a11y builder: the step heading can take focus after a step change; the decorative counter is hidden", () => {
+  const tree = MinimalAppraisalBuilderView(builderProps({ state: { step: 3, highestStep: 3 } }));
+  const h2 = all(tree, (e) => e.type === "h2" && e.props?.id === "ae-appraisal-step-title")[0];
+  assert.equal(h2.props?.tabIndex, -1);
+  const counter = all(tree, (e) => e.props?.className === "ae-appraisal-step-count")[0];
+  assert.equal(counter.props?.["aria-hidden"], "true");
+});
+
+test("a11y opportunities: the lost-reason field is named by its visible label and takes focus", () => {
+  const tree = MinimalOpportunitiesView(oppProps([opp(1)], { lostDraft: { id: 1, reason: "" } }));
+  const area = all(tree, (e) => e.type === "textarea")[0];
+  assert.equal(area.props?.["aria-label"], undefined);
+  assert.equal(area.props?.autoFocus, true);
+  const label = all(tree, (e) => e.type === "label" && all(e, (c) => c.type === "textarea").length > 0)[0];
+  assert.match(text(label), /Why was it lost\?/);
+});
+
+test("a11y opportunities: the closed toggle keeps one label with aria-pressed, and lifecycle changes are announced", () => {
+  const off = MinimalOpportunitiesView(oppProps([opp(1)]));
+  const on = MinimalOpportunitiesView(oppProps([opp(1)], { showClosed: true, announcement: "Jo Smith moved to Contacted." }));
+  const toggle = (t: unknown) => buttons(t).find((b) => b.props?.["aria-pressed"] !== undefined);
+  assert.equal(text(toggle(off)), "Show closed");
+  assert.equal(text(toggle(on)), "Show closed");
+  assert.equal(toggle(on)?.props?.["aria-pressed"], true);
+  const live = (t: unknown) => all(t, (e) => e.props?.role === "status" && e.props?.["aria-live"] === "polite");
+  assert.equal(live(off).length, 1);
+  assert.equal(text(live(off)[0]), "");
+  assert.equal(text(live(on)[0]), "Jo Smith moved to Contacted.");
+});
+
+test("a11y properties: the contact chooser takes focus on its first choice", () => {
+  const tree = MinimalPropertiesView(
+    propsFor({ chooser: { propertyId: 1, choices: [{ partyId: 3, label: "Jo Smith · Owner" }, { partyId: 4, label: "Acme Pty Ltd · Owner" }] } }),
+  );
+  assert.equal(button(tree, "Jo Smith · Owner")?.props?.autoFocus, true);
+  assert.notEqual(button(tree, "Acme Pty Ltd · Owner")?.props?.autoFocus, true);
 });

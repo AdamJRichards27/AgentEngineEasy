@@ -26,6 +26,8 @@ export interface MinimalOpportunitiesViewProps {
   showClosed: boolean;
   lostDraft: LostDraft | null;
   pendingId: number | null;
+  /** Last lifecycle change, read out by the polite live region. */
+  announcement: string | null;
   onToggleClosed(): void;
   onStage(id: number, stage: GrowOpportunityManualStage): void;
   onStartLost(id: number): void;
@@ -47,7 +49,7 @@ function cardActions(p: MinimalOpportunitiesViewProps, id: number) {
       <div className="am-ws2-lost-form">
         <label className="am-form-field">
           Why was it lost? *
-          <textarea value={p.lostDraft.reason} onChange={(e) => p.onLostReason(e.target.value)} aria-label="Reason lost" />
+          <textarea value={p.lostDraft.reason} onChange={(e) => p.onLostReason(e.target.value)} autoFocus />
         </label>
         <span className="am-card-actions">
           <button type="button" className="is-danger" disabled={pending || p.lostDraft.reason.trim().length === 0} onClick={p.onConfirmLost}>
@@ -108,7 +110,7 @@ export function MinimalOpportunitiesView(p: MinimalOpportunitiesViewProps) {
         </div>
         <div className="am-data-actions">
           <button type="button" className="am-data-button" aria-pressed={p.showClosed} onClick={p.onToggleClosed}>
-            {p.showClosed ? "Hide closed" : "Show closed"}
+            Show closed
           </button>
         </div>
       </header>
@@ -117,6 +119,9 @@ export function MinimalOpportunitiesView(p: MinimalOpportunitiesViewProps) {
           <strong>{MARKET_ACTIVITY_DEFERRED.title}.</strong> {MARKET_ACTIVITY_DEFERRED.body}
         </span>
       </aside>
+      <p className="ae-ws2-vh" role="status" aria-live="polite">
+        {p.announcement ?? ""}
+      </p>
       {p.loading ? <p className="am-empty-note">Loading opportunities…</p> : null}
       {p.error ? (
         <div className="am-rail-section" role="alert">

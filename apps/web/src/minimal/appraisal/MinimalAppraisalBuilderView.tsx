@@ -414,13 +414,14 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
           <button
             key={item.key}
             type="button"
-            aria-label={`Step ${item.n}: ${item.title}`}
             aria-current={step === item.n ? "step" : undefined}
             disabled={item.n > p.state.highestStep}
             className={`${step === item.n ? "is-active" : ""}${item.n < step ? " is-done" : ""}`}
             onClick={() => p.on.goTo(item.n)}
           >
+            <span className="ae-appraisal-vh">Step </span>
             <span className="ae-appraisal-step-number">{item.n}</span>
+            <span className="ae-appraisal-vh">: </span>
             <span className="ae-appraisal-step-label">{item.short}</span>
           </button>
         ))}
@@ -442,9 +443,11 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
               <span>
                 STEP {step} OF {MINIMAL_APPRAISAL_STEP_COUNT}
               </span>
-              <h2 id="ae-appraisal-step-title">{def.title}</h2>
+              <h2 id="ae-appraisal-step-title" tabIndex={-1}>
+                {def.title}
+              </h2>
             </div>
-            <span className="ae-appraisal-step-count">
+            <span className="ae-appraisal-step-count" aria-hidden="true">
               {String(step).padStart(2, "0")} / {String(MINIMAL_APPRAISAL_STEP_COUNT).padStart(2, "0")}
             </span>
           </header>
