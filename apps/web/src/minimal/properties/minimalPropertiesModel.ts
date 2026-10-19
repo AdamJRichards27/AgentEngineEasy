@@ -144,6 +144,8 @@ export function propertyRelationshipsPath(address: string): string {
   return `/grow/relationships?search=${encodeURIComponent(address)}&limit=100`;
 }
 
-export function selectPropertiesView(minimalShell: boolean): "minimal" | "classic" {
-  return minimalShell ? "minimal" : "classic";
+/** Route selector for WS3. "?view=full" is the explicit way back to the classic list (same convention as Contact 360). */
+export function selectPropertiesView(minimalShell: boolean, search = ""): "minimal" | "classic" {
+  if (!minimalShell) return "classic";
+  return new URLSearchParams(search).get("view") === "full" ? "classic" : "minimal";
 }

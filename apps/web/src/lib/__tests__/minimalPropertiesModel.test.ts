@@ -130,4 +130,6 @@ test("relationships lookup reuses the existing search by address", () => {
 test("flag-gated view selector", () => {
   assert.equal(selectPropertiesView(false), "classic");
   assert.equal(selectPropertiesView(true), "minimal");
+  assert.equal(selectPropertiesView(true, "?view=full"), "classic");
+  assert.equal(selectPropertiesView(false, "?view=minimal"), "classic");
 });

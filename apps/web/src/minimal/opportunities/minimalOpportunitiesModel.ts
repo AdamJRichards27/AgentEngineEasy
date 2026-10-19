@@ -157,6 +157,8 @@ export const MARKET_ACTIVITY_DEFERRED = {
 
 export const MINIMAL_OPPORTUNITIES_PAGE_LIMIT = 100;
 
-export function selectOpportunitiesView(minimalShell: boolean): "minimal" | "classic" {
-  return minimalShell ? "minimal" : "classic";
+/** Route selector for WS3 (proposed path /grow/opportunities; "?view=full" falls back to classic). */
+export function selectOpportunitiesView(minimalShell: boolean, search = ""): "minimal" | "classic" {
+  if (!minimalShell) return "classic";
+  return new URLSearchParams(search).get("view") === "full" ? "classic" : "minimal";
 }

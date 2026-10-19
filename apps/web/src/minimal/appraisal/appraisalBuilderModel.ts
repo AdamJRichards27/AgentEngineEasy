@@ -33,7 +33,7 @@ export const MINIMAL_APPRAISAL_STEPS: readonly MinimalAppraisalStep[] = [
   { n: 4, key: "competition", title: "Review Competition", short: "Competition", summary: "Keep current asking prices separate from sold evidence." },
   { n: 5, key: "range", title: "Establish Appraisal Range", short: "Range", summary: "Enter a range from your evidence, explain it, and approve it yourself." },
   { n: 6, key: "build", title: "Build Appraisal", short: "Preview", summary: "Add market commentary and build the document preview." },
-  { n: 7, key: "save", title: "Save and Follow Up", short: "Save", summary: "Book the follow-up. The appraisal is already linked to its contact and property." },
+  { n: 7, key: "save", title: "Save and Follow Up", short: "Save", summary: "Set the due follow-up. The appraisal is already linked to its contact and property." },
 ];
 
 export const MINIMAL_APPRAISAL_STEP_COUNT = MINIMAL_APPRAISAL_STEPS.length;
@@ -157,9 +157,14 @@ export function builderStepGate(step: number, ctx: BuilderContext): string | nul
   return null;
 }
 
-export function continueBuilder(state: BuilderState, ctx: BuilderContext): { state: BuilderState; message: string | null } {
+/** `reviewOnly`: the caller cannot write (no grow.opportunities.manage), so steps are browsed, not gated. */
+export function continueBuilder(
+  state: BuilderState,
+  ctx: BuilderContext,
+  opts: { reviewOnly?: boolean } = {},
+): { state: BuilderState; message: string | null } {
   if (state.step >= MINIMAL_APPRAISAL_STEP_COUNT) return { state, message: null };
-  const readOnly = appraisalReadOnlyMessage(ctx.workspace.appraisal) !== null;
+  const readOnly = opts.reviewOnly === true || appraisalReadOnlyMessage(ctx.workspace.appraisal) !== null;
   const message = readOnly ? null : builderStepGate(state.step, ctx);
   if (message) return { state, message };
   const step = state.step + 1;

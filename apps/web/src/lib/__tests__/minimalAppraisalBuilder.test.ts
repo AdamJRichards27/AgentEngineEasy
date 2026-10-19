@@ -163,6 +163,12 @@ test("read-only appraisals (finished or finalised) can be reviewed without the g
   assert.equal(builderReadOnlyMessage(workspace().appraisal), null);
 });
 
+test("a viewer without the manage entitlement browses the steps without the gates", () => {
+  const ws = workspace();
+  assert.ok(continueBuilder({ step: 2, highestStep: 2 }, ctx(ws)).message);
+  assert.equal(continueBuilder({ step: 2, highestStep: 2 }, ctx(ws), { reviewOnly: true }).state.step, 3);
+});
+
 test("parseMoney accepts en-AU money text and rejects nonsense", () => {
   assert.equal(parseMoney("$1,250,000"), 1250000);
   assert.equal(parseMoney(" 980000.50 "), 980000.5);
