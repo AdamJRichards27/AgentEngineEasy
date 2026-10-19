@@ -1,5 +1,6 @@
 import { logger } from "@aee/events";
 import { redactSecrets } from "./artifacts.js";
+import { BuildStampError, EMBEDDED_BUILD_STAMP, checkBuildStamp } from "./buildStamp.js";
 import { loadProductionBackupConfig } from "./config.js";
 import { sweepStaging } from "./stagingSweep.js";
 
@@ -18,11 +19,23 @@ import { sweepStaging } from "./stagingSweep.js";
 // variables, never values; every other failure keeps exit 1.
 const maskPaths = (text: string): string => text.replace(/'[^']*'/g, "'<path>'");
 let config: ReturnType<typeof loadProductionBackupConfig> | undefined;
+// WS4-13: a stale or unstamped bundle refuses (69; 78 for a missing/malformed expectation) before config is read.
+let stampRefused = false;
 try {
-  config = loadProductionBackupConfig();
+  checkBuildStamp({ stamp: EMBEDDED_BUILD_STAMP, entryUrl: import.meta.url, env: process.env });
 } catch (error) {
-  logger.error("staging_sweep_config_refused", { event: "staging_sweep_config_refused", reason: "config_refused", detail: redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 400) });
-  process.exitCode = 78;
+  if (!(error instanceof BuildStampError)) throw error;
+  logger.error("staging_sweep_build_stamp_refused", { event: "staging_sweep_build_stamp_refused", tool: "backup-cli", kind: error.kind, found: error.found, required: error.required, detail: redactSecrets(error.message).slice(0, 400) });
+  process.exitCode = error.exitCode;
+  stampRefused = true;
+}
+if (!stampRefused) {
+  try {
+    config = loadProductionBackupConfig();
+  } catch (error) {
+    logger.error("staging_sweep_config_refused", { event: "staging_sweep_config_refused", reason: "config_refused", detail: redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 400) });
+    process.exitCode = 78;
+  }
 }
 if (config) {
   try {

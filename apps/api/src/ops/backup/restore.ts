@@ -1,3 +1,4 @@
+import { EMBEDDED_BUILD_STAMP } from "./buildStamp.js";
 import { runCli } from "./cli.js";
 import { createScopedRunner, runCommand } from "./commands.js";
 
@@ -7,4 +8,5 @@ process.exitCode = await runCli("restore", {
   env: process.env,
   runFor: (config) => (config.envIsolation ? createScopedRunner(config.envIsolation) : runCommand),
   bootstrapRun: runCommand,
+  buildStamp: { stamp: EMBEDDED_BUILD_STAMP, entryUrl: import.meta.url },
 });

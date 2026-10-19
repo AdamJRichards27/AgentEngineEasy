@@ -112,6 +112,20 @@ Backups written after tiering are restored with `--tier=` naming the folder they
 before tiering; behaviour without `--tier` is unchanged. If a tier restore cannot download the
 artifact, the error names the tier and reminds you to check `--tier`.
 
+Restore downloads the manifest first and checks the recorded dump archive version before downloading the dump.
+Manifests written before that field existed ("legacy") are accepted by default (a `manifest_without_archive_version`
+warning is logged and the dump header is checked before `pg_restore`). To refuse them, add
+`--require-archive-version` or set `BACKUP_RESTORE_REQUIRE_ARCHIVE_VERSION=true` (either enables it; the env value must
+be exactly `true` or `false`, anything else is a refused config, exit 78). A refused legacy manifest exits 69 before
+the dump is downloaded.
+
+Bundled CLIs (`backup-backup.mjs`, `backup-restore.mjs`, `backup-sweep.mjs`, built with
+`node apps/api/src/ops/backup/bundle/build.mjs --out=<dir>` from a clean checkout) carry a build stamp and refuse to
+run unless `BACKUP_CLI_EXPECTED_DIGEST` (the digest in the bundle's `BUILD.json`) or `BACKUP_CLI_SOURCE_ROOT` (a
+source checkout to compare against) proves they match the source: stale or unstamped bundles exit 69, a missing or
+malformed expectation exits 78. `--print-digest` prints the expected digest for a checkout. The `pnpm` scripts above
+run from source and are not checked.
+
 Both scripts require `BACKUP_ENVIRONMENT=production`; this is a deliberate explicit
 production-operation guard, not permission to restore into production. Configure the
 following through the deployment's owner-controlled secret/configuration system:
@@ -287,7 +301,12 @@ its own command adapter**:
   object-store/KMS policies themselves. Not yet evidenced against any real provider.
 
 **Alerts** carry only a fixed reason code and counts (for example `prune_delete_refused: 2 delete(s)
-refused`, `restore_failed: restore failed during download`). Object names, bucket names and raw
+refused`, `restore_failed: restore failed during manifest_download`). A restore names the stage it failed in, in
+order: `manifest_download` (the manifest could not be fetched), `manifest_check` (missing or unreadable manifest),
+`archive_version_check` (archive newer than this `pg_restore`, or a legacy manifest under the strict flag),
+`download` (the dump artifact itself), `verify`, `decrypt_and_restore`. Since the manifest-first change (WS4-10) a
+missing manifest reports `manifest_download`/`manifest_check`, not `download`; alert rules or dashboards that matched
+`restore failed during download` for a missing manifest must match those stages instead. Object names, bucket names and raw
 provider output stay in the local operation log only.
 
 ## Restore preflight and disposable-only procedure
@@ -305,7 +324,8 @@ Before every restore:
    are empty; confirm no live service points at either target.
 3. Confirm the KMS owner has authorised decryption and the restore operator has no need
    to copy secrets into logs or tickets.
-4. Run the restore command above (add `--tier=` for tiered backups). It downloads artifact and manifest
+4. Run the restore command above (add `--tier=` for tiered backups). It downloads the manifest first, checks it and
+   the recorded archive version, then downloads the artifact
    (through `BACKUP_RESTORE_DOWNLOAD_COMMAND` when set), verifies SHA-256
    integrity before decryption, extracts with `tar`, restores with `pg_restore
    --exit-on-error`, validates table/row/tenant/document inventory and the drizzle migration journal (row count + digest; artifacts created before this check are not journal-validated), and verifies restored

@@ -2,11 +2,12 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { redactSecrets, sanitizeErrorText } from "./artifacts.js";
+import { BuildStampError, checkBuildStamp, type BuildStamp } from "./buildStamp.js";
 import { loadAlertCommand, loadProductionBackupConfig } from "./config.js";
 import { DumpArchiveIncompatibleError } from "./dumpFormat.js";
 import { createBackup, restoreBackup, type EngineDependencies } from "./engine.js";
 import type { DocumentObjectReader } from "./objectDocuments.js";
-import { parseRestoreArgs, type RestoreArgs } from "./restoreArgs.js";
+import { parseRestoreArgs, restoreStrictFromEnv, type RestoreArgs } from "./restoreArgs.js";
 import type { BackupConfig, BackupOperation, CommandRunner, CommandSpec, OperationLog } from "./types.js";
 
 /**
@@ -39,9 +40,11 @@ export interface CliDependencies {
   nodeVersion?: string;
   /** Object-storage document reader factory (backup with BACKUP_DOCUMENT_SOURCE=object-storage). */
   documentProvider?: () => DocumentObjectReader;
+  /** WS4-13: entrypoints pass the embedded stamp and their own import.meta.url; omitted (unit tests) = not checked. */
+  buildStamp?: { stamp: BuildStamp | undefined; entryUrl: string };
 }
 
-const RESTORE_FLAGS = /^(?:--artifact=.*|--tier=.*|--confirm-disposable)$/;
+const RESTORE_FLAGS = /^(?:--artifact=.*|--tier=.*|--confirm-disposable|--require-archive-version)$/;
 
 /** Usage errors are checked before any config is read. Restore reuses parseRestoreArgs (incl. --tier). */
 export function parseCliArgs(kind: CliKind, argv: string[]): RestoreArgs | Record<string, never> {
@@ -50,7 +53,7 @@ export function parseCliArgs(kind: CliKind, argv: string[]): RestoreArgs | Recor
     return {};
   }
   if (argv.some((value) => !RESTORE_FLAGS.test(value))) {
-    throw new UsageError("Unknown restore argument; allowed: --artifact=<name> [--tier=daily|weekly|monthly] --confirm-disposable");
+    throw new UsageError("Unknown restore argument; allowed: --artifact=<name> [--tier=daily|weekly|monthly] [--require-archive-version] --confirm-disposable");
   }
   try {
     return parseRestoreArgs(argv);
@@ -173,6 +176,16 @@ export async function runCli(kind: CliKind, deps: CliDependencies): Promise<numb
     }
   };
   try {
+    // WS4-13: a stale or unstamped bundle refuses before it interprets arguments, reads config or runs anything.
+    if (deps.buildStamp) {
+      try {
+        checkBuildStamp({ ...deps.buildStamp, env: deps.env });
+      } catch (error) {
+        if (!(error instanceof BuildStampError)) throw error;
+        line("error", "backup_build_stamp_refused", { tool: "backup-cli", kind: error.kind, found: error.found, required: error.required, error: redactSecrets(error.message) });
+        return error.exitCode;
+      }
+    }
     let args: RestoreArgs | Record<string, never>;
     try {
       args = parseCliArgs(kind, deps.argv);
@@ -184,6 +197,8 @@ export async function runCli(kind: CliKind, deps: CliDependencies): Promise<numb
     let config: BackupConfig;
     try {
       config = loadProductionBackupConfig(deps.env);
+      // WS4-13: strict mode = flag OR env=true. A malformed env value is a refused config (78) even with the flag set.
+      if (kind === "restore" && restoreStrictFromEnv(deps.env)) args = { ...(args as RestoreArgs), requireArchiveVersion: true };
       if (config.envIsolationRequired && !config.envIsolation) {
         throw new Error("Environment isolation is required (BACKUP_ENV_ISOLATION_REQUIRED=true) but no isolation policy is configured");
       }

@@ -793,6 +793,11 @@ export interface RestoreRequest {
   confirmDisposable: boolean;
   /** Tier folder to restore from. Omitted = legacy flat layout (backups written before tiering). */
   tier?: Tier;
+  /**
+   * WS4-13 strict mode (CLI `--require-archive-version` / BACKUP_RESTORE_REQUIRE_ARCHIVE_VERSION=true): refuse a manifest
+   * that records no dumpArchiveVersion, before the dump is downloaded. Default false: legacy manifests stay accepted.
+   */
+  requireArchiveVersion?: boolean;
 }
 
 function databaseIdentity(databaseUrl: string): string {
@@ -891,6 +896,15 @@ export async function restoreBackup(
       );
     }
     // WS4-10 (2/3) = WS4-06 (1/2): refuse an archive newer than this pg_restore BEFORE the dump download.
+    // WS4-13: strict mode refuses a legacy (version-less) manifest here, whether or not the pg_restore major is known.
+    if (request.requireArchiveVersion === true && typeof earlyManifest.dumpArchiveVersion !== "string") {
+      stage = "archive_version_check";
+      throw new DumpArchiveIncompatibleError(
+        "archive version not recorded (legacy manifest)",
+        "a manifest dumpArchiveVersion (strict: --require-archive-version / BACKUP_RESTORE_REQUIRE_ARCHIVE_VERSION=true)",
+        "manifest",
+      );
+    }
     if (dependencies.pgRestoreMajor !== undefined) {
       if (typeof earlyManifest.dumpArchiveVersion === "string") {
         stage = "archive_version_check";
