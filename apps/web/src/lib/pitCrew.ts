@@ -205,6 +205,39 @@ export function fetchPitCrewWorkspace(): Promise<PcWorkspace> {
   return apiFetch<PcWorkspace>("/pit-crew/workspace");
 }
 
+// PC-C: workspace load and refresh states. The page polls every 30 s and
+// the app QueryClient has retry: false. In React Query v5 a failed
+// background refetch keeps `data` and sets isError, so an error with data
+// is "ready-stale": the workspace (and any half-filled inline form) stays
+// mounted with a notice. Only an error with nothing to show is "error".
+export type PcWorkspaceViewState = "loading" | "error" | "ready" | "ready-stale";
+
+export function pcWorkspaceViewState(query: { isLoading: boolean; isError: boolean; hasData: boolean }): PcWorkspaceViewState {
+  if (query.hasData) return query.isError ? "ready-stale" : "ready";
+  if (query.isError) return "error";
+  return "loading";
+}
+
+export const PIT_CREW_WORKSPACE_LOADING_MESSAGE = "Loading Pit Crew workspace…";
+export const PIT_CREW_WORKSPACE_LOAD_ERROR_FALLBACK = "Couldn't load the Pit Crew workspace.";
+
+// ApiError.friendly when it has text, otherwise the fallback. A non-API
+// error's raw message is never shown.
+export function pcWorkspaceLoadErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.friendly.trim().length > 0) return error.friendly;
+  return PIT_CREW_WORKSPACE_LOAD_ERROR_FALLBACK;
+}
+
+// Same time style as the page's existing "Updated" line.
+export function pcWorkspaceStaleMessage(
+  generatedAt: string | undefined,
+  formatTime: (instant: Date) => string = (instant) => instant.toLocaleTimeString(),
+): string {
+  const instant = generatedAt ? new Date(generatedAt) : null;
+  if (!instant || Number.isNaN(instant.getTime())) return "Couldn't refresh. Showing the last loaded workspace.";
+  return `Couldn't refresh. Showing the workspace as of ${formatTime(instant)}.`;
+}
+
 export function fetchPitCrewTeam(): Promise<PcTeamMember[]> {
   return apiFetch<PcTeamMember[]>("/pit-crew/team");
 }
