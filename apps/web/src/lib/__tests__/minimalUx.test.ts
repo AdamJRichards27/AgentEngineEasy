@@ -157,3 +157,11 @@ function walk(root: URL): string[] {
   }
   return out;
 }
+
+test("breadcrumb: /grow/opportunities reads Grow / Opportunities (WS3 checkpoint 8485d79)", () => {
+  const links = [{ path: "/grow", label: "Grow" }, { path: "/properties", label: "Properties" }];
+  assert.deepEqual(minimalBreadcrumb("/grow/opportunities", links), { section: "Grow", page: "Opportunities" });
+  assert.deepEqual(minimalBreadcrumb("/grow/opportunities?view=full", links), { section: "Grow", page: "Opportunities" });
+  assert.deepEqual(minimalBreadcrumb("/grow/opportunities/12", links), { section: "Grow", page: "Opportunities" });
+  assert.deepEqual(minimalBreadcrumb("/grow/opportunitiesx", links), { section: "Grow", page: "Page" }, "prefix only on a path boundary");
+});

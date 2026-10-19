@@ -65,6 +65,7 @@ export function minimalBreadcrumb(
   const section = grow ? "Grow" : "Agent Engine";
   if (path.startsWith("/grow/appraisals")) return { section, page: "Appraisals" };
   if (path.startsWith("/grow/import")) return { section, page: "Import" };
+  if (path === "/grow/opportunities" || path.startsWith("/grow/opportunities/")) return { section, page: "Opportunities" };
   if (/^\/grow\/contacts\/[^/]+$/.test(path)) return { section, page: "Contact" };
   if (path === "/properties/start") return { section: "Agent Engine", page: "Start property" };
   if (path.startsWith("/properties/")) return { section: "Agent Engine", page: "Property" };
