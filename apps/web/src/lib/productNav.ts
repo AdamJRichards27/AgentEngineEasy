@@ -62,6 +62,7 @@ export function buildProductNavLinks(ctx: NavContext): NavLink[] {
     { path: "/communications", label: "Communications" },
     ...(canSeeFinancial ? [{ path: "/financial", label: "Financial" }] : []),
     ...(canSeePitCrew ? [{ path: "/pit-crew", label: "Pit Crew" }] : []),
+    ...(hasEntitlement(ctx, "run.access") ? [{ path: "/offers", label: "Offer Centre" }] : []),
     { path: "/settings", label: "Settings" },
   ];
 }
