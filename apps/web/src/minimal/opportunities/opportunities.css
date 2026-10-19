@@ -24,3 +24,6 @@
 .ae-minimal .am-ws2-column .am-data-select:focus-within { outline: 3px solid #C44F17; outline-offset: 2px; }
 /* The closed toggle keeps one label, so its pressed state must be visible. */
 .ae-minimal .am-ws2-opportunities .am-data-button[aria-pressed="true"] { border-color: #212121; color: #fff; background: #212121; }
+/* "Classic view" link to /grow/opportunities?view=full: an explicit, solid focus ring. */
+.ae-minimal .am-ws2-opportunities .am-ws2-classic-link { text-decoration: none; }
+.ae-minimal .am-ws2-opportunities .am-ws2-classic-link:focus-visible { outline: 3px solid #C44F17; outline-offset: 3px; }

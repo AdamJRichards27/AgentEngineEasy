@@ -343,3 +343,17 @@ test("a11y properties: the contact chooser takes focus on its first choice", () 
   assert.equal(button(tree, "Jo Smith · Owner")?.props?.autoFocus, true);
   assert.notEqual(button(tree, "Acme Pty Ltd · Owner")?.props?.autoFocus, true);
 });
+
+test("opportunities: a visible, named 'Classic view' link goes to /grow/opportunities?view=full and has a focus ring", async () => {
+  const tree = MinimalOpportunitiesView(oppProps([opp(1)]));
+  const header = all(tree, (e) => e.type === "header")[0];
+  const classic = all(header, (e) => e.type === Link && e.props?.href === "/grow/opportunities?view=full");
+  assert.equal(classic.length, 1);
+  assert.equal(text(classic[0]).trim(), "Classic view");
+  const label = classic[0].props?.["aria-label"];
+  if (label !== undefined) assert.match(String(label), /Classic view/);
+  assert.match(String(classic[0].props?.className), /\bam-ws2-classic-link\b/);
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../../minimal/opportunities/opportunities.css", import.meta.url), "utf8");
+  assert.match(css, /\.am-ws2-classic-link:focus-visible\s*\{[^}]*outline:\s*3px solid #C44F17/);
+});

@@ -172,3 +172,6 @@ export function lifecycleAnnouncement(contactName: string | null | undefined, co
   }
   return command.kind === "lost" ? `${who} marked lost.` : `${who} closed.`;
 }
+
+/** The classic opportunities list, reached from the Minimal page (?view=full is the classic escape). */
+export const MINIMAL_OPPORTUNITIES_CLASSIC_HREF = "/grow/opportunities?view=full";
