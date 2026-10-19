@@ -8,9 +8,11 @@ import { appraisalPricingLockedMessage, appraisalReadOnlyMessage } from "../../l
 // (D2), no distance map or building-area filter (D4: those columns do not
 // exist). The builder edits a SERVER appraisal through the existing
 // /grow/appraisals routes. It keeps no browser drafts: a draft is a server
-// appraisal in DRAFT status. The step-2, step-4 and range-approval
-// confirmations are UI-only gates (D7) and are not stored, so a resumed
-// appraisal asks for them again.
+// appraisal in DRAFT status. Owner decision D7: attestations must be
+// server-persisted and enforced, or omitted, never browser-only. No
+// attestation store exists yet, so the builder OMITS them: steps 2 and 4
+// are review steps with no gate, and step 5 gates only on the range and
+// explanation saved on the server. Every gate reads server state only.
 
 export interface MinimalAppraisalStep {
   n: number;
@@ -21,7 +23,7 @@ export interface MinimalAppraisalStep {
 }
 
 export const MINIMAL_APPRAISAL_STEPS: readonly MinimalAppraisalStep[] = [
-  { n: 1, key: "property", title: "Select Property", short: "Property", summary: "Confirm the property and the contact this appraisal is for." },
+  { n: 1, key: "property", title: "Select Property", short: "Property", summary: "Check the property and the contact this appraisal is for." },
   {
     n: 2,
     key: "enrich",
@@ -31,7 +33,7 @@ export const MINIMAL_APPRAISAL_STEPS: readonly MinimalAppraisalStep[] = [
   },
   { n: 3, key: "comparables", title: "Review Comparables", short: "Sold comps", summary: "Add the sold evidence that belongs in this appraisal." },
   { n: 4, key: "competition", title: "Review Competition", short: "Competition", summary: "Keep current asking prices separate from sold evidence." },
-  { n: 5, key: "range", title: "Establish Appraisal Range", short: "Range", summary: "Enter a range from your evidence, explain it, and approve it yourself." },
+  { n: 5, key: "range", title: "Establish Appraisal Range", short: "Range", summary: "Enter a range from your evidence, explain it, and save it to the appraisal." },
   { n: 6, key: "build", title: "Build Appraisal", short: "Preview", summary: "Add market commentary and build the document preview." },
   { n: 7, key: "save", title: "Save and Follow Up", short: "Save", summary: "Set the due follow-up. The appraisal is already linked to its contact and property." },
 ];
@@ -82,12 +84,6 @@ export interface BuilderWorkspace {
   marketCompetition: BuilderCompetitionItem[];
 }
 
-export interface BuilderAttestations {
-  propertyFactsConfirmed: boolean;
-  competitionReviewed: boolean;
-  rangeApproved: boolean;
-}
-
 export interface RangeDraft {
   low: string;
   high: string;
@@ -96,7 +92,6 @@ export interface RangeDraft {
 
 export interface BuilderContext {
   workspace: BuilderWorkspace;
-  attest: BuilderAttestations;
   rangeDraft: RangeDraft;
 }
 
@@ -104,12 +99,6 @@ export interface BuilderState {
   step: number;
   highestStep: number;
 }
-
-export const NO_ATTESTATIONS: BuilderAttestations = {
-  propertyFactsConfirmed: false,
-  competitionReviewed: false,
-  rangeApproved: false,
-};
 
 export const RANGE_RATIONALE_MIN = 20;
 
@@ -123,32 +112,25 @@ export function builderReadOnlyMessage(appraisal: Pick<BuilderAppraisal, "status
 }
 
 /** Null when the agent may continue past `step`; otherwise the reason. */
+export const BUILDER_NO_ATTESTATIONS_NOTE =
+  "This builder records no attestations or approvals. AE stores only what you save: comparables, listings, the range and its explanation, the document and the due follow-up.";
+
 export function builderStepGate(step: number, ctx: BuilderContext): string | null {
-  const { workspace, attest, rangeDraft } = ctx;
+  const { workspace, rangeDraft } = ctx;
   const appraisal = workspace.appraisal;
   if (step === 1) {
     return appraisal.propertyId ? null : "Choose a property before continuing.";
   }
-  if (step === 2) {
-    return attest.propertyFactsConfirmed
-      ? null
-      : "Confirm you have checked the property facts. AE has no property-data provider connected, so check them against your own records.";
-  }
+  // Steps 2 and 4 are review steps: D7 omits browser-only attestations.
   if (step === 3) {
     return workspace.comparableSales.length > 0
       ? null
       : "Add at least one relevant sold comparable with a verified sale price and date.";
   }
-  if (step === 4) {
-    return attest.competitionReviewed
-      ? null
-      : "Confirm you have reviewed the current competition, even if there are no listings to add.";
-  }
   if (step === 5) {
     const invalid = rangeValidation(rangeDraft);
     if (invalid) return invalid;
     if (!rangeIsSaved(rangeDraft, appraisal)) return "Save the range and explanation before continuing.";
-    if (!attest.rangeApproved) return "Only you can approve this range. Review it, then select Approve range.";
     return null;
   }
   if (step === 6) {

@@ -18,6 +18,8 @@ export interface MinimalPropertiesViewProps {
   chooser: PropertyChooser | null;
   pendingPropertyId: number | null;
   canCreateAppraisal: boolean;
+  /** run.access (D5): the property link opens the Run property workspace. */
+  runAccess: boolean;
   onSearch(text: string): void;
   onCreateAppraisal(propertyId: number): void;
   onChooseContact(propertyId: number, partyId: number): void;
@@ -84,7 +86,7 @@ export function MinimalPropertiesView(p: MinimalPropertiesViewProps) {
                 </div>
               </div>
               <Link href={card.href} className="am-data-button is-quiet">
-                Details
+                {p.runAccess ? "Open in Run" : "Details"}
               </Link>
             </div>
             <div className="am-data-card-meta">
@@ -145,7 +147,6 @@ export function MinimalPropertiesView(p: MinimalPropertiesViewProps) {
                     {card.appraisal && !card.appraisal.closed ? "Open Appraisal" : "Create Appraisal"}
                   </button>
                 ) : null}
-                <Link href={card.href}>Open details</Link>
               </span>
             </div>
           </article>

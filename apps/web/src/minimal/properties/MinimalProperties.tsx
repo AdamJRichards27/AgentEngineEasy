@@ -116,6 +116,7 @@ export default function MinimalProperties() {
       chooser={chooser}
       pendingPropertyId={pendingPropertyId}
       canCreateAppraisal={canCreateAppraisal}
+      runAccess={hasEntitlement("run.access")}
       onSearch={setSearchText}
       onCreateAppraisal={(id) => void createAppraisal(id)}
       onChooseContact={(propertyId, partyId) => {
