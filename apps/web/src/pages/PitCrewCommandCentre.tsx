@@ -52,6 +52,7 @@ import {
   pitCrewResponsibilityActionsVisible,
   pcStatusLabel,
   pcStatusPillClass,
+  pcItemDueLabel,
   pcTeamMemberName,
   reclaimPcHandBack,
   releasePcItem,
@@ -72,7 +73,7 @@ import {
   type PitCrewEscalationSeverity,
   type PitCrewHandBackReasonCategory,
 } from "../lib/pitCrew";
-import { BLOCKS_CLOSE_LABEL, categoryLabel, formatDueDate, isOverdue, severityLabel, severityPillClass, showBlocksClosePill } from "../lib/riskExceptions";
+import { BLOCKS_CLOSE_LABEL, categoryLabel, formatDueDate, severityLabel, severityPillClass, showBlocksClosePill } from "../lib/riskExceptions";
 
 function pcKey(sourceType: string, sourceRecordId: string): string {
   return `${sourceType}:${sourceRecordId}`;
@@ -635,11 +636,10 @@ function PcItemCard({
           </>
         ) : null}
         {item.propertyAddress ?? `Property #${item.propertyId}`} · {categoryLabel(item.category)}
-        {item.dueAt ? (
+        {pcItemDueLabel(item) ? (
           <>
             {" · "}
-            {isOverdue(item.dueAt) ? "overdue " : "due "}
-            {formatDueDate(item.dueAt)}
+            {pcItemDueLabel(item)}
           </>
         ) : null}
       </p>

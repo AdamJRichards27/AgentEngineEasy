@@ -4,6 +4,7 @@
 // hand-mirrors the Exception & Risk Engine -- there is no shared package
 // between apps/web and apps/api, so these shapes are kept in sync by hand.
 import { ApiError, apiFetch } from "./api";
+import { formatDueDate, isOverdue } from "./riskExceptions";
 
 export type PitCrewItemStatus =
   | "UNCLAIMED"
@@ -515,4 +516,20 @@ export function pcStatusPillClass(status: string): string {
 
 export function pcTeamMemberName(member: PcTeamMember): string {
   return `${member.firstName} ${member.lastName}`;
+}
+
+// #29: the card's due/overdue label. item.overdue comes from the API
+// (source dueAt past, or WAITING_ON past waitingOnExpectedAt) and is the
+// only thing that decides "overdue". The client clock only picks wording:
+// an overdue item whose own dueAt has not passed is overdue on the expected
+// response, so it reads "response overdue".
+export function pcItemDueLabel(
+  item: Pick<PcWorkItem, "dueAt" | "overdue">,
+): string | null {
+  const due = item.dueAt ? formatDueDate(item.dueAt) : null;
+  if (item.overdue) {
+    if (item.dueAt && isOverdue(item.dueAt)) return `overdue ${due}`;
+    return due ? `response overdue · due ${due}` : "response overdue";
+  }
+  return due ? `due ${due}` : null;
 }
