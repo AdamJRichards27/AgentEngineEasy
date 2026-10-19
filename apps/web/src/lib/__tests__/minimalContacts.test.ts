@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { Link } from "wouter";
 import { GROW_TABS, contactsEmptyMessage, growContactPath, growTabHref } from "../growWorkspace";
@@ -105,9 +105,14 @@ test("GROW_CONTACT_ROLES matches packages/db and the classic Grow role filter", 
     return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
   };
   const schema = readFileSync(new URL("../../../../../packages/db/src/schema/contacts.ts", import.meta.url), "utf8");
-  const classic = readFileSync(new URL("../../pages/Grow.tsx", import.meta.url), "utf8");
   assert.deepEqual([...GROW_CONTACT_ROLES], listIn(schema));
-  assert.deepEqual([...GROW_CONTACT_ROLES], listIn(classic));
+  // The classic list lives in pages/Grow.tsx today and moves to grow/types.ts with the #219 panel extraction.
+  const classicSources = ["../../pages/Grow.tsx", "../../grow/types.ts"]
+    .filter((rel) => existsSync(new URL(rel, import.meta.url)))
+    .map((rel) => readFileSync(new URL(rel, import.meta.url), "utf8"))
+    .filter((src) => /GROW_CONTACT_ROLES\s*=\s*\[/.test(src));
+  assert.equal(classicSources.length, 1, "exactly one classic GROW_CONTACT_ROLES list");
+  assert.deepEqual([...GROW_CONTACT_ROLES], listIn(classicSources[0]));
 });
 
 // ── Contact rows (pure) ─────────────────────────────────────────────────────
