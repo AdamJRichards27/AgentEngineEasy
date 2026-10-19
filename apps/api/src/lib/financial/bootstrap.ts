@@ -16,6 +16,7 @@ import { registerHandler, logger, type DomainEvent } from "@aee/events";
 import { finalizeCommissionForSettlement, ensurePcSuccessFeeRequest } from "./settlement.js";
 import { createPcFeeCalculation } from "./pcFeeCalculations.js";
 import { dispatchPendingPaymentOutbox } from "./paymentOutbox.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 
 // Same order of magnitude as registerExceptionEngine's own
 // SCAN_INTERVAL_MS (15 min) — the payment outbox's own backoff already
@@ -110,6 +111,8 @@ export function registerFinancialEngine(options: RegisterFinancialEngineOptions 
 
   registerFinancialEventHandlers();
 
+  // WS4-07: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) keeps this timer off, even with startScheduler: true.
+  if (backgroundLoopDisabled("financial_payment_outbox")) return;
   const startScheduler = options.startScheduler ?? process.env.NODE_ENV !== "test";
   if (!startScheduler) return;
 

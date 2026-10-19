@@ -20,6 +20,7 @@ import { registerLaunchIntegrationHandlers } from "./launchProof.js";
 import { registerCommsIntegrationHandlers } from "./commsProof.js";
 import { registerFinancialIntegrationHandlers } from "./financialProof.js";
 import { dispatchDueOutbox } from "./outbox.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
@@ -38,6 +39,9 @@ export function registerIntegrationsEngine(): void {
   registerFinancialIntegrationHandlers();
   seedProviderCatalogue().catch((err) => logger.error("seed_provider_catalogue_failed", { error: err }));
 
+  // WS4-07: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) keeps this timer off, even with startScheduler: true.
+  // Adapters, event handlers and the (DB-only) catalogue seed above stay registered; only the outbox dispatcher is off.
+  if (backgroundLoopDisabled("integrations_outbox")) return;
   intervalHandle = setInterval(() => {
     dispatchDueOutbox().catch((err) => logger.error("integration_outbox_sweep_failed", { error: err }));
   }, SWEEP_INTERVAL_MS);

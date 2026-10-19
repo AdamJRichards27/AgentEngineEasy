@@ -17,6 +17,7 @@ import { logger } from "@aee/events";
 import { registerExceptionEventHandlers, runScheduledScan, type RunScanResult } from "./engine.js";
 import { notifyScanFailure } from "./scanFailureAlert.js";
 import { scanSchedulersOffSwitch, SCAN_SCHEDULERS_OFF_SWITCH_ENV } from "../scanSchedulerOffSwitch.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
@@ -103,6 +104,9 @@ export function registerExceptionEngine(options: RegisterExceptionEngineOptions 
 
   registerExceptionEventHandlers();
 
+  // WS4-07/WS4-08: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) is the superset switch and is checked first;
+  // the WS4-05 AEE_DISABLE_SCAN_SCHEDULERS off-switch (resolve*Start below) remains as a scan-loops-only subset.
+  if (backgroundLoopDisabled("exception_scan")) return;
   const decision = resolveExceptionSchedulerStart(options);
   if (!decision.start) {
     // Logged only for the WS4 off-switch, so existing default/test boots produce exactly the same log lines as before.

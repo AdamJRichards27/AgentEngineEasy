@@ -5,6 +5,7 @@ import {
   type PendingDocumentReconciliationResult,
 } from "./documentStorage.js";
 import { dispatchOperationalAlert } from "./operationalAlerts.js";
+import { backgroundLoopDisabled } from "./restoredEnvironment.js";
 
 let registered = false;
 let running = false;
@@ -50,6 +51,8 @@ export function registerDocumentStorageReconciler(
 ): void {
   if (registered) return;
   registered = true;
+  // WS4-07: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) keeps this timer off (and the runImmediately sweep), even with startScheduler: true.
+  if (backgroundLoopDisabled("document_storage_reconciler")) return;
   const startScheduler =
     options.startScheduler ?? process.env.NODE_ENV !== "test";
   if (!startScheduler) return;

@@ -2,6 +2,7 @@ import { logger } from "@aee/events";
 import { dispatchOperationalAlert } from "../operationalAlerts.js";
 import { runSignalSweep, sweepConfig, type RunSignalSweepResult } from "./sweep.js";
 import { scanSchedulersOffSwitch, SCAN_SCHEDULERS_OFF_SWITCH_ENV } from "../scanSchedulerOffSwitch.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 
 /**
  * AE GROW "Brokerage-wide Signal Sweep" stage 1 — boot-time wiring.
@@ -93,6 +94,9 @@ export function registerSignalSweep(options: RegisterSignalSweepOptions = {}): v
   registered = true;
 
   const config = sweepConfig();
+  // WS4-07/WS4-08: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) is the superset switch and is checked first;
+  // the WS4-05 AEE_DISABLE_SCAN_SCHEDULERS off-switch (resolve*Start below) remains as a scan-loops-only subset.
+  if (backgroundLoopDisabled("signal_sweep")) return;
   const decision = resolveSignalSweepStart(options);
   if (!decision.start) {
     logger.info("property_signal_sweep_scheduler_disabled", {

@@ -17,6 +17,7 @@
 
 import { logger } from "@aee/events";
 import { dispatchDueMessages } from "./outbox.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
@@ -26,6 +27,8 @@ let intervalHandle: NodeJS.Timeout | null = null;
 export function registerCommunicationsEngine(): void {
   if (registered) return;
   registered = true;
+  // WS4-07: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) keeps this timer off, even with startScheduler: true.
+  if (backgroundLoopDisabled("communications_outbox")) return;
 
   intervalHandle = setInterval(() => {
     dispatchDueMessages().catch((err) => logger.error("communications_outbox_sweep_failed", { error: err instanceof Error ? err.message : String(err) }));
