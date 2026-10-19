@@ -9,6 +9,7 @@ import {
   createOffer,
   listOffersForProperty,
   listOffersForBrokerage,
+  listBuyersForBrokerage,
   OFFER_CENTRE_STATUSES,
   withdrawOffer,
   declineOffer,
@@ -210,6 +211,44 @@ offersRouter.get("/centre", requireAuth, requiresRunAccess, async (req, res) => 
       offset: parsed.data.offset,
     });
     res.json({ offers: result.offers, total: result.total, limit: parsed.data.limit, offset: parsed.data.offset });
+  } catch (err) {
+    handleOfferError(err, res);
+  }
+});
+
+// #34 slice 3 — buyer list. Same gates and propertyId rule as /centre.
+// Registered before "/:id" so "buyers" is not read as an offer id.
+const buyerListQuerySchema = z.object({
+  propertyId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).max(MAX_SIGNED_INT4).default(0),
+});
+
+offersRouter.get("/buyers", requireAuth, requiresRunAccess, async (req, res) => {
+  const parsed = buyerListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query" });
+    return;
+  }
+  const user = req.authedUser!;
+  let propertyId: number | undefined;
+  if (parsed.data.propertyId !== undefined) {
+    const id = readIdParam(res, parsed.data.propertyId, "property");
+    if (id === null) return;
+    if (!(await propertyInBrokerage(id, user.brokerageId))) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    propertyId = id;
+  }
+  try {
+    const result = await listBuyersForBrokerage({
+      brokerageId: user.brokerageId,
+      propertyId,
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+    });
+    res.json({ buyers: result.buyers, total: result.total, limit: parsed.data.limit, offset: parsed.data.offset });
   } catch (err) {
     handleOfferError(err, res);
   }

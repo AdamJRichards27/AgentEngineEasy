@@ -227,6 +227,73 @@ export async function listOffersForBrokerage(input: {
   };
 }
 
+// #34 slice 3 — buyer list (Buyer Engagement start). property_parties rows
+// with role "Buyer" across one brokerage. Both joins are brokerage-scoped:
+// the property must be the caller's, and so must the party, so a mis-linked
+// party from another brokerage is never listed. Names only: no email,
+// mobile, residential address, or entity details. Read-only.
+export interface BuyerListRow {
+  linkId: number;
+  partyId: number;
+  buyerName: string | null;
+  propertyId: number;
+  propertyAddress: string;
+  linkedAt: Date;
+}
+
+export async function listBuyersForBrokerage(input: {
+  brokerageId: number;
+  propertyId?: number;
+  limit: number;
+  offset: number;
+}): Promise<{ buyers: BuyerListRow[]; total: number }> {
+  const filters: SQL[] = [eq(properties.brokerageId, input.brokerageId), eq(propertyParties.role, "Buyer")];
+  if (input.propertyId !== undefined) filters.push(eq(propertyParties.propertyId, input.propertyId));
+  const where = and(...filters);
+  const partyJoin = and(eq(propertyParties.partyId, parties.id), eq(parties.brokerageId, input.brokerageId));
+
+  const rows = await db
+    .select({
+      linkId: propertyParties.id,
+      partyId: propertyParties.partyId,
+      firstName: parties.firstName,
+      lastName: parties.lastName,
+      organisationName: parties.organisationName,
+      propertyId: propertyParties.propertyId,
+      propertyAddress: properties.formattedAddress,
+      linkedAt: propertyParties.createdAt,
+    })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .innerJoin(parties, partyJoin)
+    .where(where)
+    .orderBy(desc(propertyParties.createdAt), desc(propertyParties.id))
+    .limit(input.limit)
+    .offset(input.offset);
+
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .innerJoin(parties, partyJoin)
+    .where(where);
+
+  return {
+    buyers: rows.map((row) => {
+      const personName = [row.firstName, row.lastName].filter((part) => part && part.trim()).join(" ");
+      return {
+        linkId: row.linkId,
+        partyId: row.partyId,
+        buyerName: personName || row.organisationName || null,
+        propertyId: row.propertyId,
+        propertyAddress: row.propertyAddress,
+        linkedAt: row.linkedAt,
+      };
+    }),
+    total: count,
+  };
+}
+
 export async function listOffersForProperty(propertyId: number): Promise<Offer[]> {
   return db.select().from(offers).where(eq(offers.propertyId, propertyId));
 }
