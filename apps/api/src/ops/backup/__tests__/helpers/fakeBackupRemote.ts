@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -61,6 +62,58 @@ export interface FakeRemoteOptions {
   omitVerifier?: boolean;
   /** Extra BackupConfig fields (tier policy, prune switch, vault mode, ...). */
   configOverrides?: Partial<BackupConfig>;
+  /**
+   * PH-7 R29b (retention safeguard): only VERIFIED backups count toward keep and no backup unit is deleted until a
+   * RESTORE_VERIFIED backup exists. By default ("verified+restore") every seeded artifact+manifest pair is given a
+   * matching `.verified.json` marker and the newest seeded pair also a `.restore-verified.json` marker, and their
+   * manifest/marker bodies become downloadable, so pre-R29b tests keep exercising pruning. The markers are real
+   * listed objects: they are planned for deletion with their unit (artifact, manifest, markers). "none" seeds the
+   * listing exactly as given (legacy, marker-less: nothing is deletable).
+   */
+  seedMarkers?: "verified+restore" | "verified" | "none";
+  /** Extra downloadable bodies for seeded objects (object key -> body). */
+  seedBodies?: Record<string, string>;
+  /** Listing returned by the 2nd and later `list` calls (S9 re-validation), instead of the seed. */
+  relist?: RemoteObject[];
+}
+
+// Only keys in the documented destination-relative shape (`<tier>/<name>` or a legacy flat name) get markers.
+const BACKUP_ARTIFACT = /^(?:(?:daily|weekly|monthly)\/)?(aee-protected-\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.enc)$/;
+const fakeSha = (key: string): string => createHash("sha256").update(`fake-remote:${key}`).digest("hex");
+
+/** Adds R29b markers (and their bodies) to a seed listing; see FakeRemoteOptions.seedMarkers. */
+export function withSeedMarkers(
+  seed: RemoteObject[],
+  mode: "verified+restore" | "verified" | "none" = "verified+restore",
+): { seed: RemoteObject[]; bodies: Map<string, string> } {
+  const bodies = new Map<string, string>();
+  if (mode === "none") return { seed, bodies };
+  const keys = new Set(seed.map((o) => o.key));
+  const pairs = seed.filter((o) => BACKUP_ARTIFACT.test(o.key) && keys.has(`${o.key}.sha256.json`));
+  const time = (o: RemoteObject): number => new Date(o.lastModified).valueOf();
+  const newest = mode === "verified+restore"
+    ? [...pairs].filter((o) => !Number.isNaN(time(o))).sort((a, b) => time(b) - time(a) || (a.key < b.key ? 1 : -1))[0]
+    : undefined;
+  const extra: RemoteObject[] = [];
+  for (const o of pairs) {
+    const artifact = BACKUP_ARTIFACT.exec(o.key)![1]!;
+    const sha = fakeSha(o.key);
+    bodies.set(`${o.key}.sha256.json`, JSON.stringify({ version: 1, artifact, createdAt: o.lastModified, sha256: sha, bytes: 4 }) + "\n");
+    const marker = (kind: string) => JSON.stringify({ version: 1, kind, artifact, sha256: sha, verifiedAt: o.lastModified }) + "\n";
+    if (!keys.has(`${o.key}.verified.json`)) extra.push({ key: `${o.key}.verified.json`, lastModified: o.lastModified });
+    bodies.set(`${o.key}.verified.json`, marker("verified"));
+    if (o === newest) {
+      if (!keys.has(`${o.key}.restore-verified.json`)) extra.push({ key: `${o.key}.restore-verified.json`, lastModified: o.lastModified });
+      bodies.set(`${o.key}.restore-verified.json`, marker("restore-verified"));
+    }
+  }
+  // Keep each unit's objects together (artifact, manifest, markers) in the listing order of the artifact.
+  const out: RemoteObject[] = [];
+  for (const o of seed) {
+    out.push(o);
+    if (BACKUP_ARTIFACT.test(o.key)) out.push(...extra.filter((e) => e.key.startsWith(`${o.key}.`)));
+  }
+  return { seed: out, bodies };
 }
 
 export interface FakeRemote {
@@ -113,7 +166,10 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
   const alerts: Array<Record<string, string>> = [];
   const uploaded = new Map<string, Buffer>();
   const removed: string[] = [];
-  const seed = options.seed ?? [];
+  const seeded = withSeedMarkers(options.seed ?? [], options.seedMarkers ?? "verified+restore");
+  const seed = seeded.seed;
+  const seedBodies = new Map([...seeded.bodies, ...Object.entries(options.seedBodies ?? {})]);
+  let listCalls = 0;
   const controls: FakeRemote["controls"] = {
     failRemove: options.failRemove,
     failRemovePattern: options.failRemovePattern,
@@ -150,17 +206,18 @@ export async function createFakeRemote(options: FakeRemoteOptions = {}): Promise
       case "verify-download":
       case "restore-download": {
         if (options.failDownload?.test(object!)) throw new Error("NoSuchKey");
-        const content = uploaded.get(object!);
+        const content = uploaded.get(object!) ?? (seedBodies.has(object!) ? Buffer.from(seedBodies.get(object!)!) : undefined);
         if (!content) throw new Error(`missing remote object ${object}`);
         await writeFile(replacements.destination!, content);
         return { stdout: "", stderr: "" };
       }
       case "list": {
         if (options.failList) throw new Error("list refused");
+        listCalls += 1;
         const live: RemoteObject[] = options.listIncludesUploads
           ? [...uploaded.keys()].map((key) => ({ key, lastModified: (options.now ?? new Date("2026-03-01T00:00:00Z")).toISOString() }))
           : [];
-        const all = [...seed, ...live];
+        const all = [...(listCalls > 1 && options.relist ? options.relist : seed), ...live];
         const visible = options.applyRemovals ? all.filter((o) => !removed.includes(o.key)) : all;
         return { stdout: JSON.stringify(visible), stderr: "" };
       }

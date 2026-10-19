@@ -40,8 +40,11 @@ test("C1 object-storage documents + tiered layout: all three tiers written, ever
       documentProvider: provider({ [KEY]: "bytes" }), now: () => SUNDAY_THE_FIRST, log: () => undefined,
     });
     for (const tier of ["daily", "weekly", "monthly"]) assert.ok([...remote.uploaded.keys()].some((k) => k.startsWith(`${tier}/`) && k.endsWith(".tar.enc")), tier);
-    const lastVerify = remote.calls.map((c, i) => (c.startsWith("verify-download") ? i : -1)).reduce((a, b) => Math.max(a, b));
-    assert.ok(lastVerify > -1 && remote.calls.indexOf("list") > lastVerify);
+    // Post-upload verification of every tier copy (artifact + manifest) happens before the first list. After the
+    // list, R29b reads retention evidence (manifest/marker bodies) through the same read-only verifier download.
+    const firstList = remote.calls.indexOf("list");
+    const verifiedBeforeList = remote.calls.slice(0, firstList).filter((c) => c.startsWith("verify-download:"));
+    assert.ok(firstList > -1 && verifiedBeforeList.length === 6, "3 tiers x (artifact + manifest) verified before list");
     assert.ok(seen.every(([, op]) => op !== undefined));
   } finally {
     await remote.cleanup();

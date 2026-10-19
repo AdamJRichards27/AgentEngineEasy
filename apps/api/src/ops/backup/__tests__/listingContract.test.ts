@@ -42,7 +42,8 @@ test("L3 destination-relative listing (documented contract) is accepted and prun
   const remote = await createFakeRemote({ prune: true, seed: eight("daily/"), now: NOW, configOverrides: { tierPolicy: DEFAULT_TIER_POLICY } });
   try {
     await remote.createBackup();
-    assert.equal(remote.removed.length, 2, "oldest of 8 daily backups (artifact + manifest) is pruned");
+    // R29b: the seeded backups carry .verified.json markers (fake remote default), so the unit is artifact + manifest + marker.
+    assert.equal(remote.removed.length, 3, "oldest of 8 daily backups (artifact + manifest + verified marker) is pruned");
     assert.ok(remote.removed[0]!.startsWith("daily/") && !remote.removed[0]!.endsWith(".sha256.json"), "artifact first");
     assert.equal(remote.alerts.length, 0);
     assert.ok(!remote.logs.some((l) => l.event === "prune_list_unexpected"));
@@ -60,7 +61,7 @@ test("L3b an empty listing is not 'unexpected' (fresh destination) and a legacy 
     assert.equal(empty.alerts.length, 0);
     await flat.createBackup();
     assert.equal(flat.alerts.length, 0);
-    assert.equal(flat.removed.length, 2, "legacy flat keys still age out to the floor of 7");
+    assert.equal(flat.removed.length, 3, "legacy flat keys still age out to the floor of 7 (artifact + manifest + marker)");
   } finally {
     await empty.cleanup();
     await flat.cleanup();
@@ -135,7 +136,8 @@ test("L7 mixed listing (recognised keys + backup-named keys in another shape) fa
     await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
     assert.deepEqual(remote.removed, [], "nothing deleted");
     assert.equal(remote.alerts.length, 1);
-    assert.equal(remote.alerts[0]!.error, "prune_list_unexpected: listing had 32 entries, 16 recognised, 16 backup-named unrecognised");
+    // R29b: + 8 .verified.json markers and 1 .restore-verified.json marker on the recognised daily/ backups (fake remote default).
+    assert.equal(remote.alerts[0]!.error, "prune_list_unexpected: listing had 41 entries, 25 recognised, 16 backup-named unrecognised");
     for (const pattern of LEAKY) assert.doesNotMatch(JSON.stringify(remote.alerts), pattern);
     assert.ok(!remote.logs.some((l) => l.event === "completed"));
   } finally {
@@ -154,7 +156,8 @@ test("L7b hidden-manifest mixed listing (the hazard): without the safeguard the 
   try {
     await assert.rejects(remote.createBackup(), /prune_list_unexpected/);
     assert.deepEqual(remote.removed, []);
-    assert.equal(remote.alerts[0]!.error, "prune_list_unexpected: listing had 16 entries, 13 recognised, 3 backup-named unrecognised");
+    // R29b: + 5 .verified.json markers (backups 4..8 have a listed manifest) and 1 .restore-verified.json marker.
+    assert.equal(remote.alerts[0]!.error, "prune_list_unexpected: listing had 22 entries, 19 recognised, 3 backup-named unrecognised");
   } finally {
     await remote.cleanup();
   }

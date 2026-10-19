@@ -276,7 +276,7 @@ test("encrypted artifact round trip archives and restores database metadata and 
       now: () => new Date("2026-01-02T03:04:05.000Z"),
       log: () => undefined,
     });
-    assert.equal(remote.size, 2);
+    assert.equal(remote.size, 3, "artifact, manifest and the writer's .verified.json marker (R29b)");
 
     targetPublicTables = 1;
     await assert.rejects(

@@ -88,8 +88,9 @@ test("a verified upload re-downloads artifact and manifest before pruning and lo
   const h = await harness(() => undefined);
   try {
     await h.run();
-    const afterUploads = h.calls.slice(h.calls.lastIndexOf("upload") + 1);
-    assert.deepEqual(afterUploads, ["download", "download", "list"]);
+    const afterDataUploads = h.calls.slice(h.calls.indexOf("upload") + 2);
+    // re-download artifact + manifest, then (R29b) write the .verified.json marker, then list for pruning
+    assert.deepEqual(afterDataUploads, ["download", "download", "upload", "list"]);
     const done = h.logs.find((l) => l.event === "completed");
     assert.equal(done?.verified, true);
     assert.match(String(done?.sha256), /^[a-f0-9]{64}$/);

@@ -124,7 +124,7 @@ export interface RemoteObject {
 
 export interface OperationLog {
   timestamp: string;
-  level: "info" | "error";
+  level: "info" | "warn" | "error";
   operation: "backup" | "restore";
   event: string;
   runId: string;

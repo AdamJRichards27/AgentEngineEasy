@@ -91,9 +91,10 @@ test("M5 per-unit order is artifact then its own manifest, and a unit completes 
   try {
     await r.createBackup();
     const calls = removeCalls(r);
-    assert.equal(calls.length, 10);
-    for (let i = 0; i < calls.length; i += 2) {
-      assert.ok(!isManifest(calls[i]!) && calls[i + 1] === `${calls[i]}.sha256.json`, `unit ${i / 2}: artifact immediately followed by its manifest`);
+    // R29b: a unit is artifact, then its manifest, then its .verified.json marker (fake remote seeds markers).
+    assert.equal(calls.length, 15);
+    for (let i = 0; i < calls.length; i += 3) {
+      assert.ok(!isManifest(calls[i]!) && calls[i + 1] === `${calls[i]}.sha256.json` && calls[i + 2] === `${calls[i]}.verified.json`, `unit ${i / 3}: artifact immediately followed by its manifest, then its marker`);
     }
   } finally { await r.cleanup(); }
 });
@@ -116,7 +117,7 @@ test("M7 retry is idempotent and never damages recoverability; the last verified
     r.controls.failRemovePattern = undefined; // refusal lifted (e.g. retention elapsed)
     await r.createBackup(); // run 2 (a different artifact name is produced per run)
     const listed = (JSON.parse((await r.run({ executable: "list", args: [] }, {}, "list")).stdout) as RemoteObject[]).map((o) => o.key);
-    const artifacts = listed.filter((k) => k.startsWith("daily/") && !isManifest(k) );
+    const artifacts = listed.filter((k) => k.startsWith("daily/") && k.endsWith(".tar.enc"));
     for (const a of artifacts) assert.ok(listed.includes(`${a}.sha256.json`), `${a} keeps its manifest`);
     assert.ok(artifacts.length >= 2, "keep floor of 2 recoverable backups still honoured");
     // every removed manifest had its artifact removed first

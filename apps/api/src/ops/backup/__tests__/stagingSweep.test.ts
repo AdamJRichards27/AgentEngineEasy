@@ -272,7 +272,8 @@ test("S14 engine: createBackup writes a run marker, advances its state, never sw
     };
     const { createBackup } = await import("../engine.js");
     await createBackup(r.config, { run, now: () => T0, log: (e) => r.logs.push(e) });
-    assert.deepEqual(states, ["encrypted"], "marker says 'encrypted' while artifact is uploading");
+    // R29b: the writer's .verified.json marker is uploaded only after the run marker says uploaded_verified.
+    assert.deepEqual(states, ["encrypted", "uploaded_verified"], "marker says 'encrypted' while artifact is uploading, 'uploaded_verified' while the verified marker is written");
     assert.ok(existsSync(stale), "default (off) must not sweep");
     assert.deepEqual((await readdir(r.config.stagingDirectory)).filter((n) => n.startsWith("backup-") && n !== `backup-${ID2}`), []);
   } finally { await r.cleanup(); }

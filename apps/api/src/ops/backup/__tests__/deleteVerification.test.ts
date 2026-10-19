@@ -45,7 +45,7 @@ test("DV2 verification command configured and passing: units are deleted_verifie
     assert.equal(out.deleteVerification, "command");
     assert.ok(out.units.every((u: any) => u.status === "deleted_verified"));
     const c = completed(r);
-    assert.equal(c.prunedVerified, 10);
+    assert.equal(c.prunedVerified, 15, "R29b: 5 units x (artifact + manifest + verified marker)");
     const trail = r.calls.filter((x) => x.startsWith("remove:") || x.startsWith("verify-delete:"));
     for (let i = 0; i < trail.length; i += 2) {
       assert.ok(trail[i]!.startsWith("remove:") && trail[i + 1] === trail[i]!.replace("remove:", "verify-delete:"), "each delete is immediately verified");

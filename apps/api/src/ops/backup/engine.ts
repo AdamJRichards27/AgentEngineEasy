@@ -3,9 +3,12 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertDeleteVerifierForPrune } from "./config.js";
 import {
+  ARTIFACT_PREFIX,
   DEFAULT_MIN_RETAINED_BACKUPS,
   DEFAULT_TIER_POLICY,
   MANIFEST_SUFFIX,
+  RESTORE_VERIFIED_SUFFIX,
+  VERIFIED_SUFFIX,
   artifactName,
   assessListing,
   planTierRetention,
@@ -13,9 +16,13 @@ import {
   tierKey,
   isTier,
   tiersFor,
+  unitKeyOf,
+  verifiedMarkerBody,
   verifyManifest,
   writeManifest,
+  type RetentionEvidence,
   type Tier,
+  type TierRetentionPlan,
 } from "./artifacts.js";
 import {
   newRunMarker, safeRemoveRunDirectory, startHeartbeat, sweepStaging, updateRunMarker, writeRunMarker,
@@ -90,11 +97,30 @@ async function verifyUploadedBackup(
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(`Post-upload verification failed for ${target.artifact}: ${reason}`, { cause: error });
     }
-    const verified = await verifyManifest(artifact, manifest);
-    return { bytes: verified.bytes, sha256: verified.sha256 };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Post-upload verification failed for ${name}: ${reason}`, { cause: error });
+  }
+  if (!result) throw new Error("Post-upload verification failed: no uploaded copy was verified");
+  return result;
+}
+
+/** Fixed (non-dynamic) alert text per failing stage: a reason code plus a constant label. */
+const ALERT_REASONS: Record<string, string> = {
+  preflight: "preflight_failed: backup configuration refused",
+  prepare: "prepare_failed: backup could not be prepared",
+  tier_upload: "tier_upload_failed: upload to a backup tier failed",
+  verify: "verify_failed: Post-upload verification failed",
+  marker_write: "marker_write_failed: verified marker could not be written",
+  prune: "prune_failed: retention pruning failed",
+};
+
+/** Thrown when a non-empty backup listing contains no recognisable backup key (see `assessListing`). */
+export class PruneListUnexpectedError extends Error {
+  constructor(
+    readonly listed: number,
+    readonly recognised: number,
+    readonly unrecognisedBackupLike: number = 0,
+  ) {
+    super("prune_list_unexpected: backup listing contains no recognisable backup keys, or backup-named keys in an unrecognised shape");
+    this.name = "PruneListUnexpectedError";
   }
 }
 
@@ -112,11 +138,15 @@ export interface PruneResult {
   accepted: number;
   /** Verifier classes of failed verifications this run (for the alert). */
   failureClasses?: string[];
+  /** S9: the fresh listing changed the plan, so nothing was deleted. */
+  aborted?: boolean;
 }
 
 interface PruneUnit {
   artifact?: RemoteObject;
   manifest?: RemoteObject;
+  /** `.verified.json` / `.restore-verified.json` markers of the unit (R29b); deleted last. */
+  markers: RemoteObject[];
 }
 
 type PruneUnitStatus =
@@ -129,11 +159,16 @@ type PruneUnitStatus =
   | "artifact_delete_not_verified_manifest_preserved"
   | "manifest_delete_failed_artifact_deleted"
   | "manifest_delete_not_verified_artifact_deleted"
+  /** R29b: artifact and manifest confirmed deleted, a marker delete was refused / not verified (an orphan marker is INVALID, never counted). */
+  | "marker_delete_failed_backup_deleted"
+  | "marker_delete_not_verified_backup_deleted"
   | "not_attempted_pruning_stopped";
 
 interface PruneUnitOutcome {
   artifact: string | null;
   manifest: string | null;
+  /** Additive (R29b): marker keys of the unit. */
+  markers?: string[];
   status: PruneUnitStatus;
   error?: string;
   /** Verifier class (e.g. delete_marker_retained, governance_locked, malformed_output) when verification failed. Additive field. */
@@ -142,23 +177,25 @@ interface PruneUnitOutcome {
 
 /**
  * Groups planned deletions into recoverability units: an artifact together with its own manifest (same folder,
- * name + ".sha256.json"). A manifest with no planned artifact is its own unit (orphan manifest, nothing to protect).
- * The just-uploaded artifact and its manifest are never part of a unit (defence in depth over the planner).
+ * name + ".sha256.json") and its markers (name + ".verified.json" / ".restore-verified.json"). A manifest or marker
+ * with no planned artifact is part of an artifact-less unit (orphan, nothing to protect).
+ * The just-uploaded artifact and its companions are never part of a unit (defence in depth over the planner).
  */
 function buildPruneUnits(objects: RemoteObject[], protectedArtifact: string): PruneUnit[] {
   const units = new Map<string, PruneUnit>();
   const order: string[] = [];
   for (const object of objects) {
-    const base = object.key.endsWith(MANIFEST_SUFFIX) ? object.key.slice(0, -MANIFEST_SUFFIX.length) : object.key;
+    const base = unitKeyOf(object.key);
     const basename = base.slice(base.lastIndexOf("/") + 1);
     if (basename === protectedArtifact) continue;
     let unit = units.get(base);
     if (!unit) {
-      unit = {};
+      unit = { markers: [] };
       units.set(base, unit);
       order.push(base);
     }
     if (object.key.endsWith(MANIFEST_SUFFIX)) unit.manifest = object;
+    else if (object.key.endsWith(VERIFIED_SUFFIX) || object.key.endsWith(RESTORE_VERIFIED_SUFFIX)) unit.markers.push(object);
     else unit.artifact = object;
   }
   return order.map((key) => units.get(key)!);
@@ -233,19 +270,10 @@ async function storeDeletionRecord(
   await run(config.upload, { source: local, destination: remoteUri(config.destination, key), object: key }, "upload");
 }
 
-async function prune(
-  config: BackupConfig,
-  run: CommandRunner,
-  now: Date,
-  protectedArtifact: string,
-  log: (entry: OperationLog) => void,
-  runId: string,
-  runDirectory: string,
-): Promise<PruneResult> {
-  const listing = await run(config.list, { destination: config.destination }, "list");
+function parseListing(stdout: string, log: (entry: OperationLog) => void, runId: string): RemoteObject[] {
   let objects: unknown;
   try {
-    objects = JSON.parse(listing.stdout);
+    objects = JSON.parse(stdout);
   } catch {
     throw new Error("Backup list command must return a JSON array");
   }
@@ -277,13 +305,109 @@ async function prune(
     });
     throw new PruneListUnexpectedError(assessment.listed, assessment.recognised, assessment.unrecognisedBackupLike);
   }
-  const plan = planTierRetention(
-    valid,
-    now,
-    config.tierPolicy ?? DEFAULT_TIER_POLICY,
-    { retentionDays: config.retentionDays, minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS },
-    { protectedArtifact },
-  );
+  return valid;
+}
+
+/**
+ * Reads the small manifest/marker bodies the planner needs (RETENTION-SAFEGUARD-SPEC §5.1), only for artifacts
+ * that have a manifest AND a marker, through the read-only verifier download identity (falls back to `download`).
+ * An unreadable body is simply absent evidence, which can only reduce deletions.
+ */
+async function readRetentionEvidence(
+  config: BackupConfig,
+  run: CommandRunner,
+  objects: RemoteObject[],
+  directory: string,
+): Promise<{ evidence: RetentionEvidence; unreadable: number }> {
+  const present = new Set(objects.map((o) => o.key));
+  const evidence: RetentionEvidence = {};
+  let unreadable = 0;
+  let index = 0;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const read = async (key: string): Promise<string | undefined> => {
+    const file = path.join(directory, `evidence-${index++}.json`);
+    try {
+      await run(config.verifyDownload ?? config.download, { source: remoteUri(config.destination, key), destination: file, object: key }, "verify_download");
+      return await readFile(file, "utf8");
+    } catch {
+      unreadable += 1;
+      return undefined;
+    } finally {
+      await rm(file, { force: true });
+    }
+  };
+  for (const object of objects) {
+    const key = object.key;
+    const name = path.posix.basename(key);
+    if (!name.startsWith(ARTIFACT_PREFIX) || unitKeyOf(key) !== key) continue;
+    const hasVerified = present.has(`${key}${VERIFIED_SUFFIX}`);
+    const hasRestore = present.has(`${key}${RESTORE_VERIFIED_SUFFIX}`);
+    if (!present.has(`${key}${MANIFEST_SUFFIX}`) || (!hasVerified && !hasRestore)) continue;
+    evidence[key] = {
+      manifest: await read(`${key}${MANIFEST_SUFFIX}`),
+      ...(hasVerified ? { verified: await read(`${key}${VERIFIED_SUFFIX}`) } : {}),
+      ...(hasRestore ? { restoreVerified: await read(`${key}${RESTORE_VERIFIED_SUFFIX}`) } : {}),
+    };
+  }
+  return { evidence, unreadable };
+}
+
+const planKeys = (plan: TierRetentionPlan): string => JSON.stringify(plan.delete.map((o) => o.key));
+
+async function prune(
+  config: BackupConfig,
+  run: CommandRunner,
+  now: Date,
+  protectedArtifact: string,
+  log: (entry: OperationLog) => void,
+  runId: string,
+  runDirectory: string,
+): Promise<PruneResult> {
+  const computePlan = async (): Promise<TierRetentionPlan & { unreadable: number }> => {
+    const listing = await run(config.list, { destination: config.destination }, "list");
+    const valid = parseListing(listing.stdout, log, runId);
+    const { evidence, unreadable } = await readRetentionEvidence(config, run, valid, path.join(runDirectory, "retention"));
+    const plan = planTierRetention(
+      valid,
+      now,
+      config.tierPolicy ?? DEFAULT_TIER_POLICY,
+      { retentionDays: config.retentionDays, minRetained: config.minRetainedBackups ?? DEFAULT_MIN_RETAINED_BACKUPS },
+      { protectedArtifact, evidence },
+    );
+    return { ...plan, unreadable };
+  };
+  const plan = await computePlan();
+  // AC7: counts per state per tier; alert event names only (never object keys).
+  log({
+    timestamp: new Date().toISOString(),
+    level: plan.alerts.length ? "warn" : "info",
+    operation: "backup",
+    event: "retention_plan",
+    runId,
+    states: plan.states,
+    deletions: plan.delete.length,
+    protectedByGuard: plan.protectedByGuard,
+    evidenceUnreadable: plan.unreadable,
+    alerts: plan.alerts,
+  });
+  for (const alert of plan.alerts) await safeAlert(config, run, log, runId, "warning", alert);
+  if (plan.delete.length > 0) {
+    // S9: re-validate against a fresh listing immediately before any destructive step (and before the intent
+    // record); abort the prune when the plan changed. Nothing has been deleted at this point.
+    const fresh = await computePlan();
+    if (planKeys(fresh) !== planKeys(plan)) {
+      log({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        operation: "backup",
+        event: "prune_aborted_listing_changed",
+        runId,
+        deletionsPlanned: plan.delete.length,
+        deletionsAfterRelist: fresh.delete.length,
+      });
+      return { deleted: 0, failed: 0, protectedByGuard: plan.protectedByGuard, stopped: false, manifestsPreserved: 0, verified: 0, accepted: 0, aborted: true };
+    }
+  }
   // D-3: an artifact and its manifest are ONE recoverability unit. Group the plan into units (artifact first)
   // and never touch a manifest unless its own artifact delete was confirmed in this run.
   const units = buildPruneUnits(plan.delete, protectedArtifact);
@@ -296,9 +420,9 @@ async function prune(
     runId,
     createdAt: new Date().toISOString(),
     protectedArtifact,
-    units: units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null })),
+    units: units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null, ...(u.markers.length ? { markers: u.markers.map((m) => m.key) } : {}) })),
   });
-  const outcomes: PruneUnitOutcome[] = units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null, status: "not_attempted_pruning_stopped" }));
+  const outcomes: PruneUnitOutcome[] = units.map((u) => ({ artifact: u.artifact?.key ?? null, manifest: u.manifest?.key ?? null, ...(u.markers.length ? { markers: u.markers.map((m) => m.key) } : {}), status: "not_attempted_pruning_stopped" }));
   let deleted = 0;
   const counters = { accepted: 0 };
   let failed = 0;
@@ -357,6 +481,16 @@ async function prune(
         break;
       }
     }
+    // Markers last: a marker left behind without its artifact is INVALID and never counted toward keep.
+    for (const marker of unit.markers) {
+      const result = await attempt(marker.key);
+      if (!result.ok) {
+        outcome.status = result.notVerified ? "marker_delete_not_verified_backup_deleted" : "marker_delete_failed_backup_deleted";
+        stopped = true;
+        break;
+      }
+    }
+    if (stopped) break;
     outcome.status = "deleted_verified";
   }
   if (stopped) {
@@ -518,6 +652,20 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     stage = "verify";
     const verified = await verifyUploadedBackup(config, dependencies.run, runDirectory, targets, manifest);
     await updateRunMarker(runDirectory, { state: "uploaded_verified" });
+    // R6 (RETENTION-SAFEGUARD-SPEC): the WRITER records, per tier copy, that the copy passed post-upload
+    // verification. Only verified copies count toward retention; a failed marker PUT fails the run before any
+    // list/delete (S8). Every copy was verified above, so a marker is written for each target.
+    stage = "marker_write";
+    const markerPath = `${artifact}${VERIFIED_SUFFIX}`;
+    await writeFile(markerPath, verifiedMarkerBody(name, verified.sha256, new Date().toISOString()), { mode: 0o600 });
+    for (const target of targets) {
+      const object = `${target.artifact}${VERIFIED_SUFFIX}`;
+      try {
+        await dependencies.run(config.upload, { source: markerPath, destination: remoteUri(config.destination, object), object }, "upload");
+      } catch (error) {
+        throw new Error(`marker_write_failed: verified marker upload failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+    }
     stage = "prune";
     // D-2: default OFF. Only an explicit `true` may reach any list/delete operation.
     const pruneEnabled = config.prune === true;
@@ -536,7 +684,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     });
     const pruneResult = pruneEnabled
       ? await prune(config, dependencies.run, now, name, log, runId, runDirectory)
-      : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0, verified: 0, accepted: 0 };
+      : { deleted: 0, failed: 0, protectedByGuard: 0, stopped: false, manifestsPreserved: 0, verified: 0, accepted: 0, aborted: false };
     if (pruneResult.failed > 0) {
       await safeAlert(
         config,
@@ -571,6 +719,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       pruneProtected: pruneResult.protectedByGuard,
       pruneStopped: pruneResult.stopped,
       manifestsPreserved: pruneResult.manifestsPreserved,
+      pruneAborted: pruneResult.aborted === true,
       durationMs: Date.now() - started,
     });
     return name;
@@ -582,6 +731,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       operation: "backup",
       event: "failed",
       runId,
+      stage,
       error: message,
       durationMs: Date.now() - started,
     });

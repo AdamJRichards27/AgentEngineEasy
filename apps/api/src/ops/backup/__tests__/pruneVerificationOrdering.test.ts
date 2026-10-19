@@ -14,6 +14,20 @@ function backup(day: number, withManifest = true): RemoteObject[] {
 }
 
 /**
+ * R29b: after the first list only prune traffic may follow: reads of manifest/marker bodies (retention evidence),
+ * the S9 re-list, the durable deletion records and the removes; the intent record precedes the first remove and
+ * follows the last list.
+ */
+function assertOnlyPruneTrafficAfterList(rest: string[]): void {
+  const evidenceRead = (c: string): boolean => /^download:.*\.(sha256|verified|restore-verified)\.json$/.test(c);
+  assert.ok(rest.every((c) => c === "list" || evidenceRead(c) || c.startsWith("remove:") || c.startsWith("upload:deletion-records/")), "only evidence reads, the re-list, removes and deletion records follow the list");
+  const intent = rest.findIndex((c) => c.startsWith("upload:deletion-records/") && c.endsWith(".intent.json"));
+  const firstRemove = rest.findIndex((c) => c.startsWith("remove:"));
+  assert.ok(intent > -1 && intent < firstRemove, "intent record precedes the first remove");
+  assert.ok(rest.lastIndexOf("list") < intent, "no list after the intent record");
+}
+
+/**
  * Verification-before-prune tests (Patch A "NEW" tests, unchanged). They exercise #225's post-upload
  * verification, so they can ONLY pass on an integrated base that contains #225. They are deliberately
  * not on the #224-based Package A branch. Flat (legacy) layout: configs here carry no tierPolicy.
@@ -24,10 +38,9 @@ test("NEW: verification (download artifact + manifest) completes before the firs
   try {
     const name = await remote.createBackup();
     const after = remote.calls.slice(remote.calls.lastIndexOf(`upload:${name}.sha256.json`) + 1);
-    assert.deepEqual(after.slice(0, 3), [`download:${name}`, `download:${name}.sha256.json`, "list"]);
-    // D-3: the durable deletion-intent/outcome records are uploaded around the removes; nothing else may follow the list.
-    assert.ok(after.slice(3).every((c) => c.startsWith("remove:") || c.startsWith("upload:deletion-records/")), "only removes (and deletion records) follow the list");
-    assert.ok(after[3]!.startsWith("upload:deletion-records/") && after[3]!.endsWith(".intent.json"), "intent record precedes the first remove");
+    // R29b: after verification the writer uploads the .verified.json marker, then the list runs.
+    assert.deepEqual(after.slice(0, 4), [`download:${name}`, `download:${name}.sha256.json`, `upload:${name}.verified.json`, "list"]);
+    assertOnlyPruneTrafficAfterList(after.slice(4));
     assert.ok(remote.removed.length > 0, "expired backups are actually pruned after a verified upload");
   } finally {
     await remote.cleanup();
@@ -104,9 +117,9 @@ test("T11 tiered: every tier copy is downloaded and verified before the first li
     assert.ok(listAt > 0);
     const before = after.slice(0, listAt);
     const expectedDownloads = TIERS.flatMap((t) => [`download:${t}/${name}`, `download:${t}/${name}.sha256.json`]);
-    assert.deepEqual(before, expectedDownloads, "all 3 tier copies verified (artifact + manifest) before list");
-    assert.ok(after.slice(listAt + 1).every((c) => c.startsWith("remove:") || c.startsWith("upload:deletion-records/")));
-    assert.ok(after[listAt + 1]!.startsWith("upload:deletion-records/") && after[listAt + 1]!.endsWith(".intent.json"), "intent record precedes the first remove");
+    const expectedMarkers = TIERS.map((t) => `upload:${t}/${name}.verified.json`);
+    assert.deepEqual(before, [...expectedDownloads, ...expectedMarkers], "all 3 tier copies verified (artifact + manifest), then a verified marker per tier copy (R29b), before list");
+    assertOnlyPruneTrafficAfterList(after.slice(listAt + 1));
     assert.ok(remote.removed.length > 0 && remote.removed.every((k) => k.startsWith("daily/")));
   } finally {
     await remote.cleanup();

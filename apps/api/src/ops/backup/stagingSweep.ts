@@ -37,14 +37,15 @@ export interface RunMarker {
 export const MARKER_NAME = ".run.json";
 export const AUDIT_NAME = "sweep-audit.jsonl";
 const ARTIFACT_RE = /^aee-protected-\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.enc$/;
-const KNOWN_TOP_LEVEL = new Set(["database.dump", "inventory.json", "documents.tar", "payload.tar", "documents-src", "verify", MARKER_NAME, `${MARKER_NAME}.tmp`]);
+// "retention" holds transient retention-evidence downloads; `<artifact>.verified.json` is the writer's verified marker (R29b).
+const KNOWN_TOP_LEVEL = new Set(["database.dump", "inventory.json", "documents.tar", "payload.tar", "documents-src", "verify", "retention", MARKER_NAME, `${MARKER_NAME}.tmp`]);
 const DIR_RE = /^(backup|restore)-([a-f0-9]{16})$/;
 const CLAIMED_RE = /^sweeping-(backup|restore)-([a-f0-9]{16})$/;
 
 const currentUid = (): number | null => (typeof process.getuid === "function" ? process.getuid() : null);
 
 function knownTopLevel(name: string): boolean {
-  return KNOWN_TOP_LEVEL.has(name) || ARTIFACT_RE.test(name) || (name.endsWith(".sha256.json") && ARTIFACT_RE.test(name.slice(0, -".sha256.json".length))) || /^[a-f0-9-]+\.(intent|outcome)\.json$/.test(name);
+  return KNOWN_TOP_LEVEL.has(name) || ARTIFACT_RE.test(name) || (name.endsWith(".sha256.json") && ARTIFACT_RE.test(name.slice(0, -".sha256.json".length))) || (name.endsWith(".verified.json") && ARTIFACT_RE.test(name.slice(0, -".verified.json".length))) || /^[a-f0-9-]+\.(intent|outcome)\.json$/.test(name);
 }
 
 export function newRunMarker(runId: string, kind: "backup" | "restore", now: Date = new Date()): RunMarker {

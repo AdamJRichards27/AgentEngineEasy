@@ -133,9 +133,10 @@ test("FC8 counters: `pruned` can never exceed verified permanent deletions; acce
   try {
     await ok.createBackup();
     const c = completed(ok);
-    assert.equal(c.prunedVerified, 10);
+    // R29b: 5 units x (artifact + manifest + verified marker).
+    assert.equal(c.prunedVerified, 15);
     assert.equal(c.pruned, c.prunedVerified, "deprecated alias: equals verified deletions only");
-    assert.equal(c.deleteCommandsAccepted, 10);
+    assert.equal(c.deleteCommandsAccepted, 15);
     assert.ok(!("prunedUnverified" in c));
     assert.ok(rec(ok, `deletion-records/${runId(ok)}.outcome.json`).units.every((u: any) => u.status === "deleted_verified"));
   } finally { await ok.cleanup(); }
@@ -157,8 +158,8 @@ test("FC9 partial failure: first unit verified, second unit not verified -> thir
     const out = rec(r, `deletion-records/${runId(r)}.outcome.json`);
     assert.deepEqual(out.units.map((u: any) => u.status).slice(0, 3), ["deleted_verified", "artifact_delete_not_verified_manifest_preserved", "not_attempted_pruning_stopped"]);
     assert.equal(out.stopped, true);
-    assert.equal(completed(r).prunedVerified, 2, "unit 1: artifact + manifest");
-    assert.equal(calls(r, "remove").length, 3);
+    assert.equal(completed(r).prunedVerified, 3, "unit 1: artifact + manifest + verified marker (R29b)");
+    assert.equal(calls(r, "remove").length, 4);
   } finally { await r.cleanup(); }
 });
 

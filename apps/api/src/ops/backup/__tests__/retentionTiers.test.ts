@@ -14,6 +14,7 @@ import { loadProductionBackupConfig } from "../config.js";
 import { restoreBackup } from "../engine.js";
 import { PRUNE_ENABLE_ENV } from "./helpers/productionEnv.js";
 import { createFakeRemote } from "./helpers/fakeBackupRemote.js";
+import { marked } from "./retentionFixtures.js";
 import type { OperationLog, RemoteObject } from "../types.js";
 
 const NOW = new Date("2026-03-01T00:00:00Z");
@@ -31,7 +32,14 @@ function backup(tier: Tier | "", n: number, withManifest = true, when?: string):
     ? [{ key: `${prefix}${name}`, lastModified }, { key: `${prefix}${name}.sha256.json`, lastModified }]
     : [{ key: `${prefix}${name}`, lastModified }];
 }
-const artifactsOf = (keys: string[]): string[] => keys.filter((k) => !k.endsWith(".sha256.json"));
+const artifactsOf = (keys: string[]): string[] => keys.filter((k) => k.endsWith(".tar.enc"));
+const isMarker = (k: string): boolean => k.endsWith(".verified.json") || k.endsWith(".restore-verified.json");
+// R29b: only VERIFIED backups count toward keep and nothing is deleted before a RESTORE_VERIFIED point exists, so the
+// planner tests below plan over `marked(...)` listings (a verified marker on every pair, restore-verified on the newest).
+const planMarked = (objects: RemoteObject[], now: Date, policy: TierPolicy, lg: typeof legacy, options: { protectedArtifact?: string } = {}) => {
+  const listing = marked(objects);
+  return { listing, plan: planTierRetention(listing.objects, now, policy, lg, { ...options, evidence: listing.evidence }) };
+};
 
 // ---- T1 -------------------------------------------------------------------------------------
 test("T1 tiersFor selects daily always, weekly on Sunday and monthly on the 1st (UTC)", () => {
@@ -77,19 +85,20 @@ test("T2 parseBackupKey accepts only <tier>/<backup object name>", () => {
 
 // ---- T3 -------------------------------------------------------------------------------------
 test("T3 7 daily / 4 weekly / 12 monthly survive independently when everything is expired", () => {
-  const objects = [
+  const { listing, plan } = planMarked([
     ...Array.from({ length: 20 }, (_, i) => backup("daily", i + 1)).flat(),
     ...Array.from({ length: 8 }, (_, i) => backup("weekly", i + 101)).flat(),
     ...Array.from({ length: 20 }, (_, i) => backup("monthly", i + 201)).flat(),
-  ];
-  const plan = planTierRetention(objects, new Date("2030-01-01T00:00:00Z"), DEFAULT_TIER_POLICY, legacy); // every fixture is far older than every tier window
+  ], new Date("2030-01-01T00:00:00Z"), DEFAULT_TIER_POLICY, legacy); // every fixture is far older than every tier window
+  const objects = listing.objects;
   const deleted = new Set(plan.delete.map((o) => o.key));
   for (const [tier, total, expected] of [["daily", 20, 7], ["weekly", 8, 4], ["monthly", 20, 12]] as const) {
     const survivors = objects.filter((o) => o.key.startsWith(`${tier}/`) && !deleted.has(o.key));
     assert.equal(artifactsOf(survivors.map((o) => o.key)).length, expected, `${tier} survivors`);
-    assert.equal(survivors.length, expected * 2, `${tier} manifests survive with their artifacts`);
+    assert.equal(survivors.filter((o) => !isMarker(o.key)).length, expected * 2, `${tier} manifests survive with their artifacts`);
+    assert.equal(survivors.filter((o) => o.key.endsWith(".verified.json")).length, expected, `${tier} verified markers survive with their backups`);
     assert.equal(plan.retained[tier]!.length, expected);
-    assert.equal((total - expected) * 2, [...deleted].filter((k) => k.startsWith(`${tier}/`)).length);
+    assert.equal((total - expected) * 3, [...deleted].filter((k) => k.startsWith(`${tier}/`)).length, "artifact + manifest + verified marker per deleted unit");
   }
   // The survivors are the newest ones.
   assert.ok(plan.retained.daily![0]!.includes(hex(20)));
@@ -105,7 +114,7 @@ test("T4 the same artifact name in two tiers is planned independently (no basena
     weekly: { keep: 1, retentionDays: 1 },
     monthly: { keep: 1, retentionDays: 1 },
   };
-  const plan = planTierRetention(objects, NOW, policy, legacy);
+  const { plan } = planMarked(objects, NOW, policy, legacy);
   const deleted = plan.delete.map((o) => o.key);
   // weekly has only one backup (kept as its own newest recoverable); daily #1 is deleted.
   assert.ok(deleted.every((k) => k.startsWith("daily/")), "nothing is deleted from weekly");
@@ -116,7 +125,7 @@ test("T4 the same artifact name in two tiers is planned independently (no basena
 // ---- T5 -------------------------------------------------------------------------------------
 test("T5 a tier at or below its minimum deletes nothing; zero recoverable deletes nothing anywhere", () => {
   const sevenDaily = Array.from({ length: 7 }, (_, i) => backup("daily", i + 1)).flat();
-  const plan = planTierRetention(sevenDaily, NOW, DEFAULT_TIER_POLICY, legacy);
+  const { plan } = planMarked(sevenDaily, NOW, DEFAULT_TIER_POLICY, legacy);
   assert.deepEqual(plan.delete, []);
   assert.equal(plan.retained.daily!.length, 7);
   const none = [
@@ -125,7 +134,10 @@ test("T5 a tier at or below its minimum deletes nothing; zero recoverable delete
     { key: `monthly/aee-protected-20250103T000000Z-${hex(3)}.tar.enc.sha256.json`, lastModified: "2025-01-03T00:00:00Z" },
     ...backup("", 4, false),
   ];
-  assert.deepEqual(planTierRetention(none, NOW, DEFAULT_TIER_POLICY, legacy).delete, []);
+  assert.deepEqual(planMarked(none, NOW, DEFAULT_TIER_POLICY, legacy).plan.delete, []);
+  // R29b: marker-less (legacy) pairs are PRESENT only, so even far more than `keep` of them deletes nothing.
+  const unmarked = Array.from({ length: 20 }, (_, i) => backup("daily", i + 1)).flat();
+  assert.deepEqual(planTierRetention(unmarked, new Date("2030-01-01T00:00:00Z"), DEFAULT_TIER_POLICY, legacy).delete, []);
 });
 
 // ---- T6 -------------------------------------------------------------------------------------
@@ -133,7 +145,7 @@ test("T6 the just-uploaded artifact survives in every tier it appears in", () =>
   const objects = [1, 2, 3].flatMap((n) => [...backup("daily", n), ...backup("weekly", n), ...backup("monthly", n)]);
   const protectedArtifact = backup("", 1)[0]!.key;
   const policy: TierPolicy = { daily: { keep: 1, retentionDays: 1 }, weekly: { keep: 1, retentionDays: 1 }, monthly: { keep: 1, retentionDays: 1 } };
-  const plan = planTierRetention(objects, NOW, policy, legacy, { protectedArtifact });
+  const { plan } = planMarked(objects, NOW, policy, legacy, { protectedArtifact });
   const deleted = plan.delete.map((o) => o.key);
   for (const tier of TIERS) {
     assert.ok(!deleted.includes(`${tier}/${protectedArtifact}`));
@@ -154,7 +166,7 @@ test("T7 unknown-folder, malformed and unrelated keys are never planned for dele
     { key: `daily/aee-protected-bad.tar.enc`, lastModified: "2000-01-01T00:00:00Z" },
   ];
   const real = Array.from({ length: 10 }, (_, i) => backup("daily", i + 1)).flat();
-  const plan = planTierRetention([...strangers, ...real], NOW, DEFAULT_TIER_POLICY, legacy);
+  const { plan } = planMarked([...strangers, ...real], NOW, DEFAULT_TIER_POLICY, legacy);
   assert.ok(plan.delete.length > 0);
   for (const stranger of strangers) assert.ok(!plan.delete.some((o) => o.key === stranger.key), stranger.key);
 });
@@ -193,7 +205,9 @@ test("T8 randomised invariants hold across 600 generated remote listings (seeded
       monthly: { keep: 1 + int(13), retentionDays: 1 + int(400) },
     };
     const lg = { retentionDays: 1 + int(60), minRetained: 1 + int(8) };
-    const plan = planTierRetention(unique, NOW, policy, lg, { protectedArtifact });
+    // R29b: plan over the marked listing (markers + evidence) so deletions are actually exercised.
+    const markedListing = marked(unique);
+    const plan = planTierRetention(markedListing.objects, NOW, policy, lg, { protectedArtifact, evidence: markedListing.evidence });
     const deleted = plan.delete.map((o) => o.key);
     assert.equal(new Set(deleted).size, deleted.length, "no duplicate deletions");
     for (const group of groups) {
@@ -290,7 +304,7 @@ test("T10 engine: prune off never runs list or remove, and uploads to all three 
     assert.deepEqual(done?.tiersWritten, ["daily", "weekly", "monthly"]);
     assert.deepEqual(
       [...remote.uploaded.keys()].sort(),
-      TIERS.flatMap((t) => [`${t}/${name}`, `${t}/${name}.sha256.json`]).sort(),
+      TIERS.flatMap((t) => [`${t}/${name}`, `${t}/${name}.sha256.json`, `${t}/${name}.verified.json`]).sort(),
     );
   } finally {
     await remote.cleanup();
