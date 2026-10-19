@@ -98,6 +98,13 @@ test("a PENDING financial_payment_outbox row increases the backlog gauge, and cl
       action: "SCHEDULE_DEBIT",
       status: "PENDING",
       idempotencyKey: `queue-gauge-outbox-${suffix}`,
+      // Test isolation (shared test DB): not yet due, so a concurrent GLOBAL
+      // dispatchPendingPaymentOutbox() sweep in another file never picks it
+      // up. Otherwise that sweep's failed dispatch (this request has no
+      // authority) can write status back to PENDING after this test sets it
+      // to FAILED below. The backlog gauge counts PENDING rows whatever their
+      // nextAttemptAt, so the gauge assertions are unchanged.
+      nextAttemptAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     })
     .returning();
 

@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
 import { eq, and, desc } from "drizzle-orm";
-import { db, commissionAgreements, pcFeeAuthorities, financialPaymentRequests, financialDisputes, financialLedgerEvents, domainEvents } from "@aee/db";
+import {
+  db,
+  commissionAgreements,
+  pcFeeAuthorities,
+  financialPaymentRequests,
+  financialPaymentOutbox,
+  financialDisputes,
+  financialLedgerEvents,
+  domainEvents,
+} from "@aee/db";
 import {
   createBrokerageWithUsers,
   createTransactionFromListedProperty,
@@ -116,6 +125,29 @@ async function buildScheduledFixture(addressSuffix: string): Promise<ScheduledFi
   });
 
   await advancePaymentRequestToNoticeSent(created0.id);
+
+  // Test isolation (shared test DB): pre-create this request's SCHEDULE_DEBIT
+  // outbox entry with nextAttemptAt in the future, exactly as
+  // scheduleDebitForPaymentRequest would create it apart from that one
+  // field. dispatchPendingPaymentOutbox() is a GLOBAL sweep (not scoped to a
+  // brokerage) and other files call it concurrently in the same DB
+  // (paymentOutbox.test.ts's sweep test; routes/__tests__/financial.test.ts
+  // via POST /api/financial/ops/dispatch-outbox). Without this, a sweep in
+  // another process can pick up the default-due PENDING row between its
+  // insert and our own dispatch, dispatch it a second time through that
+  // process's own sandbox provider (a different random providerRequestRef),
+  // and overwrite the ref this fixture returns, so the webhook below reads
+  // as payment_request_not_found. scheduleDebitForPaymentRequest reuses an
+  // existing entry and dispatches it directly regardless of nextAttemptAt,
+  // so the real lifecycle path is still exercised; only the sweeps skip it.
+  await db.insert(financialPaymentOutbox).values({
+    brokerageId: A.brokerageId,
+    paymentRequestId: created0.id,
+    action: "SCHEDULE_DEBIT",
+    status: "PENDING",
+    idempotencyKey: `schedule-debit:${created0.id}`,
+    nextAttemptAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
   const { paymentRequest } = await scheduleDebitForPaymentRequest({ paymentRequestId: created0.id });
 
   if (!paymentRequest.providerRequestRef) {
