@@ -2,20 +2,25 @@
 // brokerage's properties, from GET /api/offers/centre (requireAuth +
 // run.access). No accept/decline/withdraw here: those stay on the property's
 // Transaction panel. No share tokens or buyer contact details are rendered.
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { apiFetch, apiErrorMessage } from "../lib/api";
+import { apiFetch } from "../lib/api";
 import { formatCents, formatDate } from "../lib/financial";
 import {
   OFFER_CENTRE_STATUSES,
   fetchBuyerList,
   fetchOfferCentre,
+  offerCentreEmptyMessage,
+  offerCentreErrorText,
+  offerCentreRegionState,
   offerCentrePaging,
   offerStatusPillClass,
   toBuyerView,
   toOfferCentreView,
   type BuyerView,
+  type OfferCentreKind,
+  type OfferCentreRegionState,
   type OfferCentreStatus,
   type OfferCentreView,
 } from "../lib/offerCentre";
@@ -27,10 +32,15 @@ export function OfferCentreList(props: {
   offset: number;
   onPrev?: () => void;
   onNext?: () => void;
+  filtered?: boolean;
 }) {
   const paging = offerCentrePaging(props);
   if (props.rows.length === 0)
-    return <p className="muted">No offers match these filters.</p>;
+    return (
+      <p className="empty-state" role="status">
+        {offerCentreEmptyMessage("offers", props.filtered ?? true)}
+      </p>
+    );
   return (
     <>
       <table className="table">
@@ -93,10 +103,15 @@ export function BuyerList(props: {
   offset: number;
   onPrev?: () => void;
   onNext?: () => void;
+  filtered?: boolean;
 }) {
   const paging = offerCentrePaging(props);
   if (props.rows.length === 0)
-    return <p className="muted">No buyers match these filters.</p>;
+    return (
+      <p className="empty-state" role="status">
+        {offerCentreEmptyMessage("buyers", props.filtered ?? true)}
+      </p>
+    );
   return (
     <>
       <table className="table">
@@ -146,6 +161,49 @@ export function BuyerList(props: {
   );
 }
 
+// R-05 — the results region for one tab. aria-busy is true while its query
+// is fetching (first load or a background page change); loading and empty
+// are polite role=status messages, a failure is role=alert with a Try again
+// that refetches only this tab's query.
+export function OfferCentreRegion(props: {
+  kind: OfferCentreKind;
+  state: OfferCentreRegionState;
+  busy: boolean;
+  error?: unknown;
+  onRetry: () => void;
+  children?: ReactNode;
+}) {
+  let body: ReactNode = props.children;
+  if (props.state === "loading") {
+    body = (
+      <p className="muted" role="status" aria-live="polite">
+        Loading {props.kind}…
+      </p>
+    );
+  } else if (props.state === "error") {
+    const { message, reference } = offerCentreErrorText(props.error, props.kind);
+    body = (
+      <div role="alert">
+        <p className="error-text">{message}</p>
+        {reference !== undefined && (
+          <p className="muted">
+            If this keeps happening, contact support and quote{" "}
+            <strong>{reference}</strong>.
+          </p>
+        )}
+        <button
+          type="button"
+          className="btn btn-secondary btn-small"
+          onClick={props.onRetry}
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+  return <div aria-busy={props.busy ? "true" : "false"}>{body}</div>;
+}
+
 export default function OfferCentre() {
   const [status, setStatus] = useState<OfferCentreStatus | "">("");
   const [propertyId, setPropertyId] = useState("");
@@ -154,16 +212,20 @@ export default function OfferCentre() {
   const [buyerPage, setBuyerPage] = useState(0);
   const filters = { status, propertyId, page };
 
-  const { data, isLoading, isError, error } = useQuery({
+  const offers = useQuery({
     queryKey: ["offer-centre", status, propertyId, page],
     queryFn: () => fetchOfferCentre(filters),
     enabled: tab === "offers",
+    placeholderData: keepPreviousData,
   });
   const buyers = useQuery({
     queryKey: ["offer-centre-buyers", propertyId, buyerPage],
     queryFn: () => fetchBuyerList({ propertyId, page: buyerPage }),
     enabled: tab === "buyers",
+    placeholderData: keepPreviousData,
   });
+  const offersState = offerCentreRegionState(offers, offers.data?.offers.length);
+  const buyersState = offerCentreRegionState(buyers, buyers.data?.buyers.length);
   const { data: propertiesData } = useQuery({
     queryKey: ["properties", ""],
     queryFn: () =>
@@ -237,37 +299,41 @@ export default function OfferCentre() {
         </label>
       </div>
       {tab === "buyers" ? (
-        buyers.isLoading ? (
-          <p className="muted">Loading…</p>
-        ) : buyers.isError ? (
-          <p className="error-text">
-            {apiErrorMessage(buyers.error, "Couldn't load buyers. Try again.")}
-          </p>
-        ) : (
+        <OfferCentreRegion
+          kind="buyers"
+          state={buyersState}
+          busy={buyers.isFetching}
+          error={buyers.error}
+          onRetry={() => void buyers.refetch()}
+        >
           <BuyerList
             rows={(buyers.data?.buyers ?? []).map(toBuyerView)}
             total={buyers.data?.total ?? 0}
             limit={buyers.data?.limit ?? 25}
             offset={buyers.data?.offset ?? 0}
+            filtered={propertyId !== ""}
             onPrev={() => setBuyerPage((p) => Math.max(0, p - 1))}
             onNext={() => setBuyerPage((p) => p + 1)}
           />
-        )
-      ) : isLoading ? (
-        <p className="muted">Loading…</p>
-      ) : isError ? (
-        <p className="error-text">
-          {apiErrorMessage(error, "Couldn't load offers. Try again.")}
-        </p>
+        </OfferCentreRegion>
       ) : (
-        <OfferCentreList
-          rows={(data?.offers ?? []).map(toOfferCentreView)}
-          total={data?.total ?? 0}
-          limit={data?.limit ?? 25}
-          offset={data?.offset ?? 0}
-          onPrev={() => setPage((p) => Math.max(0, p - 1))}
-          onNext={() => setPage((p) => p + 1)}
-        />
+        <OfferCentreRegion
+          kind="offers"
+          state={offersState}
+          busy={offers.isFetching}
+          error={offers.error}
+          onRetry={() => void offers.refetch()}
+        >
+          <OfferCentreList
+            rows={(offers.data?.offers ?? []).map(toOfferCentreView)}
+            total={offers.data?.total ?? 0}
+            limit={offers.data?.limit ?? 25}
+            offset={offers.data?.offset ?? 0}
+            filtered={status !== "" || propertyId !== ""}
+            onPrev={() => setPage((p) => Math.max(0, p - 1))}
+            onNext={() => setPage((p) => p + 1)}
+          />
+        </OfferCentreRegion>
       )}
     </section>
   );

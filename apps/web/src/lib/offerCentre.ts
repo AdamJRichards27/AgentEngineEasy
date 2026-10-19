@@ -2,7 +2,7 @@
 // The API already omits share tokens and buyer contact details; the view
 // model below is a second whitelist so a future API field cannot reach the
 // page by accident.
-import { apiFetch } from "./api";
+import { ApiError, apiErrorMessage, apiFetch, formatSupportReference } from "./api";
 
 export const OFFER_CENTRE_STATUSES = ["Received", "Accepted", "Declined", "Withdrawn"] as const;
 export type OfferCentreStatus = (typeof OFFER_CENTRE_STATUSES)[number];
@@ -144,4 +144,39 @@ export function toBuyerView(row: BuyerListApiRow): BuyerView {
 
 export function fetchBuyerList(filters: BuyerListFilters): Promise<BuyerListResponse> {
   return apiFetch<BuyerListResponse>(buildBuyerListPath(filters));
+}
+
+// R-05 — loading, error and empty states shared by the Offers list and the
+// Buyers tab. Error copy is the ApiError's friendly text (never the raw
+// technical message) plus the short support reference when the server sent
+// a correlation id; anything else falls back to a fixed sentence.
+export type OfferCentreKind = "offers" | "buyers";
+export type OfferCentreRegionState = "loading" | "error" | "empty" | "ready";
+
+export function offerCentreRegionState(
+  query: { isLoading: boolean; isError: boolean },
+  rowCount: number | null | undefined,
+): OfferCentreRegionState {
+  if (query.isError) return "error";
+  if (query.isLoading || rowCount == null) return "loading";
+  return rowCount === 0 ? "empty" : "ready";
+}
+
+export function offerCentreEmptyMessage(kind: OfferCentreKind, filtered: boolean): string {
+  if (kind === "offers")
+    return filtered
+      ? "No offers match these filters."
+      : "No offers yet. Offers recorded on a property's Transaction panel appear here.";
+  return filtered
+    ? "No buyers match these filters."
+    : "No buyers yet. Buyers linked to a property appear here.";
+}
+
+export function offerCentreErrorText(
+  error: unknown,
+  kind: OfferCentreKind,
+): { message: string; reference?: string } {
+  const message = apiErrorMessage(error, `Couldn't load ${kind}. Try again.`);
+  const reference = error instanceof ApiError ? formatSupportReference(error.correlationId) : undefined;
+  return reference ? { message, reference } : { message };
 }
