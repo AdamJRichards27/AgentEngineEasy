@@ -37,17 +37,47 @@ export async function writeManifest(artifactPath: string, createdAt: string, ext
   return manifestPath;
 }
 
-export async function verifyManifest(artifactPath: string, manifestPath: string): Promise<ArtifactManifest> {
-  const parsed = JSON.parse(await readFile(manifestPath, "utf8")) as Partial<ArtifactManifest>;
+/**
+ * WS4-10: why a restore stopped before downloading the dump. "missing" = the manifest could not be downloaded (or the
+ * download wrote nothing); "unreadable" = it is not a valid integrity manifest for this artifact.
+ */
+export class ManifestUnavailableError extends Error {
+  constructor(readonly reason: "missing" | "unreadable", message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ManifestUnavailableError";
+  }
+}
+
+/**
+ * Structural validation of an integrity manifest body, without the artifact (WS4-10: run before the artifact is
+ * downloaded). Same rules verifyManifest() has always applied, plus: an optional dumpArchiveVersion must be a
+ * "major.minor.rev" string, so a corrupt version field can never silently skip the WS4-06 check.
+ */
+export function parseManifest(body: string, artifactName: string): ArtifactManifest {
+  let parsed: Partial<ArtifactManifest> | null;
+  try {
+    parsed = JSON.parse(body) as Partial<ArtifactManifest> | null;
+  } catch {
+    throw new Error("Artifact integrity manifest is not valid JSON");
+  }
   if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
     parsed.version !== 1 ||
-    parsed.artifact !== path.basename(artifactPath) ||
+    parsed.artifact !== artifactName ||
     typeof parsed.sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(parsed.sha256) ||
-    typeof parsed.bytes !== "number"
+    typeof parsed.bytes !== "number" ||
+    ("dumpArchiveVersion" in parsed && (typeof parsed.dumpArchiveVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(parsed.dumpArchiveVersion)))
   ) {
     throw new Error("Artifact integrity manifest is malformed or names a different artifact");
   }
+  return parsed as ArtifactManifest;
+}
+
+export async function verifyManifest(artifactPath: string, manifestPath: string): Promise<ArtifactManifest> {
+  const parsed = parseManifest(await readFile(manifestPath, "utf8"), path.basename(artifactPath));
   const info = await stat(artifactPath);
   const actual = await sha256File(artifactPath);
   if (info.size !== parsed.bytes || actual !== parsed.sha256) {

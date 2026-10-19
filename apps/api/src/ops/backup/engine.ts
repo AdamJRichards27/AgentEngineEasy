@@ -20,6 +20,8 @@ import {
   tiersFor,
   unitKeyOf,
   verifiedMarkerBody,
+  ManifestUnavailableError,
+  parseManifest,
   verifyManifest,
   writeManifest,
   type RetentionEvidence,
@@ -33,6 +35,7 @@ import { assertRestoreTargetIsEmpty, readDatabaseInventory, validateDatabaseInve
 import { stageObjectStorageDocuments, type DocumentObjectReader } from "./objectDocuments.js";
 import { compareDocumentKeys, documentInventory, prepareEmptyRestoreDirectory } from "./documents.js";
 import type {
+  ArtifactManifest,
   BackupConfig,
   CommandRunner,
   DatabaseInventory,
@@ -844,6 +847,68 @@ export async function restoreBackup(
     const artifact = path.join(runDirectory, name);
     const manifest = `${artifact}.sha256.json`;
     const remoteName = request.tier !== undefined ? tierKey(request.tier, name) : name;
+    const manifestKey = `${remoteName}.sha256.json`;
+    const tierHint = request.tier !== undefined
+      ? ` from the "${request.tier}" tier. Check that the artifact name is correct and was written to that tier (--tier=${request.tier}); the manifest lives inside the tier folder, so a different tier or omitting --tier (legacy flat layout) will not find it`
+      : " (missing or unreachable)";
+    // WS4-10 (1/3): the small integrity manifest is downloaded FIRST, so a missing, unreadable or incompatible backup
+    // is refused before the (large) dump is ever requested. Fail closed with a clear message.
+    stage = "manifest_download";
+    try {
+      await dependencies.run(config.restoreDownload ?? config.download, {
+        source: remoteUri(config.destination, manifestKey),
+        destination: manifest,
+        object: manifestKey,
+      }, "restore_download");
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new ManifestUnavailableError(
+        "missing",
+        `Restore aborted before downloading the dump: the integrity manifest "${manifestKey}" could not be downloaded${tierHint}. Underlying error: ${cause}`,
+        { cause: error },
+      );
+    }
+    stage = "manifest_check";
+    let manifestBody: string;
+    try {
+      manifestBody = await readFile(manifest, "utf8");
+    } catch (error) {
+      throw new ManifestUnavailableError(
+        "missing",
+        `Restore aborted before downloading the dump: the integrity manifest "${manifestKey}" could not be downloaded${tierHint}. Underlying error: the download command wrote no file`,
+        { cause: error },
+      );
+    }
+    let earlyManifest: ArtifactManifest;
+    try {
+      earlyManifest = parseManifest(manifestBody, name);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new ManifestUnavailableError(
+        "unreadable",
+        `Restore aborted before downloading the dump: the integrity manifest "${manifestKey}" is unreadable (${cause}). Nothing was downloaded beyond the manifest.`,
+        { cause: error },
+      );
+    }
+    // WS4-10 (2/3) = WS4-06 (1/2): refuse an archive newer than this pg_restore BEFORE the dump download.
+    if (dependencies.pgRestoreMajor !== undefined) {
+      if (typeof earlyManifest.dumpArchiveVersion === "string") {
+        stage = "archive_version_check";
+        assertArchiveReadable(earlyManifest.dumpArchiveVersion, dependencies.pgRestoreMajor, "manifest");
+      } else {
+        // Legacy (pre-WS4-06) manifest: the early check cannot run; the dump header is still checked before pg_restore.
+        log({
+          timestamp: new Date().toISOString(),
+          level: "warn",
+          operation: "restore",
+          event: "manifest_without_archive_version",
+          runId,
+          artifact: name,
+          detail: "manifest records no dumpArchiveVersion; the dump will be downloaded and its header checked before pg_restore",
+        });
+      }
+    }
+    // WS4-10 (3/3): only now download the dump artifact.
     stage = "download";
     try {
       await dependencies.run(config.restoreDownload ?? config.download, {
@@ -851,26 +916,17 @@ export async function restoreBackup(
         destination: artifact,
         object: remoteName,
       }, "restore_download");
-      await dependencies.run(config.restoreDownload ?? config.download, {
-        source: remoteUri(config.destination, `${remoteName}.sha256.json`),
-        destination: manifest,
-        object: `${remoteName}.sha256.json`,
-      }, "restore_download");
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
-      if (request.tier === undefined) throw error; // no-tier restore behaviour is unchanged
+      if (request.tier === undefined) throw error; // no-tier artifact download error is propagated unchanged
       throw new Error(
-        `Restore could not download the artifact and manifest from the "${request.tier}" tier. Check that the artifact name is correct and was written to that tier (--tier=${request.tier}); the manifest lives inside the tier folder, so a different tier or omitting --tier (legacy flat layout) will not find it. Underlying error: ${cause}`,
+        `Restore could not download the artifact from the "${request.tier}" tier (its manifest was found there). Underlying error: ${cause}`,
         { cause: error },
       );
     }
     stage = "verify";
-    const verifiedManifest = await verifyManifest(artifact, manifest);
-    // WS4-06 (1/2): the manifest is integrity-checked above; if it records the archive version, refuse before decrypt.
-    if (dependencies.pgRestoreMajor !== undefined && typeof verifiedManifest.dumpArchiveVersion === "string") {
-      stage = "archive_version_check";
-      assertArchiveReadable(verifiedManifest.dumpArchiveVersion, dependencies.pgRestoreMajor, "manifest");
-    }
+    // Integrity: the downloaded dump must match the SAME manifest file checked above (sha256 + byte length).
+    await verifyManifest(artifact, manifest);
     stage = "decrypt_and_restore";
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile }, "decrypt");

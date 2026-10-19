@@ -87,7 +87,7 @@ test("TT4 legitimate tiers and the legacy flat path still reach the download of 
         }) as never,
         log: () => undefined,
       }).catch(() => undefined);
-      assert.deepEqual(objects, [tier ? `${tier}/${ARTIFACT}` : ARTIFACT]);
+      assert.deepEqual(objects, [`${tier ? `${tier}/${ARTIFACT}` : ARTIFACT}.sha256.json`]); // WS4-10: the manifest is the first object requested
     } finally {
       await remote.cleanup();
     }

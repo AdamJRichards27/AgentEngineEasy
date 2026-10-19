@@ -157,7 +157,7 @@ test("engine called without pgRestoreMajor behaves as before (no version check)"
 const TOOLS = ["pg_dump", "pg_restore", "psql", "tar", "encrypt", "decrypt", "upload", "download", "verify-download", "list", "remove", "alert"];
 const ARTIFACT = "aee-protected-20261019T120000Z-0123456789ab.tar.enc";
 
-async function cliRestore(opts: { archiveMinor: number; manifestVersion: boolean; pgRestore: string; server: string }) {
+async function cliRestore(opts: { archiveMinor: number; manifestVersion: boolean; pgRestore: string; server: string; manifestMissing?: boolean }) {
   const root = await mkdtemp(path.join(tmpdir(), "aee-ws4-06-"));
   const bin = path.join(root, "bin");
   await mkdir(bin, { recursive: true });
@@ -193,6 +193,7 @@ async function cliRestore(opts: { archiveMinor: number; manifestVersion: boolean
     BACKUP_RESTORE_DATABASE_URL: "postgresql://restore_user:synthetic-ws4-06-r@restore.invalid:5432/aee_restore",
   };
   const calls: string[] = [];
+  const downloads: string[] = [];
   const logs: OperationLog[] = [];
   const runner = async (command: CommandSpec, replacements: Record<string, string> = {}) => {
     // Version probes are recorded separately so "pg_restore" in `calls` means a real restore run.
@@ -201,6 +202,8 @@ async function cliRestore(opts: { archiveMinor: number; manifestVersion: boolean
     if (command.executable === "psql" && command.args.some((a) => a.includes("server_version_num"))) return { stdout: `${opts.server}\n`, stderr: "" };
     if (command.executable === "psql" && command.args.some((a) => a.includes("count(*) FROM information_schema.tables"))) return { stdout: "0\n", stderr: "" };
     if (command.executable === "download") {
+      downloads.push(replacements.object!);
+      if (opts.manifestMissing && replacements.object!.endsWith(".sha256.json")) throw new Error("NoSuchKey");
       if (replacements.object!.endsWith(".sha256.json")) await writeFile(replacements.destination!, JSON.stringify(manifest) + "\n");
       else await copyFile(payload, replacements.destination!);
       return { stdout: "", stderr: "" };
@@ -213,7 +216,7 @@ async function cliRestore(opts: { archiveMinor: number; manifestVersion: boolean
   };
   const code = await runCli("restore", { argv: [`--artifact=${ARTIFACT}`, "--confirm-disposable"], env, run: runner as never, log: (e) => logs.push(e), stderr: () => {}, nodeVersion: "v24.22.0" });
   await rm(root, { recursive: true, force: true });
-  return { code, calls, logs, preflight: logs.find((l) => l.event === "backup_preflight_failed") };
+  return { code, calls, downloads, logs, preflight: logs.find((l) => l.event === "backup_preflight_failed") };
 }
 
 test("CLI: a 1.16 archive (manifest) with pg_restore 16 exits 69 before decrypt, naming the archive version", async () => {
@@ -234,4 +237,26 @@ test("CLI: a 1.15 archive with pg_restore 16 is not refused for the archive vers
   const r = await cliRestore({ archiveMinor: 15, manifestVersion: true, pgRestore: "16.15", server: "160014" });
   assert.equal(r.preflight, undefined, JSON.stringify(r.logs));
   assert.ok(r.calls.includes("pg_restore"), r.calls.join(","));
+});
+
+// ---------- WS4-10: manifest first ----------
+test("CLI (WS4-10): a 1.16 archive (manifest) with pg_restore 16 exits 69 having downloaded ONLY the manifest", async () => {
+  const r = await cliRestore({ archiveMinor: 16, manifestVersion: true, pgRestore: "16.15", server: "160014" });
+  assert.equal(r.code, EXIT.PREFLIGHT);
+  assert.deepEqual(r.downloads, [`${ARTIFACT}.sha256.json`]);
+});
+
+test("CLI (WS4-10): a missing manifest exits 1 (failed) before the dump download, with the clear message logged", async () => {
+  const r = await cliRestore({ archiveMinor: 15, manifestVersion: true, pgRestore: "16.15", server: "160014", manifestMissing: true });
+  assert.equal(r.code, EXIT.FAILED);
+  assert.deepEqual(r.downloads, [`${ARTIFACT}.sha256.json`]);
+  const failed = r.logs.find((l) => l.event === "failed");
+  assert.equal(failed?.stage, "manifest_download");
+  assert.match(String(failed?.error), /^Restore aborted before downloading the dump: the integrity manifest/);
+  assert.ok(!r.calls.includes("decrypt") && !r.calls.includes("pg_restore"));
+});
+
+test("CLI (WS4-10): a compatible archive downloads manifest then dump, in that order", async () => {
+  const r = await cliRestore({ archiveMinor: 15, manifestVersion: true, pgRestore: "16.15", server: "160014" });
+  assert.deepEqual(r.downloads, [`${ARTIFACT}.sha256.json`, ARTIFACT]);
 });

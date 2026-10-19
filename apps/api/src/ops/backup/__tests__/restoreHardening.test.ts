@@ -55,9 +55,13 @@ test("R2 restore with --tier: a failed download gives a clear tier-specific mess
   assert.equal((error.cause as Error).message, "NoSuchKey");
 });
 
-test("R3 restore without --tier: the download error is propagated unchanged (no-tier behaviour preserved)", async () => {
+test("R3 restore without --tier: a failed MANIFEST download (WS4-10: the first download) aborts with a clear message that keeps the cause", async () => {
   const { error } = await failingRestore(undefined, "NoSuchKey");
-  assert.equal(error?.message, "NoSuchKey");
+  assert.ok(error);
+  assert.match(error.message, /^Restore aborted before downloading the dump: the integrity manifest ".*\.sha256\.json" could not be downloaded/);
+  assert.match(error.message, /Underlying error: NoSuchKey$/);
+  assert.doesNotMatch(error.message, /tier/, "no tier hint without --tier");
+  assert.equal((error.cause as Error).message, "NoSuchKey");
 });
 
 test("R4 restore failure alert carries a fixed reason code and stage, never raw error text; the local log keeps the full text", async () => {
@@ -67,7 +71,7 @@ test("R4 restore failure alert carries a fixed reason code and stage, never raw 
     assert.equal(alerts.length, 1);
     assert.equal(alerts[0]!.operation, "restore");
     assert.equal(alerts[0]!.status, "failed");
-    assert.equal(alerts[0]!.error, "restore_failed: restore failed during download");
+    assert.equal(alerts[0]!.error, "restore_failed: restore failed during manifest_download"); // WS4-10: manifest is downloaded first
     assert.doesNotMatch(JSON.stringify(alerts), /my-bucket|arn:aws|AccessDenied|ae-backups/);
     assert.match(logs.find((l) => l.event === "failed")?.error ?? "", /AccessDenied/, "full text stays in the local log");
   }

@@ -436,7 +436,8 @@ test("restore reads from the tier folder when --tier is given and from the legac
     const cfg = { ...remote.config, restoreDatabaseUrl: "postgresql://restore.invalid/other" };
     await assert.rejects(restoreBackup(cfg, { artifact, confirmDisposable: true, tier: "weekly" }, { run: run as never, log: () => undefined }), /stop/);
     await assert.rejects(restoreBackup(cfg, { artifact, confirmDisposable: true }, { run: run as never, log: () => undefined }), /stop/);
-    assert.deepEqual(seen, [`durable://vault/backups/weekly/${artifact}`, `durable://vault/backups/${artifact}`]);
+    // WS4-10: the manifest is the first object requested (same folder as the artifact).
+    assert.deepEqual(seen, [`durable://vault/backups/weekly/${artifact}.sha256.json`, `durable://vault/backups/${artifact}.sha256.json`]);
   } finally {
     await remote.cleanup();
   }
