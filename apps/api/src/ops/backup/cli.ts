@@ -111,8 +111,12 @@ export async function preflight(kind: CliKind, config: BackupConfig, run: Comman
   for (const tool of pgTools) {
     const out = await run({ executable: tool, args: ["--version"] }, undefined, operation).catch(() => ({ stdout: "" }));
     const clientMajor = major(out.stdout);
-    if (!clientMajor || clientMajor < serverMajor) {
-      throw new PreflightError(tool, String(clientMajor ?? "unknown"), `>=${serverMajor}`);
+    // WS4 F1: pg_restore NEWER than the restore target emits session settings the older server rejects
+    // (pg_restore 17 -> PG16: `SET transaction_timeout`, so --exit-on-error aborts mid-restore). Restore therefore
+    // needs pg_restore's major to EQUAL the target's; psql and pg_dump keep the CLI-SPEC §4 ">= server" rule.
+    const exact = kind === "restore" && tool === "pg_restore";
+    if (!clientMajor || clientMajor < serverMajor || (exact && clientMajor !== serverMajor)) {
+      throw new PreflightError(tool, String(clientMajor ?? "unknown"), exact ? `==${serverMajor}` : `>=${serverMajor}`);
     }
   }
 }
