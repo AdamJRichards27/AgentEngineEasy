@@ -20,7 +20,7 @@ export async function sha256File(file: string): Promise<string> {
   return hash.digest("hex");
 }
 
-export async function writeManifest(artifactPath: string, createdAt: string): Promise<string> {
+export async function writeManifest(artifactPath: string, createdAt: string, extra: { dumpArchiveVersion?: string } = {}): Promise<string> {
   const info = await stat(artifactPath);
   const manifest: ArtifactManifest = {
     version: 1,
@@ -28,6 +28,8 @@ export async function writeManifest(artifactPath: string, createdAt: string): Pr
     createdAt,
     sha256: await sha256File(artifactPath),
     bytes: info.size,
+    // WS4-06: only written when the dump header was readable, so manifests of non-custom dumps keep their old shape.
+    ...(extra.dumpArchiveVersion ? { dumpArchiveVersion: extra.dumpArchiveVersion } : {}),
   };
   const manifestPath = `${artifactPath}.sha256.json`;
   await writeFile(manifestPath, JSON.stringify(manifest) + "\n", { mode: 0o600 });

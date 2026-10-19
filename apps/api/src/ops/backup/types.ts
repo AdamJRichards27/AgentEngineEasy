@@ -120,6 +120,8 @@ export interface ArtifactManifest {
   createdAt: string;
   sha256: string;
   bytes: number;
+  /** WS4-06: pg_dump custom-format archive version (e.g. "1.15.0"), read from the dump header at backup time. Absent on older manifests. */
+  dumpArchiveVersion?: string;
 }
 
 export interface RemoteObject {

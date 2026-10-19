@@ -3,6 +3,7 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { redactSecrets, sanitizeErrorText } from "./artifacts.js";
 import { loadAlertCommand, loadProductionBackupConfig } from "./config.js";
+import { DumpArchiveIncompatibleError } from "./dumpFormat.js";
 import { createBackup, restoreBackup, type EngineDependencies } from "./engine.js";
 import type { DocumentObjectReader } from "./objectDocuments.js";
 import { parseRestoreArgs, type RestoreArgs } from "./restoreArgs.js";
@@ -83,7 +84,7 @@ const major = (text: string): number | undefined => {
 };
 
 /** CLI-SPEC §4: before any staging directory is created. Read-only (version probes only). */
-export async function preflight(kind: CliKind, config: BackupConfig, run: CommandRunner, deps: Pick<CliDependencies, "env" | "nodeVersion">): Promise<void> {
+export async function preflight(kind: CliKind, config: BackupConfig, run: CommandRunner, deps: Pick<CliDependencies, "env" | "nodeVersion">): Promise<{ clientMajors: Record<string, number> }> {
   const nodeMajor = major(deps.nodeVersion ?? process.version);
   if (!nodeMajor || nodeMajor < 24) throw new PreflightError("node", String(nodeMajor ?? "unknown"), ">=24");
   const pgTools = kind === "backup" ? ["pg_dump", "psql"] : ["pg_restore", "psql"];
@@ -108,6 +109,7 @@ export async function preflight(kind: CliKind, config: BackupConfig, run: Comman
     throw new PreflightError("postgresql-server", "unreachable", "reachable");
   }
   if (!serverMajor) throw new PreflightError("postgresql-server", "unknown", "server_version_num");
+  const clientMajors: Record<string, number> = {};
   for (const tool of pgTools) {
     const out = await run({ executable: tool, args: ["--version"] }, undefined, operation).catch(() => ({ stdout: "" }));
     const clientMajor = major(out.stdout);
@@ -118,7 +120,9 @@ export async function preflight(kind: CliKind, config: BackupConfig, run: Comman
     if (!clientMajor || clientMajor < serverMajor || (exact && clientMajor !== serverMajor)) {
       throw new PreflightError(tool, String(clientMajor ?? "unknown"), exact ? `==${serverMajor}` : `>=${serverMajor}`);
     }
+    clientMajors[tool] = clientMajor;
   }
+  return { clientMajors };
 }
 
 const isolationRequested = (env: NodeJS.ProcessEnv): boolean =>
@@ -191,8 +195,9 @@ export async function runCli(kind: CliKind, deps: CliDependencies): Promise<numb
       return EXIT.CONFIG;
     }
     const run = runnerFor(config);
+    let clientMajors: Record<string, number> = {};
     try {
-      await preflight(kind, config, run, deps);
+      ({ clientMajors } = await preflight(kind, config, run, deps));
     } catch (error) {
       if (!(error instanceof PreflightError)) throw error;
       line("error", "backup_preflight_failed", { tool: error.tool, found: error.found, required: error.required });
@@ -202,6 +207,8 @@ export async function runCli(kind: CliKind, deps: CliDependencies): Promise<numb
     const engineDeps: EngineDependencies = {
       run,
       log,
+      // WS4-06: lets restore refuse an archive newer than this pg_restore can read.
+      ...(kind === "restore" && clientMajors.pg_restore ? { pgRestoreMajor: clientMajors.pg_restore } : {}),
       ...(kind === "backup" && config.documentSource === "object-storage"
         ? { documentProvider: (deps.documentProvider ?? missingProvider)() }
         : {}),
@@ -211,6 +218,12 @@ export async function runCli(kind: CliKind, deps: CliDependencies): Promise<numb
       else await restoreBackup(config, args as RestoreArgs, engineDeps);
       return EXIT.OK;
     } catch (error) {
+      // WS4-06: an archive newer than the pg_restore client is an incompatible tool -> 69 (CLI-SPEC "required tool
+      // missing or incompatible"), same line shape as preflight. The engine has already logged + alerted it.
+      if (error instanceof DumpArchiveIncompatibleError) {
+        line("error", "backup_preflight_failed", { tool: error.tool, found: error.found, required: error.required, source: error.source });
+        return EXIT.PREFLIGHT;
+      }
       // The engine logs + alerts its own failures; refusals raised before its try block do not.
       if (!terminal) line("error", "backup_failed", { error: redactSecrets(error instanceof Error ? error.message : String(error)) });
       return EXIT.FAILED;

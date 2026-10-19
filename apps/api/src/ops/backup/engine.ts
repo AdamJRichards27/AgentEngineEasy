@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertDeleteVerifierForPrune } from "./config.js";
+import { DumpArchiveIncompatibleError, assertArchiveReadable, readDumpArchiveVersion } from "./dumpFormat.js";
 import {
   ARTIFACT_PREFIX,
   DEFAULT_MIN_RETAINED_BACKUPS,
@@ -45,6 +46,12 @@ export interface EngineDependencies {
   log?: (entry: OperationLog) => void;
   /** Required when config.documentSource is "object-storage". */
   documentProvider?: DocumentObjectReader;
+  /**
+   * WS4-06: major version of the pg_restore client that will run (the CLI passes the value its preflight read).
+   * When set, restore refuses an archive newer than that client can read (manifest check before decrypt, dump header
+   * check before pg_restore). When absent (direct engine callers), restore behaves exactly as before.
+   */
+  pgRestoreMajor?: number;
 }
 
 function defaultLog(entry: OperationLog): void {
@@ -604,6 +611,8 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
       args: ["--format=custom", "--no-owner", "--no-privileges", "--file", dump, config.databaseUrl],
     }, undefined, "database");
     await chmod(dump, 0o600);
+    // WS4-06: record the archive format version so a restore can refuse an unreadable archive before decrypting it.
+    const dumpArchiveVersion = await readDumpArchiveVersion(dump);
 
     const inventory = await readDatabaseInventory(dependencies.run, config.databaseUrl);
     let documentSourceDirectory: string;
@@ -649,7 +658,7 @@ export async function createBackup(config: BackupConfig, dependencies: EngineDep
     await chmod(payload, 0o600);
     await dependencies.run(config.encryption, { input: payload, output: artifact, kmsProfile: config.encryptionKmsProfile }, "encrypt");
     await chmod(artifact, 0o600);
-    const manifest = await writeManifest(artifact, now.toISOString());
+    const manifest = await writeManifest(artifact, now.toISOString(), dumpArchiveVersion ? { dumpArchiveVersion } : {});
     await updateRunMarker(runDirectory, { state: "encrypted" });
 
     // Tiered layout is active when a tier policy is configured (the production loader always sets one):
@@ -856,7 +865,12 @@ export async function restoreBackup(
       );
     }
     stage = "verify";
-    await verifyManifest(artifact, manifest);
+    const verifiedManifest = await verifyManifest(artifact, manifest);
+    // WS4-06 (1/2): the manifest is integrity-checked above; if it records the archive version, refuse before decrypt.
+    if (dependencies.pgRestoreMajor !== undefined && typeof verifiedManifest.dumpArchiveVersion === "string") {
+      stage = "archive_version_check";
+      assertArchiveReadable(verifiedManifest.dumpArchiveVersion, dependencies.pgRestoreMajor, "manifest");
+    }
     stage = "decrypt_and_restore";
     const payload = path.join(runDirectory, "payload.tar");
     await dependencies.run(config.decryption, { input: artifact, output: payload, kmsProfile: config.encryptionKmsProfile }, "decrypt");
@@ -866,6 +880,16 @@ export async function restoreBackup(
       args: ["--extract", "--file", payload, "--directory", runDirectory],
     }, undefined, "archive");
     const expected = JSON.parse(await readFile(path.join(runDirectory, "inventory.json"), "utf8")) as DatabaseInventory;
+    // WS4-06 (2/2): always re-read the real dump header (legacy manifests carry no version) before pg_restore runs.
+    if (dependencies.pgRestoreMajor !== undefined) {
+      stage = "archive_version_check";
+      const headerVersion = await readDumpArchiveVersion(path.join(runDirectory, "database.dump"));
+      if (!headerVersion) {
+        throw new DumpArchiveIncompatibleError("archive unreadable", "a pg_dump custom-format archive (PGDMP header)", "header");
+      }
+      assertArchiveReadable(headerVersion, dependencies.pgRestoreMajor, "header");
+      stage = "decrypt_and_restore";
+    }
     await dependencies.run({
       executable: "pg_restore",
       args: [
