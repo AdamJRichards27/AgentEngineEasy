@@ -219,6 +219,58 @@ test("each block logs one structured warn line with channel, provider, rule, cod
   assert.deepEqual([parsed[0].channel, parsed[0].provider, parsed[0].rule, parsed[0].code, parsed[0].reason], ["ai_provider", "anthropic", "network_provider_not_allowlisted", RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED, "explicit_on"]);
 });
 
+// ---------- WS4-12 ----------
+test("WS4-12 (a): local filesystem storage writes/deletes are allowed in a restored env; S3 and unclassified stay blocked", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  assert.equal(guard.storageWriteBlocked("local"), null, "local fs is exempt");
+  assert.ok(guard.storageWriteBlocked("s3") instanceof RestoredEnvironmentOutboundBlockedError);
+  assert.ok(guard.storageWriteBlocked("unclassified") instanceof RestoredEnvironmentOutboundBlockedError);
+  const dir = await mkdtemp(path.join(tmpdir(), "ws4-12-local-"));
+  Object.assign(process.env, { OBJECT_STORAGE_PROVIDER: "local", OBJECT_STORAGE_LOCAL_DIR: dir });
+  const ds = await import("../documentStorage.js");
+  ds.setDocumentStorageProviderForTests(null);
+  try {
+    const p = ds.documentStorageProvider();
+    await p.putObject("restored/local.txt", Buffer.from("x"), "text/plain");
+    assert.ok(await p.headObject("restored/local.txt"), "the local write landed");
+    await p.deleteObject("restored/local.txt");
+    assert.equal(spies.sends.length, 0);
+  } finally { ds.setDocumentStorageProviderForTests(null); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("WS4-12 (b): property data — mock allowed; GooglePlaces refused unless allow-listed; ownership lookup (local) untouched; control", async () => {
+  const pd = await import("../propertyData.js");
+  const pkg = await import("@aee/integration-property-data");
+  assert.equal(guard.classifyProvider("property_data", "mock"), "in_process");
+  assert.equal(guard.classifyProvider("property_data", "google-places"), "network");
+  assert.equal(pd.propertyDataProviderId(new pkg.MockPropertyDataProvider()), "mock");
+  assert.equal(pd.propertyDataProviderId(new pkg.GooglePlacesProvider("test-only-not-a-key")), "google-places");
+  assert.equal(pd.propertyDataProviderId({} as never), "unclassified");
+  // Factory default (mock) works in a restored env.
+  const mock = pd.createGuardedPropertyDataProvider();
+  assert.equal((await mock.searchAddress("1 Test St")).length, 1);
+  assert.equal(spies.sends.length, 0);
+  // GooglePlaces through the factory (non-production, key set): searchAddress/resolveAddress refused, nothing sent.
+  Object.assign(process.env, { PROPERTY_DATA_PROVIDER: "google-places", GOOGLE_PLACES_API_KEY: "test-only-not-a-key" });
+  const gp = pd.createGuardedPropertyDataProvider();
+  await expectBlocked(() => gp.searchAddress("1 Test St"), "property_data", "google-places");
+  await expectBlocked(() => gp.resolveAddress("place-1"), "property_data", "google-places");
+  assert.equal(await gp.lookupOwnership("place-1"), null, "local method, not guarded");
+  allow("property_data:google-places");
+  await expectAllowed(() => gp.searchAddress("1 Test St"));
+  sawSend("maps.googleapis.com");
+  spies.reset(); delete process.env.AEE_RESTORED_ENV_OUTBOUND_ALLOW; off();
+  await expectAllowed(() => gp.searchAddress("1 Test St"));
+  sawSend("maps.googleapis.com");
+});
+
+test("WS4-12 (b): routes/properties.ts builds its provider through the guarded lib factory (one construction line)", () => {
+  const src = readFileSync(path.join(repoRoot, "apps/api/src/routes/properties.ts"), "utf8");
+  assert.match(src, /^const propertyDataProvider = createGuardedPropertyDataProvider\(\);$/m);
+  assert.doesNotMatch(src, /createPropertyDataProvider\(|new GooglePlacesProvider\(/);
+});
+
 // ---------- guards ----------
 // Any use of the fetch identifier (call, default parameter, injected config.fetch) or a raw transport opener.
 const TRANSPORT_RE = /\bfetch\b|\bhttps?\.(request|get)\s*\(|\bnet\.connect\s*\(|\btls\.connect\s*\(|new\s+WebSocket\s*\(|createTransport\s*\(/;
@@ -252,6 +304,7 @@ test("guard: every file that opens an outbound transport is registered to a guar
   const registered = new Set<string>([...Object.values(OUTBOUND_CHANNELS).flatMap((c) => [...c.transports]), ...Object.keys(NOT_GUARDED_TRANSPORTS)]);
   const files = sourceFiles().filter((f) => readFileSync(f, "utf8").split("\n").some((l) => isCode(l) && TRANSPORT_RE.test(l))).map(rel).sort();
   assert.ok(files.includes("packages/integrations/property-data/src/index.ts"), "the detector must see injected fetch (GooglePlacesProvider)");
+  assert.deepEqual(Object.keys(NOT_GUARDED_TRANSPORTS), [], "WS4-12: no known-gap transports remain");
   assert.deepEqual(files.filter((f) => !registered.has(f)), [], "register the transport in lib/outboundGuard.ts OUTBOUND_CHANNELS and guard it");
 });
 
@@ -274,7 +327,7 @@ test("guard: every provider class/object is classified, and its code agrees (in_
     if (!inScope) continue;
     for (const m of readFileSync(f, "utf8").matchAll(/^export\s+(?:class|const)\s+(\w+Provider)\b/gm)) found.push(m[1]!);
   }
-  assert.deepEqual(found.filter((s) => !classified.has(s) && s !== "MockPropertyDataProvider" && s !== "GooglePlacesProvider").sort(), [], "classify every provider in PROVIDERS (property-data: gap G-PD)");
+  assert.deepEqual(found.filter((s) => !classified.has(s)).sort(), [], "classify every provider in PROVIDERS");
   for (const p of PROVIDERS) {
     const body = symbolBody(p.file, p.symbol).split("\n").filter(isCode).join("\n");
     const opens = TRANSPORT_RE.test(body);

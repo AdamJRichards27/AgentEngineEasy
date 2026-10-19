@@ -13,7 +13,7 @@
 //   * auth_email is refused whatever the provider (D-PR / D-INV: restored data holds real people's addresses and the
 //     sandbox's pilot mode emits hand-deliverable credential links) and cannot be allow-listed;
 //   * document object-storage WRITES (putObject/deleteObject) are refused unless AEE_RESTORED_ENV_STORAGE_ISOLATED is
-//     exactly "true" (D-OS); reads are allowed.
+//     exactly "true" (D-OS); the local filesystem provider is exempt (WS4-12); reads are allowed.
 //
 // The refusal is code RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED; middlewares/errorHandler.ts maps it to HTTP 503 (the
 // request is valid and authorised; the server deliberately does not perform the dependency here — RFC 9110 §15.6.4;
@@ -54,6 +54,7 @@ export const OUTBOUND_CHANNELS = {
   aml: { guard: "apps/api/src/lib/aml.ts", transports: ["packages/integrations/aml/src/index.ts"] },
   telephony: { guard: "apps/api/src/lib/telephony/callSessions.ts", transports: [] as string[] },
   object_storage_write: { guard: "apps/api/src/lib/documentStorage.ts", transports: ["packages/integrations/object-storage/src/index.ts"] },
+  property_data: { guard: "apps/api/src/lib/propertyData.ts", transports: ["packages/integrations/property-data/src/index.ts"] },
 } as const;
 export type OutboundChannel = keyof typeof OUTBOUND_CHANNELS;
 
@@ -61,10 +62,8 @@ export type OutboundChannel = keyof typeof OUTBOUND_CHANNELS;
 export const ALWAYS_BLOCKED_IN_RESTORED: ReadonlySet<OutboundChannel> = new Set<OutboundChannel>(["auth_email"]);
 
 /** Transports deliberately NOT guarded, each with its reason. */
-export const NOT_GUARDED_TRANSPORTS: Record<string, string> = {
-  "packages/integrations/property-data/src/index.ts":
-    "GooglePlacesProvider (network: fetchImpl, defaulting to the global HTTP client). Constructed only in apps/api/src/routes/properties.ts, a route file outside the WS4-11 lease — STOP; gap G-PD.",
-};
+// WS4-12: empty. (property-data, the former gap G-PD, is now guarded through lib/propertyData.ts.)
+export const NOT_GUARDED_TRANSPORTS: Record<string, string> = {};
 
 export type ProviderKind = "in_process" | "network";
 export interface ProviderClassification {
@@ -96,9 +95,12 @@ export const PROVIDERS: readonly ProviderClassification[] = [
   { channel: "aml", provider: "mock", kind: "in_process", file: "packages/integrations/aml/src/index.ts", symbol: "MockAMLProvider" },
   { channel: "aml", provider: "http", kind: "network", file: "packages/integrations/aml/src/index.ts", symbol: "HttpAMLProvider" },
   { channel: "telephony", provider: "sandbox", kind: "in_process", file: "apps/api/src/lib/telephony/sandboxProvider.ts", symbol: "SandboxTelephonyProvider" },
-  // Object storage: classified for the record; writes follow the D-OS rule (isolation flag), not this kind.
+  // Object storage writes follow the D-OS rule: the local filesystem provider is exempt (WS4-12: its writes stay on
+  // that environment's own disk); every other provider needs AEE_RESTORED_ENV_STORAGE_ISOLATED=true.
   { channel: "object_storage_write", provider: "local", kind: "in_process", file: "packages/integrations/object-storage/src/index.ts", symbol: "LocalObjectStorageProvider" },
   { channel: "object_storage_write", provider: "s3", kind: "network", file: "packages/integrations/object-storage/src/index.ts", symbol: "S3ObjectStorageProvider" },
+  { channel: "property_data", provider: "mock", kind: "in_process", file: "packages/integrations/property-data/src/index.ts", symbol: "MockPropertyDataProvider" },
+  { channel: "property_data", provider: "google-places", kind: "network", file: "packages/integrations/property-data/src/index.ts", symbol: "GooglePlacesProvider" },
 ];
 
 /** ObjectStorageProvider members: every interface method must be in exactly one set (guard test). */
@@ -173,10 +175,15 @@ export function assertOutboundAllowed(channel: OutboundChannel, provider: string
   if (b) throw b;
 }
 
-/** D-OS: object-storage writes/deletes in a restored environment need AEE_RESTORED_ENV_STORAGE_ISOLATED=true exactly. */
+/**
+ * D-OS: object-storage writes/deletes in a restored environment need AEE_RESTORED_ENV_STORAGE_ISOLATED=true exactly,
+ * except the local filesystem provider (WS4-12, Grok 23:32: writes stay on that environment's disk). S3 and any
+ * unclassified provider stay blocked.
+ */
+export const STORAGE_WRITE_EXEMPT_PROVIDERS: ReadonlySet<string> = new Set(["local"]);
 export function storageWriteBlocked(provider: string, env: Env = process.env): RestoredEnvironmentOutboundBlockedError | null {
   const mode = restoredEnvironmentMode(env);
-  if (!mode.restored || restoredStorageIsolated(env)) return null;
+  if (!mode.restored || restoredStorageIsolated(env) || STORAGE_WRITE_EXEMPT_PROVIDERS.has(provider)) return null;
   return block("object_storage_write", mode.reason, provider, "storage_not_isolated");
 }
 

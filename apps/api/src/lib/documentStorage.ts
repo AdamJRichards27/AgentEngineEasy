@@ -116,7 +116,7 @@ let providerOverride: ObjectStorageProvider | null = null;
 let cachedProvider: ObjectStorageProvider | null = null;
 
 // WS4-11 D-OS: in a restored environment putObject/deleteObject are refused (RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED)
-// unless AEE_RESTORED_ENV_STORAGE_ISOLATED is exactly "true"; reads pass. Applied to the override and the configured
+// unless AEE_RESTORED_ENV_STORAGE_ISOLATED is exactly "true" (the local filesystem provider is exempt, WS4-12); reads pass. Applied to the override and the configured
 // provider alike, so every document-storage write in the API goes through it (lib/outboundGuard.ts).
 const guardedProviders = new WeakMap<ObjectStorageProvider, ObjectStorageProvider>();
 function guarded(provider: ObjectStorageProvider): ObjectStorageProvider {
