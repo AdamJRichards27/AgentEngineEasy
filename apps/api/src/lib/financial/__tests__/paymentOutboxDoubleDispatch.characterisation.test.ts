@@ -1,35 +1,19 @@
-// F-01: CHARACTERISATION TESTS ONLY. They pin CURRENT (wrong) behaviour of the payment outbox under concurrent
-// dispatch; nothing here is a fix. No production code is changed by this file.
-//
-// Gap: dispatchPendingPaymentOutbox() (lib/financial/paymentOutbox.ts) selects every due PENDING row and hands each to
-// dispatchOutboxEntry(), which calls the mandate provider and THEN updates the outbox row and the payment request
-// with no claim: no row lock, no conditional "WHERE status = 'PENDING'" update. Two dispatchers that both read the row
-// as PENDING (two API instances' timers, the timer plus POST /financial/ops/dispatch-outbox, or
-// scheduleDebitForPaymentRequest plus a sweep) both call the provider and both write. Result: two provider debits for
-// one payment command, two PC_FEE_DEBIT_SCHEDULED ledger rows, two FINANCIAL_PAYMENT_SCHEDULED domain events, and,
-// when the two dispatchers do not share provider idempotency state, the payment request's providerRequestRef is
-// overwritten by the second write (the first debit is orphaned).
-//
-// HOW TO READ THIS FILE
-// - "[F-01 GAP]" tests pin the gap. They are expected to FLIP when an Owner-approved claim/lock lands: each one says
-//   "CURRENT:" (what it asserts now) and "INTENDED (likely):" (what a fix would assert). Search for F01_GAP.
-// - "[F-01 LOCK]" tests pin neighbouring behaviour a fix must NOT change.
+// F-01: originally characterisation tests that pinned payment outbox double-dispatch under concurrent dispatchers
+// (commit c2d898d2). The F-01 fix (conditional PENDING -> DISPATCHING claim in dispatchOutboxEntry, lease on
+// nextAttemptAt, guarded success/failure writes; lib/financial/paymentOutbox.ts) has landed, so the former
+// "[F-01 GAP]" tests are FLIPPED to "[F-01 FIXED]": they now assert exactly one dispatch. "[F-01 LOCK]" tests are
+// unchanged and must keep passing.
 //
 // DETERMINISTIC HARNESS
-// - Concurrency comes from the real code: two real dispatchPendingPaymentOutbox() calls (or the scheduling call plus
-//   one sweep) run at the same time on separate pooled DB connections.
-// - The interleaving is fixed by a provider hook: mandatePaymentProvider.scheduleDebit is wrapped IN THIS TEST
-//   PROCESS ONLY (own-property override, removed afterwards). For this file's own idempotency key, each call parks at
-//   a gate. Dispatcher 1 is started and parked inside the provider call (it has read the row as PENDING and has not
-//   written anything yet); only then is dispatcher 2 started, and it parks too, having also read the row as PENDING.
-//   Then dispatcher 1 is released and run to completion, then dispatcher 2. So the write order is fixed and every
-//   count below is exact. Calls for any other idempotency key pass straight through to the real provider.
-// - "Two instances" means the second parked call is answered by a separate SandboxMandatePaymentProvider instance,
-//   modelling a second API process (each process has its own in-memory sandbox, see lib/financial/provider.ts).
-//   "Shared idempotent provider" answers both from the module singleton, which replays the same ref for the same key.
-// - Shared test DB caveat (disclosed): the sweeps are global, so for the few milliseconds of each race they could
-//   also touch another file's due PENDING outbox row, and another file's sweep could touch this one. Files that
-//   create payment outbox rows keep them out of sweeps (nextAttemptAt +24h, local/run-test-payment-outbox-isolation).
+// - Concurrency comes from the real code: real dispatchPendingPaymentOutbox() / scheduleDebitForPaymentRequest() /
+//   dispatchOutboxEntry() calls on separate pooled DB connections.
+// - mandatePaymentProvider.scheduleDebit is wrapped IN THIS TEST PROCESS ONLY (own-property override, removed
+//   afterwards). For this file's own idempotency key, each call parks at a gate. Dispatcher 1 is parked inside the
+//   provider call (it holds the claim); every other dispatcher is then run TO COMPLETION before dispatcher 1 is
+//   released, so any second provider call would be counted exactly.
+// - "Two instances" = the second call (if any) is answered by a separate SandboxMandatePaymentProvider instance.
+// - Shared test DB caveat (disclosed): sweeps are global; files that create payment outbox rows keep them out of
+//   sweeps (nextAttemptAt +24h, local/run-test-payment-outbox-isolation).
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -48,7 +32,7 @@ import { createBrokerageWithUsers, createTransactionFromListedProperty, cleanupB
 import { createCommissionCalculation } from "../calculations.js";
 import { createPcFeeCalculation } from "../pcFeeCalculations.js";
 import { ensurePcSuccessFeeRequest } from "../settlement.js";
-import { advancePaymentRequestToNoticeSent, dispatchPendingPaymentOutbox, scheduleDebitForPaymentRequest } from "../paymentOutbox.js";
+import { advancePaymentRequestToNoticeSent, dispatchOutboxEntry, dispatchPendingPaymentOutbox, scheduleDebitForPaymentRequest } from "../paymentOutbox.js";
 import { mandatePaymentProvider } from "../provider.js";
 
 process.env.SESSION_SECRET =
@@ -57,8 +41,8 @@ process.env.SESSION_SECRET =
     : "test-only-session-secret-not-for-real-use-0123456789";
 process.env.ALLOW_DEV_AUTH = "true";
 
-/** Marker a future fix flips: every [F-01 GAP] test asserts against this documented current behaviour. */
-const F01_GAP = "F-01 characterises payment outbox double-dispatch under concurrent dispatchers (no claim)";
+/** Every [F-01 FIXED] assertion carries this marker. */
+const F01_FIXED = "F-01 fix: exactly one dispatch per payment outbox command under concurrent dispatchers";
 
 let server: Server;
 let baseUrl: string;
@@ -162,6 +146,25 @@ function installProviderGate(idempotencyKey: string, options: { autoRelease?: bo
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
     },
+    /**
+     * Awaits `work`, but if it makes a SECOND parked provider call (the double dispatch the fix prevents) every parked
+     * call is released so nothing hangs; the caller's arrival-count assertion then fails fast instead of timing out.
+     */
+    async settleUnlessSecondArrival<T>(work: Promise<T>): Promise<T> {
+      let done = false;
+      const watcher = (async () => {
+        while (!done) {
+          if (arrivals.length >= 2) for (const arrival of arrivals) arrival.release(); // keep releasing until work settles
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      })();
+      try {
+        return await work;
+      } finally {
+        done = true;
+        await watcher;
+      }
+    },
     restore(): void {
       delete (mandatePaymentProvider as { scheduleDebit?: unknown }).scheduleDebit;
       assert.equal(mandatePaymentProvider.scheduleDebit, original, "provider hook removed");
@@ -195,20 +198,25 @@ async function outboxRows(f: Fixture) {
   return db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.paymentRequestId, f.paymentRequestId));
 }
 
-/** Two real sweeps, interleaved deterministically: both read the row as PENDING, then 1 finishes, then 2. */
+/**
+ * Two real sweeps: sweep 1 claims the row and parks inside the provider call; sweep 2 then runs to completion while
+ * sweep 1 still holds the claim; a stale-snapshot dispatchOutboxEntry (the row as both sweeps read it, PENDING) is
+ * also run to completion; then sweep 1 is released. Returns provider arrivals and the stand-down results.
+ */
 async function raceTwoSweeps(f: Fixture, providerFor: (index: number) => MandatePaymentProvider) {
   const gate = installProviderGate(f.idempotencyKey, { providerFor });
   try {
+    const [stalePending] = await outboxRows(f);
+    assert.equal(stalePending.status, "PENDING");
     const sweep1 = dispatchPendingPaymentOutbox(50);
-    await gate.waitForArrivals(1); // sweep 1 has read the row as PENDING and is inside the provider call
-    const sweep2 = dispatchPendingPaymentOutbox(50);
-    await gate.waitForArrivals(2); // sweep 2 has ALSO read it as PENDING (sweep 1 has written nothing yet)
+    await gate.waitForArrivals(1); // sweep 1 holds the claim and is inside the provider call
+    const sweep2Result = await gate.settleUnlessSecondArrival(dispatchPendingPaymentOutbox(50)); // finishes while sweep 1 is parked
+    const staleOutcome = await gate.settleUnlessSecondArrival(dispatchOutboxEntry(stalePending)); // read PENDING before the claim
     gate.arrivals[0].release();
     await sweep1;
-    gate.arrivals[1].release();
-    await sweep2;
-    return gate.arrivals;
+    return { arrivals: gate.arrivals, sweep2Result, staleOutcome };
   } finally {
+    for (const arrival of gate.arrivals) arrival.release();
     gate.restore();
   }
 }
@@ -225,7 +233,7 @@ before(async () => {
   if (!address || typeof address === "string") throw new Error("unexpected server address");
   baseUrl = `http://127.0.0.1:${address.port}`;
   A = await createBrokerageWithUsers(baseUrl, `F01 Double Dispatch ${suffix}`);
-  for (const label of ["two-instances", "shared-provider", "caller-vs-sweep", "single-sweep", "sequential-sweeps", "redispatch-call"]) {
+  for (const label of ["two-instances", "shared-provider", "caller-vs-sweep", "single-sweep", "sequential-sweeps", "redispatch-call", "lease-reclaim", "stale-failure"]) {
     fx[label] = await buildNoticeSentFixture(label);
   }
 });
@@ -235,70 +243,104 @@ after(async () => {
   if (server) await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
-describe("F-01 characterisation: payment outbox double-dispatch under concurrent dispatchers", { concurrency: false }, () => {
-  test("[F-01 GAP] two concurrent sweeps, two API instances: two provider debits, two ledger rows, two events, providerRequestRef overwritten", async () => {
-    // CURRENT: both sweeps dispatch the one PENDING row. INTENDED (likely): exactly one dispatch; the second sweep sees
-    // the row claimed (or skips it) and makes no provider call, no ledger row and no event.
+describe("F-01: payment outbox dispatch claim under concurrent dispatchers", { concurrency: false }, () => {
+  test("[F-01 FIXED] two concurrent sweeps, two API instances: one provider debit, one ledger row, one event, ref kept", async () => {
+    // WAS (GAP, c2d898d2): two provider debits, ref overwritten by the second, two ledger rows, two events.
     const f = fx["two-instances"];
     await insertDueOutboxRow(f);
-    const arrivals = await raceTwoSweeps(f, twoInstances());
+    const { arrivals, staleOutcome } = await raceTwoSweeps(f, twoInstances());
 
-    assert.equal(arrivals.length, 2, F01_GAP); // two provider scheduleDebit calls for ONE payment command
-    const [first, second] = arrivals.map((a) => a.result!.providerRequestRef);
-    assert.notEqual(first, second, F01_GAP); // two distinct debits at the provider
+    assert.equal(arrivals.length, 1, F01_FIXED); // exactly one provider scheduleDebit call
+    assert.equal(staleOutcome.paymentRequest, null, F01_FIXED); // the stale dispatcher stood down
     const request = await paymentRequest(f);
     assert.equal(request.status, "DEBIT_SCHEDULED");
-    assert.equal(request.providerRequestRef, second, F01_GAP); // the second write overwrote the first
-    assert.notEqual(request.providerRequestRef, first, F01_GAP); // the first debit is orphaned (no row points at it)
-    assert.equal((await scheduledLedgerRows(f)).length, 2, F01_GAP);
-    assert.equal((await scheduledDomainEvents(f)).length, 2, F01_GAP);
+    assert.equal(request.providerRequestRef, arrivals[0].result!.providerRequestRef, F01_FIXED);
+    assert.equal((await scheduledLedgerRows(f)).length, 1, F01_FIXED);
+    assert.equal((await scheduledDomainEvents(f)).length, 1, F01_FIXED);
     const rows = await outboxRows(f);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].status, "DISPATCHED");
   });
 
-  test("[F-01 GAP] two concurrent sweeps, shared idempotent provider: ref kept, but still two provider calls, two ledger rows, two events", async () => {
-    // CURRENT: the provider replays the same ref for the same idempotency key, so the ref survives, but the app still
-    // writes its side effects twice. INTENDED (likely): one provider call, one ledger row, one event.
+  test("[F-01 FIXED] two concurrent sweeps, shared idempotent provider: one provider call, one ledger row, one event", async () => {
+    // WAS (GAP): ref kept by provider idempotency, but two provider calls, two ledger rows, two events.
     const f = fx["shared-provider"];
     await insertDueOutboxRow(f);
-    const arrivals = await raceTwoSweeps(f, singletonOnly);
+    const { arrivals } = await raceTwoSweeps(f, singletonOnly);
 
-    assert.equal(arrivals.length, 2, F01_GAP);
-    const [first, second] = arrivals.map((a) => a.result!.providerRequestRef);
-    assert.equal(first, second); // provider-side idempotency on the key holds (LOCK-like; stays true after a fix)
-    assert.equal((await paymentRequest(f)).providerRequestRef, first);
-    assert.equal((await scheduledLedgerRows(f)).length, 2, F01_GAP);
-    assert.equal((await scheduledDomainEvents(f)).length, 2, F01_GAP);
+    assert.equal(arrivals.length, 1, F01_FIXED);
+    assert.equal((await paymentRequest(f)).providerRequestRef, arrivals[0].result!.providerRequestRef);
+    assert.equal((await scheduledLedgerRows(f)).length, 1, F01_FIXED);
+    assert.equal((await scheduledDomainEvents(f)).length, 1, F01_FIXED);
   });
 
-  test("[F-01 GAP] scheduleDebitForPaymentRequest racing one sweep: the caller is handed a providerRequestRef the DB no longer holds", async () => {
-    // The production shape of the paymentWebhooks full-suite flake: an API request schedules the debit while a sweep
-    // (timer or ops route, another instance) picks up the just-inserted, already-due row.
-    // CURRENT: both dispatch; the caller's returned ref is overwritten by the sweep's.
-    // INTENDED (likely): one dispatch; whatever ref the caller is given is the ref stored on the payment request.
+  test("[F-01 FIXED] scheduleDebitForPaymentRequest racing one sweep: the caller's providerRequestRef is the stored ref", async () => {
+    // WAS (GAP): both dispatched; the caller's returned ref was overwritten by the sweep's (webhook -> not_found).
     const f = fx["caller-vs-sweep"];
     const gate = installProviderGate(f.idempotencyKey, { providerFor: twoInstances() });
     let callerRef: string | null | undefined;
+    let sweepResult: Awaited<ReturnType<typeof dispatchPendingPaymentOutbox>> | undefined;
     try {
       const caller = scheduleDebitForPaymentRequest({ paymentRequestId: f.paymentRequestId });
-      await gate.waitForArrivals(1); // the caller inserted the PENDING row and is inside the provider call
-      const sweep = dispatchPendingPaymentOutbox(50);
-      await gate.waitForArrivals(2); // the sweep read the same row as PENDING
+      await gate.waitForArrivals(1); // the caller inserted and claimed the row and is inside the provider call
+      sweepResult = await gate.settleUnlessSecondArrival(dispatchPendingPaymentOutbox(50)); // completes while the caller holds the claim
+      const again = await gate.settleUnlessSecondArrival(scheduleDebitForPaymentRequest({ paymentRequestId: f.paymentRequestId })); // a retrying caller
+      assert.equal(gate.arrivals.length, 1, F01_FIXED);
+      assert.equal(again.dispatched, false, F01_FIXED); // reported in flight, not dispatched again
       gate.arrivals[0].release();
       callerRef = (await caller).paymentRequest.providerRequestRef;
-      gate.arrivals[1].release();
-      await sweep;
+    } finally {
+      for (const arrival of gate.arrivals) arrival.release();
+      gate.restore();
+    }
+    assert.ok(sweepResult);
+    assert.equal(gate.arrivals.length, 1, F01_FIXED);
+    assert.equal(callerRef, gate.arrivals[0].result!.providerRequestRef);
+    assert.equal((await paymentRequest(f)).providerRequestRef, callerRef, F01_FIXED);
+    assert.equal((await scheduledLedgerRows(f)).length, 1, F01_FIXED);
+    assert.equal((await scheduledDomainEvents(f)).length, 1, F01_FIXED);
+  });
+
+  test("[F-01 FIXED] an expired claim (crashed dispatcher) is reclaimed by the sweep, counted as an attempt, and dispatched once", async () => {
+    const f = fx["lease-reclaim"];
+    const row = await insertDueOutboxRow(f);
+    // Simulate a dispatcher that claimed the row and crashed: DISPATCHING with a lease that expired 1s ago.
+    await db.update(financialPaymentOutbox).set({ status: "DISPATCHING", nextAttemptAt: new Date(Date.now() - 1_000) }).where(eq(financialPaymentOutbox.id, row.id));
+    const gate = installProviderGate(f.idempotencyKey, { autoRelease: true, providerFor: singletonOnly });
+    try {
+      await dispatchPendingPaymentOutbox(50);
+      await dispatchPendingPaymentOutbox(50);
     } finally {
       gate.restore();
     }
-    assert.equal(gate.arrivals.length, 2, F01_GAP);
-    assert.equal(callerRef, gate.arrivals[0].result!.providerRequestRef);
-    const stored = (await paymentRequest(f)).providerRequestRef;
-    assert.equal(stored, gate.arrivals[1].result!.providerRequestRef, F01_GAP);
-    assert.notEqual(stored, callerRef, F01_GAP); // a webhook for the caller's ref would be payment_request_not_found
-    assert.equal((await scheduledLedgerRows(f)).length, 2, F01_GAP);
-    assert.equal((await scheduledDomainEvents(f)).length, 2, F01_GAP);
+    assert.equal(gate.arrivals.length, 1, F01_FIXED);
+    const [after] = await outboxRows(f);
+    assert.equal(after.status, "DISPATCHED");
+    assert.equal(after.attempts, row.attempts + 1); // the reclaim counted as an attempt
+    assert.equal((await scheduledLedgerRows(f)).length, 1, F01_FIXED);
+  });
+
+  test("[F-01 FIXED] a live claim is not reclaimed, and a stale dispatcher cannot write the row back to PENDING", async () => {
+    const f = fx["stale-failure"];
+    const row = await insertDueOutboxRow(f);
+    // Another dispatcher holds a live claim (lease in the future).
+    const leaseUntil = new Date(Date.now() + 60_000);
+    await db.update(financialPaymentOutbox).set({ status: "DISPATCHING", nextAttemptAt: leaseUntil }).where(eq(financialPaymentOutbox.id, row.id));
+    const gate = installProviderGate(f.idempotencyKey, { autoRelease: true, providerFor: singletonOnly });
+    let outcome: Awaited<ReturnType<typeof dispatchOutboxEntry>>;
+    try {
+      outcome = await dispatchOutboxEntry(row); // stale PENDING snapshot
+      await dispatchPendingPaymentOutbox(50);
+    } finally {
+      gate.restore();
+    }
+    assert.equal(gate.arrivals.length, 0, F01_FIXED);
+    assert.equal(outcome.paymentRequest, null);
+    const [after] = await outboxRows(f);
+    assert.equal(after.status, "DISPATCHING", F01_FIXED); // not flipped back to PENDING, not FAILED
+    assert.equal(after.attempts, row.attempts);
+    assert.equal(after.nextAttemptAt.getTime(), leaseUntil.getTime());
+    assert.equal((await paymentRequest(f)).status, "NOTICE_SENT");
   });
 
   test("[F-01 LOCK] one sweep alone dispatches the row once: one provider call, one ledger row, one event, ref stored", async () => {
