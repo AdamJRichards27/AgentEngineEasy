@@ -4,8 +4,10 @@ import type { AmlVerification, Party } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
+import { guardOutboundProvider } from "./outboundGuard.js";
 
-const amlProvider = createAMLProvider();
+// WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+export const amlProvider = guardOutboundProvider("aml", createAMLProvider(), ["requestVerification"]);
 
 // Placeholder pricing pending a real vendor contract — Phase 6 ("Payments")
 // is what actually charges a stored payment method for this ServiceOrder;

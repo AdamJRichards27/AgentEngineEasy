@@ -63,6 +63,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { logger } from "@aee/events";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
+import { isRestoredEnvironmentOutboundBlockedError } from "../lib/outboundGuard.js";
 
 const GENERIC_SERVER_ERROR_MESSAGE = "An unexpected error occurred. Please try again or contact support if the problem persists.";
 
@@ -94,6 +95,14 @@ function isMalformedBody(err: BodyParserLikeError): boolean {
 export function globalErrorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
   if (res.headersSent) {
     next(err);
+    return;
+  }
+
+  // WS4-09: a restored environment refused an outbound seam (lib/outboundGuard.ts). Expected, not a fault: no
+  // error log, no operational alert (which the same switch blocks anyway); a stable code and 503 for the caller.
+  if (isRestoredEnvironmentOutboundBlockedError(err)) {
+    logger.warn("restored_environment_outbound_blocked_response", { channel: err.channel, method: req.method, path: req.path });
+    res.status(err.httpStatus).json({ error: err.message, code: err.code, channel: err.channel });
     return;
   }
 

@@ -41,6 +41,7 @@ import {
 } from "@aee/db";
 import { mandatePaymentProvider } from "./provider.js";
 import { emitFinancialEvent } from "./events.js";
+import { assertOutboundAllowed } from "../outboundGuard.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -400,6 +401,8 @@ export interface DispatchSweepResult {
  * never lets one entry's error stop the sweep.
  */
 export async function dispatchPendingPaymentOutbox(limit = 20): Promise<DispatchSweepResult> {
+  // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+  assertOutboundAllowed("financial_payment_dispatch");
   const due = await db
     .select()
     .from(financialPaymentOutbox)

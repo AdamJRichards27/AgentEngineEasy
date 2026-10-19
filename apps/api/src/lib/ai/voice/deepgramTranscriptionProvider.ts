@@ -1,5 +1,6 @@
 import type { TranscriptionProvider, TranscriptionRequest, TranscriptionResponse } from "./types.js";
 import { TranscriptionProviderError } from "./types.js";
+import { assertOutboundAllowed } from "../../outboundGuard.js";
 
 // AE GROW Priority 6 Stage E — real provider, inactive until
 // AI_TRANSCRIPTION_PROVIDER=deepgram, DEEPGRAM_API_KEY, and
@@ -60,6 +61,8 @@ export class DeepgramTranscriptionProvider implements TranscriptionProvider {
   }
 
   async transcribe(request: TranscriptionRequest): Promise<TranscriptionResponse> {
+    // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+    assertOutboundAllowed("voice_transcription");
     const start = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);

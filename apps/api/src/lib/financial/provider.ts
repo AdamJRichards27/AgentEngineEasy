@@ -10,5 +10,7 @@
 // singleton, generalised across two consuming files instead of one.
 
 import { createMandatePaymentProvider } from "@aee/integration-mandate-payments";
+import { guardOutboundProvider } from "../outboundGuard.js";
 
-export const mandatePaymentProvider = createMandatePaymentProvider();
+// WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+export const mandatePaymentProvider = guardOutboundProvider("mandate_payments", createMandatePaymentProvider(), ["scheduleDebit", "cancelScheduledDebit", "reverseDebit"]);

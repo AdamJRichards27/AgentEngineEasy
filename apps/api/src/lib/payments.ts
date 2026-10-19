@@ -2,8 +2,10 @@ import { eq, and, desc } from "drizzle-orm";
 import { db, paymentMethods, serviceOrders, payments, properties } from "@aee/db";
 import type { PaymentMethod, ServiceOrder, Payment } from "@aee/db";
 import { createPaymentProvider, type PaymentWebhookResult } from "@aee/integration-payments";
+import { guardOutboundProvider } from "./outboundGuard.js";
 
-const paymentProvider = createPaymentProvider();
+// WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+export const paymentProvider = guardOutboundProvider("payments", createPaymentProvider(), ["chargeStoredMethod", "refund"]);
 
 /**
  * Attaches an already-tokenized stored payment method (Phase 6). Real card

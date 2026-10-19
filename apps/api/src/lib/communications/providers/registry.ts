@@ -37,6 +37,7 @@ import { mustForceSandboxCommunicationsProvider } from "../../env.js";
 import { sandboxEmailProvider } from "./sandboxEmail.js";
 import { sandboxSmsProvider } from "./sandboxSms.js";
 import { CommunicationProviderError, type EmailProvider, type SmsProvider } from "./types.js";
+import { assertOutboundAllowed } from "../../outboundGuard.js";
 
 /** The only provider id this build resolves. Anything else fails closed. */
 export const SANDBOX_PROVIDER_ID = "sandbox";
@@ -161,6 +162,9 @@ function resolveProvider<P extends { name: string }>(args: {
  * directly — object identity, not merely equivalent behaviour.
  */
 export function resolveEmailProvider(config: CommunicationProviderConfig = loadCommunicationProviderConfig()): EmailProvider {
+  // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+  // Thrown before dispatchMessage() moves the message to SENDING, so it stays QUEUED/RETRY_SCHEDULED.
+  assertOutboundAllowed("communications_email");
   return resolveProvider<EmailProvider>({
     channel: "EMAIL",
     requested: normalizeProviderId(config.email),
@@ -172,6 +176,8 @@ export function resolveEmailProvider(config: CommunicationProviderConfig = loadC
 
 /** SMS counterpart of resolveEmailProvider(). Resolved independently — approving one channel's provider never selects the other's. */
 export function resolveSmsProvider(config: CommunicationProviderConfig = loadCommunicationProviderConfig()): SmsProvider {
+  // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+  assertOutboundAllowed("communications_sms");
   return resolveProvider<SmsProvider>({
     channel: "SMS",
     requested: normalizeProviderId(config.sms),
