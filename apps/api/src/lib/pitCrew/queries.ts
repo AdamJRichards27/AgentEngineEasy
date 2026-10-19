@@ -384,7 +384,12 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
 
   const assignedUserIds = [...new Set(overlayRows.map((row) => row.assignedToUserId).filter((id): id is number => id != null))];
   const assignedUsers = assignedUserIds.length
-    ? await db.select({ id: users.id, firstName: users.firstName, lastName: users.lastName }).from(users).where(inArray(users.id, assignedUserIds))
+    ? await db
+        .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+        .from(users)
+        // PC-A: same brokerage scope as the launch-item lookup. An assignee
+        // outside this brokerage keeps assignedToUserId but gets no name.
+        .where(and(inArray(users.id, assignedUserIds), eq(users.brokerageId, brokerageId)))
     : [];
   const nameByUserId = new Map(assignedUsers.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
@@ -519,6 +524,9 @@ export async function getPitCrewTeam(brokerageId: number): Promise<PcTeamMember[
     .from(pitCrewAssignments)
     .where(
       and(
+        // PC-A: count only this brokerage's overlays, so another tenant's
+        // row cannot add to this team's capacity signal.
+        eq(pitCrewAssignments.brokerageId, brokerageId),
         inArray(pitCrewAssignments.assignedToUserId, memberIds),
         inArray(pitCrewAssignments.status, ["CLAIMED", "IN_PROGRESS", "WAITING_ON"]),
       ),
