@@ -16,14 +16,32 @@
  * test module -- and so @aee/db's pool -- is imported, it runs
  *   CREATE DATABASE aee_t_<epoch>_<pid> TEMPLATE <base>
  * and points DATABASE_URL at the clone. Child processes a test spawns inherit
- * the clone URL and are left alone. Idle clones older than 3 h are dropped
- * (no FORCE). Active only when NODE_ENV=test; opt out: AEE_TEST_DB_PER_FILE=0.
+ * the clone URL and are left alone. Active only when NODE_ENV=test; opt out:
+ * AEE_TEST_DB_PER_FILE=0.
+ *
+ * CLEANUP (PH-7 R29c). When the test-file process exits -- tests passed or
+ * failed -- its own clone is dropped (WITH FORCE) by perFileDatabaseDrop.mjs,
+ * run synchronously from the `exit` handler (bounded by
+ * AEE_TEST_DB_DROP_TIMEOUT_MS, default 15000). Best-effort: a failed drop
+ * prints one warning (no URL) and never changes the exit code.
+ * AEE_TEST_DB_KEEP=1 keeps the clone for debugging. A process killed by a
+ * signal cannot run the handler, so the idle sweep stays as the backstop:
+ * clones older than 3 h are dropped (no FORCE), matching ONLY names this
+ * helper generates (<prefix><epoch>_<pid>).
+ *
+ * PREFIX. AEE_TEST_DB_PREFIX (default "aee_t_"): lower-case letters, digits
+ * and "_", starting with a letter, at most 30 characters.
  */
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 
-const PREFIX = "aee_t_";
+const PREFIX = process.env.AEE_TEST_DB_PREFIX ?? "aee_t_";
 const STALE_SECONDS = 3 * 3600;
 const quote = (name) => `"${name.replace(/"/g, '""')}"`;
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeLike = (text) => text.replace(/[\\%_]/g, "\\$&");
+const helperName = new RegExp(`^${escapeRegExp(PREFIX)}(\\d+)_(\\d+)$`);
 
 async function withAdmin(url, fn) {
   const admin = new URL(url.href);
@@ -42,6 +60,29 @@ const enabled =
   process.env.AEE_TEST_DB_PER_FILE !== "0" &&
   Boolean(process.env.NODE_TEST_CONTEXT) &&
   Boolean(process.env.DATABASE_URL);
+
+if (enabled && !/^[a-z][a-z0-9_]{0,29}$/.test(PREFIX)) {
+  throw new Error("AEE_TEST_DB_PREFIX must be lower-case letters, digits or _, start with a letter, and be at most 30 characters");
+}
+
+/** Synchronous best-effort drop of this process's own clone (see CLEANUP). */
+function dropOnExit(adminUrl, clone) {
+  if (process.env.AEE_TEST_DB_KEEP === "1") return;
+  const timeout = Number(process.env.AEE_TEST_DB_DROP_TIMEOUT_MS ?? 15_000);
+  try {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("./perFileDatabaseDrop.mjs", import.meta.url))], {
+      env: { PATH: process.env.PATH ?? "", AEE_TEST_DB_DROP_ADMIN_URL: adminUrl, AEE_TEST_DB_DROP_NAME: clone },
+      encoding: "utf8",
+      timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 15_000,
+    });
+    if (result.status !== 0) {
+      const reason = result.error ? result.error.message : (result.stderr || `exit ${result.status ?? result.signal}`).trim();
+      process.stderr.write(`perFileDatabase: could not drop test database copy ${clone} (${reason.slice(0, 200)}); the idle sweep will remove it later\n`);
+    }
+  } catch (error) {
+    process.stderr.write(`perFileDatabase: could not drop test database copy ${clone} (${error instanceof Error ? error.message : String(error)})\n`);
+  }
+}
 
 if (enabled) {
   const base = new URL(process.env.DATABASE_URL);
@@ -62,10 +103,12 @@ if (enabled) {
           await new Promise((resolve) => setTimeout(resolve, 100 + Math.floor(Math.random() * 150)));
         }
       }
-      const { rows } = await client.query("select datname from pg_database where datname like $1", [`${PREFIX}%`]);
+      const { rows } = await client.query("select datname from pg_database where datname like $1", [`${escapeLike(PREFIX)}%`]);
       for (const { datname } of rows) {
-        const epoch = Number(datname.slice(PREFIX.length).split("_")[0]);
-        if (Number.isFinite(epoch) && now - epoch > STALE_SECONDS) {
+        const match = helperName.exec(datname);
+        if (!match) continue; // not a name this helper generates: never touched
+        const epoch = Number(match[1]);
+        if (datname !== clone && now - epoch > STALE_SECONDS) {
           await client.query(`drop database if exists ${quote(datname)}`).catch(() => undefined);
         }
       }
@@ -73,5 +116,8 @@ if (enabled) {
     const next = new URL(base.href);
     next.pathname = `/${clone}`;
     process.env.DATABASE_URL = next.href;
+    const adminUrl = new URL(base.href);
+    adminUrl.pathname = "/postgres";
+    process.once("exit", () => dropOnExit(adminUrl.href, clone));
   }
 }
