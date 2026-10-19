@@ -162,3 +162,13 @@ export function selectOpportunitiesView(minimalShell: boolean, search = ""): "mi
   if (!minimalShell) return "classic";
   return new URLSearchParams(search).get("view") === "full" ? "classic" : "minimal";
 }
+
+/** Sentence for the board's polite live region after a lifecycle change succeeds. */
+export function lifecycleAnnouncement(contactName: string | null | undefined, command: LifecycleCommand): string {
+  const who = contactName?.trim() || "Unnamed contact";
+  if (command.kind === "stage") {
+    const label = MINIMAL_PIPELINE_COLUMNS.find((c) => c.key === command.stage)?.label ?? command.stage;
+    return `${who} moved to ${label}.`;
+  }
+  return command.kind === "lost" ? `${who} marked lost.` : `${who} closed.`;
+}

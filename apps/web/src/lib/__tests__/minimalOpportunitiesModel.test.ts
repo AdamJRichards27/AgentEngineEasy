@@ -7,6 +7,7 @@ import {
   MARKET_ACTIVITY_DEFERRED,
   MINIMAL_PIPELINE_COLUMNS,
   buildPipelineBoard,
+  lifecycleAnnouncement,
   lifecycleBody,
   opportunityActions,
   selectOpportunitiesView,
@@ -97,4 +98,10 @@ test("flag-gated view selector", () => {
   assert.equal(selectOpportunitiesView(false), "classic");
   assert.equal(selectOpportunitiesView(true), "minimal");
   assert.equal(selectOpportunitiesView(true, "view=full"), "classic");
+});
+
+test("a11y: each lifecycle change has a short sentence for the polite live region", () => {
+  assert.equal(lifecycleAnnouncement("Jo Smith", { kind: "stage", stage: "Contacted" }), "Jo Smith moved to Contacted.");
+  assert.equal(lifecycleAnnouncement("Jo Smith", { kind: "lost", lostReason: "x" }), "Jo Smith marked lost.");
+  assert.equal(lifecycleAnnouncement(null, { kind: "close" }), "Unnamed contact closed.");
 });
