@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Switch, Route, Link, Redirect, useLocation } from "wouter";
+import { Switch, Route, Link, Redirect, useLocation, useSearch } from "wouter";
+import { selectContact360View } from "./minimal/minimalContactModel";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -39,6 +40,7 @@ const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
+const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -325,6 +327,7 @@ function SidebarLayout({
 function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boolean }) {
   const [location] = useLocation();
   const minimalShell = shouldRenderMinimalShell(useMinimalUx());
+  const search = useSearch();
   // AE GROW Pilot Readiness WP5 — a page that fails to render shows a
   // contained fallback here (sidebar stays usable); navigating away resets it.
   return (
@@ -344,7 +347,9 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
           <Route path="/grow/appraisals" component={GrowAppraisals} />
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
-          <Route path="/grow/contacts/:id" component={Grow} />
+          <Route path="/grow/contacts/:id">
+            {selectContact360View(minimalShell, search) === "minimal" ? <MinimalContact360 /> : <Grow />}
+          </Route>
           <Route path="/grow/import" component={GrowImport} />
           <Route path="/settings" component={Settings} />
           <Route path="/settings/integrations" component={SettingsIntegrations} />
