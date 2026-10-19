@@ -38,10 +38,11 @@
 
 import { eq, and, asc, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { campaignItems, db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
+import { campaignItems, communicationSettings, db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../middlewares/auth.js";
 import { listBrokerageExceptions, listedExceptionTitle } from "../exceptions/queries.js";
 import { isPitCrewLaunchItemSourceEnabled } from "./launchItemSource.js";
+import { isSamePitCrewLocalDay, resolvePitCrewDayTimeZone } from "./waitingOnDetection.js";
 import { explicitResponsibilityRecipientRole, isPitCrewResponsibilityActionsEnabled, PitCrewResponsibilityDisabledError } from "./responsibility.js";
 import {
   type PcWorkItem,
@@ -130,8 +131,16 @@ interface LoadedOpenResponsibility {
   recipientDisplayName: string | null;
 }
 
-function isSameUtcDay(a: Date, b: Date): boolean {
-  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth() && a.getUTCDate() === b.getUTCDate();
+// PC-B: "today" is the brokerage-local calendar day (Section 12, the same
+// rule as the Command Centre), via Pit Crew's own helpers. A plain select:
+// a brokerage without a communication_settings row stays without one.
+async function loadPitCrewDayTimeZone(brokerageId: number): Promise<string> {
+  const [row] = await db
+    .select({ timeZone: communicationSettings.timeZone })
+    .from(communicationSettings)
+    .where(eq(communicationSettings.brokerageId, brokerageId))
+    .limit(1);
+  return resolvePitCrewDayTimeZone(row?.timeZone ?? null);
 }
 
 function isActiveWorkspaceStatus(status: PitCrewItemStatus): boolean {
@@ -360,8 +369,19 @@ async function loadLaunchItemWorkItems(
   };
 }
 
-export async function getPitCrewWorkspace(brokerageId: number, actorUserId: number): Promise<PcWorkspace> {
-  const now = new Date();
+export interface PitCrewWorkspaceOptions {
+  /** Test clock. The route passes nothing, so production uses the real time. */
+  now?: Date;
+}
+
+export async function getPitCrewWorkspace(
+  brokerageId: number,
+  actorUserId: number,
+  options: PitCrewWorkspaceOptions = {},
+): Promise<PcWorkspace> {
+  const now = options.now ?? new Date();
+  // PC-B: brokerage-local day for Completed Today (Section 12).
+  const dayTimeZone = await loadPitCrewDayTimeZone(brokerageId);
 
   // Pit Crew never has financial entitlement (Sections 24-25) -- reusing
   // the Risk Engine's own redaction (canViewFinancials: false) rather than
@@ -462,7 +482,7 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
   const teamWork = pcRelevant.filter((item) => isActiveWorkspaceStatus(item.pcStatus)).sort(comparePcWorkItems);
   const waitingOn = pcRelevant.filter((item) => item.pcStatus === "WAITING_ON").sort(comparePcWorkItems);
   const completedToday = pcRelevant
-    .filter((item) => item.pcStatus === "DONE" && item.completedAt && isSameUtcDay(new Date(item.completedAt), now))
+    .filter((item) => item.pcStatus === "DONE" && item.completedAt && isSamePitCrewLocalDay(new Date(item.completedAt), now, dayTimeZone))
     .sort((a, b) => new Date(b.completedAt ?? 0).getTime() - new Date(a.completedAt ?? 0).getTime());
   const launchCoordination = pcRelevant
     .filter((item) => LAUNCH_COORDINATION_CATEGORIES.includes(item.category) && isActiveWorkspaceStatus(item.pcStatus))
