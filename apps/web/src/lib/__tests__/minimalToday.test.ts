@@ -155,3 +155,13 @@ test("the Today screen is flag-gated and does not render unconnected actions or 
     assert.equal(model.includes(banned), false, banned);
   }
 });
+
+// WS1: "As of" used the browser locale (headless/US browsers showed "Oct 19, 7:00 PM").
+test("Minimal Today's 'As of' time is en-AU whatever the browser locale", async () => {
+  const { formatMinimalAsOf } = await import("../../minimal/minimalTodayModel");
+  assert.match(formatMinimalAsOf("2026-10-19T02:00:00Z"), /^\d{1,2} Oct, \d{1,2}:\d{2}\s?(am|pm)$/);
+  assert.equal(formatMinimalAsOf("not a date"), "Unknown time");
+  const screen = readFileSync(new URL("../../minimal/MinimalToday.tsx", import.meta.url), "utf8");
+  assert.equal(screen.includes("formatGeneratedAt"), false);
+  assert.match(screen, /As of \{formatMinimalAsOf\(summary\.generatedAt\)\}/);
+});

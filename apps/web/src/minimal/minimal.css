@@ -1019,6 +1019,7 @@
   .ae-minimal .am-section-link { min-height: 44px; }
   .ae-minimal .am-welcome-link { min-height: 44px; }
   .ae-minimal .am-search-input, .ae-minimal .am-search-filter select { min-height: 44px; }
+  .ae-minimal .am-contacts .am-welcome { flex-direction: column; align-items: stretch; gap: 14px; }
   .ae-minimal .am-contact-row-link { grid-template-columns: 38px minmax(0, 1fr); }
   .ae-minimal .am-contact-row-meta { grid-column: 2; justify-items: start; }
   .ae-minimal .am-contact-row-meta .am-chip-row { justify-content: flex-start; }

@@ -185,3 +185,10 @@ export function buildMinimalTodayModel(
     setupSteps: setupSteps(summary, hasEntitlement),
   };
 }
+
+/** "19 Oct, 7:00 pm": fixed en-AU so the time never follows the browser locale. Browser time zone, as classic. */
+export function formatMinimalAsOf(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Unknown time";
+  return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(d);
+}

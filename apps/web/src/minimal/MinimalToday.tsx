@@ -2,11 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowTodaySummary } from "../lib/growToday";
-import { formatGeneratedAt } from "../lib/growToday";
 import { useEntitlements, useSession } from "../lib/session";
 import { GROW_TODAY_PURPOSE, growTodayCrossLink, growTodayHeading } from "../lib/todaySurfaces";
 import { formatMinimalHeaderDate } from "../lib/minimalUx";
-import { buildMinimalTodayModel, type MinimalTodayCard } from "./minimalTodayModel";
+import { buildMinimalTodayModel, formatMinimalAsOf, type MinimalTodayCard } from "./minimalTodayModel";
 import { MinimalGrowSections } from "./MinimalGrowSections";
 
 // AE Minimal A Today. The list is GET /grow/today. Channel buttons and the
@@ -58,7 +57,7 @@ function TodayBody({
   const model = buildMinimalTodayModel(summary, new Date(), hasEntitlement);
   return (
     <>
-      <p className="am-empty-note">As of {formatGeneratedAt(summary.generatedAt)}.</p>
+      <p className="am-empty-note">As of {formatMinimalAsOf(summary.generatedAt)}.</p>
       {model.withholding ? <p className="am-empty-note">{model.withholding}</p> : null}
       {model.noGrowData ? (
         <section className="am-rail-section">
