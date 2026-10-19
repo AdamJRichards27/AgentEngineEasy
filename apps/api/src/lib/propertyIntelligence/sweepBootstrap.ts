@@ -1,6 +1,6 @@
 import { logger } from "@aee/events";
 import { dispatchOperationalAlert } from "../operationalAlerts.js";
-import { runSignalSweep, sweepConfig } from "./sweep.js";
+import { runSignalSweep, sweepConfig, type RunSignalSweepResult } from "./sweep.js";
 
 /**
  * AE GROW "Brokerage-wide Signal Sweep" stage 1 — boot-time wiring.
@@ -29,6 +29,41 @@ import { runSignalSweep, sweepConfig } from "./sweep.js";
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
 
+/**
+ * One scheduled tick, with explicit observability (start / succeeded / skipped / failed). Logging only: the
+ * sweep, its advisory lock and the H-1 failure alert are unchanged. `run` is injectable for tests.
+ */
+export async function runSignalSweepTick(run: (trigger: "SCHEDULED") => Promise<RunSignalSweepResult> = runSignalSweep): Promise<void> {
+  const config = sweepConfig();
+  const startedAtMs = Date.now();
+  logger.info("property_signal_sweep_scheduled_tick_started", { intervalMs: config.intervalMs });
+  try {
+    const result = await run("SCHEDULED");
+    if (result.ok) {
+      logger.info("property_signal_sweep_scheduled_tick_succeeded", { durationMs: Date.now() - startedAtMs, ...result.summary });
+    } else {
+      logger.info("property_signal_sweep_scheduled_tick_skipped", { durationMs: Date.now() - startedAtMs, reason: result.skippedReason });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("property_signal_sweep_scheduled_run_failed", { error: message, durationMs: Date.now() - startedAtMs });
+    // AE GROW Completion W1-D (H-1). This catch is the ONLY thing standing
+    // between a permanently throwing scheduled sweep and total silence:
+    // logger.error is not bridged to dispatchOperationalAlert (logger.ts
+    // only writes JSON to stderr), and nothing else observes this timer. The
+    // dedup cooldown in operationalAlerts.ts is what keeps a tick that fails
+    // every interval to one alert per cooldown rather than one per tick.
+    void dispatchOperationalAlert({
+      type: "GROW_SIGNAL_SWEEP_UNHEALTHY",
+      summary: `The scheduled Property Intelligence signal sweep threw and did not run: ${message}`,
+      dedupKey: "grow-signal-sweep:scheduled-run-failed",
+      details: { intervalMs: config.intervalMs, error: message },
+    }).catch((alertErr) =>
+      logger.error("property_signal_sweep_alert_dispatch_failed", { error: alertErr instanceof Error ? alertErr.message : String(alertErr) }),
+    );
+  }
+}
+
 export interface RegisterSignalSweepOptions {
   /** Set false in tests / one-off scripts that call runSignalSweep() explicitly and must not also have a background timer running. Defaults to NODE_ENV !== "test". */
   startScheduler?: boolean;
@@ -47,24 +82,7 @@ export function registerSignalSweep(options: RegisterSignalSweepOptions = {}): v
   }
 
   intervalHandle = setInterval(() => {
-    runSignalSweep("SCHEDULED").catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error("property_signal_sweep_scheduled_run_failed", { error: message });
-      // AE GROW Completion W1-D (H-1). This catch is the ONLY thing standing
-      // between a permanently throwing scheduled sweep and total silence:
-      // logger.error is not bridged to dispatchOperationalAlert (logger.ts
-      // only writes JSON to stderr), and nothing else observes this timer. The
-      // dedup cooldown in operationalAlerts.ts is what keeps a tick that fails
-      // every interval to one alert per cooldown rather than one per tick.
-      void dispatchOperationalAlert({
-        type: "GROW_SIGNAL_SWEEP_UNHEALTHY",
-        summary: `The scheduled Property Intelligence signal sweep threw and did not run: ${message}`,
-        dedupKey: "grow-signal-sweep:scheduled-run-failed",
-        details: { intervalMs: config.intervalMs, error: message },
-      }).catch((alertErr) =>
-        logger.error("property_signal_sweep_alert_dispatch_failed", { error: alertErr instanceof Error ? alertErr.message : String(alertErr) }),
-      );
-    });
+    void runSignalSweepTick();
   }, config.intervalMs);
   intervalHandle.unref?.();
 

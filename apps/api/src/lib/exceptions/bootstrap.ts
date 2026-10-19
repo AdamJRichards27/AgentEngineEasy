@@ -14,7 +14,7 @@
 // ledger, not a message queue).
 
 import { logger } from "@aee/events";
-import { registerExceptionEventHandlers, runScheduledScan } from "./engine.js";
+import { registerExceptionEventHandlers, runScheduledScan, type RunScanResult } from "./engine.js";
 
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
@@ -26,6 +26,26 @@ let intervalHandle: NodeJS.Timeout | null = null;
 // single-flight guard is the actual safety net if a sweep ever does run
 // long — an overlapping tick is refused, never run concurrently).
 const SCAN_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * One scheduled tick, with explicit observability. A successful scan that finds nothing logs nothing
+ * elsewhere, so without these lines a healthy tick is indistinguishable from a dead timer. Logging only:
+ * the scan itself, its locking and its failure semantics are unchanged. `run` is injectable for tests.
+ */
+export async function runScheduledScanTick(run: (trigger: "SCHEDULED") => Promise<RunScanResult> = runScheduledScan): Promise<void> {
+  const startedAtMs = Date.now();
+  logger.info("exception_engine_scheduled_scan_tick_started", { intervalMs: SCAN_INTERVAL_MS });
+  try {
+    const result = await run("SCHEDULED");
+    if (result.ok) {
+      logger.info("exception_engine_scheduled_scan_tick_succeeded", { durationMs: Date.now() - startedAtMs, ...result.summary });
+    } else {
+      logger.info("exception_engine_scheduled_scan_tick_skipped", { durationMs: Date.now() - startedAtMs, reason: result.skippedReason });
+    }
+  } catch (err) {
+    logger.error("exception_engine_scheduled_scan_failed", { error: err, durationMs: Date.now() - startedAtMs });
+  }
+}
 
 export interface RegisterExceptionEngineOptions {
   /** Set false in tests / one-off scripts that call runScheduledScan() explicitly and must not also have a background timer running. Defaults to true. */
@@ -48,12 +68,13 @@ export function registerExceptionEngine(options: RegisterExceptionEngineOptions 
   if (!startScheduler) return;
 
   intervalHandle = setInterval(() => {
-    runScheduledScan("SCHEDULED").catch((err) => logger.error("exception_engine_scheduled_scan_failed", { error: err }));
+    void runScheduledScanTick();
   }, SCAN_INTERVAL_MS);
   // Never hold the process open just for this timer (matches Node's own
   // convention for background/best-effort intervals; a graceful shutdown
   // should not have to wait on the next tick of a periodic risk sweep).
   intervalHandle.unref?.();
+  logger.info("exception_engine_scheduler_started", { intervalMs: SCAN_INTERVAL_MS });
 }
 
 /** Test-only escape hatch — stops the interval so a test process can exit cleanly. Registration state is not reset (mirrors registerAutomationEngine's own "registered" latch being permanent for the life of the process). */
