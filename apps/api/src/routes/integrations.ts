@@ -10,6 +10,7 @@
 // value to the client (Section 10: "never display credential values").
 
 import { Router } from "express";
+import { logger } from "@aee/events";
 import { z } from "zod";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { listProviderCatalogue, resolveActiveConnection } from "../lib/integrations/registry.js";
@@ -29,6 +30,8 @@ import {
 import { mintMockAuthFlow } from "../lib/integrations/credentials.js";
 import { listDeadLettersForBrokerage, loadDeadLetterInBrokerage } from "../lib/integrations/deadLetters.js";
 import { replayDeadLetteredCommand } from "../lib/integrations/outbox.js";
+import { listManualReview, resolveManualReview, OutboundRecoveryError, MANUAL_REVIEW_QUEUES, MANUAL_REVIEW_RESOLUTIONS, RUN_SCOPED_QUEUES, type ManualReviewQueue } from "../lib/outboxRecovery/operatorActions.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { replayDeadLetteredWebhook } from "../lib/integrations/webhooks.js";
 import { publishListingToMockPortal } from "../lib/integrations/launchProof.js";
 import { sendSmsViaIntegration } from "../lib/integrations/commsProof.js";
@@ -411,3 +414,73 @@ integrationsRouter.post("/integrations/dead-letters/:id/replay", async (req, res
 });
 
 export { INTEGRATION_CAPABILITIES };
+
+// ---------------------------------------------------------------------
+// Outbound recovery (specs/outbound-message-recovery.md §4): rows whose
+// send outcome is unknown wait in MANUAL_REVIEW for an operator. Gated by
+// this router's Brokerage Administrator gate; brokerage-scoped (another
+// brokerage's row is 404, the same as a missing one); Run-scoped queues
+// additionally need run.access. Stable { error, code } bodies.
+// ---------------------------------------------------------------------
+
+const OUTBOUND_RECOVERY_ERROR_STATUS: Record<string, number> = {
+  NOT_FOUND: 404,
+  ALREADY_RESOLVED: 409,
+  RESOLUTION_NOT_SUPPORTED: 409,
+  DUPLICATE_RISK_NOT_ACKNOWLEDGED: 400,
+  NOTE_REQUIRED: 400,
+};
+const OUTBOUND_RECOVERY_ERROR_TEXT: Record<string, string> = {
+  NOT_FOUND: "That item was not found.",
+  ALREADY_RESOLVED: "That item is no longer waiting for review.",
+  RESOLUTION_NOT_SUPPORTED: "That resolution is not available for this queue.",
+  DUPLICATE_RISK_NOT_ACKNOWLEDGED: "Requeueing may send a duplicate. Confirm you accept that risk.",
+  NOTE_REQUIRED: "Add a note explaining the resolution.",
+};
+
+const resolveManualReviewBody = z.object({
+  resolution: z.enum(MANUAL_REVIEW_RESOLUTIONS),
+  note: z.string().min(1).max(500),
+  acknowledgeDuplicateRisk: z.boolean().optional(),
+});
+
+integrationsRouter.get("/integrations/outbound-recovery/manual-review", async (req, res) => {
+  try {
+    const user = req.authedUser!;
+    const items = await listManualReview(user.brokerageId);
+    const runAllowed = (await explainEntitlementDecision(user, "run.access")).allowed;
+    res.json({ items: runAllowed ? items : items.filter((i) => !RUN_SCOPED_QUEUES.includes(i.queue)) });
+  } catch (err) {
+    logger.error("outbound_recovery_list_failed", { error: err instanceof Error ? err.message : String(err) });
+    res.status(500).json({ error: "Could not load items awaiting review.", code: "INTERNAL_ERROR" });
+  }
+});
+
+integrationsRouter.post("/integrations/outbound-recovery/:queue/:id/resolve", async (req, res) => {
+  const queue = req.params.queue as ManualReviewQueue;
+  if (!MANUAL_REVIEW_QUEUES.includes(queue)) {
+    res.status(404).json({ error: OUTBOUND_RECOVERY_ERROR_TEXT.NOT_FOUND, code: "NOT_FOUND" });
+    return;
+  }
+  const parsed = resolveManualReviewBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid resolution request.", code: "INVALID_INPUT" });
+    return;
+  }
+  const user = req.authedUser!;
+  try {
+    if (RUN_SCOPED_QUEUES.includes(queue) && !(await explainEntitlementDecision(user, "run.access")).allowed) {
+      res.status(403).json({ error: "Run access is required for this item.", code: "RUN_ACCESS_REQUIRED" });
+      return;
+    }
+    const result = await resolveManualReview({ queue, id: req.params.id, brokerageId: user.brokerageId, actorUserId: user.id, ...parsed.data });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof OutboundRecoveryError) {
+      res.status(OUTBOUND_RECOVERY_ERROR_STATUS[err.code] ?? 400).json({ error: OUTBOUND_RECOVERY_ERROR_TEXT[err.code] ?? err.code, code: err.code });
+      return;
+    }
+    logger.error("outbound_recovery_resolve_failed", { queue, id: req.params.id, error: err instanceof Error ? err.message : String(err) });
+    res.status(500).json({ error: "Could not resolve that item.", code: "INTERNAL_ERROR" });
+  }
+});

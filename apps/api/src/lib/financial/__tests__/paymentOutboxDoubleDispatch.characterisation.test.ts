@@ -26,6 +26,7 @@ import {
   financialPaymentRequests,
   financialLedgerEvents,
   domainEvents,
+  auditLogs,
 } from "@aee/db";
 import { SandboxMandatePaymentProvider, type DebitRequest, type DebitResult, type MandatePaymentProvider } from "@aee/integration-mandate-payments";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
@@ -34,6 +35,7 @@ import { createPcFeeCalculation } from "../pcFeeCalculations.js";
 import { ensurePcSuccessFeeRequest } from "../settlement.js";
 import { advancePaymentRequestToNoticeSent, dispatchOutboxEntry, dispatchPendingPaymentOutbox, scheduleDebitForPaymentRequest } from "../paymentOutbox.js";
 import { mandatePaymentProvider } from "../provider.js";
+import { resolveManualReview, listManualReview } from "../../outboxRecovery/operatorActions.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -233,7 +235,7 @@ before(async () => {
   if (!address || typeof address === "string") throw new Error("unexpected server address");
   baseUrl = `http://127.0.0.1:${address.port}`;
   A = await createBrokerageWithUsers(baseUrl, `F01 Double Dispatch ${suffix}`);
-  for (const label of ["two-instances", "shared-provider", "caller-vs-sweep", "single-sweep", "sequential-sweeps", "redispatch-call", "lease-reclaim", "stale-failure"]) {
+  for (const label of ["two-instances", "shared-provider", "caller-vs-sweep", "single-sweep", "sequential-sweeps", "redispatch-call", "lease-reclaim", "stale-failure", "lease-review", "review-resolve", "review-ignored"]) {
     fx[label] = await buildNoticeSentFixture(label);
   }
 });
@@ -318,6 +320,78 @@ describe("F-01: payment outbox dispatch claim under concurrent dispatchers", { c
     assert.equal(after.status, "DISPATCHED");
     assert.equal(after.attempts, row.attempts + 1); // the reclaim counted as an attempt
     assert.equal((await scheduledLedgerRows(f)).length, 1, F01_FIXED);
+  });
+
+  test("[RECOVERY] the sandbox mandate provider declares it dedupes on the idempotency key (contract), and the reclaim above re-used the row's key", () => {
+    assert.deepEqual(mandatePaymentProvider.recovery, { dedupesOnIdempotencyKey: true });
+    assert.deepEqual(new SandboxMandatePaymentProvider().recovery, { dedupesOnIdempotencyKey: true });
+  });
+
+  test("[RECOVERY] an expired claim on a mandate provider that does NOT dedupe goes to MANUAL_REVIEW: 0 provider calls, request untouched", async () => {
+    const f = fx["lease-review"];
+    const row = await insertDueOutboxRow(f);
+    await db.update(financialPaymentOutbox).set({ status: "DISPATCHING", nextAttemptAt: new Date(Date.now() - 1_000) }).where(eq(financialPaymentOutbox.id, row.id));
+    const originalRecovery = mandatePaymentProvider.recovery;
+    (mandatePaymentProvider as { recovery?: unknown }).recovery = { dedupesOnIdempotencyKey: false };
+    const gate = installProviderGate(f.idempotencyKey, { autoRelease: true, providerFor: singletonOnly });
+    try {
+      await dispatchPendingPaymentOutbox(50);
+      await dispatchPendingPaymentOutbox(50); // a second sweep must not pick a MANUAL_REVIEW row up again
+    } finally {
+      gate.restore();
+      (mandatePaymentProvider as { recovery?: unknown }).recovery = originalRecovery;
+    }
+    assert.equal(gate.arrivals.length, 0, "an uncertain debit is never blindly re-sent");
+    const [after] = await outboxRows(f);
+    assert.equal(after.status, "MANUAL_REVIEW");
+    assert.equal(after.attempts, row.attempts + 1);
+    assert.match(after.lastError ?? "", /NO_DEDUPE_NO_LOOKUP/);
+    assert.equal((await paymentRequest(f)).status, "NOTICE_SENT");
+    assert.equal((await scheduledLedgerRows(f)).length, 0);
+    const listed = await listManualReview(A.brokerageId);
+    assert.ok(listed.some((i) => i.queue === "financial_payment_outbox" && i.id === String(row.id)));
+    assert.deepEqual(await listManualReview(A.brokerageId + 1_000_000), [], "another brokerage sees nothing");
+  });
+
+  test("[RECOVERY] operator actions on a payment MANUAL_REVIEW row: MARK_SENT refused, cross-tenant NOT_FOUND, REQUEUE needs the duplicate-risk acknowledgement, then dispatches once with the same key", async () => {
+    const f = fx["review-resolve"];
+    const row = await insertDueOutboxRow(f);
+    await db.update(financialPaymentOutbox).set({ status: "MANUAL_REVIEW" }).where(eq(financialPaymentOutbox.id, row.id));
+    const base = { queue: "financial_payment_outbox" as const, id: String(row.id), brokerageId: A.brokerageId, actorUserId: A.admin.user.id, note: "synthetic: checked sandbox console" };
+    await assert.rejects(resolveManualReview({ ...base, resolution: "MARK_SENT" }), (e: { code?: string }) => e.code === "RESOLUTION_NOT_SUPPORTED");
+    await assert.rejects(resolveManualReview({ ...base, brokerageId: A.brokerageId + 1_000_000, resolution: "MARK_FAILED" }), (e: { code?: string }) => e.code === "NOT_FOUND");
+    await assert.rejects(resolveManualReview({ ...base, resolution: "REQUEUE" }), (e: { code?: string }) => e.code === "DUPLICATE_RISK_NOT_ACKNOWLEDGED");
+    await assert.rejects(resolveManualReview({ ...base, note: "  ", resolution: "MARK_FAILED" }), (e: { code?: string }) => e.code === "NOTE_REQUIRED");
+    const resolved = await resolveManualReview({ ...base, resolution: "REQUEUE", acknowledgeDuplicateRisk: true });
+    assert.equal(resolved.status, "PENDING");
+    await assert.rejects(resolveManualReview({ ...base, resolution: "MARK_FAILED" }), (e: { code?: string }) => e.code === "ALREADY_RESOLVED");
+    const audits = await db.select().from(auditLogs).where(and(eq(auditLogs.recordType, "financial_payment_outbox"), eq(auditLogs.recordId, String(row.id))));
+    assert.deepEqual(audits.map((a) => a.action), ["outbound_recovery_manual_requeue"]);
+    assert.equal(audits[0].userId, A.admin.user.id);
+    const gate = installProviderGate(f.idempotencyKey, { autoRelease: true, providerFor: singletonOnly });
+    try {
+      await dispatchPendingPaymentOutbox(50);
+    } finally {
+      gate.restore();
+    }
+    assert.equal(gate.arrivals.length, 1);
+    assert.equal((await outboxRows(f))[0].status, "DISPATCHED");
+  });
+
+  test("[RECOVERY] rolling-deploy safety: a MANUAL_REVIEW payment row is never selected by the sweep or dispatched directly", async () => {
+    const f = fx["review-ignored"];
+    const row = await insertDueOutboxRow(f);
+    await db.update(financialPaymentOutbox).set({ status: "MANUAL_REVIEW", nextAttemptAt: new Date(Date.now() - 60_000) }).where(eq(financialPaymentOutbox.id, row.id));
+    const gate = installProviderGate(f.idempotencyKey, { autoRelease: true, providerFor: singletonOnly });
+    try {
+      await dispatchPendingPaymentOutbox(50);
+      const [current] = await outboxRows(f);
+      await dispatchOutboxEntry(current);
+    } finally {
+      gate.restore();
+    }
+    assert.equal(gate.arrivals.length, 0);
+    assert.equal((await outboxRows(f))[0].status, "MANUAL_REVIEW");
   });
 
   test("[F-01 FIXED] a live claim is not reclaimed, and a stale dispatcher cannot write the row back to PENDING", async () => {
