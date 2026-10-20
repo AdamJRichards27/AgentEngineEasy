@@ -86,3 +86,34 @@ export interface GrowCallSessionRead {
     fiveGateResult: GrowCallFiveGateResult;
   };
 }
+
+// Call-status helpers (moved verbatim from pages/Grow.tsx, Contact 360 PR3).
+export const TERMINAL_CALL_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+
+export function sandboxCallStatusLabel(status: string): string {
+  switch (status) {
+    case "READY":
+      return "Ready to confirm";
+    case "DIAL_REQUESTED":
+      return "Sandbox dial requested";
+    case "RINGING":
+      return "Sandbox ringing";
+    case "CONNECTED":
+      return "Connected in sandbox";
+    case "COMPLETED":
+      return "Sandbox call completed";
+    case "FAILED":
+      return "Sandbox call failed";
+    case "CANCELLED":
+      return "Sandbox call cancelled";
+    default:
+      return "Preparing sandbox call";
+  }
+}
+
+export function recordingGateName(key: string): string {
+  return key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, (first) => first.toUpperCase())
+    .trim();
+}
