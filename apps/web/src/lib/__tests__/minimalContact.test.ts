@@ -52,3 +52,15 @@ test("follow-up and last touch labels", () => {
   assert.deepEqual(m.followUp, { label: "Follow up", dueAt: "2026-10-20T00:00:00Z" });
   assert.equal(m.lastTouchLabel, "1 day ago");
 });
+
+test("open opportunity count uses the classic Contact 360 lifecycle rule (Open at a Lost or Converted stage is not open)", () => {
+  const m = buildMinimalContactModel({
+    ...base,
+    opportunities: [
+      { id: 1, status: "Open", stage: "New", opportunityType: "Listing" },
+      { id: 2, status: "Open", stage: "Lost", opportunityType: "Listing" },
+      { id: 3, status: "Open", stage: "Converted", opportunityType: "Listing" },
+    ],
+  });
+  assert.equal(m.openOpportunityCount, 1);
+});
