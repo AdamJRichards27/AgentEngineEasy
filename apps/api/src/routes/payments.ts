@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, paymentMethods } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   addPaymentMethod,
   listPaymentMethods,
@@ -20,6 +21,9 @@ import {
 // created by lib/aml.ts (and, later, other paid-service flows) — this
 // router is what actually charges a stored payment method against them.
 export const paymentsRouter = Router();
+
+// S-1 (transaction-services spec): service orders are a Run surface; checked after auth, before any id lookup.
+const requiresRunAccess = requireEntitlement("run.access");
 
 const addPaymentMethodSchema = z.object({
   scope: z.enum(["Mine", "Brokerage"]).default("Mine"),
@@ -110,7 +114,7 @@ paymentsRouter.delete("/payment-methods/:id", requireAuth, async (req, res) => {
 
 // Actually charges the default stored method for the ServiceOrder's
 // property agent — idempotent (see lib/payments.ts chargeServiceOrder).
-paymentsRouter.post("/service-orders/:id/charge", requireAuth, async (req, res) => {
+paymentsRouter.post("/service-orders/:id/charge", requireAuth, requiresRunAccess, async (req, res) => {
   const serviceOrderId = Number(req.params.id);
   const user = req.authedUser!;
   try {
@@ -129,7 +133,7 @@ paymentsRouter.post("/service-orders/:id/charge", requireAuth, async (req, res) 
   }
 });
 
-paymentsRouter.get("/service-orders/:id/payments", requireAuth, async (req, res) => {
+paymentsRouter.get("/service-orders/:id/payments", requireAuth, requiresRunAccess, async (req, res) => {
   const serviceOrderId = Number(req.params.id);
   const user = req.authedUser!;
   const rows = await listPaymentsForServiceOrder(serviceOrderId, user.brokerageId);
@@ -182,7 +186,7 @@ paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_
 // Read-only, mirrors GET /aml/service-orders/by-property/:propertyId's
 // shape for a single order (used by the workspace to refresh one row after
 // charging without refetching the whole property's list).
-paymentsRouter.get("/service-orders/:id", requireAuth, async (req, res) => {
+paymentsRouter.get("/service-orders/:id", requireAuth, requiresRunAccess, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
   const serviceOrder = await getServiceOrderForBrokerage(id, user.brokerageId);
