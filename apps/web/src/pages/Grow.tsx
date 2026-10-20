@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
+import { RunGatedLink } from "../components/RunGatedLink";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
@@ -1764,9 +1765,9 @@ function GrowOpportunityRowActions({
         </button>
       )}
       {propertyId !== null && (
-        <Link href={`/properties/${propertyId}`} className="btn btn-link btn-small">
+        <RunGatedLink href={`/properties/${propertyId}`} className="btn btn-link btn-small">
           View property
-        </Link>
+        </RunGatedLink>
       )}
       {onViewContact !== null && canViewContacts && partyId !== null && (
         <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(partyId)}>
@@ -2121,9 +2122,9 @@ function GrowActionCard({
           </Link>
         )}
         {showViewProperty && item.propertyId !== null && (
-          <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
+          <RunGatedLink href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
             View property
-          </Link>
+          </RunGatedLink>
         )}
         {/* The `item.partyId !== null` repeated below is what proves to the
             compiler what showViewContact/showEmail/showSms already guarantee:
@@ -3494,7 +3495,7 @@ export function GrowContactDetail({
                 <tr key={p.relationshipId}>
                   <td>
                     {p.propertyId !== null ? (
-                      <Link href={`/properties/${p.propertyId}`}>{p.propertyAddress ?? "View property"}</Link>
+                      <RunGatedLink href={`/properties/${p.propertyId}`} fallback={p.propertyAddress ?? "–"}>{p.propertyAddress ?? "View property"}</RunGatedLink>
                     ) : (
                       p.propertyAddress ?? "–"
                     )}

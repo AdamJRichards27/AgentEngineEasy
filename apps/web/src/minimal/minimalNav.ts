@@ -44,3 +44,22 @@ export function buildClassicNavLinks(ctx: NavContext): NavLink[] {
   if (minimalHasRunAccess(ctx.entitlements)) return links;
   return links.filter((link) => !MINIMAL_RUN_PATHS.includes(link.path));
 }
+
+/**
+ * Owner D5 for in-page links: true when a link target is a Run screen, i.e. one
+ * of MINIMAL_RUN_PATHS or a sub-path of /properties (the property workspace).
+ */
+export function isRunPath(href: string): boolean {
+  const path = href.split(/[?#]/)[0] || "/";
+  if (MINIMAL_RUN_PATHS.includes(path)) return true;
+  return path.startsWith("/properties/");
+}
+
+/**
+ * Whether an in-page link may be offered. Run targets need the exact run.access
+ * entitlement and fail closed while entitlements are still loading.
+ */
+export function runLinkAllowed(href: string, entitlements: readonly string[] | null | undefined, loading: boolean): boolean {
+  if (!isRunPath(href)) return true;
+  return !loading && minimalHasRunAccess(entitlements);
+}
