@@ -343,7 +343,12 @@ export async function processPaymentWebhook(
  * incrementing a paymentId.
  */
 // S-1c: stable, client-safe codes for refundPayment failures (mapped in routes/payments.ts refundErrorResponse).
-export type PaymentRefundErrorCode = "PAYMENT_NOT_FOUND" | "PAYMENT_NOT_REFUNDABLE" | "PAYMENT_NO_CHARGE_REFERENCE";
+export type PaymentRefundErrorCode =
+  | "PAYMENT_NOT_FOUND"
+  | "PAYMENT_NOT_REFUNDABLE"
+  | "PAYMENT_NO_CHARGE_REFERENCE"
+  | "REFUND_AMOUNT_INVALID"
+  | "REFUND_AMOUNT_EXCEEDS_REMAINING";
 export class PaymentRefundError extends Error {
   constructor(public readonly code: PaymentRefundErrorCode, detail?: string) {
     super(detail ?? code);
@@ -351,7 +356,13 @@ export class PaymentRefundError extends Error {
   }
 }
 
-export async function refundPayment(input: { paymentId: number; amountCents?: number; brokerageId: number }): Promise<Payment> {
+// S-1d: amountCents, when present, must be a positive safe integer; omitted means a full refund.
+// The schema does not track partial refunds (status only), so the refundable remainder is payment.amountCents.
+export async function refundPayment(input: { paymentId: number; amountCents?: unknown; brokerageId: number }): Promise<Payment> {
+  if (input.amountCents !== undefined && !(typeof input.amountCents === "number" && Number.isSafeInteger(input.amountCents) && input.amountCents > 0)) {
+    throw new PaymentRefundError("REFUND_AMOUNT_INVALID");
+  }
+  const requestedCents = input.amountCents as number | undefined;
   const payment = await selectPaymentInBrokerage(input.paymentId, input.brokerageId);
   if (!payment) {
     throw new PaymentRefundError("PAYMENT_NOT_FOUND", `Payment ${input.paymentId} not found`);
@@ -363,7 +374,11 @@ export async function refundPayment(input: { paymentId: number; amountCents?: nu
     throw new PaymentRefundError("PAYMENT_NO_CHARGE_REFERENCE", `Payment ${input.paymentId} has no provider charge reference to refund`);
   }
 
-  const refundAmount = input.amountCents ?? payment.amountCents;
+  const refundableRemainingCents = payment.amountCents;
+  if (requestedCents !== undefined && requestedCents > refundableRemainingCents) {
+    throw new PaymentRefundError("REFUND_AMOUNT_EXCEEDS_REMAINING", `requested ${requestedCents} > remaining ${refundableRemainingCents}`);
+  }
+  const refundAmount = requestedCents ?? payment.amountCents;
   await paymentProvider.refund(payment.providerChargeRef, refundAmount);
 
   const [updated] = await db
