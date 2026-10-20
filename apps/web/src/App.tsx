@@ -95,7 +95,7 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <div className="staging-banner">Staging Environment — Test Data Only</div>
+      <div className="staging-banner">{import.meta.env.VITE_ENV_BANNER || "Staging Environment — Test Data Only"}</div>
       <Switch>
       <Route path="/login">
         {isSignedIn ? <Redirect to={user?.platformOwner && user.ownerSelectedBrokerageId == null

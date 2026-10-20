@@ -3,6 +3,8 @@ entrypoint = "apps/api/src/index.ts"
 modules = ["nodejs-24"]
 [env]
 PORT = "8080"
+# Owner preview branch only (preview/minimal-a-20261021): label every screen.
+VITE_ENV_BANNER = "Owner Preview — Synthetic Demo Data Only"
 
 [[ports]]
 localPort = 5000

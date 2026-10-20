@@ -13,3 +13,6 @@ apps/api/storage/
 # project references). Never a source artefact, safe to regenerate, and
 # noisy in diffs. Added Foundation Remediation Stage 2.
 *.tsbuildinfo
+
+# Owner preview demo credentials (preview Repl only)
+.preview-credentials
