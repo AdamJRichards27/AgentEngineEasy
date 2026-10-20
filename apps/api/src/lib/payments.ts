@@ -342,16 +342,25 @@ export async function processPaymentWebhook(
  * Administrator can never refund another brokerage's payment by guessing or
  * incrementing a paymentId.
  */
+// S-1c: stable, client-safe codes for refundPayment failures (mapped in routes/payments.ts refundErrorResponse).
+export type PaymentRefundErrorCode = "PAYMENT_NOT_FOUND" | "PAYMENT_NOT_REFUNDABLE" | "PAYMENT_NO_CHARGE_REFERENCE";
+export class PaymentRefundError extends Error {
+  constructor(public readonly code: PaymentRefundErrorCode, detail?: string) {
+    super(detail ?? code);
+    this.name = "PaymentRefundError";
+  }
+}
+
 export async function refundPayment(input: { paymentId: number; amountCents?: number; brokerageId: number }): Promise<Payment> {
   const payment = await selectPaymentInBrokerage(input.paymentId, input.brokerageId);
   if (!payment) {
-    throw new Error(`Payment ${input.paymentId} not found`);
+    throw new PaymentRefundError("PAYMENT_NOT_FOUND", `Payment ${input.paymentId} not found`);
   }
   if (payment.status !== "Succeeded") {
-    throw new Error(`Payment ${input.paymentId} is not in a refundable state (status: ${payment.status})`);
+    throw new PaymentRefundError("PAYMENT_NOT_REFUNDABLE", `Payment ${input.paymentId} is not in a refundable state (status: ${payment.status})`);
   }
   if (!payment.providerChargeRef) {
-    throw new Error(`Payment ${input.paymentId} has no provider charge reference to refund`);
+    throw new PaymentRefundError("PAYMENT_NO_CHARGE_REFERENCE", `Payment ${input.paymentId} has no provider charge reference to refund`);
   }
 
   const refundAmount = input.amountCents ?? payment.amountCents;

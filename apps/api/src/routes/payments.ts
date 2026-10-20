@@ -16,6 +16,8 @@ import {
   listPaymentsForServiceOrder,
   getServiceOrderForBrokerage,
   ServiceOrderChargeError,
+  PaymentRefundError,
+  type PaymentRefundErrorCode,
   type ServiceOrderChargeErrorCode,
 } from "../lib/payments.js";
 
@@ -180,10 +182,24 @@ paymentsRouter.post("/webhook", async (req, res) => {
   res.status(200).json({ received: true, processed: result.processed, reason: result.reason });
 });
 
+// S-1c: stable { error, code } for refund failures.
+const REFUND_ERRORS: Record<PaymentRefundErrorCode, { status: number; error: string }> = {
+  PAYMENT_NOT_FOUND: { status: 404, error: "Not found" },
+  PAYMENT_NOT_REFUNDABLE: { status: 409, error: "This payment can't be refunded because it isn't a completed charge." },
+  PAYMENT_NO_CHARGE_REFERENCE: { status: 409, error: "This payment can't be refunded because it has no provider charge on record." },
+};
+export function refundErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
+  if (err instanceof PaymentRefundError && err.code in REFUND_ERRORS) {
+    const m = REFUND_ERRORS[err.code];
+    return { status: m.status, body: { error: m.error, code: err.code } };
+  }
+  return { status: 500, body: { error: "Refund failed", code: "PAYMENT_REFUND_FAILED" } };
+}
+
 // Refund — restricted to Brokerage Administrators, matching the AML
 // exception-resolution precedent for anything that reverses a recorded
 // financial outcome.
-paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+paymentsRouter.post("/:paymentId/refund", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const paymentId = Number(req.params.paymentId);
   const amountCents = typeof req.body?.amountCents === "number" ? req.body.amountCents : undefined;
   const user = req.authedUser!;
@@ -198,7 +214,9 @@ paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_
     });
     res.json({ payment });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    const mapped = refundErrorResponse(err);
+    if (mapped.status >= 500) logger.error("payment_refund_failed", { paymentId, error: err instanceof Error ? err.message : String(err) });
+    res.status(mapped.status).json(mapped.body);
   }
 });
 
