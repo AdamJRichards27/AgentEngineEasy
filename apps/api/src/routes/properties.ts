@@ -20,6 +20,8 @@ import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } fr
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { hasEntitlement } from "../lib/entitlements/resolver.js";
+import type { Request, Response, NextFunction } from "express";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -48,6 +50,70 @@ export const propertiesRouter = Router();
 // with Grow (appraisal property creation, Grow property-link search, AppraisalWorkspace timeline) and are
 // pinned open for a brokerage without run.access by runLaneRouteAccess.test.ts. Gating them is an Owner decision.
 const requiresRunAccess = requireEntitlement("run.access");
+
+// RUN-ACCESS-OPS (Owner t95u, 2026-10-20): operation-level entitlement for the four routes shared by Grow and Run
+// (POST /, GET /, GET /:id, GET /:id/timeline). Any of grow.access / run.access is required; neither is the usual
+// 403 "Not entitled". With run.access the behaviour is unchanged. Grow-only callers get a Grow projection: the
+// Run-only property fields are omitted, the Run ownership lookup is skipped on create, and the timeline keeps only
+// Grow-safe entries (property creation, parties, appraisal) at every workflowStage. Cross-tenant/hidden ids answer
+// exactly as before, after this check, so no extra existence signal is added.
+type PropertyAccess = "run" | "grow";
+const RUN_ONLY_PROPERTY_FIELDS = [
+  "workflowStage",
+  "amlStatusSummary",
+  "listingStatus",
+  "salesMethod",
+  "priceDisplay",
+  "campaignStartDate",
+  "campaignEndDate",
+  "ownershipData",
+  "ownershipReviewRequired",
+  "ownershipReviewedBy",
+  "ownershipReviewedAt",
+  "ownershipReviewNotes",
+  "isDraft",
+] as const;
+const GROW_SAFE_TIMELINE_CATEGORIES = new Set(["Party", "Appraisal"]);
+const GROW_SAFE_TIMELINE_ENTRY_TYPES = new Set(["PROPERTY_CREATED"]);
+
+async function requiresGrowOrRunAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const user = req.authedUser;
+  if (!user) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  try {
+    if (await hasEntitlement(user, "run.access")) {
+      res.locals.propertyAccess = "run" satisfies PropertyAccess;
+      return next();
+    }
+    if (await hasEntitlement(user, "grow.access")) {
+      res.locals.propertyAccess = "grow" satisfies PropertyAccess;
+      return next();
+    }
+    res.status(403).json({
+      error: "Not entitled",
+      reason: "ENTITLEMENT_MISSING",
+      entitlementKey: "run.access",
+      anyOf: ["grow.access", "run.access"],
+      upgrade: { action: "grow.checkout", productCode: "grow" },
+    });
+  } catch (err) {
+    logger.error("property_access_check_failed_closed", { userId: user.id, error: err });
+    res.status(403).json({ error: "Not entitled", reason: "ENTITLEMENT_MISSING", entitlementKey: "run.access" });
+  }
+}
+
+function propertyAccessOf(res: Response): PropertyAccess {
+  return res.locals.propertyAccess === "run" ? "run" : "grow";
+}
+
+function propertyForCaller<T extends Record<string, unknown>>(row: T, access: PropertyAccess): Partial<T> {
+  if (access === "run") return row;
+  const copy: Record<string, unknown> = { ...row };
+  for (const field of RUN_ONLY_PROPERTY_FIELDS) delete copy[field];
+  return copy as Partial<T>;
+}
 const propertyDataProvider = createPropertyDataProvider();
 
 // AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
@@ -206,7 +272,7 @@ function nonBlank(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-propertiesRouter.post("/", requireAuth, async (req, res) => {
+propertiesRouter.post("/", requireAuth, requiresGrowOrRunAccess, async (req, res) => {
   const parsed = startPropertySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -215,7 +281,7 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
   const user = req.authedUser!;
 
   let ownershipData = null;
-  if (parsed.data.placeId) {
+  if (parsed.data.placeId && propertyAccessOf(res) === "run") {
     // Ownership check (Build Brief §8) — surfaced as a review prompt later,
     // never a hard block, since trusts/companies/estates/POAs can legitimately differ.
     // No sellers exist yet at this point, so this only fetches the data —
@@ -298,7 +364,7 @@ propertiesRouter.post("/", requireAuth, async (req, res) => {
     logger.error("publish_domain_event_failed", { eventType: "PROPERTY_CREATED", error: err });
   }
 
-  res.status(201).json({ property });
+  res.status(201).json({ property: propertyForCaller(property, propertyAccessOf(res)) });
 });
 
 // UAT-S1 — optional property-list search. `properties` has no display-name
@@ -330,7 +396,7 @@ function propertyListSearch(q: string) {
   );
 }
 
-propertiesRouter.get("/", requireAuth, async (req, res) => {
+propertiesRouter.get("/", requireAuth, requiresGrowOrRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const q = propertyListQuery(req.query.q);
   const restrictTo = await restrictedPropertyIdsFor(user);
@@ -346,12 +412,13 @@ propertiesRouter.get("/", requireAuth, async (req, res) => {
     .select()
     .from(properties)
     .where(q ? and(scope, propertyListSearch(q)) : scope);
-  res.json({ properties: rows });
+  const access = propertyAccessOf(res);
+  res.json({ properties: rows.map((row) => propertyForCaller(row, access)) });
 });
 
 // #123 — tenant scoping: previously matched by id alone, so any
 // authenticated user from any brokerage could read any property by id.
-propertiesRouter.get("/:id", requireAuth, async (req, res) => {
+propertiesRouter.get("/:id", requireAuth, requiresGrowOrRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -368,7 +435,7 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  res.json({ property });
+  res.json({ property: propertyForCaller(property, propertyAccessOf(res)) });
 });
 
 // The Property Action Screen's data source (ARCHITECTURE.md §4) — one
@@ -499,7 +566,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, requiresRunAccess, async (re
 // Same #123-precedent tenant scoping as every other :id route in this
 // file; canViewFinancials gates the financial-entitlement boundary
 // (commission/funds/agent-paid figures) inside getPropertyTimeline itself.
-propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
+propertiesRouter.get("/:id/timeline", requireAuth, requiresGrowOrRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -515,7 +582,12 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
       return;
     }
     const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
-    res.json({ timeline });
+    res.json({
+      timeline:
+        propertyAccessOf(res) === "run"
+          ? timeline
+          : timeline.filter((item) => GROW_SAFE_TIMELINE_CATEGORIES.has(item.category) || GROW_SAFE_TIMELINE_ENTRY_TYPES.has(item.entryType)),
+    });
   } catch (err) {
     // getPropertyTimeline's only expected failure is assertPropertyInBrokerage's
     // own "Property <id> not found" — the 404 this route has always answered.
