@@ -11,6 +11,8 @@ import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
 import { db, entitlementGrants, properties } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { createOrUpdateException, newCorrelationId } from "../../lib/exceptions/model.js";
+import type { RiskFinding } from "../../lib/exceptions/types.js";
 import { cleanupBrokerages, createBrokerageWithUsers, createListedProperty, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -29,7 +31,9 @@ let V: Tenant;
 const callers: Record<string, Tenant> = {};
 let vPropertyId: number;
 let vSellerPartyId: number;
-let vExceptionId: number | undefined;
+let vExceptionId: string;
+const MISSING_EXCEPTION = "00000000-0000-4000-8000-000000000000";
+let exceptionCaseRuns = 0;
 
 async function call(method: string, path: string, cookie?: string, body?: unknown): Promise<Response> {
   const headers: Record<string, string> = {};
@@ -45,7 +49,7 @@ async function revoke(brokerageId: number, key: string) {
   await db.update(entitlementGrants).set({ status: "Revoked" }).where(and(eq(entitlementGrants.brokerageId, brokerageId), eq(entitlementGrants.entitlementKey, key)));
   invalidateEntitlementCache(brokerageId);
 }
-const norm = (t: string) => t.replaceAll(String(vPropertyId), "<ID>").replaceAll(String(MISSING), "<ID>").replaceAll(String(vExceptionId ?? "x"), "<ID>");
+const norm = (t: string) => t.replaceAll(String(vPropertyId), "<ID>").replaceAll(String(MISSING), "<ID>").replaceAll(String(vExceptionId), "<EX>").replaceAll(MISSING_EXCEPTION, "<EX>").replaceAll(String(vSellerPartyId), "<ID>");
 async function snapshot(res: Response) {
   return { status: res.status, body: norm(await res.text()) };
 }
@@ -94,12 +98,14 @@ before(async () => {
   const listed = await createListedProperty(baseUrl, V.agent.cookie, { address: `${MARK} Victim Listed St` });
   vPropertyId = listed.propertyId;
   vSellerPartyId = listed.sellerPartyId;
-  const ex = await call("GET", "/exceptions", V.admin.cookie);
-  if (ex.ok) {
-    const body = (await ex.json()) as { exceptions?: Array<{ id: number }> } | Array<{ id: number }>;
-    const rows = Array.isArray(body) ? body : body.exceptions ?? [];
-    vExceptionId = rows[0]?.id;
-  }
+  const finding: RiskFinding = {
+    ruleId: "TEST_TISO_RULE", ruleVersion: 1, category: "WORKFLOW_OPERATIONAL", severity: "ATTENTION",
+    title: `${MARK} victim exception`, problemDescription: "p", businessImpact: "i", detectedCause: "c",
+    ownerType: "UNASSIGNED_QUEUE", ownerUserId: null, propertyId: vPropertyId, transactionId: null, dueAt: null, escalatesAt: null,
+    recommendedAction: "a", resolutionRequirements: "r", dismissible: true, sourceRecordType: "property", sourceRecordId: String(vPropertyId),
+    dedupKey: `TEST_TISO_RULE:${V.brokerageId}:${vPropertyId}`, recurrenceMode: "REOPEN", requiresFinancialEntitlement: false,
+  };
+  vExceptionId = String((await createOrUpdateException(finding, V.brokerageId, vPropertyId, null, newCorrelationId(), null)).exception.id);
 });
 
 after(async () => {
@@ -108,6 +114,12 @@ after(async () => {
 });
 
 describe("TISO-17: cross-brokerage tenant isolation (Grow-only / Run-only / both / none)", { concurrency: false }, () => {
+  test("fixture sanity: victim sees its own exception", async () => {
+    const res = await call("GET", `/exceptions/${vExceptionId}`, V.admin.cookie);
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.ok((await res.text()).includes(MARK));
+  });
+
   test("fixture sanity: victim sees its own property", async () => {
     const res = await call("GET", `/properties/${vPropertyId}`, V.agent.cookie);
     assert.equal(res.status, 200, await res.clone().text());
@@ -127,9 +139,11 @@ describe("TISO-17: cross-brokerage tenant isolation (Grow-only / Run-only / both
           assert.ok(!f.body.includes(MARK), `${foreign[i]} leaked victim data`);
           assert.deepEqual(f, m, `${foreign[i]}: existence leak (foreign vs missing differ)`);
         }
-        if (vExceptionId !== undefined) {
+        {
+          exceptionCaseRuns += 1;
           const f = await snapshot(await call("GET", `/exceptions/${vExceptionId}`, cookie));
-          const m = await snapshot(await call("GET", `/exceptions/${MISSING}`, cookie));
+          const m = await snapshot(await call("GET", `/exceptions/${MISSING_EXCEPTION}`, cookie));
+          assert.ok(!f.body.includes(MARK), "/exceptions/:id leaked victim exception");
           assert.notEqual(f.status, 200);
           assert.deepEqual(f, m, "/exceptions/:id existence leak");
         }
@@ -137,7 +151,7 @@ describe("TISO-17: cross-brokerage tenant isolation (Grow-only / Run-only / both
         const pm = await snapshot(await call("GET", `/parties/${MISSING}`, cookie));
         assert.notEqual(pf.status, 200, "/parties/:id returned victim party");
         assert.ok(!pf.body.includes(MARK));
-        assert.equal(pf.status, pm.status, "/parties/:id existence leak (status)");
+        assert.deepEqual(pf, pm, "/parties/:id existence leak (status or body)");
       });
 
       test(`${type}/${role}: lists never include victim data`, async () => {
@@ -171,6 +185,10 @@ describe("TISO-17: cross-brokerage tenant isolation (Grow-only / Run-only / both
       });
     }
   }
+
+  test("the /exceptions/:id substitution case ran for every caller type and role", () => {
+    assert.equal(exceptionCaseRuns, 8);
+  });
 
   test("victim cannot see caller properties either (reverse direction, both-entitled caller)", async () => {
     const res = await call("POST", "/properties", callers.both.agent.cookie, { formattedAddress: `${MARK}B Caller St`, state: "NSW", suburb: "Testville", postcode: "2000" });
