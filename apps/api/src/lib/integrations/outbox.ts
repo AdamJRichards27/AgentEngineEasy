@@ -119,7 +119,8 @@ async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutbox
   if (!dispatching) throw new IntegrationError("INVALID_STATUS", "Command was claimed by another dispatcher.");
   // Terminal writes only land while this dispatcher still holds THIS lease (the lease value is the claim token).
   const stillClaimed = and(eq(integrationOutbox.id, outboxId), eq(integrationOutbox.status, "DISPATCHING"), eq(integrationOutbox.nextAttemptAt, dispatching.nextAttemptAt));
-  if (dispatching.attempts >= dispatching.maxAttempts) {
+  // Only a RECLAIM is capped here: a fresh claim of a replayed dead letter legitimately starts at attempts == maxAttempts.
+  if (reclaimed && dispatching.attempts >= dispatching.maxAttempts) {
     return failCommand(dispatching, dispatching.attempts, "LEASE_EXPIRED", "Dispatch claim expired repeatedly without an outcome.", false, stillClaimed);
   }
   const attemptNumber = dispatching.attempts + 1;
