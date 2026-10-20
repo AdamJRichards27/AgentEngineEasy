@@ -2,6 +2,9 @@ import { lazy, Suspense, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Switch, Route, Link, Redirect, useLocation, useSearch } from "wouter";
 import { selectContact360View } from "./minimal/minimalContactModel";
+import { selectPropertiesView } from "./minimal/properties/minimalPropertiesModel";
+import { selectOpportunitiesView } from "./minimal/opportunities/minimalOpportunitiesModel";
+import { selectAppraisalBuilderView } from "./minimal/appraisal/appraisalBuilderModel";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -42,6 +45,9 @@ const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
 const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
+const MinimalProperties = lazy(() => import("./minimal/properties/MinimalProperties"));
+const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalOpportunities"));
+const MinimalAppraisalBuilder = lazy(() => import("./minimal/appraisal/MinimalAppraisalBuilder"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -340,18 +346,26 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/owner" component={Owner} />
           <Route path="/" component={Home} />
           <Route path="/today" component={CommandCentre} />
-          <Route path="/properties" component={PropertiesList} />
+          <Route path="/properties">
+            {selectPropertiesView(minimalShell, search) === "minimal" ? <MinimalProperties /> : <PropertiesList />}
+          </Route>
           <Route path="/properties/start" component={StartProperty} />
           <Route path="/properties/:id" component={PropertyWorkspace} />
           <Route path="/exceptions" component={Exceptions} />
           <Route path="/communications" component={CommunicationsHub} />
           <Route path="/financial" component={FinancialOperations} />
           <Route path="/pit-crew" component={PitCrewCommandCentre} />
+          <Route path="/grow/appraisals/:id/build">
+            {selectAppraisalBuilderView(minimalShell) === "minimal" ? <MinimalAppraisalBuilder /> : <AppraisalWorkspace />}
+          </Route>
           <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
           <Route path="/grow/appraisals" component={GrowAppraisals} />
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id">
             {selectContact360View(minimalShell, search) === "minimal" ? <MinimalContact360 /> : <Grow />}
+          </Route>
+          <Route path="/grow/opportunities">
+            {selectOpportunitiesView(minimalShell, search) === "minimal" ? <MinimalOpportunities /> : <Redirect to="/grow?tab=opportunities" replace />}
           </Route>
           <Route path="/grow/import" component={GrowImport} />
           <Route path="/settings" component={Settings} />
