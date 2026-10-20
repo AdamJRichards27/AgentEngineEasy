@@ -25,7 +25,10 @@
       "@esbuild-kit/core-utils@3.3.2>esbuild": "0.25.12",
       "drizzle-kit@0.30.6>esbuild": "0.25.12",
       "qs": "^6.16.0",
-      "proxy-addr": "2.0.8"
+      "proxy-addr": "2.0.8",
+      "shell-quote": "1.11.0",
+      "source-map-js": "1.2.2",
+      "ip-address": "10.7.1"
     }
   }
 }
