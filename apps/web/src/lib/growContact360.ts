@@ -116,6 +116,15 @@ export function opportunityLifecycleOpen(status: string, stage: string): boolean
   return status === "Open" && stage !== "Lost" && stage !== "Converted";
 }
 
+/**
+ * Open-opportunity count shown on Contact 360 in both the classic and Minimal A views (Owner t388u: Lost and
+ * Converted are never open). intelligence.activeOpportunityCount from the server can differ; that gap is
+ * recorded for later reconciliation and is not shown.
+ */
+export function countOpenOpportunities(opportunities: ReadonlyArray<{ status: string; stage: string }>): number {
+  return opportunities.filter((o) => opportunityLifecycleOpen(o.status, o.stage)).length;
+}
+
 /** Status cell for a Lost row names the stored lost reason. Other statuses stay as they are. */
 export function opportunityStatusLabel(status: string, lostReason: string | null | undefined): string {
   if (status !== "Lost") return status;
