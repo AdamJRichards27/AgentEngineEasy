@@ -121,3 +121,42 @@ export function opportunityStatusLabel(status: string, lostReason: string | null
   const reason = typeof lostReason === "string" ? lostReason.trim() : "";
   return reason.length > 0 ? `Lost: ${reason}` : "Lost";
 }
+
+// Property-link options and list/property shapes shared by Grow and Contact 360 forms (moved verbatim from pages/Grow.tsx, PR4).
+// Hand-mirror of GROW_RELATIONSHIP_TYPES (packages/db/src/schema/grow.ts).
+// These are property links (POST /grow/relationships). They are not the
+// household types above (POST /grow/contacts/:partyId/relationships).
+export const GROW_PROPERTY_RELATIONSHIP_OPTIONS = [
+  ["owner", "Owner"],
+  ["co_owner", "Co-owner"],
+  ["former_owner", "Former owner"],
+  ["occupier", "Occupier"],
+  ["tenant", "Tenant"],
+  ["landlord", "Landlord"],
+  ["buyer", "Buyer"],
+  ["prospective_buyer", "Prospective buyer"],
+  ["seller", "Seller"],
+  ["prospective_seller", "Future seller"],
+  ["appraisal_contact", "Appraisal contact"],
+  ["vendor", "Vendor"],
+  ["investor", "Investor"],
+  ["developer", "Developer"],
+  ["referrer", "Referrer"],
+  ["related_party", "Related party"],
+  ["unknown_pending_review", "Unknown, pending review"],
+] as const;
+
+export interface LinkableProperty {
+  id: number;
+  formattedAddress: string;
+}
+
+export interface GrowContactListItem {
+  id: number;
+  displayName: string;
+  partyType: string;
+  email: string | null;
+  mobile: string | null;
+  roles: string[];
+  relatedPropertyCount: number;
+}
