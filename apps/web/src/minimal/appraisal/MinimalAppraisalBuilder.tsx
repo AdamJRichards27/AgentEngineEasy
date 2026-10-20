@@ -17,6 +17,7 @@ import {
   continueBuilder,
   followUpBody,
   goToBuilderStep,
+  resumeBuilderState,
   initialBuilderState,
   rangeDraftFrom,
   rangePatchBody,
@@ -68,6 +69,17 @@ export default function MinimalAppraisalBuilder() {
     }
     if (typeof document !== "undefined") document.getElementById("ae-appraisal-step-title")?.focus();
   }, [state.step]);
+  // AB-2: once the server workspace first loads, reopen at the furthest step it
+  // supports instead of step 1. Applied once; later refreshes keep the agent's place.
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (resumed.current || !workspace.data) return;
+    resumed.current = true;
+    const next = resumeBuilderState(workspace.data);
+    // Don't steal focus on load: only the agent's own step changes move focus.
+    if (next.step !== state.step) firstStep.current = true;
+    setState(next);
+  }, [workspace.data]);
   const [rangeEdit, setRangeEdit] = useState<RangeDraft | null>(null);
   const [narrativeEdit, setNarrativeEdit] = useState<string | null>(null);
   const [comparableForm, setComparableForm] = useState<ComparableForm>(EMPTY_COMPARABLE_FORM);

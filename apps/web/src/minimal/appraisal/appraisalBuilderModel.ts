@@ -153,6 +153,36 @@ export function continueBuilder(
   return { state: { step, highestStep: Math.max(state.highestStep, step) }, message: null };
 }
 
+/**
+ * AB-2: where to reopen the builder, from SERVER state only (no browser drafts).
+ * A step counts as done when its saved evidence exists; review steps 2 and 4
+ * count as done once later work is saved. The agent resumes at the first step
+ * that is not done, and can go back to any earlier step. Read-only (finished or
+ * finalised) appraisals can browse every step.
+ */
+export function resumeBuilderState(workspace: BuilderWorkspace): BuilderState {
+  const a = workspace.appraisal;
+  const comps = workspace.comparableSales.length > 0;
+  const listings = workspace.marketCompetition.length > 0;
+  const draft = rangeDraftFrom(a);
+  const rangeSaved = a.priceRangeLow != null && a.priceRangeHigh != null && rangeValidation(draft) === null;
+  const built = a.presentationDocumentId != null;
+  const done: Record<number, boolean> = {
+    1: Boolean(a.propertyId),
+    2: comps || listings || rangeSaved || built,
+    3: comps,
+    4: listings || rangeSaved || built,
+    5: rangeSaved,
+    6: built,
+  };
+  let step = MINIMAL_APPRAISAL_STEP_COUNT;
+  for (let n = 1; n < MINIMAL_APPRAISAL_STEP_COUNT; n += 1) {
+    if (!done[n]) { step = n; break; }
+  }
+  const readOnly = builderReadOnlyMessage(a) !== null;
+  return { step, highestStep: readOnly ? MINIMAL_APPRAISAL_STEP_COUNT : step };
+}
+
 export function goToBuilderStep(state: BuilderState, step: number): BuilderState {
   if (!Number.isInteger(step) || step < 1 || step > state.highestStep) return state;
   return { ...state, step };
