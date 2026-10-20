@@ -237,9 +237,10 @@ function setValue(tree: unknown, id: string, value: string) {
 const POSTED_ACTIVITY_TYPES = ["call", "meeting", "note"] as const;
 
 test("the client posts only note, call, and meeting", () => {
-  const source = readFileSync(new URL("../../pages/Grow.tsx", import.meta.url), "utf8");
+  // Contact 360 PR5 moved the note/activity writers out of pages/Grow.tsx.
+  const source = readFileSync(new URL("../../components/GrowOpportunityRowActions.tsx", import.meta.url), "utf8");
   const start = source.indexOf("function useAddGrowNote");
-  const end = source.indexOf("export function GrowContactActivityLog");
+  const end = source.indexOf("function localDatetimeValue");
   assert.ok(start > 0 && end > start);
   const writers = source.slice(start, end);
   const known = [
