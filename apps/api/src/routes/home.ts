@@ -2,6 +2,10 @@ import { Router } from "express";
 import { requireAuth } from "../middlewares/auth.js";
 import { getHomeSummary, getDashboardOverview } from "../lib/homeSummary.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+
+// RUN-ACCESS (Owner approved 2026-10-20): a Run surface; the existing run.access entitlement middleware.
+const requiresRunAccess = requireEntitlement("run.access");
 
 export const homeRouter = Router();
 
@@ -13,7 +17,7 @@ export const homeRouter = Router();
 // Also carries the Dashboard's other two sections (staging brief: "Needs
 // Attention, Active Properties, Settlements") — one round trip for the
 // whole Dashboard rather than three.
-homeRouter.get("/summary", requireAuth, async (req, res) => {
+homeRouter.get("/summary", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const restrictToPropertyIds = await restrictedPropertyIdsFor(user);
   const [items, overview] = await Promise.all([

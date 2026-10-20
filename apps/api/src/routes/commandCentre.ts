@@ -4,6 +4,10 @@ import { db, users } from "@aee/db";
 import { eq } from "drizzle-orm";
 import { getCommandCentre } from "../lib/commandCentre/queries.js";
 import { canViewFinancials, restrictedPropertyIdsFor } from "./exceptions.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+
+// RUN-ACCESS (Owner approved 2026-10-20): a Run surface; the existing run.access entitlement middleware.
+const requiresRunAccess = requireEntitlement("run.access");
 
 export const commandCentreRouter = Router();
 
@@ -16,7 +20,7 @@ export const commandCentreRouter = Router();
 // (canViewFinancials, restrictedPropertyIdsFor) from the exceptions route
 // rather than reimplementing brokerage/agent isolation — same semantics,
 // same source of truth.
-commandCentreRouter.get("/", requireAuth, async (req, res) => {
+commandCentreRouter.get("/", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const [restrictToPropertyIds, [row]] = await Promise.all([
     restrictedPropertyIdsFor(user),
