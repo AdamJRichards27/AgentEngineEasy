@@ -1,9 +1,10 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, ne, sql } from "drizzle-orm";
 import { db, amlVerifications, parties, properties, propertyParties, serviceOrders, AML_STATUSES } from "@aee/db";
 import type { AmlVerification, Party } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { createAMLProvider, type AMLWebhookResult } from "@aee/integration-aml";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
+import { findOpenServiceOrder, lockServiceOrderDedupe } from "./serviceOrders.js";
 
 const amlProvider = createAMLProvider();
 
@@ -85,65 +86,92 @@ export async function initiateAmlIfNeeded(input: {
 }): Promise<InitiateAmlResult> {
   const { party } = await assertPartyOnPropertyInBrokerage(input);
 
-  const [existing] = await db
-    .select()
-    .from(amlVerifications)
-    .where(and(eq(amlVerifications.propertyId, input.propertyId), eq(amlVerifications.partyId, input.partyId)));
-  if (existing) {
-    return { verification: existing, created: false };
-  }
+  // D6: check-then-order runs under a transaction-scoped advisory lock on
+  // (brokerage, AmlVerification, property, party), so two concurrent requests
+  // (double click, Ready to List racing a direct request) serialise: the
+  // second waits, then sees the first one's verification and returns it. Before
+  // this, both could pass the SELECT and each call the provider and insert a
+  // second, billable ServiceOrder.
+  const outcome = await db.transaction(async (tx) => {
+    await lockServiceOrderDedupe(tx, {
+      brokerageId: input.brokerageId,
+      serviceType: "AmlVerification",
+      propertyId: input.propertyId,
+      partyId: input.partyId,
+    });
 
-  const verificationType = input.verificationType ?? "Individual";
+    const [existing] = await tx
+      .select()
+      .from(amlVerifications)
+      .where(and(eq(amlVerifications.propertyId, input.propertyId), eq(amlVerifications.partyId, input.partyId)));
+    if (existing) {
+      return { verification: existing, serviceOrderId: existing.serviceOrderId, providerReference: existing.providerReference, created: false };
+    }
+    // Defensive: an open AML order without a verification row (should not exist) is never doubled.
+    const openOrder = await findOpenServiceOrder(tx, { serviceType: "AmlVerification", propertyId: input.propertyId, partyId: input.partyId });
+    if (openOrder) {
+      throw new Error(`An open AML order already exists for party ${input.partyId} on property ${input.propertyId}`);
+    }
 
-  const { providerReference } = await amlProvider.requestVerification({
-    propertyId: input.propertyId,
-    partyId: input.partyId,
-    verificationType,
-    partyDetails: {
-      firstName: party.firstName ?? undefined,
-      middleName: party.middleName ?? undefined,
-      lastName: party.lastName ?? undefined,
-      email: party.email ?? undefined,
-      mobile: party.mobile ?? undefined,
-      residentialAddress: party.residentialAddress ?? undefined,
-    },
+    const verificationType = input.verificationType ?? "Individual";
+
+    const { providerReference } = await amlProvider.requestVerification({
+      propertyId: input.propertyId,
+      partyId: input.partyId,
+      verificationType,
+      partyDetails: {
+        firstName: party.firstName ?? undefined,
+        middleName: party.middleName ?? undefined,
+        lastName: party.lastName ?? undefined,
+        email: party.email ?? undefined,
+        mobile: party.mobile ?? undefined,
+        residentialAddress: party.residentialAddress ?? undefined,
+      },
+    });
+
+    const providerName = process.env.AML_PROVIDER ?? "mock";
+
+    // Billing container (Section 11 / Phase 4) — one ServiceOrder per AML
+    // verification, created alongside it so cost/price are recorded from the
+    // moment the check is ordered, not bolted on later.
+    const [serviceOrder] = await tx
+      .insert(serviceOrders)
+      .values({
+        propertyId: input.propertyId,
+        partyId: input.partyId,
+        serviceType: "AmlVerification",
+        provider: providerName,
+        providerReference,
+        wholesaleCostCents: AML_WHOLESALE_COST_CENTS,
+        customerPriceCents: AML_CUSTOMER_PRICE_CENTS,
+        gstCents: Math.round(AML_CUSTOMER_PRICE_CENTS / 11), // AU GST-inclusive placeholder — real invoicing rules land with Phase 6
+        paymentStatus: "Pending", // no charge attempt yet — Phase 6 wires up actual charging
+        status: "Ordered",
+      })
+      .returning();
+
+    const [verification] = await tx
+      .insert(amlVerifications)
+      .values({
+        propertyId: input.propertyId,
+        partyId: input.partyId,
+        provider: providerName,
+        providerReference,
+        verificationType,
+        status: "Awaiting Seller",
+        serviceOrderId: serviceOrder.id,
+        requestedAt: new Date(),
+        createdBy: input.userId,
+      })
+      .returning();
+    return { verification, serviceOrderId: serviceOrder.id, providerReference, created: true };
   });
 
-  const providerName = process.env.AML_PROVIDER ?? "mock";
-
-  // Billing container (Section 11 / Phase 4) — one ServiceOrder per AML
-  // verification, created alongside it so cost/price are recorded from the
-  // moment the check is ordered, not bolted on later.
-  const [serviceOrder] = await db
-    .insert(serviceOrders)
-    .values({
-      propertyId: input.propertyId,
-      partyId: input.partyId,
-      serviceType: "AmlVerification",
-      provider: providerName,
-      providerReference,
-      wholesaleCostCents: AML_WHOLESALE_COST_CENTS,
-      customerPriceCents: AML_CUSTOMER_PRICE_CENTS,
-      gstCents: Math.round(AML_CUSTOMER_PRICE_CENTS / 11), // AU GST-inclusive placeholder — real invoicing rules land with Phase 6
-      paymentStatus: "Pending", // no charge attempt yet — Phase 6 wires up actual charging
-      status: "Ordered",
-    })
-    .returning();
-
-  const [verification] = await db
-    .insert(amlVerifications)
-    .values({
-      propertyId: input.propertyId,
-      partyId: input.partyId,
-      provider: providerName,
-      providerReference,
-      verificationType,
-      status: "Awaiting Seller",
-      serviceOrderId: serviceOrder.id,
-      requestedAt: new Date(),
-      createdBy: input.userId,
-    })
-    .returning();
+  if (!outcome.created) {
+    return { verification: outcome.verification, created: false };
+  }
+  const { verification, providerReference } = outcome;
+  const serviceOrder = { id: outcome.serviceOrderId! };
 
   try {
     await publishDomainEvent({
@@ -307,7 +335,8 @@ export async function processAmlWebhook(
           status: serviceOrderStatusFor(newStatus),
           completedAt: newStatus === "Complete" || newStatus === "Failed" ? completedAt : null,
         })
-        .where(eq(serviceOrders.id, updated.serviceOrderId));
+        // D6: a Cancelled order is history; a late provider webhook never revives it.
+        .where(and(eq(serviceOrders.id, updated.serviceOrderId), ne(serviceOrders.status, "Cancelled")));
     }
     return { kind: "claimed" as const, updated, property: currentRow.property };
   });
@@ -379,6 +408,14 @@ export async function retryAmlVerification(verificationId: number, brokerageId: 
   const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
     throw new Error(`AmlVerification ${verificationId} is not in a retryable state (status: ${verification.status})`);
+  }
+
+  // D6: retrying re-orders from the provider; a Cancelled order must not be silently re-opened.
+  if (verification.serviceOrderId) {
+    const [order] = await db.select({ status: serviceOrders.status }).from(serviceOrders).where(eq(serviceOrders.id, verification.serviceOrderId));
+    if (order?.status === "Cancelled") {
+      throw new Error(`AmlVerification ${verificationId} belongs to a cancelled service order and can't be retried`);
+    }
   }
 
   const [party] = await db.select().from(parties).where(eq(parties.id, verification.partyId));
