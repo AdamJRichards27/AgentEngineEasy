@@ -1,0 +1,20 @@
+/* Self-hosted Inter (SIL Open Font License 1.1).
+   Licence text: ./OFL.txt
+   Files: Inter 4.1 variable faces from https://github.com/rsms/inter/releases/tag/v4.1
+   The family name is "Inter" so classic UI and AE Minimal share one face.
+   Do not request Google Fonts. The faces are the files next to this sheet. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./InterVariable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./InterVariable-Italic.woff2") format("woff2");
+}
