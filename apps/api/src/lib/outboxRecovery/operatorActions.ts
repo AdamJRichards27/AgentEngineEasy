@@ -3,12 +3,10 @@
 // brokerage is reported NOT_FOUND, exactly like a row that does not exist.
 
 import { and, asc, eq, sql } from "drizzle-orm";
-import { db, communicationMessages, financialPaymentOutbox, integrationOutbox } from "@aee/db";
+import { db, auditLogs, communicationMessages, financialPaymentOutbox, integrationDeadLetters, integrationOutbox } from "@aee/db";
 import { logger } from "@aee/events";
 import { logAudit } from "../audit.js";
-import { writeDeadLetter } from "../integrations/deadLetters.js";
-import { applyMessageTransition } from "../communications/outbox.js";
-import { CommunicationConcurrencyError, CommunicationTenancyError, CommunicationTransitionError } from "../communications/types.js";
+import { isValidCommunicationStatusTransition, type CommunicationMessageStatus } from "../communications/types.js";
 import { MANUAL_REVIEW_STATUS } from "./policy.js";
 
 export const MANUAL_REVIEW_QUEUES = ["integration_outbox", "financial_payment_outbox", "communication_messages"] as const;
@@ -69,28 +67,49 @@ export interface ResolveManualReviewInput {
   acknowledgeDuplicateRisk?: boolean;
 }
 
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Test-only seam: called inside the resolve transaction immediately before the operator audit row is written, so a
+ * test can force the audit write to fail and prove the status change rolls back with it. Never set in production.
+ */
+export const manualReviewTestHooks: { beforeAuditWrite?: (input: { queue: ManualReviewQueue; id: string }) => void } = {};
+
+/**
+ * Resolves one MANUAL_REVIEW row. The status change, any dead letter, and every audit row commit in ONE transaction
+ * (audit writes are strict): an operator action is never left unaudited, and a failed audit leaves the row in
+ * MANUAL_REVIEW.
+ */
 export async function resolveManualReview(input: ResolveManualReviewInput): Promise<{ queue: ManualReviewQueue; id: string; status: string }> {
   const note = input.note?.trim();
   if (!note) throw new OutboundRecoveryError("NOTE_REQUIRED");
   if (input.resolution === "REQUEUE" && input.acknowledgeDuplicateRisk !== true) throw new OutboundRecoveryError("DUPLICATE_RISK_NOT_ACKNOWLEDGED");
 
-  const status = await resolveInQueue(input, note.slice(0, 500));
-  await logAudit({
-    brokerageId: input.brokerageId,
-    userId: input.actorUserId,
-    action: `outbound_recovery_manual_${input.resolution.toLowerCase()}`,
-    recordType: input.queue,
-    recordId: input.id,
-    previousValue: MANUAL_REVIEW_STATUS,
-    updatedValue: `${status}: ${note.slice(0, 200)}`,
-  } as Parameters<typeof logAudit>[0]);
+  const status = await db.transaction(async (tx) => {
+    const audit = (row: Parameters<typeof logAudit>[0]) =>
+      logAudit(row, { strict: true, write: async (i) => void (await tx.insert(auditLogs).values(i)) });
+    const newStatus = await resolveInQueue(tx, input, note.slice(0, 500), audit);
+    manualReviewTestHooks.beforeAuditWrite?.({ queue: input.queue, id: input.id });
+    await audit({
+      brokerageId: input.brokerageId,
+      userId: input.actorUserId,
+      action: `outbound_recovery_manual_${input.resolution.toLowerCase()}`,
+      recordType: input.queue,
+      recordId: input.id,
+      previousValue: MANUAL_REVIEW_STATUS,
+      updatedValue: `${newStatus}: ${note.slice(0, 200)}`,
+    });
+    return newStatus;
+  });
   logger.warn("outbound_recovery_manual_resolved", { queue: input.queue, id: input.id, brokerageId: input.brokerageId, resolution: input.resolution, actorUserId: input.actorUserId });
   return { queue: input.queue, id: input.id, status };
 }
 
-async function resolveInQueue(input: ResolveManualReviewInput, note: string): Promise<string> {
+type AuditFn = (row: Parameters<typeof logAudit>[0]) => Promise<unknown>;
+
+async function resolveInQueue(tx: Tx, input: ResolveManualReviewInput, note: string, audit: AuditFn): Promise<string> {
   if (input.queue === "integration_outbox") {
-    const [row] = await db.select().from(integrationOutbox).where(and(eq(integrationOutbox.id, input.id), eq(integrationOutbox.brokerageId, input.brokerageId)));
+    const [row] = await tx.select().from(integrationOutbox).where(and(eq(integrationOutbox.id, input.id), eq(integrationOutbox.brokerageId, input.brokerageId)));
     if (!row) throw new OutboundRecoveryError("NOT_FOUND");
     if (row.status !== MANUAL_REVIEW_STATUS) throw new OutboundRecoveryError("ALREADY_RESOLVED");
     const guard = and(eq(integrationOutbox.id, row.id), eq(integrationOutbox.brokerageId, input.brokerageId), eq(integrationOutbox.status, MANUAL_REVIEW_STATUS));
@@ -100,11 +119,16 @@ async function resolveInQueue(input: ResolveManualReviewInput, note: string): Pr
         : input.resolution === "MARK_FAILED"
           ? { status: "DEAD_LETTERED", lastError: `manual review: marked failed (${note})`, updatedAt: new Date() }
           : { status: "RETRY_SCHEDULED", nextAttemptAt: sql`now()`, lastError: `manual review: requeued, duplicate risk acknowledged (${note})`, updatedAt: new Date() };
-    const [updated] = await db.update(integrationOutbox).set(set as never).where(guard).returning();
+    const [updated] = await tx.update(integrationOutbox).set(set as never).where(guard).returning();
     if (!updated) throw new OutboundRecoveryError("ALREADY_RESOLVED");
     if (input.resolution === "MARK_FAILED") {
-      // Lands on the existing audited dead-letter replay path.
-      await writeDeadLetter({ brokerageId: row.brokerageId, connectionId: row.connectionId, sourceType: "OUTBOX", sourceId: row.id, reason: "MANUAL_REVIEW_MARKED_FAILED", payloadSnapshot: row.commandPayload } as Parameters<typeof writeDeadLetter>[0]);
+      // Same row writeDeadLetter() creates, written on this transaction so it lands on the existing audited replay path
+      // only if the resolve commits.
+      const [letter] = await tx
+        .insert(integrationDeadLetters)
+        .values({ brokerageId: row.brokerageId, connectionId: row.connectionId, sourceType: "OUTBOX", sourceId: row.id, reason: "MANUAL_REVIEW_MARKED_FAILED", payloadSnapshot: row.commandPayload } as never)
+        .returning();
+      await audit({ action: "integration_dead_letter_created", recordType: "integration_dead_letter", recordId: String(letter.id), updatedValue: "MANUAL_REVIEW_MARKED_FAILED" });
     }
     return updated.status;
   }
@@ -112,7 +136,7 @@ async function resolveInQueue(input: ResolveManualReviewInput, note: string): Pr
   if (input.queue === "financial_payment_outbox") {
     const id = Number(input.id);
     if (!Number.isSafeInteger(id)) throw new OutboundRecoveryError("NOT_FOUND");
-    const [row] = await db.select().from(financialPaymentOutbox).where(and(eq(financialPaymentOutbox.id, id), eq(financialPaymentOutbox.brokerageId, input.brokerageId)));
+    const [row] = await tx.select().from(financialPaymentOutbox).where(and(eq(financialPaymentOutbox.id, id), eq(financialPaymentOutbox.brokerageId, input.brokerageId)));
     if (!row) throw new OutboundRecoveryError("NOT_FOUND");
     if (row.status !== MANUAL_REVIEW_STATUS) throw new OutboundRecoveryError("ALREADY_RESOLVED");
     // MARK_SENT would have to record the provider's debit reference and ledger event; that is a financial correction,
@@ -123,7 +147,7 @@ async function resolveInQueue(input: ResolveManualReviewInput, note: string): Pr
       input.resolution === "MARK_FAILED"
         ? { status: "FAILED", lastError: `manual review: marked failed (${note})`, updatedAt: new Date() }
         : { status: "PENDING", nextAttemptAt: sql`now()`, lastError: `manual review: requeued, duplicate risk acknowledged (${note})`, updatedAt: new Date() };
-    const [updated] = await db
+    const [updated] = await tx
       .update(financialPaymentOutbox)
       .set(set as never)
       .where(and(eq(financialPaymentOutbox.id, id), eq(financialPaymentOutbox.brokerageId, input.brokerageId), eq(financialPaymentOutbox.status, MANUAL_REVIEW_STATUS)))
@@ -132,28 +156,33 @@ async function resolveInQueue(input: ResolveManualReviewInput, note: string): Pr
     return updated.status;
   }
 
+  // communication_messages: the same transition-table check and version guard as applyMessageTransition, written on
+  // this transaction so its communication_message audit row commits with it.
   const id = Number(input.id);
   if (!Number.isSafeInteger(id)) throw new OutboundRecoveryError("NOT_FOUND");
-  const [row] = await db.select().from(communicationMessages).where(and(eq(communicationMessages.id, id), eq(communicationMessages.brokerageId, input.brokerageId)));
+  const [row] = await tx.select().from(communicationMessages).where(and(eq(communicationMessages.id, id), eq(communicationMessages.brokerageId, input.brokerageId)));
   if (!row) throw new OutboundRecoveryError("NOT_FOUND");
   if (row.status !== MANUAL_REVIEW_STATUS) throw new OutboundRecoveryError("ALREADY_RESOLVED");
-  try {
-    const updated = await applyMessageTransition({
-      messageId: id,
-      brokerageId: input.brokerageId,
-      toStatus: input.resolution === "MARK_SENT" ? "SENT" : input.resolution === "MARK_FAILED" ? "FAILED" : "RETRY_SCHEDULED",
-      expectedVersion: row.version,
-      actorUserId: input.actorUserId,
-      auditAction: `communication_message_manual_${input.resolution.toLowerCase()}`,
-      patch:
-        input.resolution === "REQUEUE"
-          ? { scheduledAt: new Date(), failureDetail: `manual review: requeued, duplicate risk acknowledged (${note})` }
-          : { failureDetail: input.resolution === "MARK_FAILED" ? `manual review: marked failed (${note})` : null },
-    });
-    return updated.status;
-  } catch (err) {
-    if (err instanceof CommunicationTenancyError) throw new OutboundRecoveryError("NOT_FOUND");
-    if (err instanceof CommunicationConcurrencyError || err instanceof CommunicationTransitionError) throw new OutboundRecoveryError("ALREADY_RESOLVED");
-    throw err;
-  }
+  const toStatus = input.resolution === "MARK_SENT" ? "SENT" : input.resolution === "MARK_FAILED" ? "FAILED" : "RETRY_SCHEDULED";
+  if (!isValidCommunicationStatusTransition(row.status as CommunicationMessageStatus, toStatus)) throw new OutboundRecoveryError("ALREADY_RESOLVED");
+  const patch =
+    input.resolution === "REQUEUE"
+      ? { scheduledAt: new Date(), failureDetail: `manual review: requeued, duplicate risk acknowledged (${note})` }
+      : { failureDetail: input.resolution === "MARK_FAILED" ? `manual review: marked failed (${note})` : null };
+  const [updated] = await tx
+    .update(communicationMessages)
+    .set({ status: toStatus, version: row.version + 1, updatedAt: new Date(), ...patch })
+    .where(and(eq(communicationMessages.id, id), eq(communicationMessages.brokerageId, input.brokerageId), eq(communicationMessages.version, row.version), eq(communicationMessages.status, MANUAL_REVIEW_STATUS)))
+    .returning();
+  if (!updated) throw new OutboundRecoveryError("ALREADY_RESOLVED");
+  await audit({
+    userId: input.actorUserId,
+    action: `communication_message_manual_${input.resolution.toLowerCase()}`,
+    recordType: "communication_message",
+    recordId: String(updated.id),
+    propertyId: updated.propertyId ?? undefined,
+    previousValue: row.status,
+    updatedValue: updated.status,
+  });
+  return updated.status;
 }

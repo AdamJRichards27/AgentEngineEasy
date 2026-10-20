@@ -9,7 +9,7 @@
 
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { eq } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   db,
   integrationOutbox,
@@ -64,6 +64,26 @@ beforeEach(() => {
   resetMetricsForTesting();
 });
 
+// Test isolation (shared test DB, files run in parallel): the backlog gauges are GLOBAL counts, so other suites' rows,
+// leftover or in flight, are legitimately included. Instead of assuming the table is otherwise empty, compare each
+// sample with an independent COUNT taken immediately before and after it, and retry until no concurrent writer
+// changed the count in between. The gauge must equal that count exactly.
+async function sampleBacklogAgainstIndependentCount(queue: "integration_outbox" | "financial_payment_outbox", independentCount: () => Promise<number>): Promise<{ gauge: number; count: number }> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const before = await independentCount();
+    resetMetricsForTesting();
+    await sampleQueueGauges();
+    const after = await independentCount();
+    if (before !== after) continue;
+    const match = renderMetricsText().match(new RegExp(`queue_backlog_size\\{queue="${queue}"\\} (\\d+)`));
+    assert.ok(match, `expected a ${queue} backlog series`);
+    return { gauge: Number(match![1]), count: after };
+  }
+  throw new Error(`${queue}: the table never held still across a sample (20 tries)`);
+}
+const countIntegrationBacklog = async () => (await db.select({ n: sql<number>`count(*)::int` }).from(integrationOutbox).where(inArray(integrationOutbox.status, ["PENDING", "RETRY_SCHEDULED"])))[0].n;
+const countPaymentBacklog = async () => (await db.select({ n: sql<number>`count(*)::int` }).from(financialPaymentOutbox).where(inArray(financialPaymentOutbox.status, ["PENDING"])))[0].n;
+
 test("sampleQueueGauges reports a zero backlog and zero age for a brand-new brokerage with no pending work", async () => {
   await sampleQueueGauges();
   const text = renderMetricsText();
@@ -109,7 +129,7 @@ test("a PENDING financial_payment_outbox row increases the backlog gauge, and cl
     .returning();
 
   await sampleQueueGauges();
-  let text = renderMetricsText();
+  const text = renderMetricsText();
   const beforeMatch = text.match(/queue_backlog_size\{queue="financial_payment_outbox"\} (\d+)/);
   assert.ok(beforeMatch, "expected a financial_payment_outbox backlog series");
   assert.ok(Number(beforeMatch![1]) >= 1, "backlog must include the PENDING row just inserted");
@@ -119,12 +139,10 @@ test("a PENDING financial_payment_outbox row increases the backlog gauge, and cl
 
   await db.update(financialPaymentOutbox).set({ status: "FAILED" }).where(eq(financialPaymentOutbox.id, outboxRow.id));
 
-  resetMetricsForTesting();
-  await sampleQueueGauges();
-  text = renderMetricsText();
-  const afterMatch = text.match(/queue_backlog_size\{queue="financial_payment_outbox"\} (\d+)/);
-  assert.ok(afterMatch);
-  assert.equal(Number(afterMatch![1]), 0, "once the row is no longer PENDING, the very next sample must reflect zero — proving this is sampled fresh, not tracked incrementally");
+  const afterPay = await sampleBacklogAgainstIndependentCount("financial_payment_outbox", countPaymentBacklog);
+  assert.equal(afterPay.gauge, afterPay.count, "the very next sample reflects the current PENDING set exactly — sampled fresh, not tracked incrementally");
+  const [stillOurs] = await db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.id, outboxRow.id));
+  assert.equal(stillOurs.status, "FAILED", "our row is outside the counted set, so it is not in the gauge");
 });
 
 test("a QUEUED communications message increases the communications_outbox backlog gauge", async () => {
@@ -222,7 +240,7 @@ test("a PENDING integration_outbox row increases the backlog gauge, and moving i
     .returning();
 
   await sampleQueueGauges();
-  let text = renderMetricsText();
+  const text = renderMetricsText();
   const beforeMatch = text.match(/queue_backlog_size\{queue="integration_outbox"\} (\d+)/);
   assert.ok(beforeMatch, "expected an integration_outbox backlog series");
   assert.ok(Number(beforeMatch![1]) >= 1, "backlog must include the PENDING row just inserted");
@@ -231,12 +249,10 @@ test("a PENDING integration_outbox row increases the backlog gauge, and moving i
 
   await db.update(integrationOutbox).set({ status: "SENT" }).where(eq(integrationOutbox.id, outboxRow.id));
 
-  resetMetricsForTesting();
-  await sampleQueueGauges();
-  text = renderMetricsText();
-  const afterMatch = text.match(/queue_backlog_size\{queue="integration_outbox"\} (\d+)/);
-  assert.ok(afterMatch);
-  assert.equal(Number(afterMatch![1]), 0, "once the row is SENT (no longer PENDING/RETRY_SCHEDULED), the very next sample must reflect zero");
+  const afterInt = await sampleBacklogAgainstIndependentCount("integration_outbox", countIntegrationBacklog);
+  assert.equal(afterInt.gauge, afterInt.count, "once the row is SENT the next sample reflects the current PENDING/RETRY_SCHEDULED set exactly");
+  const [stillOurs] = await db.select().from(integrationOutbox).where(eq(integrationOutbox.id, outboxRow.id));
+  assert.equal(stillOurs.status, "SENT", "our row is outside the counted set, so it is not in the gauge");
 });
 
 test("sampleQueueGauges never throws even if a query fails — it fails open so a gauge-sampling bug can never 500 the metrics endpoint", async () => {
@@ -248,3 +264,31 @@ test("sampleQueueGauges never throws even if a query fails — it fails open so 
 // but the import is kept here as the same "fixtures this file's setup
 // depends on" documentation anchor used elsewhere in this suite.
 void integrationConnections;
+
+test("[ISOLATION] the backlog gauge is correct even when OTHER suites leave PENDING rows behind", async () => {
+  const actor = { id: admin.user.id, role: admin.user.role };
+  const { connection } = await createActiveMockPortalConnection(brokerageId, actor);
+  // Simulate another suite's leftovers: rows that stay PENDING for the whole test (not yet due, so no sweep takes them).
+  const leftovers = await db
+    .insert(integrationOutbox)
+    .values([1, 2, 3].map((n) => ({
+      brokerageId,
+      connectionId: connection.id,
+      capability: "PORTAL_PUBLISH_LISTING",
+      commandPayload: { note: "leftover fixture" },
+      status: "PENDING",
+      nextAttemptAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      idempotencyKey: `queue-gauge-leftover-${n}-${suffix}`,
+      correlationId: randomUUID(),
+      sourceRecordType: "TEST_FIXTURE",
+      sourceRecordId: `queue-gauge-leftover-${n}-${suffix}`,
+    })))
+    .returning();
+  try {
+    const sampled = await sampleBacklogAgainstIndependentCount("integration_outbox", countIntegrationBacklog);
+    assert.ok(sampled.count >= 3);
+    assert.equal(sampled.gauge, sampled.count);
+  } finally {
+    for (const row of leftovers) await db.update(integrationOutbox).set({ status: "CANCELLED" }).where(eq(integrationOutbox.id, row.id));
+  }
+});

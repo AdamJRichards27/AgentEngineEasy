@@ -22,6 +22,7 @@ import { sandboxEmailProvider } from "../../lib/communications/providers/sandbox
 import { sandboxSmsProvider } from "../../lib/communications/providers/sandboxSms.js";
 import { mockSmsAdapter } from "../../lib/integrations/adapters/mockSms.js";
 import { mockPaymentStatusAdapter } from "../../lib/integrations/adapters/mockPaymentStatus.js";
+import { manualReviewTestHooks } from "../../lib/outboxRecovery/operatorActions.js";
 import { decideRecovery, capabilityOf, NO_RECOVERY_CAPABILITY } from "../../lib/outboxRecovery/policy.js";
 import { sampleQueueGauges } from "../../lib/observability/queueGauges.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
@@ -300,4 +301,50 @@ test("[RECOVERY] gauges: expired-lease DISPATCHING, live DISPATCHING and MANUAL_
     for (const id of [expired.id, live.id, review.id]) await db.update(integrationOutbox).set({ status: "CANCELLED" }).where(eq(integrationOutbox.id, id));
     await db.update(communicationMessages).set({ status: "FAILED" }).where(eq(communicationMessages.id, staleMsg.id));
   }
+});
+
+// ---------------------------------------------------------------------
+// Atomicity: the resolve and its audit rows commit together or not at all.
+// ---------------------------------------------------------------------
+
+test("[ATOMIC] integration MARK_FAILED: if the operator audit write fails, the status change and the dead letter roll back (500, row still MANUAL_REVIEW)", async () => {
+  const review = await insertOutbox("MANUAL_REVIEW", "atomic-int");
+  manualReviewTestHooks.beforeAuditWrite = ({ id }) => {
+    if (id === review.id) throw new Error("synthetic audit failure");
+  };
+  try {
+    const res = await post(`/integrations/outbound-recovery/integration_outbox/${review.id}/resolve`, A.admin.cookie, { resolution: "MARK_FAILED", note: "synthetic" });
+    assert.equal(res.status, 500);
+    assert.deepEqual(await res.json(), { error: "Could not resolve that item.", code: "INTERNAL_ERROR" });
+  } finally {
+    manualReviewTestHooks.beforeAuditWrite = undefined;
+  }
+  assert.equal((await db.select().from(integrationOutbox).where(eq(integrationOutbox.id, review.id)))[0].status, "MANUAL_REVIEW");
+  assert.deepEqual(await db.select().from(integrationDeadLetters).where(eq(integrationDeadLetters.sourceId, review.id)), [], "dead letter rolled back");
+  assert.deepEqual(await db.select().from(auditLogs).where(eq(auditLogs.recordId, review.id)), []);
+  // The same action then succeeds, with exactly one of each row.
+  const ok = await post(`/integrations/outbound-recovery/integration_outbox/${review.id}/resolve`, A.admin.cookie, { resolution: "MARK_FAILED", note: "synthetic" });
+  assert.equal(ok.status, 200);
+  const letters = await db.select().from(integrationDeadLetters).where(eq(integrationDeadLetters.sourceId, review.id));
+  assert.equal(letters.length, 1);
+  const letterAudits = await db.select().from(auditLogs).where(and(eq(auditLogs.recordType, "integration_dead_letter"), eq(auditLogs.recordId, String(letters[0].id))));
+  assert.equal(letterAudits.length, 1, "the dead letter's own audit row commits in the same transaction");
+  assert.equal((await db.select().from(auditLogs).where(and(eq(auditLogs.recordType, "integration_outbox"), eq(auditLogs.recordId, review.id)))).length, 1);
+});
+
+test("[ATOMIC] comms MARK_SENT: if the operator audit write fails, the message stays MANUAL_REVIEW with its version unchanged and no audit rows", async () => {
+  const msg = await insertMessage("MANUAL_REVIEW", LONG_AGO, "atomic-comms");
+  manualReviewTestHooks.beforeAuditWrite = ({ id }) => {
+    if (id === String(msg.id)) throw new Error("synthetic audit failure");
+  };
+  try {
+    const res = await post(`/integrations/outbound-recovery/communication_messages/${msg.id}/resolve`, A.admin.cookie, { resolution: "MARK_SENT", note: "synthetic" });
+    assert.equal(res.status, 500);
+  } finally {
+    manualReviewTestHooks.beforeAuditWrite = undefined;
+  }
+  const [row] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, msg.id));
+  assert.equal(row.status, "MANUAL_REVIEW");
+  assert.equal(row.version, msg.version);
+  assert.deepEqual(await db.select().from(auditLogs).where(eq(auditLogs.recordId, String(msg.id))), []);
 });
