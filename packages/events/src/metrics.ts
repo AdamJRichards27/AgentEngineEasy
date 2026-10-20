@@ -61,7 +61,7 @@ export const METRIC_DEFINITIONS = {
   },
   integration_outbox_dispatch_total: {
     help: "Integration outbox dispatch attempts, by capability and outcome.",
-    labels: { capability: INTEGRATION_CAPABILITIES, outcome: [...OUTCOME, "retry_scheduled"] },
+    labels: { capability: INTEGRATION_CAPABILITIES, outcome: [...OUTCOME, "retry_scheduled", "reconciled"] },
   },
   integration_webhook_total: {
     help: "Inbound integration webhook deliveries, by provider-agnostic outcome.",
@@ -252,6 +252,18 @@ export const METRIC_DEFINITIONS = {
     help: "Platform Owner privilege checks that failed closed. tables_missing means platform_owners was absent so nobody is an owner. audit_unavailable means a confirmed owner was refused because the mandatory audit write failed. write_denied means a cross-brokerage write was outside the allowlist. session_expired means an owner session exceeded the 12 hour absolute cap. No user, brokerage, or path labels.",
     labels: { event: ["tables_missing", "audit_unavailable", "write_denied", "session_expired"] },
   },
+  outbound_recovery_manual_review_total: {
+    help: "An outbound send whose outcome was unknown (lease expired or stale SENDING) was moved to MANUAL_REVIEW instead of being re-sent.",
+    labels: { queue: ["integration_outbox", "financial_payment_outbox", "communications_outbox"] },
+  },
+  outbound_in_flight_gauge: {
+    help: "Current count of outbound items mid-dispatch (DISPATCHING/SENDING), split by whether the claim lease is still live or has expired (expired = outcome unknown, awaiting recovery), sampled at read time.",
+    labels: { queue: ["integration_outbox", "financial_payment_outbox", "communications_outbox"], lease: ["live", "expired"] },
+  },
+  outbound_manual_review_gauge: {
+    help: "Current count of outbound items waiting in MANUAL_REVIEW for an operator decision, sampled at read time.",
+    labels: { queue: ["integration_outbox", "financial_payment_outbox", "communications_outbox"] },
+  },
 } as const satisfies Record<string, MetricDefinition>;
 
 export type MetricName = keyof typeof METRIC_DEFINITIONS;
@@ -312,7 +324,7 @@ const HISTOGRAM_METRICS = new Set<MetricName>([
   "voice_transcription_duration_ms",
   "pit_crew_waiting_on_sweep_tick_duration_ms",
 ]);
-const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge"]);
+const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge", "outbound_in_flight_gauge", "outbound_manual_review_gauge"]);
 
 export function incrementCounter(metric: MetricName, labels: LabelValues = {}, by = 1): void {
   const safeLabels = sanitiseLabels(metric, labels);

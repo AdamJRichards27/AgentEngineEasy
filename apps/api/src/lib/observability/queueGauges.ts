@@ -55,12 +55,55 @@ async function sampleCommunicationsOutbox(): Promise<void> {
   publishBacklogGauges("communications_outbox", row?.count ?? 0, row?.oldest ?? null);
 }
 
+/**
+ * Outbound recovery: rows whose dispatch is in flight or awaiting an operator are NOT backlog (the backlog gauges
+ * above deliberately exclude them), but a stuck one is invisible without these. One COUNT ... FILTER per table:
+ *   outbound_in_flight_gauge{queue, lease="live"|"expired"}: DISPATCHING (lease in next_attempt_at) / SENDING
+ *     (comms has no lease: "expired" means older than STALE_SENDING_THRESHOLD_MS);
+ *   outbound_manual_review_gauge{queue}: MANUAL_REVIEW rows waiting for an operator.
+ */
+export const COMMS_STALE_SENDING_GAUGE_MS = 15 * 60_000;
+async function sampleOutboundRecovery(): Promise<void> {
+  const [integ] = await db
+    .select({
+      live: sql<number>`(count(*) filter (where ${integrationOutbox.status} = 'DISPATCHING' and ${integrationOutbox.nextAttemptAt} > now()))::int`,
+      expired: sql<number>`(count(*) filter (where ${integrationOutbox.status} = 'DISPATCHING' and ${integrationOutbox.nextAttemptAt} <= now()))::int`,
+      review: sql<number>`(count(*) filter (where ${integrationOutbox.status} = 'MANUAL_REVIEW'))::int`,
+    })
+    .from(integrationOutbox)
+    .where(inArray(integrationOutbox.status, ["DISPATCHING", "MANUAL_REVIEW"]));
+  const [pay] = await db
+    .select({
+      live: sql<number>`(count(*) filter (where ${financialPaymentOutbox.status} = 'DISPATCHING' and ${financialPaymentOutbox.nextAttemptAt} > now()))::int`,
+      expired: sql<number>`(count(*) filter (where ${financialPaymentOutbox.status} = 'DISPATCHING' and ${financialPaymentOutbox.nextAttemptAt} <= now()))::int`,
+      review: sql<number>`(count(*) filter (where ${financialPaymentOutbox.status} = 'MANUAL_REVIEW'))::int`,
+    })
+    .from(financialPaymentOutbox)
+    .where(inArray(financialPaymentOutbox.status, ["DISPATCHING", "MANUAL_REVIEW"]));
+  const staleBefore = new Date(Date.now() - COMMS_STALE_SENDING_GAUGE_MS);
+  const [comms] = await db
+    .select({
+      live: sql<number>`(count(*) filter (where ${communicationMessages.status} = 'SENDING' and ${communicationMessages.updatedAt} > ${staleBefore}))::int`,
+      expired: sql<number>`(count(*) filter (where ${communicationMessages.status} = 'SENDING' and ${communicationMessages.updatedAt} <= ${staleBefore}))::int`,
+      review: sql<number>`(count(*) filter (where ${communicationMessages.status} = 'MANUAL_REVIEW'))::int`,
+    })
+    .from(communicationMessages)
+    .where(inArray(communicationMessages.status, ["SENDING", "MANUAL_REVIEW"]));
+  const rows = { integration_outbox: integ, financial_payment_outbox: pay, communications_outbox: comms };
+  for (const [queue, r] of Object.entries(rows)) {
+    setGauge("outbound_in_flight_gauge", r?.live ?? 0, { queue, lease: "live" });
+    setGauge("outbound_in_flight_gauge", r?.expired ?? 0, { queue, lease: "expired" });
+    setGauge("outbound_manual_review_gauge", r?.review ?? 0, { queue });
+  }
+}
+
 /** Called once, immediately before each GET /api/internal/metrics render — see routes/metrics.ts. Never call from a request/background path other than the metrics scrape itself (a gauge is meant to reflect "right now", not be sampled speculatively). */
 export async function sampleQueueGauges(): Promise<void> {
   try {
     await sampleIntegrationOutbox();
     await sampleFinancialPaymentOutbox();
     await sampleCommunicationsOutbox();
+    await sampleOutboundRecovery();
 
     const [criticalRow] = await db
       .select({ count: sql<number>`count(*)::int` })
