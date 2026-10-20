@@ -83,6 +83,8 @@ export const COMMUNICATION_MESSAGE_STATUSES = [
   "CANCELLED",
   "BLOCKED_BY_CONSENT",
   "BLOCKED_BY_COST_CONTROL",
+  // Outbound recovery: a SENDING message whose outcome is unknown (stale past the threshold). Operator-resolved only.
+  "MANUAL_REVIEW",
 ] as const;
 export type CommunicationMessageStatus = (typeof COMMUNICATION_MESSAGE_STATUSES)[number];
 
