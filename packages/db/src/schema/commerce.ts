@@ -44,7 +44,7 @@ export const serviceOrders = pgTable("service_orders", {
   customerPriceCents: integer("customer_price_cents").notNull(),
   gstCents: integer("gst_cents").notNull().default(0),
   paymentStatus: text("payment_status").notNull().default("Pending"), // Pending | Charged | Failed | Refunded
-  status: text("status").notNull().default("Ordered"), // Ordered | InProgress | Completed | Failed
+  status: text("status").notNull().default("Ordered"), // Ordered | InProgress | Completed | Failed | Cancelled (D6; text, no migration — see apps/api/src/lib/serviceOrders.ts)
   orderedAt: timestamp("ordered_at").notNull().defaultNow(),
   completedAt: timestamp("completed_at"),
 });

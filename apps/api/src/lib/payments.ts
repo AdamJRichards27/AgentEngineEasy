@@ -166,7 +166,7 @@ export interface ChargeServiceOrderResult {
 // S-1b: stable, client-safe codes for chargeServiceOrder failures. The route maps
 // each to a status and an agent-facing sentence (routes/payments.ts chargeErrorResponse);
 // internal detail (ids, driver text) stays server-side.
-export type ServiceOrderChargeErrorCode = "SERVICE_ORDER_NOT_FOUND" | "SERVICE_ORDER_PROPERTY_MISSING" | "PAYMENT_METHOD_REQUIRED";
+export type ServiceOrderChargeErrorCode = "SERVICE_ORDER_NOT_FOUND" | "SERVICE_ORDER_PROPERTY_MISSING" | "PAYMENT_METHOD_REQUIRED" | "SERVICE_ORDER_CANCELLED";
 export class ServiceOrderChargeError extends Error {
   constructor(public readonly code: ServiceOrderChargeErrorCode, detail?: string) {
     super(detail ?? code);
@@ -182,6 +182,10 @@ export async function chargeServiceOrder(input: {
   const serviceOrder = await selectServiceOrderInBrokerage(input.serviceOrderId, input.brokerageId);
   if (!serviceOrder) {
     throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`);
+  }
+  // D6: a cancelled order is never charged.
+  if (serviceOrder.status === "Cancelled") {
+    throw new ServiceOrderChargeError("SERVICE_ORDER_CANCELLED", `ServiceOrder ${input.serviceOrderId} is cancelled`);
   }
 
   const existingAttempts = await db

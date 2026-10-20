@@ -20,6 +20,7 @@ import {
   type PaymentRefundErrorCode,
   type ServiceOrderChargeErrorCode,
 } from "../lib/payments.js";
+import { cancelServiceOrder, ServiceOrderCancelError, type ServiceOrderCancelErrorCode } from "../lib/serviceOrders.js";
 
 // Phase 6 (ARCHITECTURE.md §10): stored payment methods, ServiceOrder
 // charging, receipts, idempotency. The ServiceOrder rows themselves are
@@ -122,6 +123,7 @@ const CHARGE_ERRORS: Record<ServiceOrderChargeErrorCode, { status: number; error
   SERVICE_ORDER_NOT_FOUND: { status: 404, error: "Not found" },
   SERVICE_ORDER_PROPERTY_MISSING: { status: 409, error: "This service order can't be charged because its property record is unavailable." },
   PAYMENT_METHOD_REQUIRED: { status: 409, error: "No default payment method on file for this agent. Add one before charging." },
+  SERVICE_ORDER_CANCELLED: { status: 409, error: "This service order was cancelled and can't be charged." },
 };
 export function chargeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof ServiceOrderChargeError && err.code in CHARGE_ERRORS) {
@@ -235,4 +237,48 @@ paymentsRouter.get("/service-orders/:id", requireAuth, requiresRunAccess, async 
     return;
   }
   res.json({ serviceOrder });
+});
+
+// D6 (Owner direction t113u): cancel a service order that has not started.
+// run.access first (same order as the other /service-orders/* routes), then a
+// brokerage-scoped load inside cancelServiceOrder: a foreign id answers exactly
+// like a missing id. Permission: Brokerage Administrator, or the property's own
+// agent. Repeat cancel is idempotent (200, cancelled:false). History kept: the
+// row is updated, never deleted, and the audit row commits with it.
+const CANCEL_ERRORS: Record<ServiceOrderCancelErrorCode, { status: number; error: string }> = {
+  SERVICE_ORDER_NOT_FOUND: { status: 404, error: "Not found" },
+  SERVICE_ORDER_CANCEL_FORBIDDEN: { status: 403, error: "Only the property's agent or a Brokerage Administrator can cancel this order." },
+  SERVICE_ORDER_NOT_CANCELLABLE: { status: 409, error: "This service order has already started or finished and can't be cancelled." },
+  SERVICE_ORDER_HAS_PAYMENT: { status: 409, error: "This service order has a payment. Refund it before cancelling." },
+};
+const cancelSchema = z.object({ reason: z.string().trim().min(1, "reason is required").max(500) });
+
+paymentsRouter.post("/service-orders/:id/cancel", requireAuth, requiresRunAccess, async (req, res) => {
+  const serviceOrderId = Number(req.params.id);
+  if (!Number.isSafeInteger(serviceOrderId) || serviceOrderId <= 0) {
+    res.status(404).json({ error: "Not found", code: "SERVICE_ORDER_NOT_FOUND" });
+    return;
+  }
+  const parsed = cancelSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "A cancellation reason is required.", code: "SERVICE_ORDER_CANCEL_REASON_REQUIRED" });
+    return;
+  }
+  const user = req.authedUser!;
+  try {
+    const { serviceOrder, cancelled } = await cancelServiceOrder({
+      serviceOrderId,
+      actor: { id: user.id, role: user.role, brokerageId: user.brokerageId },
+      reason: parsed.data.reason,
+    });
+    res.status(200).json({ serviceOrder, cancelled });
+  } catch (err) {
+    if (err instanceof ServiceOrderCancelError) {
+      const m = CANCEL_ERRORS[err.code];
+      res.status(m.status).json({ error: m.error, code: err.code });
+      return;
+    }
+    logger.error("service_order_cancel_failed", { serviceOrderId, error: err instanceof Error ? err.message : String(err) });
+    res.status(500).json({ error: "Cancel failed", code: "SERVICE_ORDER_CANCEL_FAILED" });
+  }
 });
