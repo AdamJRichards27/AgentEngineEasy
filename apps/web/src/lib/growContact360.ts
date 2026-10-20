@@ -2,6 +2,7 @@
 // Shared by the classic Grow page and the AE Minimal Contact 360 view.
 import type { GrowContactability } from "./contactability";
 
+
 export interface GrowContact360HouseholdRelationship {
   id: number;
   relatedPartyId: number;
@@ -160,3 +161,53 @@ export interface GrowContactListItem {
   roles: string[];
   relatedPropertyCount: number;
 }
+
+export interface GrowAccess {
+  entitled: boolean;
+  entitlements: string[];
+  billingProviderName: string;
+}
+
+export function growActivityTypeLabel(activityType: string): string {
+  if (activityType === "call_summary") return "Call summary";
+  return activityType.replace(/_/g, " ");
+}
+
+export const GROW_CONTACT_ROLES = [
+  "Prospect",
+  "PastClient",
+  "CurrentClient",
+  "Seller",
+  "Buyer",
+  "Landlord",
+  "Tenant",
+  "Investor",
+  "PropertyOwner",
+  "AppraisalProspect",
+  "ReferralSource",
+  "ProfessionalPartner",
+  "Other",
+] as const;
+
+export const GROW_CONTACT_RELATIONSHIP_TYPES = [
+  "spouse_partner",
+  "family",
+  "co_owner",
+  "business_partner",
+  "related_contact",
+  "other",
+] as const;
+
+export type GrowContactListPage = {
+  contacts: GrowContactListItem[];
+  nextCursor?: string | null;
+  total?: number;
+};
+
+// PATCH /grow/contacts/commitments/:id is the one write behind Complete,
+// Cancel, and Reschedule. A status change sends { status }. A reschedule
+// sends { dueAt } alone — the route rejects a body that names both. Grow
+// Today and Contact 360 share this hook so the two surfaces cannot drift.
+export type GrowCommitmentPatch =
+  | { id: number; status: "Completed" | "Cancelled" }
+  | { id: number; dueAt: string };
