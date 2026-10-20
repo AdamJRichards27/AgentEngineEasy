@@ -1,0 +1,5 @@
+/* WS2 Minimal Properties, accessibility pass (19 Oct 2026). Scoped to
+   [data-ae-properties]. minimal.css gives the search field only a 1px border
+   change and a 10%-alpha glow on focus, which is too faint to see (WCAG
+   2.4.7 / 1.4.11), so the focused field also gets a solid ring here. */
+.ae-minimal [data-ae-properties] .am-data-search:focus-within { outline: 3px solid #C44F17; outline-offset: 2px; }
