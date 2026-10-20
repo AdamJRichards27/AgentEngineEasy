@@ -10,6 +10,7 @@
 // "no direct production provider activation without credentials" limit).
 
 import type { FailureCategory } from "../types.js";
+import type { ProviderRecoveryCapability } from "../../outboxRecovery/policy.js";
 
 export interface SendEmailInput {
   to: string;
@@ -37,11 +38,15 @@ export interface ProviderSendResult {
 
 export interface EmailProvider {
   readonly name: string;
+  /** Outbound recovery capability; omitted means fail-closed (MANUAL_REVIEW). */
+  readonly recovery?: ProviderRecoveryCapability;
   send(input: SendEmailInput): Promise<ProviderSendResult>;
 }
 
 export interface SmsProvider {
   readonly name: string;
+  /** Outbound recovery capability; omitted means fail-closed (MANUAL_REVIEW). */
+  readonly recovery?: ProviderRecoveryCapability;
   send(input: SendSmsInput): Promise<ProviderSendResult>;
 }
 

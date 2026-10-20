@@ -34,6 +34,8 @@ export const MOCK_SMS_PROVIDER_ID = "mock_sms_v1";
 export const mockSmsAdapter: IntegrationAdapter = {
   providerId: MOCK_SMS_PROVIDER_ID,
   version: 1,
+  // Same reference comes back, but the message is accepted again: no dedupe semantics. No lookup.
+  recovery: { dedupesOnIdempotencyKey: false },
   capabilities: ["comms.sendSms"] as IntegrationCapability[],
 
   async send(capability: IntegrationCapability, payload: Record<string, unknown>, ctx: AdapterSendContext): Promise<AdapterSendResult> {

@@ -1,3 +1,4 @@
+import type { ProviderRecoveryCapability } from "../outboxRecovery/policy.js";
 // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
 //
 // Typed, versioned adapter contracts (Section 3) and the connection
@@ -154,6 +155,8 @@ export interface IntegrationAdapter {
   version: number;
   capabilities: IntegrationCapability[];
   send(capability: IntegrationCapability, payload: Record<string, unknown>, ctx: AdapterSendContext): Promise<AdapterSendResult>;
+  /** Outbound recovery: what an uncertain (lease-expired) send may do. Omitted means fail-closed (MANUAL_REVIEW). */
+  recovery?: ProviderRecoveryCapability;
 }
 
 // ---------------------------------------------------------------------
