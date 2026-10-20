@@ -3,7 +3,7 @@
 // Import specifiers use "../lib/..." / "../components/..." so the behaviour-test module mocks still match.
 
 import { ContactCommunicationsSection } from "../components/CommunicationsSection";
-import { GROW_CONTACT_RELATIONSHIP_TYPES, GROW_CONTACT_ROLES, type GrowAccess, type GrowCommitmentPatch, type GrowContact360, type GrowContact360Commitment, type GrowContactListItem, type GrowContactListPage, growActivityTypeLabel } from "../lib/growContact360";
+import { GROW_CONTACT_RELATIONSHIP_TYPES, GROW_CONTACT_ROLES, type GrowAccess, type GrowCommitmentPatch, type GrowContact360, type GrowContact360Commitment, type GrowContactListItem, type GrowContactListPage, growActivityTypeLabel, countOpenOpportunities } from "../lib/growContact360";
 import { GrowAppraisalRecord, GrowContactOpportunitiesSection, GrowManualActivityForm, appraisalWriteErrorMessage, invalidateAppraisalReads, useAppraisalPipeline, useCanManageAppraisals, useCanReadAppraisals, useLogManualActivity } from "../components/GrowOpportunityRowActions";
 import { GrowContactCallPanel } from "../components/GrowContactCallPanel";
 import { GrowContactConsentPanel } from "../components/GrowContactConsentPanel";
@@ -508,7 +508,7 @@ export function GrowContactDetail({
 
       <div className="stat-tiles">
         <StatTile label="Related Properties" value={data.intelligence.relatedPropertyCount} />
-        <StatTile label="Open Opportunities" value={data.intelligence.activeOpportunityCount} />
+        <StatTile label="Open Opportunities" value={countOpenOpportunities(data.opportunities)} />
         <StatTile label="Recent Activity (30d)" value={data.intelligence.recentActivityCount} />
         <StatTile label="Outstanding Commitments" value={data.intelligence.outstandingCommitmentCount} />
       </div>

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { opportunityLifecycleOpen, opportunityStatusLabel } from "../growContact360";
+import { countOpenOpportunities, opportunityLifecycleOpen, opportunityStatusLabel } from "../growContact360";
 
 test("opportunityLifecycleOpen: only Open at a non-terminal stage", () => {
   assert.equal(opportunityLifecycleOpen("Open", "Qualify"), true);
@@ -15,4 +15,17 @@ test("opportunityStatusLabel: Lost names a trimmed stored reason", () => {
   assert.equal(opportunityStatusLabel("Lost", "   "), "Lost");
   assert.equal(opportunityStatusLabel("Lost", null), "Lost");
   assert.equal(opportunityStatusLabel("Lost", undefined), "Lost");
+});
+
+test("countOpenOpportunities: Lost and Converted are never open (Owner t388u)", () => {
+  assert.equal(countOpenOpportunities([]), 0);
+  assert.equal(
+    countOpenOpportunities([
+      { status: "Open", stage: "New" },
+      { status: "Open", stage: "Lost" },
+      { status: "Open", stage: "Converted" },
+      { status: "Lost", stage: "Lost" },
+    ]),
+    1,
+  );
 });

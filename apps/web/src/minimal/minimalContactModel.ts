@@ -5,7 +5,7 @@ import type {
   GrowContact360Opportunity,
   GrowContact360Property,
 } from "../lib/growContact360";
-import { opportunityLifecycleOpen } from "../lib/growContact360";
+import { countOpenOpportunities } from "../lib/growContact360";
 import { growContactPath } from "../lib/growWorkspace";
 
 // AE Minimal A Contact 360 view model.
@@ -89,8 +89,8 @@ export function buildMinimalContactModel(input: Contact360Input): MinimalContact
         href: p.propertyId == null ? null : `/properties/${p.propertyId}`,
         primary: p.isPrimary,
       })),
-    // Same "open" rule as the classic Contact 360 opportunities section (lib/growContact360, Contact 360 PR2).
-    openOpportunityCount: input.opportunities.filter((o) => opportunityLifecycleOpen(o.status, o.stage)).length,
+    // Same count as the classic Contact 360 tile (lib/growContact360 countOpenOpportunities).
+    openOpportunityCount: countOpenOpportunities(input.opportunities),
     notes: input.activities
       .filter((a) => a.activityType === "note")
       .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
