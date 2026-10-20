@@ -109,3 +109,15 @@ export interface GrowContact360 {
   // rules, rather than restated here.
   contactability: GrowContactability;
 }
+
+/** Open lifecycle: still Open and not at a terminal stage. (Moved verbatim from pages/Grow.tsx.) */
+export function opportunityLifecycleOpen(status: string, stage: string): boolean {
+  return status === "Open" && stage !== "Lost" && stage !== "Converted";
+}
+
+/** Status cell for a Lost row names the stored lost reason. Other statuses stay as they are. */
+export function opportunityStatusLabel(status: string, lostReason: string | null | undefined): string {
+  if (status !== "Lost") return status;
+  const reason = typeof lostReason === "string" ? lostReason.trim() : "";
+  return reason.length > 0 ? `Lost: ${reason}` : "Lost";
+}
