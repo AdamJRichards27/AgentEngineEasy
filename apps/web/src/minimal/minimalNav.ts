@@ -33,3 +33,14 @@ export function buildMinimalNavLinks(ctx: NavContext): NavLink[] {
   if (minimalHasRunAccess(ctx.entitlements)) return links;
   return links.filter((link) => !MINIMAL_RUN_PATHS.includes(link.path));
 }
+
+/**
+ * Classic sidebar (App.tsx) gets the same Owner D5 rule: without run.access the
+ * Run links and the Start Property button are not offered. UI gating only;
+ * the server-side Run route restrictions land separately and must follow this.
+ */
+export function buildClassicNavLinks(ctx: NavContext): NavLink[] {
+  const links = buildProductNavLinks(ctx);
+  if (minimalHasRunAccess(ctx.entitlements)) return links;
+  return links.filter((link) => !MINIMAL_RUN_PATHS.includes(link.path));
+}

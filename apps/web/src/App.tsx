@@ -7,7 +7,8 @@ import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import { useSession, useLogout, useEntitlements } from "./lib/session";
-import { buildProductNavLinks, navLinkIsActive, resolveLandingRoute } from "./lib/productNav";
+import { navLinkIsActive, resolveLandingRoute } from "./lib/productNav";
+import { buildClassicNavLinks, minimalHasRunAccess } from "./minimal/minimalNav";
 import {
   selectMinimalUxVariant,
   shouldOfferMinimalView,
@@ -262,7 +263,9 @@ function SidebarLayout({
   // for the full ordering/entitlement rationale. This is a straight extraction: who sees
   // Pit Crew/Financial is unchanged, only Grow's position (now first) has moved.
   const ownerWithoutContext = !!user?.platformOwner && user.ownerSelectedBrokerageId == null;
-  const links = ownerWithoutContext ? [] : buildProductNavLinks({ role: user?.role, entitlements });
+  // Owner D5: Run links (and Start Property) only with run.access, same rule as the Minimal shell.
+  const links = ownerWithoutContext ? [] : buildClassicNavLinks({ role: user?.role, entitlements });
+  const canStartProperty = !ownerWithoutContext && minimalHasRunAccess(entitlements);
 
   return (
     <>
@@ -288,7 +291,7 @@ function SidebarLayout({
                 {l.label}
               </Link>
             ))}
-            {!ownerWithoutContext && <Link href="/properties/start" className="btn btn-primary btn-small app-sidebar-cta">
+            {canStartProperty && <Link href="/properties/start" className="btn btn-primary btn-small app-sidebar-cta">
               + Start Property
             </Link>}
           </div>
