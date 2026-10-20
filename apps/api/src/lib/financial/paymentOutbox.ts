@@ -29,7 +29,8 @@
 // mechanics detail) changes — see events.ts.
 
 import { eq, and, lte, asc, inArray, sql } from "drizzle-orm";
-import { incrementCounter } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
+import { capabilityOf, decideRecovery, MANUAL_REVIEW_STATUS } from "../outboxRecovery/policy.js";
 import {
   db,
   financialPaymentRequests,
@@ -277,6 +278,20 @@ async function claimOutboxEntry(id: number): Promise<{ entry: FinancialPaymentOu
   return reclaimed ? { entry: reclaimed, reclaimed: true } : null;
 }
 
+async function movePaymentOutboxToManualReview(entry: FinancialPaymentOutbox, reason: string): Promise<DispatchOutcome> {
+  const [moved] = await db
+    .update(financialPaymentOutbox)
+    .set({ status: MANUAL_REVIEW_STATUS, lastError: `MANUAL_REVIEW: dispatch outcome unknown (${reason})`, updatedAt: new Date() })
+    .where(and(eq(financialPaymentOutbox.id, entry.id), eq(financialPaymentOutbox.status, "DISPATCHING")))
+    .returning();
+  const [current] = moved ? [moved] : await db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.id, entry.id));
+  if (moved) {
+    logger.warn("outbound_recovery_manual_review", { queue: "financial_payment_outbox", outboxId: entry.id, brokerageId: entry.brokerageId, reason });
+    incrementCounter("outbound_recovery_manual_review_total", { queue: "financial_payment_outbox" });
+  }
+  return { outboxEntry: current ?? entry, paymentRequest: null };
+}
+
 /**
  * Dispatches a single outbox entry: calls the provider, and on success
  * both marks the entry DISPATCHED and advances the payment request to
@@ -305,6 +320,17 @@ export async function dispatchOutboxEntry(staleEntry: FinancialPaymentOutbox): P
   try {
     if (claim.reclaimed && outboxEntry.attempts >= outboxEntry.maxAttempts) {
       throw new Error(`Dispatch claim expired ${outboxEntry.attempts} time(s) without an outcome; giving up.`);
+    }
+
+    // Outbound recovery: a reclaimed row's previous send has an UNKNOWN outcome. Re-send only when the mandate provider
+    // declares it dedupes on our idempotency key; anything else (including a lookup, which cannot hand back the
+    // providerRequestRef this path must record) goes to MANUAL_REVIEW without calling the provider.
+    if (claim.reclaimed) {
+      const decision = await decideRecovery(capabilityOf(mandatePaymentProvider), outboxEntry.idempotencyKey);
+      if (decision.action !== "RESEND_SAME_KEY") {
+        return await movePaymentOutboxToManualReview(outboxEntry, decision.reason);
+      }
+      logger.warn("financial_payment_outbox_reclaim_resend", { outboxId: outboxEntry.id, attempts: outboxEntry.attempts, reason: decision.reason });
     }
 
     const [request] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, outboxEntry.paymentRequestId));

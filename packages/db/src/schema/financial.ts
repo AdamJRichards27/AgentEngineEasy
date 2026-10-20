@@ -137,7 +137,7 @@ export type PaymentRequestKind = (typeof PAYMENT_REQUEST_KINDS)[number];
 export const OUTBOX_ACTIONS = ["SCHEDULE_DEBIT", "CANCEL_DEBIT", "REVERSE_DEBIT"] as const;
 export type OutboxAction = (typeof OUTBOX_ACTIONS)[number];
 
-export const OUTBOX_STATUSES = ["PENDING", "DISPATCHING", "DISPATCHED", "FAILED"] as const;
+export const OUTBOX_STATUSES = ["PENDING", "DISPATCHING", "DISPATCHED", "FAILED", "MANUAL_REVIEW"] as const;
 export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
 
 export const DISPUTE_STATUSES = ["OPEN", "UNDER_REVIEW", "RESOLVED_PAYABLE", "RESOLVED_ADJUSTED", "RESOLVED_WAIVED", "CLOSED"] as const;

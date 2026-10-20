@@ -308,11 +308,12 @@ test("[F-02 LOCK] a sequential second dispatch of a SENT command is rejected INV
   assert.equal(state.row.attempts, 1);
 });
 
-test("[F-02 LOCK] the sweep skips not-yet-due and DISPATCHING commands (a claim-based fix relies on DISPATCHING being invisible to the sweep)", async () => {
+test("[F-02 LOCK] the sweep skips not-yet-due and live-lease DISPATCHING commands (a claim-based fix relies on DISPATCHING being invisible to the sweep)", async () => {
   const notDue = await enqueuePastDue("not-due", {});
   await db.update(integrationOutbox).set({ nextAttemptAt: new Date("2000-01-02T00:00:00.000Z") }).where(eq(integrationOutbox.id, notDue.id));
   const claimed = await enqueuePastDue("claimed", {});
-  await db.update(integrationOutbox).set({ status: "DISPATCHING" }).where(eq(integrationOutbox.id, claimed.id));
+  // RECOVERY SKETCH: a LIVE lease (expires tomorrow) is skipped; an expired one would be reclaimed (tests below).
+  await db.update(integrationOutbox).set({ status: "DISPATCHING", nextAttemptAt: new Date(Date.now() + 86_400_000) }).where(eq(integrationOutbox.id, claimed.id));
   let calls = 0;
   mockPortalAdapter.send = async (capability, payload, ctx) => {
     if (ctx.idempotencyKey === notDue.idempotencyKey || ctx.idempotencyKey === claimed.idempotencyKey) calls++;
@@ -328,4 +329,185 @@ test("[F-02 LOCK] the sweep skips not-yet-due and DISPATCHING commands (a claim-
   assert.equal((await readState(claimed.id)).row.status, "DISPATCHING");
   // Leave nothing claimable behind.
   await db.update(integrationOutbox).set({ status: "DEAD_LETTERED" }).where(eq(integrationOutbox.id, claimed.id));
+});
+
+// ---------------------------------------------------------------------
+// [RECOVERY] outbound-message recovery (specs/outbound-message-recovery.md).
+// A DISPATCHING row whose lease expired has an UNKNOWN outcome: it is never
+// blindly re-sent. The adapter's declared `recovery` capability decides:
+// lookup -> reconcile; dedupes -> resend with the SAME key; else MANUAL_REVIEW.
+// ---------------------------------------------------------------------
+
+const originalRecovery = mockPortalAdapter.recovery;
+function setPortalRecovery(recovery: typeof mockPortalAdapter.recovery) {
+  mockPortalAdapter.recovery = recovery;
+  const prev = restoreSend;
+  restoreSend = () => {
+    prev?.();
+    mockPortalAdapter.recovery = originalRecovery;
+  };
+}
+function countSendsFor(idempotencyKey: string): { calls: number; keys: string[] } {
+  const seen = { calls: 0, keys: [] as string[] };
+  mockPortalAdapter.send = async (capability, payload, ctx) => {
+    if (ctx.idempotencyKey === idempotencyKey) {
+      seen.calls++;
+      seen.keys.push(ctx.idempotencyKey);
+    }
+    return originalSend.call(mockPortalAdapter, capability, payload, ctx);
+  };
+  const prev = restoreSend;
+  restoreSend = () => {
+    prev?.();
+    mockPortalAdapter.send = originalSend;
+  };
+  return seen;
+}
+async function strandWithExpiredLease(label: string, extra: Partial<{ attempts: number; maxAttempts: number }> = {}) {
+  const cmd = await enqueuePastDue(label, {});
+  // Simulate a crash after the claim: DISPATCHING, lease long expired.
+  await db.update(integrationOutbox).set({ status: "DISPATCHING", nextAttemptAt: PAST_DUE, ...extra }).where(eq(integrationOutbox.id, cmd.id));
+  return cmd;
+}
+
+afterEach(() => {
+  // Belt and braces: no test may leak a recovery override into the next.
+  mockPortalAdapter.recovery = originalRecovery;
+});
+
+test("[RECOVERY] the mock portal declares it cannot dedupe or look up (contract)", () => {
+  assert.deepEqual(mockPortalAdapter.recovery, { dedupesOnIdempotencyKey: false });
+});
+
+test("[RECOVERY] an expired-lease row on a non-deduping adapter goes to MANUAL_REVIEW via the sweep, with 0 provider calls", async () => {
+  const cmd = await strandWithExpiredLease("crashed-nodedupe");
+  const seen = countSendsFor(cmd.idempotencyKey);
+  const sweep = await dispatchDueOutbox(SWEEP_NOW);
+  assert.equal(sweep.errorCount, 0);
+  assert.equal(seen.calls, 0, "an uncertain send is never blindly retried");
+  const state = await readState(cmd.id);
+  assert.equal(state.row.status, "MANUAL_REVIEW");
+  assert.equal(state.row.attempts, 1, "the reclaim counts the crashed attempt");
+  assert.match(state.row.lastError ?? "", /NO_DEDUPE_NO_LOOKUP/);
+  assert.deepEqual(state.attempts, [], "no provider call, so no attempt row");
+});
+
+test("[RECOVERY] a deduping adapter is re-sent with the SAME idempotency key, once, as attempt #2", async () => {
+  const cmd = await strandWithExpiredLease("crashed-dedupe");
+  setPortalRecovery({ dedupesOnIdempotencyKey: true });
+  const seen = countSendsFor(cmd.idempotencyKey);
+  const result = await dispatchCommand(cmd.id);
+  assert.equal(result.status, "SENT");
+  assert.equal(seen.calls, 1);
+  assert.deepEqual(seen.keys, [cmd.idempotencyKey]);
+  const state = await readState(cmd.id);
+  assert.equal(state.row.attempts, 2);
+  assert.deepEqual(state.attempts, [{ attemptNumber: 2, status: "SENT" }]);
+});
+
+test("[RECOVERY] lookup DELIVERED reconciles to SENT without a send; NOT_FOUND re-sends once with the same key; UNKNOWN and a failing lookup go to MANUAL_REVIEW", async () => {
+  const cases: Array<{ label: string; lookup: () => Promise<"DELIVERED" | "NOT_FOUND" | "UNKNOWN">; status: string; calls: number }> = [
+    { label: "lookup-delivered", lookup: async () => "DELIVERED", status: "SENT", calls: 0 },
+    { label: "lookup-notfound", lookup: async () => "NOT_FOUND", status: "SENT", calls: 1 },
+    { label: "lookup-unknown", lookup: async () => "UNKNOWN", status: "MANUAL_REVIEW", calls: 0 },
+    { label: "lookup-throws", lookup: async () => { throw new Error("provider lookup timed out"); }, status: "MANUAL_REVIEW", calls: 0 },
+  ];
+  for (const c of cases) {
+    const cmd = await strandWithExpiredLease(c.label);
+    const lookedUp: string[] = [];
+    setPortalRecovery({ dedupesOnIdempotencyKey: false, lookupByIdempotencyKey: async (key) => (lookedUp.push(key), c.lookup()) });
+    const seen = countSendsFor(cmd.idempotencyKey);
+    const result = await dispatchCommand(cmd.id);
+    assert.equal(result.status, c.status, c.label);
+    assert.equal(seen.calls, c.calls, c.label);
+    assert.deepEqual(lookedUp, [cmd.idempotencyKey], `${c.label}: looked up by the row's own key`);
+    if (c.calls) assert.deepEqual(seen.keys, [cmd.idempotencyKey], c.label);
+    const state = await readState(cmd.id);
+    if (c.label === "lookup-delivered") assert.deepEqual(state.attempts, [{ attemptNumber: 2, status: "SENT" }]);
+    restoreSend?.();
+    restoreSend = null;
+  }
+});
+
+test("[RECOVERY] a live lease is not reclaimed by a direct dispatch or by the sweep", async () => {
+  const cmd = await enqueuePastDue("live-lease", {});
+  await db.update(integrationOutbox).set({ status: "DISPATCHING", nextAttemptAt: new Date(Date.now() + 86_400_000) }).where(eq(integrationOutbox.id, cmd.id));
+  const seen = countSendsFor(cmd.idempotencyKey);
+  await assert.rejects(dispatchCommand(cmd.id), (err: Error & { reason?: string }) => err.reason === "INVALID_STATUS");
+  await dispatchDueOutbox(SWEEP_NOW);
+  assert.equal(seen.calls, 0);
+  const state = await readState(cmd.id);
+  assert.equal(state.row.status, "DISPATCHING");
+  assert.equal(state.row.attempts, 0);
+  await db.update(integrationOutbox).set({ status: "DEAD_LETTERED" }).where(eq(integrationOutbox.id, cmd.id));
+});
+
+test("[RECOVERY] a row whose lease keeps expiring dead-letters at maxAttempts without calling the provider", async () => {
+  const cmd = await strandWithExpiredLease("crash-loop", { attempts: 4, maxAttempts: 5 });
+  const seen = countSendsFor(cmd.idempotencyKey);
+  const result = await dispatchCommand(cmd.id);
+  assert.equal(result.status, "DEAD_LETTERED");
+  assert.equal(seen.calls, 0);
+  assert.equal(result.attempts, 5);
+});
+
+test("[RECOVERY] a stale dispatcher whose lease was taken over (deduping adapter) cannot overwrite the new holder's outcome", async () => {
+  const cmd = await enqueuePastDue("stale-writer", {});
+  const gate = gateSendFor(cmd.idempotencyKey);
+  setPortalRecovery({ dedupesOnIdempotencyKey: true }); // after gateSendFor: chains onto (not over) its restore
+  const stale = dispatchCommand(cmd.id);
+  await gate.arrived(1);
+  await db.update(integrationOutbox).set({ nextAttemptAt: PAST_DUE }).where(eq(integrationOutbox.id, cmd.id));
+  const fresh = dispatchCommand(cmd.id);
+  await gate.arrived(2);
+  gate.calls[1].before.resolve();
+  gate.calls[1].after.resolve();
+  assert.equal((await fresh).status, "SENT");
+  gate.calls[0].before.resolve();
+  gate.calls[0].after.resolve();
+  assert.equal((await stale).status, "SENT", "the stale dispatcher returns the current row and writes no outcome of its own");
+  const state = await readState(cmd.id);
+  assert.equal(state.row.attempts, 2);
+  assert.deepEqual(state.attempts.map((a) => a.attemptNumber).sort((x, y) => x - y), [1, 2]);
+});
+
+test("[RECOVERY] a stale dispatcher finishing after its row went to MANUAL_REVIEW cannot overwrite MANUAL_REVIEW", async () => {
+  const cmd = await enqueuePastDue("stale-vs-review", {});
+  const gate = gateSendFor(cmd.idempotencyKey);
+  const stale = dispatchCommand(cmd.id);
+  await gate.arrived(1);
+  await db.update(integrationOutbox).set({ nextAttemptAt: PAST_DUE }).where(eq(integrationOutbox.id, cmd.id));
+  const reviewed = await dispatchCommand(cmd.id); // non-deduping: reclaim goes straight to review
+  assert.equal(reviewed.status, "MANUAL_REVIEW");
+  gate.calls[0].before.resolve();
+  gate.calls[0].after.resolve();
+  assert.equal((await stale).status, "MANUAL_REVIEW");
+  const state = await readState(cmd.id);
+  assert.equal(state.row.status, "MANUAL_REVIEW", "the late provider answer is recorded as history only");
+  assert.equal(gate.calls.length, 1);
+});
+
+test("[RECOVERY] two reclaimers racing on the same expired lease: exactly one claims, one terminal outcome", async () => {
+  const cmd = await strandWithExpiredLease("reclaim-race");
+  const seen = countSendsFor(cmd.idempotencyKey);
+  const settled = await Promise.allSettled([dispatchCommand(cmd.id), dispatchCommand(cmd.id)]);
+  const fulfilled = settled.filter((s) => s.status === "fulfilled");
+  const rejected = settled.filter((s) => s.status === "rejected") as PromiseRejectedResult[];
+  // The loser either stands down at the claim (INVALID_STATUS) or, if it read after the winner finished, is refused up front.
+  assert.ok(fulfilled.length >= 1);
+  for (const r of rejected) assert.equal((r.reason as { reason?: string }).reason, "INVALID_STATUS");
+  assert.equal(seen.calls, 0);
+  const state = await readState(cmd.id);
+  assert.equal(state.row.status, "MANUAL_REVIEW");
+  assert.equal(state.row.attempts, 1, "only one reclaim was counted");
+});
+
+test("[RECOVERY] rolling-deploy safety: the sweep never selects MANUAL_REVIEW rows", async () => {
+  const cmd = await enqueuePastDue("review-ignored", {});
+  await db.update(integrationOutbox).set({ status: "MANUAL_REVIEW", nextAttemptAt: PAST_DUE }).where(eq(integrationOutbox.id, cmd.id));
+  const seen = countSendsFor(cmd.idempotencyKey);
+  await dispatchDueOutbox(SWEEP_NOW);
+  await assert.rejects(dispatchCommand(cmd.id), (err: Error & { reason?: string }) => err.reason === "INVALID_STATUS");
+  assert.equal(seen.calls, 0);
+  assert.equal((await readState(cmd.id)).row.status, "MANUAL_REVIEW");
 });
