@@ -20,7 +20,7 @@ import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } fr
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { hasEntitlement } from "../lib/entitlements/resolver.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import type { Request, Response, NextFunction } from "express";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
@@ -56,7 +56,9 @@ const requiresRunAccess = requireEntitlement("run.access");
 // 403 "Not entitled". With run.access the behaviour is unchanged. Grow-only callers get a Grow projection: the
 // Run-only property fields are omitted, the Run ownership lookup is skipped on create, and the timeline keeps only
 // Grow-safe entries (property creation, parties, appraisal) at every workflowStage. Cross-tenant/hidden ids answer
-// exactly as before, after this check, so no extra existence signal is added.
+// exactly as before, after this check, so no extra existence signal is added. Uses the same uncached
+// explainEntitlementDecision lookup as the requireEntitlement middleware, so it never reads (or seeds) the
+// resolveEntitlements cache: a grant change is seen on the next request, and other checks keep their semantics.
 type PropertyAccess = "run" | "grow";
 const RUN_ONLY_PROPERTY_FIELDS = [
   "workflowStage",
@@ -83,11 +85,11 @@ async function requiresGrowOrRunAccess(req: Request, res: Response, next: NextFu
     return;
   }
   try {
-    if (await hasEntitlement(user, "run.access")) {
+    if ((await explainEntitlementDecision(user, "run.access")).allowed) {
       res.locals.propertyAccess = "run" satisfies PropertyAccess;
       return next();
     }
-    if (await hasEntitlement(user, "grow.access")) {
+    if ((await explainEntitlementDecision(user, "grow.access")).allowed) {
       res.locals.propertyAccess = "grow" satisfies PropertyAccess;
       return next();
     }
