@@ -5,6 +5,7 @@ import { db, paymentMethods } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { logAudit } from "../lib/audit.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { logger } from "@aee/events";
 import {
   addPaymentMethod,
   listPaymentMethods,
@@ -14,6 +15,8 @@ import {
   refundPayment,
   listPaymentsForServiceOrder,
   getServiceOrderForBrokerage,
+  ServiceOrderChargeError,
+  type ServiceOrderChargeErrorCode,
 } from "../lib/payments.js";
 
 // Phase 6 (ARCHITECTURE.md §10): stored payment methods, ServiceOrder
@@ -112,6 +115,20 @@ paymentsRouter.delete("/payment-methods/:id", requireAuth, async (req, res) => {
   res.json({ paymentMethod: updated });
 });
 
+// S-1b: stable { error, code } for charge failures (same shape as other routes' `code`).
+const CHARGE_ERRORS: Record<ServiceOrderChargeErrorCode, { status: number; error: string }> = {
+  SERVICE_ORDER_NOT_FOUND: { status: 404, error: "Not found" },
+  SERVICE_ORDER_PROPERTY_MISSING: { status: 409, error: "This service order can't be charged because its property record is unavailable." },
+  PAYMENT_METHOD_REQUIRED: { status: 409, error: "No default payment method on file for this agent. Add one before charging." },
+};
+export function chargeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
+  if (err instanceof ServiceOrderChargeError && err.code in CHARGE_ERRORS) {
+    const m = CHARGE_ERRORS[err.code];
+    return { status: m.status, body: { error: m.error, code: err.code } };
+  }
+  return { status: 500, body: { error: "Charge failed", code: "SERVICE_ORDER_CHARGE_FAILED" } };
+}
+
 // Actually charges the default stored method for the ServiceOrder's
 // property agent — idempotent (see lib/payments.ts chargeServiceOrder).
 paymentsRouter.post("/service-orders/:id/charge", requireAuth, requiresRunAccess, async (req, res) => {
@@ -129,7 +146,9 @@ paymentsRouter.post("/service-orders/:id/charge", requireAuth, requiresRunAccess
     });
     res.status(created ? 201 : 200).json({ payment, serviceOrder, created });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    const mapped = chargeErrorResponse(err);
+    if (mapped.status >= 500) logger.error("service_order_charge_failed", { serviceOrderId, error: err instanceof Error ? err.message : String(err) });
+    res.status(mapped.status).json(mapped.body);
   }
 });
 

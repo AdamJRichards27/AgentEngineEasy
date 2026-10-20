@@ -163,6 +163,17 @@ export interface ChargeServiceOrderResult {
  * incrementing a serviceOrderId, a stored payment method belonging to
  * brokerage A.
  */
+// S-1b: stable, client-safe codes for chargeServiceOrder failures. The route maps
+// each to a status and an agent-facing sentence (routes/payments.ts chargeErrorResponse);
+// internal detail (ids, driver text) stays server-side.
+export type ServiceOrderChargeErrorCode = "SERVICE_ORDER_NOT_FOUND" | "SERVICE_ORDER_PROPERTY_MISSING" | "PAYMENT_METHOD_REQUIRED";
+export class ServiceOrderChargeError extends Error {
+  constructor(public readonly code: ServiceOrderChargeErrorCode, detail?: string) {
+    super(detail ?? code);
+    this.name = "ServiceOrderChargeError";
+  }
+}
+
 export async function chargeServiceOrder(input: {
   serviceOrderId: number;
   userId: number;
@@ -170,7 +181,7 @@ export async function chargeServiceOrder(input: {
 }): Promise<ChargeServiceOrderResult> {
   const serviceOrder = await selectServiceOrderInBrokerage(input.serviceOrderId, input.brokerageId);
   if (!serviceOrder) {
-    throw new Error(`ServiceOrder ${input.serviceOrderId} not found`);
+    throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`);
   }
 
   const existingAttempts = await db
@@ -186,7 +197,7 @@ export async function chargeServiceOrder(input: {
 
   const [property] = await db.select().from(properties).where(eq(properties.id, serviceOrder.propertyId));
   if (!property) {
-    throw new Error(`Property ${serviceOrder.propertyId} not found`);
+    throw new ServiceOrderChargeError("SERVICE_ORDER_PROPERTY_MISSING", `Property ${serviceOrder.propertyId} not found`);
   }
 
   // Payer resolution (Section 12): the listing agent's own stored method is
@@ -195,7 +206,7 @@ export async function chargeServiceOrder(input: {
   // already models Brokerage/Team/etc. for that), not built here.
   const paymentMethod = await defaultPaymentMethodFor("Agent", property.agentId);
   if (!paymentMethod) {
-    throw new Error("No default payment method on file for this agent. Add one before charging.");
+    throw new ServiceOrderChargeError("PAYMENT_METHOD_REQUIRED");
   }
 
   const attemptNumber = existingAttempts.length + 1;
