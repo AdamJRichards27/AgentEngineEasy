@@ -86,7 +86,7 @@ export function MinimalPropertiesView(p: MinimalPropertiesViewProps) {
                 </div>
               </div>
               <Link href={card.href} className="am-data-button is-quiet">
-                {p.runAccess ? "Open in Run" : "Details"}
+                Details
               </Link>
             </div>
             <div className="am-data-card-meta">

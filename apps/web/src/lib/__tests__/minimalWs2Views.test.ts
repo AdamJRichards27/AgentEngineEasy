@@ -166,8 +166,8 @@ test("builder: without the manage entitlement every write control is disabled", 
 function propsFor(over: Partial<MinimalPropertiesViewProps> = {}): MinimalPropertiesViewProps {
   return {
     cards: [
-      { id: 1, address: "1 Park Rd, Milton QLD 4064", location: "Milton QLD 4064", stage: "Appraisal", listingStatus: "Not Listed", href: "/properties/1", appraisal: null, openOpportunityCount: 2 },
-      { id: 2, address: "2 Hale St", location: "Location not recorded", stage: "Live", listingStatus: "Listed", href: "/properties/2", appraisal: { id: 9, statusLabel: "Presented", href: "/grow/appraisals/9", closed: false }, openOpportunityCount: 0 },
+      { id: 1, address: "1 Park Rd, Milton QLD 4064", location: "Milton QLD 4064", stage: "Appraisal", listingStatus: "Not Listed", href: "/grow/properties/1", appraisal: null, openOpportunityCount: 2 },
+      { id: 2, address: "2 Hale St", location: "Location not recorded", stage: "Live", listingStatus: "Listed", href: "/grow/properties/2", appraisal: { id: 9, statusLabel: "Presented", href: "/grow/appraisals/9", closed: false }, openOpportunityCount: 0 },
     ],
     search: "",
     loading: false,
@@ -193,14 +193,14 @@ test("properties: cards show stage, appraisal link and open opportunity count", 
   assert.deepEqual(actions, ["Create Appraisal", "Open Appraisal"]);
 });
 
-test("properties D5: the property link opens Run only for users with Run access", () => {
-  const withRun = MinimalPropertiesView(propsFor({ runAccess: true }));
-  const cards = all(withRun, (e) => e.type === "article");
-  assert.deepEqual(links(cards[0]).filter((l) => l.href === "/properties/1").map((l) => l.text), ["Open in Run"]);
-  const without = MinimalPropertiesView(propsFor({ runAccess: false }));
-  const plain = all(without, (e) => e.type === "article");
-  assert.deepEqual(links(plain[0]).filter((l) => l.href === "/properties/1").map((l) => l.text), ["Details"]);
-  assert.doesNotMatch(text(without), /\bRun\b/);
+test("properties D5: cards open the Grow detail; Run is linked only from the detail page with run.access", () => {
+  for (const runAccess of [true, false]) {
+    const tree = MinimalPropertiesView(propsFor({ runAccess }));
+    const cards = all(tree, (e) => e.type === "article");
+    assert.deepEqual(links(cards[0]).filter((l) => l.href === "/grow/properties/1").map((l) => l.text), ["Details"]);
+    assert.ok(!links(tree).some((l) => /^\/properties\/\d+$/.test(l.href) && /Run/.test(l.text)));
+    assert.doesNotMatch(text(tree), /Open in Run/);
+  }
 });
 
 test("builder D5: the subject property link opens Run only with Run access", () => {

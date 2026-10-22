@@ -222,3 +222,21 @@ test("opportunity search view: idle, loading, empty, error, results link to deta
   (sel.props!.onChange as (e: unknown) => void)({ target: { value: "seller_side" } });
   assert.equal(typed, "seller_side");
 });
+
+test("pipeline view mounts the opportunity search above the board and a Details link per card", async () => {
+  const { MinimalOpportunitiesView } = await import("../../minimal/opportunities/MinimalOpportunitiesView");
+  const { buildPipelineBoard } = await import("../../minimal/opportunities/minimalOpportunitiesModel");
+  const { default: MinimalOpportunitySearch } = await import("../../minimal/opportunities/MinimalOpportunitySearch");
+  const rows = [opp()];
+  const noop = () => {};
+  const tree = MinimalOpportunitiesView({
+    board: buildPipelineBoard(rows), rowsById: new Map(rows.map((r) => [r.id, r])), total: 1, loading: false, error: null, actionError: null,
+    canManage: false, showClosed: false, lostDraft: null, pendingId: null, announcement: null,
+    onToggleClosed: noop, onStage: noop, onStartLost: noop, onLostReason: noop, onConfirmLost: noop, onCancelLost: noop, onClose: noop, onRetry: noop,
+  } as never);
+  const kids = ((tree as El).props!.children as unknown[]).flat();
+  const searchAt = kids.findIndex((k) => (k as El)?.type === MinimalOpportunitySearch);
+  const boardAt = kids.findIndex((k) => (k as El)?.props?.className === "am-ws2-board");
+  assert.ok(searchAt > 0 && searchAt < boardAt, "search sits above the board");
+  assert.ok(links(tree).some((l) => l.href === "/grow/opportunities/11" && l.text === "Details"));
+});
