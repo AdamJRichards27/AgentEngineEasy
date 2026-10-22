@@ -4,6 +4,7 @@ import { and, desc, eq, gte, inArray, isNotNull, lt, or } from "drizzle-orm";
 import { appraisalComparableSales, appraisals, db, properties } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { requireMinimalUxAllowlisted } from "../middlewares/minimalUxAllowlistGate.js";
 
 // CC #26 / SPEC-02 — Market Activity from internal AE data only. Own
 // brokerage only, read-only, no outbound network calls, no provider data,
@@ -54,6 +55,7 @@ growMarketActivityRouter.get(
   "/",
   (_req, res, next) => (isMarketActivityEnabled() ? next() : void res.status(404).json({ error: "Not found" })),
   requireAuth,
+  requireMinimalUxAllowlisted,
   requireEntitlement("grow.access"),
   async (req, res) => {
     const parsed = querySchema.safeParse(req.query);

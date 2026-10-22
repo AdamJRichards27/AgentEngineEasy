@@ -4,6 +4,7 @@ import { and, eq, gte, lt, or } from "drizzle-orm";
 import { appraisals, db, growActivities, growOpportunities } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { requireMinimalUxAllowlisted } from "../middlewares/minimalUxAllowlistGate.js";
 import {
   MOMENTUM_RULES_V1,
   isMomentumEnabled,
@@ -43,7 +44,7 @@ function addPeriods(start: Date, period: "week" | "month", n: number): Date {
   return new Date(d.getTime() - 10 * 3_600_000);
 }
 
-growMomentumRouter.get("/", flagGate, requireAuth, requireEntitlement("grow.access"), async (req, res) => {
+growMomentumRouter.get("/", flagGate, requireAuth, requireMinimalUxAllowlisted, requireEntitlement("grow.access"), async (req, res) => {
   const parsed = querySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
