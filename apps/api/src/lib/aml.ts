@@ -367,6 +367,18 @@ export async function processAmlWebhook(
  * check bolted on after the fetch — a verificationId from another
  * brokerage is indistinguishable from a nonexistent one.
  */
+/**
+ * Issue #10: a verification that does not exist, or belongs to another
+ * brokerage, is reported identically so routes can answer 404 without an
+ * existence oracle. State errors stay plain Errors (400).
+ */
+export class AmlVerificationNotFoundError extends Error {
+  constructor(verificationId: number) {
+    super(`AmlVerification ${verificationId} not found`);
+    this.name = "AmlVerificationNotFoundError";
+  }
+}
+
 export async function retryAmlVerification(verificationId: number, brokerageId: number): Promise<AmlVerification> {
   const [row] = await db
     .select({ aml: amlVerifications })
@@ -374,7 +386,7 @@ export async function retryAmlVerification(verificationId: number, brokerageId: 
     .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
     .where(and(eq(amlVerifications.id, verificationId), eq(properties.brokerageId, brokerageId)));
   if (!row) {
-    throw new Error(`AmlVerification ${verificationId} not found`);
+    throw new AmlVerificationNotFoundError(verificationId);
   }
   const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
@@ -457,7 +469,7 @@ export async function resolveAmlException(input: {
     .innerJoin(properties, eq(amlVerifications.propertyId, properties.id))
     .where(and(eq(amlVerifications.id, input.verificationId), eq(properties.brokerageId, input.brokerageId)));
   if (!row) {
-    throw new Error(`AmlVerification ${input.verificationId} not found`);
+    throw new AmlVerificationNotFoundError(input.verificationId);
   }
   const verification = row.aml;
   if (verification.status !== "Failed" && verification.status !== "Review Required") {
