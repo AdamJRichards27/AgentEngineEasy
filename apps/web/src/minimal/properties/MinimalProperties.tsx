@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { apiErrorMessage, apiFetch } from "../../lib/api";
+import { ApiError, apiErrorMessage, apiFetch } from "../../lib/api";
 import type { AppraisalListRow } from "../../lib/appraisalUi";
 import { useEntitlements } from "../../lib/session";
 import { builderPath } from "../appraisal/appraisalBuilderModel";
@@ -12,6 +12,9 @@ import {
   buildMinimalPropertyCards,
   propertyRelationshipsPath,
   resolveCreateAppraisal,
+  resolveStartFailure,
+  startAppraisalBody,
+  type StartAppraisalBody,
 } from "./minimalPropertiesModel";
 import { MinimalPropertiesView, type MinimalPropertiesViewProps, type PropertyChooser } from "./MinimalPropertiesView";
 import "./properties.css";
@@ -59,7 +62,7 @@ export default function MinimalProperties() {
   });
 
   const start = useMutation({
-    mutationFn: (body: { partyId: number; propertyId: number }) =>
+    mutationFn: (body: StartAppraisalBody) =>
       apiFetch<{ appraisal: { id: number } }>("/grow/appraisals/from-contact", { method: "POST", body: JSON.stringify(body) }),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["grow-appraisals"] });
@@ -69,7 +72,18 @@ export default function MinimalProperties() {
     },
     onError: (error, body) => {
       setPendingPropertyId(null);
-      setNotice({ propertyId: body.propertyId, text: apiErrorMessage(error, "Couldn't start the appraisal. Try again.") });
+      const failure = resolveStartFailure(
+        error instanceof ApiError ? error : null,
+        body.propertyId,
+        apiErrorMessage(error, "Couldn't start the appraisal. Try again."),
+      );
+      if (failure.kind === "open-existing") {
+        void queryClient.invalidateQueries({ queryKey: ["grow-appraisals"] });
+        setChooser(null);
+        navigate(failure.builderHref);
+        return;
+      }
+      setNotice({ propertyId: body.propertyId, text: failure.text, href: failure.href, hrefLabel: failure.hrefLabel });
     },
   });
 
@@ -122,7 +136,7 @@ export default function MinimalProperties() {
       onCreateAppraisal={(id) => void createAppraisal(id)}
       onChooseContact={(propertyId, partyId) => {
         setPendingPropertyId(propertyId);
-        start.mutate({ partyId, propertyId });
+        start.mutate(startAppraisalBody(partyId, propertyId));
       }}
       onCancelChooser={() => setChooser(null)}
       onRetry={() => void properties.refetch()}

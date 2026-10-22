@@ -35,6 +35,8 @@ export interface MinimalPropertyRelationship {
   partyFirstName: string | null;
   partyLastName: string | null;
   partyOrganisationName: string | null;
+  /** Present when the API exposes property_parties.isPrimary; primary contacts sort first in the chooser. */
+  isPrimary?: boolean | null;
 }
 
 export interface MinimalPropertyCard {
@@ -88,9 +90,20 @@ export function buildMinimalPropertyCards(
 export type CreateAppraisalResolution =
   | { kind: "existing"; appraisalId: number; contactName: string | null; builderHref: string }
   | { kind: "closed"; appraisalId: number; message: string }
-  | { kind: "start"; body: { partyId: number; propertyId: number } }
+  | { kind: "start"; body: StartAppraisalBody }
   | { kind: "choose"; choices: { partyId: number; label: string }[]; propertyId: number }
   | { kind: "no-contact"; message: string };
+
+/** D8 (SPEC-03): the server validates tenant, link and duplicates when entry is "property". */
+export interface StartAppraisalBody {
+  partyId: number;
+  propertyId: number;
+  entry: "property";
+}
+
+export function startAppraisalBody(partyId: number, propertyId: number): StartAppraisalBody {
+  return { partyId, propertyId, entry: "property" };
+}
 
 export const ONE_APPRAISAL_PER_PROPERTY =
   "This property's appraisal is finished. AE keeps one appraisal per property, so a new one can't be started here. Open the existing appraisal instead.";
@@ -136,8 +149,36 @@ export function resolveCreateAppraisal(
     linked.push(r);
   }
   if (linked.length === 0) return { kind: "no-contact", message: LINK_CONTACT_FIRST };
-  if (linked.length === 1) return { kind: "start", body: { partyId: linked[0].partyId, propertyId } };
+  if (linked.length === 1) return { kind: "start", body: startAppraisalBody(linked[0].partyId, propertyId) };
+  linked.sort((a, b) => Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary)));
   return { kind: "choose", choices: linked.map((r) => ({ partyId: r.partyId, label: partyLabel(r) })), propertyId };
+}
+
+export const CONTACT_NOT_LINKED =
+  "That contact is no longer linked to this property. Link the contact on the property, then try again.";
+
+export type StartFailureResolution =
+  | { kind: "open-existing"; builderHref: string }
+  | { kind: "notice"; text: string; href?: string; hrefLabel?: string };
+
+/**
+ * AB-3: map a failed property-entry start to what the agent sees. A 409
+ * APPRAISAL_EXISTS (another tab or a double click won the race) opens the
+ * existing appraisal; a 422 PROPERTY_CONTACT_NOT_LINKED points at the
+ * property to link a contact. Anything else is the caller's friendly message.
+ */
+export function resolveStartFailure(
+  error: { status?: number; code?: string; appraisalId?: number } | null | undefined,
+  propertyId: number,
+  fallbackText: string,
+): StartFailureResolution {
+  if (error?.status === 409 && error.code === "APPRAISAL_EXISTS" && typeof error.appraisalId === "number") {
+    return { kind: "open-existing", builderHref: builderPath(error.appraisalId) };
+  }
+  if (error?.status === 422 && error.code === "PROPERTY_CONTACT_NOT_LINKED") {
+    return { kind: "notice", text: CONTACT_NOT_LINKED, href: `/properties/${propertyId}`, hrefLabel: "Open the property" };
+  }
+  return { kind: "notice", text: fallbackText };
 }
 
 export function propertyRelationshipsPath(address: string): string {

@@ -99,7 +99,7 @@ test("Create Appraisal: a finished appraisal blocks a new one with an explanatio
 
 test("Create Appraisal: one active linked contact starts from-contact directly", () => {
   const r = resolveCreateAppraisal(1, [], [rel(3, 1), rel(3, 1, { role: "Seller" }), rel(4, 2), rel(5, 1, { status: "Historical" })]);
-  assert.deepEqual(r, { kind: "start", body: { partyId: 3, propertyId: 1 } });
+  assert.deepEqual(r, { kind: "start", body: { partyId: 3, propertyId: 1, entry: "property" } });
 });
 
 test("Create Appraisal: several linked contacts ask the agent to choose", () => {
