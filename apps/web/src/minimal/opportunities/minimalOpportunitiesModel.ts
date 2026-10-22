@@ -53,6 +53,8 @@ const TYPE_LABELS: Record<string, string> = {
 
 export interface PipelineCard {
   id: number;
+  /** Minimal opportunity detail. */
+  href: string;
   contactName: string;
   contactHref: string;
   typeLabel: string;
@@ -88,13 +90,14 @@ export function buildPipelineBoard(rows: MinimalOpportunityRow[]): PipelineColum
   for (const row of rows) {
     byKey.get(pipelineColumnKey(row))!.push({
       id: row.id,
+      href: `/grow/opportunities/${row.id}`,
       contactName: row.contactName?.trim() || "Unnamed contact",
       contactHref: `/grow/contacts/${row.partyId}`,
       typeLabel: TYPE_LABELS[row.opportunityType] ?? row.opportunityType,
       reason: row.reason?.trim() || null,
       nextAction: nextActionLabel(row),
       appraisalHref: row.convertedAppraisalId != null ? appraisalWorkspacePath(row.convertedAppraisalId) : null,
-      propertyHref: row.propertyId != null ? `/properties/${row.propertyId}` : null,
+      propertyHref: row.propertyId != null ? `/grow/properties/${row.propertyId}` : null,
     });
   }
   return MINIMAL_PIPELINE_COLUMNS.map((c) => {

@@ -5,7 +5,11 @@ import { selectContact360View } from "./minimal/minimalContactModel";
 import { selectPropertiesView } from "./minimal/properties/minimalPropertiesModel";
 import { selectAppraisalsView } from "./minimal/appraisals/minimalAppraisalsModel";
 import { selectOpportunitiesView } from "./minimal/opportunities/minimalOpportunitiesModel";
+import { selectPropertyDetailView } from "./minimal/properties/minimalPropertyDetailModel";
+import { selectOpportunityDetailView } from "./minimal/opportunities/minimalOpportunityDetailModel";
 import { selectAppraisalBuilderView } from "./minimal/appraisal/appraisalBuilderModel";
+import { selectMomentumView } from "./minimal/momentum/minimalMomentumModel";
+import { selectMarketActivityView } from "./minimal/market/minimalMarketActivityModel";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -50,6 +54,10 @@ const MinimalProperties = lazy(() => import("./minimal/properties/MinimalPropert
 const MinimalAppraisals = lazy(() => import("./minimal/appraisals/MinimalAppraisals"));
 const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalOpportunities"));
 const MinimalAppraisalBuilder = lazy(() => import("./minimal/appraisal/MinimalAppraisalBuilder"));
+const MinimalPropertyDetail = lazy(() => import("./minimal/properties/MinimalPropertyDetail"));
+const MinimalOpportunityDetail = lazy(() => import("./minimal/opportunities/MinimalOpportunityDetail"));
+const MinimalMomentum = lazy(() => import("./minimal/momentum/MinimalMomentum"));
+const MinimalMarketActivity = lazy(() => import("./minimal/market/MinimalMarketActivity"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -363,6 +371,30 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
           <Route path="/grow/appraisals">
             {selectAppraisalsView(minimalShell, search) === "minimal" ? <MinimalAppraisals /> : <GrowAppraisals />}
+          </Route>
+          {/* CC #25/#26: Minimal detail pages, before /grow and /grow/opportunities (first match wins). */}
+          <Route path="/grow/properties/:id">
+            {(params) =>
+              selectPropertyDetailView(minimalShell, search) === "minimal" ? (
+                <MinimalPropertyDetail />
+              ) : (
+                <Redirect to={`/properties/${params.id}`} replace />
+              )
+            }
+          </Route>
+          <Route path="/grow/opportunities/:id">
+            {selectOpportunityDetailView(minimalShell, search) === "minimal" ? (
+              <MinimalOpportunityDetail />
+            ) : (
+              <Redirect to="/grow?tab=opportunities" replace />
+            )}
+          </Route>
+          {/* CC #5/#26: Minimal-only My Momentum and Market Activity (#248 APIs, flag-gated by the API). Classic → /grow. */}
+          <Route path="/grow/momentum">
+            {selectMomentumView(minimalShell) === "minimal" ? <MinimalMomentum /> : <Redirect to="/grow" replace />}
+          </Route>
+          <Route path="/grow/market-activity">
+            {selectMarketActivityView(minimalShell) === "minimal" ? <MinimalMarketActivity /> : <Redirect to="/grow" replace />}
           </Route>
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id">

@@ -7,6 +7,7 @@ import {
   type PipelineColumn,
   opportunityActions,
 } from "./minimalOpportunitiesModel";
+import MinimalOpportunitySearch from "./MinimalOpportunitySearch";
 
 // Presentational AE Minimal A Opportunities: the existing Grow pipeline,
 // re-skinned (D3), with the deferred Market Activity notice. No hooks.
@@ -118,6 +119,7 @@ export function MinimalOpportunitiesView(p: MinimalOpportunitiesViewProps) {
           </button>
         </div>
       </header>
+      <MinimalOpportunitySearch />
       <aside className="am-data-banner am-ws2-market-deferred" aria-label={MARKET_ACTIVITY_DEFERRED.title}>
         <span>
           <strong>{MARKET_ACTIVITY_DEFERRED.title}.</strong> {MARKET_ACTIVITY_DEFERRED.body}
@@ -158,6 +160,9 @@ export function MinimalOpportunitiesView(p: MinimalOpportunitiesViewProps) {
                     </h3>
                     {card.reason ? <div className="am-data-card-sub">{card.reason}</div> : null}
                   </div>
+                  <Link href={card.href} className="am-data-button is-quiet" aria-label={`Details for ${card.contactName}`}>
+                    Details
+                  </Link>
                 </div>
                 <div className="am-data-card-meta">
                   <span>{card.nextAction ?? "No next action set"}</span>

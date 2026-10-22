@@ -88,12 +88,21 @@ export function resolveLandingRoute(ctx: NavContext): "/grow" | "/" {
 
 /**
  * Grow stays highlighted on Contact 360 (/grow/contacts/:id) and on the
- * appraisal pages (/grow/appraisals, /:id, /:id/build). Other links stay
+ * appraisal pages (/grow/appraisals, /:id, /:id/build), the Minimal property
+ * detail (/grow/properties/:id) and opportunities (/grow/opportunities, /:id). Other links stay
  * exact, including /grow/import, which is its own page.
  */
 export function navLinkIsActive(location: string, linkPath: string): boolean {
   const path = location.split("?")[0].split("#")[0];
   if (path === linkPath) return true;
   if (linkPath !== "/grow") return false;
-  return /^\/grow\/contacts\/[^/]+$/.test(path) || /^\/grow\/appraisals(\/[^/]+(\/build)?)?\/?$/.test(path);
+  return (
+    /^\/grow\/contacts\/[^/]+$/.test(path) ||
+    /^\/grow\/appraisals(\/[^/]+(\/build)?)?\/?$/.test(path) ||
+    // Minimal detail pages (CC #25/#26) and the Minimal opportunities pipeline.
+    /^\/grow\/properties\/[^/]+\/?$/.test(path) ||
+    /^\/grow\/opportunities(\/[^/]+)?\/?$/.test(path) ||
+    // Minimal My Momentum and Market Activity (CC #5/#26).
+    /^\/grow\/(momentum|market-activity)\/?$/.test(path)
+  );
 }

@@ -75,7 +75,7 @@ test("cards carry stage, appraisal and open-opportunity counts from existing dat
     location: "Milton QLD 4064",
     stage: "Appraisal",
     listingStatus: "Not Listed",
-    href: "/properties/1",
+    href: "/grow/properties/1",
     appraisal: { id: 10, statusLabel: "Presented", href: "/grow/appraisals/10", closed: false },
     openOpportunityCount: 1,
   });

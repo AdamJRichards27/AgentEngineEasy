@@ -73,7 +73,8 @@ export function buildMinimalPropertyCards(
       location: propertyLocationLine(p),
       stage: p.workflowStage,
       listingStatus: p.listingStatus,
-      href: `/properties/${p.id}`,
+      // Grow property detail (Minimal); it shows "Open in Run" only with run.access (D5).
+      href: `/grow/properties/${p.id}`,
       appraisal: appraisal
         ? {
             id: appraisal.id,
