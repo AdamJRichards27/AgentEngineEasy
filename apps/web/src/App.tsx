@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Switch, Route, Link, Redirect, useLocation, useSearch } from "wouter";
 import { selectContact360View } from "./minimal/minimalContactModel";
 import { selectPropertiesView } from "./minimal/properties/minimalPropertiesModel";
+import { selectAppraisalsView } from "./minimal/appraisals/minimalAppraisalsModel";
 import { selectOpportunitiesView } from "./minimal/opportunities/minimalOpportunitiesModel";
 import { selectAppraisalBuilderView } from "./minimal/appraisal/appraisalBuilderModel";
 import Login from "./pages/Login";
@@ -46,6 +47,7 @@ const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
 const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
 const MinimalProperties = lazy(() => import("./minimal/properties/MinimalProperties"));
+const MinimalAppraisals = lazy(() => import("./minimal/appraisals/MinimalAppraisals"));
 const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalOpportunities"));
 const MinimalAppraisalBuilder = lazy(() => import("./minimal/appraisal/MinimalAppraisalBuilder"));
 
@@ -359,7 +361,9 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
             {selectAppraisalBuilderView(minimalShell) === "minimal" ? <MinimalAppraisalBuilder /> : <AppraisalWorkspace />}
           </Route>
           <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
-          <Route path="/grow/appraisals" component={GrowAppraisals} />
+          <Route path="/grow/appraisals">
+            {selectAppraisalsView(minimalShell, search) === "minimal" ? <MinimalAppraisals /> : <GrowAppraisals />}
+          </Route>
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id">
             {selectContact360View(minimalShell, search) === "minimal" ? <MinimalContact360 /> : <Grow />}
