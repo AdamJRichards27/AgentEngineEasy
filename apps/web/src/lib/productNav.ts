@@ -101,6 +101,8 @@ export function navLinkIsActive(location: string, linkPath: string): boolean {
     /^\/grow\/appraisals(\/[^/]+(\/build)?)?\/?$/.test(path) ||
     // Minimal detail pages (CC #25/#26) and the Minimal opportunities pipeline.
     /^\/grow\/properties\/[^/]+\/?$/.test(path) ||
-    /^\/grow\/opportunities(\/[^/]+)?\/?$/.test(path)
+    /^\/grow\/opportunities(\/[^/]+)?\/?$/.test(path) ||
+    // Minimal My Momentum and Market Activity (CC #5/#26).
+    /^\/grow\/(momentum|market-activity)\/?$/.test(path)
   );
 }

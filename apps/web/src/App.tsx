@@ -8,6 +8,8 @@ import { selectOpportunitiesView } from "./minimal/opportunities/minimalOpportun
 import { selectPropertyDetailView } from "./minimal/properties/minimalPropertyDetailModel";
 import { selectOpportunityDetailView } from "./minimal/opportunities/minimalOpportunityDetailModel";
 import { selectAppraisalBuilderView } from "./minimal/appraisal/appraisalBuilderModel";
+import { selectMomentumView } from "./minimal/momentum/minimalMomentumModel";
+import { selectMarketActivityView } from "./minimal/market/minimalMarketActivityModel";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -54,6 +56,8 @@ const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalO
 const MinimalAppraisalBuilder = lazy(() => import("./minimal/appraisal/MinimalAppraisalBuilder"));
 const MinimalPropertyDetail = lazy(() => import("./minimal/properties/MinimalPropertyDetail"));
 const MinimalOpportunityDetail = lazy(() => import("./minimal/opportunities/MinimalOpportunityDetail"));
+const MinimalMomentum = lazy(() => import("./minimal/momentum/MinimalMomentum"));
+const MinimalMarketActivity = lazy(() => import("./minimal/market/MinimalMarketActivity"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -384,6 +388,13 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
             ) : (
               <Redirect to="/grow?tab=opportunities" replace />
             )}
+          </Route>
+          {/* CC #5/#26: Minimal-only My Momentum and Market Activity (#248 APIs, flag-gated by the API). Classic → /grow. */}
+          <Route path="/grow/momentum">
+            {selectMomentumView(minimalShell) === "minimal" ? <MinimalMomentum /> : <Redirect to="/grow" replace />}
+          </Route>
+          <Route path="/grow/market-activity">
+            {selectMarketActivityView(minimalShell) === "minimal" ? <MinimalMarketActivity /> : <Redirect to="/grow" replace />}
           </Route>
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id">
