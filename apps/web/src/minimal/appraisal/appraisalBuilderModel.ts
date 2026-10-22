@@ -161,26 +161,60 @@ export function continueBuilder(
  * finalised) appraisals can browse every step.
  */
 export function resumeBuilderState(workspace: BuilderWorkspace): BuilderState {
-  const a = workspace.appraisal;
-  const comps = workspace.comparableSales.length > 0;
-  const listings = workspace.marketCompetition.length > 0;
-  const draft = rangeDraftFrom(a);
-  const rangeSaved = a.priceRangeLow != null && a.priceRangeHigh != null && rangeValidation(draft) === null;
-  const built = a.presentationDocumentId != null;
-  const done: Record<number, boolean> = {
-    1: Boolean(a.propertyId),
-    2: comps || listings || rangeSaved || built,
-    3: comps,
-    4: listings || rangeSaved || built,
-    5: rangeSaved,
-    6: built,
-  };
+  const done = builderStepsSaved(workspace);
   let step = MINIMAL_APPRAISAL_STEP_COUNT;
   for (let n = 1; n < MINIMAL_APPRAISAL_STEP_COUNT; n += 1) {
     if (!done[n]) { step = n; break; }
   }
-  const readOnly = builderReadOnlyMessage(a) !== null;
+  const readOnly = builderReadOnlyMessage(workspace.appraisal) !== null;
   return { step, highestStep: readOnly ? MINIMAL_APPRAISAL_STEP_COUNT : step };
+}
+
+/**
+ * AB-6: which of the seven steps have their work saved on the SERVER. Each
+ * step saves on its own through an existing route, so this is the single
+ * source for resume and for the stepper's "saved" marks:
+ *   1 property linked · 2/4 review steps (done once later work is saved)
+ *   3 sold comparable(s) · 5 valid range + explanation · 6 document built
+ *   7 follow-up due date saved.
+ */
+export function builderStepsSaved(workspace: BuilderWorkspace): Record<number, boolean> {
+  const a = workspace.appraisal;
+  const comps = workspace.comparableSales.length > 0;
+  const listings = workspace.marketCompetition.length > 0;
+  const rangeSaved = a.priceRangeLow != null && a.priceRangeHigh != null && rangeValidation(rangeDraftFrom(a)) === null;
+  const built = a.presentationDocumentId != null;
+  const followUp = a.followUpAt != null;
+  return {
+    1: Boolean(a.propertyId),
+    2: comps || listings || rangeSaved || built || followUp,
+    3: comps,
+    4: listings || rangeSaved || built || followUp,
+    5: rangeSaved,
+    6: built,
+    7: followUp,
+  };
+}
+
+export const UNSAVED_RANGE_MESSAGE =
+  "The range or its explanation has unsaved changes. Save them, or choose the step again to leave without saving.";
+export const UNSAVED_NARRATIVE_MESSAGE =
+  "The market commentary has unsaved changes. Save it, or choose the step again to leave without saving.";
+
+/**
+ * AB-6: leaving a step never saves for the agent, and never silently drops
+ * typed work. Null when nothing typed on `step` differs from the server copy.
+ */
+export function unsavedStepEdits(
+  step: number,
+  edits: { range: RangeDraft | null; narrative: string | null },
+  appraisal: Pick<BuilderAppraisal, "priceRangeLow" | "priceRangeHigh" | "pricingCommentary" | "marketPositionNarrative">,
+): string | null {
+  if (step === 5 && edits.range && !rangeIsSaved(edits.range, appraisal)) return UNSAVED_RANGE_MESSAGE;
+  if (step === 6 && edits.narrative != null && edits.narrative.trim() !== (appraisal.marketPositionNarrative ?? "").trim()) {
+    return UNSAVED_NARRATIVE_MESSAGE;
+  }
+  return null;
 }
 
 export function goToBuilderStep(state: BuilderState, step: number): BuilderState {

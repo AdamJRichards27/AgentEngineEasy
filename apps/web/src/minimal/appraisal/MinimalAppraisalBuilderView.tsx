@@ -3,6 +3,7 @@ import { appraisalPricingLockedMessage, appraisalReadOnlyMessage, formatAppraisa
 import { appraisalStatusLabel } from "../../lib/growAppraisals";
 import { SAVE_DUE_FOLLOW_UP_LABEL } from "../../lib/growTerms";
 import {
+  builderStepsSaved,
   APPRAISAL_BUILDER_DISCLAIMER,
   BUILDER_NO_ATTESTATIONS_NOTE,
   MINIMAL_APPRAISAL_STEPS,
@@ -388,6 +389,7 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
   const locked = readOnly !== null || !p.canWrite;
   const pricingLocked = locked || appraisalPricingLockedMessage(a) !== null;
   const step = p.state.step;
+  const saved = builderStepsSaved(p.workspace);
   const def = MINIMAL_APPRAISAL_STEPS[step - 1];
   return (
     <section className="ae-appraisal-workspace ae-appraisal-editor" data-ae-appraisal="minimal" aria-labelledby="ae-appraisal-editor-title">
@@ -416,7 +418,8 @@ export function MinimalAppraisalBuilderView(p: BuilderViewProps) {
             type="button"
             aria-current={step === item.n ? "step" : undefined}
             disabled={item.n > p.state.highestStep}
-            className={`${step === item.n ? "is-active" : ""}${item.n < step ? " is-done" : ""}`}
+            className={`${step === item.n ? "is-active" : ""}${item.n < step ? " is-done" : ""}${saved[item.n] ? " is-saved" : ""}`}
+            data-step-saved={saved[item.n] ? "true" : "false"}
             onClick={() => p.on.goTo(item.n)}
           >
             <span className="ae-appraisal-vh">Step </span>

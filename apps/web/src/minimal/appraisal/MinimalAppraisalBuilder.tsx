@@ -17,6 +17,7 @@ import {
   continueBuilder,
   followUpBody,
   goToBuilderStep,
+  unsavedStepEdits,
   resumeBuilderState,
   initialBuilderState,
   rangeDraftFrom,
@@ -87,6 +88,8 @@ export default function MinimalAppraisalBuilder() {
   const [followUpForm, setFollowUpForm] = useState<FollowUpForm>(EMPTY_FOLLOW_UP);
   const [message, setMessage] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // AB-6: first attempt to leave a step with unsaved typing warns; choosing the same target again discards.
+  const [pendingLeave, setPendingLeave] = useState<number | null>(null);
 
   function refresh() {
     void queryClient.invalidateQueries({ queryKey: ["grow-appraisal-workspace", appraisalId] });
@@ -180,6 +183,25 @@ export default function MinimalAppraisalBuilder() {
   const busy =
     patch.isPending || addSale.isPending || removeSale.isPending || addListing.isPending || removeListing.isPending || preview.isPending || followUp.isPending;
 
+  function blockedByUnsaved(target: number): boolean {
+    if (!canWrite) return false;
+    const warning = unsavedStepEdits(state.step, { range: rangeEdit, narrative: narrativeEdit }, ws.appraisal);
+    if (!warning) {
+      setPendingLeave(null);
+      return false;
+    }
+    if (pendingLeave === target) {
+      setPendingLeave(null);
+      setRangeEdit(null);
+      setNarrativeEdit(null);
+      return false;
+    }
+    setPendingLeave(target);
+    setNotice(null);
+    setMessage(warning);
+    return true;
+  }
+
   return (
     <MinimalAppraisalBuilderView
       workspace={ws}
@@ -203,6 +225,7 @@ export default function MinimalAppraisalBuilder() {
       runAccess={hasEntitlement("run.access")}
       on={{
         continueStep: () => {
+          if (blockedByUnsaved(state.step + 1)) return;
           const next = continueBuilder(state, { workspace: ws, rangeDraft }, { reviewOnly: !canWrite });
           setNotice(null);
           setMessage(next.message);
@@ -210,10 +233,12 @@ export default function MinimalAppraisalBuilder() {
           if (!next.message && typeof window !== "undefined") window.scrollTo(0, 0);
         },
         back: () => {
+          if (blockedByUnsaved(state.step - 1)) return;
           setMessage(null);
           setState(goToBuilderStep(state, state.step - 1));
         },
         goTo: (n) => {
+          if (n !== state.step && blockedByUnsaved(n)) return;
           setMessage(null);
           setState(goToBuilderStep(state, n));
         },
