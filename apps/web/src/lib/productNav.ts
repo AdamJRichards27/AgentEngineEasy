@@ -87,11 +87,13 @@ export function resolveLandingRoute(ctx: NavContext): "/grow" | "/" {
 }
 
 /**
- * Grow stays highlighted on Contact 360 (/grow/contacts/:id). Other links
- * stay exact, including /grow/import, which is its own page.
+ * Grow stays highlighted on Contact 360 (/grow/contacts/:id) and on the
+ * appraisal pages (/grow/appraisals, /:id, /:id/build). Other links stay
+ * exact, including /grow/import, which is its own page.
  */
 export function navLinkIsActive(location: string, linkPath: string): boolean {
   const path = location.split("?")[0].split("#")[0];
   if (path === linkPath) return true;
-  return linkPath === "/grow" && /^\/grow\/contacts\/[^/]+$/.test(path);
+  if (linkPath !== "/grow") return false;
+  return /^\/grow\/contacts\/[^/]+$/.test(path) || /^\/grow\/appraisals(\/[^/]+(\/build)?)?\/?$/.test(path);
 }

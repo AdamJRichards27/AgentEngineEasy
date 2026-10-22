@@ -25,6 +25,12 @@ export interface SessionUser {
 interface SessionResponse {
   user: SessionUser;
   entitlements: string[];
+  // AE Minimal shell gate. Additive sibling of user and entitlements.
+  // Absent (older response) is read as classic by lib/minimalUx.ts.
+  ux?: {
+    eligible: boolean;
+    variant: "classic" | "minimal";
+  };
 }
 
 // Whole-app auth check — Login/App.tsx use this to decide whether to show
