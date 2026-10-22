@@ -244,3 +244,28 @@ test("Grow stays highlighted on My Momentum and Market Activity", () => {
   }
   for (const p of ["/grow/momentum/1", "/grow/market-activity/x", "/grow/momentumx"]) assert.equal(navLinkIsActive(p, "/grow"), false, p);
 });
+
+// Today mount (MinimalToday.tsx) and the two flag states.
+test("MinimalToday mounts the insight cards once, after the welcome block", () => {
+  const today = readFileSync(new URL("../../minimal/MinimalToday.tsx", import.meta.url), "utf8");
+  assert.match(today, /import MinimalTodayInsightCards from "\.\/momentum\/MinimalTodayInsightCards";/);
+  assert.equal(today.match(/<MinimalTodayInsightCards \/>/g)?.length, 1);
+  assert.ok(today.indexOf("<MinimalTodayInsightCards />") > today.indexOf('className="am-welcome"'));
+  assert.ok(today.indexOf("<MinimalTodayInsightCards />") < today.indexOf("today.isLoading ?"));
+});
+
+test("flags OFF: both APIs 404 → Today cards render nothing (Today unchanged)", () => {
+  const off = new ApiError(404, "Not found");
+  assert.equal(isFeatureHiddenError(off), true);
+  assert.equal(TodayInsightCardsView({ momentum: { kind: "hidden" }, market: { kind: "hidden" } }), null);
+  const noAccess = new ApiError(403, "Forbidden");
+  assert.equal(isFeatureHiddenError(noAccess), true);
+});
+
+test("flags ON: valid payloads → both cards render with links; one flag off hides only that card", () => {
+  const on = expand(TodayInsightCardsView({ momentum: { kind: "ready", data: momentumCardData(MOMENTUM)! }, market: { kind: "ready", data: marketCardData(MARKET)! } }));
+  assert.deepEqual(links(on).sort(), ["/grow/market-activity", "/grow/momentum"]);
+  const momOnly = expand(TodayInsightCardsView({ momentum: { kind: "ready", data: momentumCardData(MOMENTUM)! }, market: { kind: "hidden" } }));
+  assert.deepEqual(links(momOnly), ["/grow/momentum"]);
+  assert.doesNotMatch(text(momOnly), /Market Activity/);
+});

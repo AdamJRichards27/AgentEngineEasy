@@ -7,6 +7,7 @@ import { GROW_TODAY_PURPOSE, growTodayHeading } from "../lib/todaySurfaces";
 import { formatMinimalHeaderDate } from "../lib/minimalUx";
 import { buildMinimalTodayModel, formatMinimalAsOf, type MinimalTodayCard } from "./minimalTodayModel";
 import { MinimalGrowSections } from "./MinimalGrowSections";
+import MinimalTodayInsightCards from "./momentum/MinimalTodayInsightCards";
 
 // AE Minimal A Today. The list is GET /grow/today. Channel buttons and the
 // prototype's side cards are not part of this screen.
@@ -31,6 +32,9 @@ export default function MinimalToday() {
           <p>{GROW_TODAY_PURPOSE}</p>
         </div>
       </div>
+
+      {/* CC #5/#26: renders nothing while #248 answers 404/403 (flags off / no access). */}
+      <MinimalTodayInsightCards />
 
       {today.isLoading ? <p className="am-empty-note" role="status">Loading today's priorities…</p> : null}
       {today.isError ? (
