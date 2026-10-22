@@ -5,6 +5,8 @@ import { selectContact360View } from "./minimal/minimalContactModel";
 import { selectPropertiesView } from "./minimal/properties/minimalPropertiesModel";
 import { selectAppraisalsView } from "./minimal/appraisals/minimalAppraisalsModel";
 import { selectOpportunitiesView } from "./minimal/opportunities/minimalOpportunitiesModel";
+import { selectPropertyDetailView } from "./minimal/properties/minimalPropertyDetailModel";
+import { selectOpportunityDetailView } from "./minimal/opportunities/minimalOpportunityDetailModel";
 import { selectAppraisalBuilderView } from "./minimal/appraisal/appraisalBuilderModel";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
@@ -50,6 +52,8 @@ const MinimalProperties = lazy(() => import("./minimal/properties/MinimalPropert
 const MinimalAppraisals = lazy(() => import("./minimal/appraisals/MinimalAppraisals"));
 const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalOpportunities"));
 const MinimalAppraisalBuilder = lazy(() => import("./minimal/appraisal/MinimalAppraisalBuilder"));
+const MinimalPropertyDetail = lazy(() => import("./minimal/properties/MinimalPropertyDetail"));
+const MinimalOpportunityDetail = lazy(() => import("./minimal/opportunities/MinimalOpportunityDetail"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -363,6 +367,23 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/grow/appraisals/:id" component={AppraisalWorkspace} />
           <Route path="/grow/appraisals">
             {selectAppraisalsView(minimalShell, search) === "minimal" ? <MinimalAppraisals /> : <GrowAppraisals />}
+          </Route>
+          {/* CC #25/#26: Minimal detail pages, before /grow and /grow/opportunities (first match wins). */}
+          <Route path="/grow/properties/:id">
+            {(params) =>
+              selectPropertyDetailView(minimalShell, search) === "minimal" ? (
+                <MinimalPropertyDetail />
+              ) : (
+                <Redirect to={`/properties/${params.id}`} replace />
+              )
+            }
+          </Route>
+          <Route path="/grow/opportunities/:id">
+            {selectOpportunityDetailView(minimalShell, search) === "minimal" ? (
+              <MinimalOpportunityDetail />
+            ) : (
+              <Redirect to="/grow?tab=opportunities" replace />
+            )}
           </Route>
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id">
