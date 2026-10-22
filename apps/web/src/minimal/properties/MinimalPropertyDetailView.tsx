@@ -135,7 +135,11 @@ export function MinimalPropertyDetailView({ state }: { state: MinimalPropertyDet
           </ul>
         )}
         {m.opportunitiesTruncated ? (
-          <p className="am-empty-note">Showing opportunities from your latest 100. Older ones are in the full pipeline.</p>
+          <p className="am-empty-note">
+            {m.opportunitiesScope === "property"
+              ? "Showing this property's latest 100 opportunities. Older ones are in the full pipeline."
+              : "Showing opportunities from your latest 100. Older ones are in the full pipeline."}
+          </p>
         ) : null}
       </section>
     </section>

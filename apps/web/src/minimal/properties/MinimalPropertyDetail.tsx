@@ -4,8 +4,9 @@ import { apiErrorMessage, apiFetch } from "../../lib/api";
 import type { AppraisalListRow } from "../../lib/appraisalUi";
 import { useEntitlements } from "../../lib/session";
 import {
-  MINIMAL_PROPERTY_OPPORTUNITY_LIMIT,
   buildMinimalPropertyDetail,
+  classifyPropertyOpportunityPage,
+  minimalPropertyOpportunitiesPath,
   parseDetailId,
   type MinimalPropertyDetailOpportunity,
   type MinimalPropertyDetailRow,
@@ -33,8 +34,8 @@ export default function MinimalPropertyDetail() {
     enabled: id !== null && growAccess,
   });
   const opportunities = useQuery<{ opportunities: MinimalPropertyDetailOpportunity[]; nextCursor?: string | null }>({
-    queryKey: ["minimal-property-detail-opportunities"],
-    queryFn: () => apiFetch(`/grow/opportunities?limit=${MINIMAL_PROPERTY_OPPORTUNITY_LIMIT}`),
+    queryKey: ["minimal-property-detail-opportunities", id],
+    queryFn: () => apiFetch(minimalPropertyOpportunitiesPath(id!)),
     enabled: id !== null && growAccess,
   });
 
@@ -60,6 +61,7 @@ export default function MinimalPropertyDetail() {
         model: buildMinimalPropertyDetail(property.data.property, pipeline.data?.appraisals ?? [], opportunities.data?.opportunities ?? [], {
           runAccess: hasEntitlement("run.access"),
           opportunityPageFull: Boolean(opportunities.data?.nextCursor),
+          opportunityScope: classifyPropertyOpportunityPage(opportunities.data?.opportunities ?? [], id),
         }),
         relatedError,
         relatedLoading: pipeline.isLoading || opportunities.isLoading,

@@ -6,7 +6,12 @@ import { propertyLocationLine, type MinimalPropertyRow } from "./minimalProperti
 // Existing endpoints only, nothing new on the server:
 //   GET /properties/:id                 (brokerage + visibility scoped; 404 otherwise)
 //   GET /grow/appraisals/pipeline       (filtered to this property in the browser)
-//   GET /grow/opportunities?limit=100   (no propertyId filter exists; filtered in the browser)
+//   GET /grow/opportunities?propertyId=:id&limit=100
+//       Server-side property filter (API branch local/grow-opps-property-filter).
+//       An older API ignores the unknown param and returns the caller's latest
+//       100 across all properties; classifyPropertyOpportunityPage detects that
+//       (rows for other properties present) and falls back to the browser filter
+//       plus the "latest 100" note.
 // Run workspace (/properties/:id) is linked only with run.access (Owner D5).
 
 export const MINIMAL_PROPERTIES_LIST_HREF = "/properties";
@@ -41,6 +46,27 @@ export interface MinimalPropertyDetailModel {
   opportunities: { id: number; href: string; contact: string; contactHref: string; stage: string; open: boolean }[];
   /** True when the opportunity page hit the limit, so the list may be incomplete. */
   opportunitiesTruncated: boolean;
+  /** "all-properties": the old API ignored propertyId (latest 100 across all properties).
+   * "property": the page was already this property's opportunities. */
+  opportunitiesScope: PropertyOpportunityScope;
+}
+
+export type PropertyOpportunityScope = "property" | "all-properties";
+
+export function minimalPropertyOpportunitiesPath(propertyId: number): string {
+  return `/grow/opportunities?propertyId=${propertyId}&limit=${MINIMAL_PROPERTY_OPPORTUNITY_LIMIT}`;
+}
+
+/** Whether the server honoured ?propertyId=. The filtered API only returns rows
+ * for this property, so any row for another property (or unlinked) means an
+ * API without the filter. An all-matching page is treated as filtered: if an
+ * old API happened to return only this property's rows, they are still exactly
+ * this property's latest opportunities, so the "property" wording stays true. */
+export function classifyPropertyOpportunityPage(
+  rows: Pick<MinimalPropertyDetailOpportunity, "propertyId">[],
+  propertyId: number,
+): PropertyOpportunityScope {
+  return rows.every((r) => r.propertyId === propertyId) ? "property" : "all-properties";
 }
 
 /** "/grow/properties/12" style param → id, or null for anything that is not a positive integer. */
@@ -62,7 +88,7 @@ export function buildMinimalPropertyDetail(
   property: MinimalPropertyDetailRow,
   appraisals: AppraisalListRow[],
   opportunities: MinimalPropertyDetailOpportunity[],
-  opts: { runAccess: boolean; opportunityPageFull?: boolean },
+  opts: { runAccess: boolean; opportunityPageFull?: boolean; opportunityScope?: PropertyOpportunityScope },
 ): MinimalPropertyDetailModel {
   const mine = appraisals
     .filter((a) => a.propertyId === property.id)
@@ -98,6 +124,7 @@ export function buildMinimalPropertyDetail(
     appraisals: mine,
     opportunities: opps,
     opportunitiesTruncated: Boolean(opts.opportunityPageFull),
+    opportunitiesScope: opts.opportunityScope ?? "all-properties",
   };
 }
 

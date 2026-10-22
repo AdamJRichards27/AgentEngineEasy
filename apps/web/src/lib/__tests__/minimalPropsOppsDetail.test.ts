@@ -6,7 +6,9 @@ import { Link } from "wouter";
 import type { AppraisalListRow } from "../appraisalUi";
 import {
   buildMinimalPropertyDetail,
+  classifyPropertyOpportunityPage,
   minimalPropertyDetailPath,
+  minimalPropertyOpportunitiesPath,
   parseDetailId,
   selectPropertyDetailView,
   type MinimalPropertyDetailRow,
@@ -124,6 +126,40 @@ test("property detail view: loading, error+retry, ready with back link and empty
   assert.ok(hrefs.includes("/properties/7"));
   assert.match(text(full), /latest 100/);
   assert.match(text(full), /boom/);
+});
+
+test("property detail asks the server for ?propertyId= and falls back when the API ignores it", () => {
+  assert.equal(minimalPropertyOpportunitiesPath(7), "/grow/opportunities?propertyId=7&limit=100");
+  // Filtered API: only this property's rows (or none).
+  assert.equal(classifyPropertyOpportunityPage([], 7), "property");
+  assert.equal(classifyPropertyOpportunityPage([{ propertyId: 7 }, { propertyId: 7 }], 7), "property");
+  // Older API ignored the param: rows for other properties or unlinked rows.
+  assert.equal(classifyPropertyOpportunityPage([{ propertyId: 7 }, { propertyId: 8 }], 7), "all-properties");
+  assert.equal(classifyPropertyOpportunityPage([{ propertyId: null }], 7), "all-properties");
+
+  const other = { ...opp(), id: 99, propertyId: 8 };
+  // Fallback still filters in the browser and keeps the "latest 100" note on a full page.
+  const fallback = buildMinimalPropertyDetail(PROPERTY, [], [opp(), other], {
+    runAccess: false,
+    opportunityPageFull: true,
+    opportunityScope: classifyPropertyOpportunityPage([opp(), other], PROPERTY.id),
+  });
+  assert.deepEqual(fallback.opportunities.map((o) => o.id), [11]);
+  assert.match(text(expand(MinimalPropertyDetailView({ state: { kind: "ready", model: fallback } }))), /from your latest 100/);
+
+  // Server-filtered, not full: no note at all.
+  const filtered = buildMinimalPropertyDetail(PROPERTY, [], [opp()], {
+    runAccess: false,
+    opportunityPageFull: false,
+    opportunityScope: classifyPropertyOpportunityPage([opp()], PROPERTY.id),
+  });
+  assert.ok(!/latest 100/.test(text(expand(MinimalPropertyDetailView({ state: { kind: "ready", model: filtered } })))));
+
+  // Server-filtered but this property alone has more than 100: honest per-property note, not the cross-property one.
+  const filteredFull = buildMinimalPropertyDetail(PROPERTY, [], [opp()], { runAccess: false, opportunityPageFull: true, opportunityScope: "property" });
+  const t = text(expand(MinimalPropertyDetailView({ state: { kind: "ready", model: filteredFull } })));
+  assert.match(t, /this property's latest 100/);
+  assert.ok(!/from your latest 100/.test(t));
 });
 
 test("opportunity query paths use existing list params only", () => {
