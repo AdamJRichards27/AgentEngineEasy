@@ -1,12 +1,16 @@
-# GR-E2E Grow authenticated smoke — CI-READY, NOT ENABLED.
-# This file lives outside .github/workflows on purpose, so GitHub never runs
-# it. Enabling it (copying to .github/workflows/grow-e2e-smoke.yml) is an
-# Owner decision: it adds a CI job. It uses only the disposable postgres
-# service, the repo's own dev servers on loopback, and the runner's
-# preinstalled Chrome. No secrets, no external services, read-only token.
+# GR-E2E Grow signed-in smoke. PENDING OWNER ACTIVATION — not run in GitHub CI.
+# To activate, the Owner copies this file to .github/workflows/ (needs a token with workflow scope).
+# Uses only the disposable postgres service below, synthetic data seeded by
+# the test, the repo's own dev-login (ALLOW_DEV_AUTH) and dev servers on
+# loopback, and the runner's preinstalled Chrome. No secrets, no external
+# providers; the token is read-only.
 name: Grow E2E smoke
 on:
+  pull_request:
   workflow_dispatch: {}
+concurrency:
+  group: grow-e2e-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
