@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Link } from "wouter";
 import { MINIMAL_PROPERTIES_LIST_HREF, type MinimalPropertyDetailModel } from "./minimalPropertyDetailModel";
 
@@ -6,7 +7,7 @@ import { MINIMAL_PROPERTIES_LIST_HREF, type MinimalPropertyDetailModel } from ".
 export type MinimalPropertyDetailState =
   | { kind: "loading" }
   | { kind: "error"; text: string; onRetry?: () => void }
-  | { kind: "ready"; model: MinimalPropertyDetailModel; relatedError?: string | null; relatedLoading?: boolean };
+  | { kind: "ready"; model: MinimalPropertyDetailModel; relatedError?: string | null; relatedLoading?: boolean; contacts?: ReactNode };
 
 function BackLink() {
   return (
@@ -78,6 +79,8 @@ export function MinimalPropertyDetailView({ state }: { state: MinimalPropertyDet
           <dd>{m.priceDisplay}</dd>
         </dl>
       </section>
+
+      {state.contacts ?? null}
 
       {state.relatedLoading ? <p className="am-empty-note">Loading appraisals and opportunities…</p> : null}
       {state.relatedError ? (
