@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import MyBrandingEditor from "../components/branding/MyBrandingEditor";
 import { Link } from "wouter";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
@@ -92,6 +93,12 @@ export default function Settings() {
         <p className="muted">
           {user?.brokerageName} · {user?.role}
         </p>
+      </section>
+
+      <section className="card" id="my-branding">
+        <h2>My Branding &amp; Profile</h2>
+        <p className="muted">Your logo, photo and contact details for appraisals. New appraisals use these automatically.</p>
+        <MyBrandingEditor />
       </section>
 
       <section className="card">

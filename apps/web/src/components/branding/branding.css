@@ -1,0 +1,39 @@
+/* CC #52 S2 branding UI. AE Minimal v1.0 look (white rounded cards, orange
+   accent), with fallbacks so it also renders in the classic UI. */
+.ae-brand { --brand-accent: var(--am-orange-strong, #C44F17); --brand-ink: var(--am-ink, #212121); --brand-muted: var(--am-muted, #6E6E6E); --brand-line: var(--am-line, #E5E5E5); color: var(--brand-ink); }
+.ae-brand-card { margin-top: 16px; padding: 16px; background: #fff; border: 1px solid var(--brand-line); border-radius: 12px; }
+.ae-brand-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ae-brand-card-head h3 { margin: 0; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--brand-accent); }
+.ae-brand-source { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: #FFF6E0; color: #7A3A10; }
+.ae-brand-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 20px; }
+.ae-brand-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; margin: 12px 0; }
+.ae-brand-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--brand-muted); }
+.ae-brand-field input, .ae-brand-field textarea { font: inherit; font-size: 13px; color: var(--brand-ink); padding: 8px 10px; border: 1px solid var(--brand-line); border-radius: 8px; background: #fff; }
+.ae-brand-field textarea { min-height: 80px; resize: vertical; }
+.ae-brand .is-wide { grid-column: 1 / -1; }
+.ae-brand-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.ae-brand-button { display: inline-flex; align-items: center; min-height: 34px; padding: 0 12px; border: 1px solid var(--brand-line); border-radius: 8px; background: #fff; color: var(--brand-ink); font: inherit; font-size: 13px; cursor: pointer; }
+.ae-brand-button.is-primary { background: var(--brand-accent); border-color: var(--brand-accent); color: #fff; }
+.ae-brand-button:disabled { opacity: .55; cursor: default; }
+.ae-brand-vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.ae-brand-fine { font-size: 12px; color: var(--brand-muted); margin: 6px 0 0; }
+.ae-brand-error { color: #B42318; font-size: 12px; }
+.ae-brand-preview { margin-top: 12px; padding: 14px; border: 1px solid var(--brand-line); border-radius: 10px; background: #FAFAFA; }
+.ae-brand-cover { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ae-brand-logo { max-height: 56px; max-width: 220px; width: auto; height: auto; object-fit: contain; }
+.ae-brand-placeholder { font-size: 12px; color: var(--brand-muted); }
+.ae-brand-person { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ae-brand-person > div { display: flex; flex-direction: column; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.ae-brand-person strong { font-size: 14px; }
+.ae-brand-photo { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 50%; object-fit: cover; background: #E5E5E5; }
+.ae-brand-contact { list-style: none; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--brand-line); display: grid; gap: 2px; font-size: 12px; overflow-wrap: anywhere; }
+.ae-brand-bio { font-size: 12px; margin: 10px 0 0; }
+.ae-brand-uploader { position: relative; }
+.ae-brand-crop { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; gap: 10px; padding: 16px; background: rgba(20, 20, 20, .92); color: #fff; }
+.ae-brand-crop-area { position: relative; flex: 1 1 auto; min-height: 240px; }
+.ae-brand-crop .ae-brand-fine { color: #ddd; }
+.ae-brand-zoom { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+@media (max-width: 760px) {
+  .ae-brand-grid, .ae-brand-fields { grid-template-columns: 1fr; }
+  .ae-brand-actions .ae-brand-button { flex: 1 1 100%; justify-content: center; }
+}

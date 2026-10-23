@@ -273,6 +273,21 @@ test("per-appraisal override: effective branding, closed/finalised refusal path,
   assert.deepEqual(await appraisalRow(draftId), draftBefore);
 });
 
+test("saved defaults auto-load in a brand-new appraisal with no copy step (S2)", async () => {
+  const freshId = await newAppraisal(A.agent.cookie, "2 New Default St");
+  const fresh = await json<{ effective: Record<string, string | null>; sources: Record<string, string>; override: unknown; photo: unknown }>(
+    await call("GET", `/branding/appraisals/${freshId}`, A.agent.cookie), 200);
+  assert.equal(fresh.effective.fullName, "Agent User");
+  assert.equal(fresh.effective.title, "Sales Agent");
+  assert.equal(fresh.sources.fullName, "agent");
+  assert.ok(!fresh.override || Object.keys(fresh.override as object).length === 0, "no override is created for new appraisals");
+  // An updated default is picked up live by the open draft.
+  await json(await call("PUT", "/branding/me", A.agent.cookie, { ...PROFILE, title: "Senior Agent" }), 200);
+  const again = await json<{ effective: Record<string, string | null> }>(await call("GET", `/branding/appraisals/${freshId}`, A.agent.cookie), 200);
+  assert.equal(again.effective.title, "Senior Agent");
+  await json(await call("PUT", "/branding/me", A.agent.cookie, PROFILE), 200);
+});
+
 test("finalised appraisals show only the issue snapshot and refuse overrides", async () => {
   const id = await newAppraisal(A.agent.cookie, "2 Finalised St");
   await db.update(appraisals).set({ isFinalised: true, finalisedSnapshot: { finalisedAt: new Date().toISOString() } }).where(eq(appraisals.id, id));

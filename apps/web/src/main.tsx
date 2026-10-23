@@ -6,6 +6,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { installSessionExpiryHandling, reloadPageRestoredFromCache } from "./lib/session";
 import "./fonts/inter/inter.css";
 import "./styles.css";
+import "./components/branding/branding.css";
 
 // retry: false — an unauthenticated 401 (very common: it's how we detect
 // "not signed in") shouldn't sit through react-query's default 3-attempt
