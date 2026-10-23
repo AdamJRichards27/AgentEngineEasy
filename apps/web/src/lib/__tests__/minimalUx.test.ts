@@ -97,7 +97,7 @@ test("Minimal styles stay under .ae-minimal and do not include variants B or C",
   assert.deepEqual(failures, []);
 });
 
-test("the shell is flag-gated, lazy, and does not invent Run, Pit Crew, or local data", () => {
+test("the shell is flag-gated, lazy, and does not invent local data", () => {
   const app = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
   const shell = readFileSync(new URL("../../minimal/MinimalShell.tsx", import.meta.url), "utf8");
   const client = readFileSync(new URL("../minimalUx.ts", import.meta.url), "utf8");
@@ -108,12 +108,12 @@ test("the shell is flag-gated, lazy, and does not invent Run, Pit Crew, or local
   assert.equal(shell.includes("localStorage"), false);
   assert.equal(client.includes("localStorage"), false);
   assert.equal(shell.includes("fetch("), false);
-  assert.equal(/\bSoon\b/.test(shell), false);
-  assert.equal(shell.includes("My Momentum"), false);
+  // V1: "Soon" placeholders come from buildMinimalSidebar's data, never hard-coded links.
+  assert.equal(/href="[^"]*"[^>]*>\s*Soon/.test(shell), false);
   assert.equal(shell.includes("Alex Morgan"), false);
   assert.equal(shell.includes("fictional"), false);
-  // Owner D5: the shell's links are the central product nav, filtered for run.access (minimalRunGating.test.ts).
-  assert.match(shell, /buildMinimalNavLinks/);
+  // Owner D5 + V1: the shell's groups come from buildMinimalSidebar, which reuses the central product nav's role rules.
+  assert.match(shell, /buildMinimalSidebar/);
   const nav = readFileSync(new URL("../../minimal/minimalNav.ts", import.meta.url), "utf8");
   assert.match(nav, /buildProductNavLinks\(ctx\)/);
 });
