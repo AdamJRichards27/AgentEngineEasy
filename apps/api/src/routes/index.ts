@@ -42,6 +42,7 @@ import { financialRouter } from "./financial.js";
 import { financialWebhooksRouter } from "./financialWebhooks.js";
 import { integrationsRouter } from "./integrations.js";
 import { integrationsWebhooksRouter } from "./integrationsWebhooks.js";
+import { brandingRouter } from "./branding.js";
 
 export const apiRouter = Router();
 apiRouter.use("/owner", platformOwnerRouter);
@@ -121,6 +122,8 @@ apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
 apiRouter.use("/appraisals", appraisalsRouter);
 apiRouter.use("/grow/appraisals", growAppraisalsRouter);
+// CC #52 Appraisal Branding Profile S1 (self-service agent branding + per-appraisal override).
+apiRouter.use("/branding", brandingRouter);
 // CC #5 My Momentum phase 1 (SPEC-01). 404 unless GROW_MOMENTUM_ENABLED=true.
 apiRouter.use("/grow/momentum", growMomentumRouter);
 // CC #26 Market Activity from internal data (SPEC-02). 404 unless GROW_MARKET_ACTIVITY_ENABLED=true.

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --external:argon2 --external:cors --external:csv-parse --external:drizzle-orm --external:drizzle-zod --external:express --external:express-rate-limit --external:helmet --external:multer --external:pg --external:xlsx --external:zod",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --external:argon2 --external:sharp --external:cors --external:csv-parse --external:drizzle-orm --external:drizzle-zod --external:express --external:express-rate-limit --external:helmet --external:multer --external:pg --external:xlsx --external:zod",
     "start": "node dist/index.mjs",
     "e2e:grow": "./e2e/run-local.sh",
     "typecheck": "tsc --noEmit",
@@ -38,6 +38,7 @@
     "helmet": "^8.3.0",
     "multer": "^2.4.0",
     "pg": "^8.16.0",
+    "sharp": "0.35.5",
     "xlsx": "file:../../vendor/xlsx-0.20.3.tgz",
     "zod": "^3.25.76"
   },
