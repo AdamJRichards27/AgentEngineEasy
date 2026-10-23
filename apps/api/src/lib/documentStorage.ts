@@ -72,7 +72,7 @@ export interface IngestDocumentVersionInput {
   replacementReason?: string;
   retentionClass?: string;
   retainUntil?: Date;
-  source: "upload" | "generated" | "esign" | "telephony";
+  source: "upload" | "generated" | "esign" | "telephony" | "branding";
   sourceProvider?: string;
   providerDocumentId?: string;
   webhookVerified?: boolean;
@@ -282,6 +282,20 @@ function sha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * CC #52 (branding S1): logical (propertyless) documents accept exactly one
+ * source family per owner kind. Telephony keeps every kind it had, except
+ * the reserved "branding_" prefix; branding versions may only target
+ * "branding_" kinds. Property-backed documents are unaffected.
+ */
+export const BRANDING_LOGICAL_KIND_PREFIX = "branding_";
+export function logicalSourceAllowed(source: string, kind: string): boolean {
+  const branding = kind.startsWith(BRANDING_LOGICAL_KIND_PREFIX);
+  if (source === "telephony") return !branding;
+  if (source === "branding") return branding;
+  return false;
+}
+
 function logicalDocumentOwner(value: unknown): LogicalDocumentOwner | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -335,7 +349,7 @@ function assertLogicalDocumentOwnershipWithinLock(input: {
     : null;
   const existingOwner = existingVersionOwner ?? existingDocumentOwner;
 
-  if (existingOwner && input.source !== "telephony") {
+  if (existingOwner && !logicalSourceAllowed(input.source, existingOwner.kind)) {
     throw new DocumentStorageError(
       "DOCUMENT_UNAVAILABLE",
       "Logical documents may only receive telephony versions",
@@ -366,7 +380,7 @@ function assertLogicalDocumentOwnershipWithinLock(input: {
   if (
     existingOwner &&
     input.current &&
-    input.current.source !== "telephony"
+    !logicalSourceAllowed(input.current.source, existingOwner.kind)
   ) {
     throw new DocumentStorageError(
       "DOCUMENT_UNAVAILABLE",
@@ -431,7 +445,7 @@ function assertLogicalDocumentOwnershipWithinLock(input: {
       "Document tenant owner does not match the requested logical owner",
     );
   }
-  if (input.source !== "telephony") {
+  if (!logicalSourceAllowed(input.source, requestedOwner.kind)) {
     throw new DocumentStorageError(
       "DOCUMENT_UNAVAILABLE",
       "Logical document versions must use the telephony source",
@@ -525,7 +539,7 @@ function validateDocumentBytes(
 }
 
 function ingestionAccess(input: { source: string; metadata?: Record<string, unknown> }): LogicalDocumentOwner | undefined {
-  return input.source === "telephony" ? logicalDocumentOwner(input.metadata) ?? undefined : undefined;
+  return input.source === "telephony" || input.source === "branding" ? logicalDocumentOwner(input.metadata) ?? undefined : undefined;
 }
 
 /**
