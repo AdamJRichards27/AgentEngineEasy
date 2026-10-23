@@ -44,9 +44,9 @@ test("run access is the exact run.access key", () => {
   assert.equal(minimalHasRunAccess(["run.access"]), true);
 });
 
-test("MinimalShell builds its links from buildMinimalNavLinks, never the raw product nav", () => {
+test("MinimalShell builds its links from buildMinimalSidebar, never the raw product nav", () => {
   const shell = readFileSync(new URL("../../minimal/MinimalShell.tsx", import.meta.url), "utf8");
-  assert.match(shell, /buildMinimalNavLinks\(\{ role: user\.role, entitlements \}\)/);
+  assert.match(shell, /buildMinimalSidebar\(\{\s*role: user\.role,\s*entitlements,/);
   assert.doesNotMatch(shell, /buildProductNavLinks/);
   assert.doesNotMatch(shell, /href="\/properties\/start"/, "Start property comes from the gated list");
 });

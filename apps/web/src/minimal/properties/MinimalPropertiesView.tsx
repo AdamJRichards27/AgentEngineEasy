@@ -9,6 +9,57 @@ export interface PropertyChooser {
   choices: { partyId: number; label: string }[];
 }
 
+export interface AddPropertyForm {
+  open: boolean;
+  saving: boolean;
+  error: string | null;
+  onSubmit(input: { formattedAddress: string; suburb?: string; state?: string; postcode?: string }): void;
+  onCancel(): void;
+}
+
+function GrowAddPropertyForm({ form }: { form: AddPropertyForm }) {
+  return (
+    <form
+      className="am-data-inline am-grow-add-property"
+      aria-label="Add property"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const d = new FormData(e.currentTarget);
+        const v = (k: string) => String(d.get(k) ?? "").trim() || undefined;
+        const formattedAddress = v("formattedAddress");
+        if (!formattedAddress) return;
+        form.onSubmit({ formattedAddress, suburb: v("suburb"), state: v("state"), postcode: v("postcode") });
+      }}
+    >
+      <label>
+        Address
+        <input name="formattedAddress" required autoComplete="off" />
+      </label>
+      <label>
+        Suburb
+        <input name="suburb" autoComplete="off" />
+      </label>
+      <label>
+        State
+        <input name="state" autoComplete="off" />
+      </label>
+      <label>
+        Postcode
+        <input name="postcode" inputMode="numeric" autoComplete="off" />
+      </label>
+      {form.error ? <p role="alert">{form.error}</p> : null}
+      <div className="am-data-actions">
+        <button type="submit" className="am-data-button is-primary" disabled={form.saving}>
+          {form.saving ? "Saving…" : "Save property"}
+        </button>
+        <button type="button" className="am-data-button is-quiet" onClick={form.onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export interface MinimalPropertiesViewProps {
   cards: MinimalPropertyCard[];
   search: string;
@@ -18,8 +69,11 @@ export interface MinimalPropertiesViewProps {
   chooser: PropertyChooser | null;
   pendingPropertyId: number | null;
   canCreateAppraisal: boolean;
-  /** run.access (D5): the property link opens the Run property workspace. */
+  /** run.access: Run-only operations (Run Start property flow, Open in Run). */
   runAccess: boolean;
+  /** Grow-only Add Property (Owner t147u): inline form, POST /properties, no Run flow. */
+  addForm: AddPropertyForm | null;
+  onOpenAddProperty(): void;
   onSearch(text: string): void;
   onCreateAppraisal(propertyId: number): void;
   onChooseContact(propertyId: number, partyId: number): void;
@@ -38,11 +92,18 @@ export function MinimalPropertiesView(p: MinimalPropertiesViewProps) {
           <p>Property records in your brokerage, with their appraisal and open opportunities.</p>
         </div>
         <div className="am-data-actions">
-          <Link href="/properties/start" className="am-data-button is-primary">
-            Add Property
-          </Link>
+          {p.runAccess ? (
+            <Link href="/properties/start" className="am-data-button is-primary">
+              Add Property
+            </Link>
+          ) : (
+            <button type="button" className="am-data-button is-primary" onClick={p.onOpenAddProperty}>
+              Add Property
+            </button>
+          )}
         </div>
       </header>
+      {!p.runAccess && p.addForm?.open ? <GrowAddPropertyForm form={p.addForm} /> : null}
       <div className="am-data-banner">
         <span>
           <strong>Stand-alone records, not assumed leads.</strong> An address alone does not confirm ownership or seller intent. No property-data provider is connected.

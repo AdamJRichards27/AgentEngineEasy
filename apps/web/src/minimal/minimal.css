@@ -1048,3 +1048,18 @@
 .ae-minimal .am-sidebar :is(a, button):focus-visible { outline: 2px solid #FAFAFA; outline-offset: 2px; }
 /* Skip-link target: the whole workspace, so no ring; the page heading keeps one. */
 .ae-minimal #ae-main-workspace:focus { outline: none; }
+
+/* V1 grouped sidebar (AE Minimal v1.0). */
+.ae-minimal .am-nav { display: grid; gap: 14px; }
+.ae-minimal .am-nav-group { display: grid; gap: 2px; }
+.ae-minimal .am-nav-list,
+.ae-minimal .am-nav-sub { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.ae-minimal .am-nav-sub { padding-left: 30px; }
+.ae-minimal .am-nav-button.am-nav-nested { min-height: 30px; font-size: 12.5px; }
+.ae-minimal .am-nav-button.am-nav-soon { cursor: default; opacity: .62; }
+.ae-minimal .am-nav-button.am-nav-soon:hover { background: transparent; transform: none; color: inherit; }
+.ae-minimal .am-nav-soon .am-nav-tag { white-space: nowrap; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.ae-minimal .am-grow-add-property { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; padding: 14px; border: 1px solid var(--am-line); border-radius: 8px; background: var(--am-card); }
+.ae-minimal .am-grow-add-property label { display: grid; gap: 4px; font-size: 12px; }
+.ae-minimal .am-grow-add-property input { min-height: 36px; padding: 6px 9px; border: 1px solid var(--am-line); border-radius: 6px; font: inherit; }
+.ae-minimal .am-grow-add-property [role="alert"] { grid-column: 1 / -1; color: #B42318; margin: 0; }

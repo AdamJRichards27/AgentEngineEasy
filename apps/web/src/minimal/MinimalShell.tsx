@@ -2,17 +2,25 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useSearch } from "wouter";
 import { focusMinimalMain, minimalPageLabel, minimalPageReady, minimalRouteKey, shouldMoveMinimalFocus } from "./minimalA11y";
 import type { SessionUser } from "../lib/session";
-import { buildMinimalNavLinks } from "./minimalNav";
-import { formatMinimalHeaderDate, minimalBreadcrumb, minimalNavIsCurrent } from "../lib/minimalUx";
+import { useQuery } from "@tanstack/react-query";
+import { MINIMAL_COMING_SOON, buildMinimalSidebar, minimalSidebarIsCurrent, minimalSidebarLinks, type MinimalSidebarItem } from "./minimalNav";
+import { formatMinimalHeaderDate, minimalBreadcrumb } from "../lib/minimalUx";
+import { apiFetch } from "../lib/api";
+import { isFeatureHiddenError, momentumQueryPath } from "./momentum/minimalMomentumModel";
+import { marketActivityQueryPath } from "./market/minimalMarketActivityModel";
 import gear from "./brand/AE_Gear_Orange_Large.png";
 import wordmarkDark from "./brand/AE_Wordmark_Dark.png";
 import wordmarkWhite from "./brand/AE_Wordmark_White.png";
-import { MinimalNavIcon } from "./icons";
+import { MinimalSidebarIcon } from "./icons";
 import "./minimal.css";
 
-// Empty AE Minimal A shell. Same product routes as classic. No sample
-// records, no "coming soon" Run or Pit Crew items, and no actions that do
-// not already exist on a route.
+// AE Minimal A shell with the v1.0 grouped sidebar (V1, Owner t457u). Same
+// product routes as classic, no sample records. Run and Pit Crew show as
+// non-clickable "Coming Soon" placeholders without run.access; Marketing sub-items are
+// non-clickable until V7. Market Activity / My Momentum appear only when their
+// flag-gated APIs answer (same cached queries as the Today cards, no retry on 404/403).
+
+const noRetryWhenHidden = (n: number, e: unknown) => !isFeatureHiddenError(e) && n < 1;
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -41,10 +49,73 @@ export default function MinimalShell({
   const lastRouteKey = useRef<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const ownerWithoutContext = !!user.platformOwner && user.ownerSelectedBrokerageId == null;
-  const links = ownerWithoutContext ? [] : buildMinimalNavLinks({ role: user.role, entitlements });
+  const momentum = useQuery<unknown>({
+    queryKey: ["grow-momentum", "week"],
+    queryFn: () => apiFetch(momentumQueryPath("week")),
+    retry: noRetryWhenHidden,
+    enabled: !ownerWithoutContext,
+  });
+  const market = useQuery<unknown>({
+    queryKey: ["grow-market-activity", "week", null],
+    queryFn: () => apiFetch(marketActivityQueryPath({ range: "week", type: null })),
+    retry: noRetryWhenHidden,
+    enabled: !ownerWithoutContext,
+  });
+  const groups = ownerWithoutContext
+    ? []
+    : buildMinimalSidebar({
+        role: user.role,
+        entitlements,
+        marketActivityAvailable: market.isSuccess,
+        momentumAvailable: momentum.isSuccess,
+      });
+  const links = minimalSidebarLinks(groups);
   // Start property stays a sidebar-only entry, as before; the mobile bar keeps the main sections.
   const mobileLinks = links.filter((link) => link.path !== "/properties/start");
-  if (user.platformOwner) links.unshift({ path: "/owner", label: "Platform Owner" });
+  if (user.platformOwner) {
+    groups.unshift({ key: "workspace", label: "Platform", items: [{ kind: "link", key: "/owner", path: "/owner", href: "/owner", label: "Platform Owner" }] });
+    links.unshift({ path: "/owner", href: "/owner", label: "Platform Owner" });
+  }
+  const isCurrent = (href: string) => minimalSidebarIsCurrent(location, search, href);
+  const renderItem = (item: MinimalSidebarItem, nested = false): ReactNode => {
+    const children = item.children?.length ? (
+      <ul className="am-nav-sub" aria-label={`${item.label} pages`}>
+        {item.children.map((c) => <li key={c.key}>{renderItem(c, true)}</li>)}
+      </ul>
+    ) : null;
+    if (item.kind === "soon") {
+      return (
+        <>
+          <span className={`am-nav-button am-nav-soon${nested ? " am-nav-nested" : ""}`} aria-disabled="true">
+            {!nested && (
+              <span className="am-nav-glyph">
+                <MinimalSidebarIcon name={item.icon} />
+              </span>
+            )}
+            <span>{item.label}</span>
+            <span className="am-nav-tag">{MINIMAL_COMING_SOON}</span>
+          </span>
+          {children}
+        </>
+      );
+    }
+    const current = isCurrent(item.href);
+    return (
+      <>
+        <Link
+          href={item.href}
+          className={`am-nav-button${nested ? " am-nav-nested" : ""}${current ? " is-current" : ""}`}
+          aria-current={current ? "page" : undefined}
+        >
+          <span className="am-nav-glyph">
+            <MinimalSidebarIcon name={item.href} />
+          </span>
+          <span>{item.label}</span>
+        </Link>
+        {children}
+      </>
+    );
+  };
   const crumb = minimalBreadcrumb(location, links);
   const dateLabel = formatMinimalHeaderDate(new Date());
   const pageLabel = minimalPageLabel(location, search, crumb.page);
@@ -94,24 +165,17 @@ export default function MinimalShell({
               <img className="am-brand-wordmark" src={wordmarkWhite} alt="" />
             </span>
           </div>
-          <p className="am-nav-label">Your workspace</p>
           <nav className="am-nav" aria-label="Primary">
-            {links.map((link) => {
-              const current = minimalNavIsCurrent(location, link.path);
-              return (
-                <Link
-                  key={link.path}
-                  href={link.path}
-                  className={`am-nav-button${current ? " is-current" : ""}`}
-                  aria-current={current ? "page" : undefined}
-                >
-                  <span className="am-nav-glyph">
-                    <MinimalNavIcon path={link.path} />
-                  </span>
-                  <span>{link.label}</span>
-                </Link>
-              );
-            })}
+            {groups.map((group) => (
+              <div className="am-nav-group" key={`${group.key}-${group.label}`} role="group" aria-labelledby={`am-nav-group-${group.label.toLowerCase()}`}>
+                <p className="am-nav-label" id={`am-nav-group-${group.label.toLowerCase()}`}>
+                  {group.label}
+                </p>
+                <ul className="am-nav-list">
+                  {group.items.map((item) => <li key={item.key}>{renderItem(item)}</li>)}
+                </ul>
+              </div>
+            ))}
           </nav>
           <div className="am-sidebar-spacer" />
           <div className="am-user">
@@ -159,15 +223,15 @@ export default function MinimalShell({
       </div>
       <nav className="am-mobile-nav" aria-label="Mobile navigation">
         {mobileLinks.map((link) => {
-          const current = minimalNavIsCurrent(location, link.path);
+          const current = isCurrent(link.href);
           return (
             <Link
-              key={link.path}
-              href={link.path}
+              key={link.href}
+              href={link.href}
               className={current ? "is-current" : undefined}
               aria-current={current ? "page" : undefined}
             >
-              <MinimalNavIcon path={link.path} />
+              <MinimalSidebarIcon name={link.href} />
               {link.label}
             </Link>
           );

@@ -191,3 +191,10 @@ export function selectPropertiesView(minimalShell: boolean, search = ""): "minim
   if (!minimalShell) return "classic";
   return new URLSearchParams(search).get("view") === "full" ? "classic" : "minimal";
 }
+
+/** Without run.access, never send a Grow-only user to the Run property workspace. */
+export function growSafeHref(href: string | undefined, runAccess: boolean): string | undefined {
+  if (!href || runAccess) return href;
+  const m = /^\/properties\/(\d+)$/.exec(href);
+  return m ? `/grow/properties/${m[1]}` : href;
+}
