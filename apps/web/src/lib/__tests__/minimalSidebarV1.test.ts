@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  MINIMAL_COMING_SOON,
   MINIMAL_MARKETING_SOON,
   buildClassicNavLinks,
   buildMinimalNavLinks,
@@ -13,6 +14,7 @@ import {
 } from "../../minimal/minimalNav";
 import { buildProductNavLinks } from "../productNav";
 import { minimalBreadcrumb } from "../minimalUx";
+import { growSafeHref } from "../../minimal/properties/minimalPropertiesModel";
 
 // AE Minimal v1.0 V1 (Owner t457u): grouped sidebar and labels.
 
@@ -42,7 +44,7 @@ test("Grow group with run.access, flags off", () => {
 
 test("Market Activity and My Momentum only when their queries succeed", () => {
   const g = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, ...on }), "grow");
-  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Market Activity", "My Momentum", "Marketing (Soon)"]);
+  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Market Activity", "My Momentum", "Properties", "Marketing (Soon)"]);
   const onlyMarket = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, marketActivityAvailable: true, momentumAvailable: false }), "grow");
   assert.equal(labels(onlyMarket).includes("My Momentum"), false);
   assert.equal(labels(onlyMarket).includes("Market Activity"), true);
@@ -65,16 +67,42 @@ test("Operations with run.access follows role rules", () => {
   assert.equal(labels(crew).includes("Financial"), false);
 });
 
-test("without run.access: Run and Pit Crew are non-clickable Soon, no Run links anywhere", () => {
+test("without run.access: Run and Pit Crew are non-clickable Coming Soon, no Run-only links", () => {
   for (const role of ["Agent", "Brokerage Administrator", "Pit Crew"]) {
     const groups = buildMinimalSidebar({ role, entitlements: GROW_ONLY, ...on });
     assert.deepEqual(labels(group(groups, "operations")), ["Run (Soon)", "Pit Crew (Soon)"]);
     const paths = minimalSidebarLinks(groups).map((l) => l.path);
-    for (const p of ["/", "/today", "/properties", "/properties/start", "/exceptions", "/financial", "/pit-crew"]) {
+    for (const p of ["/", "/today", "/properties/start", "/exceptions", "/financial", "/pit-crew"]) {
       assert.equal(paths.includes(p), false, `${role} ${p}`);
     }
   }
   assert.deepEqual(buildMinimalSidebar({ role: "Agent", entitlements: [], ...off }).length, 3);
+});
+
+test("D5 revised (Owner t147u): Properties shows in Grow for Grow-entitled users without run.access", () => {
+  const g = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, ...off }), "grow");
+  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Properties", "Marketing (Soon)"]);
+  const none = group(buildMinimalSidebar({ role: "Agent", entitlements: [], ...off }), "grow");
+  assert.equal(labels(none).includes("Properties"), false, "no grow.access and no run.access: no Properties");
+});
+
+test("placeholders read Coming Soon", () => {
+  assert.equal(MINIMAL_COMING_SOON, "Coming Soon");
+  const shell = readFileSync(new URL("../../minimal/MinimalShell.tsx", import.meta.url), "utf8");
+  assert.match(shell, /\{MINIMAL_COMING_SOON\}/);
+  assert.doesNotMatch(shell, />Soon</);
+});
+
+test("Grow-only Properties: Run Start property flow only with run.access, Grow add form otherwise", () => {
+  const view = readFileSync(new URL("../../minimal/properties/MinimalPropertiesView.tsx", import.meta.url), "utf8");
+  assert.match(view, /p\.runAccess \? \(\s*<Link href="\/properties\/start"/);
+  assert.match(view, /!p\.runAccess && p\.addForm\?\.open/);
+  const page = readFileSync(new URL("../../minimal/properties/MinimalProperties.tsx", import.meta.url), "utf8");
+  assert.match(page, /navigate\(`\/grow\/properties\/\$\{result\.property\.id\}`\)/);
+  assert.equal(growSafeHref("/properties/7", false), "/grow/properties/7");
+  assert.equal(growSafeHref("/properties/7", true), "/properties/7");
+  assert.equal(growSafeHref("/grow/appraisals/3", false), "/grow/appraisals/3");
+  assert.equal(growSafeHref(undefined, false), undefined);
 });
 
 test("Workspace group is Communications then Settings", () => {

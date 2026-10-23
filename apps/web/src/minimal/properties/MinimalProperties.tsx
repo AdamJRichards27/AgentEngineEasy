@@ -12,6 +12,7 @@ import {
   buildMinimalPropertyCards,
   propertyRelationshipsPath,
   resolveCreateAppraisal,
+  growSafeHref,
   resolveStartFailure,
   startAppraisalBody,
   type StartAppraisalBody,
@@ -26,8 +27,11 @@ import "./properties.css";
 //   GET  /grow/opportunities?limit=100     ["minimal-property-opportunities"]
 //   GET  /grow/relationships?search=…      on demand, for Create Appraisal
 //   POST /grow/appraisals/from-contact     then open the builder
+//   POST /properties                       Grow-only Add Property (Owner t147u), then the Minimal detail.
+//                                          Server: requireAuth + tenant scope; no run.access needed.
 
 const SEARCH_DEBOUNCE_MS = 300;
+
 
 export default function MinimalProperties() {
   const [, navigate] = useLocation();
@@ -39,6 +43,17 @@ export default function MinimalProperties() {
   const [notice, setNotice] = useState<MinimalPropertiesViewProps["notice"]>(null);
   const [chooser, setChooser] = useState<PropertyChooser | null>(null);
   const [pendingPropertyId, setPendingPropertyId] = useState<number | null>(null);
+  const runAccess = hasEntitlement("run.access");
+  const [addOpen, setAddOpen] = useState(false);
+  const addProperty = useMutation({
+    mutationFn: (input: { formattedAddress: string; suburb?: string; state?: string; postcode?: string }) =>
+      apiFetch<{ property: { id: number } }>("/properties", { method: "POST", body: JSON.stringify({ ...input, isManualAddress: true }) }),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["properties"] });
+      setAddOpen(false);
+      navigate(`/grow/properties/${result.property.id}`);
+    },
+  });
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(searchText), SEARCH_DEBOUNCE_MS);
@@ -83,7 +98,7 @@ export default function MinimalProperties() {
         navigate(failure.builderHref);
         return;
       }
-      setNotice({ propertyId: body.propertyId, text: failure.text, href: failure.href, hrefLabel: failure.hrefLabel });
+      setNotice({ propertyId: body.propertyId, text: failure.text, href: growSafeHref(failure.href, runAccess), hrefLabel: failure.hrefLabel });
     },
   });
 
@@ -113,7 +128,7 @@ export default function MinimalProperties() {
         setNotice({ propertyId, text: resolution.message, href: `/grow/appraisals/${resolution.appraisalId}`, hrefLabel: "Open the appraisal" });
       } else {
         setPendingPropertyId(null);
-        setNotice({ propertyId, text: resolution.message, href: `/properties/${propertyId}`, hrefLabel: "Open the property" });
+        setNotice({ propertyId, text: resolution.message, href: growSafeHref(`/properties/${propertyId}`, runAccess), hrefLabel: "Open the property" });
       }
     } catch (error) {
       setPendingPropertyId(null);
@@ -131,7 +146,18 @@ export default function MinimalProperties() {
       chooser={chooser}
       pendingPropertyId={pendingPropertyId}
       canCreateAppraisal={canCreateAppraisal}
-      runAccess={hasEntitlement("run.access")}
+      runAccess={runAccess}
+      addForm={{
+        open: addOpen,
+        saving: addProperty.isPending,
+        error: addProperty.isError ? apiErrorMessage(addProperty.error, "Couldn't add the property. Try again.") : null,
+        onSubmit: (input) => addProperty.mutate(input),
+        onCancel: () => {
+          setAddOpen(false);
+          addProperty.reset();
+        },
+      }}
+      onOpenAddProperty={() => setAddOpen(true)}
       onSearch={setSearchText}
       onCreateAppraisal={(id) => void createAppraisal(id)}
       onChooseContact={(propertyId, partyId) => {

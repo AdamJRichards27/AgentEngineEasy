@@ -3,7 +3,7 @@ import { Link, useLocation, useSearch } from "wouter";
 import { focusMinimalMain, minimalPageLabel, minimalPageReady, minimalRouteKey, shouldMoveMinimalFocus } from "./minimalA11y";
 import type { SessionUser } from "../lib/session";
 import { useQuery } from "@tanstack/react-query";
-import { buildMinimalSidebar, minimalSidebarIsCurrent, minimalSidebarLinks, type MinimalSidebarItem } from "./minimalNav";
+import { MINIMAL_COMING_SOON, buildMinimalSidebar, minimalSidebarIsCurrent, minimalSidebarLinks, type MinimalSidebarItem } from "./minimalNav";
 import { formatMinimalHeaderDate, minimalBreadcrumb } from "../lib/minimalUx";
 import { apiFetch } from "../lib/api";
 import { isFeatureHiddenError, momentumQueryPath } from "./momentum/minimalMomentumModel";
@@ -16,7 +16,7 @@ import "./minimal.css";
 
 // AE Minimal A shell with the v1.0 grouped sidebar (V1, Owner t457u). Same
 // product routes as classic, no sample records. Run and Pit Crew show as
-// non-clickable placeholders without run.access; Marketing sub-items are
+// non-clickable "Coming Soon" placeholders without run.access; Marketing sub-items are
 // non-clickable until V7. Market Activity / My Momentum appear only when their
 // flag-gated APIs answer (same cached queries as the Today cards, no retry on 404/403).
 
@@ -93,7 +93,7 @@ export default function MinimalShell({
               </span>
             )}
             <span>{item.label}</span>
-            <span className="am-nav-tag">Soon</span>
+            <span className="am-nav-tag">{MINIMAL_COMING_SOON}</span>
           </span>
           {children}
         </>

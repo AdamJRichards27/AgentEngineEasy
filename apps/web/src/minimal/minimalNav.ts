@@ -87,12 +87,18 @@ export interface MinimalSidebarContext extends NavContext {
   momentumAvailable: boolean;
 }
 
+export const GROW_ACCESS = "grow.access";
+
+/** Label for non-clickable placeholders (Owner t147u). */
+export const MINIMAL_COMING_SOON = "Coming Soon";
+
 export const MINIMAL_MARKETING_SOON: readonly string[] = ["Overview", "Email", "SMS", "Social"];
 
 function link(path: string, label: string, href: string = path): MinimalSidebarItem {
   return { kind: "link", key: href, path, href, label };
 }
 
+/** Marketing placeholders stay until the planned Better Marketing AI work (CC #54, V7). */
 export function buildMinimalSidebar(ctx: MinimalSidebarContext): MinimalSidebarGroup[] {
   const run = minimalHasRunAccess(ctx.entitlements);
   const product = buildProductNavLinks(ctx).map((l) => l.path);
@@ -104,7 +110,10 @@ export function buildMinimalSidebar(ctx: MinimalSidebarContext): MinimalSidebarG
   ];
   if (ctx.marketActivityAvailable) grow.push(link("/grow/market-activity", "Market Activity"));
   if (ctx.momentumAvailable) grow.push(link("/grow/momentum", "My Momentum"));
-  if (run) grow.push(link("/properties", "Properties"));
+  // Owner t147u (D5 revised): Properties is a Grow surface for Grow-entitled users
+  // (property records, intelligence, appraisals). Run-only operations inside it stay
+  // gated on run.access (operation-level), and the server keeps enforcing both.
+  if (run || ctx.entitlements.includes(GROW_ACCESS)) grow.push(link("/properties", "Properties"));
   grow.push({
     kind: "soon",
     key: "marketing",

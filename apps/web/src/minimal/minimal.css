@@ -1058,4 +1058,8 @@
 .ae-minimal .am-nav-button.am-nav-nested { min-height: 30px; font-size: 12.5px; }
 .ae-minimal .am-nav-button.am-nav-soon { cursor: default; opacity: .62; }
 .ae-minimal .am-nav-button.am-nav-soon:hover { background: transparent; transform: none; color: inherit; }
-.ae-minimal .am-nav-soon .am-nav-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.ae-minimal .am-nav-soon .am-nav-tag { white-space: nowrap; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.ae-minimal .am-grow-add-property { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; padding: 14px; border: 1px solid var(--am-line); border-radius: 8px; background: var(--am-card); }
+.ae-minimal .am-grow-add-property label { display: grid; gap: 4px; font-size: 12px; }
+.ae-minimal .am-grow-add-property input { min-height: 36px; padding: 6px 9px; border: 1px solid var(--am-line); border-radius: 6px; font: inherit; }
+.ae-minimal .am-grow-add-property [role="alert"] { grid-column: 1 / -1; color: #B42318; margin: 0; }
