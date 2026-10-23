@@ -125,6 +125,9 @@ importers:
       react-dom:
         specifier: ^19.1.0
         version: 19.2.8(react@19.2.8)
+      react-easy-crop:
+        specifier: 6.2.4
+        version: 6.2.4(react-dom@19.2.8)(react@19.2.8)
       wouter:
         specifier: ^3.3.5
         version: 3.10.0(react@19.2.8)
@@ -2369,6 +2372,10 @@ packages:
     engines: {node: '>=18'}
     dev: true
 
+  /normalize-wheel@1.0.1:
+    resolution: {integrity: sha512-1OnlAPZ3zgrk8B91HyRj+eVv+kS5u+Z0SCsak6Xil/kmgEia50ga7zfkumayonZrImffAxPU/5WcyGhzetHNPA==}
+    dev: false
+
   /object-assign@4.1.1:
     resolution: {integrity: sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg==}
     engines: {node: '>=0.10.0'}
@@ -2539,6 +2546,17 @@ packages:
     dependencies:
       react: 19.2.8
       scheduler: 0.27.0
+    dev: false
+
+  /react-easy-crop@6.2.4(react-dom@19.2.8)(react@19.2.8):
+    resolution: {integrity: sha512-OWdnFYctzUNlekjob+bQfloG9wyhIBkkmeISnM5XVE4Byqn0jmVxDF7oz85ovUF+EIPQyj0yAHbBEFtnxwGv4g==}
+    peerDependencies:
+      react: '>=16.4.0'
+      react-dom: '>=16.4.0'
+    dependencies:
+      normalize-wheel: 1.0.1
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
     dev: false
 
   /react-refresh@0.18.0:

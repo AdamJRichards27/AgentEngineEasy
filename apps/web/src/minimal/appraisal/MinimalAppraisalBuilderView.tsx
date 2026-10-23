@@ -1,4 +1,5 @@
 import { Link } from "wouter";
+import AppraisalBrandingCard from "../../components/branding/AppraisalBrandingCard";
 import { appraisalPricingLockedMessage, appraisalReadOnlyMessage, formatAppraisalDate, formatAppraisalDateTime, formatAppraisalMoney } from "../../lib/appraisalUi";
 import { appraisalStatusLabel } from "../../lib/growAppraisals";
 import { SAVE_DUE_FOLLOW_UP_LABEL } from "../../lib/growTerms";
@@ -329,6 +330,7 @@ function stepBuildBody(p: BuilderViewProps, locked: boolean) {
           {a.presentationDocumentId != null ? "Rebuild document preview" : "Build document preview"}
         </button>
       </div>
+      <AppraisalBrandingCard appraisalId={a.id} canWrite={!locked} />
     </div>
   );
 }
