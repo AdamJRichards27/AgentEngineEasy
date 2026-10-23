@@ -156,7 +156,8 @@ export function minimalSidebarLinks(groups: readonly MinimalSidebarGroup[]): { p
 /**
  * Minimal-specific active matcher. Today is active only on /grow itself (not on
  * the contacts tab); Relationships on /grow?tab=contacts and Contact 360;
- * Opportunities also on /grow/opportunities/:id and /grow/properties/:id.
+ * Opportunities also on /grow/opportunities/:id; Properties on the Grow property
+ * detail (/grow/properties/:id, Owner t148u) and /properties/:id.
  */
 export function minimalSidebarIsCurrent(location: string, search: string, href: string): boolean {
   const path = location.split("?")[0].split("#")[0] || "/";
@@ -167,11 +168,15 @@ export function minimalSidebarIsCurrent(location: string, search: string, href: 
     case "/grow?tab=contacts":
       return (path === "/grow" && tab === "contacts") || /^\/grow\/contacts\/[^/]+\/?$/.test(path);
     case "/grow/opportunities":
-      return /^\/grow\/opportunities(\/[^/]+)?\/?$/.test(path) || /^\/grow\/properties\/[^/]+\/?$/.test(path);
+      return /^\/grow\/opportunities(\/[^/]+)?\/?$/.test(path);
     case "/grow/appraisals":
       return /^\/grow\/appraisals(\/.*)?$/.test(path);
     case "/properties":
-      return path === "/properties" || (path.startsWith("/properties/") && path !== "/properties/start");
+      return (
+        path === "/properties" ||
+        (path.startsWith("/properties/") && path !== "/properties/start") ||
+        /^\/grow\/properties\/[^/]+\/?$/.test(path)
+      );
     case "/settings":
       return path === "/settings" || path.startsWith("/settings/");
     default:

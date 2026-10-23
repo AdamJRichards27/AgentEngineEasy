@@ -117,7 +117,11 @@ test("active matcher: Today only on /grow, properties detail highlights Opportun
   assert.equal(minimalSidebarIsCurrent("/grow/contacts/7", "", "/grow?tab=contacts"), true);
   assert.equal(minimalSidebarIsCurrent("/grow/opportunities", "", "/grow"), false);
   assert.equal(minimalSidebarIsCurrent("/grow/opportunities/4", "", "/grow/opportunities"), true);
-  assert.equal(minimalSidebarIsCurrent("/grow/properties/9", "", "/grow/opportunities"), true);
+  // Owner t148u: a Grow property detail highlights Properties, not Opportunities.
+  assert.equal(minimalSidebarIsCurrent("/grow/properties/9", "", "/grow/opportunities"), false);
+  assert.equal(minimalSidebarIsCurrent("/grow/properties/9", "", "/properties"), true);
+  assert.equal(minimalSidebarIsCurrent("/grow/opportunities/4", "", "/grow/opportunities"), true);
+  assert.equal(minimalSidebarIsCurrent("/grow/opportunities/4", "", "/properties"), false);
   assert.equal(minimalSidebarIsCurrent("/grow/properties/9", "", "/grow"), false);
   assert.equal(minimalSidebarIsCurrent("/grow/appraisals/3/build", "", "/grow/appraisals"), true);
   assert.equal(minimalSidebarIsCurrent("/grow/momentum", "", "/grow/momentum"), true);
