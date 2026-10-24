@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { getBuyerEngagementTimeline } from "../lib/buyerEngagement.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   createOffer,
@@ -45,7 +46,7 @@ function parsePositiveId(value: unknown): number | null {
 }
 
 /** Resolves a route id, answering 400 itself and returning null when malformed. */
-function readIdParam(res: Response, value: unknown, label: "property" | "offer"): number | null {
+function readIdParam(res: Response, value: unknown, label: "property" | "offer" | "party"): number | null {
   const id = parsePositiveId(value);
   if (id === null) {
     res.status(400).json({ error: `Invalid ${label} id` });
@@ -271,6 +272,48 @@ offersRouter.get("/buyers", requireAuth, requiresRunAccess, requiresOfferCentreR
     handleOfferError(err, res);
   }
 });
+
+// CC #34 slice B-2 — buyer engagement timeline (Run sources only, read-only,
+// no migration). GET /api/offers/buyers/:partyId/engagement?propertyId=N.
+// Gates, in order: requireAuth, run.access, role (Agent and Brokerage
+// Administrator only until Owner BE-Q3 decides on Pit Crew: 403), then the
+// tenant check — another brokerage's property is 404 and counts the R-F8
+// metric once; a party not linked to the property as Buyer (or from another
+// brokerage) is the same 404. No email, mobile or address in the response.
+const engagementQuerySchema = z.object({ propertyId: z.string() });
+
+offersRouter.get(
+  "/buyers/:partyId/engagement",
+  requireAuth,
+  requiresRunAccess,
+  requireRole("Agent", ...BROKERAGE_ADMIN_ROLES),
+  async (req, res) => {
+    const parsed = engagementQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "propertyId is required" });
+      return;
+    }
+    const propertyId = readIdParam(res, parsed.data.propertyId, "property");
+    if (propertyId === null) return;
+    const partyId = readIdParam(res, req.params.partyId, "party");
+    if (partyId === null) return;
+    const user = req.authedUser!;
+    if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    try {
+      const timeline = await getBuyerEngagementTimeline({ brokerageId: user.brokerageId, propertyId, partyId });
+      if (!timeline) {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+      res.json(timeline);
+    } catch (err) {
+      handleOfferError(err, res);
+    }
+  },
+);
 
 offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
   const id = readIdParam(res, req.params.id, "offer");
