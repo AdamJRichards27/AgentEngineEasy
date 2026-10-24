@@ -16,6 +16,7 @@ import {
   getOfferByShareToken,
 } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
+import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 export const offersRouter = Router();
 
@@ -185,6 +186,10 @@ const offerCentreQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(MAX_SIGNED_INT4).default(0),
 });
 
+// Owner t165u ("Offer prices: listing agent and authorised brokerage administrators only"): on
+// top of the role gate, an Agent's rows are limited to properties they are the listing agent for
+// (properties.agent_id, the same own-property rule as lib/propertyVisibility). Brokerage
+// Administrators stay brokerage-wide.
 // CC #34 / Owner t162u: offer prices, conditions and the buyer list are confidential. Same role gate
 // as the buyer engagement timeline: Agents and Brokerage Administrators only; Pit Crew gets 403 until
 // the Owner decides Pit Crew buyer access (BE-Q3 / D2d). Which agents see which listings is R-01.
@@ -201,17 +206,21 @@ offersRouter.get("/centre", requireAuth, requiresRunAccess, requiresOfferCentreR
   if (parsed.data.propertyId !== undefined) {
     const id = readIdParam(res, parsed.data.propertyId, "property");
     if (id === null) return;
-    if (!(await propertyInBrokerage(id, user.brokerageId))) {
+    // Owner t165u: a property the caller is not the listing agent for is
+    // 404 to an Agent, the same as another brokerage's or a missing one.
+    if (!(await propertyInBrokerage(id, user.brokerageId)) || (await propertyHiddenFromCaller(user, id))) {
       res.status(404).json({ error: "Not found" });
       return;
     }
     propertyId = id;
   }
+  const restrictTo = await restrictedPropertyIdsFor(user);
   try {
     const result = await listOffersForBrokerage({
       brokerageId: user.brokerageId,
       status: parsed.data.status,
       propertyId,
+      restrictTo,
       limit: parsed.data.limit,
       offset: parsed.data.offset,
     });
@@ -240,16 +249,20 @@ offersRouter.get("/buyers", requireAuth, requiresRunAccess, requiresOfferCentreR
   if (parsed.data.propertyId !== undefined) {
     const id = readIdParam(res, parsed.data.propertyId, "property");
     if (id === null) return;
-    if (!(await propertyInBrokerage(id, user.brokerageId))) {
+    // Owner t165u: a property the caller is not the listing agent for is
+    // 404 to an Agent, the same as another brokerage's or a missing one.
+    if (!(await propertyInBrokerage(id, user.brokerageId)) || (await propertyHiddenFromCaller(user, id))) {
       res.status(404).json({ error: "Not found" });
       return;
     }
     propertyId = id;
   }
+  const restrictTo = await restrictedPropertyIdsFor(user);
   try {
     const result = await listBuyersForBrokerage({
       brokerageId: user.brokerageId,
       propertyId,
+      restrictTo,
       limit: parsed.data.limit,
       offset: parsed.data.offset,
     });

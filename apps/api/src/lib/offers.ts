@@ -4,6 +4,7 @@ import { db, offers, parties, propertyParties, properties } from "@aee/db";
 import type { Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
+import { visibleRequiredPropertySql } from "./propertyVisibility.js";
 
 /**
  * Offer capture (Build Brief — Phase 7, ARCHITECTURE.md §10). Offers are
@@ -167,12 +168,19 @@ export async function listOffersForBrokerage(input: {
   brokerageId: number;
   status?: OfferCentreStatus;
   propertyId?: number;
+  /** Owner t165u: own-property scope from restrictedPropertyIdsFor. null is
+   * brokerage-wide (Brokerage Administrator); an Agent gets only properties
+   * they are the listing agent for, so offer prices reach the listing agent
+   * and brokerage administrators only. */
+  restrictTo: number[] | null;
   limit: number;
   offset: number;
 }): Promise<{ offers: OfferCentreRow[]; total: number }> {
   const filters: SQL[] = [eq(properties.brokerageId, input.brokerageId)];
   if (input.status) filters.push(eq(offers.status, input.status));
   if (input.propertyId !== undefined) filters.push(eq(offers.propertyId, input.propertyId));
+  const scope = visibleRequiredPropertySql(offers.propertyId, input.restrictTo);
+  if (scope) filters.push(scope);
   const where = and(...filters);
   // Received first (still to act on), then Accepted, Declined, Withdrawn;
   // any unexpected status value sorts last.
@@ -246,11 +254,16 @@ export interface BuyerListRow {
 export async function listBuyersForBrokerage(input: {
   brokerageId: number;
   propertyId?: number;
+  /** Same own-property scope as listOffersForBrokerage (buyer identity is
+   * need-to-know for the listing's agent and brokerage administrators). */
+  restrictTo: number[] | null;
   limit: number;
   offset: number;
 }): Promise<{ buyers: BuyerListRow[]; total: number }> {
   const filters: SQL[] = [eq(properties.brokerageId, input.brokerageId), eq(propertyParties.role, "Buyer")];
   if (input.propertyId !== undefined) filters.push(eq(propertyParties.propertyId, input.propertyId));
+  const scope = visibleRequiredPropertySql(propertyParties.propertyId, input.restrictTo);
+  if (scope) filters.push(scope);
   const where = and(...filters);
   const partyJoin = and(eq(propertyParties.partyId, parties.id), eq(parties.brokerageId, input.brokerageId));
 
