@@ -158,10 +158,14 @@ interface TransactionBlock {
   settlementDate: string | null;
   settlementCompletedAt: string | null;
   status: string;
-  grossCommissionCents: number | null;
-  gstCents: number | null;
+  /** Omitted by the server when the viewer may not see that financial group
+   * (Owner t171u); financialVisibility then says which groups were withheld. */
+  grossCommissionCents?: number | null;
+  gstCents?: number | null;
   commissionCalculatedAt: string | null;
-  fundsReceivedCents: number;
+  fundsReceivedCents?: number;
+  depositCents?: number | null;
+  financialVisibility?: { purchasePrice: boolean; deposit: boolean; commission: boolean; funds: boolean };
   fundsReceivedAt: string | null;
   agentPaidAt: string | null;
   closedAt: string | null;
@@ -1922,9 +1926,11 @@ function TransactionBlockView({
 
       <div id="transaction-commission">
         Commission:{" "}
-        {transaction.commissionCalculatedAt
-          ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
-          : "not yet calculated"}
+        {transaction.financialVisibility?.commission === false || transaction.grossCommissionCents === undefined
+          ? "Restricted"
+          : transaction.commissionCalculatedAt
+            ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
+            : "not yet calculated"}
         {actions.calculateCommission && (
           <button className="btn btn-small" onClick={() => onAction("calculate-commission")} style={{ marginLeft: "0.5rem" }}>
             Calculate Commission
@@ -1933,7 +1939,12 @@ function TransactionBlockView({
       </div>
 
       <div className="inline-form" id="transaction-funds">
-        <span>Funds received: {formatCents(transaction.fundsReceivedCents)}</span>
+        <span>
+          Funds received:{" "}
+          {transaction.financialVisibility?.funds === false || transaction.fundsReceivedCents === undefined
+            ? "Restricted"
+            : formatCents(transaction.fundsReceivedCents)}
+        </span>
         {actions.recordFundsReceived && (
           <>
             <input value={fundsAmount} onChange={(e) => setFundsAmount(e.target.value)} placeholder="Amount ($)" />

@@ -508,7 +508,13 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
       res.status(404).json({ error: `Property ${id} not found` });
       return;
     }
-    const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
+    // Owner t165u/t171u: offer and contract prices on the timeline go to
+    // Brokerage Administrators and the listing agent only. An Agent reaching
+    // this line is the listing agent (propertyHiddenFromCaller above); Pit
+    // Crew never sees them here (their duty-scoped contract price is on the
+    // transaction panel, lib/transactionPriceAccess).
+    const offerPricesVisible = canViewFinancials || user.role === "Agent";
+    const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials, { offerPricesVisible });
     res.json({ timeline });
   } catch (err) {
     // getPropertyTimeline's only expected failure is assertPropertyInBrokerage's

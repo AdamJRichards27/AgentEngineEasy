@@ -200,11 +200,15 @@ transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactio
  */
 async function transactionRead(transaction: Transaction | null | undefined, user: AuthedUser, surface: string) {
   const closure = transaction ? await readTransactionClosureBlockers(transaction) : null;
+  const view = transaction ? await transactionViewFor(user, transaction, surface) : transaction;
   return {
-    // Owner t170u (4): never the raw row; purchasePriceCents only for the
-    // listing agent, Brokerage Administrators and assigned Pit Crew.
-    transaction: transaction ? await transactionViewFor(user, transaction, surface) : transaction,
-    fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
+    // Owner t170u/t171u (4): never the raw row; confidential financial groups
+    // only for the listing agent, Brokerage Administrators and Pit Crew whose
+    // assignment duty allows them (lib/transactionPriceAccess).
+    transaction: view,
+    // t171u: the reconciliation is derived from commission + GST and funds,
+    // so it is withheld whenever the funds group is.
+    fundsReconciliation: transaction && view && view.financialVisibility.funds ? computeFundsReconciliation(transaction) : null,
     closureBlockers: closure ? closure.closureBlockers : null,
     closureBlockerDetails: closure ? closure.closureBlockerDetails : null,
   };
