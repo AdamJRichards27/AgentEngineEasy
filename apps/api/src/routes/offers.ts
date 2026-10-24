@@ -11,10 +11,13 @@ import {
   withdrawOffer,
   declineOffer,
   getOfferByShareToken,
-  toOfferView,
+  canSeeOfferTerms,
+  toOfferViewFor,
   OfferStatusConflictError,
 } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
+import { propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
+import type { AuthedUser } from "../middlewares/auth.js";
 
 export const offersRouter = Router();
 
@@ -123,6 +126,30 @@ async function propertyInBrokerage(propertyId: number, brokerageId: number): Pro
   return true;
 }
 
+/**
+ * Owner t165u offer-price policy (integration review P1). Runs the same
+ * brokerage check as propertyInBrokerage (404 + one R-F8 rejection for
+ * another brokerage), then the existing own-property rule
+ * (lib/propertyVisibility): an Agent who is not this property's listing
+ * agent gets the same 404 as the property routes, consistent with #263/#267.
+ * Brokerage Administrator and Pit Crew pass; termsVisible is true only for
+ * the listing agent and Brokerage Administrators, so Pit Crew gets the
+ * redacted view (status, no price or conditions). null means answer 404.
+ */
+async function offerPropertyAccess(user: AuthedUser, propertyId: number): Promise<{ termsVisible: boolean } | null> {
+  const [property] = await db
+    .select({ id: properties.id, brokerageId: properties.brokerageId, agentId: properties.agentId })
+    .from(properties)
+    .where(eq(properties.id, propertyId));
+  if (!property) return null;
+  if (property.brokerageId !== user.brokerageId) {
+    incrementCounter("tenant_isolation_rejection_total", { boundary: "transaction" });
+    return null;
+  }
+  if (await propertyHiddenFromCaller(user, propertyId)) return null;
+  return { termsVisible: canSeeOfferTerms({ role: user.role, userId: user.id }, property.agentId) };
+}
+
 const createOfferSchema = z.object({
   offerPriceCents: z.number().int().positive(),
   conditions: z.record(z.unknown()).optional(),
@@ -173,12 +200,13 @@ offersRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, asy
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
-  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+  const access = await offerPropertyAccess(user, propertyId);
+  if (!access) {
     res.status(404).json({ error: "Not found" });
     return;
   }
   const rows = await listOffersForProperty(propertyId);
-  res.json({ offers: rows.map(toOfferView) });
+  res.json({ offers: rows.map((row) => toOfferViewFor(row, access.termsVisible)) });
 });
 
 offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
@@ -186,11 +214,12 @@ offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
   if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
-  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+  const access = offer ? await offerPropertyAccess(user, offer.propertyId) : null;
+  if (!offer || !access) {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  res.json({ offer: toOfferView(offer) });
+  res.json({ offer: toOfferViewFor(offer, access.termsVisible) });
 });
 
 // The chokepoint that converts a Property into an active Transaction —
@@ -201,13 +230,16 @@ offersRouter.post("/:id/accept", requireAuth, requiresRunAccess, async (req, res
   if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
-  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+  const access = offer ? await offerPropertyAccess(user, offer.propertyId) : null;
+  if (!offer || !access) {
     res.status(404).json({ error: "Not found" });
     return;
   }
   try {
     const result = await acceptOffer({ offerId: id, userId: user.id, brokerageId: user.brokerageId });
-    res.status(result.created ? 201 : 200).json({ ...result, offer: toOfferView(result.offer) });
+    // P2 (Owner decision, not changed here): result.transaction carries the
+    // purchase price exactly as before.
+    res.status(result.created ? 201 : 200).json({ ...result, offer: toOfferViewFor(result.offer, access.termsVisible) });
   } catch (err) {
     handleOfferError(err, res);
   }
@@ -218,13 +250,14 @@ offersRouter.post("/:id/decline", requireAuth, requiresRunAccess, async (req, re
   if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
-  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+  const access = offer ? await offerPropertyAccess(user, offer.propertyId) : null;
+  if (!offer || !access) {
     res.status(404).json({ error: "Not found" });
     return;
   }
   try {
     const updated = await declineOffer(id, user.id);
-    res.json({ offer: toOfferView(updated) });
+    res.json({ offer: toOfferViewFor(updated, access.termsVisible) });
   } catch (err) {
     handleOfferError(err, res);
   }
@@ -235,13 +268,14 @@ offersRouter.post("/:id/withdraw", requireAuth, requiresRunAccess, async (req, r
   if (id === null) return;
   const user = req.authedUser!;
   const [offer] = await db.select().from(offers).where(eq(offers.id, id));
-  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+  const access = offer ? await offerPropertyAccess(user, offer.propertyId) : null;
+  if (!offer || !access) {
     res.status(404).json({ error: "Not found" });
     return;
   }
   try {
     const updated = await withdrawOffer(id, user.id);
-    res.json({ offer: toOfferView(updated) });
+    res.json({ offer: toOfferViewFor(updated, access.termsVisible) });
   } catch (err) {
     handleOfferError(err, res);
   }

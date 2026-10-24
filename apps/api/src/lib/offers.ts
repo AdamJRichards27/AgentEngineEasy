@@ -4,6 +4,7 @@ import { db, offers, parties, propertyParties, properties } from "@aee/db";
 import type { Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
+import { BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 
 /**
  * CC #34 / Owner direction t113u D8: an offer leaves `Received` exactly once.
@@ -230,6 +231,37 @@ export type OfferView = Omit<Offer, "shareToken">;
 export function toOfferView(offer: Offer): OfferView {
   const { shareToken: _shareToken, ...view } = offer;
   return view;
+}
+
+/**
+ * Owner t165u: "Offer prices: listing agent and authorised brokerage
+ * administrators only." "Pit Crew: read only the buyer details required for
+ * assigned, authorised transaction work." Integration review P1. Same rule as
+ * #267's canSeeOfferTerms (lib/buyerEngagement.ts on that branch): Brokerage
+ * Administrators, or the Agent who is the property's listing agent
+ * (properties.agent_id). Never Pit Crew. Kept as one small function so the
+ * two copies can be folded together when #267 and this branch meet.
+ */
+export interface OfferTermsViewer {
+  role: string;
+  userId: number;
+}
+
+export function canSeeOfferTerms(viewer: OfferTermsViewer, listingAgentId: number | null | undefined): boolean {
+  if (BROKERAGE_ADMIN_ROLES.includes(viewer.role as (typeof BROKERAGE_ADMIN_ROLES)[number])) return true;
+  return viewer.role === "Agent" && listingAgentId != null && listingAgentId === viewer.userId;
+}
+
+export type FullOfferView = OfferView & { offerTermsVisible: true };
+/** Status, ids and dates only: offerPriceCents and conditions are omitted
+ * (not nulled), so a client cannot mistake them for a real zero/empty. */
+export type RedactedOfferView = Omit<OfferView, "offerPriceCents" | "conditions"> & { offerTermsVisible: false };
+
+export function toOfferViewFor(offer: Offer, termsVisible: boolean): FullOfferView | RedactedOfferView {
+  const view = toOfferView(offer);
+  if (termsVisible) return { ...view, offerTermsVisible: true };
+  const { offerPriceCents: _price, conditions: _conditions, ...redacted } = view;
+  return { ...redacted, offerTermsVisible: false };
 }
 
 // Public, unauthenticated lookup (offers.shareToken) — deliberately returns

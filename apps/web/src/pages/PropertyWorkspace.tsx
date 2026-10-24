@@ -135,7 +135,10 @@ interface OfferBlock {
   id: number;
   propertyId: number;
   buyerPartyId: number | null;
-  offerPriceCents: number;
+  /** Omitted by the server unless the viewer is the listing agent or a
+   * Brokerage Administrator (Owner t165u); offerTermsVisible is then false. */
+  offerPriceCents?: number;
+  offerTermsVisible?: boolean;
   status: string;
   createdAt: string;
 }
@@ -1590,6 +1593,7 @@ function PaymentMethodsBlock({
 }
 
 function offerStatusLabel(o: OfferBlock): string {
+  if (o.offerTermsVisible === false || o.offerPriceCents === undefined) return `Price restricted — ${o.status}`;
   return `${formatCents(o.offerPriceCents)} — ${o.status}`;
 }
 
