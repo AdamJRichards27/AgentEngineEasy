@@ -26,6 +26,7 @@ import { requireAuth, requireRole, PIT_CREW_ROLES, BROKERAGE_ADMIN_ROLES } from 
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { getPitCrewWorkspace, getPitCrewTeam, listResponsibilityItemsForRecipient, listResponsibilityRecipients } from "../lib/pitCrew/queries.js";
 import { listOverdueWaitingOnDetections } from "../lib/pitCrew/waitingOnDetectionRun.js";
+import { getPitCrewCapacity } from "../lib/pitCrew/capacity.js";
 import type { ResolvedPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnDetection.js";
 import { loadPitCrewWaitingOnSweepSettings } from "../lib/pitCrew/waitingOnSweepSettings.js";
 import {
@@ -151,6 +152,14 @@ pitCrewRouter.get("/pit-crew/team", requireAuth, canAccess, requiresRunAccess, a
   const user = req.authedUser!;
   const team = await getPitCrewTeam(user.brokerageId);
   res.json({ team });
+});
+
+// Owner t165u D4: capacity WARNINGS only (threshold default 12, configurable
+// via PIT_CREW_CAPACITY_WARNING_THRESHOLD). Same gate as /pit-crew/team.
+// Read-only: no claim/assign/handoff is ever blocked by this.
+pitCrewRouter.get("/pit-crew/capacity", requireAuth, canAccess, requiresRunAccess, async (req, res) => {
+  const user = req.authedUser!;
+  res.json(await getPitCrewCapacity(user.brokerageId));
 });
 
 // Searchable names for the hand-back and escalate forms. GET /pit-crew/team
