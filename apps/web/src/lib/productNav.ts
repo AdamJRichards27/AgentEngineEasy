@@ -53,6 +53,10 @@ export function hasEntitlement(ctx: NavContext, key: string): boolean {
 export function buildProductNavLinks(ctx: NavContext): NavLink[] {
   const canSeePitCrew = ctx.role === "Pit Crew" || ctx.role === "Brokerage Administrator";
   const canSeeFinancial = ctx.role === "Brokerage Administrator";
+  // #34 / Owner t162u: the Offer Centre shows confidential offer details. Same rule as the API
+  // (GET /offers/centre, /offers/buyers): run.access plus Agent or Brokerage Administrator; never Pit Crew.
+  const canSeeOfferCentre =
+    hasEntitlement(ctx, "run.access") && (ctx.role === "Agent" || ctx.role === "Brokerage Administrator");
   return [
     { path: "/grow", label: "Grow" },
     { path: "/", label: "Home" },
@@ -62,7 +66,7 @@ export function buildProductNavLinks(ctx: NavContext): NavLink[] {
     { path: "/communications", label: "Communications" },
     ...(canSeeFinancial ? [{ path: "/financial", label: "Financial" }] : []),
     ...(canSeePitCrew ? [{ path: "/pit-crew", label: "Pit Crew" }] : []),
-    ...(hasEntitlement(ctx, "run.access") ? [{ path: "/offers", label: "Offer Centre" }] : []),
+    ...(canSeeOfferCentre ? [{ path: "/offers", label: "Offer Centre" }] : []),
     { path: "/settings", label: "Settings" },
   ];
 }

@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   createOffer,
@@ -185,7 +185,12 @@ const offerCentreQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(MAX_SIGNED_INT4).default(0),
 });
 
-offersRouter.get("/centre", requireAuth, requiresRunAccess, async (req, res) => {
+// CC #34 / Owner t162u: offer prices, conditions and the buyer list are confidential. Same role gate
+// as the buyer engagement timeline: Agents and Brokerage Administrators only; Pit Crew gets 403 until
+// the Owner decides Pit Crew buyer access (BE-Q3 / D2d). Which agents see which listings is R-01.
+const requiresOfferCentreRole = requireRole("Agent", ...BROKERAGE_ADMIN_ROLES);
+
+offersRouter.get("/centre", requireAuth, requiresRunAccess, requiresOfferCentreRole, async (req, res) => {
   const parsed = offerCentreQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid query" });
@@ -224,7 +229,7 @@ const buyerListQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(MAX_SIGNED_INT4).default(0),
 });
 
-offersRouter.get("/buyers", requireAuth, requiresRunAccess, async (req, res) => {
+offersRouter.get("/buyers", requireAuth, requiresRunAccess, requiresOfferCentreRole, async (req, res) => {
   const parsed = buyerListQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid query" });
