@@ -14,6 +14,8 @@ export const SANDBOX_SMS_PROVIDER_NAME = "sandbox_sms";
 
 export const sandboxSmsProvider: SmsProvider = {
   name: SANDBOX_SMS_PROVIDER_NAME,
+  // A random message id per send; the idempotency key is not used. A resend would be a second SMS.
+  recovery: { dedupesOnIdempotencyKey: false },
 
   async send(input: SendSmsInput): Promise<ProviderSendResult> {
     const to = input.to;

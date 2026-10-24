@@ -41,7 +41,8 @@ export type CommunicationMessageStatus =
   | "UNDELIVERABLE"
   | "CANCELLED"
   | "BLOCKED_BY_CONSENT"
-  | "BLOCKED_BY_COST_CONTROL";
+  | "BLOCKED_BY_COST_CONTROL"
+  | "MANUAL_REVIEW";
 
 export interface CommunicationThread {
   id: number;
@@ -375,6 +376,7 @@ const STATUS_LABELS: Record<CommunicationMessageStatus, string> = {
   CANCELLED: "Cancelled",
   BLOCKED_BY_CONSENT: "Blocked (Consent)",
   BLOCKED_BY_COST_CONTROL: "Blocked (Cost Control)",
+  MANUAL_REVIEW: "Needs review",
 };
 
 export function communicationStatusLabel(status: string): string {
@@ -391,6 +393,7 @@ export function communicationStatusPillClass(status: string): string {
     case "SENDING":
     case "RETRY_SCHEDULED":
     case "AWAITING_APPROVAL":
+    case "MANUAL_REVIEW":
       return "pill pill-warning";
     case "FAILED":
     case "BOUNCED":

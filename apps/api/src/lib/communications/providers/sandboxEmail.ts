@@ -21,6 +21,8 @@ export const SANDBOX_EMAIL_PROVIDER_NAME = "sandbox_email";
 
 export const sandboxEmailProvider: EmailProvider = {
   name: SANDBOX_EMAIL_PROVIDER_NAME,
+  // A random message id per send; the idempotency key is not used. A resend would be a second email.
+  recovery: { dedupesOnIdempotencyKey: false },
 
   async send(input: SendEmailInput): Promise<ProviderSendResult> {
     const to = input.to.toLowerCase();

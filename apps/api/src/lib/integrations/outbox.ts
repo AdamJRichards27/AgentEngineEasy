@@ -8,13 +8,14 @@
 // "a command sits in this table" to "a provider call happens" that skips
 // the fail-closed connection check (Section 4).
 
-import { and, eq, isNull, lte, or } from "drizzle-orm";
+import { and, eq, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db, integrationOutbox, integrationOutboxAttempts, type IntegrationOutboxRow } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, runWithCorrelationId, logger, incrementCounter } from "@aee/events";
 import { resolveActiveConnection, getAdapter } from "./registry.js";
 import { writeDeadLetter, markReplayed, loadDeadLetterInBrokerage } from "./deadLetters.js";
 import { isRetryableIntegrationFailure, IntegrationError, type IntegrationCapability } from "./types.js";
+import { capabilityOf, decideRecovery, MANUAL_REVIEW_STATUS } from "../outboxRecovery/policy.js";
 
 export interface EnqueueCommandInput {
   brokerageId: number;
@@ -60,6 +61,9 @@ export async function enqueueCommand(input: EnqueueCommandInput): Promise<Integr
   }
 }
 
+/** Outbound recovery: how long a dispatch claim is held before the row may be reclaimed. Must exceed the slowest adapter call. */
+export const INTEGRATION_OUTBOX_CLAIM_LEASE_MS = 5 * 60_000;
+
 const MAX_BACKOFF_MS = 30 * 60_000;
 function backoffMs(attemptNumber: number): number {
   return Math.min(MAX_BACKOFF_MS, 60_000 * 2 ** (attemptNumber - 1));
@@ -80,14 +84,45 @@ function backoffMs(attemptNumber: number): number {
 export async function dispatchCommand(outboxId: string): Promise<IntegrationOutboxRow> {
   const [existing] = await db.select().from(integrationOutbox).where(eq(integrationOutbox.id, outboxId));
   if (!existing) throw new IntegrationError("NOT_FOUND", "Outbox command not found.");
-  if (existing.status !== "PENDING" && existing.status !== "RETRY_SCHEDULED") {
+  const leaseExpired = existing.status === "DISPATCHING" && existing.nextAttemptAt.getTime() <= Date.now();
+  if (existing.status !== "PENDING" && existing.status !== "RETRY_SCHEDULED" && !leaseExpired) {
     throw new IntegrationError("INVALID_STATUS", `Cannot dispatch a command in status ${existing.status}.`);
   }
   return runWithCorrelationId(existing.correlationId, () => dispatchCommandInner(outboxId));
 }
 
 async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutboxRow> {
-  const [dispatching] = await db.update(integrationOutbox).set({ status: "DISPATCHING", updatedAt: new Date() }).where(eq(integrationOutbox.id, outboxId)).returning();
+  // F-02 claim lock: the claim is atomic and conditional. dispatchCommand's status check above is
+  // only an early, non-authoritative read. A concurrent dispatcher (another sweep, or an on-demand
+  // dispatch) that already claimed the row makes this UPDATE match zero rows (Postgres re-checks
+  // the predicate after the row lock is released), so the loser stops before adapter.send.
+  // Outbound recovery: the claim also takes a lease, stored in next_attempt_at (no migration). A DISPATCHING row whose
+  // lease has expired (its dispatcher crashed) can be reclaimed; a reclaim counts as an attempt, so a row that keeps
+  // crashing its dispatcher dead-letters after maxAttempts instead of looping. A reclaimed row's earlier send has an
+  // UNKNOWN outcome, so it is never blindly re-sent (see the recovery decision below).
+  // Truncated to ms: the RETURNING value comes back as a JS Date (ms), and it is compared again below as the claim token.
+  const leaseUntil = sql`date_trunc('milliseconds', now() + ${`${INTEGRATION_OUTBOX_CLAIM_LEASE_MS} milliseconds`}::interval)`;
+  let reclaimed = false;
+  let [dispatching] = await db
+    .update(integrationOutbox)
+    .set({ status: "DISPATCHING", nextAttemptAt: leaseUntil, updatedAt: new Date() })
+    .where(and(eq(integrationOutbox.id, outboxId), or(eq(integrationOutbox.status, "PENDING"), eq(integrationOutbox.status, "RETRY_SCHEDULED"))))
+    .returning();
+  if (!dispatching) {
+    [dispatching] = await db
+      .update(integrationOutbox)
+      .set({ status: "DISPATCHING", nextAttemptAt: leaseUntil, attempts: sql`${integrationOutbox.attempts} + 1`, updatedAt: new Date() })
+      .where(and(eq(integrationOutbox.id, outboxId), eq(integrationOutbox.status, "DISPATCHING"), lte(integrationOutbox.nextAttemptAt, sql`now()`)))
+      .returning();
+    reclaimed = Boolean(dispatching);
+  }
+  if (!dispatching) throw new IntegrationError("INVALID_STATUS", "Command was claimed by another dispatcher.");
+  // Terminal writes only land while this dispatcher still holds THIS lease (the lease value is the claim token).
+  const stillClaimed = and(eq(integrationOutbox.id, outboxId), eq(integrationOutbox.status, "DISPATCHING"), eq(integrationOutbox.nextAttemptAt, dispatching.nextAttemptAt));
+  // Only a RECLAIM is capped here: a fresh claim of a replayed dead letter legitimately starts at attempts == maxAttempts.
+  if (reclaimed && dispatching.attempts >= dispatching.maxAttempts) {
+    return failCommand(dispatching, dispatching.attempts, "LEASE_EXPIRED", "Dispatch claim expired repeatedly without an outcome.", false, stillClaimed);
+  }
   const attemptNumber = dispatching.attempts + 1;
   logger.info("integration_outbox_dispatch_attempt_started", { outboxId, attemptNumber, capability: dispatching.capability, connectionId: dispatching.connectionId, brokerageId: dispatching.brokerageId });
 
@@ -95,15 +130,31 @@ async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutbox
   try {
     resolved = await resolveActiveConnection(dispatching.brokerageId, dispatching.connectionId, dispatching.capability as IntegrationCapability);
   } catch (err) {
+    // A reclaimed row's earlier send may have reached the provider, so its fate is still unknown: an operator decides.
+    if (reclaimed) return moveToManualReview(dispatching, "CONNECTION_UNUSABLE_ON_RECLAIM", stillClaimed);
     // A connection that stopped being usable mid-flight (suspended/revoked
     // between enqueue and dispatch) is a PERMANENT stop, never retried —
     // fail-closed applies to dispatch time, not just enqueue time.
-    return failCommand(dispatching, attemptNumber, "PERMANENT_REJECTION", err instanceof Error ? err.message : "Connection is no longer usable.", false);
+    return failCommand(dispatching, attemptNumber, "PERMANENT_REJECTION", err instanceof Error ? err.message : "Connection is no longer usable.", false, stillClaimed);
   }
 
   const adapter = getAdapter(resolved.connection.providerId);
   if (!adapter) {
-    return failCommand(dispatching, attemptNumber, "PERMANENT_REJECTION", `No adapter registered for provider ${resolved.connection.providerId}.`, false);
+    return failCommand(dispatching, attemptNumber, "PERMANENT_REJECTION", `No adapter registered for provider ${resolved.connection.providerId}.`, false, stillClaimed);
+  }
+
+  if (reclaimed) {
+    const decision = await decideRecovery(capabilityOf(adapter), dispatching.idempotencyKey);
+    logger.warn("integration_outbox_reclaim_decision", { outboxId, attempts: dispatching.attempts, action: decision.action, reason: decision.reason });
+    if (decision.action === "MANUAL_REVIEW") return moveToManualReview(dispatching, decision.reason, stillClaimed);
+    if (decision.action === "MARK_SENT") {
+      const [sent] = await db.update(integrationOutbox).set({ status: "SENT", dispatchedAt: new Date(), lastError: null, updatedAt: new Date() }).where(stillClaimed).returning();
+      if (!sent) return currentRow(outboxId);
+      await db.insert(integrationOutboxAttempts).values({ outboxId, attemptNumber, status: "SENT", providerResponseSummary: "Reconciled: provider lookup confirmed the earlier send was delivered; not re-sent.", errorDetail: null });
+      incrementCounter("integration_outbox_dispatch_total", { capability: dispatching.capability as string, outcome: "reconciled" });
+      return sent;
+    }
+    // RESEND_SAME_KEY: the provider dedupes on (or a lookup proved no send under) this idempotency key.
   }
 
   let result;
@@ -141,7 +192,8 @@ async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutbox
   }
 
   if (result.status === "SENT") {
-    const [sent] = await db.update(integrationOutbox).set({ status: "SENT", attempts: attemptNumber, dispatchedAt: new Date(), lastError: null, updatedAt: new Date() }).where(eq(integrationOutbox.id, outboxId)).returning();
+    const [sent] = await db.update(integrationOutbox).set({ status: "SENT", attempts: attemptNumber, dispatchedAt: new Date(), lastError: null, updatedAt: new Date() }).where(stillClaimed).returning();
+    if (!sent) return currentRow(outboxId); // lease lost: a reclaimer owns the row now; write nothing.
     logger.info("integration_outbox_dispatch_sent", { outboxId, attemptNumber });
     incrementCounter("integration_outbox_dispatch_total", { capability: dispatching.capability as string, outcome: "success" });
     return sent;
@@ -152,21 +204,40 @@ async function dispatchCommandInner(outboxId: string): Promise<IntegrationOutbox
     const [rescheduled] = await db
       .update(integrationOutbox)
       .set({ status: "RETRY_SCHEDULED", attempts: attemptNumber, lastError: result.failureDetail, nextAttemptAt: new Date(Date.now() + backoffMs(attemptNumber)), updatedAt: new Date() })
-      .where(eq(integrationOutbox.id, outboxId))
+      .where(stillClaimed)
       .returning();
+    if (!rescheduled) return currentRow(outboxId);
     logger.warn("integration_outbox_retry_scheduled", { outboxId, attemptNumber, nextAttemptAt: rescheduled.nextAttemptAt, failureCategory: result.failureCategory, failureDetail: result.failureDetail });
     incrementCounter("integration_outbox_dispatch_total", { capability: dispatching.capability as string, outcome: "retry_scheduled" });
     return rescheduled;
   }
 
-  return failCommand(dispatching, attemptNumber, result.failureCategory ?? "PERMANENT_REJECTION", result.failureDetail ?? "Permanent failure.", true);
+  return failCommand(dispatching, attemptNumber, result.failureCategory ?? "PERMANENT_REJECTION", result.failureDetail ?? "Permanent failure.", true, stillClaimed);
 }
 
-async function failCommand(command: IntegrationOutboxRow, attemptNumber: number, reason: string, detail: string, alreadyRecordedAttempt: boolean): Promise<IntegrationOutboxRow> {
+async function moveToManualReview(command: IntegrationOutboxRow, reason: string, guard: SQL | undefined): Promise<IntegrationOutboxRow> {
+  const [moved] = await db
+    .update(integrationOutbox)
+    .set({ status: MANUAL_REVIEW_STATUS, lastError: `MANUAL_REVIEW: dispatch outcome unknown (${reason})`, updatedAt: new Date() })
+    .where(guard ?? and(eq(integrationOutbox.id, command.id), eq(integrationOutbox.status, "DISPATCHING")))
+    .returning();
+  if (!moved) return currentRow(command.id);
+  logger.warn("outbound_recovery_manual_review", { queue: "integration_outbox", outboxId: command.id, brokerageId: command.brokerageId, reason });
+  incrementCounter("outbound_recovery_manual_review_total", { queue: "integration_outbox" });
+  return moved;
+}
+
+async function currentRow(outboxId: string): Promise<IntegrationOutboxRow> {
+  const [row] = await db.select().from(integrationOutbox).where(eq(integrationOutbox.id, outboxId));
+  return row;
+}
+
+async function failCommand(command: IntegrationOutboxRow, attemptNumber: number, reason: string, detail: string, alreadyRecordedAttempt: boolean, guard?: SQL): Promise<IntegrationOutboxRow> {
   if (!alreadyRecordedAttempt) {
     await db.insert(integrationOutboxAttempts).values({ outboxId: command.id, attemptNumber, status: "FAILED", errorDetail: detail });
   }
-  const [failed] = await db.update(integrationOutbox).set({ status: "DEAD_LETTERED", attempts: attemptNumber, lastError: detail, updatedAt: new Date() }).where(eq(integrationOutbox.id, command.id)).returning();
+  const [failed] = await db.update(integrationOutbox).set({ status: "DEAD_LETTERED", attempts: attemptNumber, lastError: detail, updatedAt: new Date() }).where(guard ?? eq(integrationOutbox.id, command.id)).returning();
+  if (!failed) return currentRow(command.id);
   await writeDeadLetter({
     brokerageId: command.brokerageId,
     connectionId: command.connectionId,
@@ -215,7 +286,13 @@ export async function dispatchDueOutbox(now: Date = new Date()): Promise<{ dispa
   const due = await db
     .select()
     .from(integrationOutbox)
-    .where(and(or(eq(integrationOutbox.status, "PENDING"), eq(integrationOutbox.status, "RETRY_SCHEDULED")), lte(integrationOutbox.nextAttemptAt, now)));
+    .where(
+      or(
+        and(or(eq(integrationOutbox.status, "PENDING"), eq(integrationOutbox.status, "RETRY_SCHEDULED")), lte(integrationOutbox.nextAttemptAt, now)),
+        // Outbound recovery: expired leases, compared with the DB clock (µs) rather than a JS ms Date.
+        and(eq(integrationOutbox.status, "DISPATCHING"), lte(integrationOutbox.nextAttemptAt, sql`now()`)),
+      ),
+    );
 
   let dispatchedCount = 0;
   let errorCount = 0;

@@ -379,6 +379,8 @@ export function outboxStatusLabel(status: string): string {
       return "Retry Scheduled";
     case "DEAD_LETTERED":
       return "Dead-Lettered";
+    case "MANUAL_REVIEW":
+      return "Needs review";
     default:
       return titleCase(status);
   }
@@ -394,6 +396,7 @@ export function outboxStatusPillClass(status: string): string {
       return "pill pill-warning";
     case "FAILED":
     case "DEAD_LETTERED":
+    case "MANUAL_REVIEW":
       return "pill pill-danger";
     default:
       return "pill"; // CANCELLED

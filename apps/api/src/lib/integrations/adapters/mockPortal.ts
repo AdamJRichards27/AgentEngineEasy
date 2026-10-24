@@ -38,6 +38,8 @@ export const MOCK_PORTAL_PROVIDER_ID = "mock_portal_v1";
 export const mockPortalAdapter: IntegrationAdapter = {
   providerId: MOCK_PORTAL_PROVIDER_ID,
   version: 1,
+  // Every SENT returns a NEW random reference: a resend is a second publish. No lookup.
+  recovery: { dedupesOnIdempotencyKey: false },
   capabilities: ["portal.publishListing", "portal.updateListingStatus"] as IntegrationCapability[],
 
   async send(capability: IntegrationCapability, payload: Record<string, unknown>, ctx: AdapterSendContext): Promise<AdapterSendResult> {

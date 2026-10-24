@@ -16,7 +16,7 @@
 // not run a second copy of that machinery.
 
 import { logger } from "@aee/events";
-import { dispatchDueMessages } from "./outbox.js";
+import { dispatchDueMessages, recoverStaleSendingMessages } from "./outbox.js";
 
 const SWEEP_INTERVAL_MS = 60_000;
 
@@ -29,6 +29,7 @@ export function registerCommunicationsEngine(): void {
 
   intervalHandle = setInterval(() => {
     dispatchDueMessages().catch((err) => logger.error("communications_outbox_sweep_failed", { error: err instanceof Error ? err.message : String(err) }));
+    recoverStaleSendingMessages().catch((err) => logger.error("communications_stale_sending_recovery_failed", { error: err instanceof Error ? err.message : String(err) }));
   }, SWEEP_INTERVAL_MS);
   intervalHandle.unref();
 }
