@@ -5,6 +5,16 @@ import { z } from "zod";
 import { db, documents, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
+import type { AgencyAgreementTerms } from "@aee/db";
+import {
+  amendmentAuditInput,
+  auditWriterFor,
+  denyFinancialAmendment,
+  hiddenAgent,
+  loadPropertyFinancialScope,
+  agencyTermsViewFor,
+  resolveAmendmentAuthority,
+} from "../lib/financialAmendments.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
 import {
@@ -160,37 +170,79 @@ const agencyTermsSchema = z
     path: ["flatFeeCents"],
   });
 
+// Owner t173u: agency-agreement terms (commission rate, flat fee, marketing
+// fee) are financial terms. Amending them needs authority: the listing agent
+// or a Brokerage Administrator acting on their own authority. Pit Crew have
+// no verifiable documented-authority record yet (lib/financialAmendments.ts)
+// and get 403; an Agent who is not the listing agent gets 404 (own-property
+// rule). The write and its before/after audit row commit together.
 documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
+  const user = req.authedUser!;
+  const scope = await loadPropertyFinancialScope(user, propertyId);
+  if (!scope || hiddenAgent(user, scope)) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const authority = resolveAmendmentAuthority(user, scope);
+  if (!authority.allowed) {
+    await denyFinancialAmendment(res, user, scope, "agency_agreement_terms", String(propertyId), "PUT /documents/agency-agreement-terms/:propertyId");
+    return;
+  }
   const parsed = agencyTermsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
   }
-  const user = req.authedUser!;
 
   try {
-    const terms = await upsertAgencyAgreementTerms({ propertyId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data });
-
-    await logAudit({
-      brokerageId: user.brokerageId,
-      userId: user.id,
-      action: "agency_agreement_terms_updated",
-      recordType: "agency_agreement_terms",
-      recordId: String(terms.id),
-      propertyId,
-    });
-
+    const terms = await upsertAgencyAgreementTerms(
+      { propertyId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data },
+      async (before, after, tx) => {
+        const write = auditWriterFor(tx);
+        await logAudit(
+          {
+            brokerageId: user.brokerageId,
+            userId: user.id,
+            action: "agency_agreement_terms_updated",
+            recordType: "agency_agreement_terms",
+            recordId: String(after.id),
+            propertyId,
+          },
+          { strict: true, write },
+        );
+        await logAudit(
+          amendmentAuditInput({
+            user,
+            authority,
+            scope,
+            recordType: "agency_agreement_terms",
+            recordId: String(after.id),
+            before: before ? agencyTermsValues(before) : null,
+            after: agencyTermsValues(after),
+            surface: "PUT /documents/agency-agreement-terms/:propertyId",
+          }),
+          { strict: true, write },
+        );
+      },
+    );
     res.json({ terms });
   } catch (err) {
     handleDocumentError(err, res);
   }
 });
 
-// R-F40 — same 404 as GET /transactions/by-property. A missing property and
-// a property in another brokerage are one result. No isolation metric: this
-// slice does not add a tenant_isolation_rejection_total boundary.
+function agencyTermsValues(t: AgencyAgreementTerms): Record<string, unknown> {
+  return {
+    commissionType: t.commissionType,
+    commissionRateBps: t.commissionRateBps,
+    flatFeeCents: t.flatFeeCents,
+    marketingFeeCents: t.marketingFeeCents,
+    agreementTermDays: t.agreementTermDays,
+  };
+}
+
 async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
   const [property] = await db
     .select({ id: properties.id })
@@ -203,13 +255,14 @@ documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, requires
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
-  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+  const scope = await loadPropertyFinancialScope(user, propertyId);
+  if (!scope || hiddenAgent(user, scope)) {
     res.status(404).json({ error: "Not found" });
     return;
   }
   try {
     const terms = await getAgencyAgreementTerms(propertyId, user.brokerageId);
-    res.json({ terms });
+    res.json({ terms: await agencyTermsViewFor(user, scope, terms, "GET /documents/agency-agreement-terms/:propertyId") });
   } catch (err) {
     handleDocumentError(err, res);
   }

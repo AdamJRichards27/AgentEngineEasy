@@ -93,10 +93,15 @@ export interface PitCrewTransactionAssignment {
   exceptionCategory: string;
 }
 
-/** The caller's active Pit Crew assignments on this transaction. */
-export async function activePitCrewAssignmentsForTransaction(
+/**
+ * The caller's active Pit Crew EXCEPTION assignments on a property, optionally
+ * narrowed to exceptions that name one transaction (the t172u transaction
+ * rule). Same brokerage, same property, assigned to this user.
+ */
+async function activePitCrewAssignments(
   user: Pick<AuthedUser, "id" | "brokerageId">,
-  transaction: Pick<Transaction, "id" | "propertyId">,
+  propertyId: number,
+  transactionId: number | null,
 ): Promise<PitCrewTransactionAssignment[]> {
   const rows = await db
     .select({ id: pitCrewAssignments.id, category: riskExceptions.category })
@@ -114,13 +119,33 @@ export async function activePitCrewAssignmentsForTransaction(
       and(
         eq(pitCrewAssignments.brokerageId, user.brokerageId),
         eq(pitCrewAssignments.assignedToUserId, user.id),
-        eq(pitCrewAssignments.propertyId, transaction.propertyId),
+        eq(pitCrewAssignments.propertyId, propertyId),
         inArray(pitCrewAssignments.status, [...ACTIVE_PIT_CREW_ASSIGNMENT_STATUSES]),
-        eq(riskExceptions.transactionId, transaction.id),
+        transactionId === null ? undefined : eq(riskExceptions.transactionId, transactionId),
       ),
     )
     .orderBy(pitCrewAssignments.id);
   return rows.map((r) => ({ assignmentId: r.id, exceptionCategory: r.category }));
+}
+
+/** The caller's active Pit Crew assignments on this transaction. */
+export async function activePitCrewAssignmentsForTransaction(
+  user: Pick<AuthedUser, "id" | "brokerageId">,
+  transaction: Pick<Transaction, "id" | "propertyId">,
+): Promise<PitCrewTransactionAssignment[]> {
+  return activePitCrewAssignments(user, transaction.propertyId, transaction.id);
+}
+
+/**
+ * Property-level form of the same rule, for property-scoped financial
+ * records that exist before (or without) a transaction, e.g. agency
+ * agreement terms (t173u C): any active EXCEPTION assignment on the property.
+ */
+export async function activePitCrewAssignmentsForProperty(
+  user: Pick<AuthedUser, "id" | "brokerageId">,
+  propertyId: number,
+): Promise<PitCrewTransactionAssignment[]> {
+  return activePitCrewAssignments(user, propertyId, null);
 }
 
 export interface TransactionFinancialAccess {

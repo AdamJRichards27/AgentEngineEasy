@@ -169,7 +169,9 @@ test("PUT /agency-agreement-terms/:propertyId rejects a property belonging to a 
   assert.equal(originalPut.status, 200);
 
   const crossTenant = await putAgencyTerms(B.agent.cookie, propertyId, { commissionRateBps: 999 });
-  assert.equal(crossTenant.status, 400, "upsertAgencyAgreementTerms throws, and the route maps it to 400 like every other write in this router");
+  // Owner t173u: the PUT now resolves the property (tenant + listing agent) before
+  // any write, so a cross-tenant id gets the same 404 as the GET.
+  assert.equal(crossTenant.status, 404, "cross-tenant PUT answers 404 before any write");
   const crossTenantBody = await json<{ error: string }>(crossTenant);
   assert.match(crossTenantBody.error, /not found/i);
 

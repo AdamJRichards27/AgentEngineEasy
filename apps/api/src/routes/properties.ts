@@ -1,3 +1,4 @@
+import { agencyTermsViewFor, loadPropertyFinancialScope } from "../lib/financialAmendments.js";
 import { Router } from "express";
 import { eq, and, inArray, ne, ilike, or } from "drizzle-orm";
 import { z } from "zod";
@@ -419,6 +420,13 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     ? await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, docPackage.id))
     : [];
   const [agreementTerms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, id));
+  // Owner t172u/t173u: commission rate, flat fee and marketing fee only for
+  // the listing agent, Brokerage Administrators and Pit Crew assigned on the
+  // property (logged); others see the row without the figures.
+  const agreementScope = await loadPropertyFinancialScope(user, id);
+  const agencyTermsView = agreementScope
+    ? await agencyTermsViewFor(user, agreementScope, agreementTerms ?? null, "GET /properties/:id/workspace")
+    : null;
   // Stage A (#114) — surfaced additively; an unstarted appraisal is simply
   // null here, never a blocking field.
   const appraisal = await getAppraisalByProperty(id, user.brokerageId);
@@ -482,7 +490,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
             : null,
         }
       : null,
-    agencyAgreementTerms: agreementTerms ?? null,
+    agencyAgreementTerms: agencyTermsView,
     appraisal,
   });
 });

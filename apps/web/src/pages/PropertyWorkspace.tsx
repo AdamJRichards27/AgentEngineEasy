@@ -97,10 +97,12 @@ interface DocumentPackageBlock {
 interface AgencyAgreementTermsBlock {
   id: number;
   commissionType: string;
-  commissionRateBps: number | null;
-  flatFeeCents: number | null;
-  marketingFeeCents: number | null;
+  /** Omitted outside the t172u view rule (Owner t173u); termsVisible is then false. */
+  commissionRateBps?: number | null;
+  flatFeeCents?: number | null;
+  marketingFeeCents?: number | null;
   agreementTermDays: number;
+  termsVisible?: boolean;
 }
 
 interface ServiceOrderBlock {
@@ -1194,7 +1196,27 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <summary>Documents & Agency Agreement</summary>
 
           <h3>Agency agreement terms</h3>
-          <AgencyTermsForm initial={data.agencyAgreementTerms} onSubmit={(input) => saveAgencyTerms.mutate(input)} />
+          {data.agencyAgreementTerms?.termsVisible === false ? (
+            <p className="muted">Terms captured. Fees are restricted to the listing agent, Brokerage Administrators and assigned Pit Crew.</p>
+          ) : (
+            <AgencyTermsForm
+              initial={
+                data.agencyAgreementTerms
+                  ? {
+                      commissionType: data.agencyAgreementTerms.commissionType,
+                      commissionRateBps: data.agencyAgreementTerms.commissionRateBps ?? null,
+                      flatFeeCents: data.agencyAgreementTerms.flatFeeCents ?? null,
+                      marketingFeeCents: data.agencyAgreementTerms.marketingFeeCents ?? null,
+                      agreementTermDays: data.agencyAgreementTerms.agreementTermDays,
+                    }
+                  : null
+              }
+              onSubmit={(input) => saveAgencyTerms.mutate(input)}
+            />
+          )}
+          {saveAgencyTerms.isError && (
+            <p className="error-text">{apiErrorMessage(saveAgencyTerms.error, "Couldn't save the agency agreement terms. Try again.")}</p>
+          )}
 
           <h3 style={{ marginTop: "1rem" }}>Documents</h3>
           <ul className="item-list">

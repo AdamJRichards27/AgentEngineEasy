@@ -412,6 +412,10 @@ test("assigned Pit Crew cannot edit fees, approve payments, settle, record funds
     ["/financial/payment-requests/1/schedule-debit", {}],
     ["/financial/payment-requests/1/cancel-debit", {}],
     ["/financial/payment-requests/1/reverse", {}],
+    ["/financial/pc-fee-authorities/1/revoke", {}],
+    ["/financial/ops/dispatch-outbox", {}],
+    ["/payments/1/refund", {}],
+    ["/integrations/connections/1/actions/link-payment-reference", { paymentRequestId: 1, externalReference: "synthetic" }],
     ["/launch/vendor-approvals/1/decide", { decision: "APPROVED" }],
     ["/launch/1/budget", { budgetCents: 1 }],
   ];
