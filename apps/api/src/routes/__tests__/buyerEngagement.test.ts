@@ -268,12 +268,16 @@ test("confidentiality: Pit Crew gets 403 with no timeline, price or conditions i
 });
 
 test("confidentiality (second line): a Pit Crew viewer reaching the timeline builder gets no offer prices", async () => {
-  assert.equal(canSeeOfferTerms("Agent"), true);
-  assert.equal(canSeeOfferTerms("Brokerage Administrator"), true);
-  assert.equal(canSeeOfferTerms("Pit Crew"), false);
-  assert.equal(canSeeOfferTerms("Something Else"), false);
+  const listingAgentId = A.agent.user.id;
+  assert.equal(canSeeOfferTerms({ role: "Agent", userId: listingAgentId }, listingAgentId), true);
+  assert.equal(canSeeOfferTerms({ role: "Brokerage Administrator", userId: A.admin.user.id }, listingAgentId), true);
+  assert.equal(canSeeOfferTerms({ role: "Agent", userId: listingAgentId + 1 }, listingAgentId), false, "a non-listing Agent");
+  assert.equal(canSeeOfferTerms({ role: "Agent", userId: listingAgentId }, null), false);
+  assert.equal(canSeeOfferTerms({ role: "Pit Crew", userId: pitCrew.user.id }, listingAgentId), false);
+  assert.equal(canSeeOfferTerms({ role: "Pit Crew", userId: listingAgentId }, listingAgentId), false, "Pit Crew never, even as agent_id");
+  assert.equal(canSeeOfferTerms({ role: "Something Else", userId: listingAgentId }, listingAgentId), false);
 
-  const t = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewerRole: "Pit Crew" });
+  const t = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewer: { role: "Pit Crew", userId: pitCrew.user.id } });
   assert.ok(t, "timeline exists for a linked buyer");
   assert.equal(t.offerTermsVisible, false);
   const text = JSON.stringify(t);
@@ -281,6 +285,24 @@ test("confidentiality (second line): a Pit Crew viewer reaching the timeline bui
   assert.ok(!text.includes("70000000") && !text.includes("72000000"), "no price values for Pit Crew");
   assert.ok(!/"conditions"/.test(text));
   // Same events otherwise: only the terms are withheld.
-  const full = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewerRole: "Agent" });
+  const full = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewer: { role: "Agent", userId: A.agent.user.id } });
   assert.deepEqual(t.events.map((e) => e.type), full!.events.map((e) => e.type));
+});
+
+// Owner t165u: "Offer prices: listing agent and authorised brokerage administrators only".
+test("price policy: an Agent who is not the listing agent gets 404 with no timeline or price", async () => {
+  const colleague = await devLogin(baseUrl, { email: `colleague-engagement-${suffix}@example.com`, firstName: "Cole", lastName: "League", brokerageName: `Engagement A ${suffix}` });
+  await db.update(users).set({ role: "Agent" }).where(eq(users.id, colleague.user.id));
+  assert.equal(colleague.user.brokerageId, A.brokerageId);
+  const res = await fetch(`${baseUrl}/api/offers/buyers/${X}/engagement?propertyId=${P}`, { headers: { cookie: colleague.cookie } });
+  const text = await res.text();
+  assert.equal(res.status, 404);
+  assert.deepEqual(JSON.parse(text), { error: "Not found" });
+  for (const leak of ["70000000", "72000000", "Xena"]) assert.ok(!text.includes(leak), `leaked ${leak}`);
+  // Second line: the builder itself withholds terms from a non-listing Agent.
+  const t = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewer: { role: "Agent", userId: colleague.user.id } });
+  assert.ok(t);
+  assert.equal(t.offerTermsVisible, false);
+  assert.ok(!JSON.stringify(t).includes("offerPriceCents"));
+  assert.ok(!JSON.stringify(t).includes("listingAgentId"), "the listing agent id is not returned");
 });

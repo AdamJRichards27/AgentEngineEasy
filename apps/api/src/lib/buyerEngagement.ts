@@ -13,11 +13,14 @@
 //     settlement scheduled (one event per settlement_scheduled audit row, so
 //     a reschedule shows both; the scheduled date is dueAt) and settled.
 //
-// Confidentiality: offer terms (price; conditions are never included) are
-// shown only to Agents and Brokerage Administrators. Any other role (Pit Crew
-// today, should Owner BE-Q3 ever admit it to this route) gets the same
-// timeline with offerPriceCents omitted and offerTermsVisible: false. The
-// route's role gate already returns 403 to Pit Crew; this is the second line.
+// Confidentiality (Owner t165u: "Offer prices: listing agent and authorised
+// brokerage administrators only"): offer terms (price; conditions are never
+// included) are shown only to Brokerage Administrators and to the Agent who is
+// the property's listing agent (properties.agent_id). Anyone else (another
+// Agent, or Pit Crew should Owner BE-Q3 ever admit it to this route) gets the
+// same timeline with offerPriceCents omitted and offerTermsVisible: false. The
+// route already returns 403 to Pit Crew and 404 to a non-listing Agent; this
+// is the second line.
 //
 // Grow data (grow_activities) is never read here: growHistoryAvailable is
 // always false until BE-Q5 / slice B-3. No email, mobile or address of the
@@ -65,10 +68,16 @@ export interface BuyerEngagementTimeline {
   offerTermsVisible: boolean;
 }
 
-/** Roles allowed to see offer prices and conditions (never Pit Crew). */
-export const OFFER_TERMS_ROLES: readonly string[] = ["Agent", "Brokerage Administrator"];
-export function canSeeOfferTerms(role: string): boolean {
-  return OFFER_TERMS_ROLES.includes(role);
+/** Roles that see every listing's offer prices and conditions. */
+export const OFFER_TERMS_ADMIN_ROLES: readonly string[] = ["Brokerage Administrator"];
+export interface OfferTermsViewer {
+  role: string;
+  userId: number;
+}
+/** Brokerage Administrators, or the Agent who is this listing's agent. Never Pit Crew. */
+export function canSeeOfferTerms(viewer: OfferTermsViewer, listingAgentId: number | null | undefined): boolean {
+  if (OFFER_TERMS_ADMIN_ROLES.includes(viewer.role)) return true;
+  return viewer.role === "Agent" && listingAgentId != null && listingAgentId === viewer.userId;
 }
 
 const OFFER_DECISION_ACTIONS = ["offer_accepted", "offer_declined", "offer_withdrawn", "offer_auto_declined"] as const;
@@ -88,9 +97,8 @@ export async function getBuyerEngagementTimeline(input: {
   brokerageId: number;
   propertyId: number;
   partyId: number;
-  viewerRole: string;
+  viewer: OfferTermsViewer;
 }): Promise<BuyerEngagementTimeline | null> {
-  const offerTermsVisible = canSeeOfferTerms(input.viewerRole);
   const [link] = await db
     .select({
       linkedAt: propertyParties.createdAt,
@@ -98,6 +106,7 @@ export async function getBuyerEngagementTimeline(input: {
       lastName: parties.lastName,
       organisationName: parties.organisationName,
       propertyAddress: properties.formattedAddress,
+      listingAgentId: properties.agentId,
     })
     .from(propertyParties)
     .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
@@ -113,6 +122,7 @@ export async function getBuyerEngagementTimeline(input: {
     .orderBy(asc(propertyParties.createdAt))
     .limit(1);
   if (!link) return null;
+  const offerTermsVisible = canSeeOfferTerms(input.viewer, link.listingAgentId);
 
   const events: EngagementEvent[] = [{ type: "buyer_linked", at: iso(link.linkedAt), source: "property_parties" }];
 

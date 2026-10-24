@@ -298,12 +298,14 @@ offersRouter.get(
     const partyId = readIdParam(res, req.params.partyId, "party");
     if (partyId === null) return;
     const user = req.authedUser!;
-    if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+    // Owner t165u: an Agent who is not this listing's agent gets the same 404
+    // as another brokerage's property (lib/propertyVisibility own-property rule).
+    if (!(await propertyInBrokerage(propertyId, user.brokerageId)) || (await propertyHiddenFromCaller(user, propertyId))) {
       res.status(404).json({ error: "Not found" });
       return;
     }
     try {
-      const timeline = await getBuyerEngagementTimeline({ brokerageId: user.brokerageId, propertyId, partyId, viewerRole: user.role });
+      const timeline = await getBuyerEngagementTimeline({ brokerageId: user.brokerageId, propertyId, partyId, viewer: { role: user.role, userId: user.id } });
       if (!timeline) {
         res.status(404).json({ error: "Not found" });
         return;
