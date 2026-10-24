@@ -122,6 +122,10 @@ const CHARGE_ERRORS: Record<ServiceOrderChargeErrorCode, { status: number; error
   SERVICE_ORDER_NOT_FOUND: { status: 404, error: "Not found" },
   SERVICE_ORDER_PROPERTY_MISSING: { status: 409, error: "This service order can't be charged because its property record is unavailable." },
   PAYMENT_METHOD_REQUIRED: { status: 409, error: "No default payment method on file for this agent. Add one before charging." },
+  SERVICE_ORDER_CHARGE_FORBIDDEN: {
+    status: 403,
+    error: "Only the listing agent or a Brokerage Administrator can charge this service order.",
+  },
 };
 export function chargeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof ServiceOrderChargeError && err.code in CHARGE_ERRORS) {
@@ -131,25 +135,57 @@ export function chargeErrorResponse(err: unknown): { status: number; body: { err
   return { status: 500, body: { error: "Charge failed", code: "SERVICE_ORDER_CHARGE_FAILED" } };
 }
 
-// Actually charges the default stored method for the ServiceOrder's
-// property agent — idempotent (see lib/payments.ts chargeServiceOrder).
+// Owner t174u(4) (CC #37): every charge attempt is audited — allowed, denied
+// or failed — with the caller, their role, the outcome code and the amount.
+// Never card data: no payment-method/customer provider refs, labels or
+// last-4; the only provider value recorded is the charge reference on success.
+function chargeAttemptValue(fields: Record<string, string | number | boolean | null | undefined>): string {
+  return JSON.stringify(fields);
+}
+
+// Charges the default stored method for the ServiceOrder's property listing
+// agent — idempotent (see lib/payments.ts chargeServiceOrder). Restricted to
+// that listing agent or a same-brokerage Brokerage Administrator.
 paymentsRouter.post("/service-orders/:id/charge", requireAuth, requiresRunAccess, async (req, res) => {
   const serviceOrderId = Number(req.params.id);
   const user = req.authedUser!;
   try {
-    const { payment, serviceOrder, created } = await chargeServiceOrder({ serviceOrderId, userId: user.id, brokerageId: user.brokerageId });
+    const { payment, serviceOrder, created } = await chargeServiceOrder({
+      serviceOrderId,
+      userId: user.id,
+      role: user.role,
+      brokerageId: user.brokerageId,
+    });
     await logAudit({
+      brokerageId: user.brokerageId,
       userId: user.id,
       action: "service_order_charged",
       recordType: "service_order",
       recordId: String(serviceOrderId),
       propertyId: serviceOrder.propertyId,
       providerReference: payment.providerChargeRef ?? undefined,
+      updatedValue: chargeAttemptValue({
+        outcome: created ? "charged" : "already_settled",
+        callerRole: user.role,
+        paymentId: payment.id,
+        paymentStatus: payment.status,
+        amountCents: payment.amountCents,
+      }),
     });
     res.status(created ? 201 : 200).json({ payment, serviceOrder, created });
   } catch (err) {
     const mapped = chargeErrorResponse(err);
     if (mapped.status >= 500) logger.error("service_order_charge_failed", { serviceOrderId, error: err instanceof Error ? err.message : String(err) });
+    const denied = mapped.status === 403 || mapped.status === 404;
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: denied ? "service_order_charge_denied" : "service_order_charge_failed",
+      recordType: "service_order",
+      recordId: Number.isFinite(serviceOrderId) ? String(serviceOrderId) : String(req.params.id).slice(0, 64),
+      propertyId: err instanceof ServiceOrderChargeError ? (err.propertyId ?? null) : null,
+      updatedValue: chargeAttemptValue({ outcome: denied ? "denied" : "failed", callerRole: user.role, code: mapped.body.code }),
+    });
     res.status(mapped.status).json(mapped.body);
   }
 });

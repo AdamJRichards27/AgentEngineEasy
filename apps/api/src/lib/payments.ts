@@ -166,22 +166,73 @@ export interface ChargeServiceOrderResult {
 // S-1b: stable, client-safe codes for chargeServiceOrder failures. The route maps
 // each to a status and an agent-facing sentence (routes/payments.ts chargeErrorResponse);
 // internal detail (ids, driver text) stays server-side.
-export type ServiceOrderChargeErrorCode = "SERVICE_ORDER_NOT_FOUND" | "SERVICE_ORDER_PROPERTY_MISSING" | "PAYMENT_METHOD_REQUIRED";
+export type ServiceOrderChargeErrorCode =
+  | "SERVICE_ORDER_NOT_FOUND"
+  | "SERVICE_ORDER_PROPERTY_MISSING"
+  | "PAYMENT_METHOD_REQUIRED"
+  | "SERVICE_ORDER_CHARGE_FORBIDDEN";
 export class ServiceOrderChargeError extends Error {
-  constructor(public readonly code: ServiceOrderChargeErrorCode, detail?: string) {
+  constructor(
+    public readonly code: ServiceOrderChargeErrorCode,
+    detail?: string,
+    /** Set only once the order is known to be in the caller's brokerage (audit context; never sent to the client). */
+    public readonly propertyId?: number,
+  ) {
     super(detail ?? code);
     this.name = "ServiceOrderChargeError";
   }
 }
 
+/**
+ * Owner t174u(4) (CC #37): charging a ServiceOrder debits the listing agent's
+ * saved card, so only the listing agent of the order's property, or a
+ * Brokerage Administrator of the same brokerage, may trigger it. Pit Crew are
+ * prohibited from executing, approving or releasing payments (403); any other
+ * Agent in the brokerage gets the same 404 as a missing order (no disclosure).
+ * Cross-brokerage callers never reach this check (tenant join 404s first).
+ * Decided before the idempotent "already settled" return and before any
+ * provider call, so a denied caller learns nothing about the payment state.
+ */
+export type ChargeAuthorization = "allowed" | "forbidden" | "not_found";
+export function chargeAuthorizationFor(
+  caller: { id: number; role: string },
+  property: { agentId: number },
+): ChargeAuthorization {
+  if (caller.role === "Brokerage Administrator") return "allowed";
+  if (caller.role === "Pit Crew") return "forbidden";
+  if (caller.role === "Agent" && property.agentId === caller.id) return "allowed";
+  return "not_found";
+}
+
 export async function chargeServiceOrder(input: {
   serviceOrderId: number;
   userId: number;
+  role: string;
   brokerageId: number;
 }): Promise<ChargeServiceOrderResult> {
   const serviceOrder = await selectServiceOrderInBrokerage(input.serviceOrderId, input.brokerageId);
   if (!serviceOrder) {
     throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`);
+  }
+
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, serviceOrder.propertyId), eq(properties.brokerageId, input.brokerageId)));
+  if (!property) {
+    // Only a Brokerage Administrator learns the property record is unavailable; nobody else can be shown to be its listing agent.
+    if (input.role === "Brokerage Administrator") {
+      throw new ServiceOrderChargeError("SERVICE_ORDER_PROPERTY_MISSING", `Property ${serviceOrder.propertyId} not found`, serviceOrder.propertyId);
+    }
+    throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`, serviceOrder.propertyId);
+  }
+
+  const authorization = chargeAuthorizationFor({ id: input.userId, role: input.role }, property);
+  if (authorization === "forbidden") {
+    throw new ServiceOrderChargeError("SERVICE_ORDER_CHARGE_FORBIDDEN", undefined, serviceOrder.propertyId);
+  }
+  if (authorization === "not_found") {
+    throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`, serviceOrder.propertyId);
   }
 
   const existingAttempts = await db
@@ -195,18 +246,13 @@ export async function chargeServiceOrder(input: {
     return { payment: settled, serviceOrder, created: false };
   }
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, serviceOrder.propertyId));
-  if (!property) {
-    throw new ServiceOrderChargeError("SERVICE_ORDER_PROPERTY_MISSING", `Property ${serviceOrder.propertyId} not found`);
-  }
-
   // Payer resolution (Section 12): the listing agent's own stored method is
   // the default payer for a property's service charges. Team/brokerage
   // billing arrangements are real future scope (paymentMethods.payerType
   // already models Brokerage/Team/etc. for that), not built here.
   const paymentMethod = await defaultPaymentMethodFor("Agent", property.agentId);
   if (!paymentMethod) {
-    throw new ServiceOrderChargeError("PAYMENT_METHOD_REQUIRED");
+    throw new ServiceOrderChargeError("PAYMENT_METHOD_REQUIRED", undefined, serviceOrder.propertyId);
   }
 
   const attemptNumber = existingAttempts.length + 1;
