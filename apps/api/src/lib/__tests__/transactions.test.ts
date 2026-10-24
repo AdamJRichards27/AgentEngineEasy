@@ -176,7 +176,7 @@ test("acceptOffer serialises a genuine concurrent-accept race: exactly one Trans
     fetch(`${baseUrl}/api/offers/${offerIdTwo}/accept`, { method: "POST", headers: { cookie: A.agent.cookie } }),
   ]);
   const statuses = [resOne.status, resTwo.status].sort();
-  assert.deepEqual(statuses, [201, 400], `exactly one accept must succeed and the other must fail cleanly, got ${JSON.stringify(statuses)}`);
+  assert.deepEqual(statuses, [201, 409], `exactly one accept must succeed and the other must fail cleanly, got ${JSON.stringify(statuses)}`);
 
   const transactionRows = await db.select().from(transactions).where(eq(transactions.propertyId, propertyId));
   assert.equal(transactionRows.length, 1, "the property-row lock must prevent two Transactions ever being created for the same property");

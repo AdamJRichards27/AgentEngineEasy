@@ -6,6 +6,43 @@ import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
 
 /**
+ * CC #34 / Owner direction t113u D8: an offer leaves `Received` exactly once.
+ * Accept, decline and withdraw are conditional on the row still being
+ * Received; the request that finds it already moved on gets this error,
+ * which routes/offers.ts answers as 409 { code: "OFFER_STATUS_CONFLICT" }.
+ */
+export class OfferStatusConflictError extends Error {
+  readonly code = "OFFER_STATUS_CONFLICT" as const;
+  constructor(
+    readonly offerId: number,
+    readonly action: "accept" | "decline" | "withdraw",
+    readonly currentStatus: string,
+  ) {
+    super(
+      `Offer ${offerId} can no longer be ${action === "accept" ? "accepted" : action === "decline" ? "declined" : "withdrawn"}: it is already ${currentStatus}.`,
+    );
+    this.name = "OfferStatusConflictError";
+  }
+}
+
+/** Moves an offer out of Received only if it is still Received (no lost update). */
+async function transitionFromReceived(
+  offerId: number,
+  to: "Declined" | "Withdrawn",
+  action: "decline" | "withdraw",
+): Promise<Offer> {
+  const [updated] = await db
+    .update(offers)
+    .set({ status: to })
+    .where(and(eq(offers.id, offerId), eq(offers.status, "Received")))
+    .returning();
+  if (updated) return updated;
+  const [current] = await db.select({ status: offers.status }).from(offers).where(eq(offers.id, offerId));
+  if (!current) throw new Error(`Offer ${offerId} not found`);
+  throw new OfferStatusConflictError(offerId, action, current.status);
+}
+
+/**
  * Offer capture (Build Brief — Phase 7, ARCHITECTURE.md §10). Offers are
  * agent-entered (a buyer submits an offer to the agent by phone/email/in
  * person, as is normal in AU real estate practice — there's no public
@@ -150,12 +187,8 @@ export async function listOffersForProperty(propertyId: number): Promise<Offer[]
 
 /** Buyer withdrew, or the agent is retracting an offer they entered in error. */
 export async function withdrawOffer(offerId: number, userId: number): Promise<Offer> {
-  const [offer] = await db.select().from(offers).where(eq(offers.id, offerId));
-  if (!offer) throw new Error(`Offer ${offerId} not found`);
-  if (offer.status !== "Received") {
-    throw new Error(`Offer ${offerId} cannot be withdrawn from status ${offer.status}`);
-  }
-  const [updated] = await db.update(offers).set({ status: "Withdrawn" }).where(eq(offers.id, offerId)).returning();
+  const updated = await transitionFromReceived(offerId, "Withdrawn", "withdraw");
+  const offer = updated;
   await logAudit({
     brokerageId: await brokerageIdForProperty(offer.propertyId),
     userId,
@@ -169,12 +202,8 @@ export async function withdrawOffer(offerId: number, userId: number): Promise<Of
 
 /** Seller (via the agent) declined this offer without accepting another. */
 export async function declineOffer(offerId: number, userId: number): Promise<Offer> {
-  const [offer] = await db.select().from(offers).where(eq(offers.id, offerId));
-  if (!offer) throw new Error(`Offer ${offerId} not found`);
-  if (offer.status !== "Received") {
-    throw new Error(`Offer ${offerId} cannot be declined from status ${offer.status}`);
-  }
-  const [updated] = await db.update(offers).set({ status: "Declined" }).where(eq(offers.id, offerId)).returning();
+  const updated = await transitionFromReceived(offerId, "Declined", "decline");
+  const offer = updated;
   await logAudit({
     brokerageId: await brokerageIdForProperty(offer.propertyId),
     userId,
