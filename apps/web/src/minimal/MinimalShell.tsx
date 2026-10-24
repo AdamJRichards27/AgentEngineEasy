@@ -12,6 +12,7 @@ import gear from "./brand/AE_Gear_Orange_Large.png";
 import wordmarkDark from "./brand/AE_Wordmark_Dark.png";
 import wordmarkWhite from "./brand/AE_Wordmark_White.png";
 import { MinimalSidebarIcon } from "./icons";
+import { mobileNavOverflowEdges, mobileNavScrollTarget } from "./minimalMobileNav";
 import "./minimal.css";
 
 // AE Minimal A shell with the v1.0 grouped sidebar (V1, Owner t457u). Same
@@ -77,6 +78,24 @@ export default function MinimalShell({
     links.unshift({ path: "/owner", href: "/owner", label: "Platform Owner" });
   }
   const isCurrent = (href: string) => minimalSidebarIsCurrent(location, search, href);
+  // V3: keep the current mobile-bar item in view and show fades where items are hidden.
+  const mobileNavRef = useRef<HTMLElement | null>(null);
+  const [mobileEdges, setMobileEdges] = useState({ start: false, end: false });
+  const mobileCurrentHref = mobileLinks.find((link) => isCurrent(link.href))?.href ?? null;
+  useEffect(() => {
+    const bar = mobileNavRef.current;
+    if (!bar) return;
+    const update = () => setMobileEdges(mobileNavOverflowEdges({ barWidth: bar.clientWidth, scrollWidth: bar.scrollWidth, scrollLeft: bar.scrollLeft }));
+    const item = bar.querySelector<HTMLElement>('a[aria-current="page"]');
+    if (item) {
+      const target = mobileNavScrollTarget({ barWidth: bar.clientWidth, scrollWidth: bar.scrollWidth, scrollLeft: bar.scrollLeft, itemLeft: item.offsetLeft, itemWidth: item.offsetWidth });
+      if (target !== null) bar.scrollLeft = target;
+    }
+    update();
+    bar.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => { bar.removeEventListener("scroll", update); window.removeEventListener("resize", update); };
+  }, [mobileCurrentHref, mobileLinks.length]);
   const renderItem = (item: MinimalSidebarItem, nested = false): ReactNode => {
     const children = item.children?.length ? (
       <ul className="am-nav-sub" aria-label={`${item.label} pages`}>
@@ -221,7 +240,11 @@ export default function MinimalShell({
           <div className="am-content am-existing-outlet">{children}</div>
         </main>
       </div>
-      <nav className="am-mobile-nav" aria-label="Mobile navigation">
+      <nav
+        ref={mobileNavRef}
+        className={`am-mobile-nav${mobileEdges.start ? " has-more-start" : ""}${mobileEdges.end ? " has-more-end" : ""}`}
+        aria-label="Mobile navigation"
+      >
         {mobileLinks.map((link) => {
           const current = isCurrent(link.href);
           return (
