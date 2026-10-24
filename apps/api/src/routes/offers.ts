@@ -12,6 +12,7 @@ import {
   declineOffer,
   getOfferByShareToken,
   toOfferView,
+  OfferStatusConflictError,
 } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
@@ -84,6 +85,13 @@ function isOperatorAuthoredError(err: unknown): err is Error {
  * Mirrors handleGrowAppraisalError / handlePropertyIntelligenceError.
  */
 function handleOfferError(err: unknown, res: Response): void {
+  // CC #34 / D8: the offer already left Received (a concurrent or earlier
+  // decision won). The caller's brokerage was checked before this point, so
+  // the current status is not a cross-tenant disclosure.
+  if (err instanceof OfferStatusConflictError) {
+    res.status(409).json({ error: err.message, code: err.code, currentStatus: err.currentStatus });
+    return;
+  }
   if (isOperatorAuthoredError(err)) {
     res.status(400).json({ error: err.message });
     return;
