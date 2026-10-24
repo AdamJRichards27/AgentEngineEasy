@@ -159,7 +159,7 @@ interface TransactionBlock {
   settlementCompletedAt: string | null;
   status: string;
   /** Omitted by the server when the viewer may not see that financial group
-   * (Owner t171u); financialVisibility then says which groups were withheld. */
+   * (Owner t171u/t172u); financialVisibility then says which groups were withheld. */
   grossCommissionCents?: number | null;
   gstCents?: number | null;
   commissionCalculatedAt: string | null;

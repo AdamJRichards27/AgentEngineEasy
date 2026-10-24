@@ -436,7 +436,7 @@ export async function assertPropertyInBrokerage(propertyId: number, brokerageId:
   if (!property) throw new Error(`Property ${propertyId} not found`);
 }
 
-/** Owner t165u/t171u: domain events whose payload carries an offer price or
+/** Owner t165u / t170u rule 1 (kept by t172u): domain events whose payload carries an offer price or
  * the agreed contract price. They are not "financial entitlement" events, so
  * they are shaped separately by `offerPricesVisible`. */
 const PRICE_BEARING_EVENT_TYPES = new Set(["OFFER_RECEIVED", "OFFER_ACCEPTED"]);
@@ -446,7 +446,7 @@ export async function getPropertyTimeline(
   propertyId: number,
   brokerageId: number,
   canViewFinancials: boolean,
-  // Owner t165u/t171u: offer and contract prices go to the listing agent and
+  // Owner t165u/t170u rule 1: competing offer prices go to the listing agent and
   // Brokerage Administrators only. Omitted (e.g. the AI timeline tool, which
   // this change does not edit) means Brokerage Administrator only, i.e. it
   // follows canViewFinancials: fail closed for everyone else.

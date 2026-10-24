@@ -1,11 +1,13 @@
-// Owner t170u + t171u — confidential transaction financials (review P2).
-// Field groups (lib/pitCrewDuties.ts): purchasePrice, deposit, commission
-// (gross + GST), funds (funds received + the derived funds reconciliation).
-// Listing agent and Brokerage Administrator: every group. Pit Crew: only the
-// groups their duty allows, and only through an ACTIVE assignment on THIS
-// transaction (duty map PENDING OWNER CONFIRMATION). Unassigned Pit Crew:
-// none. Other Agent and other brokerage: 404. Every Pit Crew reveal is
-// access-logged with field categories only, never a value. Synthetic data.
+// Owner t170u + t172u — confidential transaction financials (review P2).
+// t172u supersedes the t171u duty-based restriction (duty map removed).
+// Field groups: purchasePrice, deposit, commission (gross + GST), funds
+// (funds received + the derived funds reconciliation). Listing agent and
+// Brokerage Administrator: every group. Pit Crew with an ACTIVE assignment on
+// THIS transaction, through any exception category: every group, logged.
+// Unassigned, DONE or HANDED_BACK Pit Crew: none. Other Agent and other
+// brokerage: 404. Viewing grants no write: fee, payment, settlement, funds
+// and disbursement routes stay 403 for assigned Pit Crew. The access log
+// carries field categories only, never a value. Synthetic data.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -20,16 +22,12 @@ import {
   devLogin,
   type DevLoginResult,
 } from "./testSupport.js";
-import { PURCHASE_PRICE_VIEWED_AUDIT_ACTION, toTransactionView } from "../../lib/transactionPriceAccess.js";
 import {
-  DUTY_FINANCIAL_GROUPS,
-  EXCEPTION_CATEGORY_DUTY,
-  PIT_CREW_DUTIES,
-  dutyForAssignment,
-  financialVisibilityForDuties,
+  PURCHASE_PRICE_VIEWED_AUDIT_ACTION,
+  toTransactionView,
   type FinancialVisibility,
   type TransactionFinancialGroup,
-} from "../../lib/pitCrewDuties.js";
+} from "../../lib/transactionPriceAccess.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -60,8 +58,6 @@ const assignmentIds: Record<string, number> = {};
 
 const ALL: FinancialVisibility = { purchasePrice: true, deposit: true, commission: true, funds: true };
 const NONE: FinancialVisibility = { purchasePrice: false, deposit: false, commission: false, funds: false };
-const SETTLE: FinancialVisibility = { purchasePrice: true, deposit: true, commission: false, funds: false };
-const CONTRACT: FinancialVisibility = { purchasePrice: false, deposit: true, commission: false, funds: false };
 
 async function call(method: "GET" | "POST", path: string, cookie: string, body?: unknown) {
   const res = await fetch(`${baseUrl}/api${path}`, {
@@ -177,11 +173,14 @@ before(async () => {
 
   await crewOn("settle", txn, "SETTLEMENT_CLOSURE");
   await crewOn("contract", txn, "CONTRACT_CONDITIONS");
-  await crewOn("wrongDuty", txn, "AML_CTF");
-  await crewOn("unknownDuty", txn, "OTHER");
-  await crewOn("financial", txn, "FINANCIAL");
+  await crewOn("aml", txn, "AML_CTF");
+  await crewOn("other", txn, "OTHER");
+  await crewOn("financial", txn, "FINANCIAL", "WAITING_ON");
+  await crewOn("claimed", txn, "DOCUMENTATION", "CLAIMED");
   await crewOn("done", txn, "SETTLEMENT_CLOSURE", "DONE");
-  await crewOn("unassigned", otherTxn, "SETTLEMENT_CLOSURE"); // assigned only to the OTHER transaction
+  await crewOn("handedBack", txn, "SETTLEMENT_CLOSURE", "HANDED_BACK");
+  await crewOn("elsewhere", otherTxn, "SETTLEMENT_CLOSURE"); // assigned only to the OTHER transaction
+  crew.none = await inBrokerage("crew-none", nameA, "Pit Crew"); // no assignment at all
 });
 
 after(async () => {
@@ -189,39 +188,15 @@ after(async () => {
   if (server) await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
-// ---- pure: the duty map (PENDING OWNER CONFIRMATION) ----
-
-test("duty map: unknown category, FINANCIAL, null and non-EXCEPTION sources all yield no duty (fail closed)", () => {
-  assert.equal(dutyForAssignment("EXCEPTION", "OTHER"), null);
-  assert.equal(dutyForAssignment("EXCEPTION", "FINANCIAL"), null);
-  assert.equal(dutyForAssignment("EXCEPTION", null), null);
-  assert.equal(dutyForAssignment("EXCEPTION", "toString"), null, "prototype keys are not duties");
-  assert.equal(dutyForAssignment("LAUNCH_ITEM", "SETTLEMENT_CLOSURE"), null);
-  assert.equal(dutyForAssignment("SETTLEMENT_MILESTONE", "SETTLEMENT_CLOSURE"), null);
-  assert.equal(dutyForAssignment("EXCEPTION", "SETTLEMENT_CLOSURE"), "SETTLEMENT_PREPARATION");
-  assert.deepEqual(financialVisibilityForDuties([null, null]), NONE);
-  assert.deepEqual(financialVisibilityForDuties(["SETTLEMENT_PREPARATION"]), SETTLE);
-  assert.deepEqual(financialVisibilityForDuties(["CONTRACT_CONDITION_TRACKING", "AML_CHASING"]), CONTRACT);
-});
-
-test("duty map invariants: no duty ever sees commission or funds; OFFER_SUPPORT sees nothing; every mapped duty has an entry", () => {
-  for (const duty of PIT_CREW_DUTIES) {
-    const groups = DUTY_FINANCIAL_GROUPS[duty];
-    assert.ok(Array.isArray(groups), `${duty} has an entry`);
-    assert.equal(groups.includes("commission"), false, `${duty}: no commission`);
-    assert.equal(groups.includes("funds"), false, `${duty}: no funds`);
-  }
-  assert.deepEqual([...DUTY_FINANCIAL_GROUPS.OFFER_SUPPORT], []);
-  for (const duty of Object.values(EXCEPTION_CATEGORY_DUTY)) assert.ok(PIT_CREW_DUTIES.includes(duty));
-});
-
 test("pure view: hidden groups are omitted (not null) and flagged", () => {
   const row = { id: 1, propertyId: 2, status: "ContractPreparation", purchasePriceCents: 1, depositCents: 2, grossCommissionCents: 3, gstCents: 4, fundsReceivedCents: 5 } as any;
-  const v = toTransactionView(row, CONTRACT) as Record<string, unknown>;
-  assert.equal(v.depositCents, 2);
-  for (const k of ["purchasePriceCents", "grossCommissionCents", "gstCents", "fundsReceivedCents"]) assert.equal(k in v, false, k);
-  assert.deepEqual(v.financialVisibility, CONTRACT);
+  const v = toTransactionView(row, false) as Record<string, unknown>;
+  for (const k of ["purchasePriceCents", "depositCents", "grossCommissionCents", "gstCents", "fundsReceivedCents"]) assert.equal(k in v, false, k);
+  assert.deepEqual(v.financialVisibility, NONE);
   assert.equal(v.purchasePriceVisible, false);
+  const all = toTransactionView(row, true) as Record<string, unknown>;
+  assert.equal(all.gstCents, 4);
+  assert.deepEqual(all.financialVisibility, ALL);
 });
 
 // ---- read endpoints: every caller x every field group ----
@@ -229,13 +204,16 @@ test("pure view: hidden groups are omitted (not null) and flagged", () => {
 const READ_CASES: Array<[string, () => Who, FinancialVisibility]> = [
   ["listing agent", () => A.agent, ALL],
   ["brokerage admin", () => A.admin, ALL],
-  ["Pit Crew, settlement duty", () => crew.settle!, SETTLE],
-  ["Pit Crew, contract-conditions duty", () => crew.contract!, CONTRACT],
-  ["Pit Crew, wrong duty (AML)", () => crew.wrongDuty!, NONE],
-  ["Pit Crew, unknown duty", () => crew.unknownDuty!, NONE],
-  ["Pit Crew, FINANCIAL exception (no duty)", () => crew.financial!, NONE],
+  ["Pit Crew assigned, SETTLEMENT_CLOSURE", () => crew.settle!, ALL],
+  ["Pit Crew assigned, CONTRACT_CONDITIONS", () => crew.contract!, ALL],
+  ["Pit Crew assigned, AML_CTF", () => crew.aml!, ALL],
+  ["Pit Crew assigned, OTHER", () => crew.other!, ALL],
+  ["Pit Crew assigned, FINANCIAL (WAITING_ON)", () => crew.financial!, ALL],
+  ["Pit Crew assigned, DOCUMENTATION (CLAIMED)", () => crew.claimed!, ALL],
   ["Pit Crew, DONE assignment", () => crew.done!, NONE],
-  ["Pit Crew, unassigned (assigned elsewhere)", () => crew.unassigned!, NONE],
+  ["Pit Crew, HANDED_BACK assignment", () => crew.handedBack!, NONE],
+  ["Pit Crew, assigned only to another transaction", () => crew.elsewhere!, NONE],
+  ["Pit Crew, no assignment", () => crew.none!, NONE],
 ];
 
 test("GET /transactions/:id and /by-property: each caller sees exactly their field groups; funds reconciliation follows funds", async () => {
@@ -261,7 +239,7 @@ test("mutation responses are shaped the same way (legal-representatives, no-op b
   }
 });
 
-test("access log: one row per Pit Crew reveal with categories, duties and assignment ids, never a value; nothing for denied or owner reads", async () => {
+test("access log: one row per Pit Crew reveal with all four categories and assignment ids, never a value; nothing for denied or owner reads", async () => {
   const settle = await revealRows(crew.settle!.user.id);
   assert.ok(settle.length >= 3, "reads + mutation were logged");
   for (const row of settle) {
@@ -269,29 +247,31 @@ test("access log: one row per Pit Crew reveal with categories, duties and assign
     assert.equal(row.recordType, "transaction");
     assert.equal(row.recordId, String(txn.transactionId));
     const ctx = JSON.parse(row.updatedValue ?? "{}");
-    assert.deepEqual(ctx.fieldCategories, ["purchasePrice", "deposit"]);
-    assert.deepEqual(ctx.duties, ["SETTLEMENT_PREPARATION"]);
+    assert.deepEqual(ctx.fieldCategories, ["purchasePrice", "deposit", "commission", "funds"]);
     assert.deepEqual(ctx.pitCrewAssignmentIds, [assignmentIds.settle]);
+    assert.deepEqual(ctx.exceptionCategories, ["SETTLEMENT_CLOSURE"]);
     assert.equal(ctx.actorRole, "Pit Crew");
-    assert.equal(ctx.dutyMapStatus, "PENDING_OWNER_CONFIRMATION");
+    assert.equal(ctx.basis, "pit_crew_assignment");
+    assert.equal(ctx.policy, "t172u");
+    assert.equal("duties" in ctx, false, "t171u duty field gone");
     assert.equal(typeof ctx.surface, "string");
     const text = JSON.stringify(row);
     for (const v of Object.values(V)) assert.equal(text.includes(String(v)), false, "no value logged");
   }
-  const contract = await revealRows(crew.contract!.user.id);
-  assert.ok(contract.length >= 1);
-  for (const row of contract) assert.deepEqual(JSON.parse(row.updatedValue ?? "{}").fieldCategories, ["deposit"]);
-  for (const key of ["wrongDuty", "unknownDuty", "financial", "done", "unassigned"]) {
+  const aml = await revealRows(crew.aml!.user.id);
+  assert.ok(aml.length >= 1);
+  for (const row of aml) assert.deepEqual(JSON.parse(row.updatedValue ?? "{}").exceptionCategories, ["AML_CTF"]);
+  for (const key of ["done", "handedBack", "none"]) {
     assert.equal((await revealRows(crew[key]!.user.id)).length, 0, `${key}: nothing revealed, nothing logged`);
   }
   for (const who of [A.agent, A.admin]) assert.equal((await revealRows(who.user.id)).length, 0, "owner reads are not logged");
 });
 
-test("assignment is per transaction: the 'unassigned' crew member sees price/deposit only on their own transaction", async () => {
-  const own = await call("GET", `/transactions/${otherTxn.transactionId}`, crew.unassigned!.cookie);
+test("assignment is per transaction: a crew member sees financials only on the transaction they are assigned to", async () => {
+  const own = await call("GET", `/transactions/${otherTxn.transactionId}`, crew.elsewhere!.cookie);
   assert.equal(own.status, 200, own.raw);
   assert.equal(own.json.transaction.purchasePriceCents, OTHER_PRICE);
-  assert.deepEqual(own.json.transaction.financialVisibility, SETTLE);
+  assert.deepEqual(own.json.transaction.financialVisibility, ALL);
   const other = await call("GET", `/transactions/${otherTxn.transactionId}`, crew.settle!.cookie);
   assert.equal(other.json.transaction.purchasePriceVisible, false);
   assert.equal(other.raw.includes(String(OTHER_PRICE)), false);
@@ -330,7 +310,7 @@ test("an Agent who is not the listing agent: 404 on transaction routes and the t
   assert.equal(row!.contractDate, null, "refused call did not mutate");
 });
 
-test("Property Timeline: offer/contract prices only for listing agent and admin; never Pit Crew (any duty)", async () => {
+test("Property Timeline: competing offer prices only for listing agent and admin; never Pit Crew, assigned or not (t170u rule 1)", async () => {
   const priceText = `$${(V.purchasePrice / 100).toFixed(2)}`;
   const offerEvents = (r: { json: Record<string, any> }) =>
     (r.json.timeline as Array<Record<string, any>>).filter((i) => i.entryType === "OFFER_RECEIVED" || i.entryType === "OFFER_ACCEPTED");
@@ -341,7 +321,7 @@ test("Property Timeline: offer/contract prices only for listing agent and admin;
     assert.ok(items.length >= 2, "offer received + accepted present");
     assert.ok(items.some((i) => String(i.label).includes(priceText)), "price in label");
   }
-  for (const key of ["settle", "contract", "unassigned"]) {
+  for (const key of ["settle", "financial", "none"]) {
     const r = await call("GET", `/properties/${txn.propertyId}/timeline`, crew[key]!.cookie);
     assert.equal(r.status, 200, r.raw);
     const items = offerEvents(r);
@@ -373,7 +353,7 @@ test("offer accept: the returned transaction is shaped (listing agent full; unas
   assert.equal(agentAcc.json.transaction.purchasePriceCents, V.purchasePrice + 11);
   assert.deepEqual(agentAcc.json.transaction.financialVisibility, ALL);
 
-  const crewAcc = await call("POST", `/offers/${await mk(V.purchasePrice + 12, "crew")}/accept`, crew.unassigned!.cookie);
+  const crewAcc = await call("POST", `/offers/${await mk(V.purchasePrice + 12, "crew")}/accept`, crew.none!.cookie);
   assert.equal(crewAcc.status, 201, crewAcc.raw);
   assert.deepEqual(crewAcc.json.transaction.financialVisibility, NONE);
   for (const k of ["purchasePriceCents", "depositCents", "grossCommissionCents", "gstCents", "fundsReceivedCents"]) {
@@ -405,4 +385,50 @@ test("Home: Pit Crew sees 'Offer received' without the competing offer price; ad
     const it = (rr.json.nextActions as Array<{ propertyId: number; label: string }>).find((i) => i.propertyId === propertyId);
     assert.equal(it?.label, `Offer received — ${shown}`);
   }
+});
+
+// ---- viewing grants no write (Owner t172u) ----
+
+test("assigned Pit Crew cannot edit fees, approve payments, settle, record funds or disburse: every such route is 403 and nothing changes", async () => {
+  const before = await db.select().from(transactions).where(eq(transactions.id, txn.transactionId));
+  const t = txn.transactionId;
+  const routes: Array<[string, unknown]> = [
+    [`/transactions/${t}/calculate-commission`, {}],
+    [`/transactions/${t}/funds-received`, { amountCents: 1 }],
+    [`/transactions/${t}/settlement-complete`, {}],
+    [`/transactions/${t}/agent-paid`, {}],
+    [`/transactions/${t}/close`, {}],
+    ["/financial/commission-agreements", {}],
+    ["/financial/commission-agreements/1/approve", {}],
+    ["/financial/commission-agreements/1/cancel", {}],
+    ["/financial/commission-calculations", {}],
+    ["/financial/settlement/finalize-commission", { transactionId: t }],
+    [`/financial/transactions/${t}/legacy-commission/reconcile`, {}],
+    ["/financial/pc-fee-authorities", {}],
+    ["/financial/pc-fee-authorities/1/activate", {}],
+    ["/financial/pc-fee-calculations", {}],
+    ["/financial/settlement/ensure-pc-success-fee", { transactionId: t }],
+    ["/financial/payment-requests/1/notice-sent", {}],
+    ["/financial/payment-requests/1/schedule-debit", {}],
+    ["/financial/payment-requests/1/cancel-debit", {}],
+    ["/financial/payment-requests/1/reverse", {}],
+    ["/launch/vendor-approvals/1/decide", { decision: "APPROVED" }],
+    ["/launch/1/budget", { budgetCents: 1 }],
+  ];
+  for (const key of ["settle", "financial"]) {
+    const who = crew[key]!;
+    // Precondition: this crew member does see every group on the transaction.
+    const read = await call("GET", `/transactions/${t}`, who.cookie);
+    assert.deepEqual(read.json.transaction.financialVisibility, ALL, `${key}: full view`);
+    for (const [path, body] of routes) {
+      const r = await call("POST", path, who.cookie, body);
+      assert.equal(r.status, 403, `${key} POST ${path}: ${r.status} ${r.raw}`);
+    }
+    for (const path of [`/properties/${txn.propertyId}/financial/summary`, "/financial/payment-requests", "/financial/deposits", "/financial/reconciliations"]) {
+      const r = await call("GET", path, who.cookie);
+      assert.equal(r.status, 403, `${key} GET ${path}: Financial Engine stays Brokerage Administrator only`);
+    }
+  }
+  const afterRows = await db.select().from(transactions).where(eq(transactions.id, txn.transactionId));
+  assert.deepEqual(afterRows, before, "no transaction field changed");
 });

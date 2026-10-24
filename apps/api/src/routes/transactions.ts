@@ -202,11 +202,11 @@ async function transactionRead(transaction: Transaction | null | undefined, user
   const closure = transaction ? await readTransactionClosureBlockers(transaction) : null;
   const view = transaction ? await transactionViewFor(user, transaction, surface) : transaction;
   return {
-    // Owner t170u/t171u (4): never the raw row; confidential financial groups
-    // only for the listing agent, Brokerage Administrators and Pit Crew whose
-    // assignment duty allows them (lib/transactionPriceAccess).
+    // Owner t170u/t172u: never the raw row; confidential financial groups
+    // only for the listing agent, Brokerage Administrators and Pit Crew with
+    // an active assignment on this transaction (lib/transactionPriceAccess).
     transaction: view,
-    // t171u: the reconciliation is derived from commission + GST and funds,
+    // t171u/t172u: the reconciliation is derived from commission + GST and funds,
     // so it is withheld whenever the funds group is.
     fundsReconciliation: transaction && view && view.financialVisibility.funds ? computeFundsReconciliation(transaction) : null,
     closureBlockers: closure ? closure.closureBlockers : null,

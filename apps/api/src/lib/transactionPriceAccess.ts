@@ -1,60 +1,72 @@
-// Owner t170u + t171u — confidential transaction financials (review P2).
+// Owner t170u + t172u — confidential transaction financials (review P2).
 //
-// t170u: Pit Crew sees the agreed contract purchase price only where assigned
-//   to the transaction and required for their duties; brokerage isolation,
-//   transaction-level permissions, access logging; no price in unrestricted
-//   transaction responses.
-// t171u: the same safeguard covers every field that reveals the price
-//   directly or by derivation (deposit, commission + GST, funds received and
-//   the funds reconciliation); access needs BOTH an active assignment AND the
-//   right duty (lib/pitCrewDuties.ts, PENDING OWNER CONFIRMATION); logging
-//   stays fail-closed and never records a value.
+// t172u (supersedes the t171u duty-based restriction, whose code-level duty
+// map lib/pitCrewDuties.ts has been removed): "Authorised Pit Crew personnel
+// assigned to a transaction must be able to view all financial information
+// necessary to accurately administer and reconcile settlement." Safeguards:
+// visible only to authorised Pit Crew assigned to the relevant transaction;
+// logged and brokerage-isolated; unassigned Pit Crew and unauthorised agents
+// cannot access; viewing does not authorise changing fees, approving
+// payments or disbursing funds (this module only shapes READ responses; it
+// grants no write).
 //
-// No migration, no schema change. Who sees which group
-// (lib/pitCrewDuties.ts TRANSACTION_FINANCIAL_GROUP_FIELDS):
-//   - Brokerage Administrator: all groups.
-//   - The Agent who is the property's listing agent (properties.agent_id):
-//     all groups.
-//   - Pit Crew: only the groups their duties allow, and only through an
-//     ACTIVE assignment ON THIS TRANSACTION. Unassigned Pit Crew: none.
-//   - Anyone else who reaches this module: none. Callers have already
-//     answered 404 for another brokerage and, on the transaction routes, for
-//     an Agent who is not the listing agent.
-// A hidden group's keys are OMITTED (never nulled), and
-// `financialVisibility` says which groups were withheld.
-// `purchasePriceVisible` stays as the t170u alias of
-// financialVisibility.purchasePrice.
+// No migration, no schema change, no extra permission framework. Who sees
+// the confidential groups (TRANSACTION_FINANCIAL_GROUP_FIELDS):
+//   - Brokerage Administrator: all.
+//   - The Agent who is the property's listing agent (properties.agent_id): all.
+//   - Pit Crew (role Pit Crew; the routes already require run.access and the
+//     same brokerage) with an ACTIVE assignment ON THIS TRANSACTION: all.
+//   - Everyone else who reaches this module (unassigned Pit Crew; a Pit Crew
+//     member whose assignment is DONE, HANDED_BACK, ESCALATED or UNCLAIMED,
+//     or on another transaction): none. Callers have already answered 404 for
+//     another brokerage and, on the transaction routes, for an Agent who is
+//     not the listing agent.
+// A hidden group's keys are OMITTED (never nulled); `financialVisibility`
+// says which groups were withheld; `purchasePriceVisible` is the t170u alias.
 //
-// "Assigned to the transaction", from existing data only: an ACTIVE
-// pit_crew_assignments row (CLAIMED, IN_PROGRESS or WAITING_ON) assigned to
-// this user, in this brokerage, on this property, with source EXCEPTION, whose
-// risk_exceptions row (same brokerage and property) names this transaction.
-// The duty is derived from that exception's category (pitCrewDuties.ts).
+// "Assigned to the transaction" (unchanged since t170u, existing data only):
+// an ACTIVE pit_crew_assignments row (CLAIMED, IN_PROGRESS or WAITING_ON)
+// assigned to this user, in this brokerage, on this property, with source
+// EXCEPTION (the only writable Pit Crew source, R-F21), whose risk_exceptions
+// row (same brokerage and property) names this transaction. Any exception
+// category counts. Whether assignment through every category is "authorised"
+// work is the Owner's open D2.3 question; no gate is added for it.
 //
-// Access log: each Pit Crew reveal of at least one group writes audit_logs
+// Access log: each Pit Crew reveal writes audit_logs
 // `transaction_purchase_price_viewed` (name kept from t170u) with role,
-// basis, assignment ids, duties, the revealed field CATEGORIES and the
-// surface. Never a value. Strict: an audit failure withholds every group.
+// basis, assignment ids, the exception categories behind them, the revealed
+// field CATEGORIES and the surface. Never a value. Strict: an audit failure
+// withholds every group.
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, pitCrewAssignments, properties, riskExceptions, type Transaction } from "@aee/db";
 import { logAudit } from "./audit.js";
 import { BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
-import {
-  ALL_FINANCIALS_VISIBLE,
-  NO_FINANCIALS_VISIBLE,
-  TRANSACTION_FINANCIAL_GROUPS,
-  TRANSACTION_FINANCIAL_GROUP_FIELDS,
-  dutyForAssignment,
-  financialVisibilityForDuties,
-  type FinancialVisibility,
-  type PitCrewDuty,
-} from "./pitCrewDuties.js";
 
 export const PURCHASE_PRICE_VIEWED_AUDIT_ACTION = "transaction_purchase_price_viewed";
 
 /** Pit Crew statuses that mean "this user is currently working the item". */
 export const ACTIVE_PIT_CREW_ASSIGNMENT_STATUSES = ["CLAIMED", "IN_PROGRESS", "WAITING_ON"] as const;
+
+/** Confidential transaction financial field groups (t171u inventory, t172u list). */
+export const TRANSACTION_FINANCIAL_GROUPS = ["purchasePrice", "deposit", "commission", "funds"] as const;
+export type TransactionFinancialGroup = (typeof TRANSACTION_FINANCIAL_GROUPS)[number];
+
+/**
+ * Transaction-row keys per group. `funds` also covers the derived
+ * `fundsReconciliation` (expected = commission + GST), which the transaction
+ * routes drop when `funds` is hidden.
+ */
+export const TRANSACTION_FINANCIAL_GROUP_FIELDS = {
+  purchasePrice: ["purchasePriceCents"],
+  deposit: ["depositCents"],
+  commission: ["grossCommissionCents", "gstCents"],
+  funds: ["fundsReceivedCents"],
+} as const satisfies Record<TransactionFinancialGroup, readonly (keyof Transaction)[]>;
+
+export type FinancialVisibility = Record<TransactionFinancialGroup, boolean>;
+const ALL: FinancialVisibility = Object.freeze({ purchasePrice: true, deposit: true, commission: true, funds: true });
+const NONE: FinancialVisibility = Object.freeze({ purchasePrice: false, deposit: false, commission: false, funds: false });
 
 export type FinancialAccessBasis = "brokerage_admin" | "listing_agent" | "pit_crew_assignment";
 
@@ -64,14 +76,12 @@ export type TransactionView = Partial<Transaction> &
     purchasePriceVisible: boolean;
   };
 
-/** Pure: omit (not null) every key of every hidden group. */
-export function toTransactionView(transaction: Transaction, visibility: FinancialVisibility | boolean): TransactionView {
-  const vis: FinancialVisibility =
-    typeof visibility === "boolean" ? (visibility ? { ...ALL_FINANCIALS_VISIBLE } : { ...NO_FINANCIALS_VISIBLE }) : { ...visibility };
+/** Pure: all groups or none (t172u); keys of hidden groups are omitted. */
+export function toTransactionView(transaction: Transaction, visible: boolean): TransactionView {
+  const vis: FinancialVisibility = { ...(visible ? ALL : NONE) };
   const out: Record<string, unknown> = { ...transaction };
-  for (const group of TRANSACTION_FINANCIAL_GROUPS) {
-    if (vis[group]) continue;
-    for (const key of TRANSACTION_FINANCIAL_GROUP_FIELDS[group]) delete out[key];
+  if (!visible) {
+    for (const group of TRANSACTION_FINANCIAL_GROUPS) for (const key of TRANSACTION_FINANCIAL_GROUP_FIELDS[group]) delete out[key];
   }
   out.financialVisibility = vis;
   out.purchasePriceVisible = vis.purchasePrice;
@@ -81,16 +91,15 @@ export function toTransactionView(transaction: Transaction, visibility: Financia
 export interface PitCrewTransactionAssignment {
   assignmentId: number;
   exceptionCategory: string;
-  duty: PitCrewDuty | null;
 }
 
-/** The caller's active Pit Crew assignments on this transaction, with duties. */
+/** The caller's active Pit Crew assignments on this transaction. */
 export async function activePitCrewAssignmentsForTransaction(
   user: Pick<AuthedUser, "id" | "brokerageId">,
   transaction: Pick<Transaction, "id" | "propertyId">,
 ): Promise<PitCrewTransactionAssignment[]> {
   const rows = await db
-    .select({ id: pitCrewAssignments.id, sourceType: pitCrewAssignments.sourceType, category: riskExceptions.category })
+    .select({ id: pitCrewAssignments.id, category: riskExceptions.category })
     .from(pitCrewAssignments)
     .innerJoin(
       riskExceptions,
@@ -111,11 +120,11 @@ export async function activePitCrewAssignmentsForTransaction(
       ),
     )
     .orderBy(pitCrewAssignments.id);
-  return rows.map((r) => ({ assignmentId: r.id, exceptionCategory: r.category, duty: dutyForAssignment(r.sourceType, r.category) }));
+  return rows.map((r) => ({ assignmentId: r.id, exceptionCategory: r.category }));
 }
 
 export interface TransactionFinancialAccess {
-  visibility: FinancialVisibility;
+  visible: boolean;
   basis: FinancialAccessBasis | null;
   assignments: PitCrewTransactionAssignment[];
 }
@@ -126,17 +135,15 @@ export async function resolveTransactionFinancialAccess(
   transaction: Pick<Transaction, "id" | "propertyId">,
   listingAgentId: number | null | undefined,
 ): Promise<TransactionFinancialAccess> {
-  if (BROKERAGE_ADMIN_ROLES.includes(user.role)) return { visibility: { ...ALL_FINANCIALS_VISIBLE }, basis: "brokerage_admin", assignments: [] };
+  if (BROKERAGE_ADMIN_ROLES.includes(user.role)) return { visible: true, basis: "brokerage_admin", assignments: [] };
   if (user.role === "Agent" && listingAgentId != null && listingAgentId === user.id) {
-    return { visibility: { ...ALL_FINANCIALS_VISIBLE }, basis: "listing_agent", assignments: [] };
+    return { visible: true, basis: "listing_agent", assignments: [] };
   }
   if (PIT_CREW_ROLES.includes(user.role)) {
     const assignments = await activePitCrewAssignmentsForTransaction(user, transaction);
-    if (assignments.length > 0) {
-      return { visibility: financialVisibilityForDuties(assignments.map((a) => a.duty)), basis: "pit_crew_assignment", assignments };
-    }
+    if (assignments.length > 0) return { visible: true, basis: "pit_crew_assignment", assignments };
   }
-  return { visibility: { ...NO_FINANCIALS_VISIBLE }, basis: null, assignments: [] };
+  return { visible: false, basis: null, assignments: [] };
 }
 
 /**
@@ -153,8 +160,7 @@ export async function transactionViewFor(user: AuthedUser, transaction: Transact
   // Defence in depth: callers already 404 another brokerage.
   if (!property || property.brokerageId !== user.brokerageId) return toTransactionView(transaction, false);
   const access = await resolveTransactionFinancialAccess(user, transaction, property.agentId);
-  const revealed = TRANSACTION_FINANCIAL_GROUPS.filter((g) => access.visibility[g]);
-  if (revealed.length === 0) return toTransactionView(transaction, false);
+  if (!access.visible) return toTransactionView(transaction, false);
   if (access.basis === "pit_crew_assignment") {
     try {
       await logAudit(
@@ -169,9 +175,9 @@ export async function transactionViewFor(user: AuthedUser, transaction: Transact
             actorRole: user.role,
             basis: access.basis,
             pitCrewAssignmentIds: access.assignments.map((a) => a.assignmentId),
-            duties: [...new Set(access.assignments.map((a) => a.duty).filter((d): d is PitCrewDuty => d !== null))],
-            fieldCategories: revealed,
-            dutyMapStatus: "PENDING_OWNER_CONFIRMATION",
+            exceptionCategories: [...new Set(access.assignments.map((a) => a.exceptionCategory))],
+            fieldCategories: [...TRANSACTION_FINANCIAL_GROUPS],
+            policy: "t172u",
             surface,
           }),
         },
@@ -181,5 +187,5 @@ export async function transactionViewFor(user: AuthedUser, transaction: Transact
       return toTransactionView(transaction, false);
     }
   }
-  return toTransactionView(transaction, access.visibility);
+  return toTransactionView(transaction, true);
 }
