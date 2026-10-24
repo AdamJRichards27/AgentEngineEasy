@@ -6,7 +6,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
   auditLogs,
@@ -346,5 +346,10 @@ test("[ATOMIC] comms MARK_SENT: if the operator audit write fails, the message s
   const [row] = await db.select().from(communicationMessages).where(eq(communicationMessages.id, msg.id));
   assert.equal(row.status, "MANUAL_REVIEW");
   assert.equal(row.version, msg.version);
-  assert.deepEqual(await db.select().from(auditLogs).where(eq(auditLogs.recordId, String(msg.id))), []);
+  // recordId alone is a serial id shared with every other record type in a shared test DB, so scope it to the
+  // two comms record types written by a resolve (operator row: queue name; transition row: communication_message).
+  assert.deepEqual(
+    await db.select().from(auditLogs).where(and(eq(auditLogs.recordId, String(msg.id)), inArray(auditLogs.recordType, ["communication_messages", "communication_message"]))),
+    [],
+  );
 });
