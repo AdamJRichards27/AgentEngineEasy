@@ -24,6 +24,7 @@ const AUTHENTICATED_PAGES = [
   "Settings",
   "SettingsIntegrations",
   "SettingsUsers",
+  "OfferCentre",
 ] as const;
 
 // Block comments (including JSX comments) keep their newlines so a hit can

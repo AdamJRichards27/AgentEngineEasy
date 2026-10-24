@@ -3,10 +3,20 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
+import {
+  createOffer,
+  listOffersForProperty,
+  listOffersForBrokerage,
+  listBuyersForBrokerage,
+  OFFER_CENTRE_STATUSES,
+  withdrawOffer,
+  declineOffer,
+  getOfferByShareToken,
+} from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
+import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 
 export const offersRouter = Router();
 
@@ -162,6 +172,104 @@ offersRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, asy
   }
   const rows = await listOffersForProperty(propertyId);
   res.json({ offers: rows });
+});
+
+// #34 slice 1 — Offer Centre. Read-only list of offers across the caller's
+// brokerage's properties. Registered before "/:id" so "centre" is not read
+// as an offer id. Same gates as the other authenticated offer routes. A
+// propertyId filter goes through propertyInBrokerage, so another
+// brokerage's property is 404 and increments the R-F8 metric once.
+const offerCentreQuerySchema = z.object({
+  status: z.enum(OFFER_CENTRE_STATUSES).optional(),
+  propertyId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).max(MAX_SIGNED_INT4).default(0),
+});
+
+// Owner t165u ("Offer prices: listing agent and authorised brokerage administrators only"): on
+// top of the role gate, an Agent's rows are limited to properties they are the listing agent for
+// (properties.agent_id, the same own-property rule as lib/propertyVisibility). Brokerage
+// Administrators stay brokerage-wide.
+// CC #34 / Owner t162u: offer prices, conditions and the buyer list are confidential. Same role gate
+// as the buyer engagement timeline: Agents and Brokerage Administrators only; Pit Crew gets 403 until
+// the Owner decides Pit Crew buyer access (BE-Q3 / D2d). Which agents see which listings is R-01.
+const requiresOfferCentreRole = requireRole("Agent", ...BROKERAGE_ADMIN_ROLES);
+
+offersRouter.get("/centre", requireAuth, requiresRunAccess, requiresOfferCentreRole, async (req, res) => {
+  const parsed = offerCentreQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query" });
+    return;
+  }
+  const user = req.authedUser!;
+  let propertyId: number | undefined;
+  if (parsed.data.propertyId !== undefined) {
+    const id = readIdParam(res, parsed.data.propertyId, "property");
+    if (id === null) return;
+    // Owner t165u: a property the caller is not the listing agent for is
+    // 404 to an Agent, the same as another brokerage's or a missing one.
+    if (!(await propertyInBrokerage(id, user.brokerageId)) || (await propertyHiddenFromCaller(user, id))) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    propertyId = id;
+  }
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  try {
+    const result = await listOffersForBrokerage({
+      brokerageId: user.brokerageId,
+      status: parsed.data.status,
+      propertyId,
+      restrictTo,
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+    });
+    res.json({ offers: result.offers, total: result.total, limit: parsed.data.limit, offset: parsed.data.offset });
+  } catch (err) {
+    handleOfferError(err, res);
+  }
+});
+
+// #34 slice 3 — buyer list. Same gates and propertyId rule as /centre.
+// Registered before "/:id" so "buyers" is not read as an offer id.
+const buyerListQuerySchema = z.object({
+  propertyId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).max(MAX_SIGNED_INT4).default(0),
+});
+
+offersRouter.get("/buyers", requireAuth, requiresRunAccess, requiresOfferCentreRole, async (req, res) => {
+  const parsed = buyerListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query" });
+    return;
+  }
+  const user = req.authedUser!;
+  let propertyId: number | undefined;
+  if (parsed.data.propertyId !== undefined) {
+    const id = readIdParam(res, parsed.data.propertyId, "property");
+    if (id === null) return;
+    // Owner t165u: a property the caller is not the listing agent for is
+    // 404 to an Agent, the same as another brokerage's or a missing one.
+    if (!(await propertyInBrokerage(id, user.brokerageId)) || (await propertyHiddenFromCaller(user, id))) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    propertyId = id;
+  }
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  try {
+    const result = await listBuyersForBrokerage({
+      brokerageId: user.brokerageId,
+      propertyId,
+      restrictTo,
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+    });
+    res.json({ buyers: result.buyers, total: result.total, limit: parsed.data.limit, offset: parsed.data.offset });
+  } catch (err) {
+    handleOfferError(err, res);
+  }
 });
 
 offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {

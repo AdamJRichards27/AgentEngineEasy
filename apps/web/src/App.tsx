@@ -47,6 +47,7 @@ const Settings = lazy(() => import("./pages/Settings"));
 const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 const Owner = lazy(() => import("./pages/Owner"));
+const OfferCentre = lazy(() => import("./pages/OfferCentre"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
 const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
@@ -365,6 +366,7 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/communications" component={CommunicationsHub} />
           <Route path="/financial" component={FinancialOperations} />
           <Route path="/pit-crew" component={PitCrewCommandCentre} />
+          <Route path="/offers" component={OfferCentre} />
           <Route path="/grow/appraisals/:id/build">
             {selectAppraisalBuilderView(minimalShell) === "minimal" ? <MinimalAppraisalBuilder /> : <AppraisalWorkspace />}
           </Route>

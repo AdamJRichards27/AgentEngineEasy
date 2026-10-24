@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { eq, and } from "drizzle-orm";
+import { eq, and, asc, desc, sql, type SQL } from "drizzle-orm";
 import { db, offers, parties, propertyParties, properties } from "@aee/db";
 import type { Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
+import { visibleRequiredPropertySql } from "./propertyVisibility.js";
 
 /**
  * Offer capture (Build Brief — Phase 7, ARCHITECTURE.md §10). Offers are
@@ -142,6 +143,174 @@ async function brokerageIdForProperty(propertyId: number): Promise<number | unde
     .from(properties)
     .where(eq(properties.id, propertyId));
   return property?.brokerageId;
+}
+
+// #34 slice 1 — Offer Centre read. Offers across one brokerage's properties,
+// tenant-scoped by properties.brokerage_id in the WHERE clause, so another
+// brokerage's rows are never read. Selects an explicit column list: never
+// share_token, never buyer email/mobile/address. Read-only.
+export const OFFER_CENTRE_STATUSES = ["Received", "Accepted", "Declined", "Withdrawn"] as const;
+export type OfferCentreStatus = (typeof OFFER_CENTRE_STATUSES)[number];
+
+export interface OfferCentreRow {
+  id: number;
+  propertyId: number;
+  propertyAddress: string;
+  buyerPartyId: number | null;
+  buyerName: string | null;
+  offerPriceCents: number;
+  status: string;
+  conditions: unknown;
+  createdAt: Date;
+}
+
+export async function listOffersForBrokerage(input: {
+  brokerageId: number;
+  status?: OfferCentreStatus;
+  propertyId?: number;
+  /** Owner t165u: own-property scope from restrictedPropertyIdsFor. null is
+   * brokerage-wide (Brokerage Administrator); an Agent gets only properties
+   * they are the listing agent for, so offer prices reach the listing agent
+   * and brokerage administrators only. */
+  restrictTo: number[] | null;
+  limit: number;
+  offset: number;
+}): Promise<{ offers: OfferCentreRow[]; total: number }> {
+  const filters: SQL[] = [eq(properties.brokerageId, input.brokerageId)];
+  if (input.status) filters.push(eq(offers.status, input.status));
+  if (input.propertyId !== undefined) filters.push(eq(offers.propertyId, input.propertyId));
+  const scope = visibleRequiredPropertySql(offers.propertyId, input.restrictTo);
+  if (scope) filters.push(scope);
+  const where = and(...filters);
+  // Received first (still to act on), then Accepted, Declined, Withdrawn;
+  // any unexpected status value sorts last.
+  const statusRank = sql<number>`case ${offers.status} when 'Received' then 0 when 'Accepted' then 1 when 'Declined' then 2 when 'Withdrawn' then 3 else 4 end`;
+
+  const rows = await db
+    .select({
+      id: offers.id,
+      propertyId: offers.propertyId,
+      propertyAddress: properties.formattedAddress,
+      buyerPartyId: offers.buyerPartyId,
+      buyerFirstName: parties.firstName,
+      buyerLastName: parties.lastName,
+      buyerOrganisationName: parties.organisationName,
+      offerPriceCents: offers.offerPriceCents,
+      status: offers.status,
+      conditions: offers.conditions,
+      createdAt: offers.createdAt,
+    })
+    .from(offers)
+    .innerJoin(properties, eq(offers.propertyId, properties.id))
+    // The buyer party must be in the same brokerage, so a mis-linked party
+    // id can never surface another tenant's name.
+    .leftJoin(parties, and(eq(offers.buyerPartyId, parties.id), eq(parties.brokerageId, input.brokerageId)))
+    .where(where)
+    .orderBy(asc(statusRank), desc(offers.offerPriceCents), desc(offers.id))
+    .limit(input.limit)
+    .offset(input.offset);
+
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(offers)
+    .innerJoin(properties, eq(offers.propertyId, properties.id))
+    .where(where);
+
+  return {
+    offers: rows.map((row) => {
+      const personName = [row.buyerFirstName, row.buyerLastName].filter((part) => part && part.trim()).join(" ");
+      return {
+        id: row.id,
+        propertyId: row.propertyId,
+        propertyAddress: row.propertyAddress,
+        buyerPartyId: row.buyerPartyId,
+        buyerName: personName || row.buyerOrganisationName || null,
+        offerPriceCents: row.offerPriceCents,
+        status: row.status,
+        conditions: row.conditions,
+        createdAt: row.createdAt,
+      };
+    }),
+    total: count,
+  };
+}
+
+// #34 slice 3 — buyer list (Buyer Engagement start). property_parties rows
+// with role "Buyer" across one brokerage. Both joins are brokerage-scoped:
+// the property must be the caller's, and so must the party, so a mis-linked
+// party from another brokerage is never listed. Names only: no email,
+// mobile, residential address, or entity details. Read-only.
+export interface BuyerListRow {
+  linkId: number;
+  partyId: number;
+  buyerName: string | null;
+  propertyId: number;
+  propertyAddress: string;
+  linkedAt: Date;
+  /** Offers by this buyer party on this linked property (#34 slice 5). */
+  offerCount: number;
+}
+
+export async function listBuyersForBrokerage(input: {
+  brokerageId: number;
+  propertyId?: number;
+  /** Same own-property scope as listOffersForBrokerage (buyer identity is
+   * need-to-know for the listing's agent and brokerage administrators). */
+  restrictTo: number[] | null;
+  limit: number;
+  offset: number;
+}): Promise<{ buyers: BuyerListRow[]; total: number }> {
+  const filters: SQL[] = [eq(properties.brokerageId, input.brokerageId), eq(propertyParties.role, "Buyer")];
+  if (input.propertyId !== undefined) filters.push(eq(propertyParties.propertyId, input.propertyId));
+  const scope = visibleRequiredPropertySql(propertyParties.propertyId, input.restrictTo);
+  if (scope) filters.push(scope);
+  const where = and(...filters);
+  const partyJoin = and(eq(propertyParties.partyId, parties.id), eq(parties.brokerageId, input.brokerageId));
+
+  const rows = await db
+    .select({
+      linkId: propertyParties.id,
+      partyId: propertyParties.partyId,
+      firstName: parties.firstName,
+      lastName: parties.lastName,
+      organisationName: parties.organisationName,
+      propertyId: propertyParties.propertyId,
+      propertyAddress: properties.formattedAddress,
+      linkedAt: propertyParties.createdAt,
+      // Scoped through the link's own property, which the WHERE clause
+      // already restricts to the caller's brokerage.
+      offerCount: sql<number>`(select count(*)::int from ${offers} where ${offers.buyerPartyId} = ${propertyParties.partyId} and ${offers.propertyId} = ${propertyParties.propertyId})`,
+    })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .innerJoin(parties, partyJoin)
+    .where(where)
+    .orderBy(desc(propertyParties.createdAt), desc(propertyParties.id))
+    .limit(input.limit)
+    .offset(input.offset);
+
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .innerJoin(parties, partyJoin)
+    .where(where);
+
+  return {
+    buyers: rows.map((row) => {
+      const personName = [row.firstName, row.lastName].filter((part) => part && part.trim()).join(" ");
+      return {
+        linkId: row.linkId,
+        partyId: row.partyId,
+        buyerName: personName || row.organisationName || null,
+        propertyId: row.propertyId,
+        propertyAddress: row.propertyAddress,
+        linkedAt: row.linkedAt,
+        offerCount: row.offerCount,
+      };
+    }),
+    total: count,
+  };
 }
 
 export async function listOffersForProperty(propertyId: number): Promise<Offer[]> {
