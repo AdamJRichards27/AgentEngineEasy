@@ -13,6 +13,7 @@ import { and, eq } from "drizzle-orm";
 import { db, entitlementGrants, users } from "@aee/db";
 import { renderMetricsText, resetMetricsForTesting } from "@aee/events";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { canSeeOfferTerms, getBuyerEngagementTimeline } from "../../lib/buyerEngagement.js";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, devLogin, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -241,4 +242,45 @@ test("read-only: fetching the timeline writes nothing", async () => {
   const before1 = await engagement(X, P, A.agent.cookie);
   const before2 = await engagement(X, P, A.admin.cookie);
   assert.deepEqual(before1.body, before2.body);
+});
+
+// Confidentiality: offer prices/conditions only for Agents and Brokerage
+// Administrators, never Pit Crew.
+test("confidentiality: Agents and Brokerage Administrators see offer prices; conditions are never in the timeline", async () => {
+  for (const cookie of [A.agent.cookie, A.admin.cookie]) {
+    const r = await engagement(X, P, cookie);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.offerTermsVisible, true);
+    const prices = (r.body.events as Ev[]).filter((e) => e.type === "offer_received").map((e) => e.offerPriceCents);
+    assert.deepEqual(prices, [70_000_000, 72_000_000]);
+    assert.ok(!/"conditions"/.test(JSON.stringify(r.body)), "offer conditions must never be in the timeline");
+  }
+});
+
+test("confidentiality: Pit Crew gets 403 with no timeline, price or conditions in the body", async () => {
+  const res = await fetch(`${baseUrl}/api/offers/buyers/${X}/engagement?propertyId=${P}`, { headers: { cookie: pitCrew.cookie } });
+  const text = await res.text();
+  assert.equal(res.status, 403);
+  assert.deepEqual(JSON.parse(text), { error: "Forbidden" });
+  for (const leak of ["70000000", "72000000", "offerPriceCents", "events", "Xena"]) {
+    assert.ok(!text.includes(leak), `Pit Crew 403 body leaked ${leak}`);
+  }
+});
+
+test("confidentiality (second line): a Pit Crew viewer reaching the timeline builder gets no offer prices", async () => {
+  assert.equal(canSeeOfferTerms("Agent"), true);
+  assert.equal(canSeeOfferTerms("Brokerage Administrator"), true);
+  assert.equal(canSeeOfferTerms("Pit Crew"), false);
+  assert.equal(canSeeOfferTerms("Something Else"), false);
+
+  const t = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewerRole: "Pit Crew" });
+  assert.ok(t, "timeline exists for a linked buyer");
+  assert.equal(t.offerTermsVisible, false);
+  const text = JSON.stringify(t);
+  assert.ok(!text.includes("offerPriceCents"), "no price key for Pit Crew");
+  assert.ok(!text.includes("70000000") && !text.includes("72000000"), "no price values for Pit Crew");
+  assert.ok(!/"conditions"/.test(text));
+  // Same events otherwise: only the terms are withheld.
+  const full = await getBuyerEngagementTimeline({ brokerageId: A.brokerageId, propertyId: P, partyId: X, viewerRole: "Agent" });
+  assert.deepEqual(t.events.map((e) => e.type), full!.events.map((e) => e.type));
 });

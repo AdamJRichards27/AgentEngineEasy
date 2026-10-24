@@ -13,6 +13,12 @@
 //     settlement scheduled (one event per settlement_scheduled audit row, so
 //     a reschedule shows both; the scheduled date is dueAt) and settled.
 //
+// Confidentiality: offer terms (price; conditions are never included) are
+// shown only to Agents and Brokerage Administrators. Any other role (Pit Crew
+// today, should Owner BE-Q3 ever admit it to this route) gets the same
+// timeline with offerPriceCents omitted and offerTermsVisible: false. The
+// route's role gate already returns 403 to Pit Crew; this is the second line.
+//
 // Grow data (grow_activities) is never read here: growHistoryAvailable is
 // always false until BE-Q5 / slice B-3. No email, mobile or address of the
 // buyer is returned; commission and trust-fund fields are not exposed.
@@ -56,6 +62,13 @@ export interface BuyerEngagementTimeline {
   linkedAt: string;
   events: EngagementEvent[];
   growHistoryAvailable: false;
+  offerTermsVisible: boolean;
+}
+
+/** Roles allowed to see offer prices and conditions (never Pit Crew). */
+export const OFFER_TERMS_ROLES: readonly string[] = ["Agent", "Brokerage Administrator"];
+export function canSeeOfferTerms(role: string): boolean {
+  return OFFER_TERMS_ROLES.includes(role);
 }
 
 const OFFER_DECISION_ACTIONS = ["offer_accepted", "offer_declined", "offer_withdrawn", "offer_auto_declined"] as const;
@@ -75,7 +88,9 @@ export async function getBuyerEngagementTimeline(input: {
   brokerageId: number;
   propertyId: number;
   partyId: number;
+  viewerRole: string;
 }): Promise<BuyerEngagementTimeline | null> {
+  const offerTermsVisible = canSeeOfferTerms(input.viewerRole);
   const [link] = await db
     .select({
       linkedAt: propertyParties.createdAt,
@@ -106,7 +121,7 @@ export async function getBuyerEngagementTimeline(input: {
     .from(offers)
     .where(and(eq(offers.propertyId, input.propertyId), eq(offers.buyerPartyId, input.partyId)));
   for (const o of offerRows) {
-    events.push({ type: "offer_received", at: iso(o.createdAt), source: "offers", offerId: o.id, offerPriceCents: o.priceCents, offerStatus: o.status });
+    events.push({ type: "offer_received", at: iso(o.createdAt), source: "offers", offerId: o.id, ...(offerTermsVisible ? { offerPriceCents: o.priceCents } : {}), offerStatus: o.status });
   }
 
   if (offerRows.length > 0) {
@@ -184,5 +199,6 @@ export async function getBuyerEngagementTimeline(input: {
     linkedAt: iso(link.linkedAt),
     events,
     growHistoryAvailable: false,
+    offerTermsVisible,
   };
 }

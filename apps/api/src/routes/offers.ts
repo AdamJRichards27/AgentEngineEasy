@@ -285,7 +285,7 @@ offersRouter.get(
       return;
     }
     try {
-      const timeline = await getBuyerEngagementTimeline({ brokerageId: user.brokerageId, propertyId, partyId });
+      const timeline = await getBuyerEngagementTimeline({ brokerageId: user.brokerageId, propertyId, partyId, viewerRole: user.role });
       if (!timeline) {
         res.status(404).json({ error: "Not found" });
         return;
