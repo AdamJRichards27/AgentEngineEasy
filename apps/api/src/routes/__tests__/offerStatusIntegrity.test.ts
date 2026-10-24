@@ -299,3 +299,134 @@ test("tenant 404 and run.access 403 still come before any status check", async (
   }
   assert.equal(await offerStatus(offerId), "Received", "no 404/403 path changed the offer");
 });
+
+// ---------------------------------------------------------------------------
+// Scenarios ported from the superseded duplicate RUN-N1 branch
+// (run/offers-transition-integrity 24c2f708, offerTransitionIntegrity.test.ts)
+// that the tests above did not pin down: forced orderings where the
+// non-accept transition commits FIRST (raceBehindRowLock queues the starters
+// in the given order behind the held row lock), sequential re-accept returning
+// the same Transaction, and multi-round unforced races.
+// ---------------------------------------------------------------------------
+
+for (const firstVerb of ["withdraw", "decline"] as const) {
+  test(`ordered ${firstVerb}-then-accept: ${firstVerb} wins, accept gets 409, no overwrite, no transaction`, async () => {
+    const propertyId = await newProperty();
+    const offerId = await newOffer(propertyId, 81_000_000);
+    const [first, acc] = await raceBehindRowLock(offerId, [
+      () => call("POST", `/offers/${offerId}/${firstVerb}`, A.agent.cookie),
+      () => call("POST", `/offers/${offerId}/accept`, A.admin.cookie),
+    ]);
+    const expected = firstVerb === "withdraw" ? "Withdrawn" : "Declined";
+    assert.equal(first.status, 200, `${firstVerb} should win: ${JSON.stringify(first.body)}`);
+    assertConflict(acc, `accept after a committed ${firstVerb}`);
+    assert.equal(acc.body.currentStatus, expected);
+    assert.equal(await offerStatus(offerId), expected, `lost update: accept overwrote a committed ${firstVerb}`);
+    assert.equal(await transactionCount(propertyId), 0, `a Transaction was created from a ${expected} offer`);
+    const [property] = await db.select({ stage: properties.workflowStage }).from(properties).where(eq(properties.id, propertyId));
+    assert.equal(property.stage, "Listed");
+  });
+}
+
+for (const laterVerb of ["withdraw", "decline"] as const) {
+  test(`ordered accept-then-${laterVerb}: accept wins, ${laterVerb} gets 409 and must not overwrite Accepted`, async () => {
+    const propertyId = await newProperty();
+    const offerId = await newOffer(propertyId, 82_000_000);
+    const [acc, later] = await raceBehindRowLock(offerId, [
+      () => call("POST", `/offers/${offerId}/accept`, A.admin.cookie),
+      () => call("POST", `/offers/${offerId}/${laterVerb}`, A.agent.cookie),
+    ]);
+    assert.equal(acc.status, 201, `accept should win: ${JSON.stringify(acc.body)}`);
+    assertConflict(later, `${laterVerb} after a committed accept`);
+    assert.equal(later.body.currentStatus, "Accepted");
+    assert.equal(await offerStatus(offerId), "Accepted", `lost update: ${laterVerb} overwrote an Accepted offer with a Transaction`);
+    assert.equal(await transactionCount(propertyId), 1);
+  });
+}
+
+test("ordered sibling withdraw-then-accept: auto-decline must not overwrite the committed Withdrawn sibling, and audits nothing for it", async () => {
+  const propertyId = await newProperty();
+  const winnerId = await newOffer(propertyId, 83_000_000);
+  const siblingId = await newOffer(propertyId, 84_000_000);
+  const [wd, acc] = await raceBehindRowLock(siblingId, [
+    () => call("POST", `/offers/${siblingId}/withdraw`, A.agent.cookie),
+    () => call("POST", `/offers/${winnerId}/accept`, A.admin.cookie),
+  ]);
+  assert.equal(wd.status, 200, JSON.stringify(wd.body));
+  assert.equal(acc.status, 201, JSON.stringify(acc.body));
+  assert.equal(await offerStatus(siblingId), "Withdrawn", "lost update: auto-decline overwrote the buyer's withdrawal");
+  assert.equal(await offerStatus(winnerId), "Accepted");
+  const autoDeclineAudits = await db
+    .select({ id: auditLogs.id })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "offer_auto_declined"), eq(auditLogs.recordId, String(siblingId))));
+  assert.equal(autoDeclineAudits.length, 0, "no offer_auto_declined audit for a sibling that was not actually declined");
+});
+
+test("sequential re-accept of an Accepted offer: 200 created:false with the SAME Transaction, never a duplicate", async () => {
+  const propertyId = await newProperty();
+  const offerId = await newOffer(propertyId, 85_000_000);
+  const first = await call("POST", `/offers/${offerId}/accept`, A.admin.cookie);
+  assert.equal(first.status, 201);
+  const second = await call("POST", `/offers/${offerId}/accept`, A.agent.cookie);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.created, false);
+  assert.equal((second.body.transaction as { id: number }).id, (first.body.transaction as { id: number }).id);
+  assert.equal(await transactionCount(propertyId), 1);
+});
+
+const RACE_ROUNDS = 6;
+const FINAL: Record<"accept" | "decline" | "withdraw", string> = { accept: "Accepted", decline: "Declined", withdraw: "Withdrawn" };
+
+for (const [a, b] of [
+  ["accept", "withdraw"],
+  ["accept", "decline"],
+  ["decline", "withdraw"],
+] as const) {
+  test(`unforced race ${a} vs ${b} (${RACE_ROUNDS} rounds): exactly one wins, loser 409, final status is the winner's`, async () => {
+    for (let round = 0; round < RACE_ROUNDS; round += 1) {
+      const propertyId = await newProperty();
+      const offerId = await newOffer(propertyId, 86_000_000 + round);
+      const [ra, rb] = await Promise.all([
+        call("POST", `/offers/${offerId}/${a}`, A.admin.cookie),
+        call("POST", `/offers/${offerId}/${b}`, A.agent.cookie),
+      ]);
+      const wins = [ra, rb].filter(isSuccess);
+      assert.equal(wins.length, 1, `round ${round}: ${a} ${ra.status}, ${b} ${rb.status}`);
+      const [winnerVerb, loser] = isSuccess(ra) ? [a, rb] : [b, ra];
+      assertConflict(loser, `round ${round} ${a} vs ${b}`);
+      assert.equal(await offerStatus(offerId), FINAL[winnerVerb], `round ${round}: final status`);
+      assert.equal(await transactionCount(propertyId), winnerVerb === "accept" ? 1 : 0, `round ${round}: transactions`);
+    }
+  });
+}
+
+test(`unforced race: sibling accepts (${RACE_ROUNDS} rounds) give 201 + 409, one Transaction, Accepted + Declined`, async () => {
+  for (let round = 0; round < RACE_ROUNDS; round += 1) {
+    const propertyId = await newProperty();
+    const one = await newOffer(propertyId, 87_000_000 + round);
+    const two = await newOffer(propertyId, 87_500_000 + round);
+    const [r1, r2] = await Promise.all([
+      call("POST", `/offers/${one}/accept`, A.admin.cookie),
+      call("POST", `/offers/${two}/accept`, A.agent.cookie),
+    ]);
+    assert.deepEqual([r1.status, r2.status].sort(), [201, 409], `round ${round}`);
+    assertConflict(r1.status === 409 ? r1 : r2, `round ${round} sibling accept`);
+    assert.equal(await transactionCount(propertyId), 1);
+    assert.deepEqual([await offerStatus(one), await offerStatus(two)].sort(), ["Accepted", "Declined"]);
+  }
+});
+
+test(`unforced race: same-offer double accept (${RACE_ROUNDS} rounds) gives 201 + 200 with the same Transaction`, async () => {
+  for (let round = 0; round < RACE_ROUNDS; round += 1) {
+    const propertyId = await newProperty();
+    const offerId = await newOffer(propertyId, 88_000_000 + round);
+    const [r1, r2] = await Promise.all([
+      call("POST", `/offers/${offerId}/accept`, A.admin.cookie),
+      call("POST", `/offers/${offerId}/accept`, A.agent.cookie),
+    ]);
+    assert.deepEqual([r1.status, r2.status].sort(), [200, 201], `round ${round}`);
+    assert.equal((r1.body.transaction as { id: number }).id, (r2.body.transaction as { id: number }).id, `round ${round}: same Transaction`);
+    assert.equal(await transactionCount(propertyId), 1);
+  }
+});
