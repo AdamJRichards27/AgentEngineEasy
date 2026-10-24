@@ -7,7 +7,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, entitlementGrants } from "@aee/db";
+import { db, entitlementGrants, offers } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import {
   createBrokerageWithUsers,
@@ -88,7 +88,11 @@ before(async () => {
 
   const offerRes = await getJson(`/offers/${offerId}`, A.agent.cookie);
   assert.equal(offerRes.status, 200);
-  shareToken = ((await offerRes.json()) as { offer: { shareToken: string } }).offer.shareToken;
+  // BE-Q1: authenticated offer reads no longer return the public buyer-link
+  // token (offerShareTokenExposure.test.ts), so read it from the row.
+  const [offerRow] = await db.select({ shareToken: offers.shareToken }).from(offers).where(eq(offers.id, offerId));
+  assert.ok(offerRow?.shareToken);
+  shareToken = offerRow.shareToken;
 
   const conditionRes = await postJson(`/transactions/${transactionId}/conditions`, A.agent.cookie, {
     description: "Subject to finance",

@@ -5,7 +5,14 @@ import { db, offers, properties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
+import {
+  createOffer,
+  listOffersForProperty,
+  withdrawOffer,
+  declineOffer,
+  getOfferByShareToken,
+  toOfferView,
+} from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
 export const offersRouter = Router();
@@ -146,6 +153,8 @@ offersRouter.post("/by-property/:propertyId", requireAuth, requiresRunAccess, as
       userId: user.id,
       brokerageId: user.brokerageId,
     });
+    // BE-Q1: the only response that still carries shareToken, returned once
+    // to the user who recorded the offer (see toOfferView in lib/offers.ts).
     res.status(201).json({ offer });
   } catch (err) {
     handleOfferError(err, res);
@@ -161,7 +170,7 @@ offersRouter.get("/by-property/:propertyId", requireAuth, requiresRunAccess, asy
     return;
   }
   const rows = await listOffersForProperty(propertyId);
-  res.json({ offers: rows });
+  res.json({ offers: rows.map(toOfferView) });
 });
 
 offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
@@ -173,7 +182,7 @@ offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  res.json({ offer });
+  res.json({ offer: toOfferView(offer) });
 });
 
 // The chokepoint that converts a Property into an active Transaction —
@@ -190,7 +199,7 @@ offersRouter.post("/:id/accept", requireAuth, requiresRunAccess, async (req, res
   }
   try {
     const result = await acceptOffer({ offerId: id, userId: user.id, brokerageId: user.brokerageId });
-    res.status(result.created ? 201 : 200).json(result);
+    res.status(result.created ? 201 : 200).json({ ...result, offer: toOfferView(result.offer) });
   } catch (err) {
     handleOfferError(err, res);
   }
@@ -207,7 +216,7 @@ offersRouter.post("/:id/decline", requireAuth, requiresRunAccess, async (req, re
   }
   try {
     const updated = await declineOffer(id, user.id);
-    res.json({ offer: updated });
+    res.json({ offer: toOfferView(updated) });
   } catch (err) {
     handleOfferError(err, res);
   }
@@ -224,7 +233,7 @@ offersRouter.post("/:id/withdraw", requireAuth, requiresRunAccess, async (req, r
   }
   try {
     const updated = await withdrawOffer(id, user.id);
-    res.json({ offer: updated });
+    res.json({ offer: toOfferView(updated) });
   } catch (err) {
     handleOfferError(err, res);
   }
