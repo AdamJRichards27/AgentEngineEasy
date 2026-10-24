@@ -21,6 +21,7 @@ import {
   denyFinancialAmendment,
   hiddenAgent,
   loadPropertyFinancialScope,
+  lockLiveAuthority,
   resolveAmendmentAuthority,
 } from "../lib/financialAmendments.js";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
@@ -290,8 +291,9 @@ const vendorCostSchema = z.object({ vendorName: z.string().max(200).nullable(), 
 
 // Owner t173u: a campaign item's vendor cost is a marketing charge. Amending
 // it needs authority: the listing agent or a Brokerage Administrator (own
-// authority). Pit Crew: 403 until a documented-authority record exists
-// (lib/financialAmendments.ts). Another Agent: 404 (own-property rule).
+// authority), or Pit Crew with a live CAMPAIGN_ITEM_COST grant (t174u) plus
+// an active assignment on the grant's transaction; otherwise 403. Another
+// Agent: 404 (own-property rule).
 // The cost update and its before/after audit row commit together.
 launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
@@ -307,7 +309,7 @@ launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, req
     res.status(404).json({ error: "Campaign item not found", reason: "NOT_FOUND" });
     return;
   }
-  const authority = resolveAmendmentAuthority(user, scope);
+  const authority = await resolveAmendmentAuthority(user, scope, { scope: "CAMPAIGN_ITEM_COST", recordId: itemId });
   if (!authority.allowed) {
     await denyFinancialAmendment(res, user, scope, "campaign_item", itemId, "POST /launch/campaign-items/:itemId/vendor-cost");
     return;
@@ -319,6 +321,7 @@ launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, req
   }
   try {
     const updated = await recordVendorAndCost(itemId, user.brokerageId, actorFrom(user), parsed.data.vendorName, parsed.data.costCents, async (before, after, tx) => {
+      await lockLiveAuthority(tx, authority);
       await logAudit(
         amendmentAuditInput({
           user,

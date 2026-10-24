@@ -260,6 +260,13 @@
       "when": 1791843836237,
       "tag": "0036_e9_tenant_brokerage_id",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1792883726127,
+      "tag": "0038_financial_amendment_authorities",
+      "breakpoints": true
     }
   ]
 }

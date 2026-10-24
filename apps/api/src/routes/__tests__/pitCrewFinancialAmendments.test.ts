@@ -1,7 +1,8 @@
-// Owner t173u — Pit Crew financial permissions: amend only with documented
-// authority (none verifiable in the current schema, so Pit Crew amendments
-// fail closed), before/after amendment audit, and the t172u read rule for
-// agency-agreement fees. Synthetic data only.
+// Owner t173u/t174u — Pit Crew financial permissions: without a live
+// documented-authority grant (t174u, financial_amendment_authorities; the
+// grant paths are in financialAmendmentAuthorities.test.ts) Pit Crew
+// amendments fail closed; before/after amendment audit; and the t172u read
+// rule for agency-agreement fees. Synthetic data only.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";

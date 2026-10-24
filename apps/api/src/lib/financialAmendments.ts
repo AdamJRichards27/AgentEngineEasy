@@ -10,29 +10,39 @@
 //     releasing payments; transferring, withdrawing or disbursing funds;
 //     independently authorising changes to commission, fees or obligations.
 //
-// Design check (t173u A): the schema has NO record of a specific grant from a
-// specific listing agent or Brokerage Administrator to a specific Pit Crew
-// member for a specific transaction/record and change. pc_fee_authorities is
-// an agent's debit mandate to the platform; commission_agreements.approved_by
-// is the Brokerage Administrator's own approval; vendor_approvals is a
-// seller-side launch spend decision (Brokerage Administrator decides);
-// documents hold files, not grants; audit_logs is an append-only trail with
-// no grant, scope, expiry or revocation semantics. There is also no
-// "brokerage owner" role (roles: Agent, Brokerage Administrator, Pit Crew;
-// platform_owners is the platform operator, not a brokerage owner).
-// So documented authority cannot be verified server-side without new schema,
-// and Pit Crew amendments FAIL CLOSED (403). A client-sent authority flag or
-// "authorised by" id is never read. The proposed grant table is in the PR.
+// Design check (t173u A) found no existing record of a specific grant, so
+// Owner t174u APPROVED a narrowly scoped grant table (migration 0038,
+// financial_amendment_authorities): transaction-specific, documented,
+// limited to amendments that exist today (AGENCY_TERMS, CAMPAIGN_ITEM_COST),
+// optionally narrowed to one record, revocable and expiring. Brokerage
+// Administrator is the brokerage's authorised approval role (t174u; no
+// "brokerage owner" role). A Pit Crew amendment is allowed ONLY with a live
+// grant (unexpired, unrevoked) matching the property, scope and target AND an
+// active Pit Crew assignment on the grant's transaction. The server looks the
+// grant up; client-sent authority fields are never read. Grants never reach
+// payment, debit, refund, release, disbursement or authority routes.
 //
-// Who may amend today: the Brokerage Administrator and the property's
-// listing agent, acting on their own authority (authoriser = performer).
+// The Brokerage Administrator and the property's listing agent amend on
+// their own authority (authoriser = performer).
 
 import type { Response } from "express";
-import { auditLogs, db, properties, type AgencyAgreementTerms } from "@aee/db";
-import { and, eq } from "drizzle-orm";
+import {
+  auditLogs,
+  db,
+  financialAmendmentAuthorities,
+  FINANCIAL_AMENDMENT_SCOPE_TARGET_TYPE,
+  properties,
+  type AgencyAgreementTerms,
+  type FinancialAmendmentScope,
+} from "@aee/db";
+import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { logAudit, type AuditLogInput } from "./audit.js";
 import { BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
-import { activePitCrewAssignmentsForProperty, type PitCrewTransactionAssignment } from "./transactionPriceAccess.js";
+import {
+  activePitCrewAssignmentsForProperty,
+  activePitCrewAssignmentsForTransaction,
+  type PitCrewTransactionAssignment,
+} from "./transactionPriceAccess.js";
 
 export const FINANCIAL_RECORD_AMENDED_AUDIT_ACTION = "financial_record_amended";
 export const FINANCIAL_AMENDMENT_DENIED_AUDIT_ACTION = "financial_amendment_denied";
@@ -40,6 +50,17 @@ export const PROPERTY_FINANCIALS_VIEWED_AUDIT_ACTION = "property_financials_view
 export const AMENDMENT_AUTHORITY_REQUIRED = "FINANCIAL_AMENDMENT_AUTHORITY_REQUIRED";
 
 export type AmendmentAuthorityBasis = "brokerage_admin" | "listing_agent";
+export type AmendmentBasis = AmendmentAuthorityBasis | "documented_authority";
+
+/**
+ * Longest grant a grantor may issue, in days. Default 30 (Owner-confirmable
+ * default, t174u); configurable with FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS
+ * (1–90).
+ */
+export function maxAuthorityGrantDays(): number {
+  const n = Number(process.env.FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS);
+  return Number.isInteger(n) && n >= 1 && n <= 90 ? n : 30;
+}
 
 export interface PropertyFinancialScope {
   propertyId: number;
@@ -122,22 +143,98 @@ export async function logPitCrewPropertyFinancialView(
 }
 
 export type AmendmentAuthority =
-  | { allowed: true; basis: AmendmentAuthorityBasis; authorisedByUserId: number; authorisedByRole: string }
+  | {
+      allowed: true;
+      basis: AmendmentBasis;
+      authorisedByUserId: number;
+      authorisedByRole: string;
+      authorityId?: number;
+      authorityTransactionId?: number;
+      evidenceDocumentId?: number | null;
+      evidenceNote?: string | null;
+      pitCrewAssignmentIds?: number[];
+    }
   | { allowed: false };
 
+export interface AmendmentTarget {
+  scope: FinancialAmendmentScope;
+  /** The specific record being amended, when it already exists. */
+  recordId: string | null;
+}
+
 /**
- * Server-side only. Brokerage Administrator or listing agent amend on their
- * own authority. Pit Crew: no verifiable documented-authority record exists
- * (see header), so always denied. Nothing from the request body is read.
+ * Server-side only; nothing from the request body is read.
+ * - Brokerage Administrator / listing agent: own authority.
+ * - Pit Crew: a live grant (unrevoked, unexpired) for this property and
+ *   scope, untargeted or targeting this record, whose transaction this user
+ *   holds an active Pit Crew assignment on. Oldest matching grant wins.
+ * - Anyone else: denied.
  */
-export function resolveAmendmentAuthority(user: AuthedUser, scope: PropertyFinancialScope): AmendmentAuthority {
+export async function resolveAmendmentAuthority(
+  user: AuthedUser,
+  scope: PropertyFinancialScope,
+  target: AmendmentTarget,
+): Promise<AmendmentAuthority> {
   if (BROKERAGE_ADMIN_ROLES.includes(user.role)) {
     return { allowed: true, basis: "brokerage_admin", authorisedByUserId: user.id, authorisedByRole: user.role };
   }
   if (isListingAgent(user, scope)) {
     return { allowed: true, basis: "listing_agent", authorisedByUserId: user.id, authorisedByRole: user.role };
   }
+  if (!PIT_CREW_ROLES.includes(user.role)) return { allowed: false };
+  const targetType = FINANCIAL_AMENDMENT_SCOPE_TARGET_TYPE[target.scope];
+  const grants = await db
+    .select()
+    .from(financialAmendmentAuthorities)
+    .where(
+      and(
+        eq(financialAmendmentAuthorities.brokerageId, user.brokerageId),
+        eq(financialAmendmentAuthorities.propertyId, scope.propertyId),
+        eq(financialAmendmentAuthorities.granteeUserId, user.id),
+        eq(financialAmendmentAuthorities.scope, target.scope),
+        isNull(financialAmendmentAuthorities.revokedAt),
+        gt(financialAmendmentAuthorities.expiresAt, sql`now()`),
+        target.recordId === null
+          ? isNull(financialAmendmentAuthorities.targetRecordId)
+          : or(
+              isNull(financialAmendmentAuthorities.targetRecordId),
+              and(eq(financialAmendmentAuthorities.targetRecordType, targetType), eq(financialAmendmentAuthorities.targetRecordId, target.recordId)),
+            ),
+      ),
+    )
+    .orderBy(financialAmendmentAuthorities.id);
+  for (const grant of grants) {
+    const assignments = await activePitCrewAssignmentsForTransaction(user, { id: grant.transactionId, propertyId: grant.propertyId });
+    if (assignments.length === 0) continue;
+    return {
+      allowed: true,
+      basis: "documented_authority",
+      authorisedByUserId: grant.grantedByUserId,
+      authorisedByRole: grant.grantedByRole,
+      authorityId: grant.id,
+      authorityTransactionId: grant.transactionId,
+      evidenceDocumentId: grant.evidenceDocumentId,
+      evidenceNote: grant.evidenceNote,
+      pitCrewAssignmentIds: assignments.map((a) => a.assignmentId),
+    };
+  }
   return { allowed: false };
+}
+
+/**
+ * Inside the amendment's DB transaction: lock the grant row and confirm it is
+ * still live, so a concurrent revoke or an expiry between the check and the
+ * write rolls the amendment back (fail closed). No-op for own-authority.
+ */
+export async function lockLiveAuthority(
+  tx: { execute: typeof db.execute },
+  authority: Extract<AmendmentAuthority, { allowed: true }>,
+): Promise<void> {
+  if (authority.authorityId === undefined) return;
+  const res = await tx.execute(
+    sql`select id from financial_amendment_authorities where id = ${authority.authorityId} and revoked_at is null and expires_at > now() for update`,
+  );
+  if (res.rows.length !== 1) throw new Error("financial amendment authority is no longer live");
 }
 
 /** 403 with a stable reason, plus a best-effort, value-free denial row. */
@@ -159,7 +256,7 @@ export async function denyFinancialAmendment(
     updatedValue: JSON.stringify({ actorRole: user.role, reason: AMENDMENT_AUTHORITY_REQUIRED, policy: "t173u", surface }),
   });
   res.status(403).json({
-    error: "Changing financial terms needs documented authority from the listing agent or a Brokerage Administrator.",
+    error: "Changing financial terms needs a live documented authority from the listing agent or a Brokerage Administrator, and an active assignment on that transaction.",
     reason: AMENDMENT_AUTHORITY_REQUIRED,
   });
 }
@@ -193,6 +290,11 @@ export function amendmentAuditInput(args: {
       authorisedByUserId: args.authority.authorisedByUserId,
       authorisedByRole: args.authority.authorisedByRole,
       authorityBasis: args.authority.basis,
+      authorityId: args.authority.authorityId ?? null,
+      authorityTransactionId: args.authority.authorityTransactionId ?? null,
+      evidenceDocumentId: args.authority.evidenceDocumentId ?? null,
+      evidenceNote: args.authority.evidenceNote ?? null,
+      pitCrewAssignmentIds: args.authority.pitCrewAssignmentIds ?? [],
       performedByUserId: args.user.id,
       performedByRole: args.user.role,
       performedAt: new Date().toISOString(),

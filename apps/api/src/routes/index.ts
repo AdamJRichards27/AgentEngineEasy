@@ -12,6 +12,7 @@ import { documentsRouter } from "./documents.js";
 import { paymentsRouter } from "./payments.js";
 import { offersRouter } from "./offers.js";
 import { transactionsRouter } from "./transactions.js";
+import { financialAuthoritiesRouter } from "./financialAuthorities.js";
 import { homeRouter } from "./home.js";
 import { aiRouter } from "./ai.js";
 import { aiActionsRouter } from "./ai-actions.js";
@@ -78,6 +79,8 @@ apiRouter.use("/documents", documentsRouter);
 apiRouter.use("/payments", paymentsRouter);
 apiRouter.use("/offers", offersRouter);
 apiRouter.use("/transactions", transactionsRouter);
+// Owner t174u — Pit Crew financial amendment authority grants (migration 0038).
+apiRouter.use("/financial-amendment-authorities", financialAuthoritiesRouter);
 apiRouter.use("/home", homeRouter);
 apiRouter.use("/ai", aiRouter);
 apiRouter.use("/ai/actions", aiActionsRouter);

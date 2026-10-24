@@ -2,7 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import multer from "multer";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, documents, properties } from "@aee/db";
+import { agencyAgreementTerms, db, documents, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import type { AgencyAgreementTerms } from "@aee/db";
@@ -13,6 +13,7 @@ import {
   hiddenAgent,
   loadPropertyFinancialScope,
   agencyTermsViewFor,
+  lockLiveAuthority,
   resolveAmendmentAuthority,
 } from "../lib/financialAmendments.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
@@ -172,10 +173,11 @@ const agencyTermsSchema = z
 
 // Owner t173u: agency-agreement terms (commission rate, flat fee, marketing
 // fee) are financial terms. Amending them needs authority: the listing agent
-// or a Brokerage Administrator acting on their own authority. Pit Crew have
-// no verifiable documented-authority record yet (lib/financialAmendments.ts)
-// and get 403; an Agent who is not the listing agent gets 404 (own-property
-// rule). The write and its before/after audit row commit together.
+// or a Brokerage Administrator on their own authority, or Pit Crew holding a
+// live AGENCY_TERMS grant (t174u) plus an active assignment on the grant's
+// transaction; otherwise 403. An Agent who is not the listing agent gets 404
+// (own-property rule). The write, the grant re-check and the before/after
+// audit row commit together.
 documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
@@ -185,7 +187,14 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const authority = resolveAmendmentAuthority(user, scope);
+  const [existingTerms] = await db
+    .select({ id: agencyAgreementTerms.id })
+    .from(agencyAgreementTerms)
+    .where(eq(agencyAgreementTerms.propertyId, propertyId));
+  const authority = await resolveAmendmentAuthority(user, scope, {
+    scope: "AGENCY_TERMS",
+    recordId: existingTerms ? String(existingTerms.id) : null,
+  });
   if (!authority.allowed) {
     await denyFinancialAmendment(res, user, scope, "agency_agreement_terms", String(propertyId), "PUT /documents/agency-agreement-terms/:propertyId");
     return;
@@ -200,6 +209,7 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
     const terms = await upsertAgencyAgreementTerms(
       { propertyId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data },
       async (before, after, tx) => {
+        await lockLiveAuthority(tx, authority);
         const write = auditWriterFor(tx);
         await logAudit(
           {

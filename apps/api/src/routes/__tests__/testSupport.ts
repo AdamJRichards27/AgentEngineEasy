@@ -64,6 +64,7 @@ import {
   commissionCalculations,
   pcFeeAuthorities,
   pcFeeCalculations,
+  financialAmendmentAuthorities,
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
@@ -534,6 +535,8 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     // siblings above.
     await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
   }
+  // Owner t174u: grants reference transactions, properties, users and documents.
+  await db.delete(financialAmendmentAuthorities).where(inArray(financialAmendmentAuthorities.brokerageId, ids));
   await db.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids));
   await db.delete(pcFeeCalculations).where(inArray(pcFeeCalculations.brokerageId, ids));
   await db.delete(pcFeeAuthorities).where(inArray(pcFeeAuthorities.brokerageId, ids));
