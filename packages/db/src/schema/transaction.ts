@@ -23,6 +23,29 @@ export const offers = pgTable("offers", {
   propertyIdx: index("offers_property_idx").on(table.propertyId),
 }));
 
+// M3 (Owner t165u: revocable offer links, approved for development and
+// review; NOT executed outside local scratch without separate approval).
+// One row per issued buyer status link. offers.share_token is left exactly
+// as it was (data preservation): the migration copies every existing token
+// here as an active, non-expiring link, so links already sent keep working
+// until an agent revokes them. Reissue never overwrites: the old row is
+// revoked (reason "reissued") and a new row is added (D8 "no silent
+// replacement"). Rows are never deleted; ON DELETE CASCADE only follows the
+// test-suite cleanup of offers. User ids are plain integers, like audit_logs.
+export const offerShareLinks = pgTable("offer_share_links", {
+  id: serial("id").primaryKey(),
+  offerId: integer("offer_id").notNull().references(() => offers.id, { onDelete: "cascade" }),
+  token: text("token").notNull().unique(),
+  issuedAt: timestamp("issued_at").notNull().defaultNow(),
+  issuedByUserId: integer("issued_by_user_id"),
+  expiresAt: timestamp("expires_at"),
+  revokedAt: timestamp("revoked_at"),
+  revokedByUserId: integer("revoked_by_user_id"),
+  revokeReason: text("revoke_reason"), // "revoked" | "reissued"
+}, (table) => ({
+  offerIdx: index("offer_share_links_offer_idx").on(table.offerId),
+}));
+
 // Real structured fields from day one — not a single flat `commission` number
 // (the clearest schema gap the prior Agent Engine audit found).
 //
@@ -129,5 +152,6 @@ export type InsertOffer = z.infer<typeof insertOfferSchema>;
 export type InsertTransaction = z.infer<typeof insertTransactionSchema>;
 export type InsertTransactionCondition = z.infer<typeof insertTransactionConditionSchema>;
 export type Offer = typeof offers.$inferSelect;
+export type OfferShareLink = typeof offerShareLinks.$inferSelect;
 export type Transaction = typeof transactions.$inferSelect;
 export type TransactionCondition = typeof transactionConditions.$inferSelect;
