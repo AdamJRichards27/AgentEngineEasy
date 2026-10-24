@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { eq, and } from "drizzle-orm";
-import { db, offers, parties, propertyParties, properties } from "@aee/db";
+import { eq, and, isNull, desc } from "drizzle-orm";
+import { db, offers, offerShareLinks, parties, propertyParties, properties } from "@aee/db";
 import type { Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
@@ -94,6 +94,9 @@ export async function createOffer(input: {
       shareToken: randomBytes(16).toString("hex"),
     })
     .returning();
+  // M3: the creation token is also the offer's first share link (no expiry,
+  // same as before M3). offers.share_token keeps the original value.
+  await db.insert(offerShareLinks).values({ offerId: offer.id, token: offer.shareToken!, issuedByUserId: input.userId });
 
   await logAudit({
     brokerageId: input.brokerageId,
@@ -209,7 +212,7 @@ export function toOfferView(offer: Offer): OfferView {
 export async function getOfferByShareToken(
   shareToken: string,
 ): Promise<{ status: string; offerPriceCents: number; propertyAddress: string; createdAt: Date } | null> {
-  const [offer] = await db.select().from(offers).where(eq(offers.shareToken, shareToken));
+  const offer = await resolveShareToken(shareToken);
   if (!offer) return null;
   const [property] = await db.select().from(properties).where(eq(properties.id, offer.propertyId));
   return {
@@ -218,4 +221,116 @@ export async function getOfferByShareToken(
     propertyAddress: property?.formattedAddress ?? "",
     createdAt: offer.createdAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// M3 revocable offer links (Owner t165u; migration 0037 offer_share_links).
+// ---------------------------------------------------------------------------
+
+/**
+ * A public token is live when its offer_share_links row is neither revoked nor
+ * expired. Legacy fallback: a token found only in offers.share_token is live
+ * when that offer has no link rows at all (e.g. written by pre-M3 code during
+ * a rollout window). Revoked, expired and unknown tokens all answer null, so
+ * the public route returns the same 404 for each (no oracle).
+ */
+async function resolveShareToken(token: string, now: Date = new Date()): Promise<Offer | null> {
+  const [link] = await db.select().from(offerShareLinks).where(eq(offerShareLinks.token, token));
+  if (link) {
+    if (link.revokedAt) return null;
+    if (link.expiresAt && link.expiresAt.getTime() <= now.getTime()) return null;
+    const [offer] = await db.select().from(offers).where(eq(offers.id, link.offerId));
+    return offer ?? null;
+  }
+  const [offer] = await db.select().from(offers).where(eq(offers.shareToken, token));
+  if (!offer) return null;
+  const [anyLink] = await db.select({ id: offerShareLinks.id }).from(offerShareLinks).where(eq(offerShareLinks.offerId, offer.id)).limit(1);
+  return anyLink ? null : offer;
+}
+
+export interface ShareLinkStatus {
+  offerId: number;
+  active: boolean;
+  activeIssuedAt: Date | null;
+  activeExpiresAt: Date | null;
+  lastRevokedAt: Date | null;
+  linksIssued: number;
+}
+
+/** Status only; never returns a token. */
+export async function getShareLinkStatus(offerId: number, now: Date = new Date()): Promise<ShareLinkStatus> {
+  const rows = await db.select().from(offerShareLinks).where(eq(offerShareLinks.offerId, offerId)).orderBy(desc(offerShareLinks.issuedAt), desc(offerShareLinks.id));
+  const live = rows.find((r) => !r.revokedAt && (!r.expiresAt || r.expiresAt.getTime() > now.getTime())) ?? null;
+  const revoked = rows.filter((r) => r.revokedAt).map((r) => r.revokedAt!.getTime());
+  return {
+    offerId,
+    active: live !== null,
+    activeIssuedAt: live?.issuedAt ?? null,
+    activeExpiresAt: live?.expiresAt ?? null,
+    lastRevokedAt: revoked.length ? new Date(Math.max(...revoked)) : null,
+    linksIssued: rows.length,
+  };
+}
+
+async function revokeActiveLinks(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  offerId: number,
+  userId: number,
+  reason: "revoked" | "reissued",
+): Promise<number> {
+  const revoked = await tx
+    .update(offerShareLinks)
+    .set({ revokedAt: new Date(), revokedByUserId: userId, revokeReason: reason })
+    .where(and(eq(offerShareLinks.offerId, offerId), isNull(offerShareLinks.revokedAt)))
+    .returning({ id: offerShareLinks.id });
+  return revoked.length;
+}
+
+/** Revokes every unrevoked link of the offer. Idempotent (0 when none). Audited. */
+export async function revokeOfferShareLinks(input: { offerId: number; userId: number; brokerageId: number; propertyId: number }): Promise<{ revoked: number }> {
+  const revoked = await db.transaction((tx) => revokeActiveLinks(tx, input.offerId, input.userId, "revoked"));
+  await logAudit({
+    brokerageId: input.brokerageId,
+    userId: input.userId,
+    action: "offer_share_link_revoked",
+    recordType: "offer",
+    recordId: String(input.offerId),
+    propertyId: input.propertyId,
+    updatedValue: JSON.stringify({ revoked }),
+  });
+  return { revoked };
+}
+
+export const SHARE_LINK_MAX_EXPIRY_DAYS = 90;
+
+/**
+ * Revokes the current link(s) (reason "reissued", rows kept) and issues a new
+ * token, returned once to the caller. expiresInDays is optional: no expiry
+ * unless asked for (the default expiry is an open Owner detail, BE-Q1).
+ * The token value is never written to the audit log.
+ */
+export async function reissueOfferShareLink(input: {
+  offerId: number;
+  userId: number;
+  brokerageId: number;
+  propertyId: number;
+  expiresInDays?: number;
+}): Promise<{ shareToken: string; issuedAt: Date; expiresAt: Date | null; revokedPrevious: number }> {
+  const token = randomBytes(16).toString("hex");
+  const expiresAt = input.expiresInDays ? new Date(Date.now() + input.expiresInDays * 86_400_000) : null;
+  const result = await db.transaction(async (tx) => {
+    const revokedPrevious = await revokeActiveLinks(tx, input.offerId, input.userId, "reissued");
+    const [row] = await tx.insert(offerShareLinks).values({ offerId: input.offerId, token, issuedByUserId: input.userId, expiresAt }).returning();
+    return { revokedPrevious, row };
+  });
+  await logAudit({
+    brokerageId: input.brokerageId,
+    userId: input.userId,
+    action: "offer_share_link_reissued",
+    recordType: "offer",
+    recordId: String(input.offerId),
+    propertyId: input.propertyId,
+    updatedValue: JSON.stringify({ revokedPrevious: result.revokedPrevious, expiresAt: expiresAt?.toISOString() ?? null }),
+  });
+  return { shareToken: token, issuedAt: result.row.issuedAt, expiresAt, revokedPrevious: result.revokedPrevious };
 }

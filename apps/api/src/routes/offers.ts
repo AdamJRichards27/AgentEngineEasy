@@ -1,9 +1,9 @@
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, offers, properties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   createOffer,
@@ -12,6 +12,10 @@ import {
   declineOffer,
   getOfferByShareToken,
   toOfferView,
+  getShareLinkStatus,
+  revokeOfferShareLinks,
+  reissueOfferShareLink,
+  SHARE_LINK_MAX_EXPIRY_DAYS,
 } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
@@ -183,6 +187,81 @@ offersRouter.get("/:id", requireAuth, requiresRunAccess, async (req, res) => {
     return;
   }
   res.json({ offer: toOfferView(offer) });
+});
+
+// M3 revocable offer links (Owner t165u; migration 0037). The public link
+// shows the offer price, so managing it follows the Owner's offer-price rule
+// (t165u: "listing agent and authorised brokerage administrators only"):
+// a Brokerage Administrator, or the Agent who is the property's listing agent
+// (properties.agent_id). Other agents and Pit Crew get 403. Gate order: auth,
+// run.access, role, tenant 404 (R-F8 metric once), then the listing-agent check.
+const requiresShareLinkRole = requireRole("Agent", ...BROKERAGE_ADMIN_ROLES);
+
+async function loadOwnOffer(req: Request, res: Response): Promise<{ id: number; propertyId: number } | null> {
+  const id = readIdParam(res, req.params.id, "offer");
+  if (id === null) return null;
+  const user = req.authedUser!;
+  const [offer] = await db.select({ id: offers.id, propertyId: offers.propertyId }).from(offers).where(eq(offers.id, id));
+  if (!offer || !(await propertyInBrokerage(offer.propertyId, user.brokerageId))) {
+    res.status(404).json({ error: "Not found" });
+    return null;
+  }
+  if (!BROKERAGE_ADMIN_ROLES.includes(user.role)) {
+    const [property] = await db.select({ agentId: properties.agentId }).from(properties).where(eq(properties.id, offer.propertyId));
+    if (property?.agentId !== user.id) {
+      res.status(403).json({ error: "Only the listing agent or a brokerage administrator can manage this offer's link" });
+      return null;
+    }
+  }
+  return offer;
+}
+
+offersRouter.get("/:id/share-link", requireAuth, requiresRunAccess, requiresShareLinkRole, async (req, res) => {
+  const offer = await loadOwnOffer(req, res);
+  if (!offer) return;
+  try {
+    res.json({ shareLink: await getShareLinkStatus(offer.id) });
+  } catch (err) {
+    handleOfferError(err, res);
+  }
+});
+
+offersRouter.post("/:id/share-link/revoke", requireAuth, requiresRunAccess, requiresShareLinkRole, async (req, res) => {
+  const offer = await loadOwnOffer(req, res);
+  if (!offer) return;
+  const user = req.authedUser!;
+  try {
+    const result = await revokeOfferShareLinks({ offerId: offer.id, userId: user.id, brokerageId: user.brokerageId, propertyId: offer.propertyId });
+    res.json({ ...result, shareLink: await getShareLinkStatus(offer.id) });
+  } catch (err) {
+    handleOfferError(err, res);
+  }
+});
+
+const reissueSchema = z.object({ expiresInDays: z.number().int().min(1).max(SHARE_LINK_MAX_EXPIRY_DAYS).optional() }).strict();
+
+offersRouter.post("/:id/share-link/reissue", requireAuth, requiresRunAccess, requiresShareLinkRole, async (req, res) => {
+  const offer = await loadOwnOffer(req, res);
+  if (!offer) return;
+  const parsed = reissueSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: `expiresInDays must be a whole number from 1 to ${SHARE_LINK_MAX_EXPIRY_DAYS}` });
+    return;
+  }
+  const user = req.authedUser!;
+  try {
+    const result = await reissueOfferShareLink({
+      offerId: offer.id,
+      userId: user.id,
+      brokerageId: user.brokerageId,
+      propertyId: offer.propertyId,
+      expiresInDays: parsed.data.expiresInDays,
+    });
+    // The new token is returned once, to the caller, like POST create.
+    res.status(201).json(result);
+  } catch (err) {
+    handleOfferError(err, res);
+  }
 });
 
 // The chokepoint that converts a Property into an active Transaction —
