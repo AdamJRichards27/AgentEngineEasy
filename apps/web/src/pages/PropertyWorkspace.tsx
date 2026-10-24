@@ -137,7 +137,6 @@ interface OfferBlock {
   buyerPartyId: number | null;
   offerPriceCents: number;
   status: string;
-  shareToken: string | null;
   createdAt: string;
 }
 

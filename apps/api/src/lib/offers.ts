@@ -186,6 +186,23 @@ export async function declineOffer(offerId: number, userId: number): Promise<Off
   return updated;
 }
 
+/**
+ * CC #34 / decisions pack BE-Q1 (Owner direction t113u D8: revocable, audited
+ * buyer links, no silent replacement). `shareToken` is the unauthenticated
+ * buyer status link. Authenticated offer reads and offer-mutation responses
+ * return this view instead of the raw row, so other users in the brokerage
+ * can no longer collect every buyer's link. The token itself is unchanged
+ * (no rotation, links already sent keep working); POST create still returns
+ * it once to the user who recorded the offer. Explicit issue/revoke routes
+ * need the offer_share_links migration and wait for Owner approval.
+ */
+export type OfferView = Omit<Offer, "shareToken">;
+
+export function toOfferView(offer: Offer): OfferView {
+  const { shareToken: _shareToken, ...view } = offer;
+  return view;
+}
+
 // Public, unauthenticated lookup (offers.shareToken) — deliberately returns
 // only the minimum a buyer needs to see their own offer's status, never
 // other buyers' offers or internal ids.
