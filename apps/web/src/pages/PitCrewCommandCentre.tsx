@@ -29,6 +29,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { useSession } from "../lib/session";
 import { ApiError } from "../lib/api";
+import { PIT_CREW_WORKSPACE_LOADING_MESSAGE, pcWorkspaceLoadErrorMessage, pcWorkspaceStaleMessage, pcWorkspaceViewState } from "../lib/pitCrew";
 import {
   acknowledgePcEscalation,
   addPcNote,
@@ -52,6 +53,7 @@ import {
   pitCrewResponsibilityActionsVisible,
   pcStatusLabel,
   pcStatusPillClass,
+  pcItemDueLabel,
   pcTeamMemberName,
   reclaimPcHandBack,
   releasePcItem,
@@ -72,7 +74,7 @@ import {
   type PitCrewEscalationSeverity,
   type PitCrewHandBackReasonCategory,
 } from "../lib/pitCrew";
-import { BLOCKS_CLOSE_LABEL, categoryLabel, formatDueDate, isOverdue, severityLabel, severityPillClass, showBlocksClosePill } from "../lib/riskExceptions";
+import { BLOCKS_CLOSE_LABEL, categoryLabel, formatDueDate, severityLabel, severityPillClass, showBlocksClosePill } from "../lib/riskExceptions";
 
 function pcKey(sourceType: string, sourceRecordId: string): string {
   return `${sourceType}:${sourceRecordId}`;
@@ -199,11 +201,13 @@ export default function PitCrewCommandCentre() {
   const [tab, setTab] = useState<SectionKey>("overview");
   const [actionError, setActionError] = useState<{ key: string; message: string } | null>(null);
 
-  const { data, isLoading, isError, error } = useQuery({
+  const workspaceQuery = useQuery({
     queryKey: ["pit-crew-workspace"],
     queryFn: fetchPitCrewWorkspace,
     refetchInterval: 30000,
   });
+  const { data, isLoading, isError, error } = workspaceQuery;
+  const viewState = pcWorkspaceViewState({ isLoading: isLoading || !user, isError, hasData: data !== undefined });
 
   // 404 from the inbox route means the responsibility routes are not
   // registered. While this is loading or anything other than a confirmed
@@ -297,18 +301,22 @@ export default function PitCrewCommandCentre() {
     reclaim: (args) => reclaimMutation.mutate(args),
   };
 
-  if (isLoading || !user) {
+  // PC-C: only a load with nothing to show replaces the page. A failed
+  // background refresh keeps the workspace (and open forms) mounted.
+  if (!user || (viewState !== "ready" && viewState !== "ready-stale") || data === undefined) {
+    if (viewState === "error") {
+      return (
+        <div className="card" role="alert">
+          <p className="error-text">{pcWorkspaceLoadErrorMessage(error)}</p>
+          <button type="button" className="btn btn-secondary btn-small" onClick={() => void workspaceQuery.refetch()}>
+            Try again
+          </button>
+        </div>
+      );
+    }
     return (
-      <div className="card">
-        <p className="muted">Loading Pit Crew workspace…</p>
-      </div>
-    );
-  }
-
-  if (isError || !data) {
-    return (
-      <div className="card">
-        <p className="error-text">{error instanceof ApiError ? error.friendly : "Couldn't load the Pit Crew workspace."}</p>
+      <div className="card" role="status" aria-busy={true}>
+        <p className="muted">{PIT_CREW_WORKSPACE_LOADING_MESSAGE}</p>
       </div>
     );
   }
@@ -385,6 +393,15 @@ export default function PitCrewCommandCentre() {
           <h2>Command Centre</h2>
         </div>
       </div>
+
+      {viewState === "ready-stale" && (
+        <div className="card pc-refresh-notice" role="status">
+          <p className="muted">{pcWorkspaceStaleMessage(data.generatedAt)}</p>
+          <button type="button" className="btn btn-secondary btn-small" onClick={() => void workspaceQuery.refetch()}>
+            Try again
+          </button>
+        </div>
+      )}
 
       <nav className="pc-tabs">
         {sections.map((s) => (
@@ -635,11 +652,10 @@ function PcItemCard({
           </>
         ) : null}
         {item.propertyAddress ?? `Property #${item.propertyId}`} · {categoryLabel(item.category)}
-        {item.dueAt ? (
+        {pcItemDueLabel(item) ? (
           <>
             {" · "}
-            {isOverdue(item.dueAt) ? "overdue " : "due "}
-            {formatDueDate(item.dueAt)}
+            {pcItemDueLabel(item)}
           </>
         ) : null}
       </p>

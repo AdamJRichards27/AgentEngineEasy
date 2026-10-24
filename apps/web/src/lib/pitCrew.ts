@@ -4,6 +4,7 @@
 // hand-mirrors the Exception & Risk Engine -- there is no shared package
 // between apps/web and apps/api, so these shapes are kept in sync by hand.
 import { ApiError, apiFetch } from "./api";
+import { formatDueDate, isOverdue } from "./riskExceptions";
 
 export type PitCrewItemStatus =
   | "UNCLAIMED"
@@ -202,6 +203,39 @@ export function canResolveOrReturnEscalation(item: PcResponsibilityWorkItem, act
 
 export function fetchPitCrewWorkspace(): Promise<PcWorkspace> {
   return apiFetch<PcWorkspace>("/pit-crew/workspace");
+}
+
+// PC-C: workspace load and refresh states. The page polls every 30 s and
+// the app QueryClient has retry: false. In React Query v5 a failed
+// background refetch keeps `data` and sets isError, so an error with data
+// is "ready-stale": the workspace (and any half-filled inline form) stays
+// mounted with a notice. Only an error with nothing to show is "error".
+export type PcWorkspaceViewState = "loading" | "error" | "ready" | "ready-stale";
+
+export function pcWorkspaceViewState(query: { isLoading: boolean; isError: boolean; hasData: boolean }): PcWorkspaceViewState {
+  if (query.hasData) return query.isError ? "ready-stale" : "ready";
+  if (query.isError) return "error";
+  return "loading";
+}
+
+export const PIT_CREW_WORKSPACE_LOADING_MESSAGE = "Loading Pit Crew workspace…";
+export const PIT_CREW_WORKSPACE_LOAD_ERROR_FALLBACK = "Couldn't load the Pit Crew workspace.";
+
+// ApiError.friendly when it has text, otherwise the fallback. A non-API
+// error's raw message is never shown.
+export function pcWorkspaceLoadErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.friendly.trim().length > 0) return error.friendly;
+  return PIT_CREW_WORKSPACE_LOAD_ERROR_FALLBACK;
+}
+
+// Same time style as the page's existing "Updated" line.
+export function pcWorkspaceStaleMessage(
+  generatedAt: string | undefined,
+  formatTime: (instant: Date) => string = (instant) => instant.toLocaleTimeString(),
+): string {
+  const instant = generatedAt ? new Date(generatedAt) : null;
+  if (!instant || Number.isNaN(instant.getTime())) return "Couldn't refresh. Showing the last loaded workspace.";
+  return `Couldn't refresh. Showing the workspace as of ${formatTime(instant)}.`;
 }
 
 export function fetchPitCrewTeam(): Promise<PcTeamMember[]> {
@@ -515,4 +549,20 @@ export function pcStatusPillClass(status: string): string {
 
 export function pcTeamMemberName(member: PcTeamMember): string {
   return `${member.firstName} ${member.lastName}`;
+}
+
+// #29: the card's due/overdue label. item.overdue comes from the API
+// (source dueAt past, or WAITING_ON past waitingOnExpectedAt) and is the
+// only thing that decides "overdue". The client clock only picks wording:
+// an overdue item whose own dueAt has not passed is overdue on the expected
+// response, so it reads "response overdue".
+export function pcItemDueLabel(
+  item: Pick<PcWorkItem, "dueAt" | "overdue">,
+): string | null {
+  const due = item.dueAt ? formatDueDate(item.dueAt) : null;
+  if (item.overdue) {
+    if (item.dueAt && isOverdue(item.dueAt)) return `overdue ${due}`;
+    return due ? `response overdue · due ${due}` : "response overdue";
+  }
+  return due ? `due ${due}` : null;
 }

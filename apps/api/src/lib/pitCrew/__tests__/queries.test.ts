@@ -13,7 +13,7 @@ import { db, users } from "@aee/db";
 import { createOrUpdateException, newCorrelationId } from "../../exceptions/model.js";
 import type { RiskFinding } from "../../exceptions/types.js";
 import { getPitCrewWorkspace, getPitCrewTeam } from "../queries.js";
-import { claimWorkItem } from "../assignment.js";
+import { claimWorkItem, setWaitingOn, returnFromWaitingOn } from "../assignment.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -171,4 +171,101 @@ test("getPitCrewTeam reports a live count of claimed/in-progress/waiting-on item
   // An agent (not Pit Crew, and not active-in-brokerage-as-PC) never appears
   // in the roster at all -- this is a team capacity view, not a user list.
   assert.equal(teamAfter.some((m) => m.userId === agent.user.id), false);
+});
+
+// #29 — WAITING_ON overdue count. A Pit Crew item parked in WAITING_ON whose
+// waitingOnExpectedAt is strictly before now is overdue for the workspace
+// overdue flag and summary.overdueCount, and sorts above non-overdue
+// WAITING_ON items. The source dueAt rule is unchanged. Read-only: building
+// the workspace never changes status (the sweep does that, not this read).
+async function parkWaitingOn(
+  exceptionId: string,
+  waitingOnExpectedAt: Date | undefined,
+): Promise<number> {
+  const ref = { brokerageId, propertyId, sourceType: "EXCEPTION", sourceRecordId: exceptionId, actorUserId: pitCrewMember.user.id };
+  const claimed = await claimWorkItem({ ...ref, expectedVersion: 0 });
+  const waiting = await setWaitingOn({
+    ...ref, expectedVersion: claimed.version, waitingOnParty: "Vendor solicitor", waitingOnExpectedAt,
+  });
+  return waiting.version;
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+
+test("#29: a WAITING_ON item past waitingOnExpectedAt is overdue and counted, with no source dueAt", async () => {
+  const baseline = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const exceptionId = await createException({ ownerType: "PIT_CREW", dueAt: null });
+  await parkWaitingOn(exceptionId, new Date(Date.now() - HOUR_MS));
+
+  const ws = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const item = ws.waitingOn.find((i) => i.sourceRecordId === exceptionId);
+  assert.ok(item, "expected the item in waitingOn");
+  assert.equal(item!.pcStatus, "WAITING_ON", "the read must not change status");
+  assert.equal(item!.dueAt, null);
+  assert.equal(item!.overdue, true, "expected-at in the past makes a WAITING_ON item overdue");
+  assert.equal(ws.summary.overdueCount, baseline.summary.overdueCount + 1);
+  assert.equal(ws.summary.overdueCount, ws.teamWork.filter((i) => i.overdue).length);
+});
+
+test("#29: a WAITING_ON item with a future or null waitingOnExpectedAt is not overdue", async () => {
+  const baseline = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const futureId = await createException({ ownerType: "PIT_CREW", dueAt: null });
+  await parkWaitingOn(futureId, new Date(Date.now() + 24 * HOUR_MS));
+  const nullId = await createException({ ownerType: "PIT_CREW", dueAt: null });
+  await parkWaitingOn(nullId, undefined);
+
+  const ws = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  assert.equal(ws.waitingOn.find((i) => i.sourceRecordId === futureId)!.overdue, false);
+  assert.equal(ws.waitingOn.find((i) => i.sourceRecordId === nullId)!.overdue, false);
+  assert.equal(ws.summary.overdueCount, baseline.summary.overdueCount);
+});
+
+test("#29: source dueAt overdue behaviour is unchanged for non-WAITING_ON items", async () => {
+  const baseline = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const pastId = await createException({ ownerType: "PIT_CREW", dueAt: new Date(Date.now() - HOUR_MS) });
+  const futureId = await createException({ ownerType: "PIT_CREW", dueAt: new Date(Date.now() + 24 * HOUR_MS) });
+
+  const ws = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  assert.equal(ws.teamWork.find((i) => i.sourceRecordId === pastId)!.overdue, true);
+  assert.equal(ws.teamWork.find((i) => i.sourceRecordId === futureId)!.overdue, false);
+  assert.equal(ws.summary.overdueCount, baseline.summary.overdueCount + 1);
+});
+
+test("#29: a WAITING_ON item overdue by both rules is counted once", async () => {
+  const baseline = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const exceptionId = await createException({ ownerType: "PIT_CREW", dueAt: new Date(Date.now() - HOUR_MS) });
+  await parkWaitingOn(exceptionId, new Date(Date.now() - HOUR_MS));
+  const ws = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  assert.equal(ws.summary.overdueCount, baseline.summary.overdueCount + 1);
+});
+
+test("#29: an overdue WAITING_ON item sorts above non-overdue WAITING_ON items", async () => {
+  const notOverdueId = await createException({ ownerType: "PIT_CREW", severity: "CRITICAL", dueAt: null });
+  await parkWaitingOn(notOverdueId, new Date(Date.now() + 24 * HOUR_MS));
+  const overdueId = await createException({ ownerType: "PIT_CREW", severity: "ATTENTION", dueAt: null });
+  await parkWaitingOn(overdueId, new Date(Date.now() - HOUR_MS));
+
+  const ws = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const order = ws.waitingOn.map((i) => i.sourceRecordId);
+  assert.ok(order.indexOf(overdueId) < order.indexOf(notOverdueId), "overdue WAITING_ON must sort first");
+  const firstNotOverdue = ws.waitingOn.findIndex((i) => !i.overdue);
+  const lastOverdue = ws.waitingOn.map((i) => i.overdue).lastIndexOf(true);
+  assert.ok(firstNotOverdue === -1 || lastOverdue < firstNotOverdue, "every overdue WAITING_ON item precedes every non-overdue one");
+});
+
+test("#29: returning from WAITING_ON clears expected-at overdue", async () => {
+  const exceptionId = await createException({ ownerType: "PIT_CREW", dueAt: null });
+  const version = await parkWaitingOn(exceptionId, new Date(Date.now() - HOUR_MS));
+  const before3 = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  assert.equal(before3.waitingOn.find((i) => i.sourceRecordId === exceptionId)!.overdue, true);
+
+  await returnFromWaitingOn({
+    brokerageId, propertyId, sourceType: "EXCEPTION", sourceRecordId: exceptionId,
+    expectedVersion: version, actorUserId: pitCrewMember.user.id,
+  });
+  const after3 = await getPitCrewWorkspace(brokerageId, pitCrewMember.user.id);
+  const item = after3.teamWork.find((i) => i.sourceRecordId === exceptionId);
+  assert.equal(item!.pcStatus, "IN_PROGRESS");
+  assert.equal(item!.overdue, false);
+  assert.equal(after3.summary.overdueCount, before3.summary.overdueCount - 1);
 });

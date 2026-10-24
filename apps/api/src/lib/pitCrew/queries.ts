@@ -53,7 +53,9 @@ import {
   type ResponsibilityInbox,
   type ResponsibilityInboxItem,
   isPitCrewRelevantOwnerType,
+  comparePcWaitingOnItems,
   comparePcWorkItems,
+  isPcWorkItemOverdue,
   LAUNCH_COORDINATION_CATEGORIES,
   PIT_CREW_LAUNCH_ITEM_SOURCE_TYPE,
   TRANSACTION_COORDINATION_CATEGORIES,
@@ -330,7 +332,10 @@ async function loadLaunchItemWorkItems(
       ownerUserId: row.responsibleUserId,
       ownerName: ownerName.length > 0 ? ownerName : null,
       dueAt: dueAt ? dueAt.toISOString() : null,
-      overdue: dueAt ? dueAt.getTime() < now.getTime() : false,
+      overdue: isPcWorkItemOverdue(
+        { dueAt, pcStatus, waitingOnExpectedAt: overlay?.waitingOnExpectedAt ?? null },
+        now,
+      ),
       recommendedAction: "",
       deepLink: `/properties/${row.propertyId}`,
       detectedAt: new Date(row.createdAt).toISOString(),
@@ -407,7 +412,10 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
       ownerUserId: exc.ownerUserId,
       ownerName: exc.ownerName,
       dueAt: dueAt ? dueAt.toISOString() : null,
-      overdue: dueAt ? dueAt.getTime() < now.getTime() : false,
+      overdue: isPcWorkItemOverdue(
+        { dueAt, pcStatus, waitingOnExpectedAt: overlay?.waitingOnExpectedAt ?? null },
+        now,
+      ),
       recommendedAction: exc.recommendedAction,
       deepLink: `/properties/${exc.propertyId}`,
       detectedAt: new Date(exc.detectedAt).toISOString(),
@@ -455,7 +463,7 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
     .filter((item) => item.assignedToUserId === actorUserId && isActiveWorkspaceStatus(item.pcStatus))
     .sort(comparePcWorkItems);
   const teamWork = pcRelevant.filter((item) => isActiveWorkspaceStatus(item.pcStatus)).sort(comparePcWorkItems);
-  const waitingOn = pcRelevant.filter((item) => item.pcStatus === "WAITING_ON").sort(comparePcWorkItems);
+  const waitingOn = pcRelevant.filter((item) => item.pcStatus === "WAITING_ON").sort(comparePcWaitingOnItems);
   const completedToday = pcRelevant
     .filter((item) => item.pcStatus === "DONE" && item.completedAt && isSameUtcDay(new Date(item.completedAt), now))
     .sort((a, b) => new Date(b.completedAt ?? 0).getTime() - new Date(a.completedAt ?? 0).getTime());
