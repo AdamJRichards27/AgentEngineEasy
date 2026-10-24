@@ -9,6 +9,17 @@
 - It does **not** alter, rewrite or delete any `offers` row or column. Links already sent to buyers keep working until an agent revokes them.
 - **Number 0037 is a development placeholder.** The local, unpublished refund ledger (`0037_payment_refunds`, M5) and the PL-04 0035 repair proposal (`0037_repair_0035…`) also use 0037. Whichever is approved second must be regenerated (`pnpm --filter @aee/db run db:generate`) to the next number before merge. The journal `when` (1792837396131) is later than every existing entry, including 0034–0036, so the out-of-order 0035 `when` does not affect it.
 
+### Numbering decision (checked 24 Oct 2026, 21:20 AEST)
+- **The staging journal ends at 0036** (`0036_e9_tenant_brokerage_id`, when 1791843836237 = 13 Oct 08:23 AEST). No remote branch has a migration above 0036.
+- **Replit dev `heliumdb`:** per `PO_0035_RECONCILIATION_PLAN_2026-10-08.md` and `aee-replit-reconciliation-20261022.md`, 0035 is applied (hash `ededd89f…`, created_at 1791244800000) and the journal shows 37 rows (0000–0036). The out-of-order 0035 `when` only matters for 0035 itself. M3's `when` (1792837396131 = 24 Oct 20:23 AEST) is later than every applied created_at, so M3 is applied, not skipped. This was not re-queried live, because this lane has no DB access.
+- **Decision: keep 0037 for M3.** It is the next free number on staging, and the only 0037 approved for development (Owner t165u). The other two 0037s are local, unpublished and separately gated.
+- **What the refund ledger (`local/run-refund-ledger` 934bc3c, `0037_payment_refunds`, hand-set when 1792530000000 = 21 Oct 07:00 AEST) must become:**
+  - It must be **renumbered to the next free number (0038 or later)** by rebasing onto the merged M3 and running `db:generate`. A rename alone is not enough.
+  - Its journal `when` **must be regenerated so it is greater than 1792837396131**.
+  - Reason: drizzle applies an entry only if `when > max(created_at)`. If the ledger kept its 21 Oct `when`, any DB that had applied M3 would **skip it silently and permanently**. That is the same hazard as 0035.
+  - The same rule applies to the PL-04 repair proposal (`0037_repair_0035…`, when 1792368000000 = 19 Oct). If it is approved after M3, it needs a new number and a `when` above M3's.
+  - Approval order decides the final numbers. Each approved migration must have a strictly increasing `when`.
+
 ## Pre-apply checks (for the approved environment, later)
 1. Take a backup or snapshot, following the PH-7 backup/restore runbook.
 2. `pnpm --filter @aee/db run db:preflight` must pass.
