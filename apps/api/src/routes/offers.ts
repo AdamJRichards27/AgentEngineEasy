@@ -16,6 +16,7 @@ import {
   OfferStatusConflictError,
 } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
+import { transactionViewFor } from "../lib/transactionPriceAccess.js";
 import { propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 import type { AuthedUser } from "../middlewares/auth.js";
 
@@ -237,9 +238,14 @@ offersRouter.post("/:id/accept", requireAuth, requiresRunAccess, async (req, res
   }
   try {
     const result = await acceptOffer({ offerId: id, userId: user.id, brokerageId: user.brokerageId });
-    // P2 (Owner decision, not changed here): result.transaction carries the
-    // purchase price exactly as before.
-    res.status(result.created ? 201 : 200).json({ ...result, offer: toOfferViewFor(result.offer, access.termsVisible) });
+    // Owner t170u (4): the transaction created (or re-read) here is shaped
+    // like every other transaction response, so its purchase price reaches
+    // only the listing agent, Brokerage Administrators and assigned Pit Crew.
+    res.status(result.created ? 201 : 200).json({
+      ...result,
+      offer: toOfferViewFor(result.offer, access.termsVisible),
+      transaction: await transactionViewFor(user, result.transaction, "POST /offers/:id/accept"),
+    });
   } catch (err) {
     handleOfferError(err, res);
   }

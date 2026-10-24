@@ -146,7 +146,11 @@ interface OfferBlock {
 interface TransactionBlock {
   id: number;
   propertyId: number;
-  purchasePriceCents: number;
+  /** Omitted by the server unless the viewer is the listing agent, a
+   * Brokerage Administrator, or Pit Crew assigned to this transaction (Owner
+   * t170u); purchasePriceVisible is then false. */
+  purchasePriceCents?: number;
+  purchasePriceVisible?: boolean;
   contractDate: string | null;
   financeApprovedAt: string | null;
   exchangedAt: string | null;
@@ -1813,7 +1817,10 @@ function TransactionBlockView({
   return (
     <div className="stack">
       <p>
-        {formatCents(transaction.purchasePriceCents)} · <span className="pill">{transaction.status}</span>
+        {transaction.purchasePriceVisible === false || transaction.purchasePriceCents === undefined
+          ? "Price restricted"
+          : formatCents(transaction.purchasePriceCents)}{" "}
+        · <span className="pill">{transaction.status}</span>
       </p>
       {actions.closedNote && <p className="muted">{actions.closedNote}</p>}
 
