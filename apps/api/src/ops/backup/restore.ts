@@ -1,19 +1,12 @@
-import { runCommand } from "./commands.js";
-import { loadProductionBackupConfig } from "./config.js";
-import { restoreBackup } from "./engine.js";
+import { EMBEDDED_BUILD_STAMP } from "./buildStamp.js";
+import { runCli } from "./cli.js";
+import { createScopedRunner, runCommand } from "./commands.js";
 
-function argument(name: string): string {
-  const prefix = `--${name}=`;
-  const found = process.argv.slice(2).find((value) => value.startsWith(prefix))?.slice(prefix.length);
-  if (!found) throw new Error(`Required argument --${name}=... is missing`);
-  return found;
-}
-
-await restoreBackup(
-  loadProductionBackupConfig(),
-  {
-    artifact: argument("artifact"),
-    confirmDisposable: process.argv.includes("--confirm-disposable"),
-  },
-  { run: runCommand },
-);
+// Exit codes and output: CLI-SPEC.md (0 ok, 1 failed, 64 usage, 69 preflight, 70 internal, 78 config; 75 reserved).
+process.exitCode = await runCli("restore", {
+  argv: process.argv.slice(2),
+  env: process.env,
+  runFor: (config) => (config.envIsolation ? createScopedRunner(config.envIsolation) : runCommand),
+  bootstrapRun: runCommand,
+  buildStamp: { stamp: EMBEDDED_BUILD_STAMP, entryUrl: import.meta.url },
+});

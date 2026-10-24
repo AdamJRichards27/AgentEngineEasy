@@ -17,7 +17,7 @@ import {
   WORKFLOW_STAGES,
 } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
-import { createPropertyDataProvider } from "@aee/integration-property-data";
+import { createGuardedPropertyDataProvider } from "../lib/propertyData.js";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
@@ -42,7 +42,7 @@ export const propertiesRouter = Router();
 // same-brokerage existence oracle. Denial is requireEntitlement's
 // existing 403.
 const requiresRunAccess = requireEntitlement("run.access");
-const propertyDataProvider = createPropertyDataProvider();
+const propertyDataProvider = createGuardedPropertyDataProvider();
 
 // AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
 // request (400), not a server fault (500). Before this guard, `Number("abc")`

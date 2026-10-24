@@ -14,10 +14,13 @@ import {
   ObjectIntegrityError,
   ObjectStorageRequestError,
   createObjectStorageProvider,
+  LocalObjectStorageProvider,
+  S3ObjectStorageProvider,
   type ObjectStorageProvider,
   type ReadinessResult as ProviderReadinessResult,
 } from "@aee/integration-object-storage";
 import { logAudit } from "./audit.js";
+import { guardStorageWrites } from "./outboundGuard.js";
 import {
   documentInBrokerage,
   documentMatchesVersionBrokerage,
@@ -112,10 +115,28 @@ export interface StoredDocumentContent {
 let providerOverride: ObjectStorageProvider | null = null;
 let cachedProvider: ObjectStorageProvider | null = null;
 
+// WS4-11 D-OS: in a restored environment putObject/deleteObject are refused (RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED)
+// unless AEE_RESTORED_ENV_STORAGE_ISOLATED is exactly "true" (the local filesystem provider is exempt, WS4-12); reads pass. Applied to the override and the configured
+// provider alike, so every document-storage write in the API goes through it (lib/outboundGuard.ts).
+const guardedProviders = new WeakMap<ObjectStorageProvider, ObjectStorageProvider>();
+function guarded(provider: ObjectStorageProvider): ObjectStorageProvider {
+  let g = guardedProviders.get(provider);
+  if (!g) {
+    g = guardStorageWrites(provider, (p) => (p instanceof S3ObjectStorageProvider ? "s3" : p instanceof LocalObjectStorageProvider ? "local" : "unclassified"));
+    guardedProviders.set(provider, g);
+  }
+  return g;
+}
+
 function storageProvider(): ObjectStorageProvider {
-  if (providerOverride) return providerOverride;
+  if (providerOverride) return guarded(providerOverride);
   cachedProvider ??= createObjectStorageProvider();
-  return cachedProvider;
+  return guarded(cachedProvider);
+}
+
+/** The guarded provider every document-storage call uses (exported for the WS4-11 guard tests). */
+export function documentStorageProvider(): ObjectStorageProvider {
+  return storageProvider();
 }
 
 /** Test seam; production code always uses the configured singleton provider. */

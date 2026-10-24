@@ -37,6 +37,7 @@ import { mustForceSandboxCommunicationsProvider } from "../../env.js";
 import { sandboxEmailProvider } from "./sandboxEmail.js";
 import { sandboxSmsProvider } from "./sandboxSms.js";
 import { CommunicationProviderError, type EmailProvider, type SmsProvider } from "./types.js";
+import { assertOutboundAllowed } from "../../outboundGuard.js";
 
 /** The only provider id this build resolves. Anything else fails closed. */
 export const SANDBOX_PROVIDER_ID = "sandbox";
@@ -161,22 +162,29 @@ function resolveProvider<P extends { name: string }>(args: {
  * directly — object identity, not merely equivalent behaviour.
  */
 export function resolveEmailProvider(config: CommunicationProviderConfig = loadCommunicationProviderConfig()): EmailProvider {
-  return resolveProvider<EmailProvider>({
+  // WS4-09/11: in a restored environment only an in-process (or allow-listed) provider may be used
+  // (lib/outboundGuard.ts). Thrown before dispatchMessage() moves the message to SENDING, so it stays QUEUED.
+  const provider = resolveProvider<EmailProvider>({
     channel: "EMAIL",
     requested: normalizeProviderId(config.email),
     sandbox: sandboxEmailProvider,
     override: emailOverride,
     selectorEnv: EMAIL_PROVIDER_ENV,
   });
+  assertOutboundAllowed("communications_email", provider.name);
+  return provider;
 }
 
 /** SMS counterpart of resolveEmailProvider(). Resolved independently — approving one channel's provider never selects the other's. */
 export function resolveSmsProvider(config: CommunicationProviderConfig = loadCommunicationProviderConfig()): SmsProvider {
-  return resolveProvider<SmsProvider>({
+  // WS4-09/11: see resolveEmailProvider().
+  const provider = resolveProvider<SmsProvider>({
     channel: "SMS",
     requested: normalizeProviderId(config.sms),
     sandbox: sandboxSmsProvider,
     override: smsOverride,
     selectorEnv: SMS_PROVIDER_ENV,
   });
+  assertOutboundAllowed("communications_sms", provider.name);
+  return provider;
 }

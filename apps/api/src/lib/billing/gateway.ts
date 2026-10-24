@@ -2,6 +2,7 @@ import type { BillingProvider } from "@aee/integration-billing";
 import { MockBillingProvider, StripeBillingProvider } from "@aee/integration-billing";
 import { logger } from "@aee/events";
 import { mustForceMockExternalProvider } from "../env.js";
+import { guardOutboundProvider } from "../outboundGuard.js";
 
 export interface BillingGatewayConfig {
   providerName: "mock" | "stripe";
@@ -25,6 +26,9 @@ let cachedProvider: BillingProvider | null = null;
 // Lazy singleton with fail-closed fallback - same shape as the AI Gateway's buildProvider().
 // If BILLING_PROVIDER=stripe is set without a secret key, we never throw at boot; we log and
 // fall back to the Mock provider so the app stays usable and Grow checkout stays demoable.
+// WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+const guardBilling = (p: BillingProvider): BillingProvider => guardOutboundProvider("billing", p, ["createCheckoutSession", "cancelSubscription"], (b) => b.name);
+
 export function getBillingProvider(): BillingProvider {
   if (cachedProvider) return cachedProvider;
 
@@ -40,23 +44,23 @@ export function getBillingProvider(): BillingProvider {
       logger.warn("billing_provider_locked_to_mock_pilot_policy", {
         reason: "BILLING_PROVIDER=stripe was requested but LIVE_EXTERNAL_TRANSACTIONS_APPROVED is not \"true\" in production — no real subscription/checkout is authorised for this pilot.",
       });
-      cachedProvider = new MockBillingProvider();
+      cachedProvider = guardBilling(new MockBillingProvider());
       return cachedProvider;
     }
     if (!config.stripeSecretKey) {
       logger.warn("billing_provider_stripe_secret_key_missing_fallback_to_mock", {});
-      cachedProvider = new MockBillingProvider();
+      cachedProvider = guardBilling(new MockBillingProvider());
       return cachedProvider;
     }
-    cachedProvider = new StripeBillingProvider({
+    cachedProvider = guardBilling(new StripeBillingProvider({
       secretKey: config.stripeSecretKey,
       webhookSecret: config.stripeWebhookSecret ?? "",
       apiBaseUrl: config.stripeApiBaseUrl,
-    });
+    }));
     return cachedProvider;
   }
 
-  cachedProvider = new MockBillingProvider();
+  cachedProvider = guardBilling(new MockBillingProvider());
   return cachedProvider;
 }
 

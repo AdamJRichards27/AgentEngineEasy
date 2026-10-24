@@ -1,6 +1,7 @@
 import type { AiProvider } from "./provider.js";
 import { AiProviderError } from "../types.js";
 import type { AiProviderRequest, AiProviderResponse } from "../types.js";
+import { assertOutboundAllowed } from "../../outboundGuard.js";
 
 // Real provider, inactive until AI_PROVIDER=anthropic and ANTHROPIC_API_KEY are
 // both set (Replit Secrets - never commit the key). Talks to the Anthropic
@@ -18,6 +19,8 @@ export class AnthropicAiProvider implements AiProvider {
   }
 
   async generate(request: AiProviderRequest): Promise<AiProviderResponse> {
+    // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+    assertOutboundAllowed("ai_provider", this.name);
     const start = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);

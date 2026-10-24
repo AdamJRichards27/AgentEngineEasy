@@ -5,6 +5,7 @@ import { AiProviderError } from "./types.js";
 import type { AiProviderRequest, AiProviderResponse } from "./types.js";
 import { incrementCounter, logger, observeHistogram } from "@aee/events";
 import { mustForceMockAiProvider } from "../env.js";
+import { assertOutboundAllowed } from "../outboundGuard.js";
 
 // AI Gateway: the one place that knows how to reach a model provider. Config is
 // env-driven today (AI_PROVIDER, AI_MODEL, ... - see .env.example), mirroring
@@ -136,7 +137,11 @@ function recordGatewayResult(result: GatewayResultLabel): void {
 // provider actually answered so audit/telemetry is never silently blended.
 // Metrics for every caller are recorded here and nowhere else.
 export async function generateWithGateway(request: AiProviderRequest, config: AiGatewayConfig): Promise<AiGenerateResult> {
+  // WS4-09/11: in a restored environment only an in-process (mock) or allow-listed provider may run
+  // (lib/outboundGuard.ts). Checked on the provider actually built, before any attempt; a blocked primary
+  // throws here, so there is no retry and no silent fallback to the mock.
   const primary = buildProvider(config.provider);
+  assertOutboundAllowed("ai_provider", primary.name);
   let lastError: unknown;
   for (let attempt = 0; attempt <= config.retryLimit; attempt++) {
     try {
@@ -153,6 +158,7 @@ export async function generateWithGateway(request: AiProviderRequest, config: Ai
     throw new AiProviderError(config.provider, primaryErrorMessage);
   }
   const fallback = buildProvider(config.fallbackProvider);
+  assertOutboundAllowed("ai_provider", fallback.name);
   try {
     const response = await generateOnce(fallback, request);
     recordGatewayResult("fallback_success");

@@ -222,5 +222,6 @@ test("BACKUP_DOCUMENT_SOURCE selects object storage without a document directory
   assert.throws(() => loadProductionBackupConfig(productionEnv({})), /BACKUP_DOCUMENT_DIRECTORY is missing/);
   const directory = loadProductionBackupConfig(productionEnv({ BACKUP_DOCUMENT_DIRECTORY: "/tmp/x/documents" }));
   assert.equal(directory.documentSource, "directory");
-  assert.equal(directory.documentDirectory, "/tmp/x/documents");
+  // config.ts normalises with path.resolve(), so compare against the platform-resolved form
+  assert.equal(directory.documentDirectory, path.resolve("/tmp/x/documents"));
 });

@@ -1,9 +1,15 @@
 import { eq, and, desc } from "drizzle-orm";
 import { db, paymentMethods, serviceOrders, payments, properties } from "@aee/db";
 import type { PaymentMethod, ServiceOrder, Payment } from "@aee/db";
-import { createPaymentProvider, type PaymentWebhookResult } from "@aee/integration-payments";
+import { createPaymentProvider, MockPaymentProvider, StripePaymentProvider, type PaymentWebhookResult } from "@aee/integration-payments";
+import { guardOutboundProvider } from "./outboundGuard.js";
 
-const paymentProvider = createPaymentProvider();
+/** WS4-11: the package adapters carry no name, so the seam names them (anything else is unclassified = network). */
+export function paymentProviderId(p: object): string {
+  return p instanceof MockPaymentProvider ? "mock" : p instanceof StripePaymentProvider ? "stripe" : "unclassified";
+}
+// WS4-09/11: in a restored environment only the in-process mock or an allow-listed adapter sends (lib/outboundGuard.ts).
+export const paymentProvider = guardOutboundProvider("payments", createPaymentProvider(), ["chargeStoredMethod", "refund"], paymentProviderId);
 
 /**
  * Attaches an already-tokenized stored payment method (Phase 6). Real card

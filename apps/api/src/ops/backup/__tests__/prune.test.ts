@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { test } from "node:test";
 import { planRetention } from "../artifacts.js";
-import { runCommand } from "../commands.js";
 import { loadProductionBackupConfig } from "../config.js";
-import { createBackup } from "../engine.js";
-import type { BackupConfig, CommandSpec, OperationLog, RemoteObject } from "../types.js";
+import { createFakeRemote } from "./helpers/fakeBackupRemote.js";
+import { artifactKey, bk, merge, type Listing } from "./retentionFixtures.js";
+import type { OperationLog, RemoteObject } from "../types.js";
 
 const hex = (n: number): string => n.toString(16).padStart(12, "0");
 function backup(day: number, withManifest = true): RemoteObject[] {
@@ -20,23 +17,33 @@ function backup(day: number, withManifest = true): RemoteObject[] {
 }
 const keys = (objects: RemoteObject[]): string[] => objects.map((o) => o.key);
 
-test("planRetention never deletes the newest minRetained recoverable backups even when all are expired", () => {
-  const objects = [1, 2, 3, 4, 5].flatMap((d) => backup(d));
-  const plan = planRetention(objects, new Date("2027-01-01T00:00:00Z"), { minRetained: 2 });
-  assert.equal(plan.retained.length, 2);
-  assert.ok(plan.retained[0]!.includes("20260105"));
+// PH-7 R29b: only VERIFIED backups (artifact + manifest + matching .verified.json) count toward keep, and
+// backup units are only deleted once a RESTORE_VERIFIED point exists (RETENTION-SAFEGUARD-SPEC). The
+// fixtures below give every backup a verified marker and the newest one a restore-verified marker.
+const NOW = new Date("2027-01-02T00:00:00Z");
+function backups(days: number[], options: { manifestless?: number[]; restoreOn?: number } = {}): Listing {
+  const newest = options.restoreOn ?? Math.max(...days);
+  return merge(
+    ...days.map((d) =>
+      options.manifestless?.includes(d) ? bk(d, { manifest: false }) : bk(d, { verified: "ok", restore: d === newest ? "ok" : false }),
+    ),
+  );
+}
+const planOf = (l: Listing, cutoff: Date, options: { minRetained: number; protectedArtifact?: string }) =>
+  planRetention(l.objects, cutoff, { ...options, evidence: l.evidence, now: NOW });
+
+test("planRetention never deletes the newest minRetained verified backups even when all are expired", () => {
+  const plan = planOf(backups([1, 2, 3, 4, 5]), new Date("2027-01-01T00:00:00Z"), { minRetained: 2 });
+  assert.deepEqual(plan.retained, [artifactKey(5), artifactKey(4)]);
   const deleted = keys(plan.delete);
-  assert.equal(deleted.length, 6);
+  assert.equal(deleted.length, 9, "three units of artifact + manifest + marker");
   assert.ok(!deleted.some((k) => k.includes("20260105") || k.includes("20260104")));
   assert.equal(plan.protectedByGuard.length, 2);
 });
 
-test("planRetention deletes an artifact before its manifest and always together", () => {
-  const plan = planRetention([...backup(1), ...backup(2)], new Date("2027-01-01T00:00:00Z"), { minRetained: 1 });
-  assert.deepEqual(keys(plan.delete), [
-    "aee-protected-20260101T000000Z-000000000001.tar.enc",
-    "aee-protected-20260101T000000Z-000000000001.tar.enc.sha256.json",
-  ]);
+test("planRetention deletes an artifact before its manifest and markers, always together", () => {
+  const plan = planOf(backups([1, 2]), new Date("2027-01-01T00:00:00Z"), { minRetained: 1 });
+  assert.deepEqual(keys(plan.delete), [artifactKey(1), `${artifactKey(1)}.sha256.json`, `${artifactKey(1)}.verified.json`]);
 });
 
 test("planRetention does not delete anything when no recoverable backup exists", () => {
@@ -46,35 +53,32 @@ test("planRetention does not delete anything when no recoverable backup exists",
   assert.deepEqual(plan.retained, []);
 });
 
-test("planRetention does not count an artifact without a manifest as a retained backup and prunes orphans", () => {
-  const newestUnrecoverable = backup(9, false);
-  const plan = planRetention(
-    [...backup(1), ...backup(2), ...newestUnrecoverable, { key: "aee-protected-20260103T000000Z-000000000003.tar.enc.sha256.json", lastModified: "2026-01-03T00:00:00Z" }],
-    new Date("2027-01-01T00:00:00Z"),
-    { minRetained: 1 },
-  );
-  assert.ok(plan.retained[0]!.includes("20260102"), "newest RECOVERABLE backup is kept, not the manifest-less newest object");
+test("planRetention does not delete anything when no VERIFIED backup exists (legacy marker-less pairs)", () => {
+  const plan = planRetention([1, 2, 3].flatMap((d) => backup(d)), new Date("2027-01-01T00:00:00Z"), { minRetained: 1 });
+  assert.deepEqual(plan.delete, []);
+  assert.deepEqual(plan.retained, []);
+});
+
+test("planRetention does not count an artifact without a manifest as retained; orphans go by age only", () => {
+  const listing = merge(backups([1, 2], { restoreOn: 2 }), bk(9, { manifest: false }), bk(3, { artifact: false }));
+  const plan = planOf(listing, new Date("2027-01-01T00:00:00Z"), { minRetained: 1 });
+  assert.equal(plan.retained[0], artifactKey(2), "newest VERIFIED backup is kept, not the manifest-less newest object");
   const deleted = keys(plan.delete);
-  assert.ok(deleted.some((k) => k.includes("000000000001")));
-  assert.ok(deleted.some((k) => k.includes("20260103") && k.endsWith(".sha256.json")));
-  assert.ok(deleted.some((k) => k.includes("20260109")), "old manifest-less artifact may go once a recoverable backup is retained");
-  assert.ok(!deleted.some((k) => k.includes("20260102")));
+  assert.ok(deleted.includes(artifactKey(1)));
+  assert.ok(deleted.includes(`${artifactKey(3)}.sha256.json`), "orphan manifest is pruned by age");
+  // Behaviour change (R29/R29b): a manifest-less artifact NEWER than the protected backups is no longer
+  // deleted; only units older than every protected backup are deletable (AC4 monotonicity).
+  assert.ok(!deleted.includes(artifactKey(9)));
+  assert.ok(!deleted.some((k) => k.startsWith(artifactKey(2))));
 });
 
 test("planRetention honours the cutoff, the protected artifact, bad timestamps and unrelated objects", () => {
-  const objects: RemoteObject[] = [
-    ...backup(1),
-    ...backup(2),
-    ...backup(3),
-    { key: "customer-data.csv", lastModified: "2000-01-01T00:00:00Z" },
-    { key: "aee-protected-bad.tar.enc", lastModified: "garbage" },
-  ];
-  const plan = planRetention(objects, new Date("2026-01-03T12:00:00Z"), {
-    minRetained: 1,
-    protectedArtifact: "aee-protected-20260101T000000Z-000000000001.tar.enc",
-  });
+  const listing = backups([1, 2, 3]);
+  listing.objects.push({ key: "customer-data.csv", lastModified: "2000-01-01T00:00:00Z" });
+  listing.objects.push({ key: "aee-protected-bad.tar.enc", lastModified: "garbage" });
+  const plan = planOf(listing, new Date("2026-01-03T12:00:00Z"), { minRetained: 1, protectedArtifact: artifactKey(1) });
   const deleted = keys(plan.delete);
-  assert.deepEqual(deleted.map((k) => k.slice(0, 30)), ["aee-protected-20260102T000000Z", "aee-protected-20260102T000000Z"]);
+  assert.deepEqual(deleted, [artifactKey(2), `${artifactKey(2)}.sha256.json`, `${artifactKey(2)}.verified.json`]);
   assert.ok(!deleted.includes("customer-data.csv"));
   assert.ok(!deleted.includes("aee-protected-bad.tar.enc"));
 });
@@ -105,87 +109,47 @@ test("BACKUP_MIN_RETAINED_COUNT defaults to 7 and rejects invalid values", () =>
   }
 });
 
-function engineConfig(root: string, retentionDays: number, minRetainedBackups: number): BackupConfig {
-  const spec = (executable: string): CommandSpec => ({ executable, args: [] });
-  return {
-    databaseUrl: "postgresql://source.invalid/aee",
-    documentDirectory: path.join(root, "documents"),
-    restoreDatabaseUrl: "postgresql://restore.invalid/aee_restore",
-    restoreDocumentDirectory: path.join(root, "restore-root", "documents"),
-    restoreRoot: path.join(root, "restore-root"),
-    restoreEnvironmentId: "restore-drill-01",
-    encryptionKmsProfile: "kms:production-backup",
-    stagingDirectory: path.join(root, "staging"),
-    destination: "durable://vault/backups",
-    retentionDays,
-    minRetainedBackups,
-    encryption: spec("encrypt"), decryption: spec("decrypt"), upload: spec("upload"),
-    download: spec("download"), list: spec("list"), remove: spec("remove"), alert: spec("alert"),
-  };
-}
 
+/**
+ * Engine-level tests run the REAL createBackup() against the shared fake remote
+ * (helpers/fakeBackupRemote.ts), which implements upload/download/list/delete so that
+ * post-upload verification (engine.ts verifyUploadedBackup) really passes before prune runs.
+ * Assertions below are unchanged from the original #224 tests except where marked R29b.
+ */
 async function runEngine(
   remoteListing: RemoteObject[],
   retentionDays: number,
   minRetained: number,
   failRemove = false,
 ): Promise<{ removed: string[]; logs: OperationLog[]; name: string }> {
-  const root = await mkdtemp(path.join(tmpdir(), "aee-prune-"));
-  const removed: string[] = [];
-  const logs: OperationLog[] = [];
-  const remote = new Map<string, Buffer>();
+  const remote = await createFakeRemote({
+    seed: remoteListing,
+    retentionDays,
+    minRetainedBackups: minRetained,
+    failRemove,
+    prune: true,
+    now: new Date("2026-03-01T00:00:00Z"),
+  });
   try {
-    await mkdir(path.join(root, "documents"), { recursive: true });
-    const name = await createBackup(engineConfig(root, retentionDays, minRetained), {
-      now: () => new Date("2026-03-01T00:00:00Z"),
-      log: (entry) => logs.push(entry),
-      run: async (command: CommandSpec, replacements: Record<string, string> = {}) => {
-        switch (command.executable) {
-          case "pg_dump":
-            await writeFile(command.args[command.args.indexOf("--file") + 1]!, "dump");
-            return { stdout: "", stderr: "" };
-          case "psql":
-            return { stdout: JSON.stringify({ tenantCount: 1, recordCounts: {}, documentKeys: [] }), stderr: "" };
-          case "tar":
-            return runCommand(command);
-          case "encrypt":
-            await copyFile(replacements.input!, replacements.output!);
-            return { stdout: "", stderr: "" };
-          case "upload":
-            remote.set(replacements.destination!, await readFile(replacements.source!));
-            return { stdout: "", stderr: "" };
-          case "download": {
-            const content = remote.get(replacements.source!);
-            if (!content) throw new Error(`missing remote object ${replacements.source}`);
-            await writeFile(replacements.destination!, content);
-            return { stdout: "", stderr: "" };
-          }
-          case "list":
-            return { stdout: JSON.stringify(remoteListing), stderr: "" };
-          case "remove":
-            if (failRemove) throw new Error("AccessDenied: object lock");
-            removed.push(replacements.object!);
-            return { stdout: "", stderr: "" };
-          default:
-            throw new Error(`unexpected ${command.executable}`);
-        }
-      },
-    });
-    return { removed, logs, name };
+    const name = await remote.createBackup();
+    return { removed: remote.removed, logs: remote.logs, name };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await remote.cleanup();
   }
 }
+
 
 test("createBackup with BACKUP_RETENTION_DAYS=1 still keeps the minimum recoverable backups", async () => {
   const listing = [1, 2, 3, 4].flatMap((d) => backup(d));
   const { removed, logs } = await runEngine(listing, 1, 3);
-  assert.deepEqual(removed.sort(), [
+  // R29b: the fake remote seeds .verified.json markers (and a restore-verified marker on the newest pair).
+  assert.deepEqual(removed, [
     "aee-protected-20260101T000000Z-000000000001.tar.enc",
     "aee-protected-20260101T000000Z-000000000001.tar.enc.sha256.json",
+    "aee-protected-20260101T000000Z-000000000001.tar.enc.verified.json",
   ]);
   const done = logs.find((l) => l.event === "completed");
-  assert.equal(done?.pruned, 2);
+  assert.equal(done?.pruned, 3);
   assert.equal(done?.pruneProtected, 3);
 });
 
@@ -200,7 +164,8 @@ test("a prune delete refused by Object Lock is logged loudly but does not fail t
   assert.ok(name.startsWith("aee-protected-"));
   assert.deepEqual(removed, []);
   const failures = logs.filter((l) => l.event === "prune_delete_failed");
-  assert.equal(failures.length, 2);
+  assert.equal(failures.length, 1, "D-3: pruning stops at the first refused delete (was: every object attempted)");
   assert.equal(failures[0]?.level, "error");
-  assert.equal(logs.find((l) => l.event === "completed")?.pruneFailed, 2);
+  assert.equal(logs.find((l) => l.event === "completed")?.pruneFailed, 1);
+  assert.ok(logs.some((l) => l.event === "prune_stopped"));
 });

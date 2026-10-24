@@ -14,7 +14,10 @@
 // ledger, not a message queue).
 
 import { logger } from "@aee/events";
-import { registerExceptionEventHandlers, runScheduledScan } from "./engine.js";
+import { registerExceptionEventHandlers, runScheduledScan, type RunScanResult } from "./engine.js";
+import { notifyScanFailure } from "./scanFailureAlert.js";
+import { scanSchedulersOffSwitch, SCAN_SCHEDULERS_OFF_SWITCH_ENV } from "../scanSchedulerOffSwitch.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 
 let registered = false;
 let intervalHandle: NodeJS.Timeout | null = null;
@@ -27,9 +30,66 @@ let intervalHandle: NodeJS.Timeout | null = null;
 // long — an overlapping tick is refused, never run concurrently).
 const SCAN_INTERVAL_MS = 15 * 60 * 1000;
 
+/**
+ * One scheduled tick, with explicit observability. A successful scan that finds nothing logs nothing
+ * elsewhere, so without these lines a healthy tick is indistinguishable from a dead timer. Logging only:
+ * the scan itself, its locking and its failure semantics are unchanged. `run` is injectable for tests.
+ * WS4: failures (thrown, or completed with summary.errors > 0) are also handed to scanFailureAlert.ts's sink.
+ */
+export async function runScheduledScanTick(run: (trigger: "SCHEDULED") => Promise<RunScanResult> = runScheduledScan): Promise<void> {
+  const startedAtMs = Date.now();
+  logger.info("exception_engine_scheduled_scan_tick_started", { intervalMs: SCAN_INTERVAL_MS });
+  try {
+    const result = await run("SCHEDULED");
+    if (result.ok) {
+      logger.info("exception_engine_scheduled_scan_tick_succeeded", { durationMs: Date.now() - startedAtMs, ...result.summary });
+      // WS4: a scan that completed but recorded per-rule errors is reported to the (pluggable, default no-op) sink.
+      if (result.summary.errors > 0) {
+        notifyScanFailure({
+          kind: "scan_completed_with_errors",
+          trigger: "SCHEDULED",
+          occurredAt: new Date().toISOString(),
+          durationMs: Date.now() - startedAtMs,
+          scanRunId: result.summary.scanRunId,
+          errors: result.summary.errors,
+        });
+      }
+    } else {
+      logger.info("exception_engine_scheduled_scan_tick_skipped", { durationMs: Date.now() - startedAtMs, reason: result.skippedReason });
+    }
+  } catch (err) {
+    logger.error("exception_engine_scheduled_scan_failed", { error: err, durationMs: Date.now() - startedAtMs });
+    // WS4: a thrown scheduled scan is reported to the (pluggable, default no-op) sink; never rethrows.
+    notifyScanFailure({
+      kind: "scan_threw",
+      trigger: "SCHEDULED",
+      occurredAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAtMs,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+    });
+  }
+}
+
 export interface RegisterExceptionEngineOptions {
   /** Set false in tests / one-off scripts that call runScheduledScan() explicitly and must not also have a background timer running. Defaults to true. */
   startScheduler?: boolean;
+}
+
+export type SchedulerStartDecision = { start: true } | { start: false; reason: "off_switch" | "option" | "test_env" };
+
+/**
+ * WS4: whether the scan timer should start. AEE_DISABLE_SCAN_SCHEDULERS (see ../scanSchedulerOffSwitch.ts) wins over
+ * everything, including an explicit startScheduler: true. Otherwise unchanged: the option if given, else
+ * NODE_ENV !== "test".
+ */
+export function resolveExceptionSchedulerStart(
+  options: RegisterExceptionEngineOptions = {},
+  env: Record<string, string | undefined> = process.env,
+): SchedulerStartDecision {
+  if (scanSchedulersOffSwitch(env).disabled) return { start: false, reason: "off_switch" };
+  if (options.startScheduler !== undefined) return options.startScheduler ? { start: true } : { start: false, reason: "option" };
+  return env.NODE_ENV !== "test" ? { start: true } : { start: false, reason: "test_env" };
 }
 
 /**
@@ -44,16 +104,30 @@ export function registerExceptionEngine(options: RegisterExceptionEngineOptions 
 
   registerExceptionEventHandlers();
 
-  const startScheduler = options.startScheduler ?? process.env.NODE_ENV !== "test";
-  if (!startScheduler) return;
+  // WS4-07/WS4-08: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) is the superset switch and is checked first;
+  // the WS4-05 AEE_DISABLE_SCAN_SCHEDULERS off-switch (resolve*Start below) remains as a scan-loops-only subset.
+  if (backgroundLoopDisabled("exception_scan")) return;
+  const decision = resolveExceptionSchedulerStart(options);
+  if (!decision.start) {
+    // Logged only for the WS4 off-switch, so existing default/test boots produce exactly the same log lines as before.
+    if (decision.reason === "off_switch") {
+      logger.info("exception_engine_scheduler_disabled", {
+        reason: decision.reason,
+        offSwitchEnv: SCAN_SCHEDULERS_OFF_SWITCH_ENV,
+        offSwitch: scanSchedulersOffSwitch().reason,
+      });
+    }
+    return;
+  }
 
   intervalHandle = setInterval(() => {
-    runScheduledScan("SCHEDULED").catch((err) => logger.error("exception_engine_scheduled_scan_failed", { error: err }));
+    void runScheduledScanTick();
   }, SCAN_INTERVAL_MS);
   // Never hold the process open just for this timer (matches Node's own
   // convention for background/best-effort intervals; a graceful shutdown
   // should not have to wait on the next tick of a periodic risk sweep).
   intervalHandle.unref?.();
+  logger.info("exception_engine_scheduler_started", { intervalMs: SCAN_INTERVAL_MS });
 }
 
 /** Test-only escape hatch — stops the interval so a test process can exit cleanly. Registration state is not reset (mirrors registerAutomationEngine's own "registered" latch being permanent for the life of the process). */

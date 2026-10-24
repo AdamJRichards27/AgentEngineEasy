@@ -16,6 +16,7 @@ import { incrementCounter, logger } from "@aee/events";
 import { hashPassword, verifyPassword, passwordPolicyViolation } from "../lib/auth/password.js";
 import { generateToken, hashToken } from "../lib/auth/tokens.js";
 import { getAuthEmailProvider } from "../lib/auth/email.js";
+import { assertOutboundAllowed, outboundBlocked } from "../lib/outboundGuard.js";
 import { getActiveLegalVersions } from "../lib/auth/legalVersions.js";
 import { normalizePersonName } from "../lib/auth/personName.js";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
@@ -447,6 +448,10 @@ authRouter.post("/admin/invitations", requireAuth, requireRole(...BROKERAGE_ADMI
     return;
   }
 
+  // WS4-11 D-INV: a restored environment cannot send the invitation email, so refuse (503
+  // RESTORED_ENVIRONMENT_OUTBOUND_BLOCKED) BEFORE revoking or inserting anything — no dead row.
+  assertOutboundAllowed("auth_email");
+
   // Re-inviting an email revokes any prior pending invitation first — one
   // live invitation per email at a time (Phase 2 design §4.1).
   await db
@@ -803,7 +808,15 @@ function dummyHashForTiming(): Promise<string> {
 
 const requestResetSchema = z.object({ email: z.string().email() });
 
+const PASSWORD_RESET_ACCEPTED = { message: "If that email address has an account, a reset link has been sent." } as const;
+
 authRouter.post("/password-reset/request", async (req, res) => {
+  // WS4-11 D-PR: a restored environment sends no reset email. Answer the same 202 for every address
+  // before any lookup — no token row, no account-existence oracle (body or timing).
+  if (outboundBlocked("auth_email")) {
+    res.status(202).json(PASSWORD_RESET_ACCEPTED);
+    return;
+  }
   const parsed = requestResetSchema.safeParse(req.body);
   if (parsed.success) {
     const normalizedEmail = parsed.data.email.toLowerCase();
@@ -820,7 +833,7 @@ authRouter.post("/password-reset/request", async (req, res) => {
   // Always 202, regardless of whether the email exists, whether the body
   // was even valid, or whether the account is disabled — no
   // account-existence leak (Phase 1 threat model T4, Phase 2 design §4.5).
-  res.status(202).json({ message: "If that email address has an account, a reset link has been sent." });
+  res.status(202).json(PASSWORD_RESET_ACCEPTED);
 });
 
 const confirmResetSchema = z.object({ token: z.string().min(1), password: z.string() });

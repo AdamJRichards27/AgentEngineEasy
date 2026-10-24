@@ -143,6 +143,11 @@ export const METRIC_DEFINITIONS = {
     help: "Current count of OPEN risk_exceptions rows at CRITICAL severity, sampled at read time — the Exception & Risk Engine's own definition of a critical unresolved risk.",
     labels: { status: ["open"] },
   },
+  // WS4 follow-up: scheduler staleness for an external monitor (apps/api/src/lib/observability/schedulerStaleness.ts).
+  scheduler_last_success_age_seconds: {
+    help: "Whole seconds since the most recent COMPLETED run of a background scheduler job, sampled at read time; -1 means it has never completed or the age could not be read.",
+    labels: { job: ["exception_scan", "signal_sweep"] },
+  },
   integration_connection_degraded_total: {
     help: "An integration connection's health check or dispatch path reported degraded/unavailable provider behaviour (distinct from a single failed webhook/outbox item — this tracks sustained provider-side degradation).",
     labels: { provider: ["mock_portal_v1", "mock_sms_v1", "mock_payment_status_v1", "other"] },
@@ -312,7 +317,7 @@ const HISTOGRAM_METRICS = new Set<MetricName>([
   "voice_transcription_duration_ms",
   "pit_crew_waiting_on_sweep_tick_duration_ms",
 ]);
-const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge"]);
+const GAUGE_METRICS = new Set<MetricName>(["queue_backlog_size", "queue_oldest_item_age_ms", "unresolved_critical_risk_gauge", "scheduler_last_success_age_seconds"]);
 
 export function incrementCounter(metric: MetricName, labels: LabelValues = {}, by = 1): void {
   const safeLabels = sanitiseLabels(metric, labels);

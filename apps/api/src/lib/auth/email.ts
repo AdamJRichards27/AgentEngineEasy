@@ -18,6 +18,8 @@
 
 import { logger } from "@aee/events";
 import { isProductionEnvironment } from "../env.js";
+import { guardOutboundProvider } from "../outboundGuard.js";
+import { restoredEnvironmentMode } from "../restoredEnvironment.js";
 
 export interface AuthEmailProvider {
   readonly name: string;
@@ -225,5 +227,8 @@ export function assertAuthEmailProviderConfigured(): void {
  */
 export function getAuthEmailProvider(): AuthEmailProvider {
   assertExplicitAuthEmailProviderIsKnown();
-  return sandboxAuthEmailProvider;
+  // WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+  // Outside a restored environment the very same sandbox object is returned (identity is part of the contract).
+  if (!restoredEnvironmentMode().restored) return sandboxAuthEmailProvider;
+  return guardOutboundProvider("auth_email", sandboxAuthEmailProvider, ["sendInvitation", "sendPasswordReset", "sendAdministratorSuccession"], (p) => p.name);
 }

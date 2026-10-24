@@ -4,6 +4,7 @@ import { MockTranscriptionProvider } from "./mockTranscriptionProvider.js";
 import { DeepgramTranscriptionProvider } from "./deepgramTranscriptionProvider.js";
 import { TranscriptionProviderError } from "./types.js";
 import type { TranscriptionProvider } from "./types.js";
+import { assertOutboundAllowed } from "../../outboundGuard.js";
 
 // AE GROW Priority 6 Stage E — Voice Transcription Gateway. The one place
 // that knows how to reach a transcription provider, mirroring
@@ -63,6 +64,13 @@ export function setVoiceTranscriptionProviderForTests(provider: TranscriptionPro
  * state — never a quiet downgrade to mock.
  */
 export function buildVoiceTranscriptionProvider(config: VoiceTranscriptionConfig): TranscriptionProvider {
+  // WS4-09/11: in a restored environment only an in-process (mock) or allow-listed provider (lib/outboundGuard.ts).
+  const provider = resolveVoiceTranscriptionProvider(config);
+  assertOutboundAllowed("voice_transcription", provider.name);
+  return provider;
+}
+
+function resolveVoiceTranscriptionProvider(config: VoiceTranscriptionConfig): TranscriptionProvider {
   if (providerOverride !== null) return providerOverride;
 
   if (config.provider === "mock") {
@@ -98,6 +106,13 @@ export function buildVoiceTranscriptionProvider(config: VoiceTranscriptionConfig
  * accidentally create a path that production would not be allowed to use.
  */
 export function buildCallTranscriptionProvider(config: VoiceTranscriptionConfig): TranscriptionProvider {
+  // WS4-09/11: see buildVoiceTranscriptionProvider().
+  const provider = resolveCallTranscriptionProvider(config);
+  assertOutboundAllowed("voice_transcription", provider.name);
+  return provider;
+}
+
+function resolveCallTranscriptionProvider(config: VoiceTranscriptionConfig): TranscriptionProvider {
   if (config.provider === "mock") {
     // A mock is safe in every environment. A non-mock test seam, however,
     // must not be able to masquerade as the mock without the call approval.

@@ -31,8 +31,10 @@ import {
 } from "./documentStorage.js";
 import { refreshReadyToListSteps } from "./workflowSteps.js";
 import { documentOnProperty, propertyDocumentInBrokerage } from "./documentTenancy.js";
+import { guardOutboundProvider } from "./outboundGuard.js";
 
-const esignProvider = createESignProvider();
+// WS4-09: AEE_RESTORED_ENVIRONMENT refuses this outbound seam (lib/outboundGuard.ts).
+export const esignProvider = guardOutboundProvider("esign", createESignProvider(), ["createEnvelope"], (p) => p.kind);
 
 async function partyName(partyId: number): Promise<string> {
   const [p] = await db.select().from(parties).where(eq(parties.id, partyId));

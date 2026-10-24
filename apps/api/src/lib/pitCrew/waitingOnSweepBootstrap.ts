@@ -1,5 +1,6 @@
 import { incrementCounter, logger, observeHistogram } from "@aee/events";
 import { dispatchOperationalAlert } from "../operationalAlerts.js";
+import { backgroundLoopDisabled } from "../restoredEnvironment.js";
 import { findBrokerageIdsWithOverdueWaitingOn } from "./assignment.js";
 import { recordWaitingOnDetections } from "./waitingOnDetectionRun.js";
 import {
@@ -447,6 +448,8 @@ export function registerPitCrewWaitingOnSweep(options: RegisterPitCrewWaitingOnS
   registered = true;
 
   const config = pitCrewWaitingOnSweepConfig();
+  // WS4-07: AEE_RESTORED_ENVIRONMENT (lib/restoredEnvironment.ts) keeps this timer off, even with startScheduler: true.
+  if (backgroundLoopDisabled("pit_crew_waiting_on_sweep")) return;
   const startScheduler = options.startScheduler ?? (config.enabled && process.env.NODE_ENV !== "test");
   if (!startScheduler) {
     logger.info("pit_crew_waiting_on_sweep_scheduler_disabled", {

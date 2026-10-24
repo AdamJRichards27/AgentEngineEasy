@@ -25,6 +25,7 @@ import {
   OPEN_RISK_EXCEPTION_STATUSES,
 } from "@aee/db";
 import { setGauge, logger } from "@aee/events";
+import { sampleSchedulerStalenessGauges } from "./schedulerStaleness.js";
 
 function publishBacklogGauges(queue: "integration_outbox" | "financial_payment_outbox" | "communications_outbox", count: number, oldest: Date | string | null): void {
   setGauge("queue_backlog_size", count, { queue });
@@ -74,4 +75,6 @@ export async function sampleQueueGauges(): Promise<void> {
     // silently swallowed.
     logger.error("sample_queue_gauges_failed", { error: err });
   }
+  // WS4: scheduler staleness gauges (own try/catch inside; never throws), served on the same scrape.
+  await sampleSchedulerStalenessGauges();
 }
