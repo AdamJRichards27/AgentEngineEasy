@@ -89,10 +89,10 @@ test("navLinkIsActive: Grow stays highlighted on the appraisal list, workspace a
 });
 
 // #34 — Offer Centre link. Gated on the run.access entitlement (the same key
-// GET /api/offers/centre requires), for every role. Placed after Pit Crew and
+// GET /api/offers/centre requires) for Agents and Brokerage Administrators. Placed after Pit Crew and
 // before Settings; Grow stays first.
 test("Offer Centre link is visible with run.access and hidden without it", () => {
-  for (const role of ["Agent", "Pit Crew", "Brokerage Administrator"]) {
+  for (const role of ["Agent", "Brokerage Administrator"]) {
     const withRun = buildProductNavLinks({ role, entitlements: ["run.access"] });
     assert.ok(withRun.some((l) => l.path === "/offers" && l.label === "Offer Centre"), `visible for ${role} with run.access`);
     assert.equal(withRun[0]?.path, "/grow");
@@ -133,4 +133,17 @@ test("classic nav: Offer Centre only with run.access; Grow-only nav is unchanged
   assert.ok(classicBoth.some((l) => l.path === "/offers"), "Run-entitled agent sees Offer Centre in the classic sidebar");
   const withoutOffers = classicBoth.filter((l) => l.path !== "/offers").map((l) => l.path);
   assert.deepEqual(withoutOffers, ["/grow", "/", "/today", "/properties", "/exceptions", "/communications", "/settings"]);
+});
+
+// #34 / Owner t162u: offer details are confidential, so the Pit Crew role never gets the Offer Centre
+// link (the API answers 403 for that role too), with or without run.access. Its other links are unchanged.
+test("Offer Centre link is hidden for the Pit Crew role even with run.access", () => {
+  const pc = buildProductNavLinks({ role: "Pit Crew", entitlements: ["grow.access", "run.access"] });
+  assert.ok(!pc.some((l) => l.path === "/offers"), "Pit Crew: no Offer Centre");
+  assert.ok(pc.some((l) => l.path === "/pit-crew"), "Pit Crew keeps its own workspace link");
+  const classicPc = buildClassicNavLinks({ role: "Pit Crew", entitlements: ["grow.access", "run.access"] });
+  assert.ok(!classicPc.some((l) => l.path === "/offers"), "Pit Crew classic sidebar: no Offer Centre");
+  for (const role of [undefined, "Unknown"]) {
+    assert.ok(!buildProductNavLinks({ role, entitlements: ["run.access"] }).some((l) => l.path === "/offers"), `no Offer Centre for role ${role}`);
+  }
 });
