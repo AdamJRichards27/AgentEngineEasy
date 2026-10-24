@@ -55,10 +55,11 @@ const getTransactionStatus: AiToolDefinition = {
 };
 
 // Owner t165u / t171u: offer prices reach the model only for the listing
-// agent and Brokerage Administrators (tools/offerPriceAccess.ts). Everyone
-// else in the brokerage gets each offer's id and status with the price key
-// omitted and a withheld marker; another brokerage, or a caller who cannot
-// be confirmed, gets nothing. Decided here, inside the tool, so no prompt,
+// agent and Brokerage Administrators (tools/offerPriceAccess.ts). Pit Crew
+// (the other brokerage-wide role) gets each offer's id and status with the
+// price key omitted and a withheld marker. An Agent who is not the listing
+// agent (own-property rule), a caller without run.access, another
+// brokerage, or a caller who cannot be confirmed gets no offers at all. Decided here, inside the tool, so no prompt,
 // UI or route change can widen it.
 const NOT_AVAILABLE_ERROR = "This property is not available for this request.";
 const NO_RUN_ACCESS_ERROR = "Offers are part of Run, which this account does not have access to.";

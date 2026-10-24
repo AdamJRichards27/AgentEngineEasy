@@ -4,7 +4,9 @@
 // alone could not prove the rule. Synthetic data only.
 //
 //   listing agent, Brokerage Administrator -> full offer prices
-//   other Agent in the brokerage, Pit Crew -> prices omitted + withheld marker
+//   Pit Crew                               -> prices omitted + withheld marker
+//   other Agent in the brokerage           -> nothing (own-property rule, same
+//                                             404 as GET /properties/:id)
 //   another brokerage                      -> nothing about the property
 //   no run.access (Grow-only brokerage)    -> no offer data, even for the
 //                                             listing agent and Brokerage Admin
@@ -16,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { eq, inArray } from "drizzle-orm";
-import { db, aiInteractions, aiUsage, brokerages, domainEvents, entitlementGrants, offers, properties, users } from "@aee/db";
+import { db, aiInteractions, aiUsage, brokerages, domainEvents, entitlementGrants, offers, properties, transactions, users } from "@aee/db";
 import { TOOL_REGISTRY, redactTimelineForAi, runAllTools } from "../registry.js";
 import {
   AI_PRICE_WITHHELD_INLINE,
@@ -68,14 +70,18 @@ let propertyId = 0;
 let propertyB = 0;
 let propertyG = 0;
 
-async function ctxFor(who: keyof typeof ids, contextId = propertyId): Promise<AiContextPackage> {
+async function ctxFor(
+  who: keyof typeof ids,
+  contextId = propertyId,
+  contextType: "property" | "transaction" = "property",
+): Promise<AiContextPackage> {
   return buildContext({
     requestId: randomUUID(),
     brokerageId: brokerageOf(who),
     userId: ids[who],
     userRole: roles[who],
     role: "copilot",
-    contextType: "property",
+    contextType,
     contextId,
     growFocusItemId: null,
   });
@@ -154,6 +160,7 @@ before(async () => {
     correlationId: randomUUID(),
     payload: { offerId: 3, offerPriceCents: PRICE_A },
   });
+  await db.insert(transactions).values({ propertyId, sellerPartyIds: [], buyerPartyIds: [], purchasePriceCents: PRICE_A });
   await db.insert(offers).values([
     { propertyId, offerPriceCents: PRICE_A, status: "Accepted", shareToken: `ai-price-a-${tag}` },
     { propertyId, offerPriceCents: PRICE_B, status: "Declined", shareToken: `ai-price-b-${tag}` },
@@ -174,6 +181,7 @@ after(async () => {
   if (rows.length > 0) await db.delete(aiUsage).where(inArray(aiUsage.interactionId, rows.map((r) => r.id)));
   await db.delete(aiInteractions).where(inArray(aiInteractions.brokerageId, brokerageIds));
   await db.delete(domainEvents).where(inArray(domainEvents.brokerageId, brokerageIds));
+  await db.delete(transactions).where(inArray(transactions.propertyId, [propertyId, propertyB, propertyG].filter((id) => id > 0)));
   await db.delete(offers).where(inArray(offers.propertyId, [propertyId, propertyB, propertyG].filter((id) => id > 0)));
   await db.delete(entitlementGrants).where(inArray(entitlementGrants.brokerageId, brokerageIds));
   await db.delete(properties).where(inArray(properties.brokerageId, brokerageIds));
@@ -217,7 +225,35 @@ describe("AI tools: offer price access (Owner t165u / t171u)", { concurrency: fa
     });
   }
 
-  for (const who of ["otherAgent", "pitCrew"] as const) {
+  test("otherAgent (not the listing agent): no property context, and a forged context gets no offers or timeline", async () => {
+    const ctx = await ctxFor("otherAgent");
+    assert.equal(ctx.property, null, "own-property rule, same as GET /properties/:id");
+    assertNoPrice(JSON.stringify(await runAllTools(ctx)), "otherAgent via buildContext");
+    const forged: AiContextPackage = { ...ctx, property: { id: propertyId, address: "forged", workflowStage: "Under Offer" } };
+    assert.equal((await resolveAiOfferPriceAccess(forged, propertyId)).kind, "denied");
+    for (const name of ["get_offers_for_property", "get_property_timeline"]) {
+      const r = await toolNamed(name).run(forged, {});
+      assert.equal(r.ok, false, name);
+      assert.equal(r.data, undefined);
+    }
+    assertNoPrice(JSON.stringify(await runAllTools(forged)), "otherAgent forged");
+  });
+
+  test("transaction context is pinned to id, propertyId and status (no purchase price)", async () => {
+    for (const who of ["listingAgent", "admin", "pitCrew"] as const) {
+      const ctx = await ctxFor(who, propertyId, "transaction");
+      assert.ok(ctx.transaction, `${who}: transaction in context`);
+      assert.deepEqual(Object.keys(ctx.transaction).sort(), ["id", "propertyId", "status"], who);
+      assertNoPrice(JSON.stringify(ctx), `${who} transaction context`);
+      assertNoPrice(JSON.stringify(await runAllTools(ctx)), `${who} transaction tools`);
+    }
+    const hidden = await ctxFor("otherAgent", propertyId, "transaction");
+    assert.equal(hidden.transaction, null, "own-property rule applies to transaction context too");
+    const foreign = await ctxFor("adminB", propertyId, "transaction");
+    assert.equal(foreign.transaction, null);
+  });
+
+  for (const who of ["pitCrew"] as const) {
     test(`${who}: offers keep status, price omitted with a withheld marker; timeline scrubbed`, async () => {
       const ctx = await ctxFor(who);
       assert.ok(ctx.property, "same-brokerage property still in context");
@@ -301,11 +337,13 @@ describe("AI tools: offer price access (Owner t165u / t171u)", { concurrency: fa
     }
     assert.equal((await resolveAiOfferPriceAccess(good, null)).kind, "denied");
     assert.equal((await resolveAiOfferPriceAccess(good, 2_000_000_000)).kind, "denied");
-    // A role the rule does not name, consistent in context and database: redacted, never full.
+    // A role the rule does not name, consistent in context and database:
+    // own-property scoped like an Agent, so hidden unless it is the listing
+    // agent, and never full even then (the listing-agent rule names Agent).
     await db.update(users).set({ role: "Conveyancer" }).where(eq(users.id, ids.otherAgent));
     try {
       const odd = { ...(await ctxFor("otherAgent")), userRole: "Conveyancer" };
-      assert.equal((await resolveAiOfferPriceAccess(odd, propertyId)).kind, "redacted");
+      assert.equal((await resolveAiOfferPriceAccess(odd, propertyId)).kind, "denied");
       assertNoPrice(JSON.stringify(await runAllTools(odd)), "unnamed role");
     } finally {
       await db.update(users).set({ role: "Agent" }).where(eq(users.id, ids.otherAgent));
@@ -367,8 +405,9 @@ describe("AI tools: offer price access (Owner t165u / t171u)", { concurrency: fa
     for (const who of ["otherAgent", "pitCrew"]) {
       assert.ok(prompts[who], `${who} prompt captured`);
       assertNoPrice(prompts[who]!, `${who} prompt`);
-      assert.ok(prompts[who]!.includes("WITHHELD"), `${who} prompt carries the withheld marker`);
     }
+    assert.ok(prompts.pitCrew!.includes("WITHHELD"), "Pit Crew prompt carries the withheld marker");
+    assert.equal(prompts.otherAgent!.includes("Synthetic Offer St"), false, "colleague's listing not in the other agent's prompt");
     const rows = await db.select().from(aiInteractions).where(eq(aiInteractions.brokerageId, brokerageA));
     assert.ok(rows.length >= 3);
     assertNoPrice(JSON.stringify(rows), "ai_interactions rows");

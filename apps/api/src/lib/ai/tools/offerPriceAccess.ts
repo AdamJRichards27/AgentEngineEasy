@@ -20,6 +20,11 @@
 //     transaction purchase price under Owner t170u; that is an audited
 //     route-level reveal. The AI tools never return a purchase price to Pit
 //     Crew, which is the stricter of the two and needs no audit write.)
+//   - a caller the existing own-property rule hides the property from (an
+//     Agent, or any role other than Brokerage Administrator / Pit Crew, who
+//     is not the listing agent): nothing, the same 404 GET /properties/:id,
+//     /:id/workspace, /:id/timeline and #271's offer routes give. So in
+//     practice "redacted" is Pit Crew.
 //   - a caller without run.access (e.g. a Grow-only brokerage or user):
 //     no offer data at all. routes/offers.ts gates every offer route on
 //     requireEntitlement("run.access"); POST /ai/ask is requireAuth only, so
@@ -36,8 +41,9 @@
 // unset listing agent means only a Brokerage Administrator gets full access.
 
 import { eq } from "drizzle-orm";
-import { db, properties, users } from "@aee/db";
+import { db, properties, users, type UserRole } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../../middlewares/auth.js";
+import { propertyHiddenFromCaller } from "../../propertyVisibility.js";
 import { explainEntitlementDecision } from "../../entitlements/resolver.js";
 import type { AiContextPackage } from "../types.js";
 
@@ -91,6 +97,10 @@ export async function resolveAiOfferPriceAccess(
     .where(eq(users.id, ctx.userId));
   if (!caller || caller.isActive === false || caller.brokerageId !== ctx.brokerageId) return { kind: "denied" };
   if (caller.role !== ctx.userRole) return { kind: "denied" };
+
+  if (await propertyHiddenFromCaller({ id: ctx.userId, role: caller.role as UserRole, brokerageId: ctx.brokerageId }, propertyId)) {
+    return { kind: "denied" };
+  }
 
   const runAccess = await explainEntitlementDecision(
     { id: ctx.userId, role: caller.role, brokerageId: ctx.brokerageId },
