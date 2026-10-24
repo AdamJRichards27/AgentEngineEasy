@@ -240,7 +240,7 @@ function installGlobals(over: Record<string, unknown> = {}) {
     __w2bApiError: FakeApiError,
     __w2bInvalidated: invalidated,
     __w2bPending: pending,
-    __w2bEntitlements: ["grow.access", "grow.contacts.read", "grow.opportunities.manage"],
+    __w2bEntitlements: ["grow.access", "run.access", "grow.contacts.read", "grow.opportunities.manage"],
     __w2bMutationError: null,
     __w2bSearch: "",
     __w2bQuery: { isLoading: false, isError: false, data: { opportunities: [opportunity()] }, refetch: () => {} },
@@ -405,6 +405,8 @@ test("E-3: without grow.opportunities.manage no follow-up button is offered on e
       assert.equal(button(tree, "Add note"), undefined, "a note button that would only 403 is never shown");
       assert.equal(button(tree, "Ask AE"), undefined, "Ask AE is only offered when the tab is given Today's switch");
       assert.ok(button(tree, "View contact"), "reading the contact is still offered");
+      // Owner D5: without run.access the row never links into the Run property workspace.
+      assert.equal(JSON.stringify(tree, (_k, v) => (typeof v === "function" ? undefined : v)).includes("/properties/"), false, "no Run property link for a Grow-only user");
     });
   } finally {
     clearGlobals();
@@ -414,7 +416,7 @@ test("E-3: without grow.opportunities.manage no follow-up button is offered on e
 test("E-3: an Opportunities row adds a note with Today's POST, and Ask AE uses Today's tab switch", async () => {
   const asked: string[] = [];
   const { hooks, calls, invalidated, pending } = installGlobals({
-    __w2bEntitlements: ["grow.access", "grow.contacts.read", "grow.opportunities.manage", "grow.activities.manage"],
+    __w2bEntitlements: ["grow.access", "run.access", "grow.contacts.read", "grow.opportunities.manage", "grow.activities.manage"],
   });
   try {
     await withVite(async (vite) => {

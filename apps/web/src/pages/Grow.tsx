@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
+import { RunGatedLink } from "../components/RunGatedLink";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
@@ -20,7 +21,7 @@ import { GrowContactTranscriptPanel } from "../components/GrowContactTranscriptP
 // that extraction is the explicit mitigation recorded in the roadmap.
 import { GrowContactConsentPanel } from "../components/GrowContactConsentPanel";
 import { GrowContactEditForm } from "../components/GrowContactEditForm";
-import type { GrowContactability } from "../lib/contactability";
+import type { GrowContact360, GrowContact360Commitment, GrowContact360Opportunity } from "../lib/growContact360";
 import { GrowPendingCommitmentProposals } from "../components/GrowPendingCommitmentProposals";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 // AE GROW Pilot Readiness WP6b (D6) — the shared loading/failed/empty region
@@ -301,114 +302,6 @@ const GrowActivityItem = memoRow(function GrowActivityItem({ activity }: { activ
     </>
   );
 });
-
-interface GrowContact360HouseholdRelationship {
-  id: number;
-  relatedPartyId: number;
-  relatedPartyDisplayName: string;
-  relationshipType: string;
-  note: string | null;
-  createdAt: string;
-}
-
-interface GrowContact360Property {
-  relationshipId: number;
-  propertyId: number | null;
-  propertyAddress: string | null;
-  relationshipType: string;
-  role: string | null;
-  status: string;
-  isPrimary: boolean;
-  validFrom: string;
-  validTo: string | null;
-}
-
-interface GrowContact360Opportunity {
-  id: number;
-  opportunityType: string;
-  status: string;
-  stage: string;
-  reason: string | null;
-  /** Present on Contact 360 once the contact read includes the stored lost reason. */
-  lostReason?: string | null;
-  nextActionDueAt: string | null;
-  recommendedNextAction: string | null;
-  propertyId: number | null;
-}
-
-interface GrowContact360Activity {
-  id: number;
-  activityType: string;
-  occurredAt: string;
-  summary: string;
-  propertyId: number | null;
-  opportunityId: number | null;
-}
-
-interface GrowContact360Commitment {
-  id: number;
-  description: string;
-  dueAt: string;
-  status: string;
-  propertyId: number | null;
-  opportunityId: number | null;
-  completedAt: string | null;
-  cancelledAt: string | null;
-  cancelReason: string | null;
-}
-
-interface GrowTimelineEvent {
-  id: string;
-  type: string;
-  occurredAt: string;
-  summary: string;
-  propertyId: number | null;
-  propertyLabel: string | null;
-  opportunityId: number | null;
-}
-
-interface ContactIntelligenceSummary {
-  roles: string[];
-  relatedPropertyCount: number;
-  mostRecentInteractionAt: string | null;
-  daysSinceLastInteraction: number | null;
-  nextFollowUpAt: string | null;
-  nextFollowUpDescription: string | null;
-  activeOpportunityCount: number;
-  recentActivityCount: number;
-  outstandingCommitmentCount: number;
-  relationshipAgeDays: number | null;
-}
-
-interface GrowContact360 {
-  contact: {
-    id: number;
-    partyType: string;
-    firstName: string | null;
-    middleName: string | null;
-    lastName: string | null;
-    organisationName: string | null;
-    displayName: string;
-    email: string | null;
-    mobile: string | null;
-    residentialAddress: string | null;
-    createdAt: string;
-    updatedAt: string;
-  };
-  assignedAgentUserId: number | null;
-  roles: string[];
-  householdRelationships: GrowContact360HouseholdRelationship[];
-  properties: GrowContact360Property[];
-  opportunities: GrowContact360Opportunity[];
-  activities: GrowContact360Activity[];
-  commitments: GrowContact360Commitment[];
-  timeline: GrowTimelineEvent[];
-  intelligence: ContactIntelligenceSummary;
-  // AE GROW Completion W3-A (A-6) — consent/DNC/suppression read model. Its
-  // own shape is hand-mirrored in lib/contactability.ts, alongside the display
-  // rules, rather than restated here.
-  contactability: GrowContactability;
-}
 
 type CallEligibilityStatus =
   | "Ready to call"
@@ -1872,9 +1765,9 @@ function GrowOpportunityRowActions({
         </button>
       )}
       {propertyId !== null && (
-        <Link href={`/properties/${propertyId}`} className="btn btn-link btn-small">
+        <RunGatedLink href={`/properties/${propertyId}`} className="btn btn-link btn-small">
           View property
-        </Link>
+        </RunGatedLink>
       )}
       {onViewContact !== null && canViewContacts && partyId !== null && (
         <button type="button" className="btn btn-link btn-small" onClick={() => onViewContact(partyId)}>
@@ -2229,9 +2122,9 @@ function GrowActionCard({
           </Link>
         )}
         {showViewProperty && item.propertyId !== null && (
-          <Link href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
+          <RunGatedLink href={`/properties/${item.propertyId}`} className="btn btn-link btn-small">
             View property
-          </Link>
+          </RunGatedLink>
         )}
         {/* The `item.partyId !== null` repeated below is what proves to the
             compiler what showViewContact/showEmail/showSms already guarantee:
@@ -3602,7 +3495,7 @@ export function GrowContactDetail({
                 <tr key={p.relationshipId}>
                   <td>
                     {p.propertyId !== null ? (
-                      <Link href={`/properties/${p.propertyId}`}>{p.propertyAddress ?? "View property"}</Link>
+                      <RunGatedLink href={`/properties/${p.propertyId}`} fallback={p.propertyAddress ?? "–"}>{p.propertyAddress ?? "View property"}</RunGatedLink>
                     ) : (
                       p.propertyAddress ?? "–"
                     )}

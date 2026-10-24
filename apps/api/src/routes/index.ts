@@ -25,6 +25,8 @@ import { importRouter } from "./import.js";
 import { automationOpsRouter } from "./automationOps.js";
 import { appraisalsRouter } from "./appraisals.js";
 import { growAppraisalsRouter } from "./growAppraisals.js";
+import { growMomentumRouter } from "./growMomentum.js";
+import { growMarketActivityRouter } from "./growMarketActivity.js";
 import { propertyIntelligenceRouter } from "./propertyIntelligence.js";
 import { growCallsRouter } from "./growCalls.js";
 import { growCallsWebhooksRouter } from "./growCallsWebhooks.js";
@@ -119,6 +121,10 @@ apiRouter.use("/automation/ops", automationOpsRouter);
 // Agent Engine 2.0 — Run Transaction Vertical Slice.
 apiRouter.use("/appraisals", appraisalsRouter);
 apiRouter.use("/grow/appraisals", growAppraisalsRouter);
+// CC #5 My Momentum phase 1 (SPEC-01). 404 unless GROW_MOMENTUM_ENABLED=true.
+apiRouter.use("/grow/momentum", growMomentumRouter);
+// CC #26 Market Activity from internal data (SPEC-02). 404 unless GROW_MARKET_ACTIVITY_ENABLED=true.
+apiRouter.use("/grow/market-activity", growMarketActivityRouter);
 // AE GROW Priority 5 Remediation — Property Intelligence. Mounted the same
 // way as growAppraisalsRouter immediately above: nested under Grow's own
 // namespace (Property Intelligence is a Grow-specific view onto the

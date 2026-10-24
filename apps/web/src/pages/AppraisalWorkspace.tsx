@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useParams } from "wouter";
+import { RunGatedLink } from "../components/RunGatedLink";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../lib/api";
 import { DEMO_AI_LABEL, userVisibleAiText } from "../lib/demoAi";
@@ -477,7 +478,7 @@ export default function AppraisalWorkspace() {
       </p>
       <h1 id="appraisal-property">{address}</h1>
       <p className="muted">
-        <Link href={`/properties/${appraisal.propertyId}`}>View property</Link>
+        <RunGatedLink href={`/properties/${appraisal.propertyId}`}>View property</RunGatedLink>
       </p>
 
       <section className="card">
@@ -982,7 +983,7 @@ export default function AppraisalWorkspace() {
           {handoffNotice && (
             <p id="appraisal-run-handoff-confirmation" role="status">
               {handoffNotice.message}{" "}
-              <Link href={`/properties/${handoffNotice.propertyId}`}>Open the property in Run</Link>
+              <RunGatedLink href={`/properties/${handoffNotice.propertyId}`}>Open the property in Run</RunGatedLink>
             </p>
           )}
           {handoffError && (
