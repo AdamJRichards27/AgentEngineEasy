@@ -31,6 +31,8 @@
 // requireEntitlement — never by whether a link is rendered here. Priority 0.5's Stop
 // Condition 3 forbids gating that "relies solely on frontend hiding"; nothing here is relied
 // on for access at all.
+import { canAccessOfferCentre } from "./offerCentreAccess";
+
 export interface NavLink {
   path: string;
   label: string;
@@ -55,8 +57,7 @@ export function buildProductNavLinks(ctx: NavContext): NavLink[] {
   const canSeeFinancial = ctx.role === "Brokerage Administrator";
   // #34 / Owner t162u: the Offer Centre shows confidential offer details. Same rule as the API
   // (GET /offers/centre, /offers/buyers): run.access plus Agent or Brokerage Administrator; never Pit Crew.
-  const canSeeOfferCentre =
-    hasEntitlement(ctx, "run.access") && (ctx.role === "Agent" || ctx.role === "Brokerage Administrator");
+  const canSeeOfferCentre = canAccessOfferCentre(ctx.role, ctx.entitlements);
   return [
     { path: "/grow", label: "Grow" },
     { path: "/", label: "Home" },

@@ -6,6 +6,8 @@ import { useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { apiFetch } from "../lib/api";
+import { offerCentreGateState, type OfferCentreGateState } from "../lib/offerCentreAccess";
+import { useEntitlements, useSession } from "../lib/session";
 import { formatCents } from "../lib/financial";
 import {
   OFFER_CENTRE_STATUSES,
@@ -230,7 +232,39 @@ export function OfferCentreRegion(props: {
   return <div aria-busy={props.busy ? "true" : "false"}>{body}</div>;
 }
 
+// Owner t165u: the page self-gates like Financial Operations. Until the session
+// and entitlements say run.access + Agent/Brokerage Administrator, the content
+// (and so every offer/buyer query) never mounts. The API stays authoritative.
+export function OfferCentreGate(props: { state: OfferCentreGateState; children: ReactNode }) {
+  if (props.state === "loading") return <p className="muted">Loading…</p>;
+  if (props.state === "denied") {
+    return (
+      <div className="primary-action">
+        <div className="eyebrow">Offer Centre</div>
+        <h1>Not available</h1>
+        <p className="muted">The Offer Centre is only available to Agents and Brokerage Administrators.</p>
+      </div>
+    );
+  }
+  return <>{props.children}</>;
+}
+
 export default function OfferCentre() {
+  const { user, isLoading: sessionLoading } = useSession();
+  const { entitlements, isLoading: entitlementsLoading } = useEntitlements();
+  const state = offerCentreGateState({
+    loading: sessionLoading || entitlementsLoading,
+    role: user?.role,
+    entitlements,
+  });
+  return (
+    <OfferCentreGate state={state}>
+      <OfferCentreContent />
+    </OfferCentreGate>
+  );
+}
+
+function OfferCentreContent() {
   const [status, setStatus] = useState<OfferCentreStatus | "">("");
   const [propertyId, setPropertyId] = useState("");
   const [page, setPage] = useState(0);
