@@ -23,11 +23,14 @@
 // a different property is excluded, the same way a missing exception is
 // excluded, and its title is not returned. A COMPLETE campaign item is
 // excluded the same way. BLOCKED and the other non-complete statuses stay.
-// The flag-on exception join requires risk_exceptions.property_id to match
-// the event as well. The flag-off inbox does not. cost_cents and
-// vendor_name are not selected. LAUNCH_ITEM hand-back, escalate,
-// acknowledge, resolve, return, and reclaim run only when both flags are
-// the literal "true". The flag-off inbox function is unchanged.
+// Both exception joins (flag on and flag off) require
+// risk_exceptions.property_id to match the event as well (R-F25). The
+// flag-off inbox logs a read-only count of the rows that condition hides
+// (pit_crew_inbox_exception_property_mismatch_hidden); nothing repairs
+// them. cost_cents and vendor_name are not selected. LAUNCH_ITEM
+// hand-back, escalate, acknowledge, resolve, return, and reclaim run only
+// when both flags are the literal "true". Apart from that join condition
+// and the count, the flag-off inbox function is unchanged.
 //
 // Open campaign items are included only when
 // PIT_CREW_LAUNCH_ITEM_SOURCE_ENABLED is the literal "true". While it is
@@ -36,12 +39,14 @@
 // overlay the workspace already treats as touched (version > 0). There is
 // no due-date horizon. Pit Crew actions do not write campaign_items.
 
-import { eq, and, asc, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
+import { eq, and, asc, count, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { campaignItems, db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
+import { logger } from "@aee/events";
+import { campaignItems, communicationSettings, db, pitCrewAssignments, pitCrewResponsibilityEvents, properties, riskExceptions, users, type PitCrewResponsibilityEvent } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../middlewares/auth.js";
 import { listBrokerageExceptions, listedExceptionTitle } from "../exceptions/queries.js";
 import { isPitCrewLaunchItemSourceEnabled } from "./launchItemSource.js";
+import { isSamePitCrewLocalDay, resolvePitCrewDayTimeZone } from "./waitingOnDetection.js";
 import { explicitResponsibilityRecipientRole, isPitCrewResponsibilityActionsEnabled, PitCrewResponsibilityDisabledError } from "./responsibility.js";
 import {
   type PcWorkItem,
@@ -130,8 +135,16 @@ interface LoadedOpenResponsibility {
   recipientDisplayName: string | null;
 }
 
-function isSameUtcDay(a: Date, b: Date): boolean {
-  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth() && a.getUTCDate() === b.getUTCDate();
+// PC-B: "today" is the brokerage-local calendar day (Section 12, the same
+// rule as the Command Centre), via Pit Crew's own helpers. A plain select:
+// a brokerage without a communication_settings row stays without one.
+async function loadPitCrewDayTimeZone(brokerageId: number): Promise<string> {
+  const [row] = await db
+    .select({ timeZone: communicationSettings.timeZone })
+    .from(communicationSettings)
+    .where(eq(communicationSettings.brokerageId, brokerageId))
+    .limit(1);
+  return resolvePitCrewDayTimeZone(row?.timeZone ?? null);
 }
 
 function isActiveWorkspaceStatus(status: PitCrewItemStatus): boolean {
@@ -360,8 +373,19 @@ async function loadLaunchItemWorkItems(
   };
 }
 
-export async function getPitCrewWorkspace(brokerageId: number, actorUserId: number): Promise<PcWorkspace> {
-  const now = new Date();
+export interface PitCrewWorkspaceOptions {
+  /** Test clock. The route passes nothing, so production uses the real time. */
+  now?: Date;
+}
+
+export async function getPitCrewWorkspace(
+  brokerageId: number,
+  actorUserId: number,
+  options: PitCrewWorkspaceOptions = {},
+): Promise<PcWorkspace> {
+  const now = options.now ?? new Date();
+  // PC-B: brokerage-local day for Completed Today (Section 12).
+  const dayTimeZone = await loadPitCrewDayTimeZone(brokerageId);
 
   // Pit Crew never has financial entitlement (Sections 24-25) -- reusing
   // the Risk Engine's own redaction (canViewFinancials: false) rather than
@@ -384,7 +408,12 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
 
   const assignedUserIds = [...new Set(overlayRows.map((row) => row.assignedToUserId).filter((id): id is number => id != null))];
   const assignedUsers = assignedUserIds.length
-    ? await db.select({ id: users.id, firstName: users.firstName, lastName: users.lastName }).from(users).where(inArray(users.id, assignedUserIds))
+    ? await db
+        .select({ id: users.id, firstName: users.firstName, lastName: users.lastName })
+        .from(users)
+        // PC-A: same brokerage scope as the launch-item lookup. An assignee
+        // outside this brokerage keeps assignedToUserId but gets no name.
+        .where(and(inArray(users.id, assignedUserIds), eq(users.brokerageId, brokerageId)))
     : [];
   const nameByUserId = new Map(assignedUsers.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
@@ -457,7 +486,7 @@ export async function getPitCrewWorkspace(brokerageId: number, actorUserId: numb
   const teamWork = pcRelevant.filter((item) => isActiveWorkspaceStatus(item.pcStatus)).sort(comparePcWorkItems);
   const waitingOn = pcRelevant.filter((item) => item.pcStatus === "WAITING_ON").sort(comparePcWorkItems);
   const completedToday = pcRelevant
-    .filter((item) => item.pcStatus === "DONE" && item.completedAt && isSameUtcDay(new Date(item.completedAt), now))
+    .filter((item) => item.pcStatus === "DONE" && item.completedAt && isSamePitCrewLocalDay(new Date(item.completedAt), now, dayTimeZone))
     .sort((a, b) => new Date(b.completedAt ?? 0).getTime() - new Date(a.completedAt ?? 0).getTime());
   const launchCoordination = pcRelevant
     .filter((item) => LAUNCH_COORDINATION_CATEGORIES.includes(item.category) && isActiveWorkspaceStatus(item.pcStatus))
@@ -519,6 +548,9 @@ export async function getPitCrewTeam(brokerageId: number): Promise<PcTeamMember[
     .from(pitCrewAssignments)
     .where(
       and(
+        // PC-A: count only this brokerage's overlays, so another tenant's
+        // row cannot add to this team's capacity signal.
+        eq(pitCrewAssignments.brokerageId, brokerageId),
         inArray(pitCrewAssignments.assignedToUserId, memberIds),
         inArray(pitCrewAssignments.status, ["CLAIMED", "IN_PROGRESS", "WAITING_ON"]),
       ),
@@ -615,10 +647,12 @@ function responsibilityInboxItem(row: ResponsibilityInboxRowIdentity): Responsib
  * campaign_items.status to be anything other than COMPLETE. A row whose
  * campaign item is on a different property, or is COMPLETE, is excluded
  * from the inbox, the same way a missing exception is excluded, so the
- * campaign item title is not returned. BLOCKED stays. The flag-on exception
- * join requires the same property match. The flag-off function does not.
- * While the launch-item flag is not the literal "true", this function does
- * not query campaign_items.
+ * campaign item title is not returned. BLOCKED stays. Both exception joins
+ * (flag on and flag off) require the same property match:
+ * risk_exceptions.property_id must equal the event's property_id, so an
+ * exception on another property is excluded and its title is not
+ * returned. While the launch-item flag is not the literal "true", this
+ * function does not query campaign_items.
  */
 export async function listResponsibilityItemsForRecipient(
   brokerageId: number,
@@ -634,9 +668,14 @@ export async function listResponsibilityItemsForRecipient(
   return listResponsibilityInboxIncludingLaunchItems(brokerageId, userId, role);
 }
 
-// Flag-off inbox. The exception inner join and the selected columns stay
-// as they were before LAUNCH_ITEM. This function does not mention
-// campaign_items.
+// Flag-off inbox. The selected columns stay as they were before
+// LAUNCH_ITEM. This function does not mention campaign_items. The exception
+// inner join requires risk_exceptions.property_id to equal the event's
+// property_id, the same rule as the flag-on join (R-F25). A row that fails
+// only that condition is hidden, and a read-only count of those rows for
+// this recipient is logged as pit_crew_inbox_exception_property_mismatch_hidden
+// when it is above zero. The response shape does not change and nothing is
+// repaired.
 async function listExceptionResponsibilityInbox(
   brokerageId: number,
   userId: number,
@@ -670,6 +709,7 @@ async function listExceptionResponsibilityInbox(
         eq(pitCrewAssignments.sourceType, "EXCEPTION"),
         sql`${pitCrewAssignments.sourceRecordId} = ${riskExceptions.id}::text`,
         eq(riskExceptions.brokerageId, brokerageId),
+        eq(riskExceptions.propertyId, pitCrewResponsibilityEvents.propertyId),
       ),
     )
     .innerJoin(
@@ -721,7 +761,61 @@ async function listExceptionResponsibilityInbox(
     }),
   );
 
+  const hiddenCount = await countExceptionPropertyMismatchedResponsibilityEvents(brokerageId, userId, role);
+  if (hiddenCount > 0) {
+    logger.warn("pit_crew_inbox_exception_property_mismatch_hidden", {
+      brokerageId,
+      recipientUserId: userId,
+      recipientRole: role,
+      hiddenCount,
+      inbox: "flag_off_exception",
+    });
+  }
+
   return { generatedAt, items };
+}
+
+/**
+ * Read-only count of open responsibility events this recipient would see
+ * in the flag-off inbox if the exception property check (R-F25) were not
+ * applied: same brokerage, recipient, status, overlay and event-property
+ * filters as listExceptionResponsibilityInbox, but the EXCEPTION is on a
+ * different property than the event. Those rows are hidden from the inbox.
+ * Rows excluded for any other reason (another brokerage, a missing
+ * exception, an event on another brokerage's property) are not counted.
+ * Reads only; it does not repair, close, or reassign anything.
+ */
+export async function countExceptionPropertyMismatchedResponsibilityEvents(
+  brokerageId: number,
+  userId: number,
+  role: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ hidden: count() })
+    .from(pitCrewResponsibilityEvents)
+    .innerJoin(pitCrewAssignments, eq(pitCrewResponsibilityEvents.assignmentId, pitCrewAssignments.id))
+    .innerJoin(
+      riskExceptions,
+      and(
+        eq(pitCrewAssignments.sourceType, "EXCEPTION"),
+        sql`${pitCrewAssignments.sourceRecordId} = ${riskExceptions.id}::text`,
+        eq(riskExceptions.brokerageId, brokerageId),
+        ne(riskExceptions.propertyId, pitCrewResponsibilityEvents.propertyId),
+      ),
+    )
+    .innerJoin(
+      properties,
+      and(eq(properties.id, pitCrewResponsibilityEvents.propertyId), eq(properties.brokerageId, brokerageId)),
+    )
+    .where(
+      and(
+        eq(pitCrewResponsibilityEvents.brokerageId, brokerageId),
+        eq(pitCrewAssignments.brokerageId, brokerageId),
+        inArray(pitCrewResponsibilityEvents.status, ["OPEN", "ACKNOWLEDGED"]),
+        or(eq(pitCrewResponsibilityEvents.recipientUserId, userId), eq(pitCrewResponsibilityEvents.recipientRole, role)),
+      ),
+    );
+  return Number(row?.hidden ?? 0);
 }
 
 // Flag-on inbox. Exception rows still use listedExceptionTitle. A
@@ -732,8 +826,8 @@ async function listExceptionResponsibilityInbox(
 // is excluded: the left join does not match, and the row is dropped.
 // BLOCKED and the other non-complete statuses stay. The exception left join
 // in this function also requires risk_exceptions.property_id to equal the
-// event's property_id. The flag-off function does not add that condition.
-// cost_cents and vendor_name are not selected.
+// event's property_id. The flag-off function applies the same condition
+// (R-F25). cost_cents and vendor_name are not selected.
 async function listResponsibilityInboxIncludingLaunchItems(
   brokerageId: number,
   userId: number,

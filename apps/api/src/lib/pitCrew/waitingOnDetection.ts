@@ -189,6 +189,28 @@ export function isValidTimeZone(value: string): boolean {
   }
 }
 
+/**
+ * PC-B: true when both instants fall on the same calendar day in
+ * `timeZone`. Built on zonedParts above, so it is DST-safe.
+ */
+export function isSamePitCrewLocalDay(a: Date, b: Date, timeZone: string): boolean {
+  const pa = zonedParts(a, timeZone);
+  const pb = zonedParts(b, timeZone);
+  return pa.year === pb.year && pa.month === pb.month && pa.day === pb.day;
+}
+
+/**
+ * PC-B: the day zone for Pit Crew "today" reads. A valid stored
+ * communication_settings.time_zone wins. Missing, blank, or invalid values
+ * fall back to Australia/Brisbane. This does not consult the waiting-on
+ * sweep's own time zone, which governs only the sweep window.
+ */
+export function resolvePitCrewDayTimeZone(communicationTimeZone: string | null | undefined): string {
+  const stored = communicationTimeZone?.trim() ?? "";
+  if (stored && isValidTimeZone(stored)) return stored;
+  return PIT_CREW_WAITING_ON_SWEEP_DEFAULT_TIME_ZONE;
+}
+
 function clampCadenceMs(value: number): number {
   if (!Number.isFinite(value)) return PIT_CREW_WAITING_ON_SWEEP_DEFAULT_CADENCE_MS;
   const parsed = Math.trunc(value);
