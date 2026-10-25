@@ -24,7 +24,7 @@ import { documents } from "./documents";
  * a Brokerage Administrator still approves it) and COMMISSION_CALCULATION
  * (non-final commission calculation snapshots). Both are transaction-wide.
  */
-export const FINANCIAL_AMENDMENT_SCOPES = ["AGENCY_TERMS", "CAMPAIGN_ITEM_COST", "COMMISSION_AGREEMENT", "COMMISSION_CALCULATION"] as const;
+export const FINANCIAL_AMENDMENT_SCOPES = ["AGENCY_TERMS", "CAMPAIGN_ITEM_COST", "COMMISSION_AGREEMENT", "COMMISSION_CALCULATION", "TRANSACTION_FEE"] as const;
 export type FinancialAmendmentScope = (typeof FINANCIAL_AMENDMENT_SCOPES)[number];
 
 /** The record type a scope's optional single-record target must name. */
@@ -33,6 +33,9 @@ export const FINANCIAL_AMENDMENT_SCOPE_TARGET_TYPE: Record<FinancialAmendmentSco
   CAMPAIGN_ITEM_COST: "campaign_item",
   COMMISSION_AGREEMENT: "commission_agreement",
   COMMISSION_CALCULATION: "commission_calculation",
+  // t179u slice 2 (added by migration 0040, not 0038): draft a new version of
+  // one transaction fee (targeted) or any fee on the transaction (untargeted).
+  TRANSACTION_FEE: "transaction_fee",
 };
 
 /** Scopes that are transaction-wide only (no single-record target). */
@@ -65,7 +68,8 @@ export const financialAmendmentAuthorities = pgTable(
     granteeLookupIdx: index("fin_amend_auth_grantee_txn_scope_idx").on(table.granteeUserId, table.transactionId, table.scope),
     transactionIdx: index("fin_amend_auth_transaction_idx").on(table.transactionId),
     brokerageCreatedIdx: index("fin_amend_auth_brokerage_created_idx").on(table.brokerageId, table.createdAt),
-    scopeCheck: check("fin_amend_auth_scope_check", sql`${table.scope} in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST', 'COMMISSION_AGREEMENT', 'COMMISSION_CALCULATION')`),
+    // 0038 created this CHECK; 0040 widens it for TRANSACTION_FEE (t179u D4: 0038 itself unchanged).
+    scopeCheck: check("fin_amend_auth_scope_check", sql`${table.scope} in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST', 'COMMISSION_AGREEMENT', 'COMMISSION_CALCULATION', 'TRANSACTION_FEE')`),
     grantorRoleCheck: check("fin_amend_auth_grantor_role_check", sql`${table.grantedByRole} in ('Agent', 'Brokerage Administrator')`),
     targetPairCheck: check(
       "fin_amend_auth_target_pair_check",

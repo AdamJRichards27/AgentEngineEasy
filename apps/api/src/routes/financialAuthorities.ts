@@ -28,6 +28,7 @@ import {
   financialAmendmentAuthorities,
   properties,
   transactions,
+  transactionFees,
   users,
   type FinancialAmendmentAuthority,
 } from "@aee/db";
@@ -193,6 +194,17 @@ financialAuthoritiesRouter.post("/", requireAuth, requiresRunAccess, async (req,
           .select({ id: agencyAgreementTerms.id })
           .from(agencyAgreementTerms)
           .where(and(eq(agencyAgreementTerms.id, id), eq(agencyAgreementTerms.propertyId, txn.propertyId)));
+        found = !!row;
+        targetRecordId = String(id);
+      }
+    } else if (input.scope === "TRANSACTION_FEE") {
+      // t179u slice 2: a fee on THIS transaction (any version).
+      const id = Number(input.targetRecordId);
+      if (Number.isInteger(id) && id > 0) {
+        const [row] = await db
+          .select({ id: transactionFees.id })
+          .from(transactionFees)
+          .where(and(eq(transactionFees.id, id), eq(transactionFees.transactionId, txn.transactionId), eq(transactionFees.brokerageId, user.brokerageId)));
         found = !!row;
         targetRecordId = String(id);
       }

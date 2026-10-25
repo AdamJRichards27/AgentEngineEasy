@@ -65,6 +65,8 @@ import {
   pcFeeAuthorities,
   pcFeeCalculations,
   financialAmendmentAuthorities,
+  feeScheduleVersions,
+  transactionFees,
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
@@ -536,6 +538,12 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
   }
   // Owner t174u: grants reference transactions, properties, users and documents.
+  // t179u slices 2-3: statements (lines/confirmations first), then fees, then schedules (FK order).
+  await db.execute(sql`delete from settlement_statement_lines where statement_id in (select id from settlement_statements where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)}))`).catch(() => undefined);
+  await db.execute(sql`delete from settlement_statements where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`).catch(() => undefined);
+  await db.execute(sql`delete from settlement_confirmations where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`).catch(() => undefined);
+  await db.delete(transactionFees).where(inArray(transactionFees.brokerageId, ids));
+  await db.delete(feeScheduleVersions).where(inArray(feeScheduleVersions.brokerageId, ids));
   await db.delete(financialAmendmentAuthorities).where(inArray(financialAmendmentAuthorities.brokerageId, ids));
   await db.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids));
   await db.delete(pcFeeCalculations).where(inArray(pcFeeCalculations.brokerageId, ids));
