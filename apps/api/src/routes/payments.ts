@@ -218,6 +218,8 @@ const SERVICE_FEE_MESSAGES: Record<string, string> = {
   SETTLEMENT_STATEMENT_NOT_ISSUED: "The service fee can be collected only after a final, itemised settlement statement has been issued to the payer.",
   SETTLEMENT_STATEMENT_PAYER_MISMATCH: "The issued settlement statement is not addressed to the authorised payer.",
   SETTLEMENT_STATEMENT_FEE_MISMATCH: "The issued settlement statement does not itemise this service fee at the amount to be debited.",
+  SETTLEMENT_CONFIRMATIONS_INCOMPLETE: "Both representatives' written settlement confirmations must be on file before the fee is collected.",
+  SETTLEMENT_STATEMENT_STALE: "The figures behind the issued statement have changed. A Brokerage Administrator must correct the statement first.",
 };
 function serviceFeeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof ServiceFeeCollectionError) {

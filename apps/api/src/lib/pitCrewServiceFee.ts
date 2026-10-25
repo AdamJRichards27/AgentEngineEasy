@@ -53,7 +53,9 @@ export type ServiceFeeCollectionCode =
   | "SERVICE_FEE_NOTICE_PERIOD_RUNNING"
   | "SETTLEMENT_STATEMENT_NOT_ISSUED"
   | "SETTLEMENT_STATEMENT_PAYER_MISMATCH"
-  | "SETTLEMENT_STATEMENT_FEE_MISMATCH";
+  | "SETTLEMENT_STATEMENT_FEE_MISMATCH"
+  | "SETTLEMENT_CONFIRMATIONS_INCOMPLETE"
+  | "SETTLEMENT_STATEMENT_STALE";
 
 export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> = {
   SERVICE_FEE_NOT_FOUND: 404,
@@ -67,6 +69,8 @@ export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> 
   SETTLEMENT_STATEMENT_NOT_ISSUED: 409,
   SETTLEMENT_STATEMENT_PAYER_MISMATCH: 409,
   SETTLEMENT_STATEMENT_FEE_MISMATCH: 409,
+  SETTLEMENT_CONFIRMATIONS_INCOMPLETE: 409,
+  SETTLEMENT_STATEMENT_STALE: 409,
 };
 
 export class ServiceFeeCollectionError extends Error {
@@ -135,8 +139,20 @@ export async function activePitCrewAssignmentIdsOnTransaction(caller: ServiceFee
 }
 
 /** Every gate except the request-status/notice step. Throws ServiceFeeCollectionError. */
-export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, transactionId: number, now = new Date()): Promise<VerifiedServiceFee> {
-  if (caller.role !== "Pit Crew" && caller.role !== "Brokerage Administrator") {
+export interface ServiceFeeCollectionOptions {
+  /**
+   * t180u(1) D2: set ONLY by the statement-issue path (never from a request
+   * body). The issuer was already authorised as a D1 actor (assigned Pit
+   * Crew, listing agent or Brokerage Administrator) inside the issue
+   * transaction, so the role/assignment check is not repeated; every other
+   * gate is.
+   */
+  trigger?: "statement_issued";
+}
+
+export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, transactionId: number, now = new Date(), opts: ServiceFeeCollectionOptions = {}): Promise<VerifiedServiceFee> {
+  const autoOnIssue = opts.trigger === "statement_issued";
+  if (!autoOnIssue && caller.role !== "Pit Crew" && caller.role !== "Brokerage Administrator") {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_FOUND");
   }
   if (!Number.isSafeInteger(transactionId) || transactionId <= 0) throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_FOUND");
@@ -151,7 +167,7 @@ export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, trans
   const propertyId = transaction.propertyId;
 
   let pitCrewAssignmentIds: number[] = [];
-  if (caller.role === "Pit Crew") {
+  if (!autoOnIssue && caller.role === "Pit Crew") {
     pitCrewAssignmentIds = await activePitCrewAssignmentIdsOnTransaction(caller, propertyId, transaction.id);
     if (pitCrewAssignmentIds.length === 0) throw new ServiceFeeCollectionError("PIT_CREW_NOT_ASSIGNED", undefined, propertyId);
   }
@@ -261,9 +277,9 @@ export interface ServiceFeeCollectionResult {
 }
 
 /** Verify every gate, then advance the existing workflow by exactly one step. */
-export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transactionId: number): Promise<ServiceFeeCollectionResult> {
+export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transactionId: number, opts: ServiceFeeCollectionOptions = {}): Promise<ServiceFeeCollectionResult> {
   const now = new Date();
-  const verified = await verifyServiceFeeCollection(caller, transactionId, now);
+  const verified = await verifyServiceFeeCollection(caller, transactionId, now, opts);
   const request = verified.paymentRequest;
 
   // Owner t178u(1): no collection step of any kind (notice, debit, or an
@@ -290,4 +306,64 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
     return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
   }
   throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}.`, verified.propertyId);
+}
+
+export type AutoCollectionResult =
+  | { attempted: true; outcome: ServiceFeeCollectionOutcome; paymentRequestId: number; statusAfter: string }
+  | { attempted: true; code: ServiceFeeCollectionCode | "SERVICE_FEE_COLLECTION_FAILED" }
+  | { attempted: false; reason: "NO_SERVICE_FEE_LINE" };
+
+/**
+ * Owner t180u(1) / D2: issuing the final statement starts collection of the
+ * Pit Crew service fee automatically, through exactly the same gated
+ * workflow as the manual call (statement gate, settlement, confirmations,
+ * finalised fee, valid authority, notice period, single debit). Never throws:
+ * a refusal is recorded and the issued statement stands. Idempotent: an
+ * already started, scheduled or paid fee is a no-op (a corrected statement
+ * never re-collects a paid fee).
+ */
+export async function autoCollectOnStatementIssue(input: {
+  brokerageId: number;
+  transactionId: number;
+  statementId: number;
+  issuerUserId: number;
+  issuerRole: string;
+  hasServiceFeeLine: boolean;
+}): Promise<AutoCollectionResult> {
+  const { logAudit } = await import("./audit.js");
+  if (!input.hasServiceFeeLine) return { attempted: false, reason: "NO_SERVICE_FEE_LINE" };
+  const caller: ServiceFeeCaller = { id: input.issuerUserId, role: input.issuerRole, brokerageId: input.brokerageId };
+  let result: AutoCollectionResult;
+  let propertyId: number | null = null;
+  let extra: Record<string, unknown> = {};
+  try {
+    const r = await collectPitCrewServiceFee(caller, input.transactionId, { trigger: "statement_issued" });
+    propertyId = r.verified.propertyId;
+    result = { attempted: true, outcome: r.outcome, paymentRequestId: r.paymentRequest.id, statusAfter: r.paymentRequest.status };
+    extra = { paymentRequestId: r.paymentRequest.id, statusBefore: r.verified.paymentRequest.status, statusAfter: r.paymentRequest.status, totalFeeCents: r.verified.totalFeeCents, settlementStatementId: r.settlementStatementId };
+  } catch (err) {
+    if (err instanceof ServiceFeeCollectionError) {
+      propertyId = err.propertyId ?? null;
+      result = { attempted: true, code: err.code };
+    } else {
+      result = { attempted: true, code: "SERVICE_FEE_COLLECTION_FAILED" };
+    }
+  }
+  await logAudit({
+    brokerageId: input.brokerageId,
+    userId: input.issuerUserId,
+    action: "outcome" in result ? "pit_crew_service_fee_auto_collection" : "pit_crew_service_fee_auto_collection_refused",
+    recordType: "transaction",
+    recordId: String(input.transactionId),
+    propertyId,
+    updatedValue: JSON.stringify({
+      trigger: "statement_issued",
+      statementId: input.statementId,
+      issuerRole: input.issuerRole,
+      ...("outcome" in result ? { outcome: result.outcome } : "code" in result ? { code: result.code } : {}),
+      ...extra,
+      policy: "t180u",
+    }),
+  });
+  return result;
 }

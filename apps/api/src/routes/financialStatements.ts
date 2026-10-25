@@ -444,9 +444,19 @@ financialStatementsRouter.post("/financial/settlement-statements/:id/issue", ...
         },
         { strict: true, write },
       );
-      return { statement: issued!, superseded };
+      return { statement: issued!, superseded, hasServiceFeeLine: derived.pcServiceFeeCents != null };
     });
-    res.json(result);
+    // Owner t180u(1) / D2: issue starts the gated service-fee collection automatically (after commit).
+    const { autoCollectOnStatementIssue } = await import("../lib/pitCrewServiceFee.js");
+    const collection = await autoCollectOnStatementIssue({
+      brokerageId: user.brokerageId,
+      transactionId: result.statement.transactionId,
+      statementId: result.statement.id,
+      issuerUserId: user.id,
+      issuerRole: user.role,
+      hasServiceFeeLine: result.hasServiceFeeLine,
+    });
+    res.json({ statement: result.statement, superseded: result.superseded, collection });
   } catch (err) {
     if (!send(res, err)) throw err;
   }

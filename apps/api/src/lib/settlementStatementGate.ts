@@ -3,16 +3,20 @@
 // statement has been ISSUED to the authorised payer, with a PC_SERVICE_FEE
 // line equal to the payment request amount.
 //
-// No settlement-statement table exists yet (schema proposal S1, Owner
-// approval pending). Every lookup therefore goes through ONE function,
-// `lookupIssuedSettlementStatement`, which returns "no issued statement"
-// until S1 is built. Collection is blocked (409 SETTLEMENT_STATEMENT_NOT_ISSUED)
-// in every environment. When S1 lands, only the default lookup changes; the
-// checks below stay as they are.
+// Owner t180u(1): the default lookup now reads the real statement (0041,
+// settlement_statements + lines) and re-verifies, at collection time, what
+// issue required: both representatives' written confirmations still ACTIVE
+// and matching the recorded solicitors, and the statement lines re-derived
+// from the source records (finalised commission, approved fees, PC fee
+// request) unchanged and free of validation issues. Any drift since issue
+// refuses collection until a Brokerage Administrator corrects the statement.
 //
 // Fails closed: a missing statement, a non-ISSUED statement, a statement for
 // another transaction or brokerage, a different payer, a missing, duplicated
-// or different PC_SERVICE_FEE line, a lookup error, all refuse.
+// or different PC_SERVICE_FEE line, a stale statement, incomplete
+// confirmations, a lookup error, all refuse.
+import { and, eq } from "drizzle-orm";
+import { db, settlementConfirmations, settlementStatementLines, settlementStatements, transactions } from "@aee/db";
 
 export type StatementPayer = { payerType: "Agent"; userId: number } | { payerType: "Brokerage"; brokerageId: number };
 
@@ -24,25 +28,72 @@ export interface IssuedSettlementStatementRecord {
   issuedAt: Date | null;
   issuedTo: StatementPayer;
   lines: Array<{ kind: string; amountCents: number; currency?: string; paymentRequestId?: number | null }>;
+  /** Set by the real lookup (t180u): drift since issue. Test fakes may omit it. */
+  integrity?: "OK" | "CONFIRMATIONS_INCOMPLETE" | "STALE";
 }
 
 export type SettlementStatementLookup = (q: { brokerageId: number; transactionId: number }) => Promise<IssuedSettlementStatementRecord | null>;
 
-/** S1 not built: there is no statement record, so nothing has been issued. */
-const noStatementRecordYet: SettlementStatementLookup = async () => null;
+type LegalReps = { sellerSolicitorPartyId?: number | null; buyerSolicitorPartyId?: number | null } | null;
 
-let lookupIssuedSettlementStatement: SettlementStatementLookup = noStatementRecordYet;
+/** t180u: the real lookup over 0041. Returns the single ISSUED statement for the transaction, or null. */
+export const dbSettlementStatementLookup: SettlementStatementLookup = async ({ brokerageId, transactionId }) => {
+  const [st] = await db
+    .select()
+    .from(settlementStatements)
+    .where(and(eq(settlementStatements.transactionId, transactionId), eq(settlementStatements.brokerageId, brokerageId), eq(settlementStatements.status, "ISSUED")));
+  if (!st) return null;
+  const lines = await db.select().from(settlementStatementLines).where(eq(settlementStatementLines.statementId, st.id)).orderBy(settlementStatementLines.lineNo);
+  const [txn] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+  const reps = (txn?.legalRepresentatives ?? null) as LegalReps;
+  const active = await db
+    .select()
+    .from(settlementConfirmations)
+    .where(and(eq(settlementConfirmations.transactionId, transactionId), eq(settlementConfirmations.status, "ACTIVE")));
+  const sideOk = (side: "BUYER" | "SELLER") => {
+    const expected = side === "BUYER" ? reps?.buyerSolicitorPartyId : reps?.sellerSolicitorPartyId;
+    const c = active.find((x) => x.side === side);
+    return c != null && typeof expected === "number" && c.representativePartyId === expected;
+  };
+  let integrity: IssuedSettlementStatementRecord["integrity"] = "OK";
+  if (!sideOk("BUYER") || !sideOk("SELLER")) integrity = "CONFIRMATIONS_INCOMPLETE";
+  else {
+    // Lazy import: routes/financialStatements imports the collection workflow (auto-collect on issue).
+    const { deriveStatement, fingerprint } = await import("../routes/financialStatements.js");
+    const derived = await deriveStatement(db, transactionId, st.propertyId);
+    const payer = { payerType: st.payerType, payerUserId: st.payerUserId, payerBrokerageId: st.payerBrokerageId };
+    if (derived.issues.length > 0 || fingerprint(derived.lines, payer) !== st.linesFingerprint) integrity = "STALE";
+  }
+  return {
+    statementId: st.id,
+    brokerageId: st.brokerageId,
+    transactionId: st.transactionId,
+    status: st.status,
+    issuedAt: st.issuedAt,
+    issuedTo: st.payerType === "Brokerage" ? { payerType: "Brokerage", brokerageId: st.payerBrokerageId! } : { payerType: "Agent", userId: st.payerUserId! },
+    // The gate compares the line's gross (amount + GST) with the payment request amount.
+    lines: lines.map((l) => ({ kind: l.kind, amountCents: l.amountCents + l.gstCents, currency: st.currency, paymentRequestId: l.paymentRequestId })),
+    integrity,
+  };
+};
+
+let lookupIssuedSettlementStatement: SettlementStatementLookup = dbSettlementStatementLookup;
 
 /**
- * Test seam only, so the post-statement path stays covered until S1 exists.
- * Refuses outside NODE_ENV=test; production always uses the default lookup.
+ * Test seam only (S-1f/S-1g unit coverage with synthetic statements).
+ * Refuses outside NODE_ENV=test; production always uses the real lookup.
  */
 export function setSettlementStatementLookupForTests(fn: SettlementStatementLookup | null): void {
   if (process.env.NODE_ENV !== "test") throw new Error("settlement statement lookup override is test-only");
-  lookupIssuedSettlementStatement = fn ?? noStatementRecordYet;
+  lookupIssuedSettlementStatement = fn ?? dbSettlementStatementLookup;
 }
 
-export type SettlementStatementGateCode = "SETTLEMENT_STATEMENT_NOT_ISSUED" | "SETTLEMENT_STATEMENT_PAYER_MISMATCH" | "SETTLEMENT_STATEMENT_FEE_MISMATCH";
+export type SettlementStatementGateCode =
+  | "SETTLEMENT_STATEMENT_NOT_ISSUED"
+  | "SETTLEMENT_STATEMENT_PAYER_MISMATCH"
+  | "SETTLEMENT_STATEMENT_FEE_MISMATCH"
+  | "SETTLEMENT_CONFIRMATIONS_INCOMPLETE"
+  | "SETTLEMENT_STATEMENT_STALE";
 
 export type SettlementStatementGateResult = { ok: true; statementId: number } | { ok: false; code: SettlementStatementGateCode };
 
@@ -71,6 +122,8 @@ export async function checkSettlementStatementGate(input: {
   ) {
     return { ok: false, code: "SETTLEMENT_STATEMENT_NOT_ISSUED" };
   }
+  if (statement.integrity === "CONFIRMATIONS_INCOMPLETE") return { ok: false, code: "SETTLEMENT_CONFIRMATIONS_INCOMPLETE" };
+  if (statement.integrity !== undefined && statement.integrity !== "OK") return { ok: false, code: "SETTLEMENT_STATEMENT_STALE" };
   const to = statement.issuedTo;
   const payerOk =
     to != null &&
