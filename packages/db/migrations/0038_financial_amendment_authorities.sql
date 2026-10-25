@@ -12,6 +12,11 @@
 -- it would be skipped silently. When rebased onto M3, re-chain
 -- meta/0038_snapshot.json prevId to M3's 0037 snapshot id.
 --
+-- t177u (25 Oct 2026): the scope CHECK was widened IN PLACE to add
+-- COMMISSION_AGREEMENT and COMMISSION_CALCULATION. This is still the same
+-- single, never-executed-on-any-shared-database migration (only local
+-- scratch/test databases, which were recreated). No 0039 was added.
+--
 -- Additive only: one new table, its FKs, CHECKs and indexes. No existing
 -- table or row is altered. Rollback: docs/migrations/
 -- 0038-financial-amendment-authorities-ROLLBACK.md and
@@ -34,7 +39,7 @@ CREATE TABLE "financial_amendment_authorities" (
 	"revoked_at" timestamp,
 	"revoked_by_user_id" integer,
 	"revoke_reason" text,
-	CONSTRAINT "fin_amend_auth_scope_check" CHECK ("financial_amendment_authorities"."scope" in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST')),
+	CONSTRAINT "fin_amend_auth_scope_check" CHECK ("financial_amendment_authorities"."scope" in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST', 'COMMISSION_AGREEMENT', 'COMMISSION_CALCULATION')),
 	CONSTRAINT "fin_amend_auth_grantor_role_check" CHECK ("financial_amendment_authorities"."granted_by_role" in ('Agent', 'Brokerage Administrator')),
 	CONSTRAINT "fin_amend_auth_target_pair_check" CHECK (("financial_amendment_authorities"."target_record_type" is null) = ("financial_amendment_authorities"."target_record_id" is null)),
 	CONSTRAINT "fin_amend_auth_evidence_check" CHECK ("financial_amendment_authorities"."evidence_document_id" is not null or length(btrim(coalesce("financial_amendment_authorities"."evidence_note", ''))) > 0),

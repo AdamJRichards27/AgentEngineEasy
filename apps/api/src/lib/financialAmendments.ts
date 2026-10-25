@@ -160,6 +160,11 @@ export interface AmendmentTarget {
   scope: FinancialAmendmentScope;
   /** The specific record being amended, when it already exists. */
   recordId: string | null;
+  /**
+   * t177u: for transaction-level records (commission agreements and
+   * calculations) the grant must be for THIS transaction, not just the property.
+   */
+  transactionId?: number;
 }
 
 /**
@@ -192,6 +197,7 @@ export async function resolveAmendmentAuthority(
         eq(financialAmendmentAuthorities.propertyId, scope.propertyId),
         eq(financialAmendmentAuthorities.granteeUserId, user.id),
         eq(financialAmendmentAuthorities.scope, target.scope),
+        target.transactionId === undefined ? undefined : eq(financialAmendmentAuthorities.transactionId, target.transactionId),
         isNull(financialAmendmentAuthorities.revokedAt),
         gt(financialAmendmentAuthorities.expiresAt, sql`now()`),
         target.recordId === null
@@ -276,6 +282,7 @@ export function amendmentAuditInput(args: {
   before: Record<string, unknown> | null;
   after: Record<string, unknown>;
   surface: string;
+  policy?: string;
 }): AuditLogInput {
   return {
     brokerageId: args.user.brokerageId,
@@ -298,7 +305,7 @@ export function amendmentAuditInput(args: {
       performedByUserId: args.user.id,
       performedByRole: args.user.role,
       performedAt: new Date().toISOString(),
-      policy: "t173u",
+      policy: args.policy ?? "t173u",
       surface: args.surface,
     }),
   };

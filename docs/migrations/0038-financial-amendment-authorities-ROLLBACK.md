@@ -11,7 +11,7 @@
 | `brokerage_id`, `property_id`, `transaction_id` | NOT NULL, FKs. The property is derived from the transaction by the API. |
 | `grantee_user_id` | NOT NULL FK users. The API checks it is Pit Crew in the same brokerage. |
 | `granted_by_user_id`, `granted_by_role` | NOT NULL. Taken from the session. CHECK role in (`Agent`, `Brokerage Administrator`). |
-| `scope` | NOT NULL. CHECK in (`AGENCY_TERMS`, `CAMPAIGN_ITEM_COST`): only the amendments that exist today. |
+| `scope` | NOT NULL. CHECK in (`AGENCY_TERMS`, `CAMPAIGN_ITEM_COST`, `COMMISSION_AGREEMENT`, `COMMISSION_CALCULATION`): only the amendments that exist today. The last two were added in place on 25 Oct (t177u) while 0038 was still unexecuted anywhere shared; local scratch and test databases were recreated. |
 | `target_record_type`, `target_record_id` | Optional single-record target. CHECK both null or both set. |
 | `evidence_document_id` (FK documents), `evidence_note` | CHECK at least one is present (a document id or a non-blank note). |
 | `expires_at` | NOT NULL. CHECK `expires_at > created_at`. The API caps it at `FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS` (default **30**, Owner-confirmable, allowed range 1–90). |
@@ -70,5 +70,5 @@ Every referenced table's fingerprint is checked byte-identical at each step. The
 
 ## Open details
 - The 30-day maximum is a proposed default (Owner-confirmable), configurable per environment.
-- Scopes are limited to `AGENCY_TERMS` and `CAMPAIGN_ITEM_COST`. Commission calculation (`POST /transactions/:id/calculate-commission`) is Brokerage Administrator only and part of the settlement flow, so it is not a grantable scope. Adding a scope later needs a CHECK change (a new migration).
+- Scopes: `AGENCY_TERMS`, `CAMPAIGN_ITEM_COST`, and (t177u) `COMMISSION_AGREEMENT` (draft a new commission-agreement version; a Brokerage Administrator still approves) and `COMMISSION_CALCULATION` (ESTIMATE or PROVISIONAL snapshots only). The legacy `POST /transactions/:id/calculate-commission`, CONFIRMED/FINALISED calculations, supersede and settlement finalisation stay Brokerage Administrator only. Admin and settlement fees have no record to amend yet. Once 0038 has been applied anywhere shared, adding a scope needs a CHECK change in a new migration.
 - Invoicing, settlement statements, admin fees, adjustments and deductions, disbursements and balances are future requirements and are not built.

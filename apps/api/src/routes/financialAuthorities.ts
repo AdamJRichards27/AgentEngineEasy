@@ -24,6 +24,7 @@ import {
   documents,
   FINANCIAL_AMENDMENT_SCOPES,
   FINANCIAL_AMENDMENT_SCOPE_TARGET_TYPE,
+  FINANCIAL_AMENDMENT_TRANSACTION_WIDE_SCOPES,
   financialAmendmentAuthorities,
   properties,
   transactions,
@@ -170,6 +171,10 @@ financialAuthoritiesRouter.post("/", requireAuth, requiresRunAccess, async (req,
 
   let targetRecordType: string | null = null;
   let targetRecordId: string | null = null;
+  if (input.targetRecordId !== undefined && FINANCIAL_AMENDMENT_TRANSACTION_WIDE_SCOPES.includes(input.scope)) {
+    fail(res, 422, "TARGET_NOT_SUPPORTED_FOR_SCOPE", "Commission agreement and calculation grants cover the whole transaction; omit targetRecordId.");
+    return;
+  }
   if (input.targetRecordId !== undefined) {
     targetRecordType = FINANCIAL_AMENDMENT_SCOPE_TARGET_TYPE[input.scope];
     let found = false;

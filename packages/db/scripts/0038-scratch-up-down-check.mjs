@@ -52,6 +52,15 @@ const fingerprint = async () => {
   }
   return crypto.createHash("sha256").update(parts.join("|")).digest("hex");
 };
+const accepts = async (label, sql, params) => {
+  try {
+    await q(sql, params);
+    check(true, label);
+    await q(`delete from financial_amendment_authorities`);
+  } catch (e) {
+    check(false, label, e.code);
+  }
+};
 const rejects = async (label, sql, params) => {
   try {
     await q(sql, params);
@@ -106,6 +115,8 @@ const vals = (o = {}) => {
   return [`${base} values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,${d.exp},$12,$13)`, [b, p, t, d.grantee, d.grantor, d.role, d.scope, d.tt, d.ti, d.doc, d.note, d.ra, d.rb]];
 };
 await rejects("CHECK scope (INVOICE rejected)", ...vals({ scope: "INVOICE" }));
+await accepts("CHECK scope accepts COMMISSION_AGREEMENT (t177u)", ...vals({ scope: "COMMISSION_AGREEMENT" }));
+await accepts("CHECK scope accepts COMMISSION_CALCULATION (t177u)", ...vals({ scope: "COMMISSION_CALCULATION" }));
 await rejects("CHECK grantor role (Pit Crew rejected)", ...vals({ role: "Pit Crew" }));
 await rejects("CHECK evidence required (no document, blank note)", ...vals({ note: "   " }));
 await rejects("CHECK expiry after creation", ...vals({ exp: "now() - interval '1 minute'" }));

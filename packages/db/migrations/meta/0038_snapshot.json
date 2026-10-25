@@ -16549,7 +16549,7 @@
       "checkConstraints": {
         "fin_amend_auth_scope_check": {
           "name": "fin_amend_auth_scope_check",
-          "value": "\"financial_amendment_authorities\".\"scope\" in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST')"
+          "value": "\"financial_amendment_authorities\".\"scope\" in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST', 'COMMISSION_AGREEMENT', 'COMMISSION_CALCULATION')"
         },
         "fin_amend_auth_grantor_role_check": {
           "name": "fin_amend_auth_grantor_role_check",

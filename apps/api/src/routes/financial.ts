@@ -50,10 +50,20 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import { currentCorrelationId, logger } from "@aee/events";
-import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { db, users } from "@aee/db";
-import { eq, and } from "drizzle-orm";
+import { db, users, commissionAgreements, commissionCalculations, type CommissionAgreement, type CommissionCalculation } from "@aee/db";
+import { eq, and, desc, ne } from "drizzle-orm";
+import {
+  AMENDMENT_AUTHORITY_REQUIRED,
+  amendmentAuditInput,
+  auditWriterFor,
+  denyFinancialAmendment,
+  loadPropertyFinancialScope,
+  lockLiveAuthority,
+  resolveAmendmentAuthority,
+} from "../lib/financialAmendments.js";
+import { logAudit } from "../lib/audit.js";
 import {
   createCommissionAgreement,
   approveCommissionAgreement,
@@ -100,6 +110,71 @@ import {
 
 export const financialRouter = Router();
 const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), requireEntitlement("run.access")] as const;
+// Owner t177u(2): the two commission amendment routes also admit Pit Crew, who
+// then need a live documented grant for that transaction and scope plus an
+// active assignment on it (checked in the handler, fail closed). Every other
+// role and every other /financial/* write stays Brokerage-Administrator-only.
+const requireFinancialAdminOrGrantedPitCrew = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES, ...PIT_CREW_ROLES), requireEntitlement("run.access")] as const;
+
+function isPitCrew(user: AuthedUser): boolean {
+  return PIT_CREW_ROLES.includes(user.role);
+}
+
+/** A Pit Crew request with no usable transaction id can't match a grant: 403, nothing read. */
+function denyWithoutTransaction(res: Response): void {
+  res.status(403).json({
+    error: "Changing financial terms needs a live documented authority from the listing agent or a Brokerage Administrator, and an active assignment on that transaction.",
+    reason: AMENDMENT_AUTHORITY_REQUIRED,
+  });
+}
+
+function pitCrewTransactionId(body: unknown): number | null {
+  const raw = (body as { transactionId?: unknown } | null | undefined)?.transactionId;
+  const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : typeof raw === "number" ? raw : NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+function isAuthorityGone(err: unknown): boolean {
+  return err instanceof Error && /financial amendment authority is no longer live/.test(err.message);
+}
+
+function agreementTerms(a: CommissionAgreement): Record<string, unknown> {
+  return {
+    commissionAgreementId: a.id,
+    version: a.version,
+    status: a.status,
+    method: a.method,
+    rateBps: a.rateBps,
+    fixedAmountCents: a.fixedAmountCents,
+    tiers: a.tiers,
+    minimumAmountCents: a.minimumAmountCents,
+    manualReason: a.manualReason,
+    gstApplicable: a.gstApplicable,
+    gstRateBps: a.gstRateBps,
+    referralFeeCents: a.referralFeeCents,
+    brokerageSplitBps: a.brokerageSplitBps,
+    agentSplitBps: a.agentSplitBps,
+    sourceDocumentRef: a.sourceDocumentRef,
+  };
+}
+
+function calculationValues(c: CommissionCalculation): Record<string, unknown> {
+  return {
+    commissionCalculationId: c.id,
+    calculationVersion: c.calculationVersion,
+    state: c.state,
+    commissionAgreementId: c.commissionAgreementId,
+    salePriceCentsInput: c.salePriceCentsInput,
+    methodUsed: c.methodUsed,
+    rateBpsUsed: c.rateBpsUsed,
+    grossCommissionCents: c.grossCommissionCents,
+    referralFeeCents: c.referralFeeCents,
+    commissionExGstCents: c.commissionExGstCents,
+    gstCents: c.gstCents,
+    brokerageComponentCents: c.brokerageComponentCents,
+    agentComponentCents: c.agentComponentCents,
+  };
+}
 
 function handleFinancialControlError(err: unknown, res: Response): boolean {
   if (err instanceof FinancialControlError) {
@@ -200,8 +275,9 @@ financialRouter.get("/financial/commission-agreements/:id", ...requireFinancialA
   res.json({ agreement: row });
 });
 
-financialRouter.post("/financial/commission-agreements", ...requireFinancialAdmin, async (req, res) => {
+financialRouter.post("/financial/commission-agreements", ...requireFinancialAdminOrGrantedPitCrew, async (req, res) => {
   const user = req.authedUser!;
+  if (isPitCrew(user)) return void (await createAgreementAsGrantedPitCrew(req.body, user, res));
   const parsed = createAgreementSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
   const scope = await resolveTransactionScope(parsed.data.transactionId, user.brokerageId);
@@ -273,8 +349,9 @@ financialRouter.get("/financial/commission-calculations", ...requireFinancialAdm
   res.json({ calculations: await listCommissionCalculations(user.brokerageId, transactionId) });
 });
 
-financialRouter.post("/financial/commission-calculations", ...requireFinancialAdmin, async (req, res) => {
+financialRouter.post("/financial/commission-calculations", ...requireFinancialAdminOrGrantedPitCrew, async (req, res) => {
   const user = req.authedUser!;
+  if (isPitCrew(user)) return void (await createCalculationAsGrantedPitCrew(req.body, user, res));
   const parsed = createCalculationSchema.safeParse(req.body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
   const scope = await resolveTransactionScope(parsed.data.transactionId, user.brokerageId);
@@ -296,6 +373,150 @@ financialRouter.post("/financial/commission-calculations", ...requireFinancialAd
     if (!handlePlainError(err, res)) throw err;
   }
 });
+
+// t177u(2): grant + assignment first (fail closed), before the body is
+// validated. The new version is DRAFT and changes nothing until a Brokerage
+// Administrator approves it (separation of duties is unchanged).
+async function createAgreementAsGrantedPitCrew(body: unknown, user: AuthedUser, res: Response): Promise<void> {
+  const surface = "POST /financial/commission-agreements";
+  const txnId = pitCrewTransactionId(body);
+  if (txnId === null) return denyWithoutTransaction(res);
+  const txnScope = await resolveTransactionScope(txnId, user.brokerageId);
+  if (!txnScope) return void res.status(404).json({ error: "Transaction not found" });
+  const propertyScope = await loadPropertyFinancialScope(user, txnScope.propertyId);
+  if (!propertyScope) return void res.status(404).json({ error: "Transaction not found" });
+  const recordRef = `transaction:${txnScope.transactionId}`;
+  const authority = await resolveAmendmentAuthority(user, propertyScope, { scope: "COMMISSION_AGREEMENT", recordId: null, transactionId: txnScope.transactionId });
+  if (!authority.allowed) return denyFinancialAmendment(res, user, propertyScope, "commission_agreement", recordRef, surface);
+  const parsed = createAgreementSchema.safeParse(body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const agreement = await db.transaction(async (tx) => {
+      await lockLiveAuthority(tx, authority);
+      const [prior] = await tx
+        .select()
+        .from(commissionAgreements)
+        .where(and(eq(commissionAgreements.transactionId, txnScope.transactionId), ne(commissionAgreements.status, "CANCELLED")))
+        .orderBy(desc(commissionAgreements.version))
+        .limit(1);
+      const row = await createCommissionAgreement(
+        {
+          brokerageId: user.brokerageId,
+          propertyId: txnScope.propertyId,
+          transactionId: txnScope.transactionId,
+          method: parsed.data.method,
+          rateBps: parsed.data.rateBps,
+          fixedAmountCents: parsed.data.fixedAmountCents,
+          tiers: parsed.data.tiers,
+          minimumAmountCents: parsed.data.minimumAmountCents,
+          manualReason: parsed.data.manualReason,
+          gstApplicable: parsed.data.gstApplicable,
+          gstRateBps: parsed.data.gstRateBps,
+          referralFeeCents: parsed.data.referralFeeCents,
+          brokerageSplitBps: parsed.data.brokerageSplitBps,
+          agentSplitBps: parsed.data.agentSplitBps,
+          sourceDocumentRef: parsed.data.sourceDocumentRef,
+          notes: parsed.data.notes,
+          createdByUserId: user.id,
+        },
+        tx,
+      );
+      await logAudit(
+        amendmentAuditInput({
+          user,
+          authority,
+          scope: propertyScope,
+          recordType: "commission_agreement",
+          recordId: String(row.id),
+          before: prior ? agreementTerms(prior) : null,
+          after: { ...agreementTerms(row), transactionId: txnScope.transactionId },
+          surface,
+          policy: "t177u",
+        }),
+        { strict: true, write: auditWriterFor(tx) },
+      );
+      return row;
+    });
+    res.status(201).json({ agreement });
+  } catch (err) {
+    if (isAuthorityGone(err)) return denyFinancialAmendment(res, user, propertyScope, "commission_agreement", recordRef, surface);
+    throw err;
+  }
+}
+
+// t177u(2): Pit Crew with a COMMISSION_CALCULATION grant may record ESTIMATE or
+// PROVISIONAL snapshots from an APPROVED agreement only. CONFIRMED, FINALISED
+// and supersede (which retire a finalised figure) stay Brokerage Administrator
+// settlement steps.
+const PIT_CREW_CALCULATION_STATES = new Set(["ESTIMATE", "PROVISIONAL"]);
+
+async function createCalculationAsGrantedPitCrew(body: unknown, user: AuthedUser, res: Response): Promise<void> {
+  const surface = "POST /financial/commission-calculations";
+  const txnId = pitCrewTransactionId(body);
+  if (txnId === null) return denyWithoutTransaction(res);
+  const txnScope = await resolveTransactionScope(txnId, user.brokerageId);
+  if (!txnScope) return void res.status(404).json({ error: "Transaction not found" });
+  const propertyScope = await loadPropertyFinancialScope(user, txnScope.propertyId);
+  if (!propertyScope) return void res.status(404).json({ error: "Transaction not found" });
+  const recordRef = `transaction:${txnScope.transactionId}`;
+  const authority = await resolveAmendmentAuthority(user, propertyScope, { scope: "COMMISSION_CALCULATION", recordId: null, transactionId: txnScope.transactionId });
+  if (!authority.allowed) return denyFinancialAmendment(res, user, propertyScope, "commission_calculation", recordRef, surface);
+  const parsed = createCalculationSchema.safeParse(body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const state = parsed.data.state ?? "ESTIMATE";
+  if (!PIT_CREW_CALCULATION_STATES.has(state) || parsed.data.supersede) {
+    return void res.status(403).json({
+      error: "Confirming, finalising or superseding a commission calculation stays with Brokerage Administrators.",
+      reason: "PIT_CREW_CALCULATION_STATE_FORBIDDEN",
+    });
+  }
+  try {
+    const calculation = await db.transaction(async (tx) => {
+      await lockLiveAuthority(tx, authority);
+      const [agreement] = await tx.select().from(commissionAgreements).where(eq(commissionAgreements.id, parsed.data.commissionAgreementId));
+      if (!agreement || agreement.transactionId !== txnScope.transactionId || agreement.status !== "APPROVED") {
+        throw new Error("A commission calculation needs an APPROVED commission agreement on this transaction.");
+      }
+      const [prior] = await tx
+        .select()
+        .from(commissionCalculations)
+        .where(eq(commissionCalculations.transactionId, txnScope.transactionId))
+        .orderBy(desc(commissionCalculations.calculationVersion))
+        .limit(1);
+      const row = await createCommissionCalculation(
+        {
+          brokerageId: user.brokerageId,
+          propertyId: txnScope.propertyId,
+          transactionId: txnScope.transactionId,
+          commissionAgreementId: agreement.id,
+          salePriceCentsInput: parsed.data.salePriceCentsInput,
+          state: state as "ESTIMATE" | "PROVISIONAL",
+          calculatedByUserId: user.id,
+        },
+        tx,
+      );
+      await logAudit(
+        amendmentAuditInput({
+          user,
+          authority,
+          scope: propertyScope,
+          recordType: "commission_calculation",
+          recordId: String(row.id),
+          before: prior ? calculationValues(prior) : null,
+          after: { ...calculationValues(row), transactionId: txnScope.transactionId },
+          surface,
+          policy: "t177u",
+        }),
+        { strict: true, write: auditWriterFor(tx) },
+      );
+      return row;
+    });
+    res.status(201).json({ calculation });
+  } catch (err) {
+    if (isAuthorityGone(err)) return denyFinancialAmendment(res, user, propertyScope, "commission_calculation", recordRef, surface);
+    if (!handlePlainError(err, res)) throw err;
+  }
+}
 
 const finalizeSettlementSchema = z.object({ transactionId: z.coerce.number().int(), salePriceCentsOverride: z.number().int().nonnegative().optional() });
 
