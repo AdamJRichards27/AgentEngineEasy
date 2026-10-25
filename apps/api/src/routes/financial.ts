@@ -67,6 +67,7 @@ import { logAudit } from "../lib/audit.js";
 import { financialFeesRouter } from "./financialFees.js";
 import { financialStatementsRouter } from "./financialStatements.js";
 import { financialReceiptsRouter } from "./financialReceipts.js";
+import { financialRecoveryRouter } from "./financialRecovery.js";
 import {
   createCommissionAgreement,
   approveCommissionAgreement,
@@ -117,6 +118,8 @@ financialRouter.use(financialFeesRouter);
 financialRouter.use(financialStatementsRouter);
 // Owner t180u(2): receipts (in-app + PDF).
 financialRouter.use(financialReceiptsRouter);
+// Owner t181u (slice 7): BA-only recovery (dispute resolution, waive, write-off, UNKNOWN card charges).
+financialRouter.use(financialRecoveryRouter);
 const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), requireEntitlement("run.access")] as const;
 // Owner t177u(2): the two commission amendment routes also admit Pit Crew, who
 // then need a live documented grant for that transaction and scope plus an
