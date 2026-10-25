@@ -24599,6 +24599,257 @@
         }
       },
       "isRLSEnabled": false
+    },
+    "public.financial_card_refunds": {
+      "name": "financial_card_refunds",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payment_request_id": {
+          "name": "payment_request_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "card_charge_id": {
+          "name": "card_charge_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_cents": {
+          "name": "amount_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'AUD'"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'PENDING'"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_refund_ref": {
+          "name": "provider_refund_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_message": {
+          "name": "failure_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_by_user_id": {
+          "name": "requested_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "financial_card_refunds_idempotency_uq": {
+          "name": "financial_card_refunds_idempotency_uq",
+          "columns": [
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "financial_card_refunds_request_key_uq": {
+          "name": "financial_card_refunds_request_key_uq",
+          "columns": [
+            {
+              "expression": "card_charge_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "request_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "financial_card_refunds_charge_idx": {
+          "name": "financial_card_refunds_charge_idx",
+          "columns": [
+            {
+              "expression": "card_charge_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "financial_card_refunds_request_idx": {
+          "name": "financial_card_refunds_request_idx",
+          "columns": [
+            {
+              "expression": "payment_request_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "financial_card_refunds_brokerage_id_brokerages_id_fk": {
+          "name": "financial_card_refunds_brokerage_id_brokerages_id_fk",
+          "tableFrom": "financial_card_refunds",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_card_refunds_payment_request_id_financial_payment_requests_id_fk": {
+          "name": "financial_card_refunds_payment_request_id_financial_payment_requests_id_fk",
+          "tableFrom": "financial_card_refunds",
+          "tableTo": "financial_payment_requests",
+          "columnsFrom": [
+            "payment_request_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_card_refunds_card_charge_id_financial_card_charges_id_fk": {
+          "name": "financial_card_refunds_card_charge_id_financial_card_charges_id_fk",
+          "tableFrom": "financial_card_refunds",
+          "tableTo": "financial_card_charges",
+          "columnsFrom": [
+            "card_charge_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_card_refunds_requested_by_user_id_users_id_fk": {
+          "name": "financial_card_refunds_requested_by_user_id_users_id_fk",
+          "tableFrom": "financial_card_refunds",
+          "tableTo": "users",
+          "columnsFrom": [
+            "requested_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "financial_card_refunds_status_check": {
+          "name": "financial_card_refunds_status_check",
+          "value": "\"financial_card_refunds\".\"status\" in ('PENDING', 'SUCCEEDED', 'FAILED', 'UNKNOWN')"
+        },
+        "financial_card_refunds_amount_check": {
+          "name": "financial_card_refunds_amount_check",
+          "value": "\"financial_card_refunds\".\"amount_cents\" > 0"
+        },
+        "financial_card_refunds_reason_check": {
+          "name": "financial_card_refunds_reason_check",
+          "value": "length(btrim(\"financial_card_refunds\".\"reason\")) >= 3"
+        }
+      },
+      "isRLSEnabled": false
     }
   },
   "enums": {},

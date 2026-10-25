@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import {
+  financialCardRefunds,
   db,
   financialPaymentRequests,
   financialReceipts,
@@ -175,6 +176,31 @@ export async function syncReceiptsForPaymentRequest(paymentRequestId: number): P
     }
     if (req.status === "REVERSED") {
       out.push(await issueReceipt(req, { kind: "REFUND", dedupKey: `reversed:${req.id}`, statusSnapshot: "REVERSED", amountCents: req.amountCents, gstCents, ...src }));
+    }
+    // t181u phase 2a: one REFUND receipt per confirmed stored-card refund (partial refunds each get one).
+    const cardRefunds = await db
+      .select()
+      .from(financialCardRefunds)
+      .where(and(eq(financialCardRefunds.paymentRequestId, req.id), eq(financialCardRefunds.status, "SUCCEEDED")))
+      .orderBy(financialCardRefunds.id);
+    for (const r of cardRefunds) {
+      out.push(
+        await issueReceipt(
+          req,
+          {
+            kind: "REFUND",
+            dedupKey: `card-refund:${r.id}`,
+            statusSnapshot: "REFUNDED",
+            amountCents: r.amountCents,
+            gstCents: req.amountCents > 0 ? Math.floor((gstCents * r.amountCents) / req.amountCents) : 0,
+            sourceType: "financial_card_refund",
+            sourceId: String(r.id),
+            providerReference: r.providerRefundRef ?? null,
+          },
+          { paymentMethodType: "STORED_CARD" },
+          r.requestedByUserId,
+        ),
+      );
     }
     const recons = await db
       .select()

@@ -38,7 +38,7 @@ import { syncReceiptsForPaymentRequest } from "./receipts.js";
 
 export const RECOVERY_POLICY = "t181u";
 
-export type RecoveryAction = "waive" | "write_off" | "resolve_dispute" | "resolve_card_charge";
+export type RecoveryAction = "waive" | "write_off" | "resolve_dispute" | "resolve_card_charge" | "refund_card_charge";
 export type DisputeOutcome = "PAYABLE" | "WAIVED" | "WRITTEN_OFF";
 export type CardChargeResolution = "SUCCEEDED" | "FAILED";
 
@@ -59,7 +59,12 @@ export type RecoveryCode =
   | "CARD_CHARGE_ALREADY_FINAL"
   | "CARD_CHARGE_RESOLVER_IS_INITIATOR"
   | "CARD_CHARGE_OUTCOME_MISMATCH"
-  | "CARD_CHARGE_PROVIDER_STATUS_UNAVAILABLE";
+  | "CARD_CHARGE_PROVIDER_STATUS_UNAVAILABLE"
+  | "CARD_REFUND_PROVIDER_NOT_PERMITTED"
+  | "CARD_REFUND_CHARGE_NOT_REFUNDABLE"
+  | "CARD_REFUND_EXCEEDS_REFUNDABLE"
+  | "CARD_REFUND_REFUNDER_IS_INITIATOR"
+  | "CARD_REFUND_KEY_REUSED";
 
 const STATUS_FOR: Record<RecoveryCode, number> = {
   RECOVERY_NOT_FOUND: 404,
@@ -79,6 +84,11 @@ const STATUS_FOR: Record<RecoveryCode, number> = {
   CARD_CHARGE_RESOLVER_IS_INITIATOR: 403,
   CARD_CHARGE_OUTCOME_MISMATCH: 409,
   CARD_CHARGE_PROVIDER_STATUS_UNAVAILABLE: 409,
+  CARD_REFUND_PROVIDER_NOT_PERMITTED: 409,
+  CARD_REFUND_CHARGE_NOT_REFUNDABLE: 409,
+  CARD_REFUND_EXCEEDS_REFUNDABLE: 409,
+  CARD_REFUND_REFUNDER_IS_INITIATOR: 403,
+  CARD_REFUND_KEY_REUSED: 409,
 };
 
 export class RecoveryRefusal extends Error {
@@ -107,7 +117,7 @@ export interface RecoveryInput {
   evidenceNote?: string | null;
 }
 
-type Evidence = { kind: "document"; documentId: number; note?: string } | { kind: "note"; note: string };
+export type Evidence = { kind: "document"; documentId: number; note?: string } | { kind: "note"; note: string };
 
 export interface RecoveryResult {
   idempotent: boolean;
@@ -125,15 +135,15 @@ const OPEN_DISPUTE = ["OPEN", "UNDER_REVIEW"];
 const DISPUTE_STATUS_FOR: Record<DisputeOutcome, string> = { PAYABLE: "RESOLVED_PAYABLE", WAIVED: "RESOLVED_WAIVED", WRITTEN_OFF: "CLOSED" };
 const MANUAL_FAILURE = "Resolved as failed by a Brokerage Administrator";
 
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-function cleanReason(input: RecoveryInput, prId: number | null, propertyId: number | null): string {
+export function cleanReason(input: RecoveryInput, prId: number | null, propertyId: number | null): string {
   const reason = (input.reason ?? "").trim();
   if (reason.length < 3) throw new RecoveryRefusal("RECOVERY_REASON_REQUIRED", "A reason is required.", prId, propertyId);
   return reason.slice(0, 2000);
 }
 
-async function evidenceFor(q: Tx, input: RecoveryInput, pr: FinancialPaymentRequest): Promise<Evidence> {
+export async function evidenceFor(q: Tx, input: RecoveryInput, pr: FinancialPaymentRequest): Promise<Evidence> {
   const note = (input.evidenceNote ?? "").trim().slice(0, 2000);
   if (input.evidenceDocumentId != null) {
     const [doc] = await q.select({ id: documents.id }).from(documents).where(and(eq(documents.id, input.evidenceDocumentId), eq(documents.propertyId, pr.propertyId)));
@@ -144,7 +154,7 @@ async function evidenceFor(q: Tx, input: RecoveryInput, pr: FinancialPaymentRequ
   throw new RecoveryRefusal("RECOVERY_EVIDENCE_REQUIRED", "Attach a document or describe the evidence.", pr.id, pr.propertyId);
 }
 
-async function lockRequest(tx: Tx, actor: RecoveryActor, paymentRequestId: number): Promise<FinancialPaymentRequest> {
+export async function lockRequest(tx: Tx, actor: RecoveryActor, paymentRequestId: number): Promise<FinancialPaymentRequest> {
   if (!Number.isSafeInteger(paymentRequestId) || paymentRequestId <= 0) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
   const [pr] = await tx
     .select()
@@ -170,7 +180,7 @@ async function inFlight(tx: Tx, pr: FinancialPaymentRequest): Promise<"card" | "
   return debits.length > 0 ? "debit" : null;
 }
 
-async function ledgerTx(tx: Tx, pr: FinancialPaymentRequest, eventType: string, actor: RecoveryActor, reason: string, metadata: Record<string, unknown>) {
+export async function ledgerTx(tx: Tx, pr: FinancialPaymentRequest, eventType: string, actor: RecoveryActor, reason: string, metadata: Record<string, unknown>) {
   await tx.insert(financialLedgerEvents).values({
     brokerageId: pr.brokerageId,
     propertyId: pr.propertyId,
@@ -187,7 +197,7 @@ async function ledgerTx(tx: Tx, pr: FinancialPaymentRequest, eventType: string, 
 }
 
 /** Value-free: ids, statuses, evidence kind/document id only. Never amounts, reason or note text. */
-function auditValue(fields: Record<string, unknown>, evidence?: Evidence): string {
+export function auditValue(fields: Record<string, unknown>, evidence?: Evidence): string {
   return JSON.stringify({
     ...fields,
     ...(evidence ? { evidenceKind: evidence.kind, evidenceDocumentId: evidence.kind === "document" ? evidence.documentId : null, reasonProvided: true } : {}),
@@ -195,7 +205,7 @@ function auditValue(fields: Record<string, unknown>, evidence?: Evidence): strin
   });
 }
 
-async function auditTx(tx: Tx, actor: RecoveryActor, action: string, pr: FinancialPaymentRequest, value: string) {
+export async function auditTx(tx: Tx, actor: RecoveryActor, action: string, pr: FinancialPaymentRequest, value: string) {
   await tx.insert(auditLogs).values({
     brokerageId: actor.brokerageId,
     userId: actor.id,

@@ -1,6 +1,6 @@
 -- Rollback for 0043_pc_fee_card_charges (Owner t180u slice 6). LOCAL/scratch only.
 -- Refuses if any stored-card or brokerage authority exists (dropping its columns would silently turn it into a
--- direct-debit agent authority). Drops the card-charge attempt history (audit_logs and ledger events keep it).
+-- direct-debit agent authority). Drops the card-charge attempt and card-refund history (audit_logs and ledger events keep it).
 BEGIN;
 DO $$
 BEGIN
@@ -8,6 +8,9 @@ BEGIN
     RAISE EXCEPTION '0043 rollback refused: stored-card or brokerage PC fee authorities exist';
   END IF;
 END $$;
+DROP TABLE IF EXISTS "financial_card_refunds";
+DROP FUNCTION IF EXISTS financial_card_refunds_cap();
+DROP FUNCTION IF EXISTS financial_card_refunds_guard();
 DROP TABLE IF EXISTS "financial_card_charges";
 DROP FUNCTION IF EXISTS financial_card_charges_guard();
 ALTER TABLE "pc_fee_authorities" DROP CONSTRAINT IF EXISTS "pc_fee_authorities_brokerage_approval_check";
