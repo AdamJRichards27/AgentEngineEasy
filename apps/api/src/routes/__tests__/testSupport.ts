@@ -67,6 +67,8 @@ import {
   financialAmendmentAuthorities,
   feeScheduleVersions,
   transactionFees,
+  settlementStatements,
+  settlementConfirmations,
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
@@ -520,6 +522,11 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
   if (ids.length === 0) return;
 
+  // t179u slice 3: statements reference payment requests, fees, commission
+  // calculations and confirmations, so they go first (lines cascade).
+  await db.delete(settlementStatements).where(inArray(settlementStatements.brokerageId, ids));
+  await db.delete(settlementConfirmations).where(inArray(settlementConfirmations.brokerageId, ids));
+
   // Agent Engine 2.0 — Financial Transaction Engine (Priority 9). See this
   // function's own doc comment above for the FK ordering this block
   // depends on.
@@ -538,10 +545,7 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
   }
   // Owner t174u: grants reference transactions, properties, users and documents.
-  // t179u slices 2-3: statements (lines/confirmations first), then fees, then schedules (FK order).
-  await db.execute(sql`delete from settlement_statement_lines where statement_id in (select id from settlement_statements where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)}))`).catch(() => undefined);
-  await db.execute(sql`delete from settlement_statements where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`).catch(() => undefined);
-  await db.execute(sql`delete from settlement_confirmations where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`).catch(() => undefined);
+  // t179u slice 2: fees, then schedules (FK order).
   await db.delete(transactionFees).where(inArray(transactionFees.brokerageId, ids));
   await db.delete(feeScheduleVersions).where(inArray(feeScheduleVersions.brokerageId, ids));
   await db.delete(financialAmendmentAuthorities).where(inArray(financialAmendmentAuthorities.brokerageId, ids));
