@@ -20,6 +20,12 @@ import {
   type PaymentRefundErrorCode,
   type ServiceOrderChargeErrorCode,
 } from "../lib/payments.js";
+import {
+  collectPitCrewServiceFee,
+  verifyServiceFeeCollection,
+  ServiceFeeCollectionError,
+  SERVICE_FEE_ERROR_STATUS,
+} from "../lib/pitCrewServiceFee.js";
 
 // Phase 6 (ARCHITECTURE.md §10): stored payment methods, ServiceOrder
 // charging, receipts, idempotency. The ServiceOrder rows themselves are
@@ -185,6 +191,105 @@ paymentsRouter.post("/service-orders/:id/charge", requireAuth, requiresRunAccess
       recordId: Number.isFinite(serviceOrderId) ? String(serviceOrderId) : String(req.params.id).slice(0, 64),
       propertyId: err instanceof ServiceOrderChargeError ? (err.propertyId ?? null) : null,
       updatedValue: chargeAttemptValue({ outcome: denied ? "denied" : "failed", callerRole: user.role, code: mapped.body.code }),
+    });
+    res.status(mapped.status).json(mapped.body);
+  }
+});
+
+// Owner t177u(1) (CC #37): AE Pit Crew service-fee collection after verified
+// settlement. Assigned Pit Crew (and Brokerage Administrators) may advance the
+// existing PC_SUCCESS_FEE workflow one step at a time: start the notice
+// period, then schedule the debit through AE's processor once it elapses.
+// Every gate is re-verified server-side (lib/pitCrewServiceFee.ts). This is
+// the ONLY payment Pit Crew can initiate; service-order (saved-card) charges
+// stay 403 for Pit Crew above, and no mandate/card reference is ever returned
+// or audited.
+const SERVICE_FEE_MESSAGES: Record<string, string> = {
+  SERVICE_FEE_NOT_FOUND: "Not found",
+  SERVICE_FEE_COLLECTION_FORBIDDEN: "You can't collect this fee.",
+  PIT_CREW_NOT_ASSIGNED: "Only Pit Crew assigned to this transaction can collect its service fee.",
+  SETTLEMENT_NOT_VERIFIED: "The service fee can be collected only after settlement is recorded as complete.",
+  SERVICE_FEE_NOT_VERIFIED: "The service fee could not be verified against the agreed Pit Crew service terms.",
+  SERVICE_FEE_AUTHORITY_INVALID: "There is no valid payment authority covering this service fee.",
+  SERVICE_FEE_NOT_COLLECTABLE: "This service fee is not in a state that can be collected. A Brokerage Administrator handles recovery.",
+  SERVICE_FEE_NOTICE_PERIOD_RUNNING: "The notice period for this service fee has not finished yet.",
+};
+function serviceFeeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
+  if (err instanceof ServiceFeeCollectionError) {
+    return { status: SERVICE_FEE_ERROR_STATUS[err.code], body: { error: SERVICE_FEE_MESSAGES[err.code] ?? "Not allowed", code: err.code } };
+  }
+  return { status: 500, body: { error: "Service fee collection failed", code: "SERVICE_FEE_COLLECTION_FAILED" } };
+}
+function serviceFeeView(v: Awaited<ReturnType<typeof verifyServiceFeeCollection>>, paymentRequest = v.paymentRequest) {
+  return {
+    transactionId: v.transactionId,
+    paymentRequestId: paymentRequest.id,
+    status: paymentRequest.status,
+    currency: paymentRequest.currency,
+    grossFeeCents: v.grossFeeCents,
+    gstCents: v.gstCents,
+    totalFeeCents: v.totalFeeCents,
+    capCents: v.capCents,
+    noticeSentAt: paymentRequest.noticeSentAt,
+    noticeElapsesAt: v.noticeElapsesAt,
+    scheduledAt: paymentRequest.scheduledAt,
+    paidAt: paymentRequest.paidAt,
+  };
+}
+
+paymentsRouter.get("/pit-crew-service-fee/:transactionId", requireAuth, requiresRunAccess, async (req, res) => {
+  const user = req.authedUser!;
+  try {
+    const v = await verifyServiceFeeCollection(user, Number(req.params.transactionId));
+    const collectable = ["CALCULATED", "READY_TO_INVOICE", "INVOICED", "NOTICE_SENT"].includes(v.paymentRequest.status);
+    res.json({ serviceFee: serviceFeeView(v), collectable });
+  } catch (err) {
+    const mapped = serviceFeeErrorResponse(err);
+    if (mapped.status >= 500) logger.error("service_fee_status_failed", { error: err instanceof Error ? err.message : String(err) });
+    res.status(mapped.status).json(mapped.body);
+  }
+});
+
+paymentsRouter.post("/pit-crew-service-fee/:transactionId/collect", requireAuth, requiresRunAccess, async (req, res) => {
+  const user = req.authedUser!;
+  const transactionId = Number(req.params.transactionId);
+  const recordId = Number.isFinite(transactionId) ? String(transactionId) : String(req.params.transactionId).slice(0, 64);
+  try {
+    const result = await collectPitCrewServiceFee(user, transactionId);
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "pit_crew_service_fee_collection",
+      recordType: "transaction",
+      recordId,
+      propertyId: result.verified.propertyId,
+      updatedValue: JSON.stringify({
+        outcome: result.outcome,
+        callerRole: user.role,
+        paymentRequestId: result.paymentRequest.id,
+        statusBefore: result.verified.paymentRequest.status,
+        statusAfter: result.paymentRequest.status,
+        grossFeeCents: result.verified.grossFeeCents,
+        gstCents: result.verified.gstCents,
+        totalFeeCents: result.verified.totalFeeCents,
+        capCents: result.verified.capCents,
+        pitCrewAssignmentIds: result.verified.pitCrewAssignmentIds,
+        policy: "t177u",
+      }),
+    });
+    const status = result.outcome === "debit_queued" ? 202 : 200;
+    res.status(status).json({ outcome: result.outcome, serviceFee: serviceFeeView(result.verified, result.paymentRequest) });
+  } catch (err) {
+    const mapped = serviceFeeErrorResponse(err);
+    if (mapped.status >= 500) logger.error("service_fee_collection_failed", { error: err instanceof Error ? err.message : String(err) });
+    await logAudit({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: mapped.status === 403 || mapped.status === 404 ? "pit_crew_service_fee_collection_denied" : "pit_crew_service_fee_collection_failed",
+      recordType: "transaction",
+      recordId,
+      propertyId: err instanceof ServiceFeeCollectionError ? (err.propertyId ?? null) : null,
+      updatedValue: JSON.stringify({ outcome: "refused", callerRole: user.role, code: mapped.body.code, policy: "t177u" }),
     });
     res.status(mapped.status).json(mapped.body);
   }
