@@ -27,6 +27,11 @@ import { createCommissionCalculation } from "../../lib/financial/calculations.js
 import { createPcFeeAuthority } from "../../lib/financial/pcFeeAuthorities.js";
 import { createPcFeeCalculation } from "../../lib/financial/pcFeeCalculations.js";
 import { ensurePcSuccessFeeRequest } from "../../lib/financial/settlement.js";
+import {
+  setSettlementStatementLookupForTests,
+  type IssuedSettlementStatementRecord,
+  type SettlementStatementLookup,
+} from "../../lib/settlementStatementGate.js";
 import { cleanupBrokerages, createBrokerageWithUsers, createTransactionFromListedProperty, devLogin, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -47,6 +52,26 @@ let crewUnassigned: DevLoginResult;
 let otherAgent: DevLoginResult;
 const MANDATE_REF = `sandbox-mandate-svcfee-${suffix}`;
 let authorityId: number;
+// t178u: until S1 exists, these tests stand in an ISSUED statement per transaction
+// through the test-only lookup seam (production always returns "none issued").
+const statements = new Map<number, IssuedSettlementStatementRecord>();
+let statementSeq = 1;
+const fixtureLookup: SettlementStatementLookup = async ({ transactionId }) => statements.get(transactionId) ?? null;
+function issueStatement(c: { transactionId: number; requestId: number; amountCents: number }, patch: Partial<IssuedSettlementStatementRecord> = {}) {
+  statements.set(c.transactionId, {
+    statementId: statementSeq++,
+    brokerageId: X.brokerageId,
+    transactionId: c.transactionId,
+    status: "ISSUED",
+    issuedAt: new Date(),
+    issuedTo: { payerType: "Agent", userId: X.agent.user.id },
+    lines: [
+      { kind: "COMMISSION", amountCents: 1_600_000 },
+      { kind: "PC_SERVICE_FEE", amountCents: c.amountCents, currency: "AUD", paymentRequestId: c.requestId },
+    ],
+    ...patch,
+  });
+}
 
 async function call(method: string, path: string, cookie?: string, body?: unknown) {
   const headers: Record<string, string> = {};
@@ -97,7 +122,7 @@ async function assign(who: DevLoginResult, propertyId: number, transactionId: nu
 }
 
 /** A settled transaction with an approved agreement, FINALISED commission and PC fee calculations and a CALCULATED PC_SUCCESS_FEE request. */
-async function feeChain(tag: string, opts: { settled?: boolean; assignCrew?: boolean } = {}) {
+async function feeChain(tag: string, opts: { settled?: boolean; assignCrew?: boolean; statement?: boolean } = {}) {
   const { propertyId, transactionId } = await createTransactionFromListedProperty(baseUrl, X.agent.cookie, { address: `${suffix} ${tag} Fee St` });
   if (opts.settled !== false) {
     await db.update(transactions).set({ status: "Settled", settlementCompletedAt: new Date() }).where(eq(transactions.id, transactionId));
@@ -128,6 +153,7 @@ async function feeChain(tag: string, opts: { settled?: boolean; assignCrew?: boo
     payerUserId: X.agent.user.id,
   });
   if (opts.assignCrew !== false) await assign(crew, propertyId, transactionId, tag);
+  if (opts.statement !== false) issueStatement({ transactionId, requestId: paymentRequest.id, amountCents: paymentRequest.amountCents });
   return { propertyId, transactionId, requestId: paymentRequest.id, pcCalcId: pcCalc.id, commission, pcCalc };
 }
 async function request(id: number) {
@@ -175,9 +201,11 @@ before(async () => {
     .set({ status: "ACTIVE", mandateProviderRef: MANDATE_REF, mandateProvider: "sandbox", effectiveDate: new Date(Date.now() - 86_400_000) })
     .where(eq(pcFeeAuthorities.id, authority.id));
   authorityId = authority.id;
+  setSettlementStatementLookupForTests(fixtureLookup);
 });
 
 after(async () => {
+  setSettlementStatementLookupForTests(null);
   await cleanupBrokerages([X, Y].map((t) => t?.brokerageId).filter((id): id is number => typeof id === "number"));
   if (server) await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
@@ -361,5 +389,122 @@ describe("t177u(1): Pit Crew service-fee collection after verified settlement", 
       assert.equal(r.status, 403, path);
     }
     assert.equal((await request(c.requestId)).status, "CALCULATED");
+  });
+});
+
+describe("t178u(1): statement-first, collection is held until an itemised statement is issued to the payer", { concurrency: false }, () => {
+  async function noticeElapsed(requestId: number) {
+    await db
+      .update(financialPaymentRequests)
+      .set({ status: "NOTICE_SENT", noticeSentAt: new Date(Date.now() - 8 * 86_400_000) })
+      .where(eq(financialPaymentRequests.id, requestId));
+  }
+
+  test("production lookup (no statement record exists yet): collect is 409 SETTLEMENT_STATEMENT_NOT_ISSUED, before any outbox or provider step; audited value-free; preview still works", async () => {
+    setSettlementStatementLookupForTests(null);
+    try {
+      const c = await feeChain("hold-default");
+      const r = await collect(c.transactionId, crew.cookie);
+      assert.equal(r.status, 409);
+      assert.equal(await code(r), "SETTLEMENT_STATEMENT_NOT_ISSUED");
+      assert.equal((await request(c.requestId)).status, "CALCULATED", "no notice started");
+
+      // Even with the notice period elapsed (the step that schedules the debit), nothing is queued.
+      await noticeElapsed(c.requestId);
+      for (let i = 0; i < 3; i++) assert.equal(await code(await collect(c.transactionId, crew.cookie)), "SETTLEMENT_STATEMENT_NOT_ISSUED");
+      assert.equal(await outboxCount(c.requestId), 0, "no SCHEDULE_DEBIT outbox row, so no provider call");
+      assert.equal((await request(c.requestId)).status, "NOTICE_SENT");
+      // Brokerage Administrators are held too.
+      assert.equal(await code(await collect(c.transactionId, X.admin.cookie)), "SETTLEMENT_STATEMENT_NOT_ISSUED");
+      // Already-paid requests do not report through the gate either.
+      const p = await feeChain("hold-paid");
+      await db.update(financialPaymentRequests).set({ status: "PAID", paidAt: new Date() }).where(eq(financialPaymentRequests.id, p.requestId));
+      assert.equal(await code(await collect(p.transactionId, crew.cookie)), "SETTLEMENT_STATEMENT_NOT_ISSUED");
+
+      const s = await status(c.transactionId, crew.cookie);
+      assert.equal(s.status, 200);
+      const view = (await s.json()) as { serviceFee: { totalFeeCents: number }; collectable: boolean; settlementStatement: { issued: boolean; code?: string } };
+      assert.equal(view.collectable, false);
+      assert.deepEqual(view.settlementStatement, { issued: false, code: "SETTLEMENT_STATEMENT_NOT_ISSUED" });
+      assert.equal(view.serviceFee.totalFeeCents, c.pcCalc.totalFeeCents);
+
+      const rows = await db
+        .select()
+        .from(auditLogs)
+        .where(and(eq(auditLogs.action, "pit_crew_service_fee_collection_failed"), eq(auditLogs.recordId, String(c.transactionId))));
+      assert.ok(rows.length >= 4);
+      for (const row of rows) {
+        const v = JSON.parse(row.updatedValue!);
+        assert.deepEqual(Object.keys(v).sort(), ["callerRole", "code", "outcome", "policy"], "value-free");
+        assert.equal(v.code, "SETTLEMENT_STATEMENT_NOT_ISSUED");
+        assert.ok(!JSON.stringify(row).includes(String(c.pcCalc.totalFeeCents)));
+      }
+    } finally {
+      setSettlementStatementLookupForTests(fixtureLookup);
+    }
+  });
+
+  test("statement must be ISSUED, for this transaction and brokerage, to the authorised payer, with exactly one PC_SERVICE_FEE line equal to the request", async () => {
+    const c = await feeChain("gate-cases", { statement: false });
+    const base = { transactionId: c.transactionId, requestId: c.requestId, amountCents: c.pcCalc.totalFeeCents };
+    const cases: Array<[string, Partial<IssuedSettlementStatementRecord>, string]> = [
+      ["draft", { status: "DRAFT" }, "SETTLEMENT_STATEMENT_NOT_ISSUED"],
+      ["superseded", { status: "SUPERSEDED" }, "SETTLEMENT_STATEMENT_NOT_ISSUED"],
+      ["no issue date", { issuedAt: null }, "SETTLEMENT_STATEMENT_NOT_ISSUED"],
+      ["other transaction", { transactionId: c.transactionId + 1_000_000 }, "SETTLEMENT_STATEMENT_NOT_ISSUED"],
+      ["other brokerage", { brokerageId: Y.brokerageId }, "SETTLEMENT_STATEMENT_NOT_ISSUED"],
+      ["issued to another agent", { issuedTo: { payerType: "Agent", userId: otherAgent.user.id } }, "SETTLEMENT_STATEMENT_PAYER_MISMATCH"],
+      ["issued to the brokerage", { issuedTo: { payerType: "Brokerage", brokerageId: X.brokerageId } }, "SETTLEMENT_STATEMENT_PAYER_MISMATCH"],
+      ["no fee line", { lines: [{ kind: "COMMISSION", amountCents: 1 }] }, "SETTLEMENT_STATEMENT_FEE_MISMATCH"],
+      ["fee line differs", { lines: [{ kind: "PC_SERVICE_FEE", amountCents: c.pcCalc.totalFeeCents - 1 }] }, "SETTLEMENT_STATEMENT_FEE_MISMATCH"],
+      [
+        "two fee lines",
+        { lines: [{ kind: "PC_SERVICE_FEE", amountCents: c.pcCalc.totalFeeCents }, { kind: "PC_SERVICE_FEE", amountCents: c.pcCalc.totalFeeCents }] },
+        "SETTLEMENT_STATEMENT_FEE_MISMATCH",
+      ],
+      ["fee line for another request", { lines: [{ kind: "PC_SERVICE_FEE", amountCents: c.pcCalc.totalFeeCents, paymentRequestId: c.requestId + 1 }] }, "SETTLEMENT_STATEMENT_FEE_MISMATCH"],
+      ["fee line in another currency", { lines: [{ kind: "PC_SERVICE_FEE", amountCents: c.pcCalc.totalFeeCents, currency: "NZD" }] }, "SETTLEMENT_STATEMENT_FEE_MISMATCH"],
+    ];
+    await noticeElapsed(c.requestId);
+    for (const [label, patch, expected] of cases) {
+      issueStatement(base, patch);
+      const r = await collect(c.transactionId, crew.cookie);
+      assert.equal(r.status, 409, label);
+      assert.equal(await code(r), expected, label);
+    }
+    statements.delete(c.transactionId);
+    assert.equal(await code(await collect(c.transactionId, crew.cookie)), "SETTLEMENT_STATEMENT_NOT_ISSUED", "no statement");
+    setSettlementStatementLookupForTests(async () => {
+      throw new Error("lookup failure");
+    });
+    try {
+      assert.equal(await code(await collect(c.transactionId, crew.cookie)), "SETTLEMENT_STATEMENT_NOT_ISSUED", "lookup error fails closed");
+    } finally {
+      setSettlementStatementLookupForTests(fixtureLookup);
+    }
+    assert.equal(await outboxCount(c.requestId), 0, "nothing queued by any refused call");
+    assert.equal((await request(c.requestId)).status, "NOTICE_SENT");
+
+    // A matching statement unblocks exactly one debit, even under concurrent calls.
+    issueStatement(base);
+    const results = await Promise.all([0, 1, 2, 3].map(() => collect(c.transactionId, crew.cookie)));
+    assert.ok(results.every((r) => r.status === 200 || r.status === 202 || r.status === 409), results.map((r) => r.status).join(","));
+    assert.equal(await outboxCount(c.requestId), 1, "one SCHEDULE_DEBIT only");
+    assert.equal((await request(c.requestId)).status, "DEBIT_SCHEDULED");
+    const ok = await db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, "pit_crew_service_fee_collection"), eq(auditLogs.recordId, String(c.transactionId))));
+    assert.ok(ok.some((r) => JSON.parse(r.updatedValue!).settlementStatementId === statements.get(c.transactionId)!.statementId));
+  });
+
+  test("the test seam cannot be used outside NODE_ENV=test", () => {
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      assert.throws(() => setSettlementStatementLookupForTests(fixtureLookup), /test-only/);
+    } finally {
+      process.env.NODE_ENV = prev;
+    }
   });
 });

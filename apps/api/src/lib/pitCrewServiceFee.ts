@@ -38,6 +38,7 @@ import {
 } from "@aee/db";
 import { computePcFee } from "./financial/pcFeeCalculations.js";
 import { advancePaymentRequestToNoticeSent, scheduleDebitForPaymentRequest } from "./financial/paymentOutbox.js";
+import { checkSettlementStatementGate, type SettlementStatementGateResult, type StatementPayer } from "./settlementStatementGate.js";
 
 export const ACTIVE_PIT_CREW_ASSIGNMENT_STATUSES = ["CLAIMED", "IN_PROGRESS", "WAITING_ON"] as const;
 
@@ -49,7 +50,10 @@ export type ServiceFeeCollectionCode =
   | "SERVICE_FEE_NOT_VERIFIED"
   | "SERVICE_FEE_AUTHORITY_INVALID"
   | "SERVICE_FEE_NOT_COLLECTABLE"
-  | "SERVICE_FEE_NOTICE_PERIOD_RUNNING";
+  | "SERVICE_FEE_NOTICE_PERIOD_RUNNING"
+  | "SETTLEMENT_STATEMENT_NOT_ISSUED"
+  | "SETTLEMENT_STATEMENT_PAYER_MISMATCH"
+  | "SETTLEMENT_STATEMENT_FEE_MISMATCH";
 
 export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> = {
   SERVICE_FEE_NOT_FOUND: 404,
@@ -60,6 +64,9 @@ export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> 
   SERVICE_FEE_AUTHORITY_INVALID: 409,
   SERVICE_FEE_NOT_COLLECTABLE: 409,
   SERVICE_FEE_NOTICE_PERIOD_RUNNING: 409,
+  SETTLEMENT_STATEMENT_NOT_ISSUED: 409,
+  SETTLEMENT_STATEMENT_PAYER_MISMATCH: 409,
+  SETTLEMENT_STATEMENT_FEE_MISMATCH: 409,
 };
 
 export class ServiceFeeCollectionError extends Error {
@@ -92,6 +99,8 @@ export interface VerifiedServiceFee {
   capCents: number | null;
   noticeElapsesAt: Date | null;
   pitCrewAssignmentIds: number[];
+  /** The authorised payer (today always the authority's agent; brokerage payer needs S2). */
+  payer: StatementPayer;
 }
 
 const IN_PROGRESS = new Set(["DEBIT_SCHEDULED", "PROCESSING", "RETRY_SCHEDULED"]);
@@ -228,13 +237,27 @@ export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, trans
     capCents: authority.maximumAmountCents ?? null,
     noticeElapsesAt,
     pitCrewAssignmentIds,
+    payer: { payerType: "Agent", userId: authority.agentUserId },
   };
+}
+
+/** Owner t178u(1): statement-first. Value-free result; never throws. */
+export async function settlementStatementGateFor(verified: VerifiedServiceFee, brokerageId: number): Promise<SettlementStatementGateResult> {
+  return checkSettlementStatementGate({
+    brokerageId,
+    transactionId: verified.transactionId,
+    payer: verified.payer,
+    paymentRequestId: verified.paymentRequest.id,
+    amountCents: verified.paymentRequest.amountCents,
+    currency: verified.paymentRequest.currency,
+  });
 }
 
 export interface ServiceFeeCollectionResult {
   outcome: ServiceFeeCollectionOutcome;
   verified: VerifiedServiceFee;
   paymentRequest: FinancialPaymentRequest;
+  settlementStatementId: number;
 }
 
 /** Verify every gate, then advance the existing workflow by exactly one step. */
@@ -243,21 +266,28 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
   const verified = await verifyServiceFeeCollection(caller, transactionId, now);
   const request = verified.paymentRequest;
 
-  if (PAID.has(request.status)) return { outcome: "already_paid", verified, paymentRequest: request };
-  if (IN_PROGRESS.has(request.status)) return { outcome: "already_in_progress", verified, paymentRequest: request };
+  // Owner t178u(1): no collection step of any kind (notice, debit, or an
+  // idempotent status reply) before an ISSUED, itemised settlement statement
+  // addressed to the authorised payer. Checked before any outbox/provider call.
+  const gate = await settlementStatementGateFor(verified, caller.brokerageId);
+  if (!gate.ok) throw new ServiceFeeCollectionError(gate.code, undefined, verified.propertyId);
+  const settlementStatementId = gate.statementId;
+
+  if (PAID.has(request.status)) return { outcome: "already_paid", verified, paymentRequest: request, settlementStatementId };
+  if (IN_PROGRESS.has(request.status)) return { outcome: "already_in_progress", verified, paymentRequest: request, settlementStatementId };
   if (RECOVERY_ONLY.has(request.status)) {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}; recovery is a Brokerage Administrator action.`, verified.propertyId);
   }
   if (STARTABLE.has(request.status)) {
     const updated = await advancePaymentRequestToNoticeSent(request.id);
-    return { outcome: "notice_started", verified, paymentRequest: updated };
+    return { outcome: "notice_started", verified, paymentRequest: updated, settlementStatementId };
   }
   if (request.status === "NOTICE_SENT") {
     if (verified.noticeElapsesAt == null || now < verified.noticeElapsesAt) {
       throw new ServiceFeeCollectionError("SERVICE_FEE_NOTICE_PERIOD_RUNNING", undefined, verified.propertyId);
     }
     const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id });
-    return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest };
+    return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
   }
   throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}.`, verified.propertyId);
 }

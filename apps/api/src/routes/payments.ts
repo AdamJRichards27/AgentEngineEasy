@@ -22,6 +22,7 @@ import {
 } from "../lib/payments.js";
 import {
   collectPitCrewServiceFee,
+  settlementStatementGateFor,
   verifyServiceFeeCollection,
   ServiceFeeCollectionError,
   SERVICE_FEE_ERROR_STATUS,
@@ -213,6 +214,9 @@ const SERVICE_FEE_MESSAGES: Record<string, string> = {
   SERVICE_FEE_AUTHORITY_INVALID: "There is no valid payment authority covering this service fee.",
   SERVICE_FEE_NOT_COLLECTABLE: "This service fee is not in a state that can be collected. A Brokerage Administrator handles recovery.",
   SERVICE_FEE_NOTICE_PERIOD_RUNNING: "The notice period for this service fee has not finished yet.",
+  SETTLEMENT_STATEMENT_NOT_ISSUED: "The service fee can be collected only after a final, itemised settlement statement has been issued to the payer.",
+  SETTLEMENT_STATEMENT_PAYER_MISMATCH: "The issued settlement statement is not addressed to the authorised payer.",
+  SETTLEMENT_STATEMENT_FEE_MISMATCH: "The issued settlement statement does not itemise this service fee at the amount to be debited.",
 };
 function serviceFeeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof ServiceFeeCollectionError) {
@@ -241,8 +245,14 @@ paymentsRouter.get("/pit-crew-service-fee/:transactionId", requireAuth, requires
   const user = req.authedUser!;
   try {
     const v = await verifyServiceFeeCollection(user, Number(req.params.transactionId));
-    const collectable = ["CALCULATED", "READY_TO_INVOICE", "INVOICED", "NOTICE_SENT"].includes(v.paymentRequest.status);
-    res.json({ serviceFee: serviceFeeView(v), collectable });
+    const gate = await settlementStatementGateFor(v, user.brokerageId);
+    const statusCollectable = ["CALCULATED", "READY_TO_INVOICE", "INVOICED", "NOTICE_SENT"].includes(v.paymentRequest.status);
+    // t178u(1): preview stays available; collection waits for an issued statement.
+    res.json({
+      serviceFee: serviceFeeView(v),
+      collectable: statusCollectable && gate.ok,
+      settlementStatement: gate.ok ? { issued: true, statementId: gate.statementId } : { issued: false, code: gate.code },
+    });
   } catch (err) {
     const mapped = serviceFeeErrorResponse(err);
     if (mapped.status >= 500) logger.error("service_fee_status_failed", { error: err instanceof Error ? err.message : String(err) });
@@ -274,7 +284,8 @@ paymentsRouter.post("/pit-crew-service-fee/:transactionId/collect", requireAuth,
         totalFeeCents: result.verified.totalFeeCents,
         capCents: result.verified.capCents,
         pitCrewAssignmentIds: result.verified.pitCrewAssignmentIds,
-        policy: "t177u",
+        settlementStatementId: result.settlementStatementId,
+        policy: "t177u+t178u",
       }),
     });
     const status = result.outcome === "debit_queued" ? 202 : 200;
@@ -289,7 +300,7 @@ paymentsRouter.post("/pit-crew-service-fee/:transactionId/collect", requireAuth,
       recordType: "transaction",
       recordId,
       propertyId: err instanceof ServiceFeeCollectionError ? (err.propertyId ?? null) : null,
-      updatedValue: JSON.stringify({ outcome: "refused", callerRole: user.role, code: mapped.body.code, policy: "t177u" }),
+      updatedValue: JSON.stringify({ outcome: "refused", callerRole: user.role, code: mapped.body.code, policy: "t177u+t178u" }),
     });
     res.status(mapped.status).json(mapped.body);
   }
