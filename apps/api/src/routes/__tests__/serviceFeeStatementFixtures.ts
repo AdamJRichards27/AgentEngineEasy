@@ -220,7 +220,7 @@ export async function saveCard(payerType: "Agent" | "Brokerage", payerId: number
 /** Create (by `creator`) and activate (by `activator`) a stored-card authority through the API. */
 export async function cardAuthorityViaApi(
   w: World,
-  input: { payerType: "Agent" | "Brokerage"; paymentMethodId: number; signedEvidenceRef?: string | null; noticeRequiredDays?: number },
+  input: { payerType: "Agent" | "Brokerage"; paymentMethodId: number; signedEvidenceRef?: string | null; noticeRequiredDays?: number; agreementTermsVersion?: string; mandateTermsVersion?: string },
   creator: Who = w.X.admin,
   activator: Who = w.admin2,
 ) {
@@ -235,8 +235,18 @@ export async function cardAuthorityViaApi(
     authorisedPaymentMethod: "STORED_CARD",
     payerType: input.payerType,
     paymentMethodId: input.paymentMethodId,
+    ...(input.agreementTermsVersion ? { agreementTermsVersion: input.agreementTermsVersion } : {}),
+    ...(input.mandateTermsVersion ? { mandateTermsVersion: input.mandateTermsVersion } : {}),
   });
   if (created.status !== 201) throw new Error(`create failed ${created.status} ${created.raw}`);
   const activated = await call(w.baseUrl, "POST", `/financial/pc-fee-authorities/${created.json.authority.id}/activate`, activator.cookie, {});
   return { created, activated, id: created.json.authority.id as number };
 }
+
+/** t181u(A) terms versions. */
+export const TERMS = {
+  agreementImmediate: "AE-PCF-AGREEMENT-2026.11",
+  agreementNotice: "AE-PCF-AGREEMENT-2025.1",
+  mandateImmediate: "AE-PCF-MANDATE-2026.11",
+  mandateNotice: "AE-PCF-MANDATE-2025.1",
+} as const;

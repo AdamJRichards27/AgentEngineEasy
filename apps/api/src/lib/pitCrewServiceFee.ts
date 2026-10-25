@@ -41,6 +41,7 @@ import { computePcFee } from "./financial/pcFeeCalculations.js";
 import { advancePaymentRequestToNoticeSent, scheduleDebitForPaymentRequest } from "./financial/paymentOutbox.js";
 import { CardChargeRefusal, chargeServiceFeeStoredCard } from "./financial/pcFeeCardCharges.js";
 import { nominatedPaymentMethodFor } from "./financial/pcFeeAuthorities.js";
+import { collectionTimingFor, type CollectionTiming } from "./financial/pcFeeTerms.js";
 import { checkSettlementStatementGate, type SettlementStatementGateResult, type StatementPayer } from "./settlementStatementGate.js";
 
 export const ACTIVE_PIT_CREW_ASSIGNMENT_STATUSES = ["CLAIMED", "IN_PROGRESS", "WAITING_ON"] as const;
@@ -124,6 +125,8 @@ export interface VerifiedServiceFee {
   paymentMethod: { type: "GENERAL_ACCOUNT_DEBIT_MANDATE" | "STORED_CARD"; label: string | null };
   /** Internal only (never serialised): the authority the collection runs under. */
   authority: PcFeeAuthority;
+  /** t181u(A): which timing rule the signed terms allow (IMMEDIATE only when agreement AND mandate permit it). */
+  timing: CollectionTiming;
 }
 
 const IN_PROGRESS = new Set(["DEBIT_SCHEDULED", "PROCESSING", "RETRY_SCHEDULED"]);
@@ -166,11 +169,12 @@ export interface ServiceFeeCollectionOptions {
    * transaction, so the role/assignment check is not repeated; every other
    * gate is.
    */
-  trigger?: "statement_issued";
+  trigger?: "statement_issued" | "scheduler";
 }
 
 export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, transactionId: number, now = new Date(), opts: ServiceFeeCollectionOptions = {}): Promise<VerifiedServiceFee> {
-  const autoOnIssue = opts.trigger === "statement_issued";
+  // System triggers (statement issue, t181u scheduler) never come from a request body; every other gate still applies.
+  const autoOnIssue = opts.trigger === "statement_issued" || opts.trigger === "scheduler";
   if (!autoOnIssue && caller.role !== "Pit Crew" && caller.role !== "Brokerage Administrator") {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_FOUND");
   }
@@ -277,9 +281,9 @@ export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, trans
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_VERIFIED", undefined, propertyId);
   }
 
-  const noticeElapsesAt = paymentRequest.noticeSentAt
-    ? new Date(paymentRequest.noticeSentAt.getTime() + authority.noticeRequiredDays * 24 * 60 * 60 * 1000)
-    : null;
+  const timing = collectionTimingFor(authority);
+  const noticeDays = timing.rule === "IMMEDIATE_ON_STATEMENT_ISSUE" ? 0 : authority.noticeRequiredDays;
+  const noticeElapsesAt = paymentRequest.noticeSentAt ? new Date(paymentRequest.noticeSentAt.getTime() + noticeDays * 24 * 60 * 60 * 1000) : null;
 
   return {
     paymentRequest,
@@ -294,6 +298,7 @@ export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, trans
     payer: authority.payerType === "Brokerage" ? { payerType: "Brokerage", brokerageId: authority.brokerageId } : { payerType: "Agent", userId: authority.agentUserId },
     paymentMethod,
     authority,
+    timing,
   };
 }
 
@@ -316,7 +321,24 @@ export interface ServiceFeeCollectionResult {
   settlementStatementId: number;
 }
 
-/** Verify every gate, then advance the existing workflow by exactly one step. */
+/** t181u(A): ledger record of which timing rule applied when collection started (shown in receipt history). */
+async function recordTimingDecision(req: FinancialPaymentRequest, timing: CollectionTiming, trigger: string): Promise<void> {
+  const { financialLedgerEvents } = await import("@aee/db");
+  await db.insert(financialLedgerEvents).values({
+    brokerageId: req.brokerageId,
+    propertyId: req.propertyId,
+    transactionId: req.transactionId,
+    eventType: "PC_FEE_COLLECTION_TIMING",
+    amountCents: req.amountCents,
+    sourceRecordType: "PAYMENT_REQUEST",
+    sourceRecordId: String(req.id),
+    actorType: "SYSTEM",
+    reason: timing.rule === "IMMEDIATE_ON_STATEMENT_ISSUE" ? "Immediate on statement issue (agreement and mandate permit)" : `Notice period applies (${timing.noticeReason})`,
+    metadata: { ...timing, trigger, policy: "t181u" },
+  });
+}
+
+/** Verify every gate, then advance the existing workflow (one step, or straight to collection when the terms permit immediate collection). */
 export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transactionId: number, opts: ServiceFeeCollectionOptions = {}): Promise<ServiceFeeCollectionResult> {
   const now = new Date();
   const verified = await verifyServiceFeeCollection(caller, transactionId, now, opts);
@@ -335,8 +357,8 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
       const r = await chargeServiceFeeStoredCard({
         paymentRequestId: request.id,
         authority: verified.authority,
-        actorUserId: caller.id,
-        trigger: opts.trigger === "statement_issued" ? "statement_issued" : "collect",
+        actorUserId: opts.trigger === "scheduler" ? null : caller.id,
+        trigger: opts.trigger ?? "collect",
       });
       return { outcome: r.outcome, verified, paymentRequest: r.paymentRequest, settlementStatementId };
     } catch (err) {
@@ -356,17 +378,23 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
   if (RECOVERY_ONLY.has(request.status)) {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}; recovery is a Brokerage Administrator action.`, verified.propertyId);
   }
+  const collectNow = async (): Promise<ServiceFeeCollectionResult> => {
+    if (isCard) return chargeCard();
+    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id });
+    return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
+  };
   if (STARTABLE.has(request.status)) {
     const updated = await advancePaymentRequestToNoticeSent(request.id);
+    await recordTimingDecision(updated, verified.timing, opts.trigger ?? "collect");
+    // t181u(A): immediate collection only where the signed agreement AND mandate expressly permit it.
+    if (verified.timing.rule === "IMMEDIATE_ON_STATEMENT_ISSUE") return collectNow();
     return { outcome: "notice_started", verified, paymentRequest: updated, settlementStatementId };
   }
   if (request.status === "NOTICE_SENT") {
     if (verified.noticeElapsesAt == null || now < verified.noticeElapsesAt) {
       throw new ServiceFeeCollectionError("SERVICE_FEE_NOTICE_PERIOD_RUNNING", undefined, verified.propertyId);
     }
-    if (isCard) return chargeCard();
-    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id });
-    return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
+    return collectNow();
   }
   throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}.`, verified.propertyId);
 }
@@ -403,7 +431,7 @@ export async function autoCollectOnStatementIssue(input: {
     const r = await collectPitCrewServiceFee(caller, input.transactionId, { trigger: "statement_issued" });
     propertyId = r.verified.propertyId;
     result = { attempted: true, outcome: r.outcome, paymentRequestId: r.paymentRequest.id, statusAfter: r.paymentRequest.status };
-    extra = { paymentRequestId: r.paymentRequest.id, statusBefore: r.verified.paymentRequest.status, statusAfter: r.paymentRequest.status, totalFeeCents: r.verified.totalFeeCents, settlementStatementId: r.settlementStatementId };
+    extra = { paymentRequestId: r.paymentRequest.id, statusBefore: r.verified.paymentRequest.status, statusAfter: r.paymentRequest.status, totalFeeCents: r.verified.totalFeeCents, settlementStatementId: r.settlementStatementId, timingRule: r.verified.timing.rule, noticeReason: r.verified.timing.noticeReason ?? null };
   } catch (err) {
     if (err instanceof ServiceFeeCollectionError) {
       propertyId = err.propertyId ?? null;

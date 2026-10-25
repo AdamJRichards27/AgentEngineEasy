@@ -244,6 +244,8 @@ function serviceFeeView(v: Awaited<ReturnType<typeof verifyServiceFeeCollection>
     paidAt: paymentRequest.paidAt,
     // t180u(3): the nominated method's type and stored label only, never a token or mandate reference.
     paymentMethod: v.paymentMethod,
+    // t181u(A): which timing rule the signed terms allow.
+    collectionTiming: { rule: v.timing.rule, noticeReason: v.timing.noticeReason ?? null },
   };
 }
 
@@ -294,8 +296,10 @@ paymentsRouter.post("/pit-crew-service-fee/:transactionId/collect", requireAuth,
         pitCrewAssignmentIds: result.verified.pitCrewAssignmentIds,
         settlementStatementId: result.settlementStatementId,
         paymentMethodType: result.verified.paymentMethod.type,
+        timingRule: result.verified.timing.rule,
+        noticeReason: result.verified.timing.noticeReason ?? null,
         payerType: result.verified.payer.payerType,
-        policy: "t177u+t178u+t180u",
+        policy: "t177u+t178u+t180u+t181u",
       }),
     });
     const status = result.outcome === "debit_queued" ? 202 : 200;

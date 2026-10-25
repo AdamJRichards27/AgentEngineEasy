@@ -49,7 +49,7 @@ export const financialCardCharges = pgTable(
     statusCheck: check("financial_card_charges_status_check", sql`${t.status} in ('PENDING', 'SUCCEEDED', 'FAILED', 'UNKNOWN')`),
     payerCheck: check("financial_card_charges_payer_check", sql`${t.payerType} in ('Agent', 'Brokerage')`),
     amountCheck: check("financial_card_charges_amount_check", sql`${t.amountCents} > 0 and ${t.attemptNo} >= 1`),
-    triggerCheck: check("financial_card_charges_trigger_check", sql`${t.trigger} in ('collect', 'statement_issued')`),
+    triggerCheck: check("financial_card_charges_trigger_check", sql`${t.trigger} in ('collect', 'statement_issued', 'scheduler')`),
   }),
 );
 

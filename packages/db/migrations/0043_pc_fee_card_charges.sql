@@ -5,6 +5,9 @@
 -- cannot be ACTIVE without a Brokerage Administrator approval (not the drafter) under a signed mandate.
 -- financial_card_charges records every card attempt PENDING before the provider call; partial unique indexes
 -- allow one SUCCEEDED and one in-flight charge per payment request. Token references only (by FK).
+-- Extended IN PLACE under Owner t181u (still unapplied on every shared database): agreement/mandate terms
+-- versions on pc_fee_authorities (immediate collection only when both permit it), next_attempt_at on
+-- financial_payment_requests (retry backoff) and the 'scheduler' card-charge trigger.
 -- GATED: LOCAL development and scratch databases only. NOT applied to Replit, staging, any shared database or
 -- production without separate Owner approval (t174u/t179u/t180u).
 CREATE TABLE "financial_card_charges" (
@@ -29,13 +32,16 @@ CREATE TABLE "financial_card_charges" (
 	CONSTRAINT "financial_card_charges_status_check" CHECK ("financial_card_charges"."status" in ('PENDING', 'SUCCEEDED', 'FAILED', 'UNKNOWN')),
 	CONSTRAINT "financial_card_charges_payer_check" CHECK ("financial_card_charges"."payer_type" in ('Agent', 'Brokerage')),
 	CONSTRAINT "financial_card_charges_amount_check" CHECK ("financial_card_charges"."amount_cents" > 0 and "financial_card_charges"."attempt_no" >= 1),
-	CONSTRAINT "financial_card_charges_trigger_check" CHECK ("financial_card_charges"."trigger" in ('collect', 'statement_issued'))
+	CONSTRAINT "financial_card_charges_trigger_check" CHECK ("financial_card_charges"."trigger" in ('collect', 'statement_issued', 'scheduler'))
 );
 --> statement-breakpoint
 ALTER TABLE "pc_fee_authorities" ADD COLUMN "payer_type" text DEFAULT 'Agent' NOT NULL;--> statement-breakpoint
 ALTER TABLE "pc_fee_authorities" ADD COLUMN "payment_method_id" integer;--> statement-breakpoint
 ALTER TABLE "pc_fee_authorities" ADD COLUMN "brokerage_card_approved_by_user_id" integer;--> statement-breakpoint
 ALTER TABLE "pc_fee_authorities" ADD COLUMN "brokerage_card_approved_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pc_fee_authorities" ADD COLUMN "agreement_terms_version" text;--> statement-breakpoint
+ALTER TABLE "pc_fee_authorities" ADD COLUMN "mandate_terms_version" text;--> statement-breakpoint
+ALTER TABLE "financial_payment_requests" ADD COLUMN "next_attempt_at" timestamp;--> statement-breakpoint
 ALTER TABLE "financial_card_charges" ADD CONSTRAINT "financial_card_charges_brokerage_id_brokerages_id_fk" FOREIGN KEY ("brokerage_id") REFERENCES "public"."brokerages"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "financial_card_charges" ADD CONSTRAINT "financial_card_charges_payment_request_id_financial_payment_requests_id_fk" FOREIGN KEY ("payment_request_id") REFERENCES "public"."financial_payment_requests"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "financial_card_charges" ADD CONSTRAINT "financial_card_charges_pc_fee_authority_id_pc_fee_authorities_id_fk" FOREIGN KEY ("pc_fee_authority_id") REFERENCES "public"."pc_fee_authorities"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint

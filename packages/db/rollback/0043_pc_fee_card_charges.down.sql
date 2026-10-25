@@ -15,6 +15,9 @@ ALTER TABLE "pc_fee_authorities" DROP CONSTRAINT IF EXISTS "pc_fee_authorities_b
 ALTER TABLE "pc_fee_authorities" DROP CONSTRAINT IF EXISTS "pc_fee_authorities_card_method_check";
 ALTER TABLE "pc_fee_authorities" DROP CONSTRAINT IF EXISTS "pc_fee_authorities_payer_type_check";
 ALTER TABLE "pc_fee_authorities" DROP CONSTRAINT IF EXISTS "pc_fee_authorities_method_check";
+ALTER TABLE "financial_payment_requests" DROP COLUMN IF EXISTS "next_attempt_at";
+ALTER TABLE "pc_fee_authorities" DROP COLUMN IF EXISTS "mandate_terms_version";
+ALTER TABLE "pc_fee_authorities" DROP COLUMN IF EXISTS "agreement_terms_version";
 ALTER TABLE "pc_fee_authorities" DROP COLUMN IF EXISTS "brokerage_card_approved_at";
 ALTER TABLE "pc_fee_authorities" DROP COLUMN IF EXISTS "brokerage_card_approved_by_user_id";
 ALTER TABLE "pc_fee_authorities" DROP COLUMN IF EXISTS "payment_method_id";

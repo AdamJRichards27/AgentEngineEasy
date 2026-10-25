@@ -199,7 +199,7 @@ function handleFinancialControlError(err: unknown, res: Response): boolean {
           ? 403
           : err.reason === "CUSTODY_BOUNDARY_VIOLATION"
             ? 400
-            : err.reason === "INVALID_PAYMENT_METHOD"
+            : err.reason === "INVALID_PAYMENT_METHOD" || err.reason === "INVALID_TERMS_VERSION"
               ? 422
               : 409;
     res.status(status).json({ error: err.message, reason: err.reason });
@@ -676,6 +676,9 @@ const createAuthoritySchema = z.object({
   authorisedPaymentMethod: z.enum(["GENERAL_ACCOUNT_DEBIT_MANDATE", "STORED_CARD"]).optional(),
   payerType: z.enum(["Agent", "Brokerage"]).optional(),
   paymentMethodId: z.number().int().positive().optional(),
+  // Owner t181u(A): the signed terms versions (validated against lib/financial/pcFeeTerms.ts).
+  agreementTermsVersion: z.string().min(1).max(100).optional(),
+  mandateTermsVersion: z.string().min(1).max(100).optional(),
 });
 
 financialRouter.get("/financial/pc-fee-authorities", ...requireFinancialAdmin, async (req, res) => {

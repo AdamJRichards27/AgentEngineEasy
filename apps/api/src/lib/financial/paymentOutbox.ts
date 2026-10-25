@@ -42,6 +42,7 @@ import {
 } from "@aee/db";
 import { mandatePaymentProvider } from "./provider.js";
 import { emitFinancialEvent } from "./events.js";
+import { collectionTimingFor } from "./pcFeeTerms.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -183,7 +184,9 @@ export async function scheduleDebitForPaymentRequest(input: {
 
   const noticeSentAt = request.noticeSentAt ?? new Date();
   const noticeElapsesAt = new Date(noticeSentAt.getTime() + authority.noticeRequiredDays * 24 * 60 * 60 * 1000);
-  if (new Date() < noticeElapsesAt) {
+  // t181u(A): the notice period is waived only when the signed agreement AND mandate terms both permit immediate collection.
+  const immediate = collectionTimingFor(authority).rule === "IMMEDIATE_ON_STATEMENT_ISSUE";
+  if (!immediate && new Date() < noticeElapsesAt) {
     throw new Error(
       `Payment request ${input.paymentRequestId}'s ${authority.noticeRequiredDays}-day notice period has not elapsed yet (elapses ${noticeElapsesAt.toISOString()}).`,
     );

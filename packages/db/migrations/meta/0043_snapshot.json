@@ -15071,6 +15071,12 @@
           "notNull": true,
           "default": 3
         },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "reversed_at": {
           "name": "reversed_at",
           "type": "timestamp",
@@ -15992,6 +15998,18 @@
         "brokerage_card_approved_at": {
           "name": "brokerage_card_approved_at",
           "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agreement_terms_version": {
+          "name": "agreement_terms_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mandate_terms_version": {
+          "name": "mandate_terms_version",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -24577,7 +24595,7 @@
         },
         "financial_card_charges_trigger_check": {
           "name": "financial_card_charges_trigger_check",
-          "value": "\"financial_card_charges\".\"trigger\" in ('collect', 'statement_issued')"
+          "value": "\"financial_card_charges\".\"trigger\" in ('collect', 'statement_issued', 'scheduler')"
         }
       },
       "isRLSEnabled": false

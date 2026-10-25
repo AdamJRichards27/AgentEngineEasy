@@ -32,6 +32,7 @@ import { db, pcFeeAuthorities, financialLedgerEvents, paymentMethods, type PcFee
 import { FinancialControlError } from "./agreements.js";
 import { emitFinancialEvent } from "./events.js";
 import { noteFinancialPcFeeAuthorityIsolationRejection } from "./isolationRejection.js";
+import { isKnownAgreementTerms, isKnownMandateTerms } from "./pcFeeTerms.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -117,6 +118,9 @@ export interface CreatePcFeeAuthorityInput {
   payerType?: PcFeeAuthorityPayerType;
   /** t180u(3): the single nominated card (STORED_CARD only). */
   paymentMethodId?: number | null;
+  /** t181u(A): signed AE agreement / payment-mandate terms versions (pcFeeTerms.ts). Unknown versions are refused. */
+  agreementTermsVersion?: string | null;
+  mandateTermsVersion?: string | null;
   maximumAmountCents?: number | null;
   noticeRequiredDays?: number;
   signedEvidenceRef?: string | null;
@@ -148,6 +152,13 @@ export async function createPcFeeAuthority(input: CreatePcFeeAuthorityInput): Pr
     if (payerType === "Brokerage") throw new FinancialControlError("INVALID_PAYMENT_METHOD", "A brokerage-paid authority must use a stored brokerage card.");
   }
 
+  if (input.agreementTermsVersion != null && !isKnownAgreementTerms(input.agreementTermsVersion)) {
+    throw new FinancialControlError("INVALID_TERMS_VERSION", "Unknown AE agreement terms version.");
+  }
+  if (input.mandateTermsVersion != null && !isKnownMandateTerms(input.mandateTermsVersion)) {
+    throw new FinancialControlError("INVALID_TERMS_VERSION", "Unknown payment mandate terms version.");
+  }
+
   const version = await nextPcFeeAuthorityVersion(input.agentUserId);
   const [row] = await db
     .insert(pcFeeAuthorities)
@@ -165,6 +176,8 @@ export async function createPcFeeAuthority(input: CreatePcFeeAuthorityInput): Pr
       authorisedPaymentMethod: method,
       payerType,
       paymentMethodId: method === "STORED_CARD" ? input.paymentMethodId! : null,
+      agreementTermsVersion: input.agreementTermsVersion ?? null,
+      mandateTermsVersion: input.mandateTermsVersion ?? null,
       maximumAmountCents: input.maximumAmountCents ?? null,
       noticeRequiredDays: input.noticeRequiredDays ?? 7,
       signedEvidenceRef: input.signedEvidenceRef ?? null,

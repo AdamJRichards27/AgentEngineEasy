@@ -354,6 +354,13 @@ export const pcFeeAuthorities = pgTable(
     paymentMethodId: integer("payment_method_id").references(() => paymentMethods.id),
     brokerageCardApprovedByUserId: integer("brokerage_card_approved_by_user_id").references(() => users.id),
     brokerageCardApprovedAt: timestamp("brokerage_card_approved_at"),
+    // Owner t181u(A): the signed AE agreement and payment-mandate terms
+    // versions this authority was executed under. Immediate collection on
+    // final statement issue applies only when BOTH versions expressly permit
+    // it (lib/financial/pcFeeTerms.ts); null = pre-versioned terms, which fail
+    // closed to the notice period. A terms change is a new authority version.
+    agreementTermsVersion: text("agreement_terms_version"),
+    mandateTermsVersion: text("mandate_terms_version"),
 
     maximumAmountCents: integer("maximum_amount_cents"),
     noticeRequiredDays: integer("notice_required_days").notNull().default(7),
@@ -465,6 +472,9 @@ export const financialPaymentRequests = pgTable(
     failureReason: text("failure_reason"),
     retryCount: integer("retry_count").notNull().default(0),
     maxRetries: integer("max_retries").notNull().default(3),
+    // Owner t181u(C): earliest time a RETRY_SCHEDULED stored-card fee may be
+    // attempted again (exponential backoff, capped). Null = not scheduled.
+    nextAttemptAt: timestamp("next_attempt_at"),
 
     reversedAt: timestamp("reversed_at"),
     reversalReason: text("reversal_reason"),

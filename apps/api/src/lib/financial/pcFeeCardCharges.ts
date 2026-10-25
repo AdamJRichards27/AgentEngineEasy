@@ -43,9 +43,10 @@ import { paymentProvider } from "../paymentProvider.js";
 import { logAudit } from "../audit.js";
 import { emitFinancialEvent } from "./events.js";
 import { nominatedPaymentMethodFor } from "./pcFeeAuthorities.js";
+import { collectionTimingFor } from "./pcFeeTerms.js";
 import { sanitiseFailureMessage, syncReceiptsForPaymentRequest } from "./receipts.js";
 
-export type CardChargeTrigger = "collect" | "statement_issued";
+export type CardChargeTrigger = "collect" | "statement_issued" | "scheduler";
 export type CardChargeOutcome = "card_charged" | "card_failed_retry_scheduled" | "card_failed_final" | "card_outcome_unknown" | "already_in_progress" | "already_paid";
 
 export class CardChargeRefusal extends Error {
@@ -109,6 +110,11 @@ export async function chargeServiceFeeStoredCard(input: {
     if (!CHARGEABLE.includes(req.status)) {
       if (req.status === "PROCESSING" || req.status === "DEBIT_SCHEDULED") return { kind: "already_in_progress" as const, req };
       throw new CardChargeRefusal("NOT_CHARGEABLE", `Request is ${req.status}.`);
+    }
+    // t181u(A) defence in depth: never charge inside a contractual notice period.
+    if (req.status === "NOTICE_SENT" && collectionTimingFor(authority).rule !== "IMMEDIATE_ON_STATEMENT_ISSUE") {
+      const elapses = req.noticeSentAt ? req.noticeSentAt.getTime() + authority.noticeRequiredDays * 86_400_000 : Infinity;
+      if (Date.now() < elapses) throw new CardChargeRefusal("NOT_CHARGEABLE", "The contractual notice period has not elapsed.");
     }
     const prior = await tx.select().from(financialCardCharges).where(eq(financialCardCharges.paymentRequestId, req.id));
     if (prior.some((c) => c.status === "SUCCEEDED")) return { kind: "already_paid" as const, req };
