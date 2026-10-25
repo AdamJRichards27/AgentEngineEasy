@@ -10,6 +10,9 @@
 // correction is a new version that supersedes the issued one (Brokerage
 // Administrator only, with a reason). Every step is audited.
 //
+// t181u phase 2a: a computed, read-only payment/refund reconciliation section
+// is attached to the ISSUED statement (lib/financial/statementReconciliation.ts).
+//
 // This slice does NOT switch the #245 collection gate (that stays fully
 // blocking until a later, separately approved slice).
 import { createHash } from "node:crypto";
@@ -41,6 +44,7 @@ import { auditWriterFor, isListingAgent, loadPropertyFinancialScope } from "../l
 import { activePitCrewAssignmentsForTransaction } from "../lib/transactionPriceAccess.js";
 import { resolveTransactionScope } from "../lib/financial/queries.js";
 import { canReadTransactionFinancials } from "./financialFees.js";
+import { reconciliationForStatement } from "../lib/financial/statementReconciliation.js";
 
 export const financialStatementsRouter = Router();
 const runAccess = requireEntitlement("run.access");
@@ -481,5 +485,22 @@ financialStatementsRouter.get("/financial/settlement-statements", ...preparer, a
   const lines = statements.length
     ? await db.select().from(settlementStatementLines).where(inArray(settlementStatementLines.statementId, statements.map((s) => s.id))).orderBy(settlementStatementLines.statementId, settlementStatementLines.lineNo)
     : [];
-  res.json({ statements: statements.map((s) => ({ ...s, lines: lines.filter((l) => l.statementId === s.id) })) });
+  // t181u phase 2a (G5): PAYMENT/REFUND reconciliation is computed on read for the ISSUED statement only; never persisted.
+  const out = [];
+  for (const s of statements) {
+    const own = lines.filter((l) => l.statementId === s.id);
+    out.push({ ...s, lines: own, reconciliation: await reconciliationForStatement(s, own) });
+  }
+  res.json({ statements: out });
+});
+
+financialStatementsRouter.get("/financial/settlement-statements/:id/reconciliation", ...preparer, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return void res.status(404).json({ error: "Not found" });
+  const user = req.authedUser!;
+  const [statement] = await db.select().from(settlementStatements).where(and(eq(settlementStatements.id, id), eq(settlementStatements.brokerageId, user.brokerageId)));
+  if (!statement) return void res.status(404).json({ error: "Not found" });
+  const access = await canReadTransactionFinancials(user, statement.transactionId);
+  if (!access) return void res.status(404).json({ error: "Not found" });
+  res.json({ statementId: statement.id, statementStatus: statement.status, reconciliation: await reconciliationForStatement(statement) });
 });
