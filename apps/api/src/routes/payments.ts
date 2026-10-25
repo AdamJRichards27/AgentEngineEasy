@@ -27,6 +27,7 @@ import {
   ServiceFeeCollectionError,
   SERVICE_FEE_ERROR_STATUS,
 } from "../lib/pitCrewServiceFee.js";
+import { listRefundsForPayment, resolveRefundManually } from "../lib/paymentRefunds.js";
 
 // Phase 6 (ARCHITECTURE.md §10): stored payment methods, ServiceOrder
 // charging, receipts, idempotency. The ServiceOrder rows themselves are
@@ -341,6 +342,9 @@ const REFUND_ERRORS: Record<PaymentRefundErrorCode, { status: number; error: str
   PAYMENT_NO_CHARGE_REFERENCE: { status: 409, error: "This payment can't be refunded because it has no provider charge on record." },
   REFUND_AMOUNT_INVALID: { status: 400, error: "Refund amount must be a positive whole number of cents." },
   REFUND_AMOUNT_EXCEEDS_REMAINING: { status: 409, error: "Refund amount is more than the amount left to refund on this payment." },
+  REFUND_NOT_FOUND: { status: 404, error: "Not found" },
+  REFUND_ALREADY_RESOLVED: { status: 409, error: "This refund is not awaiting review." },
+  REFUND_IN_REVIEW: { status: 409, error: "The rest of this payment is held by refunds still in progress or awaiting review." },
 };
 export function refundErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof PaymentRefundError && err.code in REFUND_ERRORS) {
@@ -353,24 +357,93 @@ export function refundErrorResponse(err: unknown): { status: number; body: { err
 // Refund — restricted to Brokerage Administrators, matching the AML
 // exception-resolution precedent for anything that reverses a recorded
 // financial outcome.
+// Refund ledger (t429u): an optional Idempotency-Key header makes a repeat submit return the same
+// refund instead of a second one. Status by ledger outcome: SUCCEEDED 200; SUBMITTED (provider pending)
+// 202 REFUND_PENDING; UNKNOWN 202 REFUND_OUTCOME_UNKNOWN (reconciler resolves it, never a blind retry);
+// FAILED 502 REFUND_REJECTED (the reservation is released).
+const REFUND_OUTCOME_HTTP: Record<string, { status: number; code?: string }> = {
+  SUCCEEDED: { status: 200 },
+  SUBMITTED: { status: 202, code: "REFUND_PENDING" },
+  PENDING: { status: 202, code: "REFUND_PENDING" },
+  UNKNOWN: { status: 202, code: "REFUND_OUTCOME_UNKNOWN" },
+  MANUAL_REVIEW: { status: 202, code: "REFUND_IN_REVIEW" },
+  FAILED: { status: 502, code: "REFUND_REJECTED" },
+};
+const idempotencyHeader = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/);
+
 paymentsRouter.post("/:paymentId/refund", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const paymentId = Number(req.params.paymentId);
   // S-1d: passed through raw; refundPayment validates it (strings are rejected, no longer silently ignored).
   const amountCents: unknown = req.body?.amountCents;
+  const rawKey = req.header("idempotency-key");
+  let clientIdempotencyKey: string | undefined;
+  if (rawKey !== undefined) {
+    const k = idempotencyHeader.safeParse(rawKey);
+    if (!k.success) {
+      res.status(400).json({ error: "Idempotency-Key must be 1-200 characters of letters, digits, . _ : -", code: "IDEMPOTENCY_KEY_INVALID" });
+      return;
+    }
+    clientIdempotencyKey = k.data;
+  }
   const user = req.authedUser!;
   try {
-    const payment = await refundPayment({ paymentId, amountCents, brokerageId: user.brokerageId });
-    await logAudit({
-      userId: user.id,
-      action: "payment_refunded",
-      recordType: "payment",
-      recordId: String(paymentId),
-      providerReference: payment.providerChargeRef ?? undefined,
-    });
-    res.json({ payment });
+    const result = await refundPayment({ paymentId, amountCents, brokerageId: user.brokerageId, userId: user.id, clientIdempotencyKey });
+    const { refund, replayed, ...payment } = result;
+    if (!replayed && refund?.status === "SUCCEEDED") {
+      await logAudit({
+        brokerageId: user.brokerageId,
+        userId: user.id,
+        action: "payment_refunded",
+        recordType: "payment",
+        recordId: String(paymentId),
+        providerReference: refund.providerRefundRef ?? payment.providerChargeRef ?? undefined,
+        updatedValue: JSON.stringify({ refundId: refund.id, amountCents: refund.amountCents, status: payment.status }),
+      });
+    }
+    const http = REFUND_OUTCOME_HTTP[refund?.status ?? "SUCCEEDED"] ?? { status: 202, code: "REFUND_PENDING" };
+    res.status(http.status).json({ payment, refund, replayed: Boolean(replayed), ...(http.code ? { code: http.code } : {}) });
   } catch (err) {
     const mapped = refundErrorResponse(err);
     if (mapped.status >= 500) logger.error("payment_refund_failed", { paymentId, error: err instanceof Error ? err.message : String(err) });
+    res.status(mapped.status).json(mapped.body);
+  }
+});
+
+// Refund ledger reads and operator actions (Brokerage Administrator + run.access, brokerage-scoped;
+// a foreign id answers exactly like a missing one).
+paymentsRouter.get("/:paymentId/refunds", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const paymentId = Number(req.params.paymentId);
+  const user = req.authedUser!;
+  res.json({ refunds: Number.isSafeInteger(paymentId) ? await listRefundsForPayment(paymentId, user.brokerageId) : [] });
+});
+
+const resolveSchema = z.object({
+  action: z.enum(["mark_succeeded", "mark_failed"]),
+  providerRefundRef: z.string().trim().min(1).max(200).optional(),
+  note: z.string().trim().min(1).max(1000),
+});
+paymentsRouter.post("/refunds/:refundId/resolve", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+  const refundId = Number(req.params.refundId);
+  if (!Number.isSafeInteger(refundId) || refundId <= 0) {
+    res.status(404).json({ error: "Not found", code: "REFUND_NOT_FOUND" });
+    return;
+  }
+  const parsed = resolveSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "action and note are required", code: "REFUND_RESOLVE_INVALID" });
+    return;
+  }
+  if (parsed.data.action === "mark_succeeded" && !parsed.data.providerRefundRef) {
+    res.status(400).json({ error: "providerRefundRef is required to mark a refund succeeded", code: "REFUND_RESOLVE_INVALID" });
+    return;
+  }
+  const user = req.authedUser!;
+  try {
+    const refund = await resolveRefundManually({ refundId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data });
+    res.json({ refund });
+  } catch (err) {
+    const mapped = refundErrorResponse(err);
+    if (mapped.status >= 500) logger.error("payment_refund_resolve_failed", { refundId, error: err instanceof Error ? err.message : String(err) });
     res.status(mapped.status).json(mapped.body);
   }
 });

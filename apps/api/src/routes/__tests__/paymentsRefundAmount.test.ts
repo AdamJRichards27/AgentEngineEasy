@@ -105,7 +105,7 @@ describe("S-1d: refund amountCents validation", { concurrency: false }, () => {
     const r = await refund(paid[1], JSON.stringify({ amountCents: p.amountCents }));
     assert.equal(r.status, 200, await r.clone().text());
     assert.equal(refundSpy.mock.callCount(), calls + 1);
-    assert.equal(refundSpy.mock.calls.at(-1)!.arguments[1], p.amountCents);
+    assert.equal((refundSpy.mock.calls.at(-1)!.arguments[0] as { amountCents: number; idempotencyKey: string }).amountCents, p.amountCents); // refund ledger: provider takes { amountCents, idempotencyKey, ... }
   });
 
   test("a valid partial amount is passed to the provider unchanged", async () => {
@@ -113,12 +113,14 @@ describe("S-1d: refund amountCents validation", { concurrency: false }, () => {
     const r = await refund(paid[2], JSON.stringify({ amountCents: 1 }));
     assert.equal(r.status, 200, await r.clone().text());
     assert.equal(refundSpy.mock.callCount(), calls + 1);
-    assert.equal(refundSpy.mock.calls.at(-1)!.arguments[1], 1);
-    // Existing semantics (gap): no partial tracking, so the payment is marked Refunded and a second refund is 409 NOT_REFUNDABLE.
-    assert.equal((await row(paid[2])).status, "Refunded");
+    assert.equal((refundSpy.mock.calls.at(-1)!.arguments[0] as { amountCents: number; idempotencyKey: string }).amountCents, 1);
+    // Refund ledger (t429u) closes the S-1d gap: a partial refund leaves PartiallyRefunded with refundedCents, and
+    // the rest stays refundable (was: Refunded, second refund 409 NOT_REFUNDABLE).
+    assert.equal((await row(paid[2])).status, "PartiallyRefunded");
+    assert.equal((await row(paid[2])).refundedCents, 1);
     const again = await refund(paid[2], JSON.stringify({ amountCents: 1 }));
-    assert.equal(again.status, 409);
-    assert.equal(((await again.json()) as { code: string }).code, "PAYMENT_NOT_REFUNDABLE");
+    assert.equal(again.status, 200);
+    assert.equal((await row(paid[2])).refundedCents, 2);
   });
 
   test("omitted amountCents (empty body and {}) -> full refund of payment.amountCents (existing semantics)", async () => {
@@ -127,7 +129,7 @@ describe("S-1d: refund amountCents validation", { concurrency: false }, () => {
     const r = await refund(paid[3], "{}");
     assert.equal(r.status, 200, await r.clone().text());
     assert.equal(refundSpy.mock.callCount(), calls + 1);
-    assert.equal(refundSpy.mock.calls.at(-1)!.arguments[1], p.amountCents);
+    assert.equal((refundSpy.mock.calls.at(-1)!.arguments[0] as { amountCents: number; idempotencyKey: string }).amountCents, p.amountCents); // refund ledger: provider takes { amountCents, idempotencyKey, ... }
   });
 
   test("validation runs before the existence lookup only for shape: invalid amount on a missing id is still 400 (no existence signal either way)", async () => {

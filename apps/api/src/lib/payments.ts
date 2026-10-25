@@ -1,9 +1,9 @@
 import { eq, and, desc } from "drizzle-orm";
 import { db, paymentMethods, serviceOrders, payments, properties } from "@aee/db";
 import type { PaymentMethod, ServiceOrder, Payment } from "@aee/db";
-import { createPaymentProvider, type PaymentWebhookResult } from "@aee/integration-payments";
-
-const paymentProvider = createPaymentProvider();
+import type { PaymentWebhookResult } from "@aee/integration-payments";
+import { paymentProvider } from "./paymentProvider.js";
+import { requestRefund, applyProviderRefundReports, type RefundOutcome } from "./paymentRefunds.js";
 
 /**
  * Attaches an already-tokenized stored payment method (Phase 6). Real card
@@ -320,7 +320,7 @@ export async function chargeServiceOrder(input: {
 
 export interface ProcessPaymentWebhookResult {
   processed: boolean;
-  reason?: "invalid_signature" | "payment_not_found" | "duplicate_delivery";
+  reason?: "invalid_signature" | "payment_not_found" | "duplicate_delivery" | "refund_without_detail";
   payment?: Payment;
 }
 
@@ -347,6 +347,19 @@ export async function processPaymentWebhook(
   const [payment] = await db.select().from(payments).where(eq(payments.providerChargeRef, result.providerChargeRef));
   if (!payment) {
     return { processed: false, reason: "payment_not_found" };
+  }
+
+  // Refund ledger: a refund event records each reported refund on its own payment_refunds row and
+  // recomputes the payment from the ledger (PartiallyRefunded vs Refunded). It never flips the whole
+  // payment to Refunded just because the event type is charge.refunded.
+  if (result.refunds) {
+    const changed = await applyProviderRefundReports(payment, result.refunds);
+    const [fresh] = await db.select().from(payments).where(eq(payments.id, payment.id));
+    return changed ? { processed: true, payment: fresh } : { processed: false, reason: "duplicate_delivery", payment: fresh };
+  }
+  if (result.status === "Refunded") {
+    // A provider that reports "Refunded" with no refund detail can't be reconciled to the ledger safely.
+    return { processed: false, reason: "refund_without_detail", payment };
   }
 
   if (payment.status === result.status) {
@@ -389,53 +402,32 @@ export async function processPaymentWebhook(
  * incrementing a paymentId.
  */
 // S-1c: stable, client-safe codes for refundPayment failures (mapped in routes/payments.ts refundErrorResponse).
-export type PaymentRefundErrorCode =
-  | "PAYMENT_NOT_FOUND"
-  | "PAYMENT_NOT_REFUNDABLE"
-  | "PAYMENT_NO_CHARGE_REFERENCE"
-  | "REFUND_AMOUNT_INVALID"
-  | "REFUND_AMOUNT_EXCEEDS_REMAINING";
-export class PaymentRefundError extends Error {
-  constructor(public readonly code: PaymentRefundErrorCode, detail?: string) {
-    super(detail ?? code);
-    this.name = "PaymentRefundError";
-  }
-}
+// The class now lives with the refund ledger (lib/paymentRefunds.ts) and is re-exported here unchanged.
+import { PaymentRefundError } from "./paymentRefunds.js";
+export { PaymentRefundError, type PaymentRefundErrorCode } from "./paymentRefunds.js";
 
-// S-1d: amountCents, when present, must be a positive safe integer; omitted means a full refund.
-// The schema does not track partial refunds (status only), so the refundable remainder is payment.amountCents.
-export async function refundPayment(input: { paymentId: number; amountCents?: unknown; brokerageId: number }): Promise<Payment> {
+// S-1d: amountCents, when present, must be a positive safe integer.
+// Refund ledger (t429u): omitted now means "the remaining amount" (amount - refunded - in-flight), not
+// payment.amountCents. The work happens in lib/paymentRefunds.ts (lock, reservation row, idempotent
+// provider call, reconciliation). This wrapper keeps the S-1c/S-1d signature and error codes.
+export async function refundPayment(input: {
+  paymentId: number;
+  amountCents?: unknown;
+  brokerageId: number;
+  userId?: number;
+  clientIdempotencyKey?: string;
+}): Promise<Payment & { refund?: RefundOutcome["refund"]; replayed?: boolean }> {
   if (input.amountCents !== undefined && !(typeof input.amountCents === "number" && Number.isSafeInteger(input.amountCents) && input.amountCents > 0)) {
     throw new PaymentRefundError("REFUND_AMOUNT_INVALID");
   }
-  const requestedCents = input.amountCents as number | undefined;
-  const payment = await selectPaymentInBrokerage(input.paymentId, input.brokerageId);
-  if (!payment) {
-    throw new PaymentRefundError("PAYMENT_NOT_FOUND", `Payment ${input.paymentId} not found`);
-  }
-  if (payment.status !== "Succeeded") {
-    throw new PaymentRefundError("PAYMENT_NOT_REFUNDABLE", `Payment ${input.paymentId} is not in a refundable state (status: ${payment.status})`);
-  }
-  if (!payment.providerChargeRef) {
-    throw new PaymentRefundError("PAYMENT_NO_CHARGE_REFERENCE", `Payment ${input.paymentId} has no provider charge reference to refund`);
-  }
-
-  const refundableRemainingCents = payment.amountCents;
-  if (requestedCents !== undefined && requestedCents > refundableRemainingCents) {
-    throw new PaymentRefundError("REFUND_AMOUNT_EXCEEDS_REMAINING", `requested ${requestedCents} > remaining ${refundableRemainingCents}`);
-  }
-  const refundAmount = requestedCents ?? payment.amountCents;
-  await paymentProvider.refund(payment.providerChargeRef, refundAmount);
-
-  const [updated] = await db
-    .update(payments)
-    .set({ status: "Refunded", updatedAt: new Date() })
-    .where(eq(payments.id, payment.id))
-    .returning();
-
-  await db.update(serviceOrders).set({ paymentStatus: "Refunded" }).where(eq(serviceOrders.id, payment.serviceOrderId));
-
-  return updated;
+  const outcome = await requestRefund({
+    paymentId: input.paymentId,
+    amountCents: input.amountCents as number | undefined,
+    brokerageId: input.brokerageId,
+    userId: input.userId,
+    clientIdempotencyKey: input.clientIdempotencyKey,
+  });
+  return { ...outcome.payment, refund: outcome.refund, replayed: outcome.replayed };
 }
 
 /**

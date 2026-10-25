@@ -27,6 +27,7 @@ import {
   automationTasks,
   automationAttentionItems,
   auditLogs,
+  paymentRefunds,
   domainEvents,
   entitlementGrants,
   aiActionRequests,
@@ -764,6 +765,9 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     const serviceOrderRows = await db.select({ id: serviceOrders.id }).from(serviceOrders).where(inArray(serviceOrders.propertyId, propertyIds));
     const serviceOrderIds = serviceOrderRows.map((s) => s.id);
     if (serviceOrderIds.length > 0) {
+      // Refund ledger (0039): payment_refunds.payment_id -> payments.id, so refund rows go first.
+      const paymentRows = await db.select({ id: payments.id }).from(payments).where(inArray(payments.serviceOrderId, serviceOrderIds));
+      if (paymentRows.length > 0) await db.delete(paymentRefunds).where(inArray(paymentRefunds.paymentId, paymentRows.map((p) => p.id)));
       await db.delete(payments).where(inArray(payments.serviceOrderId, serviceOrderIds));
     }
     await db.delete(serviceOrders).where(inArray(serviceOrders.propertyId, propertyIds));
