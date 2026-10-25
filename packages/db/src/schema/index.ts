@@ -33,6 +33,11 @@ export * from "./communications";
 // (campaignItems) and exceptions.ts (a new "FINANCIAL" category) rather
 // than duplicating any of them — see financial.ts's own header comment.
 export * from "./financial";
+// Owner t174u — Pit Crew financial amendment authority grants (migration 0038).
+export * from "./financialAuthorities";
+// Owner t179u slice 2 (migration 0040): AE fee schedule versions + transaction fees.
+export * from "./transactionFees";
+export * from "./settlementStatements";
 // Agent Engine 2.0 — Step 5: Integration and Data Exchange Foundation.
 // Reuses packages/events (the one canonical event bus) and audit.ts
 // (logAudit) rather than duplicating either — see integrations.ts's own

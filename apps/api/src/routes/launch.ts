@@ -12,6 +12,18 @@
 
 import { Router } from "express";
 import { z } from "zod";
+import { and, eq } from "drizzle-orm";
+import { campaignItems, db } from "@aee/db";
+import { logAudit } from "../lib/audit.js";
+import {
+  amendmentAuditInput,
+  auditWriterFor,
+  denyFinancialAmendment,
+  hiddenAgent,
+  loadPropertyFinancialScope,
+  lockLiveAuthority,
+  resolveAmendmentAuthority,
+} from "../lib/financialAmendments.js";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
@@ -277,16 +289,54 @@ launchRouter.post("/launch/campaign-items/:itemId/responsibility", requireAuth, 
 
 const vendorCostSchema = z.object({ vendorName: z.string().max(200).nullable(), costCents: z.number().int().min(0) });
 
+// Owner t173u: a campaign item's vendor cost is a marketing charge. Amending
+// it needs authority: the listing agent or a Brokerage Administrator (own
+// authority), or Pit Crew with a live CAMPAIGN_ITEM_COST grant (t174u) plus
+// an active assignment on the grant's transaction; otherwise 403. Another
+// Agent: 404 (own-property rule).
+// The cost update and its before/after audit row commit together.
 launchRouter.post("/launch/campaign-items/:itemId/vendor-cost", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
+  const itemId = req.params.itemId;
+  const [item] = z.string().uuid().safeParse(itemId).success
+    ? await db
+        .select({ propertyId: campaignItems.propertyId })
+        .from(campaignItems)
+        .where(and(eq(campaignItems.id, itemId), eq(campaignItems.brokerageId, user.brokerageId)))
+    : [];
+  const scope = item ? await loadPropertyFinancialScope(user, item.propertyId) : null;
+  if (!scope || hiddenAgent(user, scope)) {
+    res.status(404).json({ error: "Campaign item not found", reason: "NOT_FOUND" });
+    return;
+  }
+  const authority = await resolveAmendmentAuthority(user, scope, { scope: "CAMPAIGN_ITEM_COST", recordId: itemId });
+  if (!authority.allowed) {
+    await denyFinancialAmendment(res, user, scope, "campaign_item", itemId, "POST /launch/campaign-items/:itemId/vendor-cost");
+    return;
+  }
   const parsed = vendorCostSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
   }
   try {
-    const item = await recordVendorAndCost(req.params.itemId, user.brokerageId, actorFrom(user), parsed.data.vendorName, parsed.data.costCents);
-    res.json({ item });
+    const updated = await recordVendorAndCost(itemId, user.brokerageId, actorFrom(user), parsed.data.vendorName, parsed.data.costCents, async (before, after, tx) => {
+      await lockLiveAuthority(tx, authority);
+      await logAudit(
+        amendmentAuditInput({
+          user,
+          authority,
+          scope,
+          recordType: "campaign_item",
+          recordId: itemId,
+          before: { vendorName: before.vendorName, costCents: before.costCents },
+          after: { vendorName: after.vendorName, costCents: after.costCents },
+          surface: "POST /launch/campaign-items/:itemId/vendor-cost",
+        }),
+        { strict: true, write: auditWriterFor(tx) },
+      );
+    });
+    res.json({ item: updated });
   } catch (err) {
     if (handleLaunchError(err, res)) return;
     throw err;

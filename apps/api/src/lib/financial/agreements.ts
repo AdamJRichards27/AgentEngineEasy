@@ -29,6 +29,9 @@ import { db, commissionAgreements, financialLedgerEvents, type CommissionAgreeme
 import { emitFinancialEvent } from "./events.js";
 import { noteFinancialCommissionAgreementIsolationRejection } from "./isolationRejection.js";
 
+/** `db` or a transaction handle, so a caller can put the write and its audit row in one DB transaction (t177u). */
+export type FinancialDbExecutor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES" | "CUSTODY_BOUNDARY_VIOLATION";
 
 export class FinancialControlError extends Error {
@@ -66,8 +69,8 @@ async function recordLedgerEvent(input: {
   });
 }
 
-async function nextCommissionAgreementVersion(transactionId: number): Promise<number> {
-  const rows = await db.select({ version: commissionAgreements.version }).from(commissionAgreements).where(eq(commissionAgreements.transactionId, transactionId));
+async function nextCommissionAgreementVersion(transactionId: number, executor: FinancialDbExecutor = db): Promise<number> {
+  const rows = await executor.select({ version: commissionAgreements.version }).from(commissionAgreements).where(eq(commissionAgreements.transactionId, transactionId));
   const maxVersion = rows.reduce((max, r) => Math.max(max, r.version), 0);
   return maxVersion + 1;
 }
@@ -99,9 +102,9 @@ export interface CreateCommissionAgreementInput {
  * Never edits a prior version (Section 9) — always the next version
  * number for the transaction, starting at DRAFT.
  */
-export async function createCommissionAgreement(input: CreateCommissionAgreementInput): Promise<CommissionAgreement> {
-  const version = await nextCommissionAgreementVersion(input.transactionId);
-  const [row] = await db
+export async function createCommissionAgreement(input: CreateCommissionAgreementInput, executor: FinancialDbExecutor = db): Promise<CommissionAgreement> {
+  const version = await nextCommissionAgreementVersion(input.transactionId, executor);
+  const [row] = await executor
     .insert(commissionAgreements)
     .values({
       brokerageId: input.brokerageId,

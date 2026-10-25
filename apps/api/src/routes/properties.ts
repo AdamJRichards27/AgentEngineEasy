@@ -1,3 +1,4 @@
+import { agencyTermsViewFor, loadPropertyFinancialScope } from "../lib/financialAmendments.js";
 import { Router } from "express";
 import { eq, and, inArray, ne, ilike, or } from "drizzle-orm";
 import { z } from "zod";
@@ -494,6 +495,13 @@ propertiesRouter.get("/:id/workspace", requireAuth, requiresRunAccess, async (re
     ? await db.select().from(signatureRequests).where(eq(signatureRequests.packageId, docPackage.id))
     : [];
   const [agreementTerms] = await db.select().from(agencyAgreementTerms).where(eq(agencyAgreementTerms.propertyId, id));
+  // Owner t172u/t173u: commission rate, flat fee and marketing fee only for
+  // the listing agent, Brokerage Administrators and Pit Crew assigned on the
+  // property (logged); others see the row without the figures.
+  const agreementScope = await loadPropertyFinancialScope(user, id);
+  const agencyTermsView = agreementScope
+    ? await agencyTermsViewFor(user, agreementScope, agreementTerms ?? null, "GET /properties/:id/workspace")
+    : null;
   // Stage A (#114) — surfaced additively; an unstarted appraisal is simply
   // null here, never a blocking field.
   const appraisal = await getAppraisalByProperty(id, user.brokerageId);
@@ -557,7 +565,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, requiresRunAccess, async (re
             : null,
         }
       : null,
-    agencyAgreementTerms: agreementTerms ?? null,
+    agencyAgreementTerms: agencyTermsView,
     appraisal,
   });
 });
@@ -583,7 +591,14 @@ propertiesRouter.get("/:id/timeline", requireAuth, requiresGrowOrRunAccess, asyn
       res.status(404).json({ error: `Property ${id} not found` });
       return;
     }
-    const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials);
+    // Owner t165u/t170u rule 1 (kept by t172u): offer prices on the timeline go to
+    // Brokerage Administrators and the listing agent only. An Agent reaching
+    // this line is the listing agent (propertyHiddenFromCaller above); Pit
+    // Crew never sees them here (an assigned Pit Crew member reads the agreed contract price on the
+    // transaction panel, lib/transactionPriceAccess).
+    // Merge (t180u): RUN-ACCESS-OPS Grow-safe filter kept for non-run callers.
+    const offerPricesVisible = canViewFinancials || user.role === "Agent";
+    const timeline = await getPropertyTimeline(id, user.brokerageId, canViewFinancials, { offerPricesVisible });
     res.json({
       timeline:
         propertyAccessOf(res) === "run"

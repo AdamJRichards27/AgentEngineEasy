@@ -1,6 +1,6 @@
 {
   "id": "442b0d82-f94c-4596-858d-f41405f789fb",
-  "prevId": "2000d9df-4ad0-4e6c-ae64-c5bfeaab24bf",
+  "prevId": "40c7f102-eeae-46df-9de0-29047f38ddf7",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2737,6 +2737,142 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.payments": {
+      "name": "payments",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "service_order_id": {
+          "name": "service_order_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payment_method_id": {
+          "name": "payment_method_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_charge_ref": {
+          "name": "provider_charge_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "amount_cents": {
+          "name": "amount_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'Pending'"
+        },
+        "refunded_cents": {
+          "name": "refunded_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "receipt_url": {
+          "name": "receipt_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "payments_service_order_id_service_orders_id_fk": {
+          "name": "payments_service_order_id_service_orders_id_fk",
+          "tableFrom": "payments",
+          "tableTo": "service_orders",
+          "columnsFrom": [
+            "service_order_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "payments_payment_method_id_payment_methods_id_fk": {
+          "name": "payments_payment_method_id_payment_methods_id_fk",
+          "tableFrom": "payments",
+          "tableTo": "payment_methods",
+          "columnsFrom": [
+            "payment_method_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "payments_idempotency_key_unique": {
+          "name": "payments_idempotency_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "idempotency_key"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.payment_refunds": {
       "name": "payment_refunds",
       "schema": "",
@@ -2878,142 +3014,6 @@
           "nullsNotDistinct": false,
           "columns": [
             "provider_refund_ref"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.payments": {
-      "name": "payments",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "serial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "service_order_id": {
-          "name": "service_order_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "payment_method_id": {
-          "name": "payment_method_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "provider_charge_ref": {
-          "name": "provider_charge_ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "amount_cents": {
-          "name": "amount_cents",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'Pending'"
-        },
-        "refunded_cents": {
-          "name": "refunded_cents",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "idempotency_key": {
-          "name": "idempotency_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "receipt_url": {
-          "name": "receipt_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failure_reason": {
-          "name": "failure_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "metadata": {
-          "name": "metadata",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "payments_service_order_id_service_orders_id_fk": {
-          "name": "payments_service_order_id_service_orders_id_fk",
-          "tableFrom": "payments",
-          "tableTo": "service_orders",
-          "columnsFrom": [
-            "service_order_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "payments_payment_method_id_payment_methods_id_fk": {
-          "name": "payments_payment_method_id_payment_methods_id_fk",
-          "tableFrom": "payments",
-          "tableTo": "payment_methods",
-          "columnsFrom": [
-            "payment_method_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "payments_idempotency_key_unique": {
-          "name": "payments_idempotency_key_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "idempotency_key"
           ]
         }
       },
@@ -16430,6 +16430,307 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.financial_amendment_authorities": {
+      "name": "financial_amendment_authorities",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "brokerage_id": {
+          "name": "brokerage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "property_id": {
+          "name": "property_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "transaction_id": {
+          "name": "transaction_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "grantee_user_id": {
+          "name": "grantee_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "granted_by_user_id": {
+          "name": "granted_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "granted_by_role": {
+          "name": "granted_by_role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_record_type": {
+          "name": "target_record_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "target_record_id": {
+          "name": "target_record_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "evidence_document_id": {
+          "name": "evidence_document_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "evidence_note": {
+          "name": "evidence_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoked_by_user_id": {
+          "name": "revoked_by_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoke_reason": {
+          "name": "revoke_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "fin_amend_auth_grantee_txn_scope_idx": {
+          "name": "fin_amend_auth_grantee_txn_scope_idx",
+          "columns": [
+            {
+              "expression": "grantee_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "transaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scope",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "fin_amend_auth_transaction_idx": {
+          "name": "fin_amend_auth_transaction_idx",
+          "columns": [
+            {
+              "expression": "transaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "fin_amend_auth_brokerage_created_idx": {
+          "name": "fin_amend_auth_brokerage_created_idx",
+          "columns": [
+            {
+              "expression": "brokerage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "financial_amendment_authorities_brokerage_id_brokerages_id_fk": {
+          "name": "financial_amendment_authorities_brokerage_id_brokerages_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "brokerages",
+          "columnsFrom": [
+            "brokerage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_amendment_authorities_property_id_properties_id_fk": {
+          "name": "financial_amendment_authorities_property_id_properties_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "properties",
+          "columnsFrom": [
+            "property_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_amendment_authorities_transaction_id_transactions_id_fk": {
+          "name": "financial_amendment_authorities_transaction_id_transactions_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "transactions",
+          "columnsFrom": [
+            "transaction_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_amendment_authorities_grantee_user_id_users_id_fk": {
+          "name": "financial_amendment_authorities_grantee_user_id_users_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "users",
+          "columnsFrom": [
+            "grantee_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_amendment_authorities_granted_by_user_id_users_id_fk": {
+          "name": "financial_amendment_authorities_granted_by_user_id_users_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "users",
+          "columnsFrom": [
+            "granted_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_amendment_authorities_evidence_document_id_documents_id_fk": {
+          "name": "financial_amendment_authorities_evidence_document_id_documents_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "documents",
+          "columnsFrom": [
+            "evidence_document_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "financial_amendment_authorities_revoked_by_user_id_users_id_fk": {
+          "name": "financial_amendment_authorities_revoked_by_user_id_users_id_fk",
+          "tableFrom": "financial_amendment_authorities",
+          "tableTo": "users",
+          "columnsFrom": [
+            "revoked_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "fin_amend_auth_scope_check": {
+          "name": "fin_amend_auth_scope_check",
+          "value": "\"financial_amendment_authorities\".\"scope\" in ('AGENCY_TERMS', 'CAMPAIGN_ITEM_COST', 'COMMISSION_AGREEMENT', 'COMMISSION_CALCULATION')"
+        },
+        "fin_amend_auth_grantor_role_check": {
+          "name": "fin_amend_auth_grantor_role_check",
+          "value": "\"financial_amendment_authorities\".\"granted_by_role\" in ('Agent', 'Brokerage Administrator')"
+        },
+        "fin_amend_auth_target_pair_check": {
+          "name": "fin_amend_auth_target_pair_check",
+          "value": "(\"financial_amendment_authorities\".\"target_record_type\" is null) = (\"financial_amendment_authorities\".\"target_record_id\" is null)"
+        },
+        "fin_amend_auth_evidence_check": {
+          "name": "fin_amend_auth_evidence_check",
+          "value": "\"financial_amendment_authorities\".\"evidence_document_id\" is not null or length(btrim(coalesce(\"financial_amendment_authorities\".\"evidence_note\", ''))) > 0"
+        },
+        "fin_amend_auth_expiry_check": {
+          "name": "fin_amend_auth_expiry_check",
+          "value": "\"financial_amendment_authorities\".\"expires_at\" > \"financial_amendment_authorities\".\"created_at\""
+        },
+        "fin_amend_auth_revoke_pair_check": {
+          "name": "fin_amend_auth_revoke_pair_check",
+          "value": "(\"financial_amendment_authorities\".\"revoked_at\" is null) = (\"financial_amendment_authorities\".\"revoked_by_user_id\" is null)"
+        },
+        "fin_amend_auth_no_self_grant_check": {
+          "name": "fin_amend_auth_no_self_grant_check",
+          "value": "\"financial_amendment_authorities\".\"grantee_user_id\" <> \"financial_amendment_authorities\".\"granted_by_user_id\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.integration_connection_transitions": {

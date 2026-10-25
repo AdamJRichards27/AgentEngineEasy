@@ -77,3 +77,12 @@ test("Grow stays highlighted on Contact 360 and not on other pages", () => {
   assert.equal(navLinkIsActive("/properties/12", "/properties"), false);
   assert.equal(navLinkIsActive("/properties/12", "/grow"), false);
 });
+
+test("navLinkIsActive: Grow stays highlighted on the appraisal list, workspace and builder (BLOCKED_ON_GROK #1)", () => {
+  for (const p of ["/grow/appraisals", "/grow/appraisals?view=full", "/grow/appraisals/12", "/grow/appraisals/12/build"]) {
+    assert.equal(navLinkIsActive(p, "/grow"), true, p);
+  }
+  assert.equal(navLinkIsActive("/grow/appraisals/12/other", "/grow"), false);
+  assert.equal(navLinkIsActive("/grow/import", "/grow"), false);
+  assert.equal(navLinkIsActive("/grow/appraisals", "/properties"), false);
+});

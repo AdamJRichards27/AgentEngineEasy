@@ -262,10 +262,31 @@
       "breakpoints": true
     },
     {
+      "idx": 38,
+      "version": "7",
+      "when": 1792883726127,
+      "tag": "0038_financial_amendment_authorities",
+      "breakpoints": true
+    },
+    {
       "idx": 39,
       "version": "7",
       "when": 1792908000000,
       "tag": "0039_payment_refunds",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1792911600000,
+      "tag": "0040_transaction_fees",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1792915200000,
+      "tag": "0041_settlement_statements",
       "breakpoints": true
     }
   ]
