@@ -3,13 +3,15 @@
 // other role 403 at the role gate; another brokerage's id 404). Each action
 // needs a reason and evidence; transitions are audited value-free and written
 // to the ledger (shown in the receipt history); replays are idempotent. Never
-// calls a payment provider. See lib/financial/recovery.ts.
+// charges: card-charge resolution only reads the (mock) provider status and
+// must match it (t181u D); the charge initiator never resolves it. See lib/financial/recovery.ts.
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import {
   auditRecoveryOutcome,
+  cardChargeProviderStatusFor,
   listCardChargesForBrokerage,
   RecoveryRefusal,
   resolvePaymentRequestDispute,
@@ -80,6 +82,16 @@ financialRecoveryRouter.post("/financial/payment-requests/:id/resolve-dispute", 
 financialRecoveryRouter.get("/financial/card-charges", ...requireBrokerageAdmin, async (req, res) => {
   const status = typeof req.query.status === "string" && ["PENDING", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(req.query.status) ? req.query.status : undefined;
   res.json({ cardCharges: await listCardChargesForBrokerage(req.authedUser!.brokerageId, status) });
+});
+
+// t181u(D): read-only provider status (mock provider only; anything else answers Unavailable and resolution fails closed).
+financialRecoveryRouter.get("/financial/card-charges/:id/provider-status", ...requireBrokerageAdmin, async (req, res) => {
+  try {
+    res.json(await cardChargeProviderStatusFor(actorOf(req), Number(req.params.id)));
+  } catch (err) {
+    if (!(err instanceof RecoveryRefusal)) throw err;
+    res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
 });
 
 financialRecoveryRouter.post("/financial/card-charges/:id/resolve", ...requireBrokerageAdmin, async (req, res) => {

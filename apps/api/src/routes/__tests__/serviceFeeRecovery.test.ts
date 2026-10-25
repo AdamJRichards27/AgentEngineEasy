@@ -82,21 +82,25 @@ async function cardReady(tag: string): Promise<Chain> {
   return ready(a.id, tag);
 }
 
-function spyCharges(script?: Array<"Succeeded" | "Failed" | "throw">) {
+function spyCharges(script?: Array<"Succeeded" | "Failed" | "throw" | "chargedThenThrow">) {
   const original = paymentProvider.chargeStoredMethod.bind(paymentProvider);
   let i = 0;
   return mock.method(paymentProvider, "chargeStoredMethod", async (input: Parameters<typeof original>[0]) => {
     const step = script?.[i++];
     if (step === "Failed") return { providerChargeRef: `mock-failed-${input.idempotencyKey}`, status: "Failed" as const, failureReason: "card_declined" };
     if (step === "throw") throw new Error(`network timeout talking to provider for ${input.paymentMethodProviderRef}`);
+    if (step === "chargedThenThrow") {
+      await original(input); // t181u(D): the provider took the money, the answer was lost
+      throw new Error(`network timeout talking to provider for ${input.paymentMethodProviderRef}`);
+    }
     return original(input);
   });
 }
 
 /** Charge once with no definite provider answer -> UNKNOWN charge, request PROCESSING. */
-async function unknownCharge(tag: string) {
+async function unknownCharge(tag: string, step: "throw" | "chargedThenThrow" = "throw") {
   const c = await cardReady(tag);
-  const spy = spyCharges(["throw"]);
+  const spy = spyCharges([step]);
   try {
     const r = await collect(w, w.crew, c);
     assert.equal(r.json.outcome, "card_outcome_unknown", r.raw);
@@ -343,7 +347,7 @@ describe("t181u slice 7: controlled recovery routes", { concurrency: false }, ()
   });
 
   test("UNKNOWN card charge -> SUCCEEDED by a BA with evidence: request PAID, payment receipt, no provider call, idempotent, concurrent once", async () => {
-    const { c, charge } = await unknownCharge("UnknownOk");
+    const { c, charge } = await unknownCharge("UnknownOk", "chargedThenThrow");
     const spy = spyCharges();
     try {
       assert.equal((await resolveCharge(w.X.admin, charge.id, "SUCCEEDED", { reason: "" })).json.code, "RECOVERY_REASON_REQUIRED");

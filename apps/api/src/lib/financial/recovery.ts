@@ -18,6 +18,7 @@
 // needs an explicit, fully re-gated collect (N23). Paid money is never
 // waived or written off here (a refund/reversal comes first). No schema change.
 import { nextCardRetryAt } from "./retryBackoff.js";
+import { lookupCardChargeProviderStatus, outcomeForProviderStatus, type CardChargeProviderStatus } from "./cardChargeStatus.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   auditLogs,
@@ -55,7 +56,10 @@ export type RecoveryCode =
   | "RECOVERY_NOT_DISPUTED"
   | "RECOVERY_PROVIDER_STATE_UNRESOLVED"
   | "CARD_CHARGE_NOT_UNKNOWN"
-  | "CARD_CHARGE_ALREADY_FINAL";
+  | "CARD_CHARGE_ALREADY_FINAL"
+  | "CARD_CHARGE_RESOLVER_IS_INITIATOR"
+  | "CARD_CHARGE_OUTCOME_MISMATCH"
+  | "CARD_CHARGE_PROVIDER_STATUS_UNAVAILABLE";
 
 const STATUS_FOR: Record<RecoveryCode, number> = {
   RECOVERY_NOT_FOUND: 404,
@@ -72,6 +76,9 @@ const STATUS_FOR: Record<RecoveryCode, number> = {
   RECOVERY_PROVIDER_STATE_UNRESOLVED: 409,
   CARD_CHARGE_NOT_UNKNOWN: 409,
   CARD_CHARGE_ALREADY_FINAL: 409,
+  CARD_CHARGE_RESOLVER_IS_INITIATOR: 403,
+  CARD_CHARGE_OUTCOME_MISMATCH: 409,
+  CARD_CHARGE_PROVIDER_STATUS_UNAVAILABLE: 409,
 };
 
 export class RecoveryRefusal extends Error {
@@ -339,10 +346,16 @@ export async function resolveUnknownCardCharge(
 ): Promise<RecoveryResult> {
   if (!Number.isSafeInteger(chargeId) || chargeId <= 0) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
   const [peek] = await db
-    .select({ paymentRequestId: financialCardCharges.paymentRequestId })
+    .select({ paymentRequestId: financialCardCharges.paymentRequestId, initiatedByUserId: financialCardCharges.initiatedByUserId, idempotencyKey: financialCardCharges.idempotencyKey, status: financialCardCharges.status })
     .from(financialCardCharges)
     .where(and(eq(financialCardCharges.id, chargeId), eq(financialCardCharges.brokerageId, actor.brokerageId)));
   if (!peek) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  // t181u(D) separation of duties: whoever initiated the charge never resolves it (system charges have no initiator).
+  if (peek.initiatedByUserId != null && peek.initiatedByUserId === actor.id) {
+    throw new RecoveryRefusal("CARD_CHARGE_RESOLVER_IS_INITIATOR", "The person who started this charge cannot resolve it; another Brokerage Administrator must.", peek.paymentRequestId);
+  }
+  // t181u(D): ask the provider (mock only; read-only, outside any lock). Unavailable fails closed below.
+  const providerStatus: CardChargeProviderStatus = peek.status === "UNKNOWN" ? lookupCardChargeProviderStatus(peek.idempotencyKey) : "Unavailable";
 
   const result = await db.transaction(async (tx) => {
     // Same lock order as the charge path: payment request first, then the charge.
@@ -366,6 +379,9 @@ export async function resolveUnknownCardCharge(
     if (ref && !validProviderChargeRef(ref)) throw new RecoveryRefusal("RECOVERY_REFERENCE_INVALID", "The provider reference must be the charge reference (no card numbers or spaces).", pr.id, pr.propertyId);
     // An UNKNOWN charge always leaves its request PROCESSING (N24); anything else is an inconsistent state.
     if (pr.status !== "PROCESSING") throw new RecoveryRefusal("RECOVERY_INVALID_TRANSITION", `Request is ${pr.status}, not PROCESSING.`, pr.id, pr.propertyId);
+    const expected = outcomeForProviderStatus(providerStatus);
+    if (expected == null) throw new RecoveryRefusal("CARD_CHARGE_PROVIDER_STATUS_UNAVAILABLE", "The payment provider cannot confirm this charge's status; it stays unresolved.", pr.id, pr.propertyId);
+    if (expected !== outcome) throw new RecoveryRefusal("CARD_CHARGE_OUTCOME_MISMATCH", `The payment provider reports this charge as ${providerStatus}; the resolution must match it.`, pr.id, pr.propertyId);
 
     let updatedCharge: FinancialCardCharge;
     let updated: FinancialPaymentRequest;
@@ -397,13 +413,13 @@ export async function resolveUnknownCardCharge(
         .returning()) as [FinancialPaymentRequest];
       await ledgerTx(tx, pr, "PC_FEE_PAYMENT_FAILED", actor, `${MANUAL_FAILURE} (stored card, attempt ${retryCount}/${pr.maxRetries}${willRetry ? ", next attempt after backoff" : ", exhausted"})`, { chargeId: charge.id });
     }
-    await ledgerTx(tx, pr, "PC_FEE_CARD_CHARGE_RESOLVED", actor, reason, { recoveryAction: "resolve_card_charge", chargeId: charge.id, attemptNo: charge.attemptNo, outcome, statusAfter: updated.status, evidence });
+    await ledgerTx(tx, pr, "PC_FEE_CARD_CHARGE_RESOLVED", actor, reason, { recoveryAction: "resolve_card_charge", chargeId: charge.id, attemptNo: charge.attemptNo, outcome, providerStatus, initiatedBy: charge.initiatedByUserId == null ? "SYSTEM" : "USER", statusAfter: updated.status, evidence });
     await auditTx(
       tx,
       actor,
       "financial_card_charge_resolved",
       pr,
-      auditValue({ paymentRequestId: pr.id, chargeId: charge.id, attemptNo: charge.attemptNo, outcome, statusBefore: pr.status, statusAfter: updated.status, providerReferenceRecorded: ref != null }, evidence),
+      auditValue({ paymentRequestId: pr.id, chargeId: charge.id, attemptNo: charge.attemptNo, outcome, providerStatus, statusBefore: pr.status, statusAfter: updated.status, providerReferenceRecorded: ref != null }, evidence),
     );
     return { idempotent: false, paymentRequest: updated, cardCharge: updatedCharge, statusBefore: pr.status };
   });
@@ -420,6 +436,24 @@ export async function resolveUnknownCardCharge(
     });
   }
   return finish(result);
+}
+
+/** t181u(D): BA-only provider status of one card charge of the caller's brokerage (no key or token returned). */
+export async function cardChargeProviderStatusFor(actor: RecoveryActor, chargeId: number) {
+  if (!Number.isSafeInteger(chargeId) || chargeId <= 0) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  const [row] = await db
+    .select({ id: financialCardCharges.id, status: financialCardCharges.status, idempotencyKey: financialCardCharges.idempotencyKey, initiatedByUserId: financialCardCharges.initiatedByUserId })
+    .from(financialCardCharges)
+    .where(and(eq(financialCardCharges.id, chargeId), eq(financialCardCharges.brokerageId, actor.brokerageId)));
+  if (!row) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  const providerStatus = row.status === "UNKNOWN" ? lookupCardChargeProviderStatus(row.idempotencyKey) : null;
+  return {
+    chargeId: row.id,
+    chargeStatus: row.status,
+    providerStatus,
+    suggestedOutcome: providerStatus ? outcomeForProviderStatus(providerStatus) : null,
+    callerMayResolve: row.initiatedByUserId == null || row.initiatedByUserId !== actor.id,
+  };
 }
 
 /** BA work queue: card charges of the caller's brokerage (no token or payment-method references). */
