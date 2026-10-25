@@ -17,6 +17,7 @@
 // automatically: after an UNKNOWN charge is resolved FAILED a retry still
 // needs an explicit, fully re-gated collect (N23). Paid money is never
 // waived or written off here (a refund/reversal comes first). No schema change.
+import { nextCardRetryAt } from "./retryBackoff.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   auditLogs,
@@ -391,10 +392,10 @@ export async function resolveUnknownCardCharge(
       const willRetry = retryCount < pr.maxRetries;
       [updated] = (await tx
         .update(financialPaymentRequests)
-        .set({ status: willRetry ? "RETRY_SCHEDULED" : "FAILED", retryCount, failedAt: willRetry ? null : new Date(), failureReason: MANUAL_FAILURE, providerStatus: "Failed", updatedAt: new Date() })
+        .set({ status: willRetry ? "RETRY_SCHEDULED" : "FAILED", retryCount, nextAttemptAt: willRetry ? nextCardRetryAt(new Date(), retryCount) : null, failedAt: willRetry ? null : new Date(), failureReason: MANUAL_FAILURE, providerStatus: "Failed", updatedAt: new Date() })
         .where(eq(financialPaymentRequests.id, pr.id))
         .returning()) as [FinancialPaymentRequest];
-      await ledgerTx(tx, pr, "PC_FEE_PAYMENT_FAILED", actor, `${MANUAL_FAILURE} (stored card, attempt ${retryCount}/${pr.maxRetries}${willRetry ? ", retry needs a new collect" : ", exhausted"})`, { chargeId: charge.id });
+      await ledgerTx(tx, pr, "PC_FEE_PAYMENT_FAILED", actor, `${MANUAL_FAILURE} (stored card, attempt ${retryCount}/${pr.maxRetries}${willRetry ? ", next attempt after backoff" : ", exhausted"})`, { chargeId: charge.id });
     }
     await ledgerTx(tx, pr, "PC_FEE_CARD_CHARGE_RESOLVED", actor, reason, { recoveryAction: "resolve_card_charge", chargeId: charge.id, attemptNo: charge.attemptNo, outcome, statusAfter: updated.status, evidence });
     await auditTx(

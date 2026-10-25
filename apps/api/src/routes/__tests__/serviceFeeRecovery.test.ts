@@ -21,6 +21,7 @@ import {
   collect,
   confirmBoth,
   elapseNotice,
+  elapseRetry,
   feeChain,
   makeWorld,
   prepare,
@@ -250,7 +251,10 @@ describe("t181u slice 7: controlled recovery routes", { concurrency: false }, ()
     const c = await cardReady("WriteOff");
     const spy = spyCharges(["Failed", "Failed", "Failed"]);
     try {
-      for (let i = 0; i < 3; i++) await collect(w, w.crew, c);
+      for (let i = 0; i < 3; i++) {
+        if (i > 0) await elapseRetry(c); // t181u(C) backoff
+        await collect(w, w.crew, c);
+      }
     } finally {
       spy.mock.restore();
     }
@@ -393,6 +397,7 @@ describe("t181u slice 7: controlled recovery routes", { concurrency: false }, ()
       assert.equal(fr.length, 1);
       assert.equal(fr[0]!.retryScheduled, true);
       assert.equal((await resolveCharge(w.X.admin, charge.id, "FAILED")).json.idempotent, true);
+      await elapseRetry(c); // t181u(C) backoff
       const rs = await Promise.all([1, 2].map(() => collect(w, w.crew, c)));
       assert.equal(rs.filter((x) => x.json.outcome === "card_charged").length, 1, rs.map((x) => x.raw).join("\n"));
       assert.equal(spy.mock.callCount(), 1);

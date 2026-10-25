@@ -29,6 +29,7 @@ import {
   collect,
   confirmBoth,
   elapseNotice,
+  elapseRetry,
   feeChain,
   makeWorld,
   prepare,
@@ -282,7 +283,8 @@ describe("t180u slice 6: stored-card and brokerage payments", { concurrency: fal
       const iss2 = await issue(w, w.X.admin, v2.json.statement.id);
       assert.equal(iss2.json.collection.outcome, "already_in_progress", iss2.raw);
       assert.equal(spy.mock.callCount(), 1);
-      // Controlled retry: concurrent explicit collects -> exactly one new attempt.
+      // Controlled retry: concurrent explicit collects -> exactly one new attempt (once the t181u backoff is due).
+      await elapseRetry(c);
       const rs = await Promise.all([1, 2, 3].map(() => collect(w, w.crew, c)));
       assert.equal(rs.filter((r) => r.json.outcome === "card_charged").length, 1, rs.map((r) => r.raw).join("\n"));
       assert.equal(spy.mock.callCount(), 2, "one retry attempt only");
@@ -312,7 +314,10 @@ describe("t180u slice 6: stored-card and brokerage payments", { concurrency: fal
     const spy = spyCharges(["Failed", "Failed", "Failed", "Failed"]);
     try {
       const outcomes: string[] = [];
-      for (let i = 0; i < 3; i++) outcomes.push((await collect(w, w.crew, c)).json.outcome);
+      for (let i = 0; i < 3; i++) {
+        if (i > 0) await elapseRetry(c);
+        outcomes.push((await collect(w, w.crew, c)).json.outcome);
+      }
       assert.deepEqual(outcomes, ["card_failed_retry_scheduled", "card_failed_retry_scheduled", "card_failed_final"]);
       const after = await collect(w, w.crew, c);
       assert.equal(after.json.code, "SERVICE_FEE_NOT_COLLECTABLE");

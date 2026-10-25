@@ -28,6 +28,7 @@
 // are read from payment_methods only to call the provider and are never
 // logged, audited, returned or put on a receipt (label at most).
 import { and, eq, inArray } from "drizzle-orm";
+import { cardRetryDue, nextCardRetryAt } from "./retryBackoff.js";
 import { MockPaymentProvider } from "@aee/integration-payments";
 import {
   db,
@@ -50,7 +51,7 @@ export type CardChargeTrigger = "collect" | "statement_issued" | "scheduler";
 export type CardChargeOutcome = "card_charged" | "card_failed_retry_scheduled" | "card_failed_final" | "card_outcome_unknown" | "already_in_progress" | "already_paid";
 
 export class CardChargeRefusal extends Error {
-  constructor(public readonly code: "PROVIDER_NOT_PERMITTED" | "METHOD_INVALID" | "NOT_CHARGEABLE", message?: string) {
+  constructor(public readonly code: "PROVIDER_NOT_PERMITTED" | "METHOD_INVALID" | "NOT_CHARGEABLE" | "RETRY_NOT_DUE", message?: string) {
     super(message ?? code);
     this.name = "CardChargeRefusal";
   }
@@ -120,6 +121,8 @@ export async function chargeServiceFeeStoredCard(input: {
     if (prior.some((c) => c.status === "SUCCEEDED")) return { kind: "already_paid" as const, req };
     if (prior.some((c) => c.status === "PENDING" || c.status === "UNKNOWN")) return { kind: "already_in_progress" as const, req };
     if (req.status === "RETRY_SCHEDULED" && req.retryCount >= req.maxRetries) throw new CardChargeRefusal("NOT_CHARGEABLE", "Retries exhausted.");
+    // t181u(C): never before the backoff elapses (fail closed when unset).
+    if (req.status === "RETRY_SCHEDULED" && !cardRetryDue(req.nextAttemptAt)) throw new CardChargeRefusal("RETRY_NOT_DUE", "The next retry is not due yet.");
     const attemptNo = prior.reduce((m, c) => Math.max(m, c.attemptNo), 0) + 1;
     const [charge] = await tx
       .insert(financialCardCharges)
@@ -141,7 +144,7 @@ export async function chargeServiceFeeStoredCard(input: {
       .returning();
     const [processing] = await tx
       .update(financialPaymentRequests)
-      .set({ status: "PROCESSING", processingStartedAt: new Date(), provider: pm.provider, providerStatus: "CardChargePending", updatedAt: new Date() })
+      .set({ status: "PROCESSING", processingStartedAt: new Date(), nextAttemptAt: null, provider: pm.provider, providerStatus: "CardChargePending", updatedAt: new Date() })
       .where(eq(financialPaymentRequests.id, req.id))
       .returning();
     return { kind: "claimed" as const, req: processing!, charge: charge! };
@@ -197,10 +200,10 @@ export async function chargeServiceFeeStoredCard(input: {
       const willRetry = retryCount < cur!.maxRetries;
       [updatedReq] = (await db
         .update(financialPaymentRequests)
-        .set({ status: willRetry ? "RETRY_SCHEDULED" : "FAILED", retryCount, failedAt: willRetry ? null : new Date(), failureReason: failure, providerStatus: "Failed", updatedAt: new Date() })
+        .set({ status: willRetry ? "RETRY_SCHEDULED" : "FAILED", retryCount, nextAttemptAt: willRetry ? nextCardRetryAt(new Date(), retryCount) : null, failedAt: willRetry ? null : new Date(), failureReason: failure, providerStatus: "Failed", updatedAt: new Date() })
         .where(eq(financialPaymentRequests.id, charge.paymentRequestId))
         .returning()) as [FinancialPaymentRequest];
-      await ledger(updatedReq, "PC_FEE_PAYMENT_FAILED", `${failure} (stored card, attempt ${retryCount}/${cur!.maxRetries}${willRetry ? ", retry needs a new collect" : ", exhausted"})`);
+      await ledger(updatedReq, "PC_FEE_PAYMENT_FAILED", `${failure} (stored card, attempt ${retryCount}/${cur!.maxRetries}${willRetry ? ", next attempt after backoff" : ", exhausted"})`);
       if (!willRetry) {
         await emitFinancialEvent({
           eventType: "FINANCIAL_PAYMENT_FAILED",

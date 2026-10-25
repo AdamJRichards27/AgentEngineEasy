@@ -250,3 +250,8 @@ export const TERMS = {
   mandateImmediate: "AE-PCF-MANDATE-2026.11",
   mandateNotice: "AE-PCF-MANDATE-2025.1",
 } as const;
+
+/** t181u(C): move a scheduled card retry's backoff into the past (synthetic clock). */
+export async function elapseRetry(c: Chain) {
+  await db.update(financialPaymentRequests).set({ nextAttemptAt: new Date(Date.now() - 60_000) }).where(eq(financialPaymentRequests.id, c.requestId));
+}

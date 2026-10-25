@@ -60,7 +60,8 @@ export type ServiceFeeCollectionCode =
   | "SETTLEMENT_STATEMENT_FEE_MISMATCH"
   | "SETTLEMENT_CONFIRMATIONS_INCOMPLETE"
   | "SETTLEMENT_STATEMENT_STALE"
-  | "SERVICE_FEE_PROVIDER_NOT_PERMITTED";
+  | "SERVICE_FEE_PROVIDER_NOT_PERMITTED"
+  | "SERVICE_FEE_RETRY_NOT_DUE";
 
 export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> = {
   SERVICE_FEE_NOT_FOUND: 404,
@@ -77,6 +78,7 @@ export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> 
   SETTLEMENT_CONFIRMATIONS_INCOMPLETE: 409,
   SETTLEMENT_STATEMENT_STALE: 409,
   SERVICE_FEE_PROVIDER_NOT_PERMITTED: 409,
+  SERVICE_FEE_RETRY_NOT_DUE: 409,
 };
 
 export class ServiceFeeCollectionError extends Error {
@@ -364,7 +366,7 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
     } catch (err) {
       if (err instanceof CardChargeRefusal) {
         const code: ServiceFeeCollectionCode =
-          err.code === "PROVIDER_NOT_PERMITTED" ? "SERVICE_FEE_PROVIDER_NOT_PERMITTED" : err.code === "METHOD_INVALID" ? "SERVICE_FEE_AUTHORITY_INVALID" : "SERVICE_FEE_NOT_COLLECTABLE";
+          err.code === "PROVIDER_NOT_PERMITTED" ? "SERVICE_FEE_PROVIDER_NOT_PERMITTED" : err.code === "RETRY_NOT_DUE" ? "SERVICE_FEE_RETRY_NOT_DUE" : err.code === "METHOD_INVALID" ? "SERVICE_FEE_AUTHORITY_INVALID" : "SERVICE_FEE_NOT_COLLECTABLE";
         throw new ServiceFeeCollectionError(code, err.message, verified.propertyId);
       }
       throw err;

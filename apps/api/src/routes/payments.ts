@@ -221,6 +221,7 @@ const SERVICE_FEE_MESSAGES: Record<string, string> = {
   SETTLEMENT_CONFIRMATIONS_INCOMPLETE: "Both representatives' written settlement confirmations must be on file before the fee is collected.",
   SETTLEMENT_STATEMENT_STALE: "The figures behind the issued statement have changed. A Brokerage Administrator must correct the statement first.",
   SERVICE_FEE_PROVIDER_NOT_PERMITTED: "Card collection is not enabled for this environment.",
+  SERVICE_FEE_RETRY_NOT_DUE: "A retry of this card payment is scheduled and is not due yet.",
 };
 function serviceFeeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof ServiceFeeCollectionError) {
