@@ -41,6 +41,12 @@ export const propertiesRouter = Router();
 // handler's tenant lookup, so an unentitled caller is refused without a
 // same-brokerage existence oracle. Denial is requireEntitlement's
 // existing 403.
+// RUN-ACCESS (Owner approved 2026-10-20): besides ready-to-list and go-live (R-F35b), the Run-only routes
+// address-search (StartProperty), :id/workspace, :id/ownership-review and :id/listing-details (PropertyWorkspace)
+// require run.access. Applied per route, not via Router.use(), because other routers also serve /properties/...
+// paths after this one. POST /, GET /, GET /:id and GET /:id/timeline stay requireAuth only: they are shared
+// with Grow (appraisal property creation, Grow property-link search, AppraisalWorkspace timeline) and are
+// pinned open for a brokerage without run.access by runLaneRouteAccess.test.ts. Gating them is an Owner decision.
 const requiresRunAccess = requireEntitlement("run.access");
 const propertyDataProvider = createPropertyDataProvider();
 
@@ -175,7 +181,7 @@ function readyToListTransition(stage: string): "advance" | "replay" | "refuse" {
 // Start Property (Build Brief §3): search or manually create an address,
 // establish the Property Record immediately, gather everything else
 // progressively rather than via one large creation form.
-propertiesRouter.get("/address-search", requireAuth, async (req, res) => {
+propertiesRouter.get("/address-search", requireAuth, requiresRunAccess, async (req, res) => {
   const query = String(req.query.q ?? "");
   if (!query) {
     res.status(400).json({ error: "q is required" });
@@ -368,7 +374,7 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
 // The Property Action Screen's data source (ARCHITECTURE.md §4) — one
 // response shaped for "what needs to happen next", not fifteen sub-screens.
 // #123 — same tenant-scoping fix as GET /:id above.
-propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
+propertiesRouter.get("/:id/workspace", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -530,7 +536,7 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
 // only surfaced a prompt, so resolving it is a simple acknowledgement.
 const ownershipReviewSchema = z.object({ notes: z.string().optional() });
 
-propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => {
+propertiesRouter.post("/:id/ownership-review", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = ownershipReviewSchema.safeParse(req.body);
@@ -582,7 +588,7 @@ const listingDetailsSchema = z.object({
   campaignEndDate: z.coerce.date().optional(),
 });
 
-propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
+propertiesRouter.post("/:id/listing-details", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = listingDetailsSchema.safeParse(req.body);
