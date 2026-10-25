@@ -66,6 +66,7 @@ import {
 import { logAudit } from "../lib/audit.js";
 import { financialFeesRouter } from "./financialFees.js";
 import { financialStatementsRouter } from "./financialStatements.js";
+import { financialReceiptsRouter } from "./financialReceipts.js";
 import {
   createCommissionAgreement,
   approveCommissionAgreement,
@@ -114,6 +115,8 @@ export const financialRouter = Router();
 // Owner t179u slices 2-3: fee schedules, transaction fees, settlement statements.
 financialRouter.use(financialFeesRouter);
 financialRouter.use(financialStatementsRouter);
+// Owner t180u(2): receipts (in-app + PDF).
+financialRouter.use(financialReceiptsRouter);
 const requireFinancialAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), requireEntitlement("run.access")] as const;
 // Owner t177u(2): the two commission amendment routes also admit Pit Crew, who
 // then need a live documented grant for that transaction and scope plus an

@@ -59,3 +59,4 @@ export * from "./callTranscriptions";
 // E-8 — call-review item to commitment-proposal to commitment link.
 export * from "./callReviewLinks";
 export * from "./platformOwners";
+export * from "./financialReceipts";

@@ -70,6 +70,7 @@ import {
   transactionFees,
   settlementStatements,
   settlementConfirmations,
+  financialReceipts,
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
@@ -525,6 +526,8 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
 
   // t179u slice 3: statements reference payment requests, fees, commission
   // calculations and confirmations, so they go first (lines cascade).
+  // t180u: receipts reference payment requests and statements.
+  await db.delete(financialReceipts).where(inArray(financialReceipts.brokerageId, ids));
   await db.delete(settlementStatements).where(inArray(settlementStatements.brokerageId, ids));
   await db.delete(settlementConfirmations).where(inArray(settlementConfirmations.brokerageId, ids));
 

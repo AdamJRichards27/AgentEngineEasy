@@ -29,6 +29,7 @@
 // mechanics detail) changes — see events.ts.
 
 import { eq, and, lte } from "drizzle-orm";
+import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import { incrementCounter } from "@aee/events";
 import {
   db,
@@ -381,6 +382,8 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
       }
     }
 
+    // Owner t180u(2): exhausted dispatch -> failure receipt (idempotent).
+    if (updatedRequest) await syncReceiptsForPaymentRequest(updatedRequest.id);
     return { outboxEntry: updatedEntry, paymentRequest: updatedRequest };
   }
 }
@@ -507,5 +510,7 @@ export async function reverseDebit(input: { paymentRequestId: number; reason: st
     payload: { paymentRequestId: updated.id, amountCents: updated.amountCents, reason: input.reason },
   });
 
+  // Owner t180u(2): refund (reversal) receipt (idempotent).
+  await syncReceiptsForPaymentRequest(updated.id);
   return updated;
 }

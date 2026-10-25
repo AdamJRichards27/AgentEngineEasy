@@ -29,6 +29,7 @@
 // module comment says the same for its own exhausted-retries path).
 
 import { eq, and } from "drizzle-orm";
+import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import {
   db,
   financialPaymentRequests,
@@ -168,6 +169,9 @@ export async function processMandatePaymentWebhook(
     .update(financialPaymentProviderEvents)
     .set({ processingStatus: "PROCESSED", paymentRequestId: request.id, processedAt: new Date() })
     .where(eq(financialPaymentProviderEvents.id, inserted.id));
+
+  // Owner t180u(2): success / failure / reversal receipts (idempotent).
+  await syncReceiptsForPaymentRequest(updated.id);
 
   return { processed: true, paymentRequest: updated };
 }
