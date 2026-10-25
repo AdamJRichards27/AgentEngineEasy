@@ -10,6 +10,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { pool } from "@aee/db";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -47,6 +48,10 @@ after(async () => {
   const ids = [A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number");
   await cleanupBrokerages(ids);
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // Close the shared @aee/db pool, which is the last thing keeping this process alive. Its idle
+  // clients each hold a 10 s pg-pool idle timer, so without this the file exits about 10 s after
+  // its last test (seen once at about 154 s). The server is closed first, so no request is in flight.
+  await pool.end();
 });
 
 async function waitForLaunchPlan(propertyId: number, cookie: string) {

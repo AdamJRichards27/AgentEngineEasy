@@ -420,10 +420,15 @@ test("N reads of Contact 360 append zero grow_consent_decisions rows, issue no c
   try {
     await holder.query("begin");
     await holder.query("select pg_advisory_xact_lock($1, $2)", [CONSENT_ADVISORY_LOCK_NAMESPACE, A.brokerageId]);
+    let raceTimer: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race([
       get(A.agent.cookie, `/grow/contacts/${partyId}`).then((r) => r.status),
-      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 15_000)),
+      new Promise<string>((resolve) => {
+        // Q-01d: kept, so it can be cleared below; an uncleared 15 s timer held the process open after the file finished.
+        raceTimer = setTimeout(() => resolve("timed-out"), 15_000);
+      }),
     ]);
+    clearTimeout(raceTimer);
     assert.equal(outcome, 200, "Contact 360 must read straight through a held consent advisory lock");
   } finally {
     await holder.query("rollback").catch(() => {});
