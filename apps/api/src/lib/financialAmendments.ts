@@ -57,9 +57,20 @@ export type AmendmentBasis = AmendmentAuthorityBasis | "documented_authority";
  * default, t174u); configurable with FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS
  * (1–90).
  */
+/** Owner t179u D7: transaction-specific grants last at most 30 days (the env var can only shorten it). */
+export const FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS_CEILING = 30;
 export function maxAuthorityGrantDays(): number {
   const n = Number(process.env.FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS);
-  return Number.isInteger(n) && n >= 1 && n <= 90 ? n : 30;
+  return Number.isInteger(n) && n >= 1 && n <= FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS_CEILING ? n : FINANCIAL_AMENDMENT_AUTHORITY_MAX_DAYS_CEILING;
+}
+
+/**
+ * Owner t179u D7: a grant expires early when its transaction is completed
+ * (Closed). Checked at use time; no schema change. Settled-but-not-Closed is
+ * NOT completion: statements and fee work happen after settlement.
+ */
+export function isTransactionCompleted(t: { status: string | null; closedAt: Date | null }): boolean {
+  return t.status === "Closed" || t.closedAt != null;
 }
 
 export interface PropertyFinancialScope {
@@ -200,6 +211,8 @@ export async function resolveAmendmentAuthority(
         target.transactionId === undefined ? undefined : eq(financialAmendmentAuthorities.transactionId, target.transactionId),
         isNull(financialAmendmentAuthorities.revokedAt),
         gt(financialAmendmentAuthorities.expiresAt, sql`now()`),
+        // t179u D7: early expiry on transaction completion.
+        sql`exists (select 1 from transactions t where t.id = ${financialAmendmentAuthorities.transactionId} and t.status <> 'Closed' and t.closed_at is null)`,
         target.recordId === null
           ? isNull(financialAmendmentAuthorities.targetRecordId)
           : or(
@@ -238,7 +251,7 @@ export async function lockLiveAuthority(
 ): Promise<void> {
   if (authority.authorityId === undefined) return;
   const res = await tx.execute(
-    sql`select id from financial_amendment_authorities where id = ${authority.authorityId} and revoked_at is null and expires_at > now() for update`,
+    sql`select a.id from financial_amendment_authorities a where a.id = ${authority.authorityId} and a.revoked_at is null and a.expires_at > now() and exists (select 1 from transactions t where t.id = a.transaction_id and t.status <> 'Closed' and t.closed_at is null) for update of a`,
   );
   if (res.rows.length !== 1) throw new Error("financial amendment authority is no longer live");
 }

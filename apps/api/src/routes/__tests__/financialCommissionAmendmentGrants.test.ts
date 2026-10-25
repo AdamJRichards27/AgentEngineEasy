@@ -229,7 +229,7 @@ test("the grant is transaction-specific, needs an assignment, and stops working 
   assert.ok([403, 404].includes((await draft(B.admin, txn1.transactionId)).status));
 });
 
-test("COMMISSION_CALCULATION grant: ESTIMATE/PROVISIONAL only, from an APPROVED agreement, audited; CONFIRMED/FINALISED/supersede stay administrator", async () => {
+test("COMMISSION_CALCULATION grant: ESTIMATE/PROVISIONAL from an APPROVED agreement, audited; supersede stays administrator (t179u D6: verified finalisation elsewhere)", async () => {
   // A COMMISSION_AGREEMENT grant does not allow calculations.
   await grant(A.agent, { transactionId: txn1.transactionId, granteeUserId: crew.user.id, scope: "COMMISSION_AGREEMENT", evidenceNote: "x", expiresAt: inDays(5) });
   assert.equal((await calc(crew, txn1.transactionId)).status, 403);
@@ -241,11 +241,14 @@ test("COMMISSION_CALCULATION grant: ESTIMATE/PROVISIONAL only, from an APPROVED 
     expiresAt: inDays(3),
   });
   assert.equal(g.status, 201, g.raw);
-  for (const extra of [{ state: "CONFIRMED" }, { state: "FINALISED" }, { supersede: true }]) {
-    const r = await calc(crew, txn1.transactionId, extra);
-    assert.equal(r.status, 403, JSON.stringify(extra));
-    assert.equal(r.json.reason, "PIT_CREW_CALCULATION_STATE_FORBIDDEN");
-  }
+  // t179u D6 supersedes the t177u limit: CONFIRMED/FINALISED are allowed once
+  // verified (see financialPitCrewFinalisation.test.ts); supersede stays BA.
+  const sup = await calc(crew, txn1.transactionId, { supersede: true });
+  assert.equal(sup.status, 403);
+  assert.equal(sup.json.reason, "PIT_CREW_CALCULATION_SUPERSEDE_FORBIDDEN");
+  const wrongPrice = await calc(crew, txn1.transactionId, { state: "CONFIRMED", salePriceCentsInput: 1 });
+  assert.equal(wrongPrice.status, 409, wrongPrice.raw);
+  assert.equal(wrongPrice.json.reason, "PIT_CREW_FINALISATION_FINANCIALS_UNVERIFIED");
   // Draft (unapproved) agreement -> 409.
   const [draftRow] = await db
     .select()

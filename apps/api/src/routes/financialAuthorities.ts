@@ -34,7 +34,7 @@ import {
 import { requireAuth, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
-import { auditWriterFor, maxAuthorityGrantDays } from "../lib/financialAmendments.js";
+import { auditWriterFor, isTransactionCompleted, maxAuthorityGrantDays } from "../lib/financialAmendments.js";
 
 export const financialAuthoritiesRouter = Router();
 const requiresRunAccess = requireEntitlement("run.access");
@@ -64,15 +64,18 @@ interface TxnScope {
   transactionId: number;
   propertyId: number;
   listingAgentId: number | null;
+  completed: boolean;
 }
 
 async function loadTransactionScope(user: AuthedUser, transactionId: number): Promise<TxnScope | null> {
   const [row] = await db
-    .select({ id: transactions.id, propertyId: transactions.propertyId, agentId: properties.agentId })
+    .select({ id: transactions.id, propertyId: transactions.propertyId, agentId: properties.agentId, status: transactions.status, closedAt: transactions.closedAt })
     .from(transactions)
     .innerJoin(properties, eq(properties.id, transactions.propertyId))
     .where(and(eq(transactions.id, transactionId), eq(properties.brokerageId, user.brokerageId)));
-  return row ? { transactionId: row.id, propertyId: row.propertyId, listingAgentId: row.agentId ?? null } : null;
+  return row
+    ? { transactionId: row.id, propertyId: row.propertyId, listingAgentId: row.agentId ?? null, completed: isTransactionCompleted({ status: row.status, closedAt: row.closedAt }) }
+    : null;
 }
 
 type GrantorCheck = "ok" | "forbidden" | "not_found";
@@ -134,6 +137,11 @@ financialAuthoritiesRouter.post("/", requireAuth, requiresRunAccess, async (req,
   }
   if (who === "forbidden") {
     fail(res, 403, "FINANCIAL_AUTHORITY_GRANT_FORBIDDEN", "Only the listing agent or a Brokerage Administrator can grant financial amendment authority.");
+    return;
+  }
+
+  if (txn.completed) {
+    fail(res, 422, "TRANSACTION_COMPLETED", "This transaction is completed; amendment authority ends on completion (t179u D7).");
     return;
   }
 

@@ -52,7 +52,7 @@ import { z } from "zod";
 import { currentCorrelationId, logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { db, users, commissionAgreements, commissionCalculations, type CommissionAgreement, type CommissionCalculation } from "@aee/db";
+import { db, users, commissionAgreements, commissionCalculations, transactions, type CommissionAgreement, type CommissionCalculation } from "@aee/db";
 import { eq, and, desc, ne } from "drizzle-orm";
 import {
   AMENDMENT_AUTHORITY_REQUIRED,
@@ -444,11 +444,32 @@ async function createAgreementAsGrantedPitCrew(body: unknown, user: AuthedUser, 
   }
 }
 
-// t177u(2): Pit Crew with a COMMISSION_CALCULATION grant may record ESTIMATE or
-// PROVISIONAL snapshots from an APPROVED agreement only. CONFIRMED, FINALISED
-// and supersede (which retire a finalised figure) stay Brokerage Administrator
-// settlement steps.
-const PIT_CREW_CALCULATION_STATES = new Set(["ESTIMATE", "PROVISIONAL"]);
+// t177u(2) + Owner t179u D6: Pit Crew with a live COMMISSION_CALCULATION grant
+// (written authority from the listing agent or a Brokerage Administrator) and
+// an active assignment may record ESTIMATE / PROVISIONAL snapshots from an
+// APPROVED agreement, and may CONFIRM or FINALISE once evidence and written
+// authorisations are complete and the figures are verified:
+//   - the agreement (the contractual fee schedule) is APPROVED on this
+//     transaction by someone other than the caller and carries a signed
+//     source document reference;
+//   - the grant carries evidence (document or written note);
+//   - the sale price equals the transaction's recorded purchase price;
+//   - FINALISED also needs a firm contract (unconditional) or completed
+//     settlement, and no existing FINALISED calculation.
+// Superseding (correcting) a FINALISED figure stays Brokerage Administrator
+// (conservative until the Owner rules, t179-reconcile N3).
+const PIT_CREW_PROVISIONAL_STATES = new Set(["ESTIMATE", "PROVISIONAL"]);
+const PIT_CREW_FINAL_STATES = new Set(["CONFIRMED", "FINALISED"]);
+
+class PitCrewCalculationRefusal extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly reason: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 async function createCalculationAsGrantedPitCrew(body: unknown, user: AuthedUser, res: Response): Promise<void> {
   const surface = "POST /financial/commission-calculations";
@@ -464,18 +485,67 @@ async function createCalculationAsGrantedPitCrew(body: unknown, user: AuthedUser
   const parsed = createCalculationSchema.safeParse(body);
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
   const state = parsed.data.state ?? "ESTIMATE";
-  if (!PIT_CREW_CALCULATION_STATES.has(state) || parsed.data.supersede) {
+  if (parsed.data.supersede) {
     return void res.status(403).json({
-      error: "Confirming, finalising or superseding a commission calculation stays with Brokerage Administrators.",
-      reason: "PIT_CREW_CALCULATION_STATE_FORBIDDEN",
+      error: "Superseding a finalised commission calculation stays with Brokerage Administrators.",
+      reason: "PIT_CREW_CALCULATION_SUPERSEDE_FORBIDDEN",
     });
   }
+  if (!PIT_CREW_PROVISIONAL_STATES.has(state) && !PIT_CREW_FINAL_STATES.has(state)) {
+    return void res.status(403).json({ error: "Unsupported calculation state.", reason: "PIT_CREW_CALCULATION_STATE_FORBIDDEN" });
+  }
+  const finalising = PIT_CREW_FINAL_STATES.has(state);
   try {
     const calculation = await db.transaction(async (tx) => {
       await lockLiveAuthority(tx, authority);
       const [agreement] = await tx.select().from(commissionAgreements).where(eq(commissionAgreements.id, parsed.data.commissionAgreementId));
       if (!agreement || agreement.transactionId !== txnScope.transactionId || agreement.status !== "APPROVED") {
         throw new Error("A commission calculation needs an APPROVED commission agreement on this transaction.");
+      }
+      let finalisationChecks: Record<string, unknown> | null = null;
+      if (finalising) {
+        const [txn] = await tx
+          .select({
+            purchasePriceCents: transactions.purchasePriceCents,
+            unconditionalAt: transactions.unconditionalAt,
+            settlementCompletedAt: transactions.settlementCompletedAt,
+          })
+          .from(transactions)
+          .where(eq(transactions.id, txnScope.transactionId));
+        const grantEvidence = authority.evidenceDocumentId != null || (authority.evidenceNote ?? "").trim().length > 0;
+        const agreementEvidence = (agreement.sourceDocumentRef ?? "").trim().length > 0;
+        const approvedByOther = agreement.approvedByUserId != null && agreement.approvedByUserId !== user.id;
+        if (!grantEvidence || !agreementEvidence || !approvedByOther) {
+          throw new PitCrewCalculationRefusal(
+            409,
+            "PIT_CREW_FINALISATION_EVIDENCE_INCOMPLETE",
+            "Finalising needs a documented grant, an agreement approved by someone else, and the agreement's signed source document.",
+          );
+        }
+        if (!txn || txn.purchasePriceCents !== parsed.data.salePriceCentsInput) {
+          throw new PitCrewCalculationRefusal(409, "PIT_CREW_FINALISATION_FINANCIALS_UNVERIFIED", "The sale price must equal the transaction's recorded purchase price.");
+        }
+        if (state === "FINALISED") {
+          if (txn.unconditionalAt == null && txn.settlementCompletedAt == null) {
+            throw new PitCrewCalculationRefusal(409, "PIT_CREW_FINALISATION_CONTRACT_NOT_FIRM", "A commission calculation can be finalised only once the contract is unconditional or settled.");
+          }
+          const [existing] = await tx
+            .select({ id: commissionCalculations.id })
+            .from(commissionCalculations)
+            .where(and(eq(commissionCalculations.transactionId, txnScope.transactionId), eq(commissionCalculations.state, "FINALISED")))
+            .limit(1);
+          if (existing) {
+            throw new PitCrewCalculationRefusal(409, "FINALISED_CALCULATION_EXISTS", "This transaction already has a finalised calculation; a Brokerage Administrator supersedes it.");
+          }
+        }
+        finalisationChecks = {
+          state,
+          grantEvidence,
+          agreementApprovedByUserId: agreement.approvedByUserId,
+          agreementSourceDocumentRef: agreement.sourceDocumentRef,
+          salePriceMatchesPurchasePrice: true,
+          contractFirm: state === "FINALISED" ? true : null,
+        };
       }
       const [prior] = await tx
         .select()
@@ -490,7 +560,7 @@ async function createCalculationAsGrantedPitCrew(body: unknown, user: AuthedUser
           transactionId: txnScope.transactionId,
           commissionAgreementId: agreement.id,
           salePriceCentsInput: parsed.data.salePriceCentsInput,
-          state: state as "ESTIMATE" | "PROVISIONAL",
+          state: state as "ESTIMATE" | "PROVISIONAL" | "CONFIRMED" | "FINALISED",
           calculatedByUserId: user.id,
         },
         tx,
@@ -503,9 +573,9 @@ async function createCalculationAsGrantedPitCrew(body: unknown, user: AuthedUser
           recordType: "commission_calculation",
           recordId: String(row.id),
           before: prior ? calculationValues(prior) : null,
-          after: { ...calculationValues(row), transactionId: txnScope.transactionId },
+          after: { ...calculationValues(row), transactionId: txnScope.transactionId, ...(finalisationChecks ? { finalisationChecks } : {}) },
           surface,
-          policy: "t177u",
+          policy: finalising ? "t179u" : "t177u",
         }),
         { strict: true, write: auditWriterFor(tx) },
       );
@@ -514,6 +584,7 @@ async function createCalculationAsGrantedPitCrew(body: unknown, user: AuthedUser
     res.status(201).json({ calculation });
   } catch (err) {
     if (isAuthorityGone(err)) return denyFinancialAmendment(res, user, propertyScope, "commission_calculation", recordRef, surface);
+    if (err instanceof PitCrewCalculationRefusal) return void res.status(err.status).json({ error: err.message, reason: err.reason });
     if (!handlePlainError(err, res)) throw err;
   }
 }
