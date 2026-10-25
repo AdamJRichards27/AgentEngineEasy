@@ -22,6 +22,7 @@ import {
   documents,
   financialPaymentRequests,
   marketingPaymentRecords,
+  pcFeeAuthorities,
   pcFeeCalculations,
   settlementConfirmations,
   settlementStatementLines,
@@ -200,6 +201,8 @@ export interface DerivedStatement {
   netCents: number;
   pcServiceFeeCents: number | null;
   pcFeePayerUserId: number | null;
+  /** t180u(3): who the service fee is charged to under its authority (Agent, or Brokerage for a brokerage-card authority). */
+  pcFeePayer: { payerType: "Agent"; payerUserId: number | null } | { payerType: "Brokerage"; payerBrokerageId: number } | null;
 }
 const PC_FEE_UNCALCULATED = ["NOT_CALCULATED", "ESTIMATED"];
 const PC_FEE_EXCLUDED = ["WAIVED", "REVERSED", "WRITTEN_OFF"];
@@ -240,6 +243,7 @@ export async function deriveStatement(q: Tx | typeof db, transactionId: number, 
 
   let pcServiceFeeCents: number | null = null;
   let pcFeePayerUserId: number | null = null;
+  let pcFeePayer: DerivedStatement["pcFeePayer"] = null;
   const [pr] = await q.select().from(financialPaymentRequests).where(and(eq(financialPaymentRequests.transactionId, transactionId), eq(financialPaymentRequests.kind, "PC_SUCCESS_FEE")));
   if (pr && !PC_FEE_EXCLUDED.includes(pr.status)) {
     if (PC_FEE_UNCALCULATED.includes(pr.status)) issues.push("PC_FEE_NOT_CALCULATED");
@@ -251,6 +255,10 @@ export async function deriveStatement(q: Tx | typeof db, transactionId: number, 
     }
     pcServiceFeeCents = pr.amountCents;
     pcFeePayerUserId = pr.payerUserId;
+    const [auth] = pr.pcFeeAuthorityId
+      ? await q.select({ payerType: pcFeeAuthorities.payerType, brokerageId: pcFeeAuthorities.brokerageId }).from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, pr.pcFeeAuthorityId))
+      : [];
+    pcFeePayer = auth?.payerType === "Brokerage" ? { payerType: "Brokerage", payerBrokerageId: auth.brokerageId } : { payerType: "Agent", payerUserId: pr.payerUserId };
     lines.push({ ...base, kind: "PC_SERVICE_FEE", effect: "DEBIT", description: "Pit Crew service fee", amountCents: pr.amountCents - gst, gstCents: gst, sourceType: "financial_payment_request", sourceId: String(pr.id), paymentRequestId: pr.id });
   }
   // PAYMENT / REFUND lines are reserved kinds: their sources (payments and
@@ -259,7 +267,7 @@ export async function deriveStatement(q: Tx | typeof db, transactionId: number, 
   const value = (l: DerivedLine) => l.amountCents + l.gstCents;
   const creditsCents = lines.filter((l) => l.effect === "CREDIT").reduce((s, l) => s + value(l), 0);
   const debitsCents = lines.filter((l) => l.effect === "DEBIT").reduce((s, l) => s + value(l), 0);
-  return { lines, issues: [...new Set(issues)], creditsCents, debitsCents, netCents: creditsCents - debitsCents, pcServiceFeeCents, pcFeePayerUserId };
+  return { lines, issues: [...new Set(issues)], creditsCents, debitsCents, netCents: creditsCents - debitsCents, pcServiceFeeCents, pcFeePayerUserId, pcFeePayer };
 }
 
 export function fingerprint(lines: DerivedLine[], payer: { payerType: string; payerUserId: number | null; payerBrokerageId: number | null }): string {
@@ -406,7 +414,11 @@ financialStatementsRouter.post("/financial/settlement-statements/:id/issue", ...
       if (derived.lines.length === 0) throw new StatementRefusal(409, "STATEMENT_VALIDATION_FAILED", "Statement has no lines");
       const payer = { payerType: st.payerType, payerUserId: st.payerUserId, payerBrokerageId: st.payerBrokerageId };
       if (fingerprint(derived.lines, payer) !== st.linesFingerprint) throw new StatementRefusal(409, "STATEMENT_LINES_STALE", "Source figures changed since the draft was prepared; prepare it again");
-      if (derived.pcServiceFeeCents != null && (st.payerType !== "Agent" || st.payerUserId !== derived.pcFeePayerUserId)) {
+      const fp = derived.pcFeePayer;
+      const payerMatches =
+        fp == null ||
+        (fp.payerType === "Agent" ? st.payerType === "Agent" && st.payerUserId === fp.payerUserId : st.payerType === "Brokerage" && st.payerBrokerageId === fp.payerBrokerageId);
+      if (derived.pcServiceFeeCents != null && !payerMatches) {
         throw new StatementRefusal(409, "STATEMENT_PAYER_MISMATCH", "The statement payer must be the payer on the Pit Crew service-fee request");
       }
       const now = new Date();

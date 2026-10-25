@@ -135,8 +135,8 @@ export async function processMandatePaymentWebhook(
     result.brokerageId !== undefined ||
     result.provider !== undefined ||
     result.mandateProviderRef !== undefined;
-  const requiresAuthority = options.requireTransportContext || contextSupplied;
-  const [authority] = requiresAuthority && request.pcFeeAuthorityId != null
+  // t180u(3): always read (also for trusted in-process events) so a stored-card request is never mandate-driven.
+  const [authority] = request.pcFeeAuthorityId != null
     ? await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, request.pcFeeAuthorityId))
     : [];
   const contextMissing = options.requireTransportContext && (
@@ -144,8 +144,11 @@ export async function processMandatePaymentWebhook(
     result.provider === undefined ||
     result.mandateProviderRef === undefined
   );
+  // t180u(3) D8: a stored-card PC fee is never driven by mandate-debit webhooks.
+  const cardAuthority = authority?.authorisedPaymentMethod === "STORED_CARD";
   if (
     contextMissing ||
+    cardAuthority ||
     (contextSupplied && (
       result.provider !== mandatePaymentProvider.name ||
       request.provider !== result.provider ||

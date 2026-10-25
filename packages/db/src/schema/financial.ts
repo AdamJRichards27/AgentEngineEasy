@@ -61,13 +61,14 @@
 // "reported"/"evidence"/"reconciled" language is used throughout —
 // never "held"/"AE trust balance"/"disbursed by AE".
 
-import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
 import { properties } from "./property";
 import { transactions } from "./transaction";
+import { paymentMethods } from "./commerce";
 
 // ---------------------------------------------------------------------
 // Shared vocabularies
@@ -98,6 +99,11 @@ export type FinancialSnapshotState = (typeof FINANCIAL_SNAPSHOT_STATES)[number];
 
 export const PC_FEE_BASES = ["PERCENTAGE_OF_GCI", "FIXED_AMOUNT", "NONE", "MANUAL_WITH_REASON"] as const;
 export type PcFeeBasis = (typeof PC_FEE_BASES)[number];
+
+export const PC_FEE_AUTHORITY_PAYMENT_METHODS = ["GENERAL_ACCOUNT_DEBIT_MANDATE", "STORED_CARD"] as const;
+export type PcFeeAuthorityPaymentMethod = (typeof PC_FEE_AUTHORITY_PAYMENT_METHODS)[number];
+export const PC_FEE_AUTHORITY_PAYER_TYPES = ["Agent", "Brokerage"] as const;
+export type PcFeeAuthorityPayerType = (typeof PC_FEE_AUTHORITY_PAYER_TYPES)[number];
 
 export const PC_FEE_AUTHORITY_STATUSES = ["NOT_PROVIDED", "PENDING", "ACTIVE", "EXPIRED", "REVOKED", "REPLACED", "INVALID"] as const;
 export type PcFeeAuthorityStatus = (typeof PC_FEE_AUTHORITY_STATUSES)[number];
@@ -338,6 +344,16 @@ export const pcFeeAuthorities = pgTable(
     // reference from a provider, or null in sandbox until one exists.
     mandateProviderRef: text("mandate_provider_ref"),
     mandateProvider: text("mandate_provider"), // e.g. "sandbox"
+    // Owner t180u(3) (slice 6, migration 0043): the SINGLE nominated payment
+    // method (D8, no fallback). GENERAL_ACCOUNT_DEBIT_MANDATE uses the mandate
+    // above; STORED_CARD names exactly one tokenised payment_methods row
+    // (provider tokens only, never card data). payer_type says whose
+    // authority covers the charge: the agent's own, or the brokerage's (D3,
+    // stored card only, Brokerage Administrator approval under a signed mandate).
+    payerType: text("payer_type").notNull().default("Agent"), // PC_FEE_AUTHORITY_PAYER_TYPES
+    paymentMethodId: integer("payment_method_id").references(() => paymentMethods.id),
+    brokerageCardApprovedByUserId: integer("brokerage_card_approved_by_user_id").references(() => users.id),
+    brokerageCardApprovedAt: timestamp("brokerage_card_approved_at"),
 
     maximumAmountCents: integer("maximum_amount_cents"),
     noticeRequiredDays: integer("notice_required_days").notNull().default(7),
@@ -357,6 +373,17 @@ export const pcFeeAuthorities = pgTable(
     agentVersionIdx: uniqueIndex("pc_fee_authorities_agent_version_idx").on(table.agentUserId, table.version),
     agentStatusIdx: index("pc_fee_authorities_agent_status_idx").on(table.agentUserId, table.status),
     brokerageStatusIdx: index("pc_fee_authorities_brokerage_status_idx").on(table.brokerageId, table.status),
+    methodCheck: check("pc_fee_authorities_method_check", sql`${table.authorisedPaymentMethod} in ('GENERAL_ACCOUNT_DEBIT_MANDATE', 'STORED_CARD')`),
+    payerTypeCheck: check("pc_fee_authorities_payer_type_check", sql`${table.payerType} in ('Agent', 'Brokerage')`),
+    cardMethodCheck: check(
+      "pc_fee_authorities_card_method_check",
+      sql`(${table.authorisedPaymentMethod} = 'STORED_CARD') = (${table.paymentMethodId} is not null)`,
+    ),
+    brokeragePayerCheck: check("pc_fee_authorities_brokerage_payer_check", sql`${table.payerType} = 'Agent' or ${table.authorisedPaymentMethod} = 'STORED_CARD'`),
+    brokerageApprovalCheck: check(
+      "pc_fee_authorities_brokerage_approval_check",
+      sql`${table.payerType} = 'Agent' or ${table.status} <> 'ACTIVE' or (${table.brokerageCardApprovedByUserId} is not null and ${table.brokerageCardApprovedAt} is not null and ${table.signedEvidenceRef} is not null and ${table.brokerageCardApprovedByUserId} is distinct from ${table.createdByUserId})`,
+    ),
   }),
 );
 

@@ -173,6 +173,10 @@ export async function scheduleDebitForPaymentRequest(input: {
   if (authority.status !== "ACTIVE") {
     throw new Error(`PC fee authority ${authority.id} is ${authority.status}, not ACTIVE — cannot schedule a debit against it.`);
   }
+  // t180u(3) D8: no fallback. A stored-card authority is never debited through the mandate outbox.
+  if (authority.authorisedPaymentMethod !== "GENERAL_ACCOUNT_DEBIT_MANDATE") {
+    throw new Error(`PC fee authority ${authority.id} nominates ${authority.authorisedPaymentMethod}, not a direct-debit mandate — no fallback.`);
+  }
   if (!authority.mandateProviderRef) {
     throw new Error(`PC fee authority ${authority.id} has no mandateProviderRef on file — cannot schedule a debit.`);
   }
@@ -265,7 +269,7 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
     const [authority] = request.pcFeeAuthorityId
       ? await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, request.pcFeeAuthorityId))
       : [undefined];
-    if (!authority?.mandateProviderRef) {
+    if (!authority?.mandateProviderRef || authority.authorisedPaymentMethod !== "GENERAL_ACCOUNT_DEBIT_MANDATE") {
       throw new Error(`Payment request ${request.id} has no active mandate to debit.`);
     }
 
@@ -477,6 +481,12 @@ export async function reverseDebit(input: { paymentRequestId: number; reason: st
     throw new Error(`Payment request ${input.paymentRequestId} is ${request.status}, not PAID — nothing to reverse.`);
   }
   if (!request.providerRequestRef) throw new Error(`Payment request ${input.paymentRequestId} has no providerRequestRef to reverse.`);
+  // t180u(3): a stored-card fee is never reversed through the mandate provider (no cross-method action).
+  // Card refunds are a separate, not-yet-wired Brokerage Administrator flow (fail closed).
+  if (request.pcFeeAuthorityId != null) {
+    const [auth] = await db.select({ method: pcFeeAuthorities.authorisedPaymentMethod }).from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, request.pcFeeAuthorityId));
+    if (auth?.method === "STORED_CARD") throw new Error(`Payment request ${input.paymentRequestId} was paid by stored card; card refunds are not available through the mandate reversal path.`);
+  }
 
   await mandatePaymentProvider.reverseDebit(request.providerRequestRef, request.amountCents, input.reason);
 

@@ -10,6 +10,7 @@ import {
   entitlementGrants,
   financialPaymentRequests,
   parties,
+  paymentMethods,
   pcFeeAuthorities,
   pitCrewAssignments,
   riskExceptions,
@@ -201,4 +202,41 @@ export async function request(id: number) {
 
 export async function elapseNotice(c: Chain) {
   await db.update(financialPaymentRequests).set({ noticeSentAt: new Date(Date.now() - 8 * 86_400_000) }).where(eq(financialPaymentRequests.id, c.requestId));
+}
+
+/** Marker embedded in every synthetic provider token, so tests can prove tokens never leak. */
+export const CARD_TOKEN_MARKER = "t180u_tok_secret";
+
+/** A synthetic tokenised saved card (mock provider). */
+export async function saveCard(payerType: "Agent" | "Brokerage", payerId: number, label = "Visa ending 4242") {
+  const n = Math.floor(Math.random() * 1e9);
+  const [row] = await db
+    .insert(paymentMethods)
+    .values({ payerType, payerId, provider: "mock", providerCustomerRef: `cus_${CARD_TOKEN_MARKER}_${n}`, providerPaymentMethodRef: `pm_${CARD_TOKEN_MARKER}_${n}`, label, isDefault: true, isActive: true })
+    .returning();
+  return row!;
+}
+
+/** Create (by `creator`) and activate (by `activator`) a stored-card authority through the API. */
+export async function cardAuthorityViaApi(
+  w: World,
+  input: { payerType: "Agent" | "Brokerage"; paymentMethodId: number; signedEvidenceRef?: string | null; noticeRequiredDays?: number },
+  creator: Who = w.X.admin,
+  activator: Who = w.admin2,
+) {
+  const created = await call(w.baseUrl, "POST", "/financial/pc-fee-authorities", creator.cookie, {
+    agentUserId: w.X.agent.user.id,
+    feeBasis: "PERCENTAGE_OF_GCI",
+    rateBps: 690,
+    gstApplicable: true,
+    maximumAmountCents: 1_000_000,
+    noticeRequiredDays: input.noticeRequiredDays ?? 7,
+    ...(input.signedEvidenceRef === null ? {} : { signedEvidenceRef: input.signedEvidenceRef ?? "synthetic-signed-card-authority" }),
+    authorisedPaymentMethod: "STORED_CARD",
+    payerType: input.payerType,
+    paymentMethodId: input.paymentMethodId,
+  });
+  if (created.status !== 201) throw new Error(`create failed ${created.status} ${created.raw}`);
+  const activated = await call(w.baseUrl, "POST", `/financial/pc-fee-authorities/${created.json.authority.id}/activate`, activator.cookie, {});
+  return { created, activated, id: created.json.authority.id as number };
 }

@@ -17,6 +17,7 @@ import {
   financialPaymentRequests,
   financialReceipts,
   financialReconciliations,
+  paymentMethods,
   pcFeeAuthorities,
   pcFeeCalculations,
   settlementStatements,
@@ -69,7 +70,13 @@ async function contextFor(req: FinancialPaymentRequest) {
     .select({ id: settlementStatements.id })
     .from(settlementStatements)
     .where(and(eq(settlementStatements.transactionId, req.transactionId), eq(settlementStatements.status, "ISSUED")));
-  return { authority, gstCents: Math.min(calc?.gstCents ?? 0, req.amountCents), statementId: statement?.id ?? null };
+  // t180u(3): a stored-card receipt shows the label already stored on the nominated card ("Visa ending 4242"), nothing more.
+  let cardLabel: string | null = null;
+  if (authority?.authorisedPaymentMethod === "STORED_CARD" && authority.paymentMethodId != null) {
+    const [pm] = await db.select({ label: paymentMethods.label }).from(paymentMethods).where(eq(paymentMethods.id, authority.paymentMethodId));
+    cardLabel = pm?.label ?? "Saved card";
+  }
+  return { authority, cardLabel, gstCents: Math.min(calc?.gstCents ?? 0, req.amountCents), statementId: statement?.id ?? null };
 }
 
 /** Insert one receipt if its dedup key is new. Returns the row (new or existing). */
@@ -77,7 +84,7 @@ export async function issueReceipt(req: FinancialPaymentRequest, d: Draft, extra
   const [existing] = await db.select().from(financialReceipts).where(eq(financialReceipts.dedupKey, d.dedupKey));
   if (existing) return existing;
   const ctx = await contextFor(req);
-  const authorityPayer = (ctx.authority as { payerType?: string } | undefined)?.payerType === "Brokerage" ? "Brokerage" : "Agent";
+  const authorityPayer = ctx.authority?.payerType === "Brokerage" ? "Brokerage" : "Agent";
   const payer =
     extra.payer ??
     (authorityPayer === "Brokerage"
@@ -100,7 +107,7 @@ export async function issueReceipt(req: FinancialPaymentRequest, d: Draft, extra
       gstCents: Math.min(d.gstCents, d.amountCents),
       currency: req.currency,
       paymentMethodType: methodType,
-      paymentMethodLabel: extra.paymentMethodLabel ?? (methodType === "GENERAL_ACCOUNT_DEBIT_MANDATE" ? "Direct debit mandate (general account)" : null),
+      paymentMethodLabel: extra.paymentMethodLabel ?? (methodType === "GENERAL_ACCOUNT_DEBIT_MANDATE" ? "Direct debit mandate (general account)" : ctx.cardLabel),
       payerType: payer.payerType,
       payerUserId: payer.payerType === "Agent" ? payer.userId : null,
       payerBrokerageId: payer.payerType === "Brokerage" ? payer.brokerageId : null,

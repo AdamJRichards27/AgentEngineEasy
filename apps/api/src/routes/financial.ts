@@ -190,7 +190,15 @@ function handleFinancialControlError(err: unknown, res: Response): boolean {
     // rejection, not a state conflict — 400, not the 409 every other non-NOT_FOUND/
     // non-SEPARATION_OF_DUTIES reason falls back to.
     const status =
-      err.reason === "NOT_FOUND" ? 404 : err.reason === "SEPARATION_OF_DUTIES" ? 403 : err.reason === "CUSTODY_BOUNDARY_VIOLATION" ? 400 : 409;
+      err.reason === "NOT_FOUND"
+        ? 404
+        : err.reason === "SEPARATION_OF_DUTIES"
+          ? 403
+          : err.reason === "CUSTODY_BOUNDARY_VIOLATION"
+            ? 400
+            : err.reason === "INVALID_PAYMENT_METHOD"
+              ? 422
+              : 409;
     res.status(status).json({ error: err.message, reason: err.reason });
     return true;
   }
@@ -660,6 +668,11 @@ const createAuthoritySchema = z.object({
   maximumAmountCents: z.number().int().optional(),
   noticeRequiredDays: z.number().int().min(0).optional(),
   signedEvidenceRef: z.string().max(500).optional(),
+  // Owner t180u(3) (D8/D3): the single nominated method and whose authority it is.
+  // Enum-restricted; the custody boundary in pcFeeAuthorities.ts still re-checks.
+  authorisedPaymentMethod: z.enum(["GENERAL_ACCOUNT_DEBIT_MANDATE", "STORED_CARD"]).optional(),
+  payerType: z.enum(["Agent", "Brokerage"]).optional(),
+  paymentMethodId: z.number().int().positive().optional(),
 });
 
 financialRouter.get("/financial/pc-fee-authorities", ...requireFinancialAdmin, async (req, res) => {
@@ -682,11 +695,16 @@ financialRouter.post("/financial/pc-fee-authorities", ...requireFinancialAdmin, 
   if (!(await agentBelongsToBrokerage(parsed.data.agentUserId, user.brokerageId))) {
     return void res.status(404).json({ error: "Agent not found" });
   }
-  const authority = await createPcFeeAuthority({ ...parsed.data, brokerageId: user.brokerageId, createdByUserId: user.id });
-  res.status(201).json({ authority: redactPcFeeAuthority(authority) });
+  try {
+    const authority = await createPcFeeAuthority({ ...parsed.data, brokerageId: user.brokerageId, createdByUserId: user.id });
+    res.status(201).json({ authority: redactPcFeeAuthority(authority) });
+  } catch (err) {
+    if (!handleFinancialControlError(err, res)) throw err;
+  }
 });
 
-const activateAuthoritySchema = z.object({ mandateProviderRef: z.string().min(1).max(500), mandateProvider: z.string().min(1).max(200) });
+// t180u(3): a stored-card authority activates without a mandate (its single method is the nominated card).
+const activateAuthoritySchema = z.object({ mandateProviderRef: z.string().min(1).max(500).optional(), mandateProvider: z.string().min(1).max(200).optional() });
 
 financialRouter.post("/financial/pc-fee-authorities/:id/activate", ...requireFinancialAdmin, async (req, res) => {
   const user = req.authedUser!;

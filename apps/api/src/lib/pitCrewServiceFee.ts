@@ -35,9 +35,12 @@ import {
   riskExceptions,
   transactions,
   type FinancialPaymentRequest,
+  type PcFeeAuthority,
 } from "@aee/db";
 import { computePcFee } from "./financial/pcFeeCalculations.js";
 import { advancePaymentRequestToNoticeSent, scheduleDebitForPaymentRequest } from "./financial/paymentOutbox.js";
+import { CardChargeRefusal, chargeServiceFeeStoredCard } from "./financial/pcFeeCardCharges.js";
+import { nominatedPaymentMethodFor } from "./financial/pcFeeAuthorities.js";
 import { checkSettlementStatementGate, type SettlementStatementGateResult, type StatementPayer } from "./settlementStatementGate.js";
 
 export const ACTIVE_PIT_CREW_ASSIGNMENT_STATUSES = ["CLAIMED", "IN_PROGRESS", "WAITING_ON"] as const;
@@ -55,7 +58,8 @@ export type ServiceFeeCollectionCode =
   | "SETTLEMENT_STATEMENT_PAYER_MISMATCH"
   | "SETTLEMENT_STATEMENT_FEE_MISMATCH"
   | "SETTLEMENT_CONFIRMATIONS_INCOMPLETE"
-  | "SETTLEMENT_STATEMENT_STALE";
+  | "SETTLEMENT_STATEMENT_STALE"
+  | "SERVICE_FEE_PROVIDER_NOT_PERMITTED";
 
 export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> = {
   SERVICE_FEE_NOT_FOUND: 404,
@@ -71,6 +75,7 @@ export const SERVICE_FEE_ERROR_STATUS: Record<ServiceFeeCollectionCode, number> 
   SETTLEMENT_STATEMENT_FEE_MISMATCH: 409,
   SETTLEMENT_CONFIRMATIONS_INCOMPLETE: 409,
   SETTLEMENT_STATEMENT_STALE: 409,
+  SERVICE_FEE_PROVIDER_NOT_PERMITTED: 409,
 };
 
 export class ServiceFeeCollectionError extends Error {
@@ -85,7 +90,17 @@ export class ServiceFeeCollectionError extends Error {
   }
 }
 
-export type ServiceFeeCollectionOutcome = "notice_started" | "debit_scheduled" | "debit_queued" | "already_in_progress" | "already_paid";
+export type ServiceFeeCollectionOutcome =
+  | "notice_started"
+  | "debit_scheduled"
+  | "debit_queued"
+  | "already_in_progress"
+  | "already_paid"
+  // t180u(3): stored-card outcomes.
+  | "card_charged"
+  | "card_failed_retry_scheduled"
+  | "card_failed_final"
+  | "card_outcome_unknown";
 
 export interface ServiceFeeCaller {
   id: number;
@@ -103,8 +118,12 @@ export interface VerifiedServiceFee {
   capCents: number | null;
   noticeElapsesAt: Date | null;
   pitCrewAssignmentIds: number[];
-  /** The authorised payer (today always the authority's agent; brokerage payer needs S2). */
+  /** The authorised payer: the authority's agent, or the brokerage for a BA-approved brokerage-card authority (D3). */
   payer: StatementPayer;
+  /** t180u(3) D8: the single nominated method. Never the token; the label at most. */
+  paymentMethod: { type: "GENERAL_ACCOUNT_DEBIT_MANDATE" | "STORED_CARD"; label: string | null };
+  /** Internal only (never serialised): the authority the collection runs under. */
+  authority: PcFeeAuthority;
 }
 
 const IN_PROGRESS = new Set(["DEBIT_SCHEDULED", "PROCESSING", "RETRY_SCHEDULED"]);
@@ -198,10 +217,29 @@ export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, trans
     authority.revokedAt == null &&
     (authority.expiresAt == null || authority.expiresAt > now) &&
     (authority.effectiveDate == null || authority.effectiveDate <= now) &&
-    !!authority.mandateProviderRef &&
     authority.agentUserId === agentId &&
     (paymentRequest.payerUserId == null || paymentRequest.payerUserId === authority.agentUserId);
   if (!authorityValid || !authority) throw new ServiceFeeCollectionError("SERVICE_FEE_AUTHORITY_INVALID", undefined, propertyId);
+  // t180u(3) D8/D3: exactly one nominated method, valid in itself. No fallback between them.
+  let paymentMethod: VerifiedServiceFee["paymentMethod"];
+  if (authority.authorisedPaymentMethod === "GENERAL_ACCOUNT_DEBIT_MANDATE") {
+    if (!authority.mandateProviderRef || authority.payerType !== "Agent" || authority.paymentMethodId != null) {
+      throw new ServiceFeeCollectionError("SERVICE_FEE_AUTHORITY_INVALID", undefined, propertyId);
+    }
+    paymentMethod = { type: "GENERAL_ACCOUNT_DEBIT_MANDATE", label: "Direct debit mandate (general account)" };
+  } else if (authority.authorisedPaymentMethod === "STORED_CARD") {
+    const brokerageApproved =
+      authority.payerType !== "Brokerage" ||
+      (authority.brokerageCardApprovedByUserId != null &&
+        authority.brokerageCardApprovedAt != null &&
+        authority.brokerageCardApprovedByUserId !== authority.createdByUserId &&
+        !!authority.signedEvidenceRef);
+    const pm = brokerageApproved ? await nominatedPaymentMethodFor(authority) : null;
+    if (!pm) throw new ServiceFeeCollectionError("SERVICE_FEE_AUTHORITY_INVALID", undefined, propertyId);
+    paymentMethod = { type: "STORED_CARD", label: pm.label ?? "Saved card" };
+  } else {
+    throw new ServiceFeeCollectionError("SERVICE_FEE_AUTHORITY_INVALID", undefined, propertyId);
+  }
 
   // Fee from the agreed terms.
   if (paymentRequest.pcFeeCalculationId == null) throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_VERIFIED", undefined, propertyId);
@@ -253,7 +291,9 @@ export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, trans
     capCents: authority.maximumAmountCents ?? null,
     noticeElapsesAt,
     pitCrewAssignmentIds,
-    payer: { payerType: "Agent", userId: authority.agentUserId },
+    payer: authority.payerType === "Brokerage" ? { payerType: "Brokerage", brokerageId: authority.brokerageId } : { payerType: "Agent", userId: authority.agentUserId },
+    paymentMethod,
+    authority,
   };
 }
 
@@ -289,7 +329,29 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
   if (!gate.ok) throw new ServiceFeeCollectionError(gate.code, undefined, verified.propertyId);
   const settlementStatementId = gate.statementId;
 
+  const isCard = verified.paymentMethod.type === "STORED_CARD";
+  const chargeCard = async (): Promise<ServiceFeeCollectionResult> => {
+    try {
+      const r = await chargeServiceFeeStoredCard({
+        paymentRequestId: request.id,
+        authority: verified.authority,
+        actorUserId: caller.id,
+        trigger: opts.trigger === "statement_issued" ? "statement_issued" : "collect",
+      });
+      return { outcome: r.outcome, verified, paymentRequest: r.paymentRequest, settlementStatementId };
+    } catch (err) {
+      if (err instanceof CardChargeRefusal) {
+        const code: ServiceFeeCollectionCode =
+          err.code === "PROVIDER_NOT_PERMITTED" ? "SERVICE_FEE_PROVIDER_NOT_PERMITTED" : err.code === "METHOD_INVALID" ? "SERVICE_FEE_AUTHORITY_INVALID" : "SERVICE_FEE_NOT_COLLECTABLE";
+        throw new ServiceFeeCollectionError(code, err.message, verified.propertyId);
+      }
+      throw err;
+    }
+  };
+
   if (PAID.has(request.status)) return { outcome: "already_paid", verified, paymentRequest: request, settlementStatementId };
+  // t180u(3): a declined card charge is retried only on an explicit, fully re-gated collect (never by a statement issue).
+  if (isCard && request.status === "RETRY_SCHEDULED" && opts.trigger !== "statement_issued") return chargeCard();
   if (IN_PROGRESS.has(request.status)) return { outcome: "already_in_progress", verified, paymentRequest: request, settlementStatementId };
   if (RECOVERY_ONLY.has(request.status)) {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}; recovery is a Brokerage Administrator action.`, verified.propertyId);
@@ -302,6 +364,7 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
     if (verified.noticeElapsesAt == null || now < verified.noticeElapsesAt) {
       throw new ServiceFeeCollectionError("SERVICE_FEE_NOTICE_PERIOD_RUNNING", undefined, verified.propertyId);
     }
+    if (isCard) return chargeCard();
     const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id });
     return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
   }

@@ -220,6 +220,7 @@ const SERVICE_FEE_MESSAGES: Record<string, string> = {
   SETTLEMENT_STATEMENT_FEE_MISMATCH: "The issued settlement statement does not itemise this service fee at the amount to be debited.",
   SETTLEMENT_CONFIRMATIONS_INCOMPLETE: "Both representatives' written settlement confirmations must be on file before the fee is collected.",
   SETTLEMENT_STATEMENT_STALE: "The figures behind the issued statement have changed. A Brokerage Administrator must correct the statement first.",
+  SERVICE_FEE_PROVIDER_NOT_PERMITTED: "Card collection is not enabled for this environment.",
 };
 function serviceFeeErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof ServiceFeeCollectionError) {
@@ -241,6 +242,8 @@ function serviceFeeView(v: Awaited<ReturnType<typeof verifyServiceFeeCollection>
     noticeElapsesAt: v.noticeElapsesAt,
     scheduledAt: paymentRequest.scheduledAt,
     paidAt: paymentRequest.paidAt,
+    // t180u(3): the nominated method's type and stored label only, never a token or mandate reference.
+    paymentMethod: v.paymentMethod,
   };
 }
 
@@ -249,7 +252,9 @@ paymentsRouter.get("/pit-crew-service-fee/:transactionId", requireAuth, requires
   try {
     const v = await verifyServiceFeeCollection(user, Number(req.params.transactionId));
     const gate = await settlementStatementGateFor(v, user.brokerageId);
-    const statusCollectable = ["CALCULATED", "READY_TO_INVOICE", "INVOICED", "NOTICE_SENT"].includes(v.paymentRequest.status);
+    const statusCollectable =
+      ["CALCULATED", "READY_TO_INVOICE", "INVOICED", "NOTICE_SENT"].includes(v.paymentRequest.status) ||
+      (v.paymentMethod.type === "STORED_CARD" && v.paymentRequest.status === "RETRY_SCHEDULED");
     // t178u(1): preview stays available; collection waits for an issued statement.
     res.json({
       serviceFee: serviceFeeView(v),
@@ -288,7 +293,9 @@ paymentsRouter.post("/pit-crew-service-fee/:transactionId/collect", requireAuth,
         capCents: result.verified.capCents,
         pitCrewAssignmentIds: result.verified.pitCrewAssignmentIds,
         settlementStatementId: result.settlementStatementId,
-        policy: "t177u+t178u",
+        paymentMethodType: result.verified.paymentMethod.type,
+        payerType: result.verified.payer.payerType,
+        policy: "t177u+t178u+t180u",
       }),
     });
     const status = result.outcome === "debit_queued" ? 202 : 200;
