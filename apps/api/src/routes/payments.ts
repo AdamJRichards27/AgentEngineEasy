@@ -247,6 +247,26 @@ function serviceFeeView(v: Awaited<ReturnType<typeof verifyServiceFeeCollection>
     paymentMethod: v.paymentMethod,
     // t181u(A): which timing rule the signed terms allow.
     collectionTiming: { rule: v.timing.rule, noticeReason: v.timing.noticeReason ?? null },
+    // t181u phase 2b item 6: read-only authority summary (no mandate, evidence or payment-method references).
+    authority: {
+      id: v.authority.id,
+      version: v.authority.version,
+      status: v.authority.status,
+      payerType: v.authority.payerType,
+      authorisedPaymentMethod: v.authority.authorisedPaymentMethod,
+      feeBasis: v.authority.feeBasis,
+      rateBps: v.authority.rateBps,
+      fixedAmountCents: v.authority.fixedAmountCents,
+      gstApplicable: v.authority.gstApplicable,
+      maximumAmountCents: v.authority.maximumAmountCents,
+      noticeRequiredDays: v.authority.noticeRequiredDays,
+      agreementTermsVersion: v.authority.agreementTermsVersion,
+      mandateTermsVersion: v.authority.mandateTermsVersion,
+      effectiveDate: v.authority.effectiveDate,
+      expiresAt: v.authority.expiresAt,
+      hasSignedEvidence: Boolean(v.authority.signedEvidenceRef),
+      brokerageCardApproved: v.authority.brokerageCardApprovedAt != null,
+    },
   };
 }
 
