@@ -37,21 +37,23 @@ test("three labelled groups in order", () => {
 
 test("Grow group with run.access, flags off", () => {
   const g = group(buildMinimalSidebar({ role: "Brokerage Administrator", entitlements: GROW_RUN, ...off }), "grow");
-  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Properties", "Marketing (Soon)"]);
+  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Properties", "Marketing"]);
   const hrefs = g.filter((i) => i.kind === "link").map((i) => (i.kind === "link" ? i.href : ""));
-  assert.deepEqual(hrefs, ["/grow", "/grow?tab=contacts", "/grow/opportunities", "/grow/appraisals", "/properties"]);
+  assert.deepEqual(hrefs, ["/grow", "/grow?tab=contacts", "/grow/opportunities", "/grow/appraisals", "/properties", "/grow/marketing"]);
 });
 
 test("Market Activity and My Momentum only when their queries succeed", () => {
   const g = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, ...on }), "grow");
-  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Market Activity", "My Momentum", "Properties", "Marketing (Soon)"]);
+  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Market Activity", "My Momentum", "Properties", "Marketing"]);
   const onlyMarket = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, marketActivityAvailable: true, momentumAvailable: false }), "grow");
   assert.equal(labels(onlyMarket).includes("My Momentum"), false);
   assert.equal(labels(onlyMarket).includes("Market Activity"), true);
 });
 
-test("Marketing sub-items are non-link Soon placeholders", () => {
-  const g = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, ...off }), "grow");
+// V7 (Grok clearance 28 Oct): with grow.access Marketing is a link group (minimalMarketingV7.test.ts);
+// without grow.access the V1 Coming Soon placeholder is unchanged.
+test("Marketing sub-items are non-link Soon placeholders without grow.access", () => {
+  const g = group(buildMinimalSidebar({ role: "Agent", entitlements: [], ...off }), "grow");
   const marketing = g.find((i) => i.label === "Marketing");
   assert.ok(marketing && marketing.kind === "soon");
   assert.deepEqual(marketing.children?.map((c) => [c.kind, c.label]), MINIMAL_MARKETING_SOON.map((l) => ["soon", l]));
@@ -81,7 +83,7 @@ test("without run.access: Run and Pit Crew are non-clickable Coming Soon, no Run
 
 test("D5 revised (Owner t147u): Properties shows in Grow for Grow-entitled users without run.access", () => {
   const g = group(buildMinimalSidebar({ role: "Agent", entitlements: GROW_ONLY, ...off }), "grow");
-  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Properties", "Marketing (Soon)"]);
+  assert.deepEqual(labels(g), ["Today", "Relationships", "Opportunities", "Appraisals", "Properties", "Marketing"]);
   const none = group(buildMinimalSidebar({ role: "Agent", entitlements: [], ...off }), "grow");
   assert.equal(labels(none).includes("Properties"), false, "no grow.access and no run.access: no Properties");
 });

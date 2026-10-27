@@ -94,11 +94,19 @@ export const MINIMAL_COMING_SOON = "Coming Soon";
 
 export const MINIMAL_MARKETING_SOON: readonly string[] = ["Overview", "Email", "SMS", "Social"];
 
+/** V7 (Owner t457u): Marketing pages for grow.access users. Sample previews only, nothing is sent. */
+export const MINIMAL_MARKETING_LINKS: readonly { label: string; href: string }[] = [
+  { label: "Overview", href: "/grow/marketing/overview" },
+  { label: "Email", href: "/grow/marketing/email" },
+  { label: "SMS", href: "/grow/marketing/sms" },
+  { label: "Social", href: "/grow/marketing/social" },
+];
+
 function link(path: string, label: string, href: string = path): MinimalSidebarItem {
   return { kind: "link", key: href, path, href, label };
 }
 
-/** Marketing placeholders stay until the planned Better Marketing AI work (CC #54, V7). */
+/** Marketing: V7 sample pages with grow.access, Coming Soon placeholders otherwise (CC #54). */
 export function buildMinimalSidebar(ctx: MinimalSidebarContext): MinimalSidebarGroup[] {
   const run = minimalHasRunAccess(ctx.entitlements);
   const product = buildProductNavLinks(ctx).map((l) => l.path);
@@ -114,13 +122,25 @@ export function buildMinimalSidebar(ctx: MinimalSidebarContext): MinimalSidebarG
   // (property records, intelligence, appraisals). Run-only operations inside it stay
   // gated on run.access (operation-level), and the server keeps enforcing both.
   if (run || ctx.entitlements.includes(GROW_ACCESS)) grow.push(link("/properties", "Properties"));
-  grow.push({
-    kind: "soon",
-    key: "marketing",
-    label: "Marketing",
-    icon: "marketing",
-    children: MINIMAL_MARKETING_SOON.map((label) => ({ kind: "soon" as const, key: `marketing-${label.toLowerCase()}`, label, icon: "dot" })),
-  });
+  // V7: Marketing pages need grow.access; without it the placeholder stays.
+  if (ctx.entitlements.includes(GROW_ACCESS)) {
+    grow.push({
+      kind: "link",
+      key: "marketing",
+      path: "/grow/marketing",
+      href: "/grow/marketing",
+      label: "Marketing",
+      children: MINIMAL_MARKETING_LINKS.map((l) => link(l.href, l.label)),
+    });
+  } else {
+    grow.push({
+      kind: "soon",
+      key: "marketing",
+      label: "Marketing",
+      icon: "marketing",
+      children: MINIMAL_MARKETING_SOON.map((label) => ({ kind: "soon" as const, key: `marketing-${label.toLowerCase()}`, label, icon: "dot" })),
+    });
+  }
 
   const operations: MinimalSidebarItem[] = [];
   if (run) {
