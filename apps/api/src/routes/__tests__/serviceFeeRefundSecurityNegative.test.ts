@@ -3,12 +3,13 @@
 // resolution, BA queues, reconciliation). Unauthenticated access, malformed
 // ids and bodies, evidence from another property, queue filter injection and
 // key leakage. Synthetic data, mock provider only; no behaviour change.
-import { test, before, after, describe } from "node:test";
+import { test, before, after, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { eq, inArray } from "drizzle-orm";
 import { db, financialCardCharges, financialCardRefunds, settlementStatements } from "@aee/db";
 import { MockPaymentProvider } from "@aee/integration-payments";
+import { paymentProvider } from "../../lib/paymentProvider.js";
 import { cleanupBrokerages } from "./testSupport.js";
 import {
   call,
@@ -164,5 +165,59 @@ describe("t181u hardening: refund/recovery negative and security tests", { concu
     assert.ok(!list.raw.includes("pcf-card-refund") && !list.raw.includes("requestKey") && !list.raw.includes("idempotencyKey"));
     const ids = (list.json.refunds as { id: number }[]).map((r) => r.id);
     assert.equal((await db.select().from(financialCardRefunds).where(inArray(financialCardRefunds.id, ids))).every((r) => r.brokerageId === w.X.brokerageId), true);
+  });
+});
+
+// Owner t525u item 3: "The initiating administrator must not resolve their own
+// uncertain transaction." Card charges: the BA who started an UNKNOWN charge is
+// told they cannot resolve it and is refused for BOTH outcomes; another BA can.
+describe("t525u: the initiating administrator never resolves their own uncertain charge or refund", { concurrency: false }, () => {
+  test("UNKNOWN card charge started by a BA: provider-status says callerMayResolve=false; SUCCEEDED and FAILED both 403 CARD_CHARGE_RESOLVER_IS_INITIATOR; nothing changes; another BA resolves", async () => {
+    const card = await saveCard("Agent", w.X.agent.user.id);
+    const a = await cardAuthorityViaApi(w, { payerType: "Agent", paymentMethodId: card.id });
+    assert.equal(a.activated.status, 200, a.activated.raw);
+    const c = await feeChain(w, a.id, "NegInit");
+    await confirmBoth(w, c);
+    assert.equal((await prepareAndIssue(w, w.crew, c)).status, 200);
+    await elapseNotice(c);
+    // The provider takes the money but the answer is lost -> UNKNOWN, initiated by the BA.
+    const original = paymentProvider.chargeStoredMethod.bind(paymentProvider);
+    const spy = mock.method(paymentProvider, "chargeStoredMethod", async (input: Parameters<typeof original>[0]) => {
+      await original(input);
+      throw new Error("synthetic lost answer");
+    });
+    try {
+      const r = await collect(w, w.X.admin, c);
+      assert.equal(r.json.outcome, "card_outcome_unknown", r.raw);
+    } finally {
+      spy.mock.restore();
+    }
+    const [charge] = await db.select().from(financialCardCharges).where(eq(financialCardCharges.paymentRequestId, c.requestId));
+    assert.equal(charge!.status, "UNKNOWN");
+    assert.equal(charge!.initiatedByUserId, w.X.admin.user.id);
+    const st = await call(w.baseUrl, "GET", `/financial/card-charges/${charge!.id}/provider-status`, w.X.admin.cookie);
+    assert.equal(st.status, 200, st.raw);
+    assert.equal(st.json.callerMayResolve, false);
+    for (const outcome of ["SUCCEEDED", "FAILED"]) {
+      const self = await call(w.baseUrl, "POST", `/financial/card-charges/${charge!.id}/resolve`, w.X.admin.cookie, { outcome, reason: REASON, evidenceNote: NOTE });
+      assert.equal(self.status, 403, self.raw);
+      assert.equal(self.json.code, "CARD_CHARGE_RESOLVER_IS_INITIATOR");
+    }
+    const [still] = await db.select().from(financialCardCharges).where(eq(financialCardCharges.id, charge!.id));
+    assert.equal(still!.status, "UNKNOWN");
+    assert.equal((await call(w.baseUrl, "GET", `/financial/card-charges/${charge!.id}/provider-status`, w.admin2.cookie)).json.callerMayResolve, true);
+    const other = await call(w.baseUrl, "POST", `/financial/card-charges/${charge!.id}/resolve`, w.admin2.cookie, { outcome: "SUCCEEDED", reason: REASON, evidenceNote: NOTE });
+    assert.equal(other.status, 200, other.raw);
+  });
+
+  test("PENDING and UNKNOWN card refunds: the requesting BA is refused for both outcomes; another BA resolves", async () => {
+    const { refundId } = await unknownRefund("NegReqU");
+    for (const outcome of ["SUCCEEDED", "FAILED"]) {
+      const r = await call(w.baseUrl, "POST", `/financial/card-refunds/${refundId}/resolve`, w.X.admin.cookie, { outcome, reason: REASON, evidenceNote: NOTE });
+      assert.equal(r.status, 403, r.raw);
+      assert.equal(r.json.code, "CARD_REFUND_RESOLVER_IS_REQUESTER");
+    }
+    assert.equal((await refundRow(refundId)).status, "UNKNOWN");
+    assert.equal((await call(w.baseUrl, "POST", `/financial/card-refunds/${refundId}/resolve`, w.admin2.cookie, { outcome: "FAILED", reason: REASON, evidenceNote: NOTE })).status, 200);
   });
 });

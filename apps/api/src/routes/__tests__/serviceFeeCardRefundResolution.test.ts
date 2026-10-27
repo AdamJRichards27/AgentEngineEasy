@@ -231,12 +231,13 @@ describe("t181u phase 2b (G15): BA resolution of UNKNOWN card refunds", { concur
   });
 });
 
-// Owner t181u hardening (G19): a refund row left PENDING (process stopped
-// between the durable intent and recording the provider answer) is resolvable
-// by another Brokerage Administrator once it is stale (older than the in-flight
-// window), with exactly the G15 rules. No schema change: the 0043 guard already
-// allows PENDING -> SUCCEEDED/FAILED. A fresh PENDING row is in flight and refused.
-describe("t181u hardening (G19): BA resolution of a stalled PENDING card refund", { concurrency: false }, () => {
+// Owner t181u hardening (G19) + t525u item 3: a refund row left PENDING (process
+// stopped between the durable intent and recording the provider answer) is
+// resolvable by another Brokerage Administrator with exactly the G15 rules.
+// t525u removed the 15-minute waiting period: independent BA, provider-verified
+// outcome, reason + evidence, idempotency, the refund cap and the requester ban
+// stay. No schema change: the 0043 guard already allows PENDING -> SUCCEEDED/FAILED.
+describe("t181u G19 + t525u: BA resolution of a PENDING card refund (no waiting period)", { concurrency: false }, () => {
   async function pendingRefund(tag: string, ageMs: number, provider?: "Succeeded" | "Pending") {
     const p = await paidCharge(tag);
     const { createHash } = await import("node:crypto");
@@ -262,27 +263,40 @@ describe("t181u hardening (G19): BA resolution of a stalled PENDING card refund"
     if (provider) MockPaymentProvider.refundsByKey.set(idempotencyKey, { providerRefundRef: `mock-refund-g19-${row!.id}`, status: provider, aeRefundId: row!.id, amountCents: p.amountCents });
     return { ...p, refundId: row!.id };
   }
-  const STALE = 20 * 60 * 1000;
+  const STALE = 0; // t525u: age no longer matters
 
-  test("in flight: a fresh PENDING refund is refused (409), stays PENDING and reserved; status shows no provider answer; refusal audited", async () => {
-    const { chargeId, refundId } = await pendingRefund("G19Fresh", 1000);
+  test("t525u: no waiting period — a fresh PENDING refund is resolvable at once by an independent BA, only to the provider's verified answer; the requester never; reason+evidence required; cap and reservation kept", async () => {
+    const { chargeId, refundId, amountCents } = await pendingRefund("T525Fresh", 0);
+    assert.equal((await call(w.baseUrl, "GET", `/financial/card-charges/${chargeId}/refunds`, w.admin2.cookie)).json.refundableCents, 0, "PENDING reserves the amount (cap)");
+    const over = await call(w.baseUrl, "POST", `/financial/card-charges/${chargeId}/refunds`, w.admin2.cookie, { amountCents: 1, reason: REASON, evidenceNote: NOTE, requestKey: key() });
+    assert.equal(over.json.code, "CARD_REFUND_EXCEEDS_REFUNDABLE", "no duplicate refund while the first is uncertain");
     const s = await status(w.admin2, refundId);
     assert.equal(s.status, 200, s.raw);
     assert.equal(s.json.refundStatus, "PENDING");
-    assert.equal(s.json.providerStatus, null, "no lookup while in flight");
-    assert.equal(s.json.resolvable, false);
+    assert.equal(s.json.resolvable, true);
+    assert.equal(s.json.providerStatus, "NotFound", "provider asked straight away");
+    assert.equal(s.json.suggestedOutcome, "FAILED");
+    assert.equal("stalePending" in s.json, false, "no age concept any more");
+    assert.equal((await status(w.X.admin, refundId)).json.callerMayResolve, false, "requester told they cannot resolve");
     for (const o of ["SUCCEEDED", "FAILED"]) {
-      const r = await resolve(w.admin2, refundId, o);
-      assert.equal(r.status, 409, r.raw);
-      assert.equal(r.json.code, "CARD_REFUND_IN_FLIGHT");
+      const self = await resolve(w.X.admin, refundId, o);
+      assert.equal(self.status, 403, self.raw);
+      assert.equal(self.json.code, "CARD_REFUND_RESOLVER_IS_REQUESTER");
     }
-    assert.equal((await refundRow(refundId)).status, "PENDING");
-    assert.equal((await call(w.baseUrl, "GET", `/financial/card-charges/${chargeId}/refunds`, w.admin2.cookie)).json.refundableCents, 0, "PENDING reserves the amount");
-    const audits = await db.select().from(auditLogs).where(and(eq(auditLogs.brokerageId, w.X.brokerageId), eq(auditLogs.userId, w.admin2.user.id)));
-    assert.ok(audits.some((a) => (a.updatedValue ?? "").includes("CARD_REFUND_IN_FLIGHT")));
+    assert.equal((await resolve(w.admin2, refundId, "FAILED", { reason: "" })).json.code, "RECOVERY_REASON_REQUIRED");
+    assert.equal((await resolve(w.admin2, refundId, "FAILED", { evidenceNote: undefined })).json.code, "RECOVERY_EVIDENCE_REQUIRED");
+    assert.equal((await resolve(w.admin2, refundId, "SUCCEEDED")).json.code, "CARD_REFUND_OUTCOME_MISMATCH");
+    assert.equal((await refundRow(refundId)).status, "PENDING", "nothing changed by the refusals");
+    const ok = await resolve(w.admin2, refundId, "FAILED");
+    assert.equal(ok.status, 200, ok.raw);
+    assert.notEqual(ok.json.code, "CARD_REFUND_IN_FLIGHT");
+    assert.equal((await refundRow(refundId)).status, "FAILED");
+    assert.equal((await call(w.baseUrl, "GET", `/financial/card-charges/${chargeId}/refunds`, w.admin2.cookie)).json.refundableCents, amountCents, "released");
+    const mod = (await import("../../lib/financial/cardRefunds.js")) as Record<string, unknown>;
+    assert.equal(mod.STALE_PENDING_REFUND_MS, undefined, "the 15-minute gate is gone");
   });
 
-  test("stalled, never reached the provider: queue lists it; SUCCEEDED refused (mismatch); FAILED releases the reservation, no receipt, audit statusBefore PENDING, idempotent, never calls the provider", async () => {
+  test("PENDING, never reached the provider: queue lists it; SUCCEEDED refused (mismatch); FAILED releases the reservation, no receipt, audit statusBefore PENDING, idempotent, never calls the provider", async () => {
     const { c, chargeId, refundId, amountCents } = await pendingRefund("G19Never", STALE);
     const q = await queue(w.admin2, "PENDING");
     assert.ok(q.json.cardRefunds.some((r: { id: number }) => r.id === refundId), q.raw);
@@ -312,7 +326,7 @@ describe("t181u hardening (G19): BA resolution of a stalled PENDING card refund"
     assert.ok(!(mine[0]!.updatedValue ?? "").includes(REASON) && !(mine[0]!.updatedValue ?? "").includes(String(amountCents)), "value-free audit");
   });
 
-  test("stalled after the provider accepted: SUCCEEDED -> REFUND receipt and provider ref recorded; FAILED refused", async () => {
+  test("PENDING after the provider accepted: SUCCEEDED -> REFUND receipt and provider ref recorded; FAILED refused", async () => {
     const { c, refundId, amountCents } = await pendingRefund("G19Took", STALE, "Succeeded");
     assert.equal((await resolve(w.admin2, refundId, "FAILED")).json.code, "CARD_REFUND_OUTCOME_MISMATCH");
     const ok = await resolve(w.admin2, refundId, "SUCCEEDED");
@@ -326,7 +340,7 @@ describe("t181u hardening (G19): BA resolution of a stalled PENDING card refund"
     assert.equal((await resolve(w.admin2, refundId, "FAILED")).json.code, "CARD_REFUND_ALREADY_FINAL");
   });
 
-  test("stalled: requester 403, Pit Crew/agents 403, other brokerage 404; provider Pending -> refused, stays PENDING", async () => {
+  test("PENDING: requester 403, Pit Crew/agents 403, other brokerage 404; provider Pending -> refused, stays PENDING", async () => {
     const { refundId } = await pendingRefund("G19Gate", STALE, "Pending");
     assert.equal((await resolve(w.X.admin, refundId, "FAILED")).json.code, "CARD_REFUND_RESOLVER_IS_REQUESTER");
     for (const who of [w.crew, w.X.agent]) assert.equal((await resolve(who, refundId, "FAILED")).status, 403);

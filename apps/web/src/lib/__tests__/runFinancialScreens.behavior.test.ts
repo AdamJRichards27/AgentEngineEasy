@@ -255,13 +255,14 @@ test("refund resolution form: status check first; reason >= 3 chars and evidence
   // Status check (server says the stalled PENDING refund was never refunded).
   g.__rfApiAnswer = (p: string) =>
     p.endsWith("/21/provider-status")
-      ? { providerStatus: "NotFound", suggestedOutcome: "FAILED", callerMayResolve: true, resolvable: true, stalePending: true }
-      : { providerStatus: "Succeeded", suggestedOutcome: "SUCCEEDED", callerMayResolve: false, resolvable: true, stalePending: false };
+      ? { providerStatus: "NotFound", suggestedOutcome: "FAILED", callerMayResolve: true, resolvable: true }
+      : { providerStatus: "Succeeded", suggestedOutcome: "SUCCEEDED", callerMayResolve: false, resolvable: true };
   for (const id of [21, 22]) (button(rowOf(tree, id), /Check provider status/)[0]!.props!.onClick as () => void)();
   await new Promise((r) => setTimeout(r, 0));
   tree = R();
   assert.ok(g.__rfApi.some((c: { path: string }) => c.path === "/financial/card-refunds/21/provider-status"));
-  assert.match(norm(rowOf(tree, 21)), /Stalled in pending/);
+  assert.match(norm(rowOf(tree, 21)), /Pending with no recorded outcome/);
+  assert.doesNotMatch(norm(section(tree, "Card refunds")), /15 minutes|stalled|wait/i);
   assert.ok(resolveBtns(tree, 21).every((b) => b.props!.disabled === true), "evidence still missing");
   setField(tree, "cardrefund-21-reason", "  ab  ");
   tree = R();

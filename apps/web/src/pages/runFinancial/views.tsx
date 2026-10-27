@@ -917,15 +917,9 @@ export function CardRefundRow({
           >
             Check provider status
           </button>
-          {status && status.resolvable === false && (
+          {status && (
             <p className="muted">
-              This refund may still be in progress with the provider; it can be
-              resolved once it has been pending for 15 minutes.
-            </p>
-          )}
-          {status && status.resolvable !== false && (
-            <p className="muted">
-              {status.stalePending && "Stalled in pending · "}
+              {refund.status === "PENDING" && "Pending with no recorded outcome · "}
               Provider says: {status.providerStatus ?? "unavailable"}
               {status.suggestedOutcome
                 ? ` → resolve as ${status.suggestedOutcome}`

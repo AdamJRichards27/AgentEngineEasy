@@ -184,9 +184,8 @@ export interface ProviderStatus {
   providerStatus: string | null;
   suggestedOutcome: "SUCCEEDED" | "FAILED" | null;
   callerMayResolve: boolean;
-  /** Card refunds only (G19): UNKNOWN, or PENDING past the in-flight window. */
+  /** Card refunds only (G19, t525u): UNKNOWN or PENDING, resolvable by an independent BA to the provider's answer. */
   resolvable?: boolean;
-  stalePending?: boolean;
 }
 
 // ---------------------------------------------------------------------------

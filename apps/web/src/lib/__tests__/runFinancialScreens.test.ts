@@ -155,16 +155,17 @@ test("recovery actions by payment request status", () => {
   assert.match(html(createElement(RecoveryActionsView, { paymentRequestId: 9, status: "DISPUTED", onAction: noop })), /Resolve dispute/);
 });
 
-test("G19: a PENDING card refund offers status check; resolve stays disabled until the server says it is stalled and resolvable", () => {
+test("t525u: a PENDING card refund can be checked and resolved at once (no waiting period); resolve only to the provider's answer; no copy mentions a wait", () => {
   const refund: CardRefund = { id: 3, paymentRequestId: 9, cardChargeId: 4, amountCents: 5000, currency: "AUD", status: "PENDING", requestedByUserId: 1, failureMessage: null, createdAt: "2026-10-21T00:00:00.000Z", completedAt: null };
   const none = html(createElement(CardRefundRow, { refund, onCheckStatus: noop, onResolve: noop }));
   assert.match(none, /Check provider status/);
-  const fresh = html(createElement(CardRefundRow, { refund, status: { providerStatus: null, suggestedOutcome: null, callerMayResolve: true, resolvable: false, stalePending: false }, onCheckStatus: noop, onResolve: noop }));
-  assert.match(fresh, /may still be in progress/);
-  assert.equal((fresh.match(/<button[^>]*disabled=""[^>]*>Resolve as/g) ?? []).length, 2, "both resolve buttons disabled while in flight");
-  const stale = html(createElement(CardRefundRow, { refund, status: { providerStatus: "NotFound", suggestedOutcome: "FAILED", callerMayResolve: true, resolvable: true, stalePending: true }, onCheckStatus: noop, onResolve: noop }));
-  assert.match(stale, /Stalled in pending/);
-  assert.match(stale, /resolve as FAILED/);
+  assert.equal((none.match(/<button[^>]*disabled=""[^>]*>Resolve as/g) ?? []).length, 2, "disabled until the provider has answered");
+  const answered = html(createElement(CardRefundRow, { refund, status: { providerStatus: "NotFound", suggestedOutcome: "FAILED", callerMayResolve: true, resolvable: true }, onCheckStatus: noop, onResolve: noop }));
+  assert.match(answered, /Pending with no recorded outcome/);
+  assert.match(answered, /resolve as FAILED/);
+  const pendingAtProvider = html(createElement(CardRefundRow, { refund, status: { providerStatus: "Pending", suggestedOutcome: null, callerMayResolve: true, resolvable: true }, onCheckStatus: noop, onResolve: noop }));
+  assert.match(pendingAtProvider, /no definite answer; the amount stays reserved/);
+  for (const out of [none, answered, pendingAtProvider]) assert.doesNotMatch(out, /15 minutes|minutes|wait|stalled|still be in progress/i, "no waiting-period copy");
   const done = html(createElement(CardRefundRow, { refund: { ...refund, status: "SUCCEEDED" }, onCheckStatus: noop, onResolve: noop }));
   assert.doesNotMatch(done, /Check provider status/);
 });
