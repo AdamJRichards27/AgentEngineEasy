@@ -33,6 +33,13 @@ export interface MarketEventDto {
   recordDate: string;
   propertyId: number | null;
   appraisalId: number | null;
+  /**
+   * Owner t525u item 2. "record": the viewer may open the AE record.
+   * "public": a public market fact on a record the viewer may not open (another
+   * agent's listing), sent without propertyId, appraisalId or record date.
+   * Older responses omit it; then a missing propertyId means no link.
+   */
+  access?: "record" | "public";
 }
 
 export interface MarketActivityResponse {
@@ -226,12 +233,17 @@ export function formatMarketDate(iso: string, timeZone = "Australia/Brisbane"): 
 }
 
 /** True for agent-entered comparables: not AE property records, so nothing links. */
-export function isAgentEnteredEvent(e: Pick<MarketEventDto, "type" | "propertyId">): boolean {
-  return e.type === "agentEvidence" || e.propertyId == null;
+export function isAgentEnteredEvent(e: Pick<MarketEventDto, "type">): boolean {
+  return e.type === "agentEvidence";
 }
 
-export function marketPropertyHref(e: Pick<MarketEventDto, "type" | "propertyId">): string | null {
-  return !isAgentEnteredEvent(e) && e.propertyId != null ? `/grow/properties/${e.propertyId}` : null;
+/** A public market fact the viewer may not open (another agent's listing). */
+export function isPublicOnlyEvent(e: Pick<MarketEventDto, "type" | "propertyId" | "access">): boolean {
+  return !isAgentEnteredEvent(e) && (e.access === "public" || e.propertyId == null);
+}
+
+export function marketPropertyHref(e: Pick<MarketEventDto, "type" | "propertyId" | "access">): string | null {
+  return !isAgentEnteredEvent(e) && !isPublicOnlyEvent(e) && e.propertyId != null ? `/grow/properties/${e.propertyId}` : null;
 }
 
 export function buildMarketRows(events: MarketEventDto[]): MarketEventRow[] {
@@ -254,9 +266,12 @@ export interface MarketEventDetail {
   address: string;
   suburb: string;
   date: string;
-  recorded: string;
+  /** Null for public-only events: the server sends no internal record date. */
+  recorded: string | null;
   source: string;
   agentEntered: boolean;
+  /** Another agent's listing: public market facts only, no record actions. */
+  publicOnly: boolean;
   /** View Property: only for AE property records (propertyId present). */
   propertyHref: string | null;
   /** Create Follow-Up: only on an AE property record (a commitment on a linked contact). */
@@ -271,6 +286,7 @@ export function findMarketEvent(events: readonly MarketEventDto[], key: string |
 
 export function buildMarketEventDetail(e: MarketEventDto, f: MarketFilters): MarketEventDetail {
   const agentEntered = isAgentEnteredEvent(e);
+  const publicOnly = isPublicOnlyEvent(e);
   const propertyHref = marketPropertyHref(e);
   return {
     key: e.key,
@@ -279,9 +295,10 @@ export function buildMarketEventDetail(e: MarketEventDto, f: MarketFilters): Mar
     address: e.address,
     suburb: e.suburb?.trim() || "Suburb not recorded",
     date: formatMarketDate(e.eventDate),
-    recorded: formatMarketDate(e.recordDate),
+    recorded: publicOnly ? null : formatMarketDate(e.recordDate),
     source: agentEntered ? "Agent-entered comparable" : e.sourceLabel,
     agentEntered,
+    publicOnly,
     propertyHref,
     propertyId: propertyHref ? e.propertyId : null,
     closeHref: marketActivityHref({ ...f, event: undefined }),

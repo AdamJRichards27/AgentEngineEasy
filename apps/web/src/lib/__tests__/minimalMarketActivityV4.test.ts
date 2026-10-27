@@ -253,3 +253,29 @@ test("V4-8 accessibility structure: chip groups are labelled lists with aria-cur
   assert.deepEqual(view.map((l) => l.props?.href), ["/grow/properties/4"]);
   assert.match(text(v), /Source: Agent-entered comparable/);
 });
+
+test("V4-9 privacy: another agent's public listing renders public facts only, with no record links or commitment", () => {
+  const PUBLIC_EVENT: MarketEventDto = {
+    key: "public-1", type: "sold", label: "Sold", sourceLabel: "AE brokerage listing",
+    address: "6 Their Sold St", suburb: "Ashgrove", eventDate: "2026-10-22T00:00:00.000Z", recordDate: "2026-10-22T00:00:00.000Z",
+    propertyId: null, appraisalId: null, access: "public",
+  };
+  const filters: MarketFilters = { ...W, event: "public-1" };
+  assert.equal(parseMarketFilters("?event=public-1").event, "public-1", "public keys round-trip in the URL");
+  const detail = buildMarketEventDetail(PUBLIC_EVENT, filters);
+  assert.equal(detail.publicOnly, true);
+  assert.equal(detail.agentEntered, false, "a public listing is not mislabelled as an agent-entered comparable");
+  assert.equal(detail.source, "AE brokerage listing");
+  assert.equal(detail.propertyHref, null);
+  assert.equal(detail.recorded, null, "no internal record date");
+  assert.equal(buildMarketRows([PUBLIC_EVENT])[0].href, null);
+  // Even if a public event somehow carried a propertyId, it must not link.
+  assert.equal(buildMarketEventDetail({ ...PUBLIC_EVENT, propertyId: 6 }, filters).propertyHref, null);
+  const panel = expand(MarketEventDetailView({ detail }));
+  assert.deepEqual(hrefs(panel), ["/grow/market-activity"], "only Close details links");
+  assert.equal(all(panel, (e) => e.props?.["data-mm-event-source"] === "public").length, 1);
+  assert.equal(all(panel, (e) => e.props?.["data-mm-public-only"] === true).length, 1);
+  assert.doesNotMatch(text(panel), /Recorded in AE|View Property|not an AE property record/);
+  // Container renders the commitment form only when there is a record link.
+  assert.match(src("MinimalMarketActivity.tsx"), /followUp: detail\?\.propertyId != null && detail\.propertyHref \?/);
+});

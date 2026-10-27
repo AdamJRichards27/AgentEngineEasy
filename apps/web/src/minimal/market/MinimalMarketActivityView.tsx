@@ -120,14 +120,23 @@ export function MarketEventDetailView({ detail, followUp }: { detail: MarketEven
         <dd>{detail.suburb}</dd>
         <dt>Date</dt>
         <dd>{detail.date}</dd>
-        <dt>Recorded in AE</dt>
-        <dd>{detail.recorded}</dd>
+        {detail.recorded ? (
+          <>
+            <dt>Recorded in AE</dt>
+            <dd>{detail.recorded}</dd>
+          </>
+        ) : null}
         <dt>Source</dt>
-        <dd data-mm-event-source={detail.agentEntered ? "agent-entered" : "ae-record"}>{detail.source}</dd>
+        <dd data-mm-event-source={detail.agentEntered ? "agent-entered" : detail.publicOnly ? "public" : "ae-record"}>{detail.source}</dd>
       </dl>
       {detail.agentEntered ? (
         <p className="am-empty-note" data-mm-agent-entered>
           Entered by an agent as a comparable sale in an appraisal. It is not an AE property record, so there is no property to open or add a commitment against here.
+        </p>
+      ) : null}
+      {detail.publicOnly ? (
+        <p className="am-empty-note" data-mm-public-only>
+          Another agent's listing in your brokerage. Only the public market details are shown.
         </p>
       ) : null}
       <div className="mm-event-actions">
