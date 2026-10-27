@@ -56,6 +56,42 @@ export interface MarketEvent {
   lng: number | null;
 }
 
+/**
+ * Owner 28 Oct 2026 09:19 (V5 #274): other agents' public Just listed / Sold
+ * events may be shown on the map as AREA pins carrying only the event type and
+ * the suburb. Their exact coordinates never leave the server: one pin per
+ * (suburb, event type), placed at the centre of the 0.02° grid cell
+ * (about 2.2 km N-S x 2.0 km E-W at Brisbane's latitude) that contains the
+ * centroid of the contributing properties. A pin therefore reveals only a
+ * ~2 km cell, including when the suburb has a single property.
+ */
+export const AREA_PIN_GRID_DEGREES = 0.02;
+export interface MarketAreaPin {
+  key: string;
+  type: MarketEventType;
+  suburb: string;
+  lat: number;
+  lng: number;
+}
+export function snapToAreaGrid(v: number): number {
+  return Number(((Math.floor(v / AREA_PIN_GRID_DEGREES) + 0.5) * AREA_PIN_GRID_DEGREES).toFixed(2));
+}
+export function buildAreaPins(points: readonly { type: MarketEventType; suburb: string | null; lat: number | null; lng: number | null }[]): MarketAreaPin[] {
+  const groups = new Map<string, { type: MarketEventType; suburb: string; lat: number; lng: number; n: number }>();
+  for (const p of points) {
+    if (!PUBLIC_MARKET_EVENT_TYPES.includes(p.type) || p.lat == null || p.lng == null) continue;
+    const suburb = p.suburb?.trim();
+    if (!suburb) continue;
+    const k = `${p.type}|${suburb.toLowerCase()}`;
+    const g = groups.get(k) ?? { type: p.type, suburb, lat: 0, lng: 0, n: 0 };
+    g.lat += p.lat; g.lng += p.lng; g.n += 1;
+    groups.set(k, g);
+  }
+  return [...groups.values()]
+    .sort((a, b) => a.suburb.localeCompare(b.suburb, "en-AU") || a.type.localeCompare(b.type))
+    .map((g, i) => ({ key: `area-${i + 1}`, type: g.type, suburb: g.suburb, lat: snapToAreaGrid(g.lat / g.n), lng: snapToAreaGrid(g.lng / g.n) }));
+}
+
 /** Parse a stored numeric coordinate; null when missing, non-finite or out of range. */
 export function parseCoordinate(v: string | number | null | undefined, max: number): number | null {
   if (v == null || v === "") return null;
@@ -104,6 +140,8 @@ growMarketActivityRouter.get(
     const suburbOk = (s: string | null) => suburbs.length === 0 || (s != null && suburbs.includes(s.trim().toLowerCase()));
 
     const events: MarketEvent[] = [];
+    // Exact points of public-form events: server-side only, coarsened by buildAreaPins.
+    const publicPoints: { type: MarketEventType; suburb: string | null; lat: number | null; lng: number | null }[] = [];
     const propertyRows = await db
       .select({
         id: properties.id,
@@ -138,6 +176,7 @@ growMarketActivityRouter.get(
         } else if (PUBLIC_MARKET_EVENT_TYPES.includes(type)) {
           // Public form: the key is assigned after sorting and never carries the property id.
           events.push({ key: "", type, label, sourceLabel: PUBLIC_EVENT_SOURCE_LABEL, address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: at.toISOString(), propertyId: null, appraisalId: null, access: "public", lat: null, lng: null });
+          if (hasCoords) publicPoints.push({ type, suburb: p.suburb, lat, lng });
         }
         // Private types on a property the caller may not see are dropped (not counted).
       };
@@ -203,6 +242,7 @@ growMarketActivityRouter.get(
       counts,
       events: events.slice(0, EVENT_CAP),
       truncated: events.length > EVENT_CAP,
+      areaPins: buildAreaPins(publicPoints),
       providers: "none",
     });
   },

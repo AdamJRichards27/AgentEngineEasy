@@ -172,7 +172,11 @@ test("V5 map coordinates: only on AE property records the caller may open; never
     assert.equal(e.lng, null);
   }
   assert.ok(!raw(a).includes("152.98"), "another agent's coordinates leaked");
-  assert.ok(!raw(a).includes("152.97"), "another tenant's coordinates leaked");
+  // Area pins (Owner 28 Oct) sit on 0.02° grid centres, which may share one component with a real
+  // point by coincidence; the exact pair must never appear. Event rows carry no other-tenant coordinates.
+  assert.ok(!JSON.stringify(a.events).includes("152.97"), "another tenant's coordinates leaked");
+  const pins = ((a as unknown as { areaPins?: { lat: number; lng: number }[] }).areaPins ?? []);
+  assert.ok(!pins.some((p) => (p.lat === -27.44 && p.lng === 152.97) || (p.lat === -27.445 && p.lng === 152.98)), "exact pair leaked as a pin");
   // Records without coordinates send nulls, not zeros.
   const withdrawn = a.events.find((e) => e.address.includes("Mine Withdrawn St"))!;
   assert.deepEqual([withdrawn.lat, withdrawn.lng], [null, null]);
