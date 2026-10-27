@@ -92,8 +92,10 @@ function isLive(g: FinancialAmendmentAuthority, now = new Date()): boolean {
   return g.revokedAt === null && g.expiresAt > now;
 }
 
-function grantView(g: FinancialAmendmentAuthority) {
-  return { ...g, live: isLive(g) };
+// t181u hardening (#271): a grant on a completed (Closed) transaction is not
+// live (t179u D7); enforcement already refused it, the list now says so too.
+function grantView(g: FinancialAmendmentAuthority, transactionCompleted = false) {
+  return { ...g, live: !transactionCompleted && isLive(g) };
 }
 
 function grantAuditValue(g: FinancialAmendmentAuthority, extra: Record<string, unknown> = {}): string {
@@ -296,7 +298,7 @@ financialAuthoritiesRouter.get("/", requireAuth, requiresRunAccess, async (req, 
       ),
     )
     .orderBy(asc(financialAmendmentAuthorities.id));
-  res.json({ authorities: rows.map(grantView), maxGrantDays: maxAuthorityGrantDays() });
+  res.json({ authorities: rows.map((g) => grantView(g, txn.completed)), maxGrantDays: maxAuthorityGrantDays(), transactionCompleted: txn.completed });
 });
 
 financialAuthoritiesRouter.post("/:id/revoke", requireAuth, requiresRunAccess, async (req, res) => {
