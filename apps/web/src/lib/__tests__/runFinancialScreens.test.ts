@@ -154,3 +154,17 @@ test("recovery actions by payment request status", () => {
   assert.equal(html(createElement(RecoveryActionsView, { paymentRequestId: 9, status: "PAID", onAction: noop })), "");
   assert.match(html(createElement(RecoveryActionsView, { paymentRequestId: 9, status: "DISPUTED", onAction: noop })), /Resolve dispute/);
 });
+
+test("G19: a PENDING card refund offers status check; resolve stays disabled until the server says it is stalled and resolvable", () => {
+  const refund: CardRefund = { id: 3, paymentRequestId: 9, cardChargeId: 4, amountCents: 5000, currency: "AUD", status: "PENDING", requestedByUserId: 1, failureMessage: null, createdAt: "2026-10-21T00:00:00.000Z", completedAt: null };
+  const none = html(createElement(CardRefundRow, { refund, onCheckStatus: noop, onResolve: noop }));
+  assert.match(none, /Check provider status/);
+  const fresh = html(createElement(CardRefundRow, { refund, status: { providerStatus: null, suggestedOutcome: null, callerMayResolve: true, resolvable: false, stalePending: false }, onCheckStatus: noop, onResolve: noop }));
+  assert.match(fresh, /may still be in progress/);
+  assert.equal((fresh.match(/<button[^>]*disabled=""[^>]*>Resolve as/g) ?? []).length, 2, "both resolve buttons disabled while in flight");
+  const stale = html(createElement(CardRefundRow, { refund, status: { providerStatus: "NotFound", suggestedOutcome: "FAILED", callerMayResolve: true, resolvable: true, stalePending: true }, onCheckStatus: noop, onResolve: noop }));
+  assert.match(stale, /Stalled in pending/);
+  assert.match(stale, /resolve as FAILED/);
+  const done = html(createElement(CardRefundRow, { refund: { ...refund, status: "SUCCEEDED" }, onCheckStatus: noop, onResolve: noop }));
+  assert.doesNotMatch(done, /Check provider status/);
+});

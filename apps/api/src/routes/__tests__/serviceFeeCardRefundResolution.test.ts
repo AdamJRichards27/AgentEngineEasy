@@ -230,3 +230,110 @@ describe("t181u phase 2b (G15): BA resolution of UNKNOWN card refunds", { concur
     assert.equal(nr.json.code, "CARD_REFUND_NOT_UNKNOWN");
   });
 });
+
+// Owner t181u hardening (G19): a refund row left PENDING (process stopped
+// between the durable intent and recording the provider answer) is resolvable
+// by another Brokerage Administrator once it is stale (older than the in-flight
+// window), with exactly the G15 rules. No schema change: the 0043 guard already
+// allows PENDING -> SUCCEEDED/FAILED. A fresh PENDING row is in flight and refused.
+describe("t181u hardening (G19): BA resolution of a stalled PENDING card refund", { concurrency: false }, () => {
+  async function pendingRefund(tag: string, ageMs: number, provider?: "Succeeded" | "Pending") {
+    const p = await paidCharge(tag);
+    const { createHash } = await import("node:crypto");
+    const requestKey = key();
+    const [charge] = await db.select().from(financialCardCharges).where(eq(financialCardCharges.id, p.chargeId));
+    const idempotencyKey = `pcf-card-refund:${p.chargeId}:${createHash("sha256").update(requestKey).digest("hex").slice(0, 32)}`;
+    const [row] = await db
+      .insert(financialCardRefunds)
+      .values({
+        brokerageId: w.X.brokerageId,
+        paymentRequestId: p.c.requestId,
+        cardChargeId: p.chargeId,
+        requestKey,
+        idempotencyKey,
+        amountCents: p.amountCents,
+        status: "PENDING",
+        provider: charge!.provider,
+        reason: "Synthetic refund interrupted before the outcome was recorded",
+        requestedByUserId: w.X.admin.user.id,
+        createdAt: new Date(Date.now() - ageMs),
+      })
+      .returning();
+    if (provider) MockPaymentProvider.refundsByKey.set(idempotencyKey, { providerRefundRef: `mock-refund-g19-${row!.id}`, status: provider, aeRefundId: row!.id, amountCents: p.amountCents });
+    return { ...p, refundId: row!.id };
+  }
+  const STALE = 20 * 60 * 1000;
+
+  test("in flight: a fresh PENDING refund is refused (409), stays PENDING and reserved; status shows no provider answer; refusal audited", async () => {
+    const { chargeId, refundId } = await pendingRefund("G19Fresh", 1000);
+    const s = await status(w.admin2, refundId);
+    assert.equal(s.status, 200, s.raw);
+    assert.equal(s.json.refundStatus, "PENDING");
+    assert.equal(s.json.providerStatus, null, "no lookup while in flight");
+    assert.equal(s.json.resolvable, false);
+    for (const o of ["SUCCEEDED", "FAILED"]) {
+      const r = await resolve(w.admin2, refundId, o);
+      assert.equal(r.status, 409, r.raw);
+      assert.equal(r.json.code, "CARD_REFUND_IN_FLIGHT");
+    }
+    assert.equal((await refundRow(refundId)).status, "PENDING");
+    assert.equal((await call(w.baseUrl, "GET", `/financial/card-charges/${chargeId}/refunds`, w.admin2.cookie)).json.refundableCents, 0, "PENDING reserves the amount");
+    const audits = await db.select().from(auditLogs).where(and(eq(auditLogs.brokerageId, w.X.brokerageId), eq(auditLogs.userId, w.admin2.user.id)));
+    assert.ok(audits.some((a) => (a.updatedValue ?? "").includes("CARD_REFUND_IN_FLIGHT")));
+  });
+
+  test("stalled, never reached the provider: queue lists it; SUCCEEDED refused (mismatch); FAILED releases the reservation, no receipt, audit statusBefore PENDING, idempotent, never calls the provider", async () => {
+    const { c, chargeId, refundId, amountCents } = await pendingRefund("G19Never", STALE);
+    const q = await queue(w.admin2, "PENDING");
+    assert.ok(q.json.cardRefunds.some((r: { id: number }) => r.id === refundId), q.raw);
+    const s = await status(w.admin2, refundId);
+    assert.equal(s.json.providerStatus, "NotFound");
+    assert.equal(s.json.suggestedOutcome, "FAILED");
+    assert.equal(s.json.resolvable, true);
+    assert.ok(!s.raw.includes("pcf-card-refund"));
+    const spy = mock.method(paymentProvider, "refund");
+    try {
+      assert.equal((await resolve(w.admin2, refundId, "SUCCEEDED")).json.code, "CARD_REFUND_OUTCOME_MISMATCH");
+      assert.equal((await resolve(w.admin2, refundId, "FAILED", { reason: "" })).json.code, "RECOVERY_REASON_REQUIRED");
+      const rs = await Promise.all([1, 2].map(() => resolve(w.admin2, refundId, "FAILED")));
+      assert.deepEqual(rs.map((r) => r.status), [200, 200], rs.map((r) => r.raw).join("\n"));
+      assert.equal(rs.filter((r) => r.json.idempotent === false).length, 1);
+      assert.equal(spy.mock.callCount(), 0);
+    } finally {
+      spy.mock.restore();
+    }
+    assert.equal((await refundRow(refundId)).status, "FAILED");
+    assert.equal((await call(w.baseUrl, "GET", `/financial/card-charges/${chargeId}/refunds`, w.admin2.cookie)).json.refundableCents, amountCents);
+    assert.equal((await receipts(c)).filter((r) => r.kind === "REFUND").length, 0);
+    const audits = await db.select().from(auditLogs).where(and(eq(auditLogs.brokerageId, w.X.brokerageId), eq(auditLogs.action, "financial_card_refund_resolved")));
+    const mine = audits.filter((a) => (a.updatedValue ?? "").includes(`"refundId":${refundId}`));
+    assert.equal(mine.length, 1);
+    assert.ok((mine[0]!.updatedValue ?? "").includes(`"statusBefore":"PENDING"`), mine[0]!.updatedValue ?? "");
+    assert.ok(!(mine[0]!.updatedValue ?? "").includes(REASON) && !(mine[0]!.updatedValue ?? "").includes(String(amountCents)), "value-free audit");
+  });
+
+  test("stalled after the provider accepted: SUCCEEDED -> REFUND receipt and provider ref recorded; FAILED refused", async () => {
+    const { c, refundId, amountCents } = await pendingRefund("G19Took", STALE, "Succeeded");
+    assert.equal((await resolve(w.admin2, refundId, "FAILED")).json.code, "CARD_REFUND_OUTCOME_MISMATCH");
+    const ok = await resolve(w.admin2, refundId, "SUCCEEDED");
+    assert.equal(ok.status, 200, ok.raw);
+    const row = await refundRow(refundId);
+    assert.equal(row.status, "SUCCEEDED");
+    assert.equal(row.providerRefundRef, `mock-refund-g19-${refundId}`);
+    const rc = (await receipts(c)).filter((r) => r.kind === "REFUND");
+    assert.equal(rc.length, 1);
+    assert.equal(rc[0]!.amountCents, amountCents);
+    assert.equal((await resolve(w.admin2, refundId, "FAILED")).json.code, "CARD_REFUND_ALREADY_FINAL");
+  });
+
+  test("stalled: requester 403, Pit Crew/agents 403, other brokerage 404; provider Pending -> refused, stays PENDING", async () => {
+    const { refundId } = await pendingRefund("G19Gate", STALE, "Pending");
+    assert.equal((await resolve(w.X.admin, refundId, "FAILED")).json.code, "CARD_REFUND_RESOLVER_IS_REQUESTER");
+    for (const who of [w.crew, w.X.agent]) assert.equal((await resolve(who, refundId, "FAILED")).status, 403);
+    assert.equal((await resolve(w.Y.admin, refundId, "FAILED")).status, 404);
+    assert.equal((await status(w.Y.admin, refundId)).status, 404);
+    assert.equal((await status(w.admin2, refundId)).json.providerStatus, "Pending");
+    for (const o of ["SUCCEEDED", "FAILED"]) assert.equal((await resolve(w.admin2, refundId, o)).json.code, "CARD_REFUND_PROVIDER_STATUS_UNAVAILABLE");
+    assert.equal((await refundRow(refundId)).status, "PENDING");
+  });
+});

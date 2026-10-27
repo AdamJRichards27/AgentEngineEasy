@@ -195,7 +195,23 @@ export async function refundCardCharge(actor: RecoveryActor, chargeId: number, i
 //     reserved amount is released (no receipt);
 //   * idempotent (a replay of the applied resolution is 200 idempotent:true);
 //   * never calls the provider refund again; value-free audit.
+// Owner t181u hardening (G19): a PENDING row whose outcome was never recorded
+// (the process stopped between the durable intent and step 3) is resolved the
+// same way once it is older than the in-flight window; a younger PENDING row
+// may still have a provider call in progress and is refused
+// (CARD_REFUND_IN_FLIGHT). No schema change: the 0043 guard already permits
+// PENDING -> SUCCEEDED/FAILED, and step 3's update is conditional on PENDING,
+// so a late provider answer never overwrites a resolution.
 export type CardRefundResolution = "SUCCEEDED" | "FAILED";
+export const STALE_PENDING_REFUND_MS = 15 * 60 * 1000;
+
+function stalePending(row: Pick<FinancialCardRefund, "status" | "createdAt">, now = Date.now()): boolean {
+  return row.status === "PENDING" && now - new Date(row.createdAt).getTime() >= STALE_PENDING_REFUND_MS;
+}
+/** UNKNOWN, or PENDING beyond the in-flight window. */
+function resolvable(row: Pick<FinancialCardRefund, "status" | "createdAt">): boolean {
+  return row.status === "UNKNOWN" || stalePending(row);
+}
 
 async function peekRefund(actor: RecoveryActor, refundId: number) {
   if (!Number.isSafeInteger(refundId) || refundId <= 0) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
@@ -214,11 +230,14 @@ export async function listCardRefundsForBrokerage(brokerageId: number, status?: 
 
 export async function cardRefundProviderStatusFor(actor: RecoveryActor, refundId: number) {
   const row = await peekRefund(actor, refundId);
-  const providerStatus: CardRefundProviderStatus | null = row.status === "UNKNOWN" ? lookupCardRefundProviderStatus(row.idempotencyKey) : null;
+  const canResolve = resolvable(row);
+  const providerStatus: CardRefundProviderStatus | null = canResolve ? lookupCardRefundProviderStatus(row.idempotencyKey) : null;
   return {
     refundId: row.id,
     chargeId: row.cardChargeId,
     refundStatus: row.status,
+    resolvable: canResolve,
+    stalePending: stalePending(row),
     providerStatus,
     suggestedOutcome: providerStatus ? refundOutcomeForProviderStatus(providerStatus) : null,
     callerMayResolve: row.requestedByUserId !== actor.id,
@@ -231,8 +250,8 @@ export async function resolveUnknownCardRefund(actor: RecoveryActor, refundId: n
     throw new RecoveryRefusal("CARD_REFUND_RESOLVER_IS_REQUESTER", "The person who requested this refund cannot resolve it; another Brokerage Administrator must.", peek.paymentRequestId);
   }
   // Read-only provider answer, outside any lock (mock only; anything else fails closed below).
-  const providerStatus: CardRefundProviderStatus = peek.status === "UNKNOWN" ? lookupCardRefundProviderStatus(peek.idempotencyKey) : "Unavailable";
-  const providerRef = peek.status === "UNKNOWN" ? mockRefundRefFor(peek.idempotencyKey) : null;
+  const providerStatus: CardRefundProviderStatus = resolvable(peek) ? lookupCardRefundProviderStatus(peek.idempotencyKey) : "Unavailable";
+  const providerRef = resolvable(peek) ? mockRefundRefFor(peek.idempotencyKey) : null;
 
   const result = await db.transaction(async (tx) => {
     // Lock order: request, charge, refund (same as the refund path).
@@ -240,13 +259,16 @@ export async function resolveUnknownCardRefund(actor: RecoveryActor, refundId: n
     await tx.select({ id: financialCardCharges.id }).from(financialCardCharges).where(eq(financialCardCharges.id, peek.cardChargeId)).for("update");
     const [row] = await tx.select().from(financialCardRefunds).where(eq(financialCardRefunds.id, peek.id)).for("update");
     if (!row || row.brokerageId !== actor.brokerageId) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
-    if (row.status !== "UNKNOWN") {
+    if (row.status === "PENDING" && !stalePending(row)) {
+      throw new RecoveryRefusal("CARD_REFUND_IN_FLIGHT", "This refund may still be in progress with the provider; it can be resolved once it has been pending for 15 minutes.", pr.id, pr.propertyId);
+    }
+    if (row.status !== "UNKNOWN" && row.status !== "PENDING") {
       const events = await tx
         .select({ metadata: financialLedgerEvents.metadata })
         .from(financialLedgerEvents)
         .where(and(eq(financialLedgerEvents.sourceRecordType, "PAYMENT_REQUEST"), eq(financialLedgerEvents.sourceRecordId, String(pr.id)), eq(financialLedgerEvents.eventType, "PC_FEE_CARD_REFUND_RESOLVED")));
       const byUs = events.find((e) => (e.metadata as { refundId?: number } | null)?.refundId === row.id);
-      if (!byUs) throw new RecoveryRefusal("CARD_REFUND_NOT_UNKNOWN", "Only a refund with an UNKNOWN outcome is resolved here.", pr.id, pr.propertyId);
+      if (!byUs) throw new RecoveryRefusal("CARD_REFUND_NOT_UNKNOWN", "Only a refund with an UNKNOWN outcome (or one stalled in PENDING) is resolved here.", pr.id, pr.propertyId);
       if (row.status === outcome) return { idempotent: true as const, pr, refund: row };
       throw new RecoveryRefusal("CARD_REFUND_ALREADY_FINAL", "This refund has already been resolved.", pr.id, pr.propertyId);
     }
@@ -263,8 +285,9 @@ export async function resolveUnknownCardRefund(actor: RecoveryActor, refundId: n
         failureMessage: outcome === "FAILED" ? "Refund not taken by the provider (confirmed by a Brokerage Administrator)" : null,
         completedAt: new Date(),
       })
-      .where(and(eq(financialCardRefunds.id, row.id), eq(financialCardRefunds.status, "UNKNOWN")))
+      .where(and(eq(financialCardRefunds.id, row.id), eq(financialCardRefunds.status, row.status)))
       .returning();
+    if (!updated) throw new RecoveryRefusal("CARD_REFUND_STATE_CHANGED", "This refund changed while it was being resolved; check its status again.", pr.id, pr.propertyId);
     const meta = { recoveryAction: "resolve_card_refund", chargeId: row.cardChargeId, refundId: row.id, refundAmountCents: row.amountCents, status: outcome };
     // The same outcome events as the direct refund path, so receipts and the statement reconciliation see one source.
     await ledgerTx(tx, pr, outcome === "SUCCEEDED" ? "PC_FEE_CARD_REFUNDED" : "PC_FEE_CARD_REFUND_FAILED", actor, reason, meta);
@@ -274,7 +297,7 @@ export async function resolveUnknownCardRefund(actor: RecoveryActor, refundId: n
       actor,
       "financial_card_refund_resolved",
       pr,
-      auditValue({ paymentRequestId: pr.id, chargeId: row.cardChargeId, refundId: row.id, outcome, providerStatus, statusBefore: "UNKNOWN", statusAfter: outcome }, evidence),
+      auditValue({ paymentRequestId: pr.id, chargeId: row.cardChargeId, refundId: row.id, outcome, providerStatus, statusBefore: row.status, statusAfter: outcome }, evidence),
     );
     return { idempotent: false as const, pr, refund: updated! };
   });

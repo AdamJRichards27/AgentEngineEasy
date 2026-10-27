@@ -907,7 +907,7 @@ export function CardRefundRow({
         {refund.status}
       </span>{" "}
       · {formatAud(refund.amountCents, refund.currency)}
-      {refund.status === "UNKNOWN" && (
+      {(refund.status === "UNKNOWN" || refund.status === "PENDING") && (
         <div className="stack">
           <button
             className="btn btn-small btn-secondary"
@@ -917,8 +917,15 @@ export function CardRefundRow({
           >
             Check provider status
           </button>
-          {status && (
+          {status && status.resolvable === false && (
             <p className="muted">
+              This refund may still be in progress with the provider; it can be
+              resolved once it has been pending for 15 minutes.
+            </p>
+          )}
+          {status && status.resolvable !== false && (
+            <p className="muted">
+              {status.stalePending && "Stalled in pending · "}
               Provider says: {status.providerStatus ?? "unavailable"}
               {status.suggestedOutcome
                 ? ` → resolve as ${status.suggestedOutcome}`

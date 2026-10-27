@@ -200,6 +200,7 @@ export function BaPaymentQueues({ role }: { role: string | null | undefined }) {
           Status
           <select value={refundFilter} onChange={(e) => setRefundFilter(e.target.value)}>
             <option value="UNKNOWN">Unknown outcome</option>
+            <option value="PENDING">Pending (check for stalled)</option>
             <option value="SUCCEEDED">Succeeded</option>
             <option value="FAILED">Failed</option>
             <option value="">All</option>
