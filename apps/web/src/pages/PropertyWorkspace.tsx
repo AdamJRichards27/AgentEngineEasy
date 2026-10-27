@@ -50,6 +50,7 @@ import { FinancialSummarySection } from "../components/FinancialSummarySection";
 // component with anchor="contact". See that component's own header comment for why this is a
 // shared panel rather than a second bespoke screen.
 import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
+import { RunTransactionFinancials } from "./runFinancial/containers";
 
 interface PropertyOverview {
   id: number;
@@ -1088,6 +1089,11 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           />
         </section>
       )}
+
+      {/* Owner t181u phase 2b item 6: Run financial screens (settlement
+          statement + reconciliation, Pit Crew service fee, receipts). Its own
+          sections; role-gated in the UI, server-authoritative. */}
+      {transaction && <RunTransactionFinancials transactionId={transaction.id} role={user?.role} />}
 
       {/* Agent Engine 2.0 — Property Launch & Campaign Coordination. Only
           rendered once a Launch Plan exists (auto-proposed on

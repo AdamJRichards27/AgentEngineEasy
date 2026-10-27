@@ -46,6 +46,7 @@ import {
   paymentRequestStatusLabel,
   paymentRequestStatusPillClass,
 } from "../lib/financial";
+import { BaPaymentQueues, PaymentRequestRecovery } from "./runFinancial/containers";
 
 export default function FinancialOperations() {
   const { user, isLoading: sessionLoading } = useSession();
@@ -78,6 +79,8 @@ export default function FinancialOperations() {
 
       <FinancialExceptionsPanel />
       <PaymentRequestsPanel />
+      {/* Owner t181u phase 2b item 6: BA card charge/refund queues (mock provider). */}
+      <BaPaymentQueues role={user?.role} />
       <AuditReturnRemindersPanel />
     </div>
   );
@@ -222,6 +225,7 @@ function PaymentRequestsPanel() {
                 {pr.paidAt && `${pr.noticeSentAt ? " · " : ""}Paid ${formatDate(pr.paidAt)}`}
                 {pr.failureReason && <span className="error-text">{" · "}{pr.failureReason}</span>}
               </div>
+              {pr.kind === "PC_SUCCESS_FEE" && <PaymentRequestRecovery role="Brokerage Administrator" paymentRequestId={pr.id} status={pr.status} />}
             </li>
           ))}
         </ul>
