@@ -22,7 +22,7 @@ import {
   type RecoveryActor,
   type RecoveryResult,
 } from "../lib/financial/recovery.js";
-import { listCardRefunds, refundCardCharge } from "../lib/financial/cardRefunds.js";
+import { cardRefundProviderStatusFor, listCardRefunds, listCardRefundsForBrokerage, refundCardCharge, resolveUnknownCardRefund } from "../lib/financial/cardRefunds.js";
 
 export const financialRecoveryRouter = Router();
 const requireBrokerageAdmin = [requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), requireEntitlement("run.access")] as const;
@@ -131,6 +131,41 @@ financialRecoveryRouter.post("/financial/card-charges/:id/refunds", ...requireBr
   } catch (err) {
     if (!(err instanceof RecoveryRefusal)) throw err;
     await auditRecoveryOutcome(actor, "refund_card_charge", { refused: err }, id);
+    res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
+});
+
+// t181u phase 2b (G15): BA resolution of UNKNOWN card refunds (mock provider status only; requester never resolves).
+const refundResolveSchema = z.object({ ...evidenceShape, outcome: z.enum(["SUCCEEDED", "FAILED"]) }).strict();
+
+financialRecoveryRouter.get("/financial/card-refunds", ...requireBrokerageAdmin, async (req, res) => {
+  const status = typeof req.query.status === "string" && ["PENDING", "SUCCEEDED", "FAILED", "UNKNOWN"].includes(req.query.status) ? req.query.status : undefined;
+  res.json({ cardRefunds: await listCardRefundsForBrokerage(req.authedUser!.brokerageId, status) });
+});
+
+financialRecoveryRouter.get("/financial/card-refunds/:id/provider-status", ...requireBrokerageAdmin, async (req, res) => {
+  try {
+    res.json(await cardRefundProviderStatusFor(actorOf(req), Number(req.params.id)));
+  } catch (err) {
+    if (!(err instanceof RecoveryRefusal)) throw err;
+    res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
+});
+
+financialRecoveryRouter.post("/financial/card-refunds/:id/resolve", ...requireBrokerageAdmin, async (req, res) => {
+  const parsed = refundResolveSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const id = Number(req.params.id);
+  const actor = actorOf(req);
+  try {
+    const result = await resolveUnknownCardRefund(actor, id, parsed.data.outcome, parsed.data);
+    if (result.idempotent) {
+      await auditRecoveryOutcome(actor, "resolve_card_refund", { replayed: { idempotent: true, paymentRequest: { id: result.paymentRequestId, status: result.refund.status, propertyId: null } as never, statusBefore: result.refund.status } }, id);
+    }
+    res.json(result);
+  } catch (err) {
+    if (!(err instanceof RecoveryRefusal)) throw err;
+    await auditRecoveryOutcome(actor, "resolve_card_refund", { refused: err }, id);
     res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
   }
 });

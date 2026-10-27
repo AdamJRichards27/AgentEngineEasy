@@ -38,7 +38,7 @@ import { syncReceiptsForPaymentRequest } from "./receipts.js";
 
 export const RECOVERY_POLICY = "t181u";
 
-export type RecoveryAction = "waive" | "write_off" | "resolve_dispute" | "resolve_card_charge" | "refund_card_charge";
+export type RecoveryAction = "waive" | "write_off" | "resolve_dispute" | "resolve_card_charge" | "refund_card_charge" | "resolve_card_refund";
 export type DisputeOutcome = "PAYABLE" | "WAIVED" | "WRITTEN_OFF";
 export type CardChargeResolution = "SUCCEEDED" | "FAILED";
 
@@ -64,7 +64,12 @@ export type RecoveryCode =
   | "CARD_REFUND_CHARGE_NOT_REFUNDABLE"
   | "CARD_REFUND_EXCEEDS_REFUNDABLE"
   | "CARD_REFUND_REFUNDER_IS_INITIATOR"
-  | "CARD_REFUND_KEY_REUSED";
+  | "CARD_REFUND_KEY_REUSED"
+  | "CARD_REFUND_NOT_UNKNOWN"
+  | "CARD_REFUND_ALREADY_FINAL"
+  | "CARD_REFUND_RESOLVER_IS_REQUESTER"
+  | "CARD_REFUND_OUTCOME_MISMATCH"
+  | "CARD_REFUND_PROVIDER_STATUS_UNAVAILABLE";
 
 const STATUS_FOR: Record<RecoveryCode, number> = {
   RECOVERY_NOT_FOUND: 404,
@@ -89,6 +94,11 @@ const STATUS_FOR: Record<RecoveryCode, number> = {
   CARD_REFUND_EXCEEDS_REFUNDABLE: 409,
   CARD_REFUND_REFUNDER_IS_INITIATOR: 403,
   CARD_REFUND_KEY_REUSED: 409,
+  CARD_REFUND_NOT_UNKNOWN: 409,
+  CARD_REFUND_ALREADY_FINAL: 409,
+  CARD_REFUND_RESOLVER_IS_REQUESTER: 403,
+  CARD_REFUND_OUTCOME_MISMATCH: 409,
+  CARD_REFUND_PROVIDER_STATUS_UNAVAILABLE: 409,
 };
 
 export class RecoveryRefusal extends Error {

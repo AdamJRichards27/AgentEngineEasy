@@ -26,8 +26,9 @@
 // are tracked per charge and shown on receipts and the statement
 // reconciliation section.
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
-import { db, financialCardCharges, financialCardRefunds, type FinancialCardRefund, type FinancialPaymentRequest } from "@aee/db";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { db, financialCardCharges, financialCardRefunds, financialLedgerEvents, type FinancialCardRefund, type FinancialPaymentRequest } from "@aee/db";
+import { lookupCardRefundProviderStatus, mockRefundRefFor, refundOutcomeForProviderStatus, type CardRefundProviderStatus } from "./cardRefundStatus.js";
 import { RefundRejectedError } from "@aee/integration-payments";
 import { paymentProvider } from "../paymentProvider.js";
 import { cardProviderPermitted } from "./pcFeeCardCharges.js";
@@ -182,4 +183,103 @@ export async function refundCardCharge(actor: RecoveryActor, chargeId: number, i
   if (updated.status === "SUCCEEDED") await syncReceiptsForPaymentRequest(pr.id);
   const t = await totals(db, charge.id, charge.amountCents);
   return { idempotent: false, refund: publicRefund(updated), ...t };
+}
+
+// ---------------------------------------------------------------------------
+// Owner t181u phase 2b (G15): Brokerage Administrator resolution of an
+// UNKNOWN card refund, mirroring card-charge resolution (N46/N47):
+//   * read-only, namespaced mock provider status (lib/financial/cardRefundStatus.ts);
+//   * the resolution must match the provider; no definite answer -> refused;
+//   * the BA who requested the refund never resolves it;
+//   * SUCCEEDED -> PC_FEE_CARD_REFUNDED + REFUND receipt; FAILED -> the
+//     reserved amount is released (no receipt);
+//   * idempotent (a replay of the applied resolution is 200 idempotent:true);
+//   * never calls the provider refund again; value-free audit.
+export type CardRefundResolution = "SUCCEEDED" | "FAILED";
+
+async function peekRefund(actor: RecoveryActor, refundId: number) {
+  if (!Number.isSafeInteger(refundId) || refundId <= 0) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  const [row] = await db.select().from(financialCardRefunds).where(and(eq(financialCardRefunds.id, refundId), eq(financialCardRefunds.brokerageId, actor.brokerageId)));
+  if (!row) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  return row;
+}
+
+/** BA work queue of card refunds (no provider or request keys). */
+export async function listCardRefundsForBrokerage(brokerageId: number, status?: string) {
+  const conds = [eq(financialCardRefunds.brokerageId, brokerageId)];
+  if (status) conds.push(inArray(financialCardRefunds.status, [status]));
+  const rows = await db.select().from(financialCardRefunds).where(and(...conds)).orderBy(desc(financialCardRefunds.id)).limit(200);
+  return rows.map(publicRefund);
+}
+
+export async function cardRefundProviderStatusFor(actor: RecoveryActor, refundId: number) {
+  const row = await peekRefund(actor, refundId);
+  const providerStatus: CardRefundProviderStatus | null = row.status === "UNKNOWN" ? lookupCardRefundProviderStatus(row.idempotencyKey) : null;
+  return {
+    refundId: row.id,
+    chargeId: row.cardChargeId,
+    refundStatus: row.status,
+    providerStatus,
+    suggestedOutcome: providerStatus ? refundOutcomeForProviderStatus(providerStatus) : null,
+    callerMayResolve: row.requestedByUserId !== actor.id,
+  };
+}
+
+export async function resolveUnknownCardRefund(actor: RecoveryActor, refundId: number, outcome: CardRefundResolution, input: RecoveryInput) {
+  const peek = await peekRefund(actor, refundId);
+  if (peek.requestedByUserId === actor.id) {
+    throw new RecoveryRefusal("CARD_REFUND_RESOLVER_IS_REQUESTER", "The person who requested this refund cannot resolve it; another Brokerage Administrator must.", peek.paymentRequestId);
+  }
+  // Read-only provider answer, outside any lock (mock only; anything else fails closed below).
+  const providerStatus: CardRefundProviderStatus = peek.status === "UNKNOWN" ? lookupCardRefundProviderStatus(peek.idempotencyKey) : "Unavailable";
+  const providerRef = peek.status === "UNKNOWN" ? mockRefundRefFor(peek.idempotencyKey) : null;
+
+  const result = await db.transaction(async (tx) => {
+    // Lock order: request, charge, refund (same as the refund path).
+    const pr = await lockRequest(tx, actor, peek.paymentRequestId);
+    await tx.select({ id: financialCardCharges.id }).from(financialCardCharges).where(eq(financialCardCharges.id, peek.cardChargeId)).for("update");
+    const [row] = await tx.select().from(financialCardRefunds).where(eq(financialCardRefunds.id, peek.id)).for("update");
+    if (!row || row.brokerageId !== actor.brokerageId) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+    if (row.status !== "UNKNOWN") {
+      const events = await tx
+        .select({ metadata: financialLedgerEvents.metadata })
+        .from(financialLedgerEvents)
+        .where(and(eq(financialLedgerEvents.sourceRecordType, "PAYMENT_REQUEST"), eq(financialLedgerEvents.sourceRecordId, String(pr.id)), eq(financialLedgerEvents.eventType, "PC_FEE_CARD_REFUND_RESOLVED")));
+      const byUs = events.find((e) => (e.metadata as { refundId?: number } | null)?.refundId === row.id);
+      if (!byUs) throw new RecoveryRefusal("CARD_REFUND_NOT_UNKNOWN", "Only a refund with an UNKNOWN outcome is resolved here.", pr.id, pr.propertyId);
+      if (row.status === outcome) return { idempotent: true as const, pr, refund: row };
+      throw new RecoveryRefusal("CARD_REFUND_ALREADY_FINAL", "This refund has already been resolved.", pr.id, pr.propertyId);
+    }
+    const reason = cleanReason(input, pr.id, pr.propertyId);
+    const evidence = await evidenceFor(tx, input, pr);
+    const expected = refundOutcomeForProviderStatus(providerStatus);
+    if (expected == null) throw new RecoveryRefusal("CARD_REFUND_PROVIDER_STATUS_UNAVAILABLE", "The payment provider has no definite answer for this refund; it stays unresolved and reserved.", pr.id, pr.propertyId);
+    if (expected !== outcome) throw new RecoveryRefusal("CARD_REFUND_OUTCOME_MISMATCH", `The payment provider reports this refund as ${providerStatus}; the resolution must match it.`, pr.id, pr.propertyId);
+    const [updated] = await tx
+      .update(financialCardRefunds)
+      .set({
+        status: outcome,
+        providerRefundRef: outcome === "SUCCEEDED" ? (providerRef ?? row.providerRefundRef) : row.providerRefundRef,
+        failureMessage: outcome === "FAILED" ? "Refund not taken by the provider (confirmed by a Brokerage Administrator)" : null,
+        completedAt: new Date(),
+      })
+      .where(and(eq(financialCardRefunds.id, row.id), eq(financialCardRefunds.status, "UNKNOWN")))
+      .returning();
+    const meta = { recoveryAction: "resolve_card_refund", chargeId: row.cardChargeId, refundId: row.id, refundAmountCents: row.amountCents, status: outcome };
+    // The same outcome events as the direct refund path, so receipts and the statement reconciliation see one source.
+    await ledgerTx(tx, pr, outcome === "SUCCEEDED" ? "PC_FEE_CARD_REFUNDED" : "PC_FEE_CARD_REFUND_FAILED", actor, reason, meta);
+    await ledgerTx(tx, pr, "PC_FEE_CARD_REFUND_RESOLVED", actor, reason, { ...meta, outcome, providerStatus, evidence });
+    await auditTx(
+      tx,
+      actor,
+      "financial_card_refund_resolved",
+      pr,
+      auditValue({ paymentRequestId: pr.id, chargeId: row.cardChargeId, refundId: row.id, outcome, providerStatus, statusBefore: "UNKNOWN", statusAfter: outcome }, evidence),
+    );
+    return { idempotent: false as const, pr, refund: updated! };
+  });
+  if (!result.idempotent && result.refund.status === "SUCCEEDED") await syncReceiptsForPaymentRequest(result.pr.id);
+  const [charge] = await db.select({ amountCents: financialCardCharges.amountCents }).from(financialCardCharges).where(eq(financialCardCharges.id, result.refund.cardChargeId));
+  const t = await totals(db, result.refund.cardChargeId, charge?.amountCents ?? 0);
+  return { idempotent: result.idempotent, refund: publicRefund(result.refund), ...t, paymentRequestId: result.pr.id };
 }
