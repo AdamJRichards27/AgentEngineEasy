@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { Suspense, lazy, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Redirect, useLocation, useSearch } from "wouter";
 import { apiErrorMessage, apiFetch } from "../../lib/api";
@@ -21,6 +21,7 @@ import {
 } from "./minimalMarketActivityModel";
 import { MARKET_EVENT_PANEL_ID, MARKET_EVENT_TITLE_ID, MinimalMarketActivityView } from "./MinimalMarketActivityView";
 import { MinimalMarketEventFollowUp } from "./MinimalMarketEventFollowUp";
+import { marketMapPoints } from "./marketMap";
 import "../momentum/momentum.css";
 import "./market.css";
 
@@ -31,6 +32,9 @@ import "./market.css";
 //   GET /parties/by-property/:id, POST /grow/contacts/:partyId/commitments  (Create Follow-Up)
 // Flag off (404) or no grow.access (403): the page does not exist → back to /grow.
 // The market query waits for the area to resolve, so flag-off shows nothing at all.
+
+// V5: the map library and its CSS load only when the Map tab is opened.
+const MinimalMarketMapCanvas = lazy(() => import("./MinimalMarketMapCanvas"));
 
 export default function MinimalMarketActivity() {
   const search = useSearch();
@@ -79,6 +83,19 @@ export default function MinimalMarketActivity() {
     return () => panel?.removeEventListener("keydown", onKey);
   }, [detail?.key, detail?.closeHref]);
 
+  function mapState(events: Parameters<typeof marketMapPoints>[0]) {
+    const points = marketMapPoints(events, filters);
+    return {
+      points,
+      total: events.length,
+      canvas: (
+        <Suspense fallback={<p className="am-empty-note" role="status">Loading map…</p>}>
+          <MinimalMarketMapCanvas points={points} selectedKey={detail?.key ?? null} />
+        </Suspense>
+      ),
+    };
+  }
+
   if (q.isError && isFeatureHiddenError(q.error)) return <Redirect to="/grow" replace />;
   // Nothing (not even chips) until the flag-gated API has answered.
   if (!areaReady || q.isLoading) return <MinimalMarketActivityView filters={filters} state={{ kind: "loading" }} />;
@@ -105,6 +122,7 @@ export default function MinimalMarketActivity() {
         followUp: detail?.propertyId != null && detail.propertyHref ? (
           <MinimalMarketEventFollowUp key={detail.key} detail={detail} propertyId={detail.propertyId} propertyHref={detail.propertyHref} />
         ) : null,
+        map: filters.view === "map" ? mapState(data.events) : undefined,
       }}
     />
   );

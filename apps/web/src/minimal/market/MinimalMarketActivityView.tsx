@@ -14,6 +14,7 @@ import {
   type MarketFilters,
 } from "./minimalMarketActivityModel";
 import { COMMITMENT_ADD_LABEL, MARKET_COMMITMENT_HINT } from "./minimalMarketActivityModel";
+import { MAP_PRIVACY_NOTICE, OSM_REPORT_ISSUE_URL, mapCoverageNote, marketViewTabs, type MarketMapPoint } from "./marketMap";
 
 // Presentational AE Minimal A Market Activity list (V4: area chips + event
 // detail panel). No hooks, no network.
@@ -32,6 +33,8 @@ export type MinimalMarketActivityState =
       detail?: MarketEventDetail | null;
       /** v1.0 "Create Follow-Up": the Add commitment block for an open AE property event (container-rendered). */
       followUp?: unknown;
+      /** V5 Map tab (filters.view === "map"): points the viewer may see, and the lazily loaded map (container-rendered). */
+      map?: { points: MarketMapPoint[]; total: number; canvas: unknown };
     };
 
 export interface MarketAreaProps {
@@ -41,7 +44,7 @@ export interface MarketAreaProps {
 
 function chipFilters(filters: MarketFilters): MarketFilters {
   // Changing a range or type chip closes the detail panel but keeps the area.
-  return { range: filters.range, type: filters.type, ...(filters.area ? { area: filters.area } : {}) };
+  return { range: filters.range, type: filters.type, ...(filters.area ? { area: filters.area } : {}), ...(filters.view ? { view: filters.view } : {}) };
 }
 
 function Frame({ filters, area, children }: { filters: MarketFilters; area?: MarketAreaProps; children: unknown }) {
@@ -89,6 +92,15 @@ function Frame({ filters, area, children }: { filters: MarketFilters; area?: Mar
           <li key={t}>
             <Link href={marketActivityHref({ ...base, type: t })} className="am-chip" aria-current={filters.type === t ? "page" : undefined}>
               {MARKET_TYPE_LABELS[t]}
+            </Link>
+          </li>
+        ))}
+      </ul>
+      <ul className="mm-tabs" aria-label="View" data-mm-view-tabs>
+        {marketViewTabs(filters).map((t) => (
+          <li key={t.key}>
+            <Link href={t.href} className="am-chip" aria-current={t.current ? "page" : undefined} data-mm-view-tab={t.key}>
+              {t.label}
             </Link>
           </li>
         ))}
@@ -309,7 +321,9 @@ export function MinimalMarketActivityView({ state, filters, area }: { state: Min
       </section>
       <div className={detail ? "mm-market-layout has-panel" : "mm-market-layout"}>
         {detail ? <MarketEventDetailView detail={detail} followUp={state.followUp} /> : null}
-        {state.rows.length === 0 ? (
+        {filters.view === "map" ? (
+          <MarketMapSection map={state.map} />
+        ) : state.rows.length === 0 ? (
           <section className="am-rail-section">
             <p className="am-empty-note">No activity in your AE records for this range.</p>
           </section>
@@ -355,5 +369,33 @@ export function MinimalMarketActivityView({ state, filters, area }: { state: Min
       </div>
       {state.truncated ? <p className="am-empty-note">Showing the latest 100 events. Narrow the range or type to see the rest.</p> : null}
     </Frame>
+  );
+}
+
+/** V5 Map tab: privacy notice (exact Owner text), the map, mapped-event links for keyboard users, and the OSM issue link. */
+export function MarketMapSection({ map }: { map?: { points: MarketMapPoint[]; total: number; canvas: unknown } }) {
+  const points = map?.points ?? [];
+  return (
+    <section className="am-rail-section mm-market-map" aria-label="Market map" data-mm-map>
+      <p className="mm-map-privacy" data-mm-map-privacy>{MAP_PRIVACY_NOTICE}</p>
+      {points.length > 0 ? (map?.canvas as never) : null}
+      <p className="am-empty-note" data-mm-map-coverage>{mapCoverageNote(map?.total ?? 0, points.length)}</p>
+      {points.length > 0 ? (
+        <ul className="mm-map-points" aria-label="Mapped events">
+          {points.map((p) => (
+            <li key={p.key}>
+              <Link href={p.detailHref} className="mm-event-details" data-mm-map-point={p.key} aria-label={`Details: ${p.label} at ${p.address}`}>
+                {p.label} · {p.address}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="mm-map-credit">
+        <a href={OSM_REPORT_ISSUE_URL} target="_blank" rel="noopener noreferrer" data-mm-map-report>
+          Report a map issue
+        </a>
+      </p>
+    </section>
   );
 }

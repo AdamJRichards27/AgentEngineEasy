@@ -65,15 +65,15 @@ before(async () => {
   await grant(brokerageId, "grow.access");
   await grant(OTHER.brokerageId, "grow.access");
   const now = Date.now();
-  ids.a1Listed = await property(agent1.cookie, "1 Mine Listed St", "Paddington", { listingStatus: "Listed", campaignStartDate: new Date(now - 2 * day) });
+  ids.a1Listed = await property(agent1.cookie, "1 Mine Listed St", "Paddington", { listingStatus: "Listed", campaignStartDate: new Date(now - 2 * day), latitude: "-27.4600000", longitude: "153.0000000" });
   ids.a1Withdrawn = await property(agent1.cookie, "2 Mine Withdrawn St", "Paddington", { listingStatus: "Withdrawn", campaignStartDate: new Date(now - 40 * day), campaignEndDate: new Date(now - 3 * day) });
-  ids.a2Listed = await property(agent2.cookie, "5 Their Listed St", "Ashgrove", { listingStatus: "Listed", campaignStartDate: new Date(now - 1 * day) });
+  ids.a2Listed = await property(agent2.cookie, "5 Their Listed St", "Ashgrove", { listingStatus: "Listed", campaignStartDate: new Date(now - 1 * day), latitude: "-27.4450000", longitude: "152.9800000" });
   ids.a2Sold = await property(agent2.cookie, "6 Their Sold St", "Ashgrove", { listingStatus: "Sold", campaignStartDate: new Date(now - 50 * day), campaignEndDate: new Date(now - 2 * day) });
   ids.a2Withdrawn = await property(agent2.cookie, "7 Their Withdrawn St", "Ashgrove", { listingStatus: "Withdrawn", campaignStartDate: new Date(now - 50 * day), campaignEndDate: new Date(now - 2 * day) });
   const mine = await comparable(ids.a1Listed, "8 Mine Comparable Ct");
   const theirs = await comparable(ids.a2Listed, "9 Their Comparable Ct");
   ids.mineComp = mine.compId; ids.theirComp = theirs.compId; ids.theirAppraisal = theirs.appraisalId;
-  ids.foreign = await property(OTHER.agent.cookie, "99 Foreign St", "Ashgrove", { listingStatus: "Listed", campaignStartDate: new Date(now - 1 * day) });
+  ids.foreign = await property(OTHER.agent.cookie, "99 Foreign St", "Ashgrove", { listingStatus: "Listed", campaignStartDate: new Date(now - 1 * day), latitude: "-27.4400000", longitude: "152.9700000" });
 });
 
 after(async () => {
@@ -83,7 +83,7 @@ after(async () => {
   await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));
 });
 
-type Ev = { key: string; type: string; address: string; suburb: string | null; sourceLabel: string; eventDate: string; recordDate: string; propertyId: number | null; appraisalId: number | null; access?: string };
+type Ev = { key: string; type: string; address: string; suburb: string | null; sourceLabel: string; eventDate: string; recordDate: string; propertyId: number | null; appraisalId: number | null; access?: string; lat?: number | null; lng?: number | null };
 type Body = { counts: Record<string, number>; events: Ev[] };
 async function list(u: DevLoginResult, q = "?range=30d"): Promise<Body> {
   const res = await fetch(`${baseUrl}/api/grow/market-activity${q}`, { headers: { cookie: u.cookie } });
@@ -160,4 +160,30 @@ test("cross-tenant: another brokerage sees only its own events, never brokerage 
   assert.deepEqual(b.events.map((e) => e.address.replace(` ${suffix}`, "")), ["99 Foreign St"]);
   const a = await list(agent1);
   assert.ok(!has(a, "Foreign"));
+});
+
+test("V5 map coordinates: only on AE property records the caller may open; never public-form, comparables or other tenants", async () => {
+  process.env.GROW_MARKET_ACTIVITY_ENABLED = "true";
+  const a = await list(agent1);
+  const mine = a.events.find((e) => e.address.includes("Mine Listed St"))!;
+  assert.deepEqual([mine.lat, mine.lng], [-27.46, 153]);
+  for (const e of a.events.filter((x) => x.access === "public" || x.type === "agentEvidence")) {
+    assert.equal(e.lat, null, `${e.key}: coordinates on a non-record event`);
+    assert.equal(e.lng, null);
+  }
+  assert.ok(!raw(a).includes("152.98"), "another agent's coordinates leaked");
+  assert.ok(!raw(a).includes("152.97"), "another tenant's coordinates leaked");
+  // Records without coordinates send nulls, not zeros.
+  const withdrawn = a.events.find((e) => e.address.includes("Mine Withdrawn St"))!;
+  assert.deepEqual([withdrawn.lat, withdrawn.lng], [null, null]);
+  for (const u of [admin, pitCrew]) {
+    const b = await list(u);
+    const theirs = b.events.find((e) => e.address.includes("Their Listed St"))!;
+    assert.deepEqual([theirs.lat, theirs.lng], [-27.445, 152.98]);
+    assert.ok(!raw(b).includes("152.97"));
+  }
+  const o = await list(otherAdmin);
+  const foreign = o.events.find((e) => e.address.includes("99 Foreign St"))!;
+  assert.deepEqual([foreign.lat, foreign.lng], [-27.44, 152.97], "a tenant's own admin sees its own coordinates");
+  assert.ok(!raw(o).includes("-27.46") && !raw(o).includes("152.98"), "brokerage A coordinates leaked cross-tenant");
 });

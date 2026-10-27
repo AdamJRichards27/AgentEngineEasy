@@ -27,3 +27,11 @@
   .ae-minimal .mm-event-row-actions { grid-column: 2; justify-content: flex-start; }
   .ae-minimal .mm-event-row-actions .am-row-open { display: inline; }
 }
+
+/* V5 Market Activity map (supervised preview behind the Market Activity flag). */
+.mm-market-map { display: grid; gap: 8px; min-width: 0; }
+.mm-market-map-canvas { height: 420px; width: 100%; border-radius: 8px; border: 1px solid var(--am-border, #d8ddd9); }
+.mm-map-privacy { margin: 0; font-size: 0.85rem; line-height: 1.4; }
+.mm-map-points { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.mm-map-credit { margin: 0; font-size: 0.85rem; }
+@media (max-width: 600px) { .mm-market-map-canvas { height: 300px; } }

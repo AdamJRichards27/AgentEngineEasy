@@ -234,7 +234,9 @@ test("V4-5 Create Follow-Up (Add commitment, glossary G-6) uses the existing Gro
 });
 
 test("V4-6 no outbound network calls: market sources use relative AE API paths only", () => {
-  for (const f of readdirSync(marketDir)) {
+  // V5 (Owner t525u item 4): the map files are the only exception; see V5-4.
+  const MAP_FILES = new Set(["marketMap.ts", "MinimalMarketMapCanvas.tsx"]);
+  for (const f of readdirSync(marketDir).filter((x) => !MAP_FILES.has(x))) {
     const s = src(f);
     assert.doesNotMatch(s, /https?:\/\//, `${f}: no absolute URLs`);
     assert.doesNotMatch(s, /\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|new Image\(|EventSource|leaflet|tile/i, `${f}: no raw network APIs or map tiles`);
@@ -246,9 +248,9 @@ test("V4-6 no outbound network calls: market sources use relative AE API paths o
 test("V4-8 accessibility structure: chip groups are labelled lists with aria-current; rows expose labelled actions", () => {
   const v = readyView({ ...W, area: { kind: "suburb", suburb: "Testville" } });
   const lists = all(v, (e) => e.type === "ul").map((e) => e.props?.["aria-label"]);
-  assert.deepEqual(lists, ["Area", "Date range", "Type"]);
+  assert.deepEqual(lists, ["Area", "Date range", "Type", "View"]);
   const current = links(v).filter((l) => l.props?.className === "am-chip" && l.props?.["aria-current"] === "page").map((l) => text(l));
-  assert.deepEqual(current, ["Testville", "Last 7 days", "All types"]);
+  assert.deepEqual(current, ["Testville", "Last 7 days", "All types", "List"]);
   const view = links(v).filter((l) => String(l.props?.["aria-label"] ?? "").startsWith("View Property:"));
   assert.deepEqual(view.map((l) => l.props?.href), ["/grow/properties/4"]);
   assert.match(text(v), /Source: Agent-entered comparable/);

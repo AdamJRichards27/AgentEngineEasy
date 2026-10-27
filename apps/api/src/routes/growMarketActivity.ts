@@ -8,7 +8,8 @@ import { restrictedPropertyIdsFor, visibleRequiredPropertySql } from "../lib/pro
 
 // CC #26 / SPEC-02 — Market Activity from internal AE data only. Own
 // brokerage only, read-only, no outbound network calls, no provider data,
-// no coordinates. 404 unless GROW_MARKET_ACTIVITY_ENABLED=true. Events never
+// coordinates only on AE property records the caller may open (V5 map,
+// Owner t525u item 4; never on public-form events or comparables). 404 unless GROW_MARKET_ACTIVITY_ENABLED=true. Events never
 // assert seller intent and never earn Momentum points.
 
 export const MARKET_ACTIVITY_FLAG_ENV = "GROW_MARKET_ACTIVITY_ENABLED";
@@ -50,6 +51,16 @@ export interface MarketEvent {
   appraisalId: number | null;
   /** "record": the caller may open the AE record. "public": public market fact only. */
   access: MarketEventAccess;
+  /** WGS84 coordinates from the AE property record; null unless access is "record" on a property event. */
+  lat: number | null;
+  lng: number | null;
+}
+
+/** Parse a stored numeric coordinate; null when missing, non-finite or out of range. */
+export function parseCoordinate(v: string | number | null | undefined, max: number): number | null {
+  if (v == null || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && Math.abs(n) <= max ? n : null;
 }
 
 const querySchema = z.object({
@@ -102,6 +113,8 @@ growMarketActivityRouter.get(
         campaignStartDate: properties.campaignStartDate,
         campaignEndDate: properties.campaignEndDate,
         updatedAt: properties.updatedAt,
+        latitude: properties.latitude,
+        longitude: properties.longitude,
       })
       .from(properties)
       .where(and(
@@ -116,12 +129,15 @@ growMarketActivityRouter.get(
     for (const p of propertyRows) {
       if (!suburbOk(p.suburb)) continue;
       const open = mayOpen(p.id);
+      const lat = parseCoordinate(p.latitude, 90);
+      const lng = parseCoordinate(p.longitude, 180);
+      const hasCoords = lat != null && lng != null;
       const push = (type: MarketEventType, label: string, keyPrefix: string, at: Date) => {
         if (open) {
-          events.push({ key: `${keyPrefix}-${p.id}`, type, label, sourceLabel: "AE property record", address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: p.updatedAt.toISOString(), propertyId: p.id, appraisalId: null, access: "record" });
+          events.push({ key: `${keyPrefix}-${p.id}`, type, label, sourceLabel: "AE property record", address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: p.updatedAt.toISOString(), propertyId: p.id, appraisalId: null, access: "record", lat: hasCoords ? lat : null, lng: hasCoords ? lng : null });
         } else if (PUBLIC_MARKET_EVENT_TYPES.includes(type)) {
           // Public form: the key is assigned after sorting and never carries the property id.
-          events.push({ key: "", type, label, sourceLabel: PUBLIC_EVENT_SOURCE_LABEL, address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: at.toISOString(), propertyId: null, appraisalId: null, access: "public" });
+          events.push({ key: "", type, label, sourceLabel: PUBLIC_EVENT_SOURCE_LABEL, address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: at.toISOString(), propertyId: null, appraisalId: null, access: "public", lat: null, lng: null });
         }
         // Private types on a property the caller may not see are dropped (not counted).
       };
@@ -168,6 +184,8 @@ growMarketActivityRouter.get(
           propertyId: null,
           appraisalId: c.appraisalId,
           access: "record",
+          lat: null,
+          lng: null,
         });
       }
     }

@@ -40,6 +40,9 @@ export interface MarketEventDto {
    * Older responses omit it; then a missing propertyId means no link.
    */
   access?: "record" | "public";
+  /** V5 map: WGS84 coordinates, only on AE property records the viewer may open. */
+  lat?: number | null;
+  lng?: number | null;
 }
 
 export interface MarketActivityResponse {
@@ -70,6 +73,8 @@ export interface MarketFilters {
   area?: MarketArea;
   /** Key of the event whose detail panel is open. */
   event?: string;
+  /** V5: "map" shows the Map tab; omitted means the List (the default). */
+  view?: "map";
 }
 
 /** The API rejects `suburbs` longer than 500 characters and splits on commas. */
@@ -98,6 +103,7 @@ export function parseMarketFilters(search: string): MarketFilters {
   else if (p.get("area") === "all") f.area = { kind: "all" };
   const ev = p.get("event");
   if (ev && ev.length <= MARKET_EVENT_KEY_MAX && /^[a-z]+-\d+$/.test(ev)) f.event = ev;
+  if (p.get("view") === "map") f.view = "map";
   return f;
 }
 
@@ -176,6 +182,7 @@ export function marketActivityHref(f: MarketFilters): string {
   if (area.kind === "all") q.set("area", "all");
   if (area.kind === "suburb") q.set("suburb", area.suburb);
   if (f.event) q.set("event", f.event);
+  if (f.view === "map") q.set("view", "map");
   const s = q.toString();
   return s ? `${MINIMAL_MARKET_ACTIVITY_HREF}?${s}` : MINIMAL_MARKET_ACTIVITY_HREF;
 }
@@ -190,7 +197,7 @@ export interface MarketAreaChip {
 /** "My suburbs", "All suburbs", then up to MARKET_SUBURB_CHIP_MAX suburbs (agent's first). Opening a chip closes any panel. */
 export function marketAreaChips(f: MarketFilters, mine: readonly string[], visible: readonly string[]): MarketAreaChip[] {
   const area = marketAreaOf(f);
-  const base = { range: f.range, type: f.type };
+  const base = { range: f.range, type: f.type, ...(f.view ? { view: f.view } : {}) };
   const chips: MarketAreaChip[] = [
     { key: "mine", label: "My suburbs", href: marketActivityHref({ ...base }), current: area.kind === "mine" },
     { key: "all", label: "All suburbs", href: marketActivityHref({ ...base, area: { kind: "all" } }), current: area.kind === "all" },
