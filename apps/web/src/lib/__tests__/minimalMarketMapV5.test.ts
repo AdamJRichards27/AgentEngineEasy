@@ -84,7 +84,7 @@ test("V5-1 list stays the default; the map only exists on the flag-gated Market 
   assert.deepEqual(marketViewTabs(W).map((t) => [t.label, t.current]), [["List", true], ["Map", false]]);
   const c = src("MinimalMarketActivity.tsx");
   assert.match(c, /isFeatureHiddenError\(q\.error\)\) return <Redirect to="\/grow" replace \/>/, "flag off: whole page (map included) redirects");
-  assert.match(c, /map: filters\.view === "map" \? mapState\(data\.events\) : undefined/, "map built only on the Map tab");
+  assert.match(c, /map: filters\.view === "map" \? mapState\(data\.events, data\.areaPins\) : undefined/, "map built only on the Map tab");
 });
 
 test("V5-2 view=map round-trips and survives chip, tab and panel navigation", () => {
@@ -168,4 +168,36 @@ test("V5-6 map tab: keyboard-reachable mapped-event links open the same detail p
   assert.equal(tabs.length, 1);
   const current = all(tabs[0], (e) => e.type === Link && e.props?.["aria-current"] === "page").map(text);
   assert.deepEqual(current, ["Map"]);
+});
+
+// Owner 28 Oct 09:19: other agents' public Just listed / Sold as area pins, type + area only.
+test("V5-7 area pins: popup and list show only the event type and the area; extra fields are dropped", async () => {
+  const mm = await import("../../minimal/market/marketMap");
+  const dirty = [
+    { key: "area-1", type: "justListed", suburb: "Ashgrove", lat: -27.45, lng: 152.99, address: "10 Hidden St", propertyId: 77, agent: "Pinny" },
+    { key: "area-2", type: "sold", suburb: "Bardon", lat: -27.45, lng: 152.97 },
+    { key: "area-3", type: "withdrawn", suburb: "Ashgrove", lat: -27.45, lng: 152.99 },
+    { key: "area-4", type: "justListed", suburb: "", lat: -27.45, lng: 152.99 },
+    { key: "area-5", type: "sold", suburb: "Red Hill", lat: 200, lng: 152.99 },
+    { key: "x-6", type: "sold", suburb: "Paddington", lat: -27.45, lng: 152.99 },
+  ];
+  const pins = mm.marketAreaPinPoints(dirty as never);
+  assert.deepEqual(pins.map((p) => p.popupText), ["Just listed · Ashgrove", "Sold · Bardon"], "private types, blank areas, bad points and odd keys dropped");
+  for (const p of pins) assert.deepEqual(Object.keys(p).sort(), ["key", "lat", "lng", "popupText"], "nothing but type+area text and the coarse point");
+  assert.ok(!JSON.stringify(pins).includes("Hidden") && !JSON.stringify(pins).includes("77") && !JSON.stringify(pins).includes("Pinny"));
+  assert.deepEqual(mm.marketAreaPinPoints(undefined), []);
+  // Rendered list: plain text, no links, no address.
+  const s = expand(MarketMapSection({ map: { points: [], areaPins: pins, total: 4, canvas: "CANVAS" } }));
+  const items = all(s, (e) => e.props?.["data-mm-area-pin"] !== undefined);
+  assert.deepEqual(items.map(text), ["Just listed · Ashgrove", "Sold · Bardon"]);
+  for (const i of items) assert.equal(all(i, (e) => e.type === Link || e.type === "a").length, 0, "area pins never link");
+  assert.match(text(s), /CANVAS/, "map shown when only area pins exist");
+  assert.match(text(s), /other agents' Just listed and Sold events by area only/i);
+  // Leaflet popups/tooltips get DOM text nodes, never HTML strings built from data.
+  const canvas = src("MinimalMarketMapCanvas.tsx");
+  assert.match(canvas, /textContent = /);
+  assert.doesNotMatch(canvas, /bind(Popup|Tooltip)\(`/, "no HTML template strings in popups or tooltips");
+  assert.match(canvas, /areaPins/);
+  assert.match(canvas, /bindPopup\(textEl\(a\.popupText\)\)/);
+  assert.doesNotMatch(canvas.slice(canvas.indexOf("for (const a of areaPins)")), /navigate\(/, "area pins do not open record panels");
 });

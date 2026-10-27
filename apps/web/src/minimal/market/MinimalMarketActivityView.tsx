@@ -14,7 +14,7 @@ import {
   type MarketFilters,
 } from "./minimalMarketActivityModel";
 import { COMMITMENT_ADD_LABEL, MARKET_COMMITMENT_HINT } from "./minimalMarketActivityModel";
-import { MAP_PRIVACY_NOTICE, OSM_REPORT_ISSUE_URL, mapCoverageNote, marketViewTabs, type MarketMapPoint } from "./marketMap";
+import { MAP_PRIVACY_NOTICE, OSM_REPORT_ISSUE_URL, mapCoverageNote, marketViewTabs, type MarketAreaPinPoint, type MarketMapPoint } from "./marketMap";
 
 // Presentational AE Minimal A Market Activity list (V4: area chips + event
 // detail panel). No hooks, no network.
@@ -34,8 +34,16 @@ export type MinimalMarketActivityState =
       /** v1.0 "Create Follow-Up": the Add commitment block for an open AE property event (container-rendered). */
       followUp?: unknown;
       /** V5 Map tab (filters.view === "map"): points the viewer may see, and the lazily loaded map (container-rendered). */
-      map?: { points: MarketMapPoint[]; total: number; canvas: unknown };
+      map?: MarketMapState;
     };
+
+export interface MarketMapState {
+  points: MarketMapPoint[];
+  /** Other agents' public events by area only (type + area text, coarse point). */
+  areaPins?: MarketAreaPinPoint[];
+  total: number;
+  canvas: unknown;
+}
 
 export interface MarketAreaProps {
   chips: MarketAreaChip[];
@@ -373,13 +381,14 @@ export function MinimalMarketActivityView({ state, filters, area }: { state: Min
 }
 
 /** V5 Map tab: privacy notice (exact Owner text), the map, mapped-event links for keyboard users, and the OSM issue link. */
-export function MarketMapSection({ map }: { map?: { points: MarketMapPoint[]; total: number; canvas: unknown } }) {
+export function MarketMapSection({ map }: { map?: MarketMapState }) {
   const points = map?.points ?? [];
+  const areaPins = map?.areaPins ?? [];
   return (
     <section className="am-rail-section mm-market-map" aria-label="Market map" data-mm-map>
       <p className="mm-map-privacy" data-mm-map-privacy>{MAP_PRIVACY_NOTICE}</p>
-      {points.length > 0 ? (map?.canvas as never) : null}
-      <p className="am-empty-note" data-mm-map-coverage>{mapCoverageNote(map?.total ?? 0, points.length)}</p>
+      {points.length + areaPins.length > 0 ? (map?.canvas as never) : null}
+      <p className="am-empty-note" data-mm-map-coverage>{mapCoverageNote(map?.total ?? 0, points.length, areaPins.length)}</p>
       {points.length > 0 ? (
         <ul className="mm-map-points" aria-label="Mapped events">
           {points.map((p) => (
@@ -388,6 +397,13 @@ export function MarketMapSection({ map }: { map?: { points: MarketMapPoint[]; to
                 {p.label} · {p.address}
               </Link>
             </li>
+          ))}
+        </ul>
+      ) : null}
+      {areaPins.length > 0 ? (
+        <ul className="mm-map-points mm-map-area-pins" aria-label="Other agents' activity by area">
+          {areaPins.map((a) => (
+            <li key={a.key} data-mm-area-pin={a.key}>{a.popupText}</li>
           ))}
         </ul>
       ) : null}

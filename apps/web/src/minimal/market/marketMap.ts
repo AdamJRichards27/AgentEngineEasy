@@ -1,4 +1,4 @@
-import { marketActivityHref, marketEventDetailHref, type MarketEventDto, type MarketFilters } from "./minimalMarketActivityModel";
+import { MARKET_TYPE_LABELS, marketActivityHref, marketEventDetailHref, type MarketAreaPinDto, type MarketEventDto, type MarketFilters } from "./minimalMarketActivityModel";
 
 // AE Minimal v1.0 V5: Market Activity map (Owner t525u items 4-6).
 // Draft and supervised preview only: the page exists only while the
@@ -56,6 +56,30 @@ export function marketMapPoints(events: readonly MarketEventDto[], f: MarketFilt
   return out;
 }
 
+/**
+ * Owner 28 Oct 09:19: other agents' public Just listed / Sold events appear as
+ * area pins showing only the event type and the area. The server sends a
+ * coarse point (centre of a 0.02° grid cell, about 2 km); this keeps only
+ * the text "<type> · <area>" and that point, dropping anything else.
+ */
+export interface MarketAreaPinPoint {
+  key: string;
+  popupText: string;
+  lat: number;
+  lng: number;
+}
+const AREA_PIN_TYPES = new Set(["justListed", "sold"]);
+export function marketAreaPinPoints(pins: readonly MarketAreaPinDto[] | undefined): MarketAreaPinPoint[] {
+  const out: MarketAreaPinPoint[] = [];
+  for (const p of pins ?? []) {
+    if (!p || !AREA_PIN_TYPES.has(p.type) || typeof p.key !== "string" || !/^area-\d+$/.test(p.key)) continue;
+    const area = typeof p.suburb === "string" ? p.suburb.trim() : "";
+    if (!area || !finite(p.lat, 90) || !finite(p.lng, 180)) continue;
+    out.push({ key: p.key, popupText: `${MARKET_TYPE_LABELS[p.type]} · ${area}`, lat: p.lat, lng: p.lng });
+  }
+  return out;
+}
+
 export interface MarketViewTab {
   key: "list" | "map";
   label: string;
@@ -72,8 +96,11 @@ export function marketViewTabs(f: MarketFilters): MarketViewTab[] {
   ];
 }
 
-export function mapCoverageNote(total: number, mapped: number): string {
+export const AREA_PIN_NOTE = "Other agents' Just listed and Sold events by area only (approximate, about 2 km). No address or details.";
+
+export function mapCoverageNote(total: number, mapped: number, areaPins = 0): string {
   if (total === 0) return "No activity in your AE records for this range.";
+  if (areaPins > 0) return `Showing ${mapped} of ${total} events at their location. ${AREA_PIN_NOTE}`;
   if (mapped === 0) return "None of these events has a location on its AE property record, so nothing is mapped. The list shows them all.";
   if (mapped === total) return `Showing all ${total} events on the map.`;
   return `Showing ${mapped} of ${total} events on the map. The rest have no location you can see (another agent's listing, an agent-entered comparable, or no coordinates on the record). The list shows them all.`;

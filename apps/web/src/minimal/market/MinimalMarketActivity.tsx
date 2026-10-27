@@ -21,7 +21,7 @@ import {
 } from "./minimalMarketActivityModel";
 import { MARKET_EVENT_PANEL_ID, MARKET_EVENT_TITLE_ID, MinimalMarketActivityView } from "./MinimalMarketActivityView";
 import { MinimalMarketEventFollowUp } from "./MinimalMarketEventFollowUp";
-import { marketMapPoints } from "./marketMap";
+import { marketAreaPinPoints, marketMapPoints } from "./marketMap";
 import "../momentum/momentum.css";
 import "./market.css";
 
@@ -83,14 +83,16 @@ export default function MinimalMarketActivity() {
     return () => panel?.removeEventListener("keydown", onKey);
   }, [detail?.key, detail?.closeHref]);
 
-  function mapState(events: Parameters<typeof marketMapPoints>[0]) {
+  function mapState(events: Parameters<typeof marketMapPoints>[0], pins: Parameters<typeof marketAreaPinPoints>[0]) {
     const points = marketMapPoints(events, filters);
+    const areaPins = marketAreaPinPoints(pins);
     return {
       points,
+      areaPins,
       total: events.length,
       canvas: (
         <Suspense fallback={<p className="am-empty-note" role="status">Loading map…</p>}>
-          <MinimalMarketMapCanvas points={points} selectedKey={detail?.key ?? null} />
+          <MinimalMarketMapCanvas points={points} areaPins={areaPins} selectedKey={detail?.key ?? null} />
         </Suspense>
       ),
     };
@@ -122,7 +124,7 @@ export default function MinimalMarketActivity() {
         followUp: detail?.propertyId != null && detail.propertyHref ? (
           <MinimalMarketEventFollowUp key={detail.key} detail={detail} propertyId={detail.propertyId} propertyHref={detail.propertyHref} />
         ) : null,
-        map: filters.view === "map" ? mapState(data.events) : undefined,
+        map: filters.view === "map" ? mapState(data.events, data.areaPins) : undefined,
       }}
     />
   );

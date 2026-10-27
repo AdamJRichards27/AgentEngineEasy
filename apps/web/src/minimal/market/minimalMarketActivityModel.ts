@@ -45,6 +45,14 @@ export interface MarketEventDto {
   lng?: number | null;
 }
 
+export interface MarketAreaPinDto {
+  key: string;
+  type: MarketEventType;
+  suburb: string;
+  lat: number;
+  lng: number;
+}
+
 export interface MarketActivityResponse {
   asOf: string;
   range: MarketRange;
@@ -54,6 +62,8 @@ export interface MarketActivityResponse {
   events: MarketEventDto[];
   truncated: boolean;
   providers: "none";
+  /** V5 (Owner 28 Oct): other agents' public Just listed / Sold, by area only, at a coarse server-computed point. */
+  areaPins?: MarketAreaPinDto[];
 }
 
 export const MINIMAL_MARKET_ACTIVITY_HREF = "/grow/market-activity";
