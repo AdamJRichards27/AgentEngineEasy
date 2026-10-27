@@ -97,10 +97,12 @@ interface DocumentPackageBlock {
 interface AgencyAgreementTermsBlock {
   id: number;
   commissionType: string;
-  commissionRateBps: number | null;
-  flatFeeCents: number | null;
-  marketingFeeCents: number | null;
+  /** Omitted outside the t172u view rule (Owner t173u); termsVisible is then false. */
+  commissionRateBps?: number | null;
+  flatFeeCents?: number | null;
+  marketingFeeCents?: number | null;
   agreementTermDays: number;
+  termsVisible?: boolean;
 }
 
 interface ServiceOrderBlock {
@@ -135,7 +137,10 @@ interface OfferBlock {
   id: number;
   propertyId: number;
   buyerPartyId: number | null;
-  offerPriceCents: number;
+  /** Omitted by the server unless the viewer is the listing agent or a
+   * Brokerage Administrator (Owner t165u); offerTermsVisible is then false. */
+  offerPriceCents?: number;
+  offerTermsVisible?: boolean;
   status: string;
   createdAt: string;
 }
@@ -143,7 +148,11 @@ interface OfferBlock {
 interface TransactionBlock {
   id: number;
   propertyId: number;
-  purchasePriceCents: number;
+  /** Omitted by the server unless the viewer is the listing agent, a
+   * Brokerage Administrator, or Pit Crew assigned to this transaction (Owner
+   * t170u); purchasePriceVisible is then false. */
+  purchasePriceCents?: number;
+  purchasePriceVisible?: boolean;
   contractDate: string | null;
   financeApprovedAt: string | null;
   exchangedAt: string | null;
@@ -151,10 +160,14 @@ interface TransactionBlock {
   settlementDate: string | null;
   settlementCompletedAt: string | null;
   status: string;
-  grossCommissionCents: number | null;
-  gstCents: number | null;
+  /** Omitted by the server when the viewer may not see that financial group
+   * (Owner t171u/t172u); financialVisibility then says which groups were withheld. */
+  grossCommissionCents?: number | null;
+  gstCents?: number | null;
   commissionCalculatedAt: string | null;
-  fundsReceivedCents: number;
+  fundsReceivedCents?: number;
+  depositCents?: number | null;
+  financialVisibility?: { purchasePrice: boolean; deposit: boolean; commission: boolean; funds: boolean };
   fundsReceivedAt: string | null;
   agentPaidAt: string | null;
   closedAt: string | null;
@@ -1183,7 +1196,27 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           <summary>Documents & Agency Agreement</summary>
 
           <h3>Agency agreement terms</h3>
-          <AgencyTermsForm initial={data.agencyAgreementTerms} onSubmit={(input) => saveAgencyTerms.mutate(input)} />
+          {data.agencyAgreementTerms?.termsVisible === false ? (
+            <p className="muted">Terms captured. Fees are restricted to the listing agent, Brokerage Administrators and assigned Pit Crew.</p>
+          ) : (
+            <AgencyTermsForm
+              initial={
+                data.agencyAgreementTerms
+                  ? {
+                      commissionType: data.agencyAgreementTerms.commissionType,
+                      commissionRateBps: data.agencyAgreementTerms.commissionRateBps ?? null,
+                      flatFeeCents: data.agencyAgreementTerms.flatFeeCents ?? null,
+                      marketingFeeCents: data.agencyAgreementTerms.marketingFeeCents ?? null,
+                      agreementTermDays: data.agencyAgreementTerms.agreementTermDays,
+                    }
+                  : null
+              }
+              onSubmit={(input) => saveAgencyTerms.mutate(input)}
+            />
+          )}
+          {saveAgencyTerms.isError && (
+            <p className="error-text">{apiErrorMessage(saveAgencyTerms.error, "Couldn't save the agency agreement terms. Try again.")}</p>
+          )}
 
           <h3 style={{ marginTop: "1rem" }}>Documents</h3>
           <ul className="item-list">
@@ -1590,6 +1623,7 @@ function PaymentMethodsBlock({
 }
 
 function offerStatusLabel(o: OfferBlock): string {
+  if (o.offerTermsVisible === false || o.offerPriceCents === undefined) return `Price restricted — ${o.status}`;
   return `${formatCents(o.offerPriceCents)} — ${o.status}`;
 }
 
@@ -1809,7 +1843,10 @@ function TransactionBlockView({
   return (
     <div className="stack">
       <p>
-        {formatCents(transaction.purchasePriceCents)} · <span className="pill">{transaction.status}</span>
+        {transaction.purchasePriceVisible === false || transaction.purchasePriceCents === undefined
+          ? "Price restricted"
+          : formatCents(transaction.purchasePriceCents)}{" "}
+        · <span className="pill">{transaction.status}</span>
       </p>
       {actions.closedNote && <p className="muted">{actions.closedNote}</p>}
 
@@ -1911,9 +1948,11 @@ function TransactionBlockView({
 
       <div id="transaction-commission">
         Commission:{" "}
-        {transaction.commissionCalculatedAt
-          ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
-          : "not yet calculated"}
+        {transaction.financialVisibility?.commission === false || transaction.grossCommissionCents === undefined
+          ? "Restricted"
+          : transaction.commissionCalculatedAt
+            ? `${formatCents(transaction.grossCommissionCents ?? 0)} + ${formatCents(transaction.gstCents ?? 0)} GST`
+            : "not yet calculated"}
         {actions.calculateCommission && (
           <button className="btn btn-small" onClick={() => onAction("calculate-commission")} style={{ marginLeft: "0.5rem" }}>
             Calculate Commission
@@ -1922,7 +1961,12 @@ function TransactionBlockView({
       </div>
 
       <div className="inline-form" id="transaction-funds">
-        <span>Funds received: {formatCents(transaction.fundsReceivedCents)}</span>
+        <span>
+          Funds received:{" "}
+          {transaction.financialVisibility?.funds === false || transaction.fundsReceivedCents === undefined
+            ? "Restricted"
+            : formatCents(transaction.fundsReceivedCents)}
+        </span>
         {actions.recordFundsReceived && (
           <>
             <input value={fundsAmount} onChange={(e) => setFundsAmount(e.target.value)} placeholder="Amount ($)" />

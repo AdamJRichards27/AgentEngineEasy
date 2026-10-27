@@ -67,7 +67,13 @@ function propertiesInScope(brokerageId: number, restrictToPropertyIds: number[] 
 export async function getHomeSummary(
   brokerageId: number,
   restrictToPropertyIds: number[] | null = null,
+  options: { offerPriceVisible?: boolean } = {},
 ): Promise<HomeSummaryItem[]> {
+  // Owner t165u/t170u (1): competing offer prices are for the listing agent
+  // and Brokerage Administrators only. The Home route passes false for Pit
+  // Crew, who read the brokerage-wide scope; the default keeps every other
+  // caller (including the AI business context) unchanged.
+  const offerPriceVisible = options.offerPriceVisible ?? true;
   if (restrictToPropertyIds !== null && restrictToPropertyIds.length === 0) return [];
   const propertyRows = await db.select().from(properties).where(propertiesInScope(brokerageId, restrictToPropertyIds));
   // A Closed property has nothing left to action — exclude it up front so
@@ -194,7 +200,7 @@ export async function getHomeSummary(
       propertyAddress: addressOf(offer.propertyId),
       workflowStage: stageOf(offer.propertyId),
       category: "NextAction",
-      label: `Offer received — $${(offer.offerPriceCents / 100).toLocaleString()}`,
+      label: offerPriceVisible ? `Offer received — $${(offer.offerPriceCents / 100).toLocaleString()}` : "Offer received",
       detail: "Accept or decline in the workspace.",
     });
   }

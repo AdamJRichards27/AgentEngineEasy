@@ -64,6 +64,11 @@ import {
   commissionCalculations,
   pcFeeAuthorities,
   pcFeeCalculations,
+  financialAmendmentAuthorities,
+  feeScheduleVersions,
+  transactionFees,
+  settlementStatements,
+  settlementConfirmations,
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
@@ -517,6 +522,11 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
   if (ids.length === 0) return;
 
+  // t179u slice 3: statements reference payment requests, fees, commission
+  // calculations and confirmations, so they go first (lines cascade).
+  await db.delete(settlementStatements).where(inArray(settlementStatements.brokerageId, ids));
+  await db.delete(settlementConfirmations).where(inArray(settlementConfirmations.brokerageId, ids));
+
   // Agent Engine 2.0 — Financial Transaction Engine (Priority 9). See this
   // function's own doc comment above for the FK ordering this block
   // depends on.
@@ -534,6 +544,11 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     // siblings above.
     await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
   }
+  // Owner t174u: grants reference transactions, properties, users and documents.
+  // t179u slice 2: fees, then schedules (FK order).
+  await db.delete(transactionFees).where(inArray(transactionFees.brokerageId, ids));
+  await db.delete(feeScheduleVersions).where(inArray(feeScheduleVersions.brokerageId, ids));
+  await db.delete(financialAmendmentAuthorities).where(inArray(financialAmendmentAuthorities.brokerageId, ids));
   await db.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids));
   await db.delete(pcFeeCalculations).where(inArray(pcFeeCalculations.brokerageId, ids));
   await db.delete(pcFeeAuthorities).where(inArray(pcFeeAuthorities.brokerageId, ids));
