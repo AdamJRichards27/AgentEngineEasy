@@ -134,6 +134,7 @@ export function MinimalNavIcon({ path }: { path: string }) {
         </Svg>
       );
     case "marketing":
+    case "/grow/marketing":
       return (
         <Svg>
           <path d="M4 10v4l11 5V5z" />

@@ -9,6 +9,7 @@ import { selectPropertyDetailView } from "./minimal/properties/minimalPropertyDe
 import { selectOpportunityDetailView } from "./minimal/opportunities/minimalOpportunityDetailModel";
 import { selectAppraisalBuilderView } from "./minimal/appraisal/appraisalBuilderModel";
 import { selectMomentumView } from "./minimal/momentum/minimalMomentumModel";
+import { selectMarketingView } from "./minimal/marketing/minimalMarketingModel";
 import { selectMarketActivityView } from "./minimal/market/minimalMarketActivityModel";
 import Login from "./pages/Login";
 import AcceptInvitation from "./pages/AcceptInvitation";
@@ -58,6 +59,7 @@ const MinimalPropertyDetail = lazy(() => import("./minimal/properties/MinimalPro
 const MinimalOpportunityDetail = lazy(() => import("./minimal/opportunities/MinimalOpportunityDetail"));
 const MinimalMomentum = lazy(() => import("./minimal/momentum/MinimalMomentum"));
 const MinimalMarketActivity = lazy(() => import("./minimal/market/MinimalMarketActivity"));
+const MinimalMarketing = lazy(() => import("./minimal/marketing/MinimalMarketing"));
 
 function initials(firstName?: string, lastName?: string): string {
   return `${firstName?.[0] ?? ""}${lastName?.[0] ?? ""}`.toUpperCase() || "?";
@@ -395,6 +397,10 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           </Route>
           <Route path="/grow/market-activity">
             {selectMarketActivityView(minimalShell) === "minimal" ? <MinimalMarketActivity /> : <Redirect to="/grow" replace />}
+          </Route>
+          {/* V7: Minimal-only Marketing sample pages (no sends, no API). Classic → /grow. */}
+          <Route path="/grow/marketing/:page?">
+            {selectMarketingView(minimalShell) === "minimal" ? <MinimalMarketing /> : <Redirect to="/grow" replace />}
           </Route>
           <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
           <Route path="/grow/contacts/:id">
