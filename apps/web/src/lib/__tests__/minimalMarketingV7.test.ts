@@ -254,7 +254,7 @@ test("V7 source: marketing files make no network call and hold no send or publis
 
 test("V7 source: the container gates on grow.access and redirects unknown pages", () => {
   const src = readFileSync(path.join(MARKETING_DIR, "MinimalMarketing.tsx"), "utf8");
-  assert.match(src, /marketingAllowed\(/);
-  assert.match(src, /<Redirect to="\/grow" replace \/>/);
-  assert.match(src, /<Redirect to="\/grow\/marketing" replace \/>/);
+  // Branches are decided by marketingRouteOutcome (grow.access, unknown page); see minimalMarketingRoute.test.ts.
+  assert.match(src, /marketingRouteOutcome\(/);
+  assert.match(src, /<Redirect to=\{outcome\.to\} replace \/>/);
 });

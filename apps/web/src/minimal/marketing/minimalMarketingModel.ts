@@ -38,6 +38,27 @@ export function parseMarketingPage(param: string | undefined | null): MarketingP
   return (MARKETING_CHANNELS as readonly string[]).includes(param) ? (param as MarketingChannel) : null;
 }
 
+export type MarketingRouteOutcome =
+  | { kind: "loading" }
+  | { kind: "redirect"; to: "/grow" | "/grow/marketing" }
+  | { kind: "render"; page: MarketingPage };
+
+/**
+ * Inside the Minimal shell (App.tsx sends classic to /grow): wait while
+ * entitlements load (fail closed), no grow.access → /grow, unknown page →
+ * Overview, otherwise render the page.
+ */
+export function marketingRouteOutcome(
+  entitlements: readonly string[] | null | undefined,
+  isLoading: boolean,
+  param: string | undefined | null,
+): MarketingRouteOutcome {
+  if (isLoading) return { kind: "loading" };
+  if (!marketingAllowed(entitlements)) return { kind: "redirect", to: "/grow" };
+  const page = parseMarketingPage(param);
+  return page === null ? { kind: "redirect", to: "/grow/marketing" } : { kind: "render", page };
+}
+
 /** Minimal shell only; the classic shell has no Marketing pages. */
 export function selectMarketingView(minimalShell: boolean): "minimal" | "classic" {
   return minimalShell ? "minimal" : "classic";
