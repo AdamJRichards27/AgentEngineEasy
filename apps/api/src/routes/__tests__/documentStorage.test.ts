@@ -459,12 +459,28 @@ test("aged pending uploads are finalized or terminally quarantined without autom
     );
   assert.ok(missing);
   const deletesBefore = storage.deleteKeys.length;
-  const result = await reconcilePendingDocumentVersions({
-    now: new Date(Date.now() + 1_000),
-    reconcileAfterMs: 0,
-    quarantineAfterMs: 0,
-    limit: 50,
-  });
+  // The reconciliation scan is DATABASE-wide, and every test file shares the
+  // database from its own process. A broad scan here (limit 50, zero grace)
+  // also took other files' in-flight PendingUpload versions, whose objects are
+  // "missing" from THIS process's in-memory storage, and quarantined them; the
+  // other file's populate then failed with "Pending document version requires
+  // reconciliation before finalization" (seen in exceptionRunAccess.test.ts).
+  // So reconcile exactly this test's two rows: afterId = id - 1 with limit 1
+  // selects the lowest eligible id above it, which is that row itself.
+  const reconcileOwn = (id: number) =>
+    reconcilePendingDocumentVersions({
+      now: new Date(Date.now() + 1_000),
+      afterId: id - 1,
+      reconcileAfterMs: 0,
+      quarantineAfterMs: 0,
+      limit: 1,
+    });
+  const results = [await reconcileOwn(recoverable.id), await reconcileOwn(missing.id)];
+  assert.deepEqual(results.map((r) => r.scanned), [1, 1], "each scan is scoped to exactly one of this test's rows");
+  const result = {
+    finalized: results.reduce((n, r) => n + r.finalized, 0),
+    quarantinedMissing: results.reduce((n, r) => n + r.quarantinedMissing, 0),
+  };
   assert.ok(result.finalized >= 1);
   assert.ok(result.quarantinedMissing >= 1);
   assert.equal(storage.deleteKeys.length, deletesBefore);
@@ -858,12 +874,18 @@ test("batch document locks prevent a competing upload from creating partial acti
       "provider failure may leave resumable pending rows but never an active partial set",
     );
 
+    // The scan is DATABASE-wide (see the aged-pending test above), so it is
+    // bounded in time to this batch: `now` is the batch's own creation time
+    // with zero grace, which makes these rows eligible for BOTH finalization
+    // and missing-object quarantine were they not e-sign, while another
+    // file's in-flight upload created later is never in scope.
     await reconcilePendingDocumentVersions({
-      now: new Date(Date.now() + 60 * 60 * 1000),
+      // +1 ms: Postgres keeps microseconds, a JS Date only milliseconds.
+      now: new Date(Math.max(...eSignVersions.map((version) => version.createdAt.getTime())) + 1),
       afterId: Math.min(...eSignVersions.map((version) => version.id)) - 1,
       limit: 50,
       reconcileAfterMs: 0,
-      quarantineAfterMs: 30 * 60 * 1000,
+      quarantineAfterMs: 0,
     });
     const afterReconciliationVersions = await db
       .select()
