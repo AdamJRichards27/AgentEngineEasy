@@ -227,7 +227,11 @@ function expandSourceRows<T extends { sourceRowNumbers: number[] }>(
 async function flushErrorMarks(client: DbClient, importJobId: number, marks: ErrorMark[]): Promise<void> {
   const rows = expandSourceRows(marks);
   if (rows.length === 0) return;
-  const now = new Date();
+  // import_records.updated_at is `timestamp` (without time zone) holding UTC
+  // wall-clock (Drizzle's convention). A raw JS Date bind is serialised in the
+  // process-local zone and the assignment cast drops the offset, so bind the
+  // instant as an ISO-8601 UTC string and convert explicitly (see #277).
+  const nowIso = new Date().toISOString();
   for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
     const values = sql.join(
       slice.map((row) => sql`(${row.sourceRowNumber}::int, ${JSON.stringify([row.message])}::jsonb)`),
@@ -237,7 +241,7 @@ async function flushErrorMarks(client: DbClient, importJobId: number, marks: Err
       UPDATE import_records AS r
       SET status = 'error',
           errors = v.errors,
-          updated_at = ${now}
+          updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
       FROM (VALUES ${values}) AS v(source_row_number, errors)
       WHERE r.import_job_id = ${importJobId}
         AND r.source_row_number = v.source_row_number
@@ -252,7 +256,8 @@ async function flushPartyMarks(
 ): Promise<void> {
   const rows = expandSourceRows(marks);
   if (rows.length === 0) return;
-  const now = new Date();
+  // UTC-instant bind for a `timestamp` (UTC wall-clock) column; see flushErrorMarks.
+  const nowIso = new Date().toISOString();
   for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
     const values = sql.join(
       slice.map((row) => sql`(${row.sourceRowNumber}::int, ${row.partyId}::int, ${row.created}::boolean)`),
@@ -263,7 +268,7 @@ async function flushPartyMarks(
       SET result_party_id = v.party_id,
           party_was_created = v.was_created,
           status = 'imported',
-          updated_at = ${now}
+          updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
       FROM (VALUES ${values}) AS v(source_row_number, party_id, was_created)
       WHERE r.import_job_id = ${importJobId}
         AND r.source_row_number = v.source_row_number
@@ -278,7 +283,8 @@ async function flushPropertyMarks(
 ): Promise<void> {
   const rows = expandSourceRows(marks);
   if (rows.length === 0) return;
-  const now = new Date();
+  // UTC-instant bind for a `timestamp` (UTC wall-clock) column; see flushErrorMarks.
+  const nowIso = new Date().toISOString();
   for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
     const values = sql.join(
       slice.map((row) => sql`(${row.sourceRowNumber}::int, ${row.propertyId}::int, ${row.created}::boolean)`),
@@ -289,7 +295,7 @@ async function flushPropertyMarks(
       SET result_property_id = v.property_id,
           property_was_created = v.was_created,
           status = 'imported',
-          updated_at = ${now}
+          updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
       FROM (VALUES ${values}) AS v(source_row_number, property_id, was_created)
       WHERE r.import_job_id = ${importJobId}
         AND r.source_row_number = v.source_row_number
@@ -304,7 +310,8 @@ async function flushRelationshipMarks(
 ): Promise<void> {
   const rows = expandSourceRows(marks);
   if (rows.length === 0) return;
-  const now = new Date();
+  // UTC-instant bind for a `timestamp` (UTC wall-clock) column; see flushErrorMarks.
+  const nowIso = new Date().toISOString();
   for (const slice of chunk(rows, IMPORT_MARK_ROWS_PER_STATEMENT)) {
     const values = sql.join(
       slice.map((row) => sql`(${row.sourceRowNumber}::int, ${row.relationshipId}::int, ${row.created}::boolean)`),
@@ -315,7 +322,7 @@ async function flushRelationshipMarks(
       SET result_relationship_id = v.relationship_id,
           relationship_was_created = v.was_created,
           status = 'imported',
-          updated_at = ${now}
+          updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
       FROM (VALUES ${values}) AS v(source_row_number, relationship_id, was_created)
       WHERE r.import_job_id = ${importJobId}
         AND r.source_row_number = v.source_row_number
@@ -583,7 +590,8 @@ interface ContactChunkDelta {
 
 async function flushPartyGapUpdates(client: DbClient, brokerageId: number, rows: PartyGap[]): Promise<void> {
   if (rows.length === 0) return;
-  const now = new Date();
+  // UTC-instant bind for a `timestamp` (UTC wall-clock) column; see flushErrorMarks.
+  const nowIso = new Date().toISOString();
   const values = sql.join(
     rows.map(
       (row) =>
@@ -598,7 +606,7 @@ async function flushPartyGapUpdates(client: DbClient, brokerageId: number, rows:
         email = v.email,
         mobile = v.mobile,
         residential_address = v.residential_address,
-        updated_at = ${now}
+        updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
     FROM (VALUES ${values}) AS v(id, first_name, last_name, email, mobile, residential_address)
     WHERE p.id = v.id
       AND p.brokerage_id = ${brokerageId}
@@ -779,7 +787,8 @@ interface PropertyChunkDelta {
 
 async function flushPropertyGapUpdates(client: DbClient, brokerageId: number, rows: PropertyGap[]): Promise<void> {
   if (rows.length === 0) return;
-  const now = new Date();
+  // UTC-instant bind for a `timestamp` (UTC wall-clock) column; see flushErrorMarks.
+  const nowIso = new Date().toISOString();
   const values = sql.join(
     rows.map((row) => sql`(${row.id}::int, ${row.suburb}::text, ${row.state}::text, ${row.postcode}::text)`),
     sql`, `,
@@ -789,7 +798,7 @@ async function flushPropertyGapUpdates(client: DbClient, brokerageId: number, ro
     SET suburb = v.suburb,
         state = v.state,
         postcode = v.postcode,
-        updated_at = ${now}
+        updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
     FROM (VALUES ${values}) AS v(id, suburb, state, postcode)
     WHERE p.id = v.id
       AND p.brokerage_id = ${brokerageId}
