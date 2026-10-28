@@ -31,7 +31,9 @@ import {
   GROW_CONSENT_CHANNELS,
   type GrowOpportunitySignal,
 } from "@aee/db";
-import { runSignalSweep, resetSweepResumePointForTests, type SweepSummary } from "../sweep.js";
+import { resetSweepResumePointForTests, type SweepSummary } from "../sweep.js";
+// Cross-file contention on the sweep lock: see sweepLockContention.ts.
+import { sweepWhenLockFree } from "./sweepLockContention.js";
 import { evaluateCandidates, EVALUATION_RULE_NAMES } from "../evaluation.js";
 import { readActiveSignalsForParty } from "../signals.js";
 import { recordObservation, ownershipStartCoverage } from "../observations.js";
@@ -142,8 +144,7 @@ async function createRelationship(input: {
 }
 
 async function sweep(brokerageIds: number[], options: { force?: boolean } = {}): Promise<SweepSummary> {
-  const result = await runSignalSweep("MANUAL", { brokerageIds, force: true, ...options });
-  assert.ok(result.ok, `sweep was skipped: ${result.ok ? "" : result.skippedReason}`);
+  const result = await sweepWhenLockFree({ brokerageIds, force: true, ...options });
   return result.summary;
 }
 

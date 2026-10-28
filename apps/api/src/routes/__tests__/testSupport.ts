@@ -855,5 +855,16 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
 
   await db.delete(users).where(inArray(users.brokerageId, ids));
   await db.delete(pitCrewWaitingOnSweepSettings).where(inArray(pitCrewWaitingOnSweepSettings.brokerageId, ids));
-  await db.delete(brokerages).where(inArray(brokerages.id, ids));
+  // An UNSCOPED signal sweep running in a sibling test file (they share this
+  // database) can write a grow_signal_sweep_cursors row for any brokerage,
+  // including one this cleanup is half-way through deleting, after the
+  // cursor delete above. The brokerages delete then failed on that FK. So the
+  // final step locks the brokerage rows first (a concurrent cursor insert's
+  // FK check waits on that lock and then finds the brokerage gone), clears
+  // any cursor written in the meantime, and deletes, in one transaction.
+  await db.transaction(async (tx) => {
+    await tx.select({ id: brokerages.id }).from(brokerages).where(inArray(brokerages.id, ids)).for("update");
+    await tx.delete(growSignalSweepCursors).where(inArray(growSignalSweepCursors.brokerageId, ids));
+    await tx.delete(brokerages).where(inArray(brokerages.id, ids));
+  });
 }

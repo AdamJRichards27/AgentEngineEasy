@@ -21,12 +21,12 @@ import { db, growSignalSweepCursors, growSignalSweepRuns, parties, properties, s
 import { renderMetricsText, resetMetricsForTesting } from "@aee/events";
 import {
   runSignalSweep,
-  tryHoldSignalSweepLockForTests,
   resetSweepResumePointForTests,
   getSweepOpsHealth,
   sweepConfig,
   LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS,
 } from "../sweep.js";
+import { acquireSweepLockForTest, sweepWhenLockFree } from "./sweepLockContention.js";
 import {
   __setOperationalAlertTransportForTesting,
   __resetOperationalAlertsForTesting,
@@ -165,38 +165,14 @@ async function clearRunningRows(): Promise<void> {
  * genuine leak -- the P0 this file exists to catch -- still fails the suite
  * rather than hanging.
  */
-const LOCK_CONTENTION_ATTEMPTS = 40;
-const LOCK_CONTENTION_WAIT_MS = 50;
-
-const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/** Takes the sweep lock for a test, waiting out a sibling suite that holds it. */
-async function acquireSweepLockForTest(): Promise<() => Promise<void>> {
-  for (let attempt = 0; attempt < LOCK_CONTENTION_ATTEMPTS; attempt += 1) {
-    const release = await tryHoldSignalSweepLockForTests();
-    if (release) return release;
-    await pause(LOCK_CONTENTION_WAIT_MS);
-  }
-  throw new Error(
-    `The sweep advisory lock was still held after ${LOCK_CONTENTION_ATTEMPTS} attempts. ` +
-      "Either a sibling suite is sweeping for an unusually long time, or the lock has genuinely leaked.",
-  );
-}
-
-/** Runs a sweep that must actually happen, waiting out transient lock refusals. */
-async function sweepExclusively(options: Parameters<typeof runSignalSweep>[1]): Promise<Extract<Awaited<ReturnType<typeof runSignalSweep>>, { ok: true }>> {
-  let last: Awaited<ReturnType<typeof runSignalSweep>> | undefined;
-  for (let attempt = 0; attempt < LOCK_CONTENTION_ATTEMPTS; attempt += 1) {
-    last = await runSignalSweep("MANUAL", options);
-    if (last.ok) return last;
-    await pause(LOCK_CONTENTION_WAIT_MS);
-  }
-  throw new Error(
-    `The sweep never acquired its lock after ${LOCK_CONTENTION_ATTEMPTS} attempts` +
-      (last && !last.ok && "skippedReason" in last ? ` (last skippedReason: ${String(last.skippedReason)})` : "") +
-      ".",
-  );
-}
+//
+// The waits themselves now live in sweepLockContention.ts, shared with the
+// other sweep suites: a 60 s bound instead of 2 s, a free-lock probe before
+// each sweep attempt, and no orphaned-refusal count carried over from a
+// contention retry. Every test here that inserts or clears RUNNING rows does
+// it while holding the lock, so a sibling's live run is never among them and
+// a sibling's stale-run recovery cannot close this file's fixture row.
+const sweepExclusively = sweepWhenLockFree;
 
 /* ---------------------------------------------------------------------
  * H-1 (P0) — the suspected lock leak must be ALERTABLE, not just logged.
@@ -209,9 +185,9 @@ async function sweepExclusively(options: Parameters<typeof runSignalSweep>[1]): 
  * -----------------------------------------------------------------*/
 
 test("H-1 — a held lock with no RUNNING row, repeated to the threshold, dispatches exactly one GROW_SIGNAL_SWEEP_UNHEALTHY alert", async () => {
-  await clearRunningRows();
   const release = await acquireSweepLockForTest();
   try {
+    await clearRunningRows();
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS; attempt += 1) {
       const refused = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
       assert.equal(refused.ok, false, "the lock is held, so every attempt must be refused");
@@ -232,9 +208,9 @@ test("H-1 — a held lock with no RUNNING row, repeated to the threshold, dispat
 });
 
 test("H-1 — the ordinary race (a single orphaned refusal below the threshold) alerts nobody", async () => {
-  await clearRunningRows();
   const release = await acquireSweepLockForTest();
   try {
+    await clearRunningRows();
     // One below the threshold: this is the documented, expected case — the
     // holder inserts its run row a moment after taking the lock.
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS - 1; attempt += 1) {
@@ -249,18 +225,19 @@ test("H-1 — the ordinary race (a single orphaned refusal below the threshold) 
 
 test("H-1 — a refusal while a sweep really IS running is the expected outcome and alerts nobody", async () => {
   // A genuine RUNNING row present: this is not a leak at all.
-  await clearRunningRows();
-  const [runningRow] = await db.insert(growSignalSweepRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
   const release = await acquireSweepLockForTest();
+  let runningRow: { id: string } | undefined;
   try {
+    await clearRunningRows();
+    [runningRow] = await db.insert(growSignalSweepRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS + 2; attempt += 1) {
       const refused = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
       assert.equal(refused.ok, false);
     }
     await settleAlerts();
   } finally {
+    if (runningRow) await db.delete(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, runningRow.id));
     await release();
-    await db.delete(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, runningRow.id));
   }
   assert.deepEqual(captured, [], "a refusal with a real RUNNING row is the documented expected case, not an incident");
   assert.equal(
@@ -275,9 +252,9 @@ test("H-1 — a refusal while a sweep really IS running is the expected outcome 
  * -----------------------------------------------------------------*/
 
 test("H-6 — orphaned-lock refusals are counted by kind, separately from property_signal_sweep_total's skipped_locked", async () => {
-  await clearRunningRows();
   const release = await acquireSweepLockForTest();
   try {
+    await clearRunningRows();
     for (let attempt = 0; attempt < LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS; attempt += 1) {
       await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
     }
@@ -302,9 +279,9 @@ test("H-6 — orphaned-lock refusals are counted by kind, separately from proper
 });
 
 test("H-6 — no new sweep metric series carries a tenant identifier", async () => {
-  await clearRunningRows();
   const release = await acquireSweepLockForTest();
   try {
+    await clearRunningRows();
     await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
   } finally {
     await release();
@@ -401,16 +378,23 @@ test("H-3 — staleness is computed against lastCompletedAt, so an old completio
 });
 
 test("H-3 — runningRunId reports an in-flight run and is null otherwise", async () => {
-  await clearRunningRows();
-  const idle = await getSweepOpsHealth();
-  assert.equal(idle.runningRunId, null, "nothing is running, so this must be null");
-
-  const [runningRow] = await db.insert(growSignalSweepRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
+  // Held for the whole test, so no sibling file's sweep can insert its own
+  // RUNNING row or recover (close) this one between the two reads.
+  const release = await acquireSweepLockForTest();
   try {
-    const busy = await getSweepOpsHealth();
-    assert.equal(busy.runningRunId, runningRow.id, "a RUNNING row must be reported — a non-null id with an old startedAt is the shape of a crashed sweep");
+    await clearRunningRows();
+    const idle = await getSweepOpsHealth();
+    assert.equal(idle.runningRunId, null, "nothing is running, so this must be null");
+
+    const [runningRow] = await db.insert(growSignalSweepRuns).values({ status: "RUNNING", trigger: "SCHEDULED" }).returning();
+    try {
+      const busy = await getSweepOpsHealth();
+      assert.equal(busy.runningRunId, runningRow.id, "a RUNNING row must be reported — a non-null id with an old startedAt is the shape of a crashed sweep");
+    } finally {
+      await db.delete(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, runningRow.id));
+    }
   } finally {
-    await db.delete(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, runningRow.id));
+    await release();
   }
 });
 
@@ -418,21 +402,31 @@ test("H-3 — lastCompletedAt is derived from a real COMPLETED row, not from the
   // The distinction this asserts: with the five most recent runs ALL non-
   // COMPLETED, a health check that scanned only recentRuns would wrongly
   // report "never completed" on a system that has completed sweeps.
-  await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
+  await sweepExclusively({ brokerageIds: [A.brokerageId] });
   const withCompletion = await getSweepOpsHealth();
   assert.notEqual(withCompletion.lastCompletedAt, null);
 
+  // The run rows are global. Holding the sweep lock keeps a sibling file's
+  // sweep from adding its own run row between the noise and the read, and the
+  // noise is dated an hour ahead so it is the newest window even next to a
+  // sibling's fixture row (sweep.test.ts's stale-run row starts 10 min ahead).
+  const release = await acquireSweepLockForTest();
   const noise = [];
-  for (let i = 0; i < 6; i += 1) {
-    const [row] = await db.insert(growSignalSweepRuns).values({ status: "FAILED", trigger: "SCHEDULED", completedAt: new Date() }).returning();
-    noise.push(row.id);
-  }
   try {
+    const noiseStartedAt = new Date(Date.now() + 60 * 60 * 1000);
+    for (let i = 0; i < 6; i += 1) {
+      const [row] = await db
+        .insert(growSignalSweepRuns)
+        .values({ status: "FAILED", trigger: "SCHEDULED", startedAt: new Date(noiseStartedAt.getTime() + i), completedAt: new Date() })
+        .returning();
+      noise.push(row.id);
+    }
     const health = await getSweepOpsHealth();
     assert.ok(health.recentRuns.every((r) => r.status === "FAILED"), "the recentRuns window is now entirely FAILED rows");
     assert.notEqual(health.lastCompletedAt, null, "lastCompletedAt must still find the real completion behind the window");
   } finally {
     for (const id of noise) await db.delete(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, id));
+    await release();
   }
 });
 

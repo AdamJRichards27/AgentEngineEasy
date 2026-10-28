@@ -44,7 +44,9 @@ import {
   PropertyIntelligenceAccessError,
 } from "../service.js";
 import { classifySignalAnchor, CONTACT_ANCHORABLE_SIGNAL_TYPES, CONTACT_ANCHORABLE_RULE_NAMES } from "../evaluation.js";
-import { runSignalSweep, resetSweepResumePointForTests } from "../sweep.js";
+import { resetSweepResumePointForTests } from "../sweep.js";
+// Cross-file contention on the sweep lock: see sweepLockContention.ts.
+import { sweepWhenLockFree } from "./sweepLockContention.js";
 import { invalidateEntitlementCache } from "../../entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
@@ -178,7 +180,7 @@ async function insertRawSignal(input: {
 }
 
 async function sweep(brokerageIds: number[]): Promise<void> {
-  const result = await runSignalSweep("MANUAL", { brokerageIds, force: true });
+  const result = await sweepWhenLockFree({ brokerageIds, force: true });
   assert.ok(result.ok, "the sweep ran");
 }
 
