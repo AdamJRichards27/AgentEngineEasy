@@ -1,6 +1,5 @@
 import express from "express";
 import cors from "cors";
-import helmet from "helmet";
 import { apiRouter } from "./routes/index.js";
 import { loadSession } from "./middlewares/auth.js";
 import { requestId, CORRELATION_ID_HEADER } from "./middlewares/requestId.js";
@@ -11,6 +10,7 @@ import { globalErrorHandler } from "./middlewares/errorHandler.js";
 import { mountStaticWebIfPresent } from "./lib/staticWeb.js";
 import { configuredDocumentWebhookMaxBytes } from "./lib/documentStorage.js";
 import { logger } from "@aee/events";
+import { securityHeaders } from "./lib/securityHeaders.js";
 
 export function createApp() {
   const app = express();
@@ -53,7 +53,10 @@ export function createApp() {
   // <script src>/<link href> tags with no inline scripts, so the defaults
   // need no hand-tuning here; verified in
   // docs/gate-evidence/PHASE9_DEPLOYMENT_READINESS_AUDIT.md.
-  app.use(helmet());
+  // Owner t525u item 4: helmet defaults unchanged except a narrow img-src
+  // allowance for OSM map tiles while the Market Activity flag is on; see
+  // lib/securityHeaders.ts.
+  app.use(securityHeaders());
 
   // Generates a per-request correlation id and echoes it back as
   // X-Correlation-Id on every response — including ones later rejected by

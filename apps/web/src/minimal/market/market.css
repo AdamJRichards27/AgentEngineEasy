@@ -1,0 +1,37 @@
+/* AE Minimal v1.0 V4 — Market Activity area chips and event detail panel. Reuses minimal.css tokens only. */
+.ae-minimal .mm-area-note { margin: -6px 0 12px; }
+.ae-minimal .mm-market-layout { display: grid; gap: 14px; margin-top: 14px; }
+@media (min-width: 1100px) {
+  .ae-minimal .mm-market-layout.has-panel { grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); align-items: start; }
+  .ae-minimal .mm-market-layout.has-panel > .mm-event-panel { order: 2; position: sticky; top: 12px; }
+}
+.ae-minimal .mm-event-panel h2 { margin: 4px 0 10px; font-size: 15px; line-height: 1.35; }
+.ae-minimal .mm-event-panel h2:focus { outline: none; }
+.ae-minimal .mm-event-panel h2:focus-visible { outline: 2px solid var(--am-orange-strong); outline-offset: 2px; }
+.ae-minimal .mm-event-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0 0 12px; font-size: 12px; }
+.ae-minimal .mm-event-facts dt { color: var(--am-muted); }
+.ae-minimal .mm-event-facts dd { margin: 0; overflow-wrap: anywhere; }
+.ae-minimal .mm-event-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
+.ae-minimal .mm-event-action { width: auto; min-height: 36px; padding: 0 14px; display: inline-flex; align-items: center; text-decoration: none; }
+.ae-minimal .mm-event-row-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.ae-minimal a.mm-event-details { padding: 5px 8px; color: var(--am-orange-strong); font-size: 12px; font-weight: 600; text-decoration: none; border-radius: 6px; }
+.ae-minimal a.mm-event-details:hover, .ae-minimal a.mm-event-details[aria-current="true"] { background: var(--am-orange-soft); }
+.ae-minimal a.mm-event-details:focus-visible { outline: 2px solid var(--am-orange-strong); outline-offset: 2px; }
+.ae-minimal .am-agenda-row.is-open { background: rgba(234, 88, 12, .05); }
+.ae-minimal .mm-follow-up { display: grid; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--am-line); }
+.ae-minimal .mm-follow-up h3 { margin: 0 0 4px; font-size: 13px; }
+.ae-minimal .mm-follow-up label { font-size: 11px; color: var(--am-muted); }
+.ae-minimal .mm-follow-up select, .ae-minimal .mm-follow-up textarea, .ae-minimal .mm-follow-up input { width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; padding: 7px 8px; border: 1px solid var(--am-line); border-radius: 7px; background: var(--am-card); color: var(--am-ink); }
+@media (max-width: 760px) {
+  .ae-minimal .am-agenda-row { grid-template-columns: 53px minmax(0, 1fr); }
+  .ae-minimal .mm-event-row-actions { grid-column: 2; justify-content: flex-start; }
+  .ae-minimal .mm-event-row-actions .am-row-open { display: inline; }
+}
+
+/* V5 Market Activity map (supervised preview behind the Market Activity flag). */
+.mm-market-map { display: grid; gap: 8px; min-width: 0; }
+.mm-market-map-canvas { height: 420px; width: 100%; border-radius: 8px; border: 1px solid var(--am-border, #d8ddd9); }
+.mm-map-privacy { margin: 0; font-size: 0.85rem; line-height: 1.4; }
+.mm-map-points { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.mm-map-credit { margin: 0; font-size: 0.85rem; }
+@media (max-width: 600px) { .mm-market-map-canvas { height: 300px; } }
