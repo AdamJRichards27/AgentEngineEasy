@@ -8,8 +8,6 @@
  */
 import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, test } from "node:test";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
@@ -38,27 +36,14 @@ import {
   cleanupBrokerages,
   createBrokerageWithUsers,
 } from "./testSupport.js";
+import { PARENT_BUDGET_MS, runIsolatedMockChild } from "./support/isolatedMockProcess.js";
 
 // The ordinary API test command need not acquire an experimental flag.
 // Only this test file re-executes in an isolated Node 24 mock-enabled process.
 if (!process.execArgv.includes("--experimental-test-module-mocks")) {
-  test("F3 runtime boundary suite (isolated module-mock process)", async (t) => {
-    const childEnv = { ...process.env };
-    // Node otherwise detects a recursive test runner, skips every child test,
-    // and exits zero. A zero exit alone must never count as boundary coverage.
-    delete childEnv.NODE_TEST_CONTEXT;
-    const child = spawn(process.execPath, [
-      "--experimental-test-module-mocks",
-      "--import", fileURLToPath(new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
-      "--test", "--test-reporter=tap", "--test-timeout=120000", fileURLToPath(import.meta.url),
-    ], { env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    const exit = await new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", resolve);
-    });
+  test("F3 runtime boundary suite (isolated module-mock process)", { timeout: PARENT_BUDGET_MS }, async (t) => {
+    const { exit, output, killedAtBudget, elapsedMs } = await runIsolatedMockChild(import.meta.url, "F3");
+    assert.equal(killedAtBudget, false, `child killed at the ${PARENT_BUDGET_MS} ms budget after ${elapsedMs} ms; output so far:\n${output}`);
     t.diagnostic(output);
     assert.equal(exit, 0, output);
     assert.match(output, /# tests 5\b/, "All five runtime cases must actually execute");
