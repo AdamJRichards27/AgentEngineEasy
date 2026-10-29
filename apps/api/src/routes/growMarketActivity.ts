@@ -4,6 +4,7 @@ import { and, desc, eq, gte, inArray, isNotNull, lt, or } from "drizzle-orm";
 import { appraisalComparableSales, appraisals, db, properties } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { restrictedPropertyIdsFor, visibleRequiredPropertySql } from "../lib/propertyVisibility.js";
 
 // CC #26 / SPEC-02 — Market Activity from internal AE data only. Own
 // brokerage only, read-only, no outbound network calls, no provider data,
@@ -18,6 +19,21 @@ export function isMarketActivityEnabled(env: Record<string, string | undefined> 
 
 export type MarketEventType = "justListed" | "sold" | "withdrawn" | "agentEvidence";
 export const MARKET_EVENT_TYPES: MarketEventType[] = ["justListed", "sold", "withdrawn", "agentEvidence"];
+
+// Owner t525u item 2 — privacy classification of every event type.
+//   public market: justListed, sold. A listing going live and a completed sale
+//     are public facts, so they stay brokerage-wide for any grow.access user.
+//   private agent data: withdrawn (listing performance) and agentEvidence
+//     (comparables an agent entered in a client appraisal).
+// Callers scoped by restrictedPropertyIdsFor (Agents: own properties only;
+// Brokerage Administrator and Pit Crew: whole brokerage) get private types only
+// for properties they may see. A public event on a property they may not see is
+// returned in public form: no propertyId, appraisalId, internal record date or
+// id-bearing key, so no record link can be built from it.
+export const PUBLIC_MARKET_EVENT_TYPES: readonly MarketEventType[] = ["justListed", "sold"];
+export const PRIVATE_AGENT_EVENT_TYPES: readonly MarketEventType[] = ["withdrawn", "agentEvidence"];
+export type MarketEventAccess = "record" | "public";
+export const PUBLIC_EVENT_SOURCE_LABEL = "AE brokerage listing";
 const EVENT_CAP = 100;
 
 export interface MarketEvent {
@@ -32,6 +48,8 @@ export interface MarketEvent {
   recordDate: string;
   propertyId: number | null;
   appraisalId: number | null;
+  /** "record": the caller may open the AE record. "public": public market fact only. */
+  access: MarketEventAccess;
 }
 
 const querySchema = z.object({
@@ -62,6 +80,8 @@ growMarketActivityRouter.get(
       return;
     }
     const user = req.authedUser!;
+    const restrictTo = await restrictedPropertyIdsFor(user);
+    const mayOpen = (propertyId: number) => restrictTo === null || restrictTo.includes(propertyId);
     const now = parsed.data.asOf ?? new Date();
     const { start, end } = resolveRange(parsed.data.range, now);
     const wanted = new Set<MarketEventType>(
@@ -95,16 +115,19 @@ growMarketActivityRouter.get(
     const within = (d: Date | null): d is Date => !!d && d >= start && d < end;
     for (const p of propertyRows) {
       if (!suburbOk(p.suburb)) continue;
-      const base = { sourceLabel: "AE property record", address: p.address, suburb: p.suburb, recordDate: p.updatedAt.toISOString(), propertyId: p.id, appraisalId: null };
-      if (wanted.has("justListed") && p.listingStatus === "Listed" && within(p.campaignStartDate)) {
-        events.push({ key: `listed-${p.id}`, type: "justListed", label: "Just listed", eventDate: p.campaignStartDate.toISOString(), ...base });
-      }
-      if (wanted.has("sold") && p.listingStatus === "Sold" && within(p.campaignEndDate)) {
-        events.push({ key: `sold-${p.id}`, type: "sold", label: "Sold", eventDate: p.campaignEndDate.toISOString(), ...base });
-      }
-      if (wanted.has("withdrawn") && p.listingStatus === "Withdrawn" && within(p.campaignEndDate)) {
-        events.push({ key: `withdrawn-${p.id}`, type: "withdrawn", label: "Withdrawn", eventDate: p.campaignEndDate.toISOString(), ...base });
-      }
+      const open = mayOpen(p.id);
+      const push = (type: MarketEventType, label: string, keyPrefix: string, at: Date) => {
+        if (open) {
+          events.push({ key: `${keyPrefix}-${p.id}`, type, label, sourceLabel: "AE property record", address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: p.updatedAt.toISOString(), propertyId: p.id, appraisalId: null, access: "record" });
+        } else if (PUBLIC_MARKET_EVENT_TYPES.includes(type)) {
+          // Public form: the key is assigned after sorting and never carries the property id.
+          events.push({ key: "", type, label, sourceLabel: PUBLIC_EVENT_SOURCE_LABEL, address: p.address, suburb: p.suburb, eventDate: at.toISOString(), recordDate: at.toISOString(), propertyId: null, appraisalId: null, access: "public" });
+        }
+        // Private types on a property the caller may not see are dropped (not counted).
+      };
+      if (wanted.has("justListed") && p.listingStatus === "Listed" && within(p.campaignStartDate)) push("justListed", "Just listed", "listed", p.campaignStartDate);
+      if (wanted.has("sold") && p.listingStatus === "Sold" && within(p.campaignEndDate)) push("sold", "Sold", "sold", p.campaignEndDate);
+      if (wanted.has("withdrawn") && p.listingStatus === "Withdrawn" && within(p.campaignEndDate)) push("withdrawn", "Withdrawn", "withdrawn", p.campaignEndDate);
     }
 
     if (wanted.has("agentEvidence")) {
@@ -126,6 +149,8 @@ growMarketActivityRouter.get(
           inArray(appraisalComparableSales.source, ["manual"]),
           gte(appraisalComparableSales.createdAt, start),
           lt(appraisalComparableSales.createdAt, end),
+          // Private agent data: only appraisals on properties the caller may see.
+          visibleRequiredPropertySql(appraisals.propertyId, restrictTo),
         ))
         .orderBy(desc(appraisalComparableSales.createdAt))
         .limit(EVENT_CAP);
@@ -142,11 +167,14 @@ growMarketActivityRouter.get(
           recordDate: c.createdAt.toISOString(),
           propertyId: null,
           appraisalId: c.appraisalId,
+          access: "record",
         });
       }
     }
 
-    events.sort((a, b) => b.eventDate.localeCompare(a.eventDate) || a.key.localeCompare(b.key));
+    events.sort((a, b) => b.eventDate.localeCompare(a.eventDate) || a.key.localeCompare(b.key) || a.address.localeCompare(b.address));
+    let publicN = 0;
+    for (const e of events) if (e.access === "public") e.key = `public-${++publicN}`;
     const counts = { justListed: 0, sold: 0, withdrawn: 0, agentEvidence: 0 };
     for (const e of events) counts[e.type]++;
     res.json({
