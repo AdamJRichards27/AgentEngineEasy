@@ -30,7 +30,7 @@
 
 import { eq, and, lte, like, desc } from "drizzle-orm";
 import { syncReceiptsForPaymentRequest } from "./receipts.js";
-import { incrementCounter } from "@aee/events";
+import { incrementCounter, logger } from "@aee/events";
 import {
   db,
   financialPaymentRequests,
@@ -454,7 +454,7 @@ async function holdUncertainDispatch(outboxEntry: FinancialPaymentOutbox, reques
     });
     incrementCounter("job_repeated_failure_total", { job: "financial_payment_outbox_command" });
   } catch (sideEffectErr) {
-    console.error(JSON.stringify({ level: "error", message: "financial_payment_debit_dispatch_held_side_effect_failed", outboxEntryId: outboxEntry.id, error: (sideEffectErr as Error).message }));
+    logger.error("financial_payment_debit_dispatch_held_side_effect_failed", { outboxEntryId: outboxEntry.id, error: (sideEffectErr as Error).message });
   }
   return { outboxEntry: heldEntry, paymentRequest: heldRequest };
 }
