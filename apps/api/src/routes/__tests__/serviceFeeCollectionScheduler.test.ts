@@ -159,11 +159,16 @@ describe("t181u(B): notice-period collection scheduler", { concurrency: false },
   });
 
   test("tick collects only due fees: elapsed DD notice -> one debit; running notice, UNKNOWN and not-due retries untouched; idempotent", async () => {
+    // Activate the card authority FIRST. Activation marks one prior ACTIVE authority for the agent as
+    // REPLACED (priorActiveRows[0], unordered). If the fixture-made debit authority below already
+    // existed alongside the one left ACTIVE by the "disabled does nothing" test, which of the two
+    // got replaced depended on row order, and the due fee was intermittently refused with
+    // SERVICE_FEE_AUTHORITY_INVALID. Created afterwards, the debit authority is never replaced here.
+    const cardId = await cardAuthority();
     const dd = await activeDebitAuthority(w);
     const due = await issued(dd.id, "SchedDue");
     await elapseNotice(due);
     const running = await issued(dd.id, "SchedRunning");
-    const cardId = await cardAuthority();
     const unknown = await issued(cardId, "SchedUnknown");
     await elapseNotice(unknown);
     const notDue = await issued(cardId, "SchedNotDue");
