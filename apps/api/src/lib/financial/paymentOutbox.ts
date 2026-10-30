@@ -28,7 +28,7 @@
 // below where a payment request's OWN outcome (not just an outbox
 // mechanics detail) changes — see events.ts.
 
-import { eq, and, lte } from "drizzle-orm";
+import { eq, and, lte, like, desc } from "drizzle-orm";
 import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import { incrementCounter } from "@aee/events";
 import {
@@ -37,6 +37,7 @@ import {
   financialPaymentOutbox,
   pcFeeAuthorities,
   financialLedgerEvents,
+  auditLogs,
   type FinancialPaymentRequest,
   type FinancialPaymentOutbox,
 } from "@aee/db";
@@ -276,13 +277,20 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
       throw new Error(`Payment request ${request.id} has no active mandate to debit.`);
     }
 
-    const result = await mandatePaymentProvider.scheduleDebit({
-      mandateProviderRef: authority.mandateProviderRef,
-      amountCents: request.amountCents,
-      currency: "AUD",
-      idempotencyKey: outboxEntry.idempotencyKey,
-      description: `PC success fee — payment request #${request.id}`,
-    });
+    // Owner t210u: once the provider is called, an error means the outcome is UNCERTAIN (the debit
+    // may have been accepted). Never auto-resend: hold it for Brokerage Administrator review.
+    let result: Awaited<ReturnType<typeof mandatePaymentProvider.scheduleDebit>>;
+    try {
+      result = await mandatePaymentProvider.scheduleDebit({
+        mandateProviderRef: authority.mandateProviderRef,
+        amountCents: request.amountCents,
+        currency: "AUD",
+        idempotencyKey: outboxEntry.idempotencyKey,
+        description: `PC success fee — payment request #${request.id}`,
+      });
+    } catch (providerErr) {
+      return await holdUncertainDispatch(outboxEntry, request, providerErr as Error);
+    }
 
     const [dispatchedEntry] = await db
       .update(financialPaymentOutbox)
@@ -393,6 +401,79 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
     if (updatedRequest) await syncReceiptsForPaymentRequest(updatedRequest.id);
     return { outboxEntry: updatedEntry, paymentRequest: updatedRequest };
   }
+}
+
+/** Marker on a held outbox entry's lastError (no new status or column: Owner t210u, no schema change). */
+export const HELD_UNCERTAIN_PREFIX = "HELD_UNCERTAIN: ";
+
+/**
+ * Owner t210u: the provider call errored, so the debit may or may not exist. Stop and flag for a
+ * human. The outbox entry leaves PENDING (FAILED + HELD_UNCERTAIN marker, so no sweep resends it);
+ * the fee goes to PROCESSING (outcome unknown, the same never-auto-retried state as an UNKNOWN card
+ * charge); a ledger event and an audit row record the hold; Brokerage Administrators see it at
+ * GET /financial/payment-outbox/held. Nothing here calls the provider again.
+ */
+async function holdUncertainDispatch(outboxEntry: FinancialPaymentOutbox, request: FinancialPaymentRequest, err: Error): Promise<DispatchOutcome> {
+  const message = err.message || "provider error";
+  const { heldEntry, heldRequest } = await db.transaction(async (tx) => {
+    const [heldEntry] = await tx
+      .update(financialPaymentOutbox)
+      .set({ status: "FAILED", attempts: outboxEntry.attempts + 1, lastError: `${HELD_UNCERTAIN_PREFIX}${message}`, updatedAt: new Date() })
+      .where(and(eq(financialPaymentOutbox.id, outboxEntry.id), eq(financialPaymentOutbox.status, "PENDING")))
+      .returning();
+    const [heldRequest] = await tx
+      .update(financialPaymentRequests)
+      .set({ status: "PROCESSING", processingStartedAt: new Date(), nextAttemptAt: null, provider: mandatePaymentProvider.name, updatedAt: new Date() })
+      .where(eq(financialPaymentRequests.id, request.id))
+      .returning();
+    await tx.insert(auditLogs).values({
+      brokerageId: request.brokerageId,
+      userId: null,
+      action: "financial_payment_debit_dispatch_held",
+      recordType: "financial_payment_request",
+      recordId: String(request.id),
+      propertyId: request.propertyId,
+      updatedValue: JSON.stringify({ outboxEntryId: outboxEntry.id, attempt: outboxEntry.attempts + 1, outcome: "UNCERTAIN", autoResend: false, needs: "BROKERAGE_ADMIN_REVIEW", error: message }),
+    });
+    return { heldEntry: heldEntry ?? outboxEntry, heldRequest: heldRequest ?? request };
+  });
+  // The hold is committed above (audit row included). What follows is best effort: an error here
+  // must NEVER fall through to the caller's retry path and re-arm a resend.
+  try {
+    await recordLedgerEvent({
+      brokerageId: heldRequest.brokerageId,
+      propertyId: heldRequest.propertyId,
+      transactionId: heldRequest.transactionId,
+      eventType: "PC_FEE_PAYMENT_PROCESSING",
+      amountCents: heldRequest.amountCents,
+      sourceRecordType: "PAYMENT_REQUEST",
+      sourceRecordId: String(heldRequest.id),
+      actorType: "SYSTEM",
+      reason: `Debit scheduling outcome uncertain (${message}); held for manual review by a Brokerage Administrator, not resent.`,
+      correlationId: outboxEntry.correlationId,
+    });
+    incrementCounter("job_repeated_failure_total", { job: "financial_payment_outbox_command" });
+  } catch (sideEffectErr) {
+    console.error(JSON.stringify({ level: "error", message: "financial_payment_debit_dispatch_held_side_effect_failed", outboxEntryId: outboxEntry.id, error: (sideEffectErr as Error).message }));
+  }
+  return { outboxEntry: heldEntry, paymentRequest: heldRequest };
+}
+
+/** Held (uncertain) debit dispatches for one brokerage, newest first. Brokerage Administrator view. */
+export async function listHeldDebitDispatches(brokerageId: number) {
+  const rows = await db
+    .select()
+    .from(financialPaymentOutbox)
+    .where(and(eq(financialPaymentOutbox.brokerageId, brokerageId), eq(financialPaymentOutbox.status, "FAILED"), like(financialPaymentOutbox.lastError, `${HELD_UNCERTAIN_PREFIX}%`)))
+    .orderBy(desc(financialPaymentOutbox.updatedAt));
+  return rows.map((r) => ({
+    outboxEntryId: r.id,
+    paymentRequestId: r.paymentRequestId,
+    action: r.action,
+    attempts: r.attempts,
+    heldAt: r.updatedAt,
+    reason: (r.lastError ?? "").slice(HELD_UNCERTAIN_PREFIX.length),
+  }));
 }
 
 export interface DispatchSweepResult {

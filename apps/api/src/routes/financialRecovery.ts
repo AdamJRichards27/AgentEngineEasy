@@ -23,6 +23,7 @@ import {
   type RecoveryActor,
   type RecoveryResult,
 } from "../lib/financial/recovery.js";
+import { listHeldDebitDispatches } from "../lib/financial/paymentOutbox.js";
 import { cardRefundProviderStatusFor, listCardRefunds, listCardRefundsForBrokerage, refundCardCharge, resolveUnknownCardRefund } from "../lib/financial/cardRefunds.js";
 
 export const financialRecoveryRouter = Router();
@@ -97,6 +98,11 @@ financialRecoveryRouter.get("/financial/payment-requests/:id/adjustments", ...re
     if (!(err instanceof RecoveryRefusal)) throw err;
     res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
   }
+});
+
+// Owner t210u: uncertain debit dispatches held for manual review (read-only; nothing is resent).
+financialRecoveryRouter.get("/financial/payment-outbox/held", ...requireBrokerageAdmin, async (req, res) => {
+  res.json({ held: await listHeldDebitDispatches(req.authedUser!.brokerageId) });
 });
 
 financialRecoveryRouter.get("/financial/card-charges", ...requireBrokerageAdmin, async (req, res) => {
