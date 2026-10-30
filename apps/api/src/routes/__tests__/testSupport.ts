@@ -76,6 +76,8 @@ import {
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
+  financialReconciliationExceptions,
+  pcFeeCollectionRequests,
   financialDisputes,
   marketingPaymentRecords,
   financialDeposits,
@@ -551,6 +553,9 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   // calculations and confirmations, so they go first (lines cascade).
   // t180u: receipts reference payment requests and statements.
   // Owner t211u (0044): finalised financial records refuse DELETE; teardown bypasses the guards in its own transaction.
+  // t212u (0045): rows that reference payment requests / provider events.
+  await db.delete(financialReconciliationExceptions).where(inArray(financialReconciliationExceptions.brokerageId, ids));
+  await db.delete(pcFeeCollectionRequests).where(inArray(pcFeeCollectionRequests.brokerageId, ids));
   await withFinancialGuardsBypassed((tx) => tx.delete(financialReceipts).where(inArray(financialReceipts.brokerageId, ids)));
   await db.delete(financialCardRefunds).where(inArray(financialCardRefunds.brokerageId, ids)); // t181u phase 2a (FK to card charges)
   await db.delete(financialCardCharges).where(inArray(financialCardCharges.brokerageId, ids));

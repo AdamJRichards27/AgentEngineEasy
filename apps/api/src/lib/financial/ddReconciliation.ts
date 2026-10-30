@@ -16,12 +16,15 @@ import { db, financialLedgerEvents, financialPaymentRequests, pcFeeAuthorities, 
 import type { ProviderDebitStatus } from "@aee/integration-mandate-payments";
 import { logger } from "@aee/events";
 import { mandatePaymentProvider, mandateProviderPermitted } from "./provider.js";
+import { ADJUSTED_STATUSES, hasPaidAfterAdjustmentException, raisePaidAfterAdjustment } from "./reconciliationExceptions.js";
 import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import { emitFinancialEvent } from "./events.js";
 
 const RECONCILABLE = ["DEBIT_SCHEDULED", "PROCESSING", "RETRY_SCHEDULED"];
 
 export interface DdReconciliationResult {
+  /** t212u item 3: Paid reported for a waived / written-off fee -> reconciliation exceptions raised (no mutation). */
+  exceptions?: number;
   checked: number;
   updated: number;
   unchanged: number;
@@ -141,6 +144,36 @@ export async function reconcileProviderManagedDebits(opts: { brokerageIds?: numb
       }
     } catch (err) {
       logger.error("financial_dd_reconciliation_side_effect_failed", { paymentRequestId: applied.id, error: (err as Error).message });
+    }
+  }
+  // Owner t212u item 3: a provider that collects a fee AE already waived / wrote off is surfaced as a
+  // reconciliation exception for BA review. The locked request is never changed here.
+  const adjusted = await db
+    .select({ req: financialPaymentRequests })
+    .from(financialPaymentRequests)
+    .innerJoin(pcFeeAuthorities, eq(pcFeeAuthorities.id, financialPaymentRequests.pcFeeAuthorityId))
+    .where(
+      and(
+        eq(financialPaymentRequests.kind, "PC_SUCCESS_FEE"),
+        inArray(financialPaymentRequests.status, [...ADJUSTED_STATUSES]),
+        isNotNull(financialPaymentRequests.providerRequestRef),
+        eq(financialPaymentRequests.provider, mandatePaymentProvider.name),
+        eq(pcFeeAuthorities.authorisedPaymentMethod, "GENERAL_ACCOUNT_DEBIT_MANDATE"),
+        ...(opts.brokerageIds ? [inArray(financialPaymentRequests.brokerageId, opts.brokerageIds.length ? opts.brokerageIds : [-1])] : []),
+      ),
+    )
+    .limit(opts.limit ?? 100);
+  for (const { req } of adjusted) {
+    if (await hasPaidAfterAdjustmentException(req.id)) continue;
+    let status: ProviderDebitStatus | null = null;
+    try {
+      status = await mandatePaymentProvider.getDebitStatus(req.providerRequestRef!);
+    } catch (err) {
+      logger.warn("financial_dd_reconciliation_status_unavailable", { paymentRequestId: req.id, error: (err as Error).message });
+    }
+    if (status?.status === "Paid" && status.providerRequestRef === req.providerRequestRef) {
+      const { created } = await raisePaidAfterAdjustment({ request: req, source: "RECONCILIATION", providerRequestRef: req.providerRequestRef!, detail: { providerAttempt: status.attempt } });
+      if (created) result.exceptions = (result.exceptions ?? 0) + 1;
     }
   }
   return result;

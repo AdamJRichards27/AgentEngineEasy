@@ -143,7 +143,7 @@ export type PaymentRequestKind = (typeof PAYMENT_REQUEST_KINDS)[number];
 export const OUTBOX_ACTIONS = ["SCHEDULE_DEBIT", "CANCEL_DEBIT", "REVERSE_DEBIT"] as const;
 export type OutboxAction = (typeof OUTBOX_ACTIONS)[number];
 
-export const OUTBOX_STATUSES = ["PENDING", "DISPATCHED", "FAILED"] as const;
+export const OUTBOX_STATUSES = ["PENDING", "DISPATCHED", "FAILED", "CANCELLED"] as const; // CANCELLED: t212u item 4, provider-confirmed cancellation of pending retries
 export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
 
 export const DISPUTE_STATUSES = ["OPEN", "UNDER_REVIEW", "RESOLVED_PAYABLE", "RESOLVED_ADJUSTED", "RESOLVED_WAIVED", "CLOSED"] as const;
@@ -516,7 +516,7 @@ export const financialPaymentProviderEvents = pgTable(
     payload: jsonb("payload"),
     receivedAt: timestamp("received_at").notNull().defaultNow(),
     processedAt: timestamp("processed_at"),
-    processingStatus: text("processing_status").notNull().default("PENDING"), // PENDING | PROCESSED | FAILED
+    processingStatus: text("processing_status").notNull().default("PENDING"), // PENDING | PROCESSED | FAILED | EXCEPTION | NO_CHANGE (t212u)
     processingError: text("processing_error"),
   },
   (table) => ({
@@ -968,3 +968,73 @@ export type FinancialSettingsRow = typeof financialSettings.$inferSelect;
 // against the domains it references, mirroring commerce.ts's own pattern.
 export type { Transaction } from "./transaction";
 export type { CampaignItem } from "./launch";
+
+// ---------------------------------------------------------------------
+// Owner t212u (0045): collection REQUESTS vs execution, and BA reconciliation exceptions.
+// ---------------------------------------------------------------------
+
+/**
+ * t212u item 1: a collection request (Pit Crew, a Brokerage Administrator, the statement-issue
+ * trigger or the scheduler). Recording never calls a provider; the system payment workflow
+ * executes it after re-validating every gate. One open (PENDING/EXECUTING) request per fee.
+ */
+export const pcFeeCollectionRequests = pgTable(
+  "pc_fee_collection_requests",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    transactionId: integer("transaction_id").notNull().references(() => transactions.id),
+    paymentRequestId: integer("payment_request_id").notNull().references(() => financialPaymentRequests.id),
+    requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+    requestedByRole: text("requested_by_role").notNull(),
+    trigger: text("trigger").notNull(), // collect | statement_issued | scheduler
+    status: text("status").notNull().default("PENDING"), // PENDING | EXECUTING | EXECUTED | REFUSED | FAILED
+    executedBy: text("executed_by"), // SYSTEM_PAYMENT_WORKFLOW
+    outcome: text("outcome"),
+    refusalCode: text("refusal_code"),
+    executedAt: timestamp("executed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    oneOpenPerRequest: uniqueIndex("pc_fee_collection_requests_one_open_idx")
+      .on(table.paymentRequestId)
+      .where(sql`${table.status} in ('PENDING', 'EXECUTING')`),
+    brokerageStatusIdx: index("pc_fee_collection_requests_brokerage_status_idx").on(table.brokerageId, table.status),
+  }),
+);
+export type PcFeeCollectionRequest = typeof pcFeeCollectionRequests.$inferSelect;
+
+/**
+ * t212u items 3-4: provider outcomes AE must not apply to a locked record (a "Paid" after a waiver
+ * or write-off) and unconfirmed provider cancellations. Reviewed and resolved by a Brokerage
+ * Administrator (refund assessment); the financial records themselves are never mutated here.
+ */
+export const financialReconciliationExceptions = pgTable(
+  "financial_reconciliation_exceptions",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    paymentRequestId: integer("payment_request_id").notNull().references(() => financialPaymentRequests.id),
+    propertyId: integer("property_id").references(() => properties.id),
+    kind: text("kind").notNull(), // PAID_AFTER_WAIVER | PAID_AFTER_WRITE_OFF | CANCELLATION_UNCONFIRMED
+    source: text("source").notNull(), // WEBHOOK | RECONCILIATION | RECOVERY
+    providerEventRowId: integer("provider_event_row_id").references(() => financialPaymentProviderEvents.id),
+    providerRequestRef: text("provider_request_ref"),
+    amountCents: integer("amount_cents"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    status: text("status").notNull().default("OPEN"), // OPEN | RESOLVED
+    refundAssessment: text("refund_assessment"), // REFUND_REQUIRED | NO_REFUND_REQUIRED | NOT_APPLICABLE
+    resolutionReason: text("resolution_reason"),
+    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    resolvedAt: timestamp("resolved_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    oneOpenPerKind: uniqueIndex("financial_reconciliation_exceptions_one_open_idx")
+      .on(table.paymentRequestId, table.kind)
+      .where(sql`${table.status} = 'OPEN'`),
+    brokerageStatusIdx: index("financial_reconciliation_exceptions_brokerage_status_idx").on(table.brokerageId, table.status),
+  }),
+);
+export type FinancialReconciliationException = typeof financialReconciliationExceptions.$inferSelect;

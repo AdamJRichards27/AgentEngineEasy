@@ -28,6 +28,7 @@
 // to intervene past exhausted retries" posture (paymentOutbox.ts's own
 // module comment says the same for its own exhausted-retries path).
 
+import { ADJUSTED_STATUSES, raisePaidAfterAdjustment } from "./reconciliationExceptions.js";
 import { eq, and } from "drizzle-orm";
 import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import {
@@ -164,6 +165,25 @@ export async function processMandatePaymentWebhook(
       .set({ processingStatus: "FAILED", processingError: "Webhook provider, brokerage, or mandate context did not match payment request.", processedAt: new Date() })
       .where(eq(financialPaymentProviderEvents.id, inserted.id));
     return { processed: false, reason: "context_mismatch" };
+  }
+
+  // Owner t212u item 3: a waived / written-off fee is a locked record. A provider "Paid" for it raises a
+  // reconciliation exception for BA review (refund assessment); any other status is recorded with no
+  // change. The provider event row above is kept either way (never discarded).
+  if (ADJUSTED_STATUSES.has(request.status)) {
+    if (result.status === "Paid") {
+      const { exception } = await raisePaidAfterAdjustment({ request, source: "WEBHOOK", providerEventRowId: inserted.id, providerRequestRef: result.providerRequestRef });
+      await db
+        .update(financialPaymentProviderEvents)
+        .set({ processingStatus: "EXCEPTION", paymentRequestId: request.id, processingError: `Paid after ${request.status}: reconciliation exception #${exception.id} raised for Brokerage Administrator review.`, processedAt: new Date() })
+        .where(eq(financialPaymentProviderEvents.id, inserted.id));
+    } else {
+      await db
+        .update(financialPaymentProviderEvents)
+        .set({ processingStatus: "NO_CHANGE", paymentRequestId: request.id, processingError: `Request is ${request.status} (locked); provider status ${result.status} recorded, nothing changed.`, processedAt: new Date() })
+        .where(eq(financialPaymentProviderEvents.id, inserted.id));
+    }
+    return { processed: true, paymentRequest: request };
   }
 
   const updated = await applyMandateWebhookResult(request, result);

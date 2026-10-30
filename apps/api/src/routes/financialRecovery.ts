@@ -23,6 +23,8 @@ import {
   type RecoveryActor,
   type RecoveryResult,
 } from "../lib/financial/recovery.js";
+import { correctFinancialRecord, correctionEvidenceFrom, FinancialCorrectionRefusal, listFinancialCorrections, type CorrectableTable } from "../lib/financial/corrections.js";
+import { listReconciliationExceptions, RECON_ERROR_STATUS, ReconExceptionRefusal, resolveReconciliationException } from "../lib/financial/reconciliationExceptions.js";
 import { HeldDebitRefusal, listHeldDebitDispatches, resolveHeldDebit } from "../lib/financial/paymentOutbox.js";
 import { cardRefundProviderStatusFor, listCardRefunds, listCardRefundsForBrokerage, refundCardCharge, resolveUnknownCardRefund } from "../lib/financial/cardRefunds.js";
 
@@ -198,5 +200,55 @@ financialRecoveryRouter.post("/financial/card-refunds/:id/resolve", ...requireBr
     if (!(err instanceof RecoveryRefusal)) throw err;
     await auditRecoveryOutcome(actor, "resolve_card_refund", { refused: err }, id);
     res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Owner t212u item 2: audited correction of locked financial records (BA only; 0044 correction path).
+const correctionSchema = z.object({
+  table: z.string().min(1).max(64),
+  id: z.number().int().positive(),
+  patch: z.record(z.string().min(1).max(64), z.union([z.string().max(4000), z.number(), z.boolean(), z.null()])),
+  reason: z.string().max(2000).optional(),
+  evidenceRef: z.string().max(500).optional(),
+  evidenceUpload: z.object({ fileName: z.string().max(255), sha256: z.string().max(64), sizeBytes: z.number() }).optional(),
+});
+financialRecoveryRouter.post("/financial/corrections", ...requireBrokerageAdmin, async (req, res) => {
+  const parsed = correctionSchema.safeParse(req.body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const user = req.authedUser!;
+  try {
+    const evidence = correctionEvidenceFrom(parsed.data);
+    const out = await correctFinancialRecord(
+      { id: user.id, role: user.role, brokerageId: user.brokerageId },
+      { table: parsed.data.table as CorrectableTable, id: parsed.data.id, patch: parsed.data.patch, justification: parsed.data.reason ?? "", evidence },
+    );
+    res.json(out);
+  } catch (err) {
+    if (!(err instanceof FinancialCorrectionRefusal)) throw err;
+    const status = err.code === "CORRECTION_FORBIDDEN" ? 403 : err.code === "CORRECTION_NOT_FOUND" ? 404 : 400;
+    res.status(status).json(status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
+});
+financialRecoveryRouter.get("/financial/corrections", ...requireBrokerageAdmin, async (req, res) => {
+  const user = req.authedUser!;
+  res.json({ corrections: await listFinancialCorrections({ id: user.id, role: user.role, brokerageId: user.brokerageId }) });
+});
+
+// Owner t212u items 3-4: reconciliation exceptions (Paid after waiver/write-off; unconfirmed provider cancellation).
+financialRecoveryRouter.get("/financial/reconciliation-exceptions", ...requireBrokerageAdmin, async (req, res) => {
+  const user = req.authedUser!;
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  res.json({ exceptions: await listReconciliationExceptions({ id: user.id, role: user.role, brokerageId: user.brokerageId }, { status }) });
+});
+financialRecoveryRouter.post("/financial/reconciliation-exceptions/:id/resolve", ...requireBrokerageAdmin, async (req, res) => {
+  const user = req.authedUser!;
+  try {
+    const body = (req.body ?? {}) as { refundAssessment?: unknown; reason?: unknown };
+    res.json({ exception: await resolveReconciliationException({ id: user.id, role: user.role, brokerageId: user.brokerageId }, Number(req.params.id), body) });
+  } catch (err) {
+    if (!(err instanceof ReconExceptionRefusal)) throw err;
+    const status = RECON_ERROR_STATUS[err.code];
+    res.status(status).json(status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
   }
 });

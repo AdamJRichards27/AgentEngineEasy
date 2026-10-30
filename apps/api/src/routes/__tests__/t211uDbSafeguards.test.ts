@@ -138,7 +138,7 @@ describe("t211u item 1: finalised financial records are protected by the databas
   test("correction path: a Brokerage Administrator with a justification can correct; it writes the audit row first; the flag is transaction-scoped", async () => {
     const [ev] = await db.select().from(financialLedgerEvents).where(eq(financialLedgerEvents.sourceRecordId, String(paid.requestId))).orderBy(desc(financialLedgerEvents.id)).limit(1);
     const before = ev!.reason;
-    const r = await correctFinancialRecord(ba(), { table: "financial_ledger_events", id: ev!.id, patch: { reason: "Corrected reason (synthetic)" }, justification: "Typo in the recorded reason; see ticket SYN-1" });
+    const r = await correctFinancialRecord(ba(), { table: "financial_ledger_events", id: ev!.id, patch: { reason: "Corrected reason (synthetic)" }, evidence: { kind: "reference", ref: "synthetic-evidence-ref" }, justification: "Typo in the recorded reason; see ticket SYN-1" });
     const [after] = await db.select().from(financialLedgerEvents).where(eq(financialLedgerEvents.id, ev!.id));
     assert.equal(after!.reason, "Corrected reason (synthetic)");
     const [audit] = await db.select().from(auditLogs).where(eq(auditLogs.id, r.auditId));
@@ -155,11 +155,11 @@ describe("t211u item 1: finalised financial records are protected by the databas
   test("correction path refusals: non-BA, blank justification, other brokerage, protected columns, DELETE; a forged flag is refused", async () => {
     const [ev] = await db.select().from(financialLedgerEvents).where(eq(financialLedgerEvents.sourceRecordId, String(paid.requestId))).limit(1);
     const code = (c: string) => (e: unknown) => e instanceof FinancialCorrectionRefusal && e.code === c;
-    await assert.rejects(correctFinancialRecord({ id: w.crew.user.id, role: "Pit Crew", brokerageId: w.X.brokerageId }, { table: "financial_ledger_events", id: ev!.id, patch: { reason: "x" }, justification: REASON }), code("CORRECTION_FORBIDDEN"));
-    await assert.rejects(correctFinancialRecord(ba(), { table: "financial_ledger_events", id: ev!.id, patch: { reason: "x" }, justification: "   " }), code("CORRECTION_JUSTIFICATION_REQUIRED"));
-    await assert.rejects(correctFinancialRecord({ id: w.Y.admin.user.id, role: "Brokerage Administrator", brokerageId: w.Y.brokerageId }, { table: "financial_ledger_events", id: ev!.id, patch: { reason: "x" }, justification: REASON }), code("CORRECTION_NOT_FOUND"));
-    await assert.rejects(correctFinancialRecord(ba(), { table: "financial_ledger_events", id: ev!.id, patch: { brokerage_id: w.Y.brokerageId }, justification: REASON }), code("CORRECTION_COLUMN_NOT_ALLOWED"));
-    await assert.rejects(correctFinancialRecord(ba(), { table: "users" as never, id: 1, patch: { role: "x" }, justification: REASON }), code("CORRECTION_TABLE_NOT_ALLOWED"));
+    await assert.rejects(correctFinancialRecord({ id: w.crew.user.id, role: "Pit Crew", brokerageId: w.X.brokerageId }, { table: "financial_ledger_events", id: ev!.id, patch: { reason: "x" }, evidence: { kind: "reference", ref: "synthetic-evidence-ref" }, justification: REASON }), code("CORRECTION_FORBIDDEN"));
+    await assert.rejects(correctFinancialRecord(ba(), { table: "financial_ledger_events", id: ev!.id, patch: { reason: "x" }, evidence: { kind: "reference", ref: "synthetic-evidence-ref" }, justification: "   " }), code("CORRECTION_JUSTIFICATION_REQUIRED"));
+    await assert.rejects(correctFinancialRecord({ id: w.Y.admin.user.id, role: "Brokerage Administrator", brokerageId: w.Y.brokerageId }, { table: "financial_ledger_events", id: ev!.id, patch: { reason: "x" }, evidence: { kind: "reference", ref: "synthetic-evidence-ref" }, justification: REASON }), code("CORRECTION_NOT_FOUND"));
+    await assert.rejects(correctFinancialRecord(ba(), { table: "financial_ledger_events", id: ev!.id, patch: { brokerage_id: w.Y.brokerageId }, evidence: { kind: "reference", ref: "synthetic-evidence-ref" }, justification: REASON }), code("CORRECTION_COLUMN_NOT_ALLOWED"));
+    await assert.rejects(correctFinancialRecord(ba(), { table: "users" as never, id: 1, patch: { role: "x" }, evidence: { kind: "reference", ref: "synthetic-evidence-ref" }, justification: REASON }), code("CORRECTION_TABLE_NOT_ALLOWED"));
     // Forged: pointing the flag at an existing (older) correction audit row from another transaction.
     const [old] = await db.select().from(auditLogs).where(eq(auditLogs.action, "financial_record_correction")).orderBy(desc(auditLogs.id)).limit(1);
     await assert.rejects(

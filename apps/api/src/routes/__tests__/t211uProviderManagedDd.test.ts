@@ -125,11 +125,12 @@ describe("t211u item 4: provider-managed direct-debit retries; AE reconciles, ne
     const live = await scheduledDd("DdLiveRetry");
     sandbox().simulateDebitStatus(live.ref, { status: "RetryScheduled", attempt: 1, nextAttemptAt: new Date(Date.now() + 86_400_000), failureReason: "insufficient_funds" });
     await reconcile();
+    // t212u item 4: the adjustment now first asks the provider to cancel its retries; unconfirmed keeps it refused.
+    sandbox().simulateCancellation(live.ref, "unconfirmed");
     for (const action of ["waive", "write-off"]) {
       const r = await call(w.baseUrl, "POST", `/financial/payment-requests/${live.c.requestId}/${action}`, w.X.admin.cookie, body);
       assert.equal(r.status, 409, `${action} while the provider may still collect: ${r.raw}`);
-      assert.equal(r.json.code, "RECOVERY_PAYMENT_IN_FLIGHT");
-      assert.match(r.json.error, /provider is still retrying this direct debit/, "the BA is told why and what to wait for");
+      assert.equal(r.json.code, "RECOVERY_CANCELLATION_UNCONFIRMED");
     }
     const wo = await scheduledDd("DdFinalWriteOff");
     sandbox().simulateDebitStatus(wo.ref, { status: "Failed", attempt: 3, final: true, failureReason: "insufficient_funds" });

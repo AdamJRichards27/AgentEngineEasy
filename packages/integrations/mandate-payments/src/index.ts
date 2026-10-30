@@ -100,6 +100,13 @@ export interface ProviderDebitStatus {
   failureReason?: string;
 }
 
+export type ProviderCancellationStatus = "Cancelled" | "CancellationPending";
+export interface ProviderCancellationResult {
+  providerRequestRef: string;
+  status: ProviderCancellationStatus;
+}
+export type SandboxCancellationOutcome = "confirmed" | "unconfirmed" | "error";
+
 export interface MandatePaymentProvider {
   name: string;
   /** Owner t211u item 4. Providers that retry failed debits themselves declare PROVIDER_MANAGED. */
@@ -109,6 +116,13 @@ export interface MandatePaymentProvider {
   cancelScheduledDebit(providerRequestRef: string, options: ProviderCallOptions): Promise<void>;
   /** Unwinds an already-cleared ("Paid") debit. */
   reverseDebit(providerRequestRef: string, amountCents: number, reason: string, options: ProviderCallOptions): Promise<void>;
+  /**
+   * Owner t212u item 4: stop the provider's own pending retries for a debit. The answer is the
+   * provider's CONFIRMED state: "Cancelled" only when the provider confirms no further attempt will
+   * be made; "CancellationPending" when it accepted the request but has not confirmed. Throws when
+   * the provider could not be asked or refused. Idempotent on the key.
+   */
+  cancelPendingRetries(providerRequestRef: string, options: ProviderCallOptions): Promise<ProviderCancellationResult>;
   /** Read-only: the provider's current status for one debit (null if it has no record). Never sends. */
   getDebitStatus?(providerRequestRef: string): Promise<ProviderDebitStatus | null>;
   // Same shape as PaymentProvider/BillingProvider's own verifyWebhookSignature — payload should
@@ -166,6 +180,7 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
   private simulated = new Map<string, ProviderDebitStatus | null>();
   /** idempotency key -> completed cancel/reverse call (replayed, never repeated). */
   private completedCalls = new Set<string>();
+  private cancellationOutcomes = new Map<string, SandboxCancellationOutcome>();
   private idempotencyIndex = new Map<string, string>(); // idempotencyKey -> providerRequestRef
   private readonly configuredWebhookSecret: string | undefined;
   private readonly configuredWebhooksEnabled: boolean | undefined;
@@ -236,6 +251,29 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
     }
     this.scheduled.delete(providerRequestRef);
     this.completedCalls.add(`cancel:${options.idempotencyKey}`);
+  }
+
+  /** SANDBOX/TEST ONLY: how the next cancelPendingRetries for this debit answers (default confirmed). */
+  simulateCancellation(providerRequestRef: string, outcome: SandboxCancellationOutcome): void {
+    this.cancellationOutcomes.set(providerRequestRef, outcome);
+  }
+
+  async cancelPendingRetries(providerRequestRef: string, options: ProviderCallOptions): Promise<ProviderCancellationResult> {
+    if (!options?.idempotencyKey) throw new Error("cancelPendingRetries requires an idempotencyKey.");
+    if (this.completedCalls.has(`cancel-retries:${options.idempotencyKey}`)) return { providerRequestRef, status: "Cancelled" };
+    const outcome = this.cancellationOutcomes.get(providerRequestRef) ?? "confirmed";
+    if (outcome === "error") throw new Error("Sandbox: the provider could not be reached to cancel retries.");
+    if (outcome === "unconfirmed") return { providerRequestRef, status: "CancellationPending" };
+    const rec = this.scheduled.get(providerRequestRef);
+    const known = rec !== undefined || this.simulated.has(providerRequestRef);
+    if (!known) throw new Error(`Unknown providerRequestRef: ${providerRequestRef}`);
+    if (rec?.status === "Paid" || this.simulated.get(providerRequestRef)?.status === "Paid") {
+      throw new Error("Cannot cancel retries: the provider has already collected this debit.");
+    }
+    this.simulated.set(providerRequestRef, { providerRequestRef, status: "Failed", attempt: this.simulated.get(providerRequestRef)?.attempt ?? 1, final: true, failureReason: "cancelled_at_creditor_request" });
+    if (rec) rec.status = "Failed";
+    this.completedCalls.add(`cancel-retries:${options.idempotencyKey}`);
+    return { providerRequestRef, status: "Cancelled" };
   }
 
   async reverseDebit(providerRequestRef: string, _amountCents: number, _reason: string, options: ProviderCallOptions): Promise<void> {

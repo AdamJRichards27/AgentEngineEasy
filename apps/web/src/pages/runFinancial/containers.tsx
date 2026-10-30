@@ -17,11 +17,15 @@ import {
   type ServiceFeeResponse,
   type SettlementConfirmation,
   type SettlementStatement,
+  type CorrectionRecord,
+  type ReconciliationException,
 } from "../../lib/runFinancial";
 import {
   AdjustmentRecordsView,
   CardChargeRow,
   HeldDebitsView,
+  CorrectionsView,
+  ReconciliationExceptionsView,
   CardRefundRow,
   ReceiptsView,
   RecoveryActionsView,
@@ -287,4 +291,61 @@ function PaymentRequestAdjustments({ enabled, paymentRequestId }: { enabled: boo
   });
   if (!enabled) return null;
   return <AdjustmentRecordsView records={q.data?.adjustments} error={q.isError ? apiErrorMessage(q.error, "Couldn't load adjustment records.") : null} />;
+}
+
+/** Owner t212u: reconciliation exceptions (review + refund assessment) and audited corrections. BA only. */
+export function BaReconciliationAndCorrections({ role }: { role: string | null | undefined }) {
+  const caps = runFinancialCapabilities(role);
+  const qc = useQueryClient();
+  const [message, setMessage] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const exQ = useQuery({
+    queryKey: ["run-recon-exceptions"],
+    queryFn: () => apiFetch<{ exceptions: ReconciliationException[] }>("/financial/reconciliation-exceptions"),
+    enabled: caps.reconciliationExceptions,
+  });
+  const corrQ = useQuery({
+    queryKey: ["run-corrections"],
+    queryFn: () => apiFetch<{ corrections: CorrectionRecord[] }>("/financial/corrections"),
+    enabled: caps.corrections,
+  });
+  const act = useMutation({
+    mutationFn: (v: { path: string; body: unknown; done: string }) => post(v.path, v.body).then(() => v.done),
+    onSuccess: (done) => {
+      setFailure(null);
+      setMessage(done);
+      qc.invalidateQueries({ queryKey: ["run-recon-exceptions"] });
+      qc.invalidateQueries({ queryKey: ["run-corrections"] });
+    },
+    onError: (e) => {
+      setMessage(null);
+      setFailure(apiErrorMessage(e, "That action was refused."));
+    },
+  });
+  if (!caps.reconciliationExceptions && !caps.corrections) return null;
+  return (
+    <>
+      {caps.reconciliationExceptions && (
+        <section className="card" aria-label="Reconciliation exceptions">
+          <ReconciliationExceptionsView
+            exceptions={exQ.data?.exceptions}
+            error={exQ.isError ? apiErrorMessage(exQ.error, "Couldn't load reconciliation exceptions.") : null}
+            busy={act.isPending}
+            onResolve={(id, body) => act.mutate({ path: `/financial/reconciliation-exceptions/${id}/resolve`, body, done: "Exception resolved." })}
+          />
+        </section>
+      )}
+      {caps.corrections && (
+        <section className="card" aria-label="Corrections">
+          <CorrectionsView
+            corrections={corrQ.data?.corrections}
+            error={failure ?? (corrQ.isError ? apiErrorMessage(corrQ.error, "Couldn't load corrections.") : null)}
+            message={message}
+            busy={act.isPending}
+            onSubmit={(body) => act.mutate({ path: "/financial/corrections", body, done: "Correction recorded." })}
+          />
+        </section>
+      )}
+    </>
+  );
 }

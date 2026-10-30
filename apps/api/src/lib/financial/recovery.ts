@@ -29,6 +29,8 @@ import {
   financialLedgerEvents,
   financialPaymentOutbox,
   financialPaymentRequests,
+  financialReconciliationExceptions,
+  pcFeeAuthorities,
   pcFeeCalculations,
   settlementStatements,
   type FinancialCardCharge,
@@ -37,6 +39,7 @@ import {
 import { logAudit } from "../audit.js";
 import { emitFinancialEvent } from "./events.js";
 import { syncReceiptsForPaymentRequest } from "./receipts.js";
+import { mandatePaymentProvider } from "./provider.js";
 
 export const RECOVERY_POLICY = "t181u";
 
@@ -54,6 +57,7 @@ export type RecoveryCode =
   | "RECOVERY_USE_DISPUTE_RESOLUTION"
   | "RECOVERY_USE_CANCEL_DEBIT"
   | "RECOVERY_PAYMENT_IN_FLIGHT"
+  | "RECOVERY_CANCELLATION_UNCONFIRMED"
   | "RECOVERY_PAID_REFUND_REQUIRED"
   | "RECOVERY_NOT_DISPUTED"
   | "RECOVERY_PROVIDER_STATE_UNRESOLVED"
@@ -84,6 +88,7 @@ const STATUS_FOR: Record<RecoveryCode, number> = {
   RECOVERY_USE_DISPUTE_RESOLUTION: 409,
   RECOVERY_USE_CANCEL_DEBIT: 409,
   RECOVERY_PAYMENT_IN_FLIGHT: 409,
+  RECOVERY_CANCELLATION_UNCONFIRMED: 409,
   RECOVERY_PAID_REFUND_REQUIRED: 409,
   RECOVERY_NOT_DISPUTED: 409,
   RECOVERY_PROVIDER_STATE_UNRESOLVED: 409,
@@ -430,7 +435,82 @@ async function finish(result: RecoveryResult): Promise<RecoveryResult> {
   return result;
 }
 
+/**
+ * Owner t212u item 4: a direct debit the provider is still retrying (RETRY_SCHEDULED with the
+ * debit DISPATCHED) can be waived or written off only after the provider CONFIRMS it has cancelled
+ * its pending retries. Called before the locking transaction, after the request itself is
+ * validated (reason + evidence), so an invalid request never reaches the provider.
+ * Confirmed -> the dispatched debit is closed (outbox CANCELLED) and audited; the adjustment proceeds.
+ * Unconfirmed or error -> nothing changes (the hold stays), an audit row is written and an OPEN
+ * CANCELLATION_UNCONFIRMED exception is raised for Brokerage Administrators; the call is refused.
+ */
+async function ensureProviderRetriesCancelled(actor: RecoveryActor, paymentRequestId: number, input: RecoveryInput, action: "waive" | "write_off"): Promise<void> {
+  if (!Number.isSafeInteger(paymentRequestId) || paymentRequestId <= 0) return;
+  const [pr] = await db
+    .select()
+    .from(financialPaymentRequests)
+    .where(and(eq(financialPaymentRequests.id, paymentRequestId), eq(financialPaymentRequests.brokerageId, actor.brokerageId)));
+  if (!pr || pr.kind !== "PC_SUCCESS_FEE" || pr.status !== "RETRY_SCHEDULED" || !pr.providerRequestRef) return;
+  const [dispatched] = await db
+    .select()
+    .from(financialPaymentOutbox)
+    .where(and(eq(financialPaymentOutbox.paymentRequestId, pr.id), eq(financialPaymentOutbox.action, "SCHEDULE_DEBIT"), eq(financialPaymentOutbox.status, "DISPATCHED")));
+  if (!dispatched) return;
+  if (pr.pcFeeAuthorityId != null) {
+    const [authority] = await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, pr.pcFeeAuthorityId));
+    if (authority?.authorisedPaymentMethod === "STORED_CARD") return; // card retries are AE-managed, not provider-managed
+  }
+  cleanReason(input, pr.id, pr.propertyId);
+  await evidenceFor(db as unknown as Tx, input, pr);
+
+  const ref = pr.providerRequestRef;
+  const idempotencyKey = `cancel-retries:${pr.id}:${ref}`;
+  let confirmed = false;
+  let detail: Record<string, unknown>;
+  try {
+    const answer = await mandatePaymentProvider.cancelPendingRetries(ref, { idempotencyKey });
+    confirmed = answer.status === "Cancelled";
+    detail = { providerStatus: answer.status };
+  } catch (err) {
+    detail = { providerError: err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500) };
+  }
+  const base = { paymentRequestId: pr.id, providerRequestRef: ref, idempotencyKey, recoveryAction: action, callerRole: actor.role, ...detail, policy: "t212u item 4" };
+  if (confirmed) {
+    await db.transaction(async (tx) => {
+      await tx
+        .update(financialPaymentOutbox)
+        .set({ status: "CANCELLED", lastError: "CANCELLED: provider confirmed cancellation of pending retries", updatedAt: new Date() })
+        .where(and(eq(financialPaymentOutbox.id, dispatched.id), eq(financialPaymentOutbox.status, "DISPATCHED")));
+      await auditTx(tx, actor, "provider_retry_cancellation_confirmed", pr, JSON.stringify(base));
+    });
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(financialReconciliationExceptions)
+      .values({
+        brokerageId: pr.brokerageId,
+        paymentRequestId: pr.id,
+        propertyId: pr.propertyId,
+        kind: "CANCELLATION_UNCONFIRMED",
+        source: "RECOVERY",
+        providerRequestRef: ref,
+        amountCents: pr.amountCents,
+        detail: { ...base, raisedByUserId: actor.id },
+      })
+      .onConflictDoNothing();
+    await auditTx(tx, actor, "provider_retry_cancellation_unconfirmed", pr, JSON.stringify(base));
+  });
+  throw new RecoveryRefusal(
+    "RECOVERY_CANCELLATION_UNCONFIRMED",
+    "The provider has not confirmed that its pending retries are cancelled, so the debit stays on hold. This has been escalated for Brokerage Administrator review.",
+    pr.id,
+    pr.propertyId,
+  );
+}
+
 export async function waivePaymentRequest(actor: RecoveryActor, paymentRequestId: number, input: RecoveryInput): Promise<RecoveryResult> {
+  await ensureProviderRetriesCancelled(actor, paymentRequestId, input, "waive");
   const result = await db.transaction(async (tx) => {
     const pr = await lockRequest(tx, actor, paymentRequestId);
     if (pr.status === "WAIVED") return { idempotent: true, paymentRequest: pr, statusBefore: pr.status };
@@ -450,6 +530,7 @@ export async function waivePaymentRequest(actor: RecoveryActor, paymentRequestId
 }
 
 export async function writeOffPaymentRequest(actor: RecoveryActor, paymentRequestId: number, input: RecoveryInput): Promise<RecoveryResult> {
+  await ensureProviderRetriesCancelled(actor, paymentRequestId, input, "write_off");
   const result = await db.transaction(async (tx) => {
     const pr = await lockRequest(tx, actor, paymentRequestId);
     if (pr.status === "WRITTEN_OFF") return { idempotent: true, paymentRequest: pr, statusBefore: pr.status };

@@ -31,6 +31,8 @@ export interface RunFinancialCapabilities {
   heldDebits: boolean;
   /** S6: waiver / write-off adjustment records (server: BA only). */
   adjustmentRecords: boolean;
+  corrections: boolean;
+  reconciliationExceptions: boolean;
 }
 
 export function runFinancialCapabilities(role: string | null | undefined): RunFinancialCapabilities {
@@ -47,6 +49,9 @@ export function runFinancialCapabilities(role: string | null | undefined): RunFi
     baQueues: isBa,
     heldDebits: isBa,
     adjustmentRecords: isBa,
+    // Owner t212u: audited corrections and reconciliation exceptions (existing BA role gate).
+    corrections: isBa,
+    reconciliationExceptions: isBa,
   };
 }
 
@@ -368,4 +373,92 @@ export function recoveryActionsFor(status: string) {
     writeOff: ["RETRY_SCHEDULED", "FAILED"].includes(status),
     resolveDispute: status === "DISPUTED",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Owner t212u: audited corrections + reconciliation exceptions (BA only).
+export interface CorrectionEvidenceView {
+  kind: "reference" | "upload";
+  ref?: string;
+  fileName?: string;
+  sha256?: string;
+  sizeBytes?: number;
+}
+export interface CorrectionRecord {
+  auditId: number;
+  table: string;
+  recordId: string;
+  correctedByUserId: number | null;
+  correctedAt: string;
+  before: Record<string, unknown>;
+  patch: Record<string, unknown>;
+  reason: string;
+  evidence: CorrectionEvidenceView | null;
+}
+export interface CorrectionUpload {
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+}
+export interface CorrectionFormInput {
+  table: string;
+  id: string;
+  column: string;
+  value: string;
+  reason: string;
+  evidenceRef: string;
+  upload: CorrectionUpload | null;
+}
+export const CORRECTABLE_TABLES = ["financial_ledger_events", "financial_receipts", "settlement_statements", "pc_fee_authorities", "financial_payment_requests"] as const;
+export function correctionBody(input: CorrectionFormInput): {
+  table: string;
+  id: number;
+  patch: Record<string, string>;
+  reason: string;
+  evidenceRef?: string;
+  evidenceUpload?: CorrectionUpload;
+} | null {
+  const id = Number(input.id);
+  const column = input.column.trim();
+  const reason = input.reason.trim();
+  if (!input.table || !Number.isSafeInteger(id) || id <= 0 || !column || reason.length < 1 || reason.length > 2000) return null;
+  const ref = input.evidenceRef.trim();
+  const base = { table: input.table, id, patch: { [column]: input.value }, reason };
+  if (ref.length >= 3) return { ...base, evidenceRef: ref };
+  const u = input.upload;
+  if (u && u.fileName.trim() && /^[0-9a-f]{64}$/.test(u.sha256) && Number.isSafeInteger(u.sizeBytes) && u.sizeBytes > 0) {
+    return { ...base, evidenceUpload: { fileName: u.fileName.trim(), sha256: u.sha256, sizeBytes: u.sizeBytes } };
+  }
+  return null;
+}
+
+export type ReconExceptionKind = "PAID_AFTER_WAIVER" | "PAID_AFTER_WRITE_OFF" | "CANCELLATION_UNCONFIRMED";
+export type RefundAssessment = "REFUND_REQUIRED" | "NO_REFUND_REQUIRED" | "NOT_APPLICABLE";
+export interface ReconciliationException {
+  id: number;
+  paymentRequestId: number;
+  kind: ReconExceptionKind | string;
+  source: string;
+  amountCents: number | null;
+  status: "OPEN" | "RESOLVED" | string;
+  refundAssessment: RefundAssessment | string | null;
+  resolutionReason: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+export const RECON_KIND_LABEL: Record<string, string> = {
+  PAID_AFTER_WAIVER: "Paid after waiver",
+  PAID_AFTER_WRITE_OFF: "Paid after write-off",
+  CANCELLATION_UNCONFIRMED: "Provider cancellation not confirmed",
+};
+export const REFUND_ASSESSMENT_LABEL: Record<string, string> = {
+  REFUND_REQUIRED: "Refund required",
+  NO_REFUND_REQUIRED: "No refund required",
+  NOT_APPLICABLE: "Not applicable",
+};
+export function reconResolveBody(assessment: string, reason: string): { refundAssessment: RefundAssessment; reason: string } | null {
+  if (!(assessment in REFUND_ASSESSMENT_LABEL)) return null;
+  const r = reason.trim();
+  if (r.length < 3 || r.length > 2000) return null;
+  return { refundAssessment: assessment as RefundAssessment, reason: r };
 }

@@ -23,6 +23,11 @@
 // notice period (pc_fee_authorities.notice_required_days) is honoured: the
 // first call starts it, and a call after it elapses schedules the debit.
 // Brokerage Administrators may use the same gated path. No schema change.
+//
+// Owner t212u item 1 (supersedes "initiate" above for the provider step): Pit Crew may initiate a
+// collection REQUEST but never execute a payment. This module never calls a provider; the provider
+// step is recorded in pc_fee_collection_requests and executed by the system payment workflow
+// (lib/financial/collectionRequests.ts), which re-validates every gate from the database first.
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   db,
@@ -38,9 +43,7 @@ import {
   type PcFeeAuthority,
 } from "@aee/db";
 import { computePcFee } from "./financial/pcFeeCalculations.js";
-import { advancePaymentRequestToNoticeSent, scheduleDebitForPaymentRequest } from "./financial/paymentOutbox.js";
-import { mandateProviderPermitted } from "./financial/provider.js";
-import { CardChargeRefusal, chargeServiceFeeStoredCard } from "./financial/pcFeeCardCharges.js";
+import { advancePaymentRequestToNoticeSent } from "./financial/paymentOutbox.js";
 import { nominatedPaymentMethodFor } from "./financial/pcFeeAuthorities.js";
 import { collectionTimingFor, type CollectionTiming } from "./financial/pcFeeTerms.js";
 import { checkSettlementStatementGate, type SettlementStatementGateResult, type StatementPayer } from "./settlementStatementGate.js";
@@ -172,12 +175,18 @@ export interface ServiceFeeCollectionOptions {
    * transaction, so the role/assignment check is not repeated; every other
    * gate is.
    */
-  trigger?: "statement_issued" | "scheduler";
+  trigger?: "statement_issued" | "scheduler" | "collection_request";
+  /**
+   * Owner t212u item 1: set ONLY by lib/financial/collectionRequests.ts when the system payment
+   * workflow executes a recorded collection request (trigger "collection_request"). Only then may
+   * this function hand off to the provider step; every other caller records a request instead.
+   */
+  executing?: { collectionRequestId: number; trigger: string; requestedByUserId: number | null };
 }
 
 export async function verifyServiceFeeCollection(caller: ServiceFeeCaller, transactionId: number, now = new Date(), opts: ServiceFeeCollectionOptions = {}): Promise<VerifiedServiceFee> {
   // System triggers (statement issue, t181u scheduler) never come from a request body; every other gate still applies.
-  const autoOnIssue = opts.trigger === "statement_issued" || opts.trigger === "scheduler";
+  const autoOnIssue = opts.trigger === "statement_issued" || opts.trigger === "scheduler" || opts.trigger === "collection_request";
   if (!autoOnIssue && caller.role !== "Pit Crew" && caller.role !== "Brokerage Administrator") {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_FOUND");
   }
@@ -355,53 +364,37 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
   const settlementStatementId = gate.statementId;
 
   const isCard = verified.paymentMethod.type === "STORED_CARD";
-  const chargeCard = async (): Promise<ServiceFeeCollectionResult> => {
-    try {
-      const r = await chargeServiceFeeStoredCard({
-        paymentRequestId: request.id,
-        authority: verified.authority,
-        actorUserId: opts.trigger === "scheduler" ? null : caller.id,
-        trigger: opts.trigger ?? "collect",
-      });
-      return { outcome: r.outcome, verified, paymentRequest: r.paymentRequest, settlementStatementId };
-    } catch (err) {
-      if (err instanceof CardChargeRefusal) {
-        const code: ServiceFeeCollectionCode =
-          err.code === "PROVIDER_NOT_PERMITTED" ? "SERVICE_FEE_PROVIDER_NOT_PERMITTED" : err.code === "RETRY_NOT_DUE" ? "SERVICE_FEE_RETRY_NOT_DUE" : err.code === "METHOD_INVALID" ? "SERVICE_FEE_AUTHORITY_INVALID" : "SERVICE_FEE_NOT_COLLECTABLE";
-        throw new ServiceFeeCollectionError(code, err.message, verified.propertyId);
-      }
-      throw err;
+  // Owner t212u item 1: this module never calls a provider. A provider step is either RECORDED as a
+  // collection request and handed to the system payment workflow (which re-validates every gate
+  // from the database first), or, when that workflow is the caller, performed by it.
+  const providerStep = async (): Promise<ServiceFeeCollectionResult> => {
+    const exec = await import("./financial/collectionRequests.js");
+    if (opts.trigger === "collection_request" && opts.executing) {
+      return exec.performProviderStep({ verified, settlementStatementId, executing: opts.executing });
     }
+    return exec.requestAndExecute(caller, verified, settlementStatementId, opts.trigger ?? "collect");
   };
+  const originalTrigger = opts.executing?.trigger ?? opts.trigger;
 
   if (PAID.has(request.status)) return { outcome: "already_paid", verified, paymentRequest: request, settlementStatementId };
   // t180u(3): a declined card charge is retried only on an explicit, fully re-gated collect (never by a statement issue).
-  if (isCard && request.status === "RETRY_SCHEDULED" && opts.trigger !== "statement_issued") return chargeCard();
+  if (isCard && request.status === "RETRY_SCHEDULED" && originalTrigger !== "statement_issued") return providerStep();
   if (IN_PROGRESS.has(request.status)) return { outcome: "already_in_progress", verified, paymentRequest: request, settlementStatementId };
   if (RECOVERY_ONLY.has(request.status)) {
     throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}; recovery is a Brokerage Administrator action.`, verified.propertyId);
   }
-  const collectNow = async (): Promise<ServiceFeeCollectionResult> => {
-    if (isCard) return chargeCard();
-    // t183u item 6: never hand a debit to anything but the sandbox mandate provider.
-    if (!mandateProviderPermitted()) {
-      throw new ServiceFeeCollectionError("SERVICE_FEE_PROVIDER_NOT_PERMITTED", "Only the sandbox mandate provider may process debits.", verified.propertyId);
-    }
-    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id, initiatedByUserId: caller.id > 0 ? caller.id : null });
-    return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
-  };
   if (STARTABLE.has(request.status)) {
     const updated = await advancePaymentRequestToNoticeSent(request.id);
     await recordTimingDecision(updated, verified.timing, opts.trigger ?? "collect");
     // t181u(A): immediate collection only where the signed agreement AND mandate expressly permit it.
-    if (verified.timing.rule === "IMMEDIATE_ON_STATEMENT_ISSUE") return collectNow();
+    if (verified.timing.rule === "IMMEDIATE_ON_STATEMENT_ISSUE") return providerStep();
     return { outcome: "notice_started", verified, paymentRequest: updated, settlementStatementId };
   }
   if (request.status === "NOTICE_SENT") {
     if (verified.noticeElapsesAt == null || now < verified.noticeElapsesAt) {
       throw new ServiceFeeCollectionError("SERVICE_FEE_NOTICE_PERIOD_RUNNING", undefined, verified.propertyId);
     }
-    return collectNow();
+    return providerStep();
   }
   throw new ServiceFeeCollectionError("SERVICE_FEE_NOT_COLLECTABLE", `Request is ${request.status}.`, verified.propertyId);
 }

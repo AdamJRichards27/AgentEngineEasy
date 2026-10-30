@@ -46,7 +46,7 @@ import {
   paymentRequestStatusLabel,
   paymentRequestStatusPillClass,
 } from "../lib/financial";
-import { BaPaymentQueues, PaymentRequestRecovery } from "./runFinancial/containers";
+import { BaPaymentQueues, BaReconciliationAndCorrections, PaymentRequestRecovery } from "./runFinancial/containers";
 
 export default function FinancialOperations() {
   const { user, isLoading: sessionLoading } = useSession();
@@ -81,6 +81,8 @@ export default function FinancialOperations() {
       <PaymentRequestsPanel />
       {/* Owner t181u phase 2b item 6: BA card charge/refund queues (mock provider). */}
       <BaPaymentQueues role={user?.role} />
+      {/* Owner t212u: reconciliation exceptions + audited corrections (BA only). */}
+      <BaReconciliationAndCorrections role={user?.role} />
       <AuditReturnRemindersPanel />
     </div>
   );

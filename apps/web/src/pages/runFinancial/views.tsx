@@ -37,6 +37,13 @@ import {
   type SettlementConfirmation,
   type SettlementStatement,
   type StatementReconciliation,
+  CORRECTABLE_TABLES,
+  correctionBody,
+  reconResolveBody,
+  RECON_KIND_LABEL,
+  REFUND_ASSESSMENT_LABEL,
+  type CorrectionRecord,
+  type ReconciliationException,
 } from "../../lib/runFinancial";
 
 export const DEMO_NOTICE =
@@ -1147,5 +1154,166 @@ function HeldDebitRow({ entry, onResolve, busy }: { entry: HeldDebit; onResolve:
         Resolve
       </button>
     </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Owner t212u screens (BA only via existing role gate).
+
+export function ReconciliationExceptionsView({
+  exceptions,
+  busy,
+  error,
+  onResolve,
+}: {
+  exceptions: ReconciliationException[] | undefined;
+  busy: boolean;
+  error?: string | null;
+  onResolve: (id: number, body: { refundAssessment: string; reason: string }) => void;
+}) {
+  return (
+    <div className="stack" data-testid="recon-exceptions">
+      <h3>Reconciliation exceptions (needs review)</h3>
+      <p className="muted">
+        The provider reported something AE could not apply to a locked record, or did not confirm a cancellation. The provider event is kept and the
+        locked records were not changed. Record a refund assessment; any refund is a separate, approved action.
+      </p>
+      {error && <p className="error-text" role="alert">{error}</p>}
+      {!exceptions && !error && <p className="muted">Loading…</p>}
+      {exceptions && exceptions.length === 0 && <p className="muted">No reconciliation exceptions.</p>}
+      {exceptions && exceptions.length > 0 && (
+        <ul className="item-list">
+          {exceptions.map((e) => (
+            <ReconExceptionRow key={e.id} exception={e} busy={busy} onResolve={onResolve} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ReconExceptionRow({ exception: e, busy, onResolve }: { exception: ReconciliationException; busy: boolean; onResolve: (id: number, body: { refundAssessment: string; reason: string }) => void }) {
+  const [assessment, setAssessment] = useState(e.kind === "CANCELLATION_UNCONFIRMED" ? "NOT_APPLICABLE" : "");
+  const [reason, setReason] = useState("");
+  const body = reconResolveBody(assessment, reason);
+  return (
+    <li data-testid={`recon-exception-${e.id}`}>
+      <strong>{RECON_KIND_LABEL[e.kind] ?? e.kind}</strong> · payment request #{e.paymentRequestId} · {formatAud(e.amountCents)} · {e.source.toLowerCase()} ·{" "}
+      {formatAestTime(e.createdAt)} · <span className={e.status === "OPEN" ? "error-text" : "muted"}>{e.status === "OPEN" ? "Open" : "Resolved"}</span>
+      {e.status !== "OPEN" && (
+        <div className="muted">
+          {REFUND_ASSESSMENT_LABEL[e.refundAssessment ?? ""] ?? e.refundAssessment} · {e.resolutionReason}
+        </div>
+      )}
+      {e.status === "OPEN" && (
+        <div className="inline-form">
+          <label>
+            Refund assessment{" "}
+            <select value={assessment} onChange={(ev) => setAssessment(ev.target.value)} disabled={busy}>
+              <option value="">Choose…</option>
+              {Object.entries(REFUND_ASSESSMENT_LABEL).map(([k, v]) => (
+                <option key={k} value={k}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Reason (required) <input value={reason} onChange={(ev) => setReason(ev.target.value)} maxLength={2000} disabled={busy} />
+          </label>
+          <button type="button" className="btn btn-small" disabled={busy || !body} onClick={() => body && onResolve(e.id, body)}>
+            Resolve
+          </button>
+        </div>
+      )}
+    </li>
+  );
+}
+
+export function CorrectionsView({
+  corrections,
+  busy,
+  error,
+  message,
+  onSubmit,
+}: {
+  corrections: CorrectionRecord[] | undefined;
+  busy: boolean;
+  error?: string | null;
+  message?: string | null;
+  onSubmit: (body: NonNullable<ReturnType<typeof correctionBody>>) => void;
+}) {
+  const [f, setF] = useState({ table: CORRECTABLE_TABLES[0] as string, id: "", column: "", value: "", reason: "", evidenceRef: "", fileName: "", sha256: "", sizeBytes: "" });
+  const set = (k: keyof typeof f) => (ev: { target: { value: string } }) => setF((x) => ({ ...x, [k]: ev.target.value }));
+  const upload = f.fileName || f.sha256 || f.sizeBytes ? { fileName: f.fileName, sha256: f.sha256.trim().toLowerCase(), sizeBytes: Number(f.sizeBytes) } : null;
+  const body = correctionBody({ table: f.table, id: f.id, column: f.column, value: f.value, reason: f.reason, evidenceRef: f.evidenceRef, upload });
+  return (
+    <div className="stack" data-testid="corrections">
+      <h3>Correct a locked financial record</h3>
+      <p className="muted">
+        Ledger events, issued statements, receipts, active authority terms and waiver/write-off records are locked. A correction needs a reason and
+        supporting evidence, and is written to the audit trail with the before and after values.
+      </p>
+      <div className="inline-form">
+        <label>
+          Record type{" "}
+          <select value={f.table} onChange={set("table")} disabled={busy}>
+            {CORRECTABLE_TABLES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Record id <input value={f.id} onChange={set("id")} inputMode="numeric" disabled={busy} />
+        </label>
+        <label>
+          Field <input value={f.column} onChange={set("column")} disabled={busy} />
+        </label>
+        <label>
+          New value <input value={f.value} onChange={set("value")} disabled={busy} />
+        </label>
+        <label>
+          Reason (required) <input value={f.reason} onChange={set("reason")} maxLength={2000} disabled={busy} />
+        </label>
+        <label>
+          Evidence reference <input value={f.evidenceRef} onChange={set("evidenceRef")} maxLength={500} disabled={busy} />
+        </label>
+        <span className="muted">or upload metadata:</span>
+        <label>
+          File name <input value={f.fileName} onChange={set("fileName")} disabled={busy} />
+        </label>
+        <label>
+          sha256 <input value={f.sha256} onChange={set("sha256")} maxLength={64} disabled={busy} />
+        </label>
+        <label>
+          Size (bytes) <input value={f.sizeBytes} onChange={set("sizeBytes")} inputMode="numeric" disabled={busy} />
+        </label>
+        <button type="button" className="btn btn-small" disabled={busy || !body} onClick={() => body && onSubmit(body)}>
+          Record correction
+        </button>
+      </div>
+      {message && <p className="muted">{message}</p>}
+      {error && <p className="error-text" role="alert">{error}</p>}
+      {!corrections && !error && <p className="muted">Loading…</p>}
+      {corrections && corrections.length === 0 && <p className="muted">No corrections recorded.</p>}
+      {corrections && corrections.length > 0 && (
+        <ul className="item-list">
+          {corrections.map((c) => (
+            <li key={c.auditId}>
+              <strong>Audit #{c.auditId}</strong> · {c.table} #{c.recordId} · {formatAestTime(c.correctedAt)}
+              <div className="muted">
+                {Object.keys(c.patch ?? {}).map((k) => `${k}: ${JSON.stringify(c.before?.[k])} → ${JSON.stringify(c.patch[k])}`).join("; ")}
+              </div>
+              <div className="muted">
+                {c.reason} · evidence:{" "}
+                {c.evidence?.kind === "reference" ? c.evidence.ref : c.evidence ? `${c.evidence.fileName} (sha256 ${c.evidence.sha256?.slice(0, 12)}…, ${c.evidence.sizeBytes} bytes)` : "—"}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
