@@ -4,7 +4,7 @@
 // other transaction financials); everyone else 404. Every read first runs
 // the idempotent receipt sync so a missed hook cannot hide a receipt.
 import { Router } from "express";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
 import { db, financialLedgerEvents, financialPaymentRequests, financialReceipts, type FinancialReceipt } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
@@ -33,11 +33,23 @@ async function syncTransaction(brokerageId: number, transactionId: number) {
   for (const r of reqs) await syncReceiptsForPaymentRequest(r.id);
 }
 
+// Owner t183u item 2: waivers and write-offs are adjustments, not receipt activity. Their ledger events
+// (the formal adjustment records) are kept out of every receipt view (detail history and PDF) and are
+// read from GET /financial/payment-requests/:id/adjustments instead.
+const ADJUSTMENT_EVENT_TYPES = ["PC_FEE_WAIVED", "PC_FEE_WRITTEN_OFF"];
+
 async function historyFor(receipt: FinancialReceipt) {
   const rows = await db
     .select()
     .from(financialLedgerEvents)
-    .where(and(eq(financialLedgerEvents.brokerageId, receipt.brokerageId), inArray(financialLedgerEvents.sourceRecordType, ["PAYMENT_REQUEST", "financial_payment_request"]), eq(financialLedgerEvents.sourceRecordId, String(receipt.paymentRequestId))))
+    .where(
+      and(
+        eq(financialLedgerEvents.brokerageId, receipt.brokerageId),
+        inArray(financialLedgerEvents.sourceRecordType, ["PAYMENT_REQUEST", "financial_payment_request"]),
+        eq(financialLedgerEvents.sourceRecordId, String(receipt.paymentRequestId)),
+        notInArray(financialLedgerEvents.eventType, ADJUSTMENT_EVENT_TYPES),
+      ),
+    )
     .orderBy(asc(financialLedgerEvents.id));
   return rows.map((e) => ({ eventType: e.eventType, at: e.occurredAt, amountCents: e.amountCents, reason: e.reason ? sanitiseFailureMessage(e.reason) : null }));
 }

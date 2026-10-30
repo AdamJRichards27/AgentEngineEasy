@@ -248,6 +248,27 @@ describe("Owner t183u items 1-2: single-admin PC fee adjustments with formal adj
     assert.ok(!(list.json.receipts as Array<{ receiptNumber: string }>).some((x) => x.receiptNumber.startsWith("ADJ-")));
   });
 
+  test("item 2: adjustments are kept out of receipt views: no waiver/write-off activity in a receipt's history or PDF", async () => {
+    const c = await failedCardFee("AdjNotInReceiptHistory");
+    const rc = await receiptRows(c);
+    assert.ok(rc.length > 0, "the failed attempts issued payment-failed receipts");
+    assert.equal((await writeOff(w.X.admin, c)).status, 200);
+    const [rec] = (await adjustments(w.X.admin, c)).json.adjustments as AdjustmentRecord[];
+    for (const r of await receiptRows(c)) {
+      const detail = await call(w.baseUrl, "GET", `/financial/receipts/${r.id}`, w.X.admin.cookie);
+      assert.equal(detail.status, 200, detail.raw);
+      const types = (detail.json.history as Array<{ eventType: string }>).map((h) => h.eventType);
+      assert.ok(types.includes("PC_FEE_PAYMENT_FAILED"), "payment activity still shown");
+      assert.ok(!types.includes("PC_FEE_WRITTEN_OFF") && !types.includes("PC_FEE_WAIVED"), `no adjustment in receipt history: ${types.join(",")}`);
+      assert.ok(!detail.raw.includes(rec!.recordNumber));
+      const pdf = await fetch(`${w.baseUrl}/api/financial/receipts/${r.id}/pdf`, { headers: { cookie: w.X.admin.cookie } });
+      assert.equal(pdf.status, 200);
+      const bytes = Buffer.from(await pdf.arrayBuffer()).toString("latin1");
+      assert.ok(!bytes.includes("PC_FEE_WRITTEN_OFF") && !bytes.includes("PC_FEE_WAIVED"), "no adjustment in the receipt PDF");
+      assert.ok(!bytes.includes(REASON), "write-off reason not printed on a receipt");
+    }
+  });
+
   test("item 2: dispute resolution to WAIVED or WRITTEN_OFF produces the same formal records (via DISPUTE_RESOLUTION)", async () => {
     const dd = await activeDebitAuthority(w);
     const cw = await issued(dd.id, "AdjDisputeWaive");

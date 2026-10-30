@@ -275,9 +275,11 @@ describe("t181u slice 7: controlled recovery routes", { concurrency: false }, ()
     const ev = await ledger(c, ["PC_FEE_WRITTEN_OFF"]);
     assert.equal(ev.length, 1);
     assert.deepEqual((ev[0]!.metadata as Record<string, unknown>).evidence, { kind: "note", note: NOTE });
-    // The ledger event is in the receipt history (0042 hook).
+    // Owner t183u item 2: a write-off is an adjustment, not receipt activity. It is NOT in the receipt
+    // history (it is read from GET /financial/payment-requests/:id/adjustments instead).
     const detail = await call(w.baseUrl, "GET", `/financial/receipts/${rcBefore.at(-1)!.id}`, w.X.admin.cookie);
-    assert.ok(detail.json.history.some((h: { eventType: string }) => h.eventType === "PC_FEE_WRITTEN_OFF"), detail.raw);
+    assert.equal(detail.status, 200, detail.raw);
+    assert.ok(!detail.json.history.some((h: { eventType: string }) => h.eventType === "PC_FEE_WRITTEN_OFF"), detail.raw);
     assert.equal((await writeOff(w.X.admin, c)).json.idempotent, true);
     assert.equal((await waive(w.X.admin, c)).status, 409, "written off cannot become waived");
 
