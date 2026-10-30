@@ -28,7 +28,9 @@
 // to intervene past exhausted retries" posture (paymentOutbox.ts's own
 // module comment says the same for its own exhausted-retries path).
 
+import { ADJUSTED_STATUSES, raisePaidAfterAdjustment } from "./reconciliationExceptions.js";
 import { eq, and } from "drizzle-orm";
+import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import {
   db,
   financialPaymentRequests,
@@ -134,8 +136,8 @@ export async function processMandatePaymentWebhook(
     result.brokerageId !== undefined ||
     result.provider !== undefined ||
     result.mandateProviderRef !== undefined;
-  const requiresAuthority = options.requireTransportContext || contextSupplied;
-  const [authority] = requiresAuthority && request.pcFeeAuthorityId != null
+  // t180u(3): always read (also for trusted in-process events) so a stored-card request is never mandate-driven.
+  const [authority] = request.pcFeeAuthorityId != null
     ? await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, request.pcFeeAuthorityId))
     : [];
   const contextMissing = options.requireTransportContext && (
@@ -143,8 +145,11 @@ export async function processMandatePaymentWebhook(
     result.provider === undefined ||
     result.mandateProviderRef === undefined
   );
+  // t180u(3) D8: a stored-card PC fee is never driven by mandate-debit webhooks.
+  const cardAuthority = authority?.authorisedPaymentMethod === "STORED_CARD";
   if (
     contextMissing ||
+    cardAuthority ||
     (contextSupplied && (
       result.provider !== mandatePaymentProvider.name ||
       request.provider !== result.provider ||
@@ -162,12 +167,34 @@ export async function processMandatePaymentWebhook(
     return { processed: false, reason: "context_mismatch" };
   }
 
+  // Owner t212u item 3: a waived / written-off fee is a locked record. A provider "Paid" for it raises a
+  // reconciliation exception for BA review (refund assessment); any other status is recorded with no
+  // change. The provider event row above is kept either way (never discarded).
+  if (ADJUSTED_STATUSES.has(request.status)) {
+    if (result.status === "Paid") {
+      const { exception } = await raisePaidAfterAdjustment({ request, source: "WEBHOOK", providerEventRowId: inserted.id, providerRequestRef: result.providerRequestRef });
+      await db
+        .update(financialPaymentProviderEvents)
+        .set({ processingStatus: "EXCEPTION", paymentRequestId: request.id, processingError: `Paid after ${request.status}: reconciliation exception #${exception.id} raised for Brokerage Administrator review.`, processedAt: new Date() })
+        .where(eq(financialPaymentProviderEvents.id, inserted.id));
+    } else {
+      await db
+        .update(financialPaymentProviderEvents)
+        .set({ processingStatus: "NO_CHANGE", paymentRequestId: request.id, processingError: `Request is ${request.status} (locked); provider status ${result.status} recorded, nothing changed.`, processedAt: new Date() })
+        .where(eq(financialPaymentProviderEvents.id, inserted.id));
+    }
+    return { processed: true, paymentRequest: request };
+  }
+
   const updated = await applyMandateWebhookResult(request, result);
 
   await db
     .update(financialPaymentProviderEvents)
     .set({ processingStatus: "PROCESSED", paymentRequestId: request.id, processedAt: new Date() })
     .where(eq(financialPaymentProviderEvents.id, inserted.id));
+
+  // Owner t180u(2): success / failure / reversal receipts (idempotent).
+  await syncReceiptsForPaymentRequest(updated.id);
 
   return { processed: true, paymentRequest: updated };
 }

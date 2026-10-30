@@ -22,11 +22,55 @@ export interface PaymentWebhookResult {
   status: "Succeeded" | "Failed" | "Refunded";
   receiptUrl?: string;
   failureReason?: string;
+  /**
+   * Refund ledger: for refund events (Stripe charge.refunded / refund.updated) the individual
+   * refunds the provider reports. When present, the app routes each one to its own
+   * payment_refunds row and never flips the whole payment to Refunded from `status`.
+   */
+  refunds?: ProviderRefundReport[];
+}
+
+export interface ProviderRefundReport {
+  providerRefundRef: string;
+  amountCents: number;
+  status: "Succeeded" | "Pending" | "Failed";
+  aeRefundId?: number; // metadata.ae_refund_id when we created it
+  failureReason?: string;
+}
+
+export interface RefundRequest {
+  providerChargeRef: string;
+  amountCents: number;
+  /** One key per refund row, minted once, reused on every retry and reconciliation. */
+  idempotencyKey: string;
+  aeRefundId: number;
+}
+
+export interface RefundResult {
+  providerRefundRef: string;
+  status: "Succeeded" | "Pending" | "Failed";
+  failureReason?: string;
+}
+
+/** A definite provider rejection (4xx): the refund did not and will not happen. Anything else thrown is an UNKNOWN outcome. */
+export class RefundRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RefundRejectedError";
+  }
 }
 
 export interface PaymentProvider {
   chargeStoredMethod(input: ChargeRequest): Promise<ChargeResult>;
-  refund(providerChargeRef: string, amountCents: number): Promise<void>;
+  refund(input: RefundRequest): Promise<RefundResult>;
+  /**
+   * Reconciliation lookup. Returns the provider's record of the refund created with this
+   * aeRefundId / providerRefundRef, or null when the provider has none. Optional: an adapter
+   * without it sends UNKNOWN refunds straight to MANUAL_REVIEW.
+   */
+  lookupRefund?(input: { providerChargeRef: string; aeRefundId: number; providerRefundRef?: string | null }): Promise<RefundResult | null>;
+  /** How long the provider honours an idempotency key (Stripe: ~24 h). A same-key retry is only safe inside it. */
+  readonly refundIdempotencyWindowMs: number;
   // Same shape as the AML/ESign providers (packages/integrations/aml, /esign)
   // — `payload` should be the raw request body whenever the provider signs
   // raw bytes, which is the normal case for HMAC-based webhook signatures.
@@ -54,8 +98,40 @@ export class MockPaymentProvider implements PaymentProvider {
     };
   }
 
-  async refund(_providerChargeRef: string, _amountCents: number): Promise<void> {
-    // no-op for the mock provider
+  readonly refundIdempotencyWindowMs = 24 * 60 * 60 * 1000;
+  // Mock refund ledger, modelled on SandboxMandatePaymentProvider: the same idempotency key replays
+  // the cached result instead of refunding twice. Static so the record survives across the module's
+  // single provider instance and test spies on the prototype.
+  static refundsByKey = new Map<string, RefundResult & { aeRefundId: number; amountCents: number }>();
+  /**
+   * Test hook: what the NEXT refund call does.
+   * - "accept-then-throw": record the refund, then throw (accepted but response lost -> UNKNOWN)
+   * - "throw": throw without recording (network error before acceptance -> UNKNOWN)
+   * - "reject": definite 4xx-style rejection (-> FAILED)
+   * - "pending": accepted, still pending
+   */
+  static nextRefundBehaviour: "accept-then-throw" | "throw" | "reject" | "pending" | null = null;
+
+  async refund(input: RefundRequest): Promise<RefundResult> {
+    const cached = MockPaymentProvider.refundsByKey.get(input.idempotencyKey);
+    if (cached) return { providerRefundRef: cached.providerRefundRef, status: cached.status, failureReason: cached.failureReason };
+    const behaviour = MockPaymentProvider.nextRefundBehaviour;
+    MockPaymentProvider.nextRefundBehaviour = null;
+    if (behaviour === "throw") throw new Error("mock: network error before the provider accepted the refund");
+    if (behaviour === "reject") throw new RefundRejectedError("mock: refund rejected by provider");
+    const result: RefundResult = { providerRefundRef: `mock-refund-${input.aeRefundId}`, status: behaviour === "pending" ? "Pending" : "Succeeded" };
+    MockPaymentProvider.refundsByKey.set(input.idempotencyKey, { ...result, aeRefundId: input.aeRefundId, amountCents: input.amountCents });
+    if (behaviour === "accept-then-throw") throw new Error("mock: provider accepted the refund but the response was lost");
+    return result;
+  }
+
+  async lookupRefund(input: { providerChargeRef: string; aeRefundId: number; providerRefundRef?: string | null }): Promise<RefundResult | null> {
+    for (const r of MockPaymentProvider.refundsByKey.values()) {
+      if (r.aeRefundId === input.aeRefundId || (input.providerRefundRef && r.providerRefundRef === input.providerRefundRef)) {
+        return { providerRefundRef: r.providerRefundRef, status: r.status, failureReason: r.failureReason };
+      }
+    }
+    return null;
   }
 
   verifyWebhookSignature(_payload: unknown, _signature: string): boolean {
@@ -69,6 +145,7 @@ export class MockPaymentProvider implements PaymentProvider {
       status: p.status ?? "Succeeded",
       receiptUrl: p.receiptUrl,
       failureReason: p.failureReason,
+      refunds: p.refunds,
     };
   }
 }
@@ -164,22 +241,59 @@ export class StripePaymentProvider implements PaymentProvider {
     };
   }
 
-  async refund(providerChargeRef: string, amountCents: number): Promise<void> {
+  readonly refundIdempotencyWindowMs = 24 * 60 * 60 * 1000; // Stripe keeps idempotency keys ~24 h (verify against current Stripe docs)
+
+  private static mapRefundStatus(status: string | undefined): RefundResult["status"] {
+    if (status === "succeeded") return "Succeeded";
+    if (status === "failed" || status === "canceled") return "Failed";
+    return "Pending"; // pending, requires_action, unknown
+  }
+
+  // Refund ledger: one Idempotency-Key per refund row (reused on retry) and metadata[ae_refund_id]
+  // so reconciliation can find the refund at Stripe. Returns the re_... id and its status.
+  async refund(input: RefundRequest): Promise<RefundResult> {
     const body = new URLSearchParams({
-      payment_intent: providerChargeRef,
-      amount: String(amountCents),
+      payment_intent: input.providerChargeRef,
+      amount: String(input.amountCents),
+      "metadata[ae_refund_id]": String(input.aeRefundId),
     });
 
     const res = await fetch(`${this.config.apiBaseUrl}/v1/refunds`, {
       method: "POST",
-      headers: this.authHeaders(),
+      headers: this.authHeaders(input.idempotencyKey),
       body: body.toString(),
     });
 
+    const json = (await res.json().catch(() => ({}))) as { id?: string; status?: string; failure_reason?: string; error?: { message?: string } };
     if (!res.ok) {
-      const json = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
-      throw new Error(json.error?.message ?? `Stripe refund failed: ${res.status}`);
+      const message = json.error?.message ?? `Stripe refund failed: ${res.status}`;
+      // 4xx (other than 409 idempotency conflict and 429 rate limit) is a definite rejection; 5xx/409/429 is unknown.
+      if (res.status >= 400 && res.status < 500 && res.status !== 409 && res.status !== 429) throw new RefundRejectedError(message);
+      throw new Error(message);
     }
+    if (!json.id) throw new Error("Stripe refunds response did not include an id");
+    return { providerRefundRef: json.id, status: StripePaymentProvider.mapRefundStatus(json.status), failureReason: json.failure_reason };
+  }
+
+  async lookupRefund(input: { providerChargeRef: string; aeRefundId: number; providerRefundRef?: string | null }): Promise<RefundResult | null> {
+    const url = input.providerRefundRef
+      ? `${this.config.apiBaseUrl}/v1/refunds/${encodeURIComponent(input.providerRefundRef)}`
+      : `${this.config.apiBaseUrl}/v1/refunds?payment_intent=${encodeURIComponent(input.providerChargeRef)}&limit=100`;
+    const res = await fetch(url, { method: "GET", headers: this.authHeaders() });
+    if (res.status === 404) return null;
+    const json = (await res.json().catch(() => ({}))) as {
+      id?: string;
+      status?: string;
+      failure_reason?: string;
+      data?: Array<{ id: string; status?: string; failure_reason?: string; metadata?: Record<string, string> }>;
+      error?: { message?: string };
+    };
+    if (!res.ok) throw new Error(json.error?.message ?? `Stripe refund lookup failed: ${res.status}`);
+    const found = input.providerRefundRef
+      ? json.id ? { id: json.id, status: json.status, failure_reason: json.failure_reason } : undefined
+      : json.data?.find((r) => r.metadata?.ae_refund_id === String(input.aeRefundId));
+    if (!found) return null;
+    return { providerRefundRef: found.id, status: StripePaymentProvider.mapRefundStatus(found.status), failureReason: found.failure_reason };
   }
 
   // Real Stripe signature scheme: header is "t=<timestamp>,v1=<hex hmac>"
@@ -214,6 +328,18 @@ export class StripePaymentProvider implements PaymentProvider {
     return timingSafeEqual(expectedBuf, givenBuf);
   }
 
+  private static toRefundReport(r: Record<string, unknown>): ProviderRefundReport {
+    const metadata = (r.metadata ?? {}) as Record<string, string>;
+    const aeRefundId = metadata.ae_refund_id ? Number(metadata.ae_refund_id) : undefined;
+    return {
+      providerRefundRef: String(r.id ?? "unknown"),
+      amountCents: Number(r.amount ?? 0),
+      status: StripePaymentProvider.mapRefundStatus(r.status as string | undefined),
+      aeRefundId: Number.isSafeInteger(aeRefundId) ? aeRefundId : undefined,
+      failureReason: (r.failure_reason as string | undefined) ?? undefined,
+    };
+  }
+
   parseWebhook(payload: unknown): PaymentWebhookResult {
     const event = (payload ?? {}) as {
       type?: string;
@@ -222,10 +348,22 @@ export class StripePaymentProvider implements PaymentProvider {
     const object = event.data?.object ?? {};
     const type = event.type ?? "";
 
+    // Refund ledger: charge.refunded fires for partial refunds too (amount_refunded < amount), so the
+    // individual refunds are reported and the app records each one; it never maps this to a whole
+    // "Refunded" payment on its own.
     if (type === "charge.refunded") {
+      const list = (object.refunds as { data?: Array<Record<string, unknown>> } | undefined)?.data ?? [];
       return {
         providerChargeRef: String(object.payment_intent ?? "unknown"),
         status: "Refunded",
+        refunds: list.map((r) => StripePaymentProvider.toRefundReport(r)),
+      };
+    }
+    if (type === "refund.updated" || type === "refund.created" || type === "charge.refund.updated") {
+      return {
+        providerChargeRef: String(object.payment_intent ?? "unknown"),
+        status: "Refunded",
+        refunds: [StripePaymentProvider.toRefundReport(object)],
       };
     }
 

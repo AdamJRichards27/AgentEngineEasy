@@ -1,0 +1,10 @@
+/* AE Minimal A — My Momentum / Market Activity. Reuses minimal.css tokens only. */
+.ae-minimal .mm-score { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.ae-minimal .mm-score-number { font-size: 40px; font-weight: 600; line-height: 1; color: var(--am-ink); }
+.ae-minimal .mm-change.is-up { color: var(--am-orange-strong); }
+.ae-minimal .mm-change.is-down, .ae-minimal .mm-change.is-flat { color: var(--am-muted); }
+.ae-minimal .mm-unavailable { color: var(--am-muted); font-style: italic; }
+.ae-minimal .mm-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; padding: 0; list-style: none; }
+.ae-minimal .mm-tabs a[aria-current="page"] { border-color: var(--am-orange-strong); color: var(--am-ink); }
+.ae-minimal .mm-trend-row.is-current .am-metric-label { color: var(--am-ink); font-weight: 600; }
+.ae-minimal .mm-today-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 0 0 16px; }

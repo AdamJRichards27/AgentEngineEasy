@@ -31,6 +31,7 @@ import {
   checkDocumentStorageReadiness,
 } from "./lib/documentStorage.js";
 import { registerDocumentStorageReconciler } from "./lib/documentStorageReconciler.js";
+import { registerPaymentRefundReconciler } from "./lib/paymentRefunds.js";
 import { registerCallTranscriptionReconciler } from "./lib/telephony/callTranscriptionReconciler.js";
 import { assertESignProviderConfigured } from "@aee/integration-esign";
 import { assertDatabaseSessionTimezoneUtc } from "./lib/dbTimezone.js";
@@ -149,6 +150,9 @@ registerIntegrationsEngine();
 // Matching bytes are finalized; missing/corrupt terminal states are
 // quarantined with audit evidence rather than silently discarded.
 registerDocumentStorageReconciler();
+// Refund ledger reconciler: off unless PAYMENT_REFUND_RECONCILER_ENABLED="true" (needs migration 0039).
+registerPaymentRefundReconciler();
+void import("./lib/financial/serviceFeeScheduler.js").then((m) => m.registerServiceFeeCollectionScheduler()).catch(() => undefined); // t181u(B): PC fee notice-period collection, OFF unless explicitly enabled; mock providers only.
 registerCallTranscriptionReconciler();
 
 // Fire-and-forget, non-blocking - same pattern as the rest of this app's boot-time setup.

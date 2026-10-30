@@ -35,7 +35,7 @@ export function appraisalInBrokerage(brokerageId: number) {
   return sql`${appraisals.brokerageId} = ${brokerageId} and ${appraisals.propertyId} in (select ${properties.id} from ${properties} where ${properties.brokerageId} = ${brokerageId})`;
 }
 
-async function selectAppraisalForBrokerageProperty(propertyId: number, brokerageId: number): Promise<Appraisal | undefined> {
+export async function selectAppraisalForBrokerageProperty(propertyId: number, brokerageId: number): Promise<Appraisal | undefined> {
   const [row] = await db
     .select({ appraisal: appraisals })
     .from(appraisals)

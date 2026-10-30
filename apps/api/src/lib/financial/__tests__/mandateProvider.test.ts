@@ -55,19 +55,20 @@ describe("SandboxMandatePaymentProvider — cancelScheduledDebit", () => {
   test("cancels a Scheduled debit without error", async () => {
     const provider = new SandboxMandatePaymentProvider();
     const { providerRequestRef } = await provider.scheduleDebit({ mandateProviderRef: "mandate-1", amountCents: 10_000, currency: "AUD", idempotencyKey: "key-cancel", description: "d" });
-    await provider.cancelScheduledDebit(providerRequestRef);
+    await provider.cancelScheduledDebit(providerRequestRef, { idempotencyKey: "cancel-1" });
   });
 
   test("cancelling an already-cancelled (unknown) providerRequestRef throws", async () => {
     const provider = new SandboxMandatePaymentProvider();
     const { providerRequestRef } = await provider.scheduleDebit({ mandateProviderRef: "mandate-1", amountCents: 10_000, currency: "AUD", idempotencyKey: "key-cancel-2", description: "d" });
-    await provider.cancelScheduledDebit(providerRequestRef);
-    await assert.rejects(() => provider.cancelScheduledDebit(providerRequestRef));
+    await provider.cancelScheduledDebit(providerRequestRef, { idempotencyKey: "cancel-2" });
+    // A different call (new key) on a cancelled debit is refused; the same key would replay.
+    await assert.rejects(() => provider.cancelScheduledDebit(providerRequestRef, { idempotencyKey: "cancel-2b" }));
   });
 
   test("cancelling an entirely unknown providerRequestRef throws", async () => {
     const provider = new SandboxMandatePaymentProvider();
-    await assert.rejects(() => provider.cancelScheduledDebit("no-such-ref"));
+    await assert.rejects(() => provider.cancelScheduledDebit("no-such-ref", { idempotencyKey: "cancel-3" }));
   });
 });
 
@@ -75,12 +76,12 @@ describe("SandboxMandatePaymentProvider — reverseDebit", () => {
   test("reverses a known debit without error", async () => {
     const provider = new SandboxMandatePaymentProvider();
     const { providerRequestRef } = await provider.scheduleDebit({ mandateProviderRef: "mandate-1", amountCents: 10_000, currency: "AUD", idempotencyKey: "key-reverse", description: "d" });
-    await provider.reverseDebit(providerRequestRef, 10_000, "test reversal");
+    await provider.reverseDebit(providerRequestRef, 10_000, "test reversal", { idempotencyKey: "reverse-1" });
   });
 
   test("reversing an unknown providerRequestRef throws", async () => {
     const provider = new SandboxMandatePaymentProvider();
-    await assert.rejects(() => provider.reverseDebit("no-such-ref", 10_000, "test"));
+    await assert.rejects(() => provider.reverseDebit("no-such-ref", 10_000, "test", { idempotencyKey: "reverse-2" }));
   });
 });
 

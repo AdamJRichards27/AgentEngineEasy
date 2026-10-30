@@ -68,7 +68,38 @@ const addPartySchema = z.object({
   mobile: z.string().optional(),
   email: z.string().email().optional(),
   residentialAddress: z.string().optional(),
+  // AE Minimal v1.0 (Owner t149u): link an EXISTING contact instead of
+  // creating one. When present, no contact fields are read and no party row
+  // is inserted. Omitted = the original create-and-link behaviour.
+  partyId: z.number().int().positive().optional(),
 });
+
+// Party boundary twin of notePartyPropertyIsolationRejection: on a miss only.
+async function notePartyIsolationRejection(partyId: number, brokerageId: number): Promise<void> {
+  const [elsewhere] = await db
+    .select({ id: parties.id })
+    .from(parties)
+    .where(and(eq(parties.id, partyId), ne(parties.brokerageId, brokerageId)));
+  if (elsewhere) incrementCounter("tenant_isolation_rejection_total", { boundary: "party" });
+}
+
+async function runSellerSideEffects(propertyId: number, partyId: number, user: { id: number; brokerageId: number }) {
+  // Re-run the ownership review-not-block check now that a seller exists
+  // to compare against (Build Brief §8) — see apps/api/src/lib/ownership.ts.
+  await reviewOwnershipForProperty(propertyId).catch((err) =>
+    logger.error("review_ownership_for_property_failed", { propertyId, error: err }),
+  );
+  // If Ready to List already ran for this property, a seller added
+  // afterwards still needs AML initiated and the workflow steps recomputed.
+  if (await readyToListWorkflowExists(propertyId)) {
+    await initiateAmlIfNeeded({ propertyId, partyId, userId: user.id, brokerageId: user.brokerageId }).catch((err) =>
+      logger.error("initiate_aml_if_needed_failed", { propertyId, partyId, error: err }),
+    );
+    await refreshReadyToListSteps(propertyId).catch((err) =>
+      logger.error("refresh_ready_to_list_steps_failed", { propertyId, error: err }),
+    );
+  }
+}
 
 partiesRouter.post("/", requireAuth, async (req, res) => {
   const parsed = addPartySchema.safeParse(req.body);
@@ -77,6 +108,62 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
     return;
   }
   const user = req.authedUser!;
+
+  if (parsed.data.partyId !== undefined) {
+    const { propertyId, partyId, role, isPrimary } = parsed.data;
+    // One transaction; the property row is locked FOR UPDATE so concurrent
+    // submissions for the same property serialise and the duplicate check
+    // below cannot race. property_parties has no unique constraint and this
+    // change adds no migration (Owner t149u), so the lock is the guard.
+    const outcome = await db.transaction(async (tx) => {
+      const [property] = await tx
+        .select({ id: properties.id })
+        .from(properties)
+        .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId)))
+        .for("update");
+      if (!property) return { kind: "property_missing" as const };
+      const [party] = await tx
+        .select()
+        .from(parties)
+        .where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId)));
+      if (!party) return { kind: "party_missing" as const };
+      const [existing] = await tx
+        .select()
+        .from(propertyParties)
+        .where(and(eq(propertyParties.propertyId, propertyId), eq(propertyParties.partyId, partyId), eq(propertyParties.role, role)));
+      if (existing) return { kind: "exists" as const, party, link: existing };
+      const [link] = await tx.insert(propertyParties).values({ propertyId, partyId, role, isPrimary }).returning();
+      return { kind: "created" as const, party, link };
+    });
+    if (outcome.kind === "property_missing") {
+      await notePartyPropertyIsolationRejection(propertyId, user.brokerageId);
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
+    if (outcome.kind === "party_missing") {
+      await notePartyIsolationRejection(partyId, user.brokerageId);
+      res.status(404).json({ error: "Contact not found" });
+      return;
+    }
+    if (outcome.kind === "exists") {
+      res.status(409).json({
+        error: "This contact is already linked to the property with that role",
+        code: "PROPERTY_PARTY_LINK_EXISTS",
+        link: outcome.link,
+      });
+      return;
+    }
+    await logAudit({
+      userId: user.id,
+      action: "party_linked_existing",
+      recordType: "party",
+      recordId: String(partyId),
+      propertyId,
+    });
+    if (role === "Seller") await runSellerSideEffects(propertyId, partyId, user);
+    res.status(201).json({ party: outcome.party, link: outcome.link });
+    return;
+  }
 
   // Tenant-scoped in the same fetch that loads the property, not a check
   // bolted on after — a propertyId from another brokerage is

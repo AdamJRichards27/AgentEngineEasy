@@ -169,17 +169,18 @@ describe("payments routes — cross-tenant IDOR fix: brokerage B vs brokerage A'
       headers: { cookie: B.agent.cookie },
     });
 
-    assert.equal(crossTenantRes.status, 400, "must reject, never charge brokerage A's stored payment method");
+    // S-1b: stable code instead of the raw 400 message.
+    assert.equal(crossTenantRes.status, 404, "must reject, never charge brokerage A's stored payment method");
     assert.equal(nonExistentRes.status, crossTenantRes.status);
 
-    const crossTenantBody = await json<{ error: string }>(crossTenantRes);
-    const nonExistentBody = await json<{ error: string }>(nonExistentRes);
+    const crossTenantBody = await json<{ error: string; code?: string }>(crossTenantRes);
+    const nonExistentBody = await json<{ error: string; code?: string }>(nonExistentRes);
     // Same message SHAPE for both ("ServiceOrder <id> not found") — the ids
     // differ by construction, so this checks the template, not literal
     // string equality, which is the real "cannot distinguish exists-but-
     // not-mine from doesn't-exist-at-all" guarantee.
-    assert.match(crossTenantBody.error, /^ServiceOrder \d+ not found$/);
-    assert.match(nonExistentBody.error, /^ServiceOrder \d+ not found$/);
+    assert.deepEqual(crossTenantBody, { error: "Not found", code: "SERVICE_ORDER_NOT_FOUND" });
+    assert.deepEqual(nonExistentBody, crossTenantBody);
 
     // Brokerage A's own view must be completely unaffected by B's attempt:
     // still Succeeded, never re-charged or otherwise disturbed.
@@ -199,13 +200,14 @@ describe("payments routes — cross-tenant IDOR fix: brokerage B vs brokerage A'
       headers: { "content-type": "application/json", cookie: B.admin.cookie },
     });
 
-    assert.equal(crossTenantRes.status, 400, "must reject, never refund brokerage A's payment");
+    // S-1c: stable code instead of the raw 400 message.
+    assert.equal(crossTenantRes.status, 404, "must reject, never refund brokerage A's payment");
     assert.equal(nonExistentRes.status, crossTenantRes.status);
 
     const crossTenantBody = await json<{ error: string }>(crossTenantRes);
     const nonExistentBody = await json<{ error: string }>(nonExistentRes);
-    assert.match(crossTenantBody.error, /^Payment \d+ not found$/);
-    assert.match(nonExistentBody.error, /^Payment \d+ not found$/);
+    assert.deepEqual(crossTenantBody, { error: "Not found", code: "PAYMENT_NOT_FOUND" });
+    assert.deepEqual(nonExistentBody, crossTenantBody);
 
     // Brokerage A's payment must still be Succeeded, not Refunded, after B's attempt.
     const stillA = await fetch(`${baseUrl}/api/payments/service-orders/${serviceOrderId}/payments`, { headers: { cookie: A.agent.cookie } });
