@@ -33,6 +33,7 @@ import {
 } from "@aee/db";
 import { createCommissionCalculation } from "./calculations.js";
 import { emitFinancialEvent } from "./events.js";
+import { pcFeeMaxPaymentAttempts } from "./retryBackoff.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -224,6 +225,8 @@ export async function ensurePcSuccessFeeRequest(input: EnsurePcSuccessFeeRequest
       payerUserId: input.payerUserId ?? null,
       status: "CALCULATED",
       amountCents: pcFeeCalculation.totalFeeCents,
+      // #245 S3: configurable attempt budget, snapshotted at creation.
+      maxRetries: pcFeeMaxPaymentAttempts(),
       idempotencyKey,
     })
     .onConflictDoNothing()
