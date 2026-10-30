@@ -76,6 +76,11 @@ export interface MandatePaymentProvider {
   // be the raw request body whenever the provider signs raw bytes.
   verifyWebhookSignature(payload: unknown, signature: string): boolean;
   isWebhookEnabled(): boolean;
+  /**
+   * Read-only: the provider's own record of a debit by idempotency key, or null if it has none.
+   * Optional; only the sandbox implements it (#245 S5, held-dispatch resolution). Never sends.
+   */
+  lookupDebit?(idempotencyKey: string): Promise<{ providerRequestRef: string; status: MandateDebitStatus } | null>;
   parseWebhook(payload: unknown): MandateWebhookResult;
 }
 
@@ -149,6 +154,12 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
     this.scheduled.set(providerRequestRef, { mandateProviderRef: input.mandateProviderRef, amountCents: input.amountCents, status: "Scheduled" });
     this.idempotencyIndex.set(input.idempotencyKey, providerRequestRef);
     return { providerRequestRef, status: "Scheduled", scheduledFor };
+  }
+
+  async lookupDebit(idempotencyKey: string): Promise<{ providerRequestRef: string; status: MandateDebitStatus } | null> {
+    const ref = this.idempotencyIndex.get(idempotencyKey);
+    const rec = ref ? this.scheduled.get(ref) : undefined;
+    return ref && rec ? { providerRequestRef: ref, status: rec.status } : null;
   }
 
   async cancelScheduledDebit(providerRequestRef: string): Promise<void> {

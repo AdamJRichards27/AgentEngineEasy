@@ -11,7 +11,7 @@
 // or account reference. Provider failure text is sanitised (long digit
 // runs masked) and truncated.
 import { createHash } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   financialCardRefunds,
   db,
@@ -234,4 +234,23 @@ export async function listReceiptsForTransaction(brokerageId: number, transactio
     .from(financialReceipts)
     .where(and(eq(financialReceipts.brokerageId, brokerageId), eq(financialReceipts.transactionId, transactionId)))
     .orderBy(desc(financialReceipts.issuedAt), desc(financialReceipts.id));
+}
+
+/**
+ * Owner t183u item 7 (#245 S5): each receipt links to the issued settlement statement it was written
+ * under. Every statement version is its own row, so the stored id pins the version; the version (and
+ * the statement's current status) is derived here on read. Nothing about the statement is changed.
+ */
+export async function withStatementLinks<T extends { settlementStatementId: number | null; brokerageId: number }>(
+  receipts: T[],
+): Promise<Array<T & { settlementStatement: { id: number; version: number; status: string } | null }>> {
+  const ids = [...new Set(receipts.map((r) => r.settlementStatementId).filter((v): v is number => v != null))];
+  const rows = ids.length
+    ? await db.select({ id: settlementStatements.id, version: settlementStatements.version, status: settlementStatements.status, brokerageId: settlementStatements.brokerageId }).from(settlementStatements).where(inArray(settlementStatements.id, ids))
+    : [];
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return receipts.map((r) => {
+    const st = r.settlementStatementId != null ? byId.get(r.settlementStatementId) : undefined;
+    return { ...r, settlementStatement: st && st.brokerageId === r.brokerageId ? { id: st.id, version: st.version, status: st.status } : null };
+  });
 }

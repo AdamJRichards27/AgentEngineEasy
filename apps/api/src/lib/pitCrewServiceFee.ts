@@ -39,6 +39,7 @@ import {
 } from "@aee/db";
 import { computePcFee } from "./financial/pcFeeCalculations.js";
 import { advancePaymentRequestToNoticeSent, scheduleDebitForPaymentRequest } from "./financial/paymentOutbox.js";
+import { mandateProviderPermitted } from "./financial/provider.js";
 import { CardChargeRefusal, chargeServiceFeeStoredCard } from "./financial/pcFeeCardCharges.js";
 import { nominatedPaymentMethodFor } from "./financial/pcFeeAuthorities.js";
 import { collectionTimingFor, type CollectionTiming } from "./financial/pcFeeTerms.js";
@@ -382,7 +383,11 @@ export async function collectPitCrewServiceFee(caller: ServiceFeeCaller, transac
   }
   const collectNow = async (): Promise<ServiceFeeCollectionResult> => {
     if (isCard) return chargeCard();
-    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id });
+    // t183u item 6: never hand a debit to anything but the sandbox mandate provider.
+    if (!mandateProviderPermitted()) {
+      throw new ServiceFeeCollectionError("SERVICE_FEE_PROVIDER_NOT_PERMITTED", "Only the sandbox mandate provider may process debits.", verified.propertyId);
+    }
+    const result = await scheduleDebitForPaymentRequest({ paymentRequestId: request.id, initiatedByUserId: caller.id > 0 ? caller.id : null });
     return { outcome: result.dispatched ? "debit_scheduled" : "debit_queued", verified, paymentRequest: result.paymentRequest, settlementStatementId };
   };
   if (STARTABLE.has(request.status)) {

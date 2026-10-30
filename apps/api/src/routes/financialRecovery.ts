@@ -23,7 +23,7 @@ import {
   type RecoveryActor,
   type RecoveryResult,
 } from "../lib/financial/recovery.js";
-import { listHeldDebitDispatches } from "../lib/financial/paymentOutbox.js";
+import { HeldDebitRefusal, listHeldDebitDispatches, resolveHeldDebit } from "../lib/financial/paymentOutbox.js";
 import { cardRefundProviderStatusFor, listCardRefunds, listCardRefundsForBrokerage, refundCardCharge, resolveUnknownCardRefund } from "../lib/financial/cardRefunds.js";
 
 export const financialRecoveryRouter = Router();
@@ -103,6 +103,20 @@ financialRecoveryRouter.get("/financial/payment-requests/:id/adjustments", ...re
 // Owner t210u: uncertain debit dispatches held for manual review (read-only; nothing is resent).
 financialRecoveryRouter.get("/financial/payment-outbox/held", ...requireBrokerageAdmin, async (req, res) => {
   res.json({ held: await listHeldDebitDispatches(req.authedUser!.brokerageId) });
+});
+
+// #245 S5: resolve a held debit against the sandbox provider's record (never sends).
+const resolveHeldSchema = z.object({ outcome: z.enum(["SCHEDULED", "FAILED"]), reason: z.string().trim().min(1).max(2000) }).strict();
+financialRecoveryRouter.post("/financial/payment-outbox/:id/resolve-held", ...requireBrokerageAdmin, async (req, res) => {
+  const parsed = resolveHeldSchema.safeParse(req.body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const user = req.authedUser!;
+  try {
+    res.json(await resolveHeldDebit({ brokerageId: user.brokerageId, actorUserId: user.id, outboxEntryId: Number(req.params.id), ...parsed.data }));
+  } catch (err) {
+    if (!(err instanceof HeldDebitRefusal)) throw err;
+    res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
 });
 
 financialRecoveryRouter.get("/financial/card-charges", ...requireBrokerageAdmin, async (req, res) => {

@@ -9,7 +9,7 @@ import { db, financialLedgerEvents, financialPaymentRequests, financialReceipts,
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, PIT_CREW_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
-import { listReceiptsForTransaction, RECEIPT_POLICY, sanitiseFailureMessage, syncReceiptsForPaymentRequest } from "../lib/financial/receipts.js";
+import { listReceiptsForTransaction, RECEIPT_POLICY, sanitiseFailureMessage, syncReceiptsForPaymentRequest, withStatementLinks } from "../lib/financial/receipts.js";
 import { renderReceiptPdf } from "../lib/financial/receiptPdf.js";
 import { canReadTransactionFinancials } from "./financialFees.js";
 
@@ -68,13 +68,14 @@ financialReceiptsRouter.get("/financial/receipts", ...reader, async (req, res) =
   const access = await canReadTransactionFinancials(user, Number(req.query.transactionId));
   if (!access) return void res.status(404).json({ error: "Not found" });
   await syncTransaction(user.brokerageId, access.transactionId);
-  res.json({ receipts: await listReceiptsForTransaction(user.brokerageId, access.transactionId) });
+  res.json({ receipts: await withStatementLinks(await listReceiptsForTransaction(user.brokerageId, access.transactionId)) });
 });
 
 financialReceiptsRouter.get("/financial/receipts/:id", ...reader, async (req, res) => {
   const receipt = await loadReadable(req, Number(req.params.id));
   if (!receipt) return void res.status(404).json({ error: "Not found" });
-  res.json({ receipt, history: await historyFor(receipt) });
+  const [linked] = await withStatementLinks([receipt]);
+  res.json({ receipt: linked, history: await historyFor(receipt) });
 });
 
 financialReceiptsRouter.get("/financial/receipts/:id/pdf", ...reader, async (req, res) => {
@@ -82,6 +83,7 @@ financialReceiptsRouter.get("/financial/receipts/:id/pdf", ...reader, async (req
   const receipt = await loadReadable(req, Number(req.params.id));
   if (!receipt) return void res.status(404).json({ error: "Not found" });
   const history = await historyFor(receipt);
+  const [{ settlementStatement: st }] = await withStatementLinks([receipt]);
   const lines: Array<[string, string]> = [
     ["Receipt number", receipt.receiptNumber],
     ["Issued", aest(receipt.issuedAt)],
@@ -90,7 +92,7 @@ financialReceiptsRouter.get("/financial/receipts/:id/pdf", ...reader, async (req
     ["GST", money(receipt.gstCents, receipt.currency)],
     ["For", "AE Pit Crew service fee"],
     ["Transaction", `#${receipt.transactionId} (property #${receipt.propertyId})`],
-    ["Settlement statement", receipt.settlementStatementId ? `#${receipt.settlementStatementId}` : "-"],
+    ["Settlement statement", st ? `#${st.id} version ${st.version}` : receipt.settlementStatementId ? `#${receipt.settlementStatementId}` : "-"],
     ["Payment request", `#${receipt.paymentRequestId}`],
     ["Payer", receipt.payerType === "Brokerage" ? `Brokerage #${receipt.payerBrokerageId}` : `Agent #${receipt.payerUserId}`],
     ["Payment method", receipt.paymentMethodLabel ?? receipt.paymentMethodType],
