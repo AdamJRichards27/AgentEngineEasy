@@ -12,7 +12,7 @@ import { mandatePaymentProvider } from "../../lib/financial/provider.js";
 import { reconcileProviderManagedDebits } from "../../lib/financial/ddReconciliation.js";
 import { runServiceFeeCollectionTick } from "../../lib/financial/serviceFeeScheduler.js";
 import { cleanupBrokerages } from "./testSupport.js";
-import { activeDebitAuthority, cardAuthorityViaApi, collect, confirmBoth, elapseNotice, elapseRetry, feeChain, makeWorld, prepareAndIssue, request, saveCard, type Chain, type World } from "./serviceFeeStatementFixtures.js";
+import { activeDebitAuthority, call, cardAuthorityViaApi, collect, confirmBoth, elapseNotice, elapseRetry, feeChain, makeWorld, prepareAndIssue, request, saveCard, type Chain, type World } from "./serviceFeeStatementFixtures.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32 ? process.env.SESSION_SECRET : "test-only-session-secret-not-for-real-use-0123456789";
@@ -118,6 +118,31 @@ describe("t211u item 4: provider-managed direct-debit retries; AE reconciles, ne
     assert.equal(r.status, "FAILED");
     assert.equal(r.retryCount, 3);
     assert.equal(r.nextAttemptAt, null);
+  });
+
+  test("walkthrough defect: a DD the provider has FINALLY failed can be written off or waived by one BA; while the provider is still retrying both stay refused", async () => {
+    const body = { reason: "Synthetic: hardship approved", evidenceNote: "Synthetic evidence note" };
+    const live = await scheduledDd("DdLiveRetry");
+    sandbox().simulateDebitStatus(live.ref, { status: "RetryScheduled", attempt: 1, nextAttemptAt: new Date(Date.now() + 86_400_000), failureReason: "insufficient_funds" });
+    await reconcile();
+    for (const action of ["waive", "write-off"]) {
+      const r = await call(w.baseUrl, "POST", `/financial/payment-requests/${live.c.requestId}/${action}`, w.X.admin.cookie, body);
+      assert.equal(r.status, 409, `${action} while the provider may still collect: ${r.raw}`);
+      assert.equal(r.json.code, "RECOVERY_PAYMENT_IN_FLIGHT");
+      assert.match(r.json.error, /provider is still retrying this direct debit/, "the BA is told why and what to wait for");
+    }
+    const wo = await scheduledDd("DdFinalWriteOff");
+    sandbox().simulateDebitStatus(wo.ref, { status: "Failed", attempt: 3, final: true, failureReason: "insufficient_funds" });
+    await reconcile();
+    const r1 = await call(w.baseUrl, "POST", `/financial/payment-requests/${wo.c.requestId}/write-off`, w.X.admin.cookie, body);
+    assert.equal(r1.status, 200, r1.raw);
+    assert.equal((await request(wo.c.requestId)).status, "WRITTEN_OFF");
+    const wv = await scheduledDd("DdFinalWaive");
+    sandbox().simulateDebitStatus(wv.ref, { status: "Failed", attempt: 3, final: true, failureReason: "insufficient_funds" });
+    await reconcile();
+    const r2 = await call(w.baseUrl, "POST", `/financial/payment-requests/${wv.c.requestId}/waive`, w.X.admin.cookie, body);
+    assert.equal(r2.status, 200, r2.raw);
+    assert.equal((await request(wv.c.requestId)).status, "WAIVED");
   });
 
   test("no provider record (or no status lookup) -> nothing changes", async () => {

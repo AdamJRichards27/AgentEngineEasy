@@ -187,10 +187,15 @@ async function inFlight(tx: Tx, pr: FinancialPaymentRequest): Promise<"card" | "
     .from(financialCardCharges)
     .where(and(eq(financialCardCharges.paymentRequestId, pr.id), inArray(financialCardCharges.status, ["PENDING", "UNKNOWN"])));
   if (open.length > 0) return "card";
+  // t211u item 4: a DISPATCHED debit is live at the provider (it may still collect, including its
+  // own provider-managed retries) UNLESS the request is FAILED, which AE records only when the
+  // provider has stopped (reconciled final failure / exhausted retries) or a BA resolved a hold as
+  // failed. Only then is the debit over and a waiver or write-off safe. A PENDING entry always blocks.
+  const debitStatuses: ("PENDING" | "DISPATCHED")[] = pr.status === "FAILED" ? ["PENDING"] : ["PENDING", "DISPATCHED"];
   const debits = await tx
     .select({ id: financialPaymentOutbox.id })
     .from(financialPaymentOutbox)
-    .where(and(eq(financialPaymentOutbox.paymentRequestId, pr.id), eq(financialPaymentOutbox.action, "SCHEDULE_DEBIT"), inArray(financialPaymentOutbox.status, ["PENDING", "DISPATCHED"])));
+    .where(and(eq(financialPaymentOutbox.paymentRequestId, pr.id), eq(financialPaymentOutbox.action, "SCHEDULE_DEBIT"), inArray(financialPaymentOutbox.status, debitStatuses)));
   return debits.length > 0 ? "debit" : null;
 }
 
@@ -403,7 +408,17 @@ export async function auditRecoveryOutcome(actor: RecoveryActor, action: Recover
 async function assertRecoverable(tx: Tx, pr: FinancialPaymentRequest, allowed: Set<string>) {
   if (pr.status === "DISPUTED") throw new RecoveryRefusal("RECOVERY_USE_DISPUTE_RESOLUTION", "A disputed fee is resolved through dispute resolution.", pr.id, pr.propertyId);
   if (pr.status === "DEBIT_SCHEDULED") throw new RecoveryRefusal("RECOVERY_USE_CANCEL_DEBIT", "A scheduled debit is cancelled with the provider first.", pr.id, pr.propertyId);
-  if (pr.status === "PROCESSING" || (await inFlight(tx, pr))) {
+  const live = pr.status === "PROCESSING" ? "processing" : await inFlight(tx, pr);
+  if (live === "debit" && pr.status === "RETRY_SCHEDULED") {
+    // t211u walkthrough: provider-managed retries mean the provider may still collect this debit.
+    throw new RecoveryRefusal(
+      "RECOVERY_PAYMENT_IN_FLIGHT",
+      "The provider is still retrying this direct debit and may yet collect it. Wait for the provider's final outcome before waiving or writing it off.",
+      pr.id,
+      pr.propertyId,
+    );
+  }
+  if (live) {
     throw new RecoveryRefusal("RECOVERY_PAYMENT_IN_FLIGHT", "A payment is in flight or unresolved; resolve it first.", pr.id, pr.propertyId);
   }
   if (PAID.has(pr.status) || (pr.paidAt && !pr.reversedAt)) throw new RecoveryRefusal("RECOVERY_PAID_REFUND_REQUIRED", "Paid money is refunded or reversed first.", pr.id, pr.propertyId);
