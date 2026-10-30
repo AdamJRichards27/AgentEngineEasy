@@ -27,7 +27,7 @@
 // in the payload, consistent with this module's own Section 33 posture
 // above.
 
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc, inArray, ne, sql } from "drizzle-orm";
 import { db, pcFeeAuthorities, financialLedgerEvents, paymentMethods, type PcFeeAuthority, type PcFeeBasis } from "@aee/db";
 import { FinancialControlError } from "./agreements.js";
 import { emitFinancialEvent } from "./events.js";
@@ -226,28 +226,48 @@ export async function activatePcFeeAuthority(
   // D3: activating a brokerage-card authority IS the Brokerage Administrator approval (route is BA-only; drafter excluded above).
   const brokerageApproval = authority.payerType === "Brokerage" ? { brokerageCardApprovedByUserId: actorUserId, brokerageCardApprovedAt: new Date() } : {};
 
-  const priorActiveRows = await db
-    .select()
-    .from(pcFeeAuthorities)
-    .where(and(eq(pcFeeAuthorities.agentUserId, authority.agentUserId), eq(pcFeeAuthorities.status, "ACTIVE")));
-  const priorActive = priorActiveRows[0];
-  if (priorActive) {
-    await db.update(pcFeeAuthorities).set({ status: "REPLACED", updatedAt: new Date() }).where(eq(pcFeeAuthorities.id, priorActive.id));
-  }
-
-  const [updated] = await db
-    .update(pcFeeAuthorities)
-    .set({
-      status: "ACTIVE",
-      supersedesId: priorActive?.id ?? authority.supersedesId,
-      mandateProviderRef: isCard ? null : mandateProviderRef!,
-      mandateProvider: isCard ? cardProvider : (mandateProvider ?? null),
-      ...brokerageApproval,
-      effectiveDate: authority.effectiveDate ?? new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(pcFeeAuthorities.id, id))
-    .returning();
+  // One ACTIVE authority per agent (CC #57). Supersession runs in one transaction under a per-agent
+  // advisory lock, so concurrent activations for the same agent are serialised: each one sees the
+  // previous one's ACTIVE row and replaces it. EVERY prior ACTIVE row is replaced, not just the
+  // first one a query returns. The target row is locked and re-checked, so the same authority can't
+  // be activated twice. The stored-card checks above (single nominated method, active card, signed
+  // evidence) run first; the transaction then applies the card or mandate fields. No schema change:
+  // the invariant is enforced here, not by a constraint.
+  const updated = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('pc_fee_authority_activation'), ${authority.agentUserId})`);
+    const [target] = await tx.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, id)).for("update");
+    if (!target || target.status !== "PENDING") {
+      throw new FinancialControlError("INVALID_STATUS", `PC fee authority ${id} is ${target?.status ?? "missing"}, not PENDING.`);
+    }
+    const priorActiveRows = await tx
+      .select()
+      .from(pcFeeAuthorities)
+      .where(and(eq(pcFeeAuthorities.agentUserId, target.agentUserId), eq(pcFeeAuthorities.status, "ACTIVE"), ne(pcFeeAuthorities.id, id)))
+      .orderBy(desc(pcFeeAuthorities.id))
+      .for("update");
+    if (priorActiveRows.length > 0) {
+      await tx
+        .update(pcFeeAuthorities)
+        .set({ status: "REPLACED", updatedAt: new Date() })
+        .where(inArray(pcFeeAuthorities.id, priorActiveRows.map((r) => r.id)));
+    }
+    // supersedesId keeps a single link: the most recent prior ACTIVE authority.
+    const priorActive = priorActiveRows[0];
+    const [row] = await tx
+      .update(pcFeeAuthorities)
+      .set({
+        status: "ACTIVE",
+        supersedesId: priorActive?.id ?? target.supersedesId,
+        mandateProviderRef: isCard ? null : mandateProviderRef!,
+        mandateProvider: isCard ? cardProvider : (mandateProvider ?? null),
+        ...brokerageApproval,
+        effectiveDate: target.effectiveDate ?? new Date(),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(pcFeeAuthorities.id, id), eq(pcFeeAuthorities.status, "PENDING")))
+      .returning();
+    return row;
+  });
 
   await recordLedgerEvent({
     brokerageId: updated.brokerageId,
