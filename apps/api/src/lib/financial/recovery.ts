@@ -29,6 +29,8 @@ import {
   financialLedgerEvents,
   financialPaymentOutbox,
   financialPaymentRequests,
+  pcFeeCalculations,
+  settlementStatements,
   type FinancialCardCharge,
   type FinancialPaymentRequest,
 } from "@aee/db";
@@ -192,8 +194,16 @@ async function inFlight(tx: Tx, pr: FinancialPaymentRequest): Promise<"card" | "
   return debits.length > 0 ? "debit" : null;
 }
 
-export async function ledgerTx(tx: Tx, pr: FinancialPaymentRequest, eventType: string, actor: RecoveryActor, reason: string, metadata: Record<string, unknown>) {
-  await tx.insert(financialLedgerEvents).values({
+export async function ledgerTx(
+  tx: Tx,
+  pr: FinancialPaymentRequest,
+  eventType: string,
+  actor: RecoveryActor,
+  reason: string,
+  metadata: Record<string, unknown>,
+  occurredAt?: Date,
+): Promise<number> {
+  const [row] = await tx.insert(financialLedgerEvents).values({
     brokerageId: pr.brokerageId,
     propertyId: pr.propertyId,
     transactionId: pr.transactionId,
@@ -205,6 +215,147 @@ export async function ledgerTx(tx: Tx, pr: FinancialPaymentRequest, eventType: s
     actorUserId: actor.id,
     reason,
     metadata: { ...metadata, policy: RECOVERY_POLICY },
+    ...(occurredAt ? { occurredAt } : {}),
+  }).returning({ id: financialLedgerEvents.id });
+  return row!.id;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Owner t183u items 1-2: formal PC fee adjustment records (waivers and write-offs).
+// One authorised Brokerage Administrator approves AND executes the adjustment in a single step; there
+// is no second-admin approval. The formal record IS the PC_FEE_WAIVED / PC_FEE_WRITTEN_OFF ledger event
+// (append-only: no code path updates or deletes ledger events): its `adjustment` metadata carries the
+// amount, GST treatment, the settlement statement it adjusts, the reason and the approval details, and
+// the record number is derived from the event id. It is not a payment receipt: it is never written to
+// financial_receipts, never takes a receipt kind or number, and is read from its own endpoint.
+// No schema change.
+// ---------------------------------------------------------------------------------------------------
+export type AdjustmentKind = "WAIVER" | "WRITE_OFF";
+export type AdjustmentVia = "WAIVE" | "WRITE_OFF" | "DISPUTE_RESOLUTION";
+export const ADJUSTMENT_EVENT_FOR: Record<AdjustmentKind, string> = { WAIVER: "PC_FEE_WAIVED", WRITE_OFF: "PC_FEE_WRITTEN_OFF" };
+const KIND_FOR_EVENT: Record<string, AdjustmentKind> = { PC_FEE_WAIVED: "WAIVER", PC_FEE_WRITTEN_OFF: "WRITE_OFF" };
+
+export function adjustmentRecordNumber(kind: AdjustmentKind, ledgerEventId: number): string {
+  return `ADJ-${kind === "WAIVER" ? "W" : "WO"}-${String(ledgerEventId).padStart(8, "0")}`;
+}
+
+/** Writes the adjustment's ledger event (the formal record) and returns its record number. */
+async function recordAdjustmentTx(
+  tx: Tx,
+  pr: FinancialPaymentRequest,
+  kind: AdjustmentKind,
+  via: AdjustmentVia,
+  actor: RecoveryActor,
+  reason: string,
+  evidence: Evidence,
+  extra: Record<string, unknown>,
+): Promise<string> {
+  const [calc] = pr.pcFeeCalculationId
+    ? await tx.select({ gstCents: pcFeeCalculations.gstCents }).from(pcFeeCalculations).where(eq(pcFeeCalculations.id, pr.pcFeeCalculationId))
+    : [];
+  // The statement being adjusted: the transaction's currently ISSUED statement (null if none was issued yet).
+  const [statement] = await tx
+    .select({ id: settlementStatements.id, version: settlementStatements.version })
+    .from(settlementStatements)
+    .where(and(eq(settlementStatements.transactionId, pr.transactionId), eq(settlementStatements.brokerageId, pr.brokerageId), eq(settlementStatements.status, "ISSUED")));
+  const gstCents = Math.max(0, Math.min(calc?.gstCents ?? 0, pr.amountCents));
+  const approvedAt = new Date();
+  const adjustment = {
+    documentType: "PC_FEE_ADJUSTMENT",
+    isReceipt: false,
+    kind,
+    via,
+    amountCents: pr.amountCents,
+    gstCents,
+    amountExGstCents: pr.amountCents - gstCents,
+    gstTreatment: gstCents > 0 ? "GST_INCLUSIVE" : "NO_GST",
+    currency: pr.currency ?? "AUD",
+    settlementStatementId: statement?.id ?? null,
+    settlementStatementVersion: statement?.version ?? null,
+    approvalMode: "SINGLE_BROKERAGE_ADMIN",
+    approvedByUserId: actor.id,
+    approvedByRole: actor.role,
+    approvedAt: approvedAt.toISOString(),
+    executedByUserId: actor.id,
+  };
+  const id = await ledgerTx(tx, pr, ADJUSTMENT_EVENT_FOR[kind], actor, reason, { ...extra, evidence, adjustment }, approvedAt);
+  return adjustmentRecordNumber(kind, id);
+}
+
+export interface AdjustmentRecord {
+  recordNumber: string;
+  documentType: "PC_FEE_ADJUSTMENT";
+  isReceipt: false;
+  kind: AdjustmentKind;
+  via: AdjustmentVia;
+  ledgerEventId: number;
+  paymentRequestId: number;
+  transactionId: number;
+  settlementStatementId: number | null;
+  settlementStatementVersion: number | null;
+  amountCents: number;
+  gstCents: number;
+  amountExGstCents: number;
+  gstTreatment: string;
+  currency: string;
+  reason: string;
+  approval: { mode: string; approvedByUserId: number; approvedByRole: string; approvedAt: string; executedByUserId: number };
+  evidence: { kind: string; documentId: number | null };
+}
+
+/** Brokerage Administrator read: the formal adjustment records for one payment request (oldest first). */
+export async function listAdjustmentRecords(actor: RecoveryActor, paymentRequestId: number): Promise<AdjustmentRecord[]> {
+  if (!Number.isSafeInteger(paymentRequestId) || paymentRequestId <= 0) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  const [pr] = await db
+    .select()
+    .from(financialPaymentRequests)
+    .where(and(eq(financialPaymentRequests.id, paymentRequestId), eq(financialPaymentRequests.brokerageId, actor.brokerageId)));
+  if (!pr) throw new RecoveryRefusal("RECOVERY_NOT_FOUND", "Not found.");
+  const rows = await db
+    .select()
+    .from(financialLedgerEvents)
+    .where(
+      and(
+        eq(financialLedgerEvents.brokerageId, pr.brokerageId),
+        eq(financialLedgerEvents.sourceRecordType, "PAYMENT_REQUEST"),
+        eq(financialLedgerEvents.sourceRecordId, String(pr.id)),
+        inArray(financialLedgerEvents.eventType, Object.values(ADJUSTMENT_EVENT_FOR)),
+      ),
+    )
+    .orderBy(financialLedgerEvents.id);
+  return rows.flatMap((e) => {
+    const meta = (e.metadata ?? {}) as { adjustment?: Record<string, unknown>; evidence?: { kind?: string; documentId?: number } };
+    const a = meta.adjustment;
+    const kind = KIND_FOR_EVENT[e.eventType];
+    if (!a || !kind) return []; // events recorded before formal records existed carry no adjustment metadata
+    return [
+      {
+        recordNumber: adjustmentRecordNumber(kind, e.id),
+        documentType: "PC_FEE_ADJUSTMENT" as const,
+        isReceipt: false as const,
+        kind,
+        via: a.via as AdjustmentVia,
+        ledgerEventId: e.id,
+        paymentRequestId: pr.id,
+        transactionId: pr.transactionId,
+        settlementStatementId: (a.settlementStatementId as number | null) ?? null,
+        settlementStatementVersion: (a.settlementStatementVersion as number | null) ?? null,
+        amountCents: a.amountCents as number,
+        gstCents: a.gstCents as number,
+        amountExGstCents: a.amountExGstCents as number,
+        gstTreatment: a.gstTreatment as string,
+        currency: a.currency as string,
+        reason: e.reason ?? "",
+        approval: {
+          mode: a.approvalMode as string,
+          approvedByUserId: a.approvedByUserId as number,
+          approvedByRole: a.approvedByRole as string,
+          approvedAt: a.approvedAt as string,
+          executedByUserId: a.executedByUserId as number,
+        },
+        evidence: { kind: meta.evidence?.kind ?? "unknown", documentId: meta.evidence?.kind === "document" ? (meta.evidence.documentId ?? null) : null },
+      },
+    ];
   });
 }
 
@@ -276,8 +427,8 @@ export async function waivePaymentRequest(actor: RecoveryActor, paymentRequestId
       .set({ status: "WAIVED", waivedAt: new Date(), waivedByUserId: actor.id, waiveReason: reason, updatedAt: new Date() })
       .where(eq(financialPaymentRequests.id, pr.id))
       .returning();
-    await ledgerTx(tx, pr, "PC_FEE_WAIVED", actor, reason, { recoveryAction: "waive", statusBefore: pr.status, evidence });
-    await auditTx(tx, actor, "financial_pc_fee_waived", pr, auditValue({ paymentRequestId: pr.id, statusBefore: pr.status, statusAfter: "WAIVED" }, evidence));
+    const recordNumber = await recordAdjustmentTx(tx, pr, "WAIVER", "WAIVE", actor, reason, evidence, { recoveryAction: "waive", statusBefore: pr.status });
+    await auditTx(tx, actor, "financial_pc_fee_waived", pr, auditValue({ paymentRequestId: pr.id, statusBefore: pr.status, statusAfter: "WAIVED", adjustmentRecordNumber: recordNumber }, evidence));
     return { idempotent: false, paymentRequest: updated!, statusBefore: pr.status };
   });
   return finish(result);
@@ -295,8 +446,8 @@ export async function writeOffPaymentRequest(actor: RecoveryActor, paymentReques
       .set({ status: "WRITTEN_OFF", writtenOffAt: new Date(), writtenOffByUserId: actor.id, writeOffReason: reason, updatedAt: new Date() })
       .where(eq(financialPaymentRequests.id, pr.id))
       .returning();
-    await ledgerTx(tx, pr, "PC_FEE_WRITTEN_OFF", actor, reason, { recoveryAction: "write_off", statusBefore: pr.status, evidence });
-    await auditTx(tx, actor, "financial_pc_fee_written_off", pr, auditValue({ paymentRequestId: pr.id, statusBefore: pr.status, statusAfter: "WRITTEN_OFF" }, evidence));
+    const recordNumber = await recordAdjustmentTx(tx, pr, "WRITE_OFF", "WRITE_OFF", actor, reason, evidence, { recoveryAction: "write_off", statusBefore: pr.status });
+    await auditTx(tx, actor, "financial_pc_fee_written_off", pr, auditValue({ paymentRequestId: pr.id, statusBefore: pr.status, statusAfter: "WRITTEN_OFF", adjustmentRecordNumber: recordNumber }, evidence));
     return { idempotent: false, paymentRequest: updated!, statusBefore: pr.status };
   });
   return finish(result);
@@ -348,8 +499,17 @@ export async function resolvePaymentRequestDispute(actor: RecoveryActor, payment
       .returning({ id: financialDisputes.id });
     const disputeIds = resolvedDisputes.map((d) => d.id);
     await ledgerTx(tx, pr, "PC_FEE_DISPUTE_RESOLVED", actor, reason, { recoveryAction: "resolve_dispute", outcome, statusBefore: pr.status, statusAfter, disputeIds, evidence });
-    if (outcome !== "PAYABLE") await ledgerTx(tx, pr, outcome === "WAIVED" ? "PC_FEE_WAIVED" : "PC_FEE_WRITTEN_OFF", actor, reason, { recoveryAction: "resolve_dispute", disputeIds, evidence });
-    await auditTx(tx, actor, "financial_pc_fee_dispute_resolved", pr, auditValue({ paymentRequestId: pr.id, outcome, statusBefore: pr.status, statusAfter, disputeIds }, evidence));
+    const recordNumber =
+      outcome === "PAYABLE"
+        ? null
+        : await recordAdjustmentTx(tx, pr, outcome === "WAIVED" ? "WAIVER" : "WRITE_OFF", "DISPUTE_RESOLUTION", actor, reason, evidence, { recoveryAction: "resolve_dispute", disputeIds });
+    await auditTx(
+      tx,
+      actor,
+      "financial_pc_fee_dispute_resolved",
+      pr,
+      auditValue({ paymentRequestId: pr.id, outcome, statusBefore: pr.status, statusAfter, disputeIds, ...(recordNumber ? { adjustmentRecordNumber: recordNumber } : {}) }, evidence),
+    );
     return { idempotent: false, paymentRequest: updated!, statusBefore: pr.status };
   });
   return finish(result);

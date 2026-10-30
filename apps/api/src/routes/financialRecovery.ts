@@ -17,6 +17,7 @@ import {
   resolvePaymentRequestDispute,
   resolveUnknownCardCharge,
   waivePaymentRequest,
+  listAdjustmentRecords,
   writeOffPaymentRequest,
   type RecoveryAction,
   type RecoveryActor,
@@ -86,6 +87,16 @@ financialRecoveryRouter.post("/financial/payment-requests/:id/resolve-dispute", 
   if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
   const id = Number(req.params.id);
   await run(req, res, "resolve_dispute", id, () => resolvePaymentRequestDispute(actorOf(req), id, parsed.data.outcome, parsed.data));
+});
+
+// Owner t183u item 2: formal waiver / write-off adjustment records (read-only; never receipts).
+financialRecoveryRouter.get("/financial/payment-requests/:id/adjustments", ...requireBrokerageAdmin, async (req, res) => {
+  try {
+    res.json({ adjustments: await listAdjustmentRecords(actorOf(req), Number(req.params.id)) });
+  } catch (err) {
+    if (!(err instanceof RecoveryRefusal)) throw err;
+    res.status(err.status).json(err.status === 404 ? { error: "Not found." } : { error: err.message, code: err.code });
+  }
 });
 
 financialRecoveryRouter.get("/financial/card-charges", ...requireBrokerageAdmin, async (req, res) => {
