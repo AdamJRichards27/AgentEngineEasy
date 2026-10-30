@@ -226,7 +226,7 @@ describe("pc-fee authority duplicate check script (real tables, local test DB)",
   const draft = (agentUserId: number) => createPcFeeAuthority({ brokerageId: A.brokerageId, agentUserId, rateBps: 690, createdByUserId: A.admin.user.id });
   const mine = (rows: Finding[]) => rows.filter((r) => r.brokerage_id === A.brokerageId);
 
-  test("activations through activatePcFeeAuthority are clean; a directly-forced second ACTIVE is detected", async () => {
+  test("activations through activatePcFeeAuthority are clean; a directly-forced second ACTIVE is detected", async (t) => {
     const clean = await freshAgent();
     const a1 = await draft(clean);
     await activatePcFeeAuthority(a1.id, A.brokerageId, activator.user.id, `dup-check-${suffix}-1`, "sandbox");
@@ -237,12 +237,18 @@ describe("pc-fee authority duplicate check script (real tables, local test DB)",
     try {
       assert.deepEqual(mine(await runScriptReadOnly(client)), [], "real activation path leaves nothing to report");
 
-      // Legacy/raced state, written the way the #245 scheduler fixture does: status set straight to ACTIVE.
+      // Legacy/raced state, written the way #245's old activeDebitAuthority fixture did: status set straight to ACTIVE.
       const dirty = await freshAgent();
       const d1 = await draft(dirty);
       const d2 = await draft(dirty);
       await db.update(pcFeeAuthorities).set({ status: "ACTIVE" }).where(eq(pcFeeAuthorities.id, d1.id));
-      await db.update(pcFeeAuthorities).set({ status: "ACTIVE" }).where(eq(pcFeeAuthorities.id, d2.id));
+      try {
+        await db.update(pcFeeAuthorities).set({ status: "ACTIVE" }).where(eq(pcFeeAuthorities.id, d2.id));
+      } catch (err) {
+        // With the proposed one-ACTIVE-per-agent unique index the database refuses the duplicate outright.
+        assert.match(String((err as { cause?: unknown }).cause ?? err), /pc_fee_authorities_one_active_per_agent_idx/);
+        return t.skip("the one-ACTIVE-per-agent unique index refuses the legacy duplicate state");
+      }
 
       const found = mine(await runScriptReadOnly(client));
       assert.deepEqual(found, [

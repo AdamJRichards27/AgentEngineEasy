@@ -322,6 +322,11 @@ describe("t181u slice 7: controlled recovery routes", { concurrency: false }, ()
     assert.equal(iss.status, 200, iss.raw);
     assert.equal(iss.json.collection.outcome, "notice_started", "collection re-gated from the start");
 
+    // Unpaid dispute to be written off below: its fee is calculated now, while the direct-debit authority
+    // is still the agent's ACTIVE one. cardReady() activates a card authority, which replaces it (one
+    // ACTIVE authority per agent, Owner t183u, t201u), and no new fee can be calculated on a REPLACED one.
+    const q = await feeChain(w, dd.id, "DisputeWO");
+
     // Paid then disputed: the money stands unless a refund/reversal is done first.
     const p = await cardReady("DisputePaid");
     assert.equal((await collect(w, w.crew, p)).json.outcome, "card_charged");
@@ -335,8 +340,7 @@ describe("t181u slice 7: controlled recovery routes", { concurrency: false }, ()
     assert.equal((await request(p.requestId)).status, "PAID");
     assert.deepEqual((await receipts(p)).map((x) => x.id), rcBefore.map((x) => x.id), "no duplicate payment receipt");
 
-    // Unpaid dispute written off.
-    const q = await feeChain(w, dd.id, "DisputeWO");
+    // Unpaid dispute written off (its fee chain was built above, before the switch to card).
     const qd = await markDisputed(q);
     const qw = await resolveDispute(w.X.admin, q, "WRITTEN_OFF");
     assert.equal(qw.status, 200, qw.raw);

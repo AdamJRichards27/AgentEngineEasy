@@ -97,13 +97,30 @@ async function holdRowLocks(ids: number[]) {
   };
 }
 
+/**
+ * Forces legacy duplicate-ACTIVE state. With the proposed one-ACTIVE-per-agent partial unique index in
+ * place the database refuses it: returns false after asserting the refusal came from that index.
+ */
+async function forceLegacyActive(write: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await write();
+    return true;
+  } catch (err) {
+    assert.match(String((err as { cause?: unknown }).cause ?? err), /pc_fee_authorities_one_active_per_agent_idx/);
+    return false;
+  }
+}
+
 describe("activatePcFeeAuthority: exactly one ACTIVE authority per agent", { concurrency: false }, () => {
-  test("multiple prior ACTIVE rows (legacy or raced state): activation replaces every one of them", async () => {
+  test("multiple prior ACTIVE rows (legacy or raced state): activation replaces every one of them", async (t) => {
     const agent = await freshAgent();
     const a = await draft(agent, 600);
     const b = await draft(agent, 650);
     // Simulate a state left by an earlier race: two ACTIVE rows for one agent.
-    await db.update(pcFeeAuthorities).set({ status: "ACTIVE", mandateProviderRef: "sandbox-legacy", mandateProvider: "sandbox" }).where(inArray(pcFeeAuthorities.id, [a.id, b.id]));
+    const forced = await forceLegacyActive(() =>
+      db.update(pcFeeAuthorities).set({ status: "ACTIVE", mandateProviderRef: "sandbox-legacy", mandateProvider: "sandbox" }).where(inArray(pcFeeAuthorities.id, [a.id, b.id])),
+    );
+    if (!forced) return t.skip("the one-ACTIVE-per-agent unique index refuses the legacy duplicate state");
     assert.equal((await activeFor(agent)).length, 2);
     const c = await draft(agent, 700);
     const activated = await activate(c.id, "sandbox-race-multi");

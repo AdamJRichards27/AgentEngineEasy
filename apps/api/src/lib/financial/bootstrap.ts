@@ -10,7 +10,7 @@
 // (idempotent "registered" latch, an options.startScheduler escape hatch
 // for tests, unref()'d interval so a graceful shutdown never waits on it).
 
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { db, properties, pcFeeAuthorities } from "@aee/db";
 import { registerHandler, logger, type DomainEvent } from "@aee/events";
 import { finalizeCommissionForSettlement, ensurePcSuccessFeeRequest } from "./settlement.js";
@@ -60,10 +60,27 @@ export async function handleSettlementCompleted(event: DomainEvent): Promise<voi
   }
   if (!agentUserId) return;
 
-  const [activeAuthority] = await db
+  // One ACTIVE authority per agent (Owner t183u, t201u; enforced by activatePcFeeAuthority). This used
+  // to take whichever ACTIVE row the database returned first, so legacy duplicates billed an arbitrary
+  // authority. Read up to two rows: more than one is corrupt data, so fail closed (bill nothing, log it
+  // for Brokerage Administrator review via scripts/sql/pc-fee-authority-duplicate-check.sql) rather
+  // than guess which rate applies.
+  const activeRows = await db
     .select()
     .from(pcFeeAuthorities)
-    .where(and(eq(pcFeeAuthorities.agentUserId, agentUserId), eq(pcFeeAuthorities.status, "ACTIVE")));
+    .where(and(eq(pcFeeAuthorities.agentUserId, agentUserId), eq(pcFeeAuthorities.status, "ACTIVE")))
+    .orderBy(desc(pcFeeAuthorities.id))
+    .limit(2);
+  if (activeRows.length > 1) {
+    logger.error("pc_fee_authority_multiple_active", {
+      brokerageId: event.brokerageId,
+      transactionId: event.transactionId,
+      agentUserId,
+      pcFeeAuthorityIds: activeRows.map((r) => r.id),
+    });
+    return;
+  }
+  const [activeAuthority] = activeRows;
   if (!activeAuthority) return; // no PC fee authority on file for this agent -- nothing to bill (Section 13: never invented, only ever recorded).
 
   const pcFeeCalculation = await createPcFeeCalculation({

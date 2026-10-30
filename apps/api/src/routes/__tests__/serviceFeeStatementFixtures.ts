@@ -20,7 +20,7 @@ import {
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createCommissionAgreement } from "../../lib/financial/agreements.js";
 import { createCommissionCalculation } from "../../lib/financial/calculations.js";
-import { createPcFeeAuthority } from "../../lib/financial/pcFeeAuthorities.js";
+import { activatePcFeeAuthority, createPcFeeAuthority } from "../../lib/financial/pcFeeAuthorities.js";
 import { createPcFeeCalculation } from "../../lib/financial/pcFeeCalculations.js";
 import { ensurePcSuccessFeeRequest } from "../../lib/financial/settlement.js";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, devLogin, type DevLoginResult } from "./testSupport.js";
@@ -86,8 +86,14 @@ export async function makeWorld(baseUrl: string, tag: string): Promise<World> {
 
 export const MANDATE_REF_PREFIX = "sandbox-mandate-t180u";
 
-/** An ACTIVE direct-debit authority for X.agent (activated by a second BA). */
-export async function activeDebitAuthority(w: World, overrides: Partial<typeof pcFeeAuthorities.$inferInsert> = {}) {
+/**
+ * An ACTIVE direct-debit authority for X.agent, activated through activatePcFeeAuthority by a second
+ * Brokerage Administrator (admin2; X.admin drafted it). One ACTIVE authority per agent (Owner t183u,
+ * t201u: "one card authority only"): activation replaces every other ACTIVE authority for the agent,
+ * including a stored-card one, exactly as production does. The fixture used to force status ACTIVE
+ * directly, which left card and direct-debit authorities ACTIVE together, a state production cannot reach.
+ */
+export async function activeDebitAuthority(w: World, overrides: { agreementTermsVersion?: string; mandateTermsVersion?: string } = {}) {
   const a = await createPcFeeAuthority({
     brokerageId: w.X.brokerageId,
     agentUserId: w.X.agent.user.id,
@@ -97,14 +103,11 @@ export async function activeDebitAuthority(w: World, overrides: Partial<typeof p
     maximumAmountCents: 1_000_000,
     noticeRequiredDays: 7,
     signedEvidenceRef: "synthetic-signed-authority",
+    effectiveDate: new Date(Date.now() - 86_400_000),
     createdByUserId: w.X.admin.user.id,
+    ...overrides,
   });
-  const [row] = await db
-    .update(pcFeeAuthorities)
-    .set({ status: "ACTIVE", mandateProviderRef: `${MANDATE_REF_PREFIX}-${a.id}`, mandateProvider: "sandbox", effectiveDate: new Date(Date.now() - 86_400_000), ...overrides })
-    .where(eq(pcFeeAuthorities.id, a.id))
-    .returning();
-  return row!;
+  return activatePcFeeAuthority(a.id, w.X.brokerageId, w.admin2.user.id, `${MANDATE_REF_PREFIX}-${a.id}`, "sandbox");
 }
 
 export interface Chain {
