@@ -7,7 +7,9 @@ import { useState } from "react";
 import {
   activeConfirmations,
   formatAud,
+  formatAestTime,
   formatDay,
+  heldResolveBody,
   methodText,
   newRefundRequestKey,
   reconciliationIssueText,
@@ -21,7 +23,11 @@ import {
   statementStatusPill,
   statementVersions,
   timingText,
+  type AdjustmentRecord,
   type AuthoritySummary,
+  type HeldDebit,
+  type HeldResolveOutcome,
+  type RetryState,
   type CardCharge,
   type CardRefund,
   type ProviderStatus,
@@ -555,6 +561,9 @@ export function AuthorityView({
   const a = authority;
   return (
     <div className="stack" data-testid="authority-view">
+      {a.status === "REPLACED" && (
+        <p className="muted">Replaced by a newer version — shown as read-only history.</p>
+      )}
       <h3>
         Payment authority v{a.version}{" "}
         <span
@@ -585,6 +594,8 @@ export function AuthorityView({
         <dd>{a.agreementTermsVersion ?? "Not versioned (notice applies)"}</dd>
         <dt>Mandate terms</dt>
         <dd>{a.mandateTermsVersion ?? "Not versioned (notice applies)"}</dd>
+        <dt>Effective</dt>
+        <dd>{formatDay(a.effectiveDate)}</dd>
         <dt>Signed evidence on file</dt>
         <dd>{a.hasSignedEvidence ? "Yes" : "No"}</dd>
         {a.payerType === "Brokerage" && (
@@ -650,6 +661,7 @@ export function ServiceFeePanelView({
                 Notice ends {formatDay(data.serviceFee.noticeElapsesAt)}
               </p>
             )}
+          <RetryStatusView retry={data.serviceFee.retry} />
           {data.serviceFee.paidAt && (
             <p className="text-success">
               Paid {formatDay(data.serviceFee.paidAt)}
@@ -728,6 +740,11 @@ export function ReceiptsView({
               {formatAud(r.amountCents, r.currency)} · {formatDay(r.issuedAt)}
               {r.paymentMethodLabel && (
                 <span className="muted"> · {r.paymentMethodLabel}</span>
+              )}
+              {r.settlementStatement && (
+                <span className="muted">
+                  {" "}· Statement #{r.settlementStatement.id} v{r.settlementStatement.version}
+                </span>
               )}
               {r.failureMessage && (
                 <div className="error-text">
@@ -1034,5 +1051,101 @@ export function RecoveryActionsView({
         </>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// #245 S6 screens (existing role gates; mock/read states; nothing sends here).
+
+export function RetryStatusView({ retry }: { retry: RetryState | null | undefined }) {
+  if (!retry) return null;
+  return (
+    <p className="muted" data-testid="retry-status">
+      Attempt {retry.attempts} of {retry.maxAttempts}
+      {retry.nextAttemptAt ? ` · next attempt ${formatAestTime(retry.nextAttemptAt)}` : " · no further automatic attempts"}
+    </p>
+  );
+}
+
+export function AdjustmentRecordsView({ records, error }: { records: AdjustmentRecord[] | undefined; error?: string | null }) {
+  return (
+    <div className="stack" data-testid="adjustment-records">
+      <h3>Waivers and write-offs</h3>
+      <p className="muted">Adjustment records are not a receipt; no payment was taken.</p>
+      {error && <p className="error-text" role="alert">{error}</p>}
+      {!records && !error && <p className="muted">Loading…</p>}
+      {records && records.length === 0 && <p className="muted">No waivers or write-offs.</p>}
+      {records && records.length > 0 && (
+        <ul className="item-list">
+          {records.map((r) => (
+            <li key={r.recordNumber}>
+              <strong>{r.recordNumber}</strong> · {r.kind === "WAIVER" ? "Waiver" : "Write-off"} · {formatAud(r.amountCents, r.currency)} · {formatDay(r.approval.approvedAt)}
+              {r.settlementStatementId != null && (
+                <span className="muted"> · Statement #{r.settlementStatementId} v{r.settlementStatementVersion}</span>
+              )}
+              <div className="muted">{r.reason}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function HeldDebitsView({
+  held,
+  onResolve,
+  busy,
+  error,
+}: {
+  held: HeldDebit[] | undefined;
+  onResolve: (outboxEntryId: number, body: { outcome: HeldResolveOutcome; reason: string }) => void;
+  busy: boolean;
+  error?: string | null;
+}) {
+  return (
+    <div className="stack" data-testid="held-debits">
+      <h3>Held debits (needs review)</h3>
+      <p className="muted">
+        The provider outcome was uncertain, so these are never resent automatically. Check the provider, then record what happened.
+        Another Brokerage Administrator must resolve a debit you raised.
+      </p>
+      {error && <p className="error-text" role="alert">{error}</p>}
+      {!held && !error && <p className="muted">Loading…</p>}
+      {held && held.length === 0 && <p className="muted">No held debits.</p>}
+      {held && held.length > 0 && (
+        <ul className="item-list">
+          {held.map((h) => (
+            <HeldDebitRow key={h.outboxEntryId} entry={h} onResolve={onResolve} busy={busy} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function HeldDebitRow({ entry, onResolve, busy }: { entry: HeldDebit; onResolve: (id: number, body: { outcome: HeldResolveOutcome; reason: string }) => void; busy: boolean }) {
+  const [outcome, setOutcome] = useState<HeldResolveOutcome>("SCHEDULED");
+  const [reason, setReason] = useState("");
+  const body = heldResolveBody(outcome, reason);
+  return (
+    <li>
+      <strong>Payment request #{entry.paymentRequestId}</strong> · held {formatAestTime(entry.heldAt)} · attempts {entry.attempts}
+      <div className="error-text">{entry.reason}</div>
+      <label>
+        Provider outcome{" "}
+        <select value={outcome} onChange={(e) => setOutcome(e.target.value as HeldResolveOutcome)} disabled={busy}>
+          <option value="SCHEDULED">Scheduled at provider</option>
+          <option value="FAILED">Failed / not at provider</option>
+        </select>
+      </label>
+      <label>
+        Reason (required){" "}
+        <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} disabled={busy} />
+      </label>
+      <button type="button" className="btn" disabled={busy || !body} onClick={() => body && onResolve(entry.outboxEntryId, body)}>
+        Resolve
+      </button>
+    </li>
   );
 }

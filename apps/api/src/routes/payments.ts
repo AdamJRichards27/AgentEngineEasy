@@ -243,6 +243,11 @@ function serviceFeeView(v: Awaited<ReturnType<typeof verifyServiceFeeCollection>
     noticeElapsesAt: v.noticeElapsesAt,
     scheduledAt: paymentRequest.scheduledAt,
     paidAt: paymentRequest.paidAt,
+    // #245 S6: read-only retry state for the screens (counts and time only).
+    retry:
+      paymentRequest.status === "RETRY_SCHEDULED" || paymentRequest.status === "FAILED"
+        ? { attempts: paymentRequest.retryCount, maxAttempts: paymentRequest.maxRetries, nextAttemptAt: paymentRequest.status === "RETRY_SCHEDULED" ? paymentRequest.nextAttemptAt : null }
+        : null,
     // t180u(3): the nominated method's type and stored label only, never a token or mandate reference.
     paymentMethod: v.paymentMethod,
     // t181u(A): which timing rule the signed terms allow.

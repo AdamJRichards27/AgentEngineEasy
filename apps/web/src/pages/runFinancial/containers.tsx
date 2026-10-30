@@ -8,7 +8,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiErrorMessage, apiFetch } from "../../lib/api";
 import {
   runFinancialCapabilities,
+  type AdjustmentRecord,
   type CardCharge,
+  type HeldDebit,
   type CardRefund,
   type ProviderStatus,
   type Receipt,
@@ -17,7 +19,9 @@ import {
   type SettlementStatement,
 } from "../../lib/runFinancial";
 import {
+  AdjustmentRecordsView,
   CardChargeRow,
+  HeldDebitsView,
   CardRefundRow,
   ReceiptsView,
   RecoveryActionsView,
@@ -145,8 +149,14 @@ export function BaPaymentQueues({ role }: { role: string | null | undefined }) {
     queryFn: () => apiFetch<{ cardRefunds: CardRefund[] }>(`/financial/card-refunds${refundFilter ? `?status=${refundFilter}` : ""}`),
     enabled: caps.baQueues,
   });
+  const heldQ = useQuery({
+    queryKey: ["run-held-debits"],
+    queryFn: () => apiFetch<{ held: HeldDebit[] }>("/financial/payment-outbox/held"),
+    enabled: caps.heldDebits,
+  });
   const done = (text: string) => {
     setMessage(text);
+    qc.invalidateQueries({ queryKey: ["run-held-debits"] });
     qc.invalidateQueries({ queryKey: ["run-card-charges"] });
     qc.invalidateQueries({ queryKey: ["run-card-refunds"] });
     qc.invalidateQueries({ queryKey: ["financial-payment-requests"] });
@@ -223,6 +233,16 @@ export function BaPaymentQueues({ role }: { role: string | null | undefined }) {
           ))}
         </ul>
       </section>
+      {caps.heldDebits && (
+        <section className="card" aria-label="Held debits">
+          <HeldDebitsView
+            held={heldQ.data?.held}
+            error={heldQ.isError ? apiErrorMessage(heldQ.error, "Couldn't load held debits.") : null}
+            busy={act.isPending}
+            onResolve={(id, body) => run(() => post(`/financial/payment-outbox/${id}/resolve-held`, body), "Held debit resolved.")}
+          />
+        </section>
+      )}
     </>
   );
 }
@@ -237,12 +257,14 @@ export function PaymentRequestRecovery({ role, paymentRequestId, status }: { rol
     onSuccess: () => {
       setMessage("Done.");
       qc.invalidateQueries({ queryKey: ["financial-payment-requests"] });
+      qc.invalidateQueries({ queryKey: ["run-adjustments", paymentRequestId] });
     },
     onError: (e) => setMessage(apiErrorMessage(e, "That action was refused.")),
   });
   if (!caps.baQueues) return null;
   return (
     <>
+      <PaymentRequestAdjustments enabled={caps.adjustmentRecords} paymentRequestId={paymentRequestId} />
       <RecoveryActionsView
         paymentRequestId={paymentRequestId}
         status={status}
@@ -254,4 +276,15 @@ export function PaymentRequestRecovery({ role, paymentRequestId, status }: { rol
       {message && <span className="muted">{message}</span>}
     </>
   );
+}
+
+/** S6: waiver / write-off records for one payment request (BA only, read). */
+function PaymentRequestAdjustments({ enabled, paymentRequestId }: { enabled: boolean; paymentRequestId: number }) {
+  const q = useQuery({
+    queryKey: ["run-adjustments", paymentRequestId],
+    queryFn: () => apiFetch<{ adjustments: AdjustmentRecord[] }>(`/financial/payment-requests/${paymentRequestId}/adjustments`),
+    enabled,
+  });
+  if (!enabled) return null;
+  return <AdjustmentRecordsView records={q.data?.adjustments} error={q.isError ? apiErrorMessage(q.error, "Couldn't load adjustment records.") : null} />;
 }

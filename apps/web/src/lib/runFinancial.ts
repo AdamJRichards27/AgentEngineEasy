@@ -27,6 +27,10 @@ export interface RunFinancialCapabilities {
   editAuthority: false;
   /** BA-only queues and recovery: card charges/refunds, resolve, refund, waive/write-off, disputes. */
   baQueues: boolean;
+  /** S6: held (uncertain-outcome) debits + resolve (server: BA only, resolver must not be the raiser). */
+  heldDebits: boolean;
+  /** S6: waiver / write-off adjustment records (server: BA only). */
+  adjustmentRecords: boolean;
 }
 
 export function runFinancialCapabilities(role: string | null | undefined): RunFinancialCapabilities {
@@ -41,6 +45,8 @@ export function runFinancialCapabilities(role: string | null | undefined): RunFi
     collectServiceFee: isBa || isCrew,
     editAuthority: false,
     baQueues: isBa,
+    heldDebits: isBa,
+    adjustmentRecords: isBa,
   };
 }
 
@@ -132,6 +138,8 @@ export interface ServiceFeeSummary {
   noticeElapsesAt: string | null;
   scheduledAt: string | null;
   paidAt: string | null;
+  /** S6: read-only retry state (null unless RETRY_SCHEDULED / FAILED). */
+  retry?: RetryState | null;
   paymentMethod: { type: string; label?: string | null };
   collectionTiming: { rule: "IMMEDIATE_ON_STATEMENT_ISSUE" | "NOTICE_PERIOD"; noticeReason: string | null };
   authority?: AuthoritySummary;
@@ -155,6 +163,49 @@ export interface Receipt {
   failureMessage: string | null;
   retryScheduled: boolean;
   issuedAt: string;
+  /** S5: the issued statement this receipt belongs to (null when none). */
+  settlementStatement?: { id: number; version: number; status: string } | null;
+}
+/** S6: retry state of a failed collection (server-computed; read only). */
+export interface RetryState {
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAt: string | null;
+}
+/** S6: a formal waiver / write-off record (not a receipt). Subset of the API shape. */
+export interface AdjustmentRecord {
+  recordNumber: string;
+  kind: "WAIVER" | "WRITE_OFF";
+  amountCents: number;
+  gstCents: number;
+  currency: string;
+  reason: string;
+  settlementStatementId: number | null;
+  settlementStatementVersion: number | null;
+  approval: { approvedAt: string; approvedByRole: string };
+}
+/** S6: a debit held after an uncertain provider outcome (never auto-resent). */
+export interface HeldDebit {
+  outboxEntryId: number;
+  paymentRequestId: number;
+  action: string;
+  attempts: number;
+  heldAt: string | null;
+  reason: string;
+}
+export type HeldResolveOutcome = "SCHEDULED" | "FAILED";
+/** Body for POST /financial/payment-outbox/:id/resolve-held; null when invalid (mirrors the server's strict schema). */
+export function heldResolveBody(outcome: HeldResolveOutcome, reason: string): { outcome: HeldResolveOutcome; reason: string } | null {
+  if (outcome !== "SCHEDULED" && outcome !== "FAILED") return null;
+  const r = reason.trim();
+  if (r.length < 1 || r.length > 2000) return null;
+  return { outcome, reason: r };
+}
+export function formatAestTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Australia/Brisbane" })} AEST`;
 }
 export interface CardCharge {
   id: number;

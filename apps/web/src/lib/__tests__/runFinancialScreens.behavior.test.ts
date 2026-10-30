@@ -212,7 +212,10 @@ test("BA queues: default filters are Unknown; the refund filter offers Pending; 
   reset({});
   let tree = render(C.BaPaymentQueues, { role: "Brokerage Administrator" });
   const keys = g.__rfQueryCalls.map((q: { key: string }) => q.key);
-  assert.deepEqual(keys, [JSON.stringify(["run-card-charges", "UNKNOWN"]), JSON.stringify(["run-card-refunds", "UNKNOWN"])]);
+  assert.deepEqual(keys, [JSON.stringify(["run-card-charges", "UNKNOWN"]), JSON.stringify(["run-card-refunds", "UNKNOWN"]), JSON.stringify(["run-held-debits"])]);
+  // S6: the held-debit list (BA only) reads the existing held endpoint.
+  await g.__rfQueryCalls.find((q: { key: string }) => q.key.includes("run-held-debits")).queryFn();
+  assert.equal(g.__rfApi.at(-1).path, "/financial/payment-outbox/held");
   const refundSelect = findAll(section(tree, "Card refunds"), (e) => e.type === "select")[0]!;
   const values = findAll(refundSelect, (e) => e.type === "option").map((o) => o.props!.value);
   assert.deepEqual(values, ["UNKNOWN", "PENDING", "SUCCEEDED", "FAILED", ""]);
