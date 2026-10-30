@@ -379,6 +379,9 @@ const REFUND_ERRORS: Record<PaymentRefundErrorCode, { status: number; error: str
   REFUND_NOT_FOUND: { status: 404, error: "Not found" },
   REFUND_ALREADY_RESOLVED: { status: 409, error: "This refund is not awaiting review." },
   REFUND_IN_REVIEW: { status: 409, error: "The rest of this payment is held by refunds still in progress or awaiting review." },
+  REFUND_RESOLVER_IS_REQUESTER: { status: 403, error: "The person who requested this refund cannot resolve it; another Brokerage Administrator must." },
+  REFUND_PROVIDER_MISMATCH: { status: 409, error: "The payment provider's record does not match this resolution." },
+  REFUND_PROVIDER_UNVERIFIED: { status: 409, error: "The payment provider has no definite record for this refund; it stays held and reserved." },
 };
 export function refundErrorResponse(err: unknown): { status: number; body: { error: string; code: string } } {
   if (err instanceof PaymentRefundError && err.code in REFUND_ERRORS) {

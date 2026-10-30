@@ -231,3 +231,46 @@ describe("t181u phase 2a item 3: controlled card refunds", { concurrency: false 
     assert.equal((await receipts(c)).filter((r) => r.kind === "REFUND").length, 0, "no refund receipt without a confirmed refund");
   });
 });
+
+// Owner 27 Oct refund rules (c) verified processor evidence and (e) provider
+// references mandatory: a provider "Succeeded" answer that carries no provider
+// reference is not verified evidence, so it must never mark money as moved.
+describe("Owner 27 Oct (c)(e): a success without a provider reference is not verified", { concurrency: false }, () => {
+  test("refund: provider says Succeeded but returns no refund reference -> held UNKNOWN, amount reserved, no REFUND receipt", async () => {
+    const { c, charge } = await paidCharge("RefundNoRef");
+    const m = mock.method(paymentProvider, "refund", async () => ({ providerRefundRef: "", status: "Succeeded" as const }));
+    try {
+      const r = await refund(w.X.admin, charge.id, { amountCents: 200 });
+      assert.equal(r.status, 201, r.raw);
+      assert.equal(r.json.refund.status, "UNKNOWN", "an unreferenced success must be held as uncertain");
+      assert.equal(r.json.refund.providerRefundRef ?? null, null);
+      assert.equal(r.json.refundableCents, charge.amountCents - 200, "the amount stays reserved");
+    } finally {
+      m.mock.restore();
+    }
+    assert.equal((await receipts(c)).filter((x) => x.kind === "REFUND").length, 0, "no refund receipt without a provider reference");
+    const [row] = await refunds(charge.id);
+    assert.equal(row!.status, "UNKNOWN");
+  });
+
+  test("charge: provider says Succeeded but returns no charge reference -> not PAID; charge held UNKNOWN for Brokerage Administrator review", async () => {
+    const card = await saveCard("Agent", w.X.agent.user.id);
+    const a = await cardAuthorityViaApi(w, { payerType: "Agent", paymentMethodId: card.id });
+    assert.equal(a.activated.status, 200, a.activated.raw);
+    const c = await feeChain(w, a.id, "ChargeNoRef");
+    await confirmBoth(w, c);
+    const iss = await prepareAndIssue(w, w.crew, c);
+    assert.equal(iss.status, 200, iss.raw);
+    await elapseNotice(c);
+    const m = mock.method(paymentProvider, "chargeStoredMethod", async () => ({ providerChargeRef: "", status: "Succeeded" as const }));
+    try {
+      await collect(w, w.crew, c);
+    } finally {
+      m.mock.restore();
+    }
+    const [charge] = await db.select().from(financialCardCharges).where(eq(financialCardCharges.paymentRequestId, c.requestId));
+    assert.notEqual(charge!.status, "SUCCEEDED", "an unreferenced success must not be recorded as a succeeded charge");
+    assert.equal(charge!.status, "UNKNOWN");
+    assert.notEqual((await request(c.requestId)).status, "PAID", "the fee must not be marked PAID without a provider charge reference");
+  });
+});

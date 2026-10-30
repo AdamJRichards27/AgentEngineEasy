@@ -166,6 +166,9 @@ export async function chargeServiceFeeStoredCard(input: {
       idempotencyKey: charge.idempotencyKey,
       description: `AE Pit Crew service fee, payment request #${charge.paymentRequestId}`,
     });
+    // Owner 27 Oct (e): a success with no provider charge reference is not a definite answer;
+    // the catch below holds the charge UNKNOWN for Brokerage Administrator review (never PAID).
+    if (result.status === "Succeeded" && !result.providerChargeRef?.trim()) throw new Error("provider success without a charge reference");
     if (result.status === "Succeeded") {
       [updatedCharge] = (await db
         .update(financialCardCharges)

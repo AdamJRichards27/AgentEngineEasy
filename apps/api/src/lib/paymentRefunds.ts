@@ -28,7 +28,11 @@ export type PaymentRefundErrorCode =
   | "REFUND_AMOUNT_EXCEEDS_REMAINING"
   | "REFUND_NOT_FOUND"
   | "REFUND_ALREADY_RESOLVED"
-  | "REFUND_IN_REVIEW";
+  | "REFUND_IN_REVIEW"
+  // Owner 27 Oct refund rules (b)/(c): independent review against the provider's verified record.
+  | "REFUND_RESOLVER_IS_REQUESTER"
+  | "REFUND_PROVIDER_MISMATCH"
+  | "REFUND_PROVIDER_UNVERIFIED";
 export class PaymentRefundError extends Error {
   constructor(public readonly code: PaymentRefundErrorCode, detail?: string) {
     super(detail ?? code);
@@ -195,6 +199,11 @@ async function submitToProvider(refund: PaymentRefund, providerChargeRef: string
 }
 
 async function applyProviderResult(refundId: number, result: RefundResult, fromStatuses: PaymentRefundStatus[], userId?: number | null): Promise<PaymentRefund> {
+  // Owner 27 Oct (c)/(e): a success with no provider refund reference is not verified evidence.
+  // Hold it as UNKNOWN (amount stays reserved) for the reconciler's lookup; never move the ledger.
+  if (result.status === "Succeeded" && !result.providerRefundRef?.trim()) {
+    return transition(refundId, fromStatuses, "UNKNOWN", { failureReason: "Provider reported success without a refund reference", nextReconcileAt: new Date(Date.now() + 60_000) }, userId);
+  }
   if (result.status === "Succeeded") return markSucceeded(refundId, result.providerRefundRef, fromStatuses, userId);
   if (result.status === "Failed") return markFailed(refundId, result.failureReason ?? "Provider reported the refund failed", fromStatuses, userId, result.providerRefundRef);
   // Pending: keep SUBMITTED with the provider ref; the webhook or reconciler resolves it.
@@ -370,6 +379,31 @@ export async function resolveRefundManually(input: {
   const [row] = await db.select().from(paymentRefunds).where(and(eq(paymentRefunds.id, input.refundId), eq(paymentRefunds.brokerageId, input.brokerageId)));
   if (!row) throw new PaymentRefundError("REFUND_NOT_FOUND", `Refund ${input.refundId} not found`);
   if (row.status !== "MANUAL_REVIEW") throw new PaymentRefundError("REFUND_ALREADY_RESOLVED", `Refund ${input.refundId} is ${row.status}`);
+  // Owner 27 Oct (b): an independent Brokerage Administrator reviews; the requester never resolves.
+  if (row.requestedByUserId != null && row.requestedByUserId === input.userId) {
+    throw new PaymentRefundError("REFUND_RESOLVER_IS_REQUESTER", `Refund ${input.refundId} was requested by this user`);
+  }
+  // Owner 27 Oct (c): the outcome must match the provider's verified record. No lookup, a lookup
+  // error, or a still-pending provider answer leaves the refund held and reserved.
+  const [pay] = await db.select({ chargeRef: payments.providerChargeRef }).from(payments).where(eq(payments.id, row.paymentId));
+  if (typeof paymentProvider.lookupRefund !== "function" || !pay?.chargeRef) {
+    throw new PaymentRefundError("REFUND_PROVIDER_UNVERIFIED", `Refund ${input.refundId}: provider record unavailable`);
+  }
+  let found: RefundResult | null;
+  try {
+    found = await paymentProvider.lookupRefund({ providerChargeRef: pay.chargeRef, aeRefundId: row.id, providerRefundRef: row.providerRefundRef });
+  } catch {
+    throw new PaymentRefundError("REFUND_PROVIDER_UNVERIFIED", `Refund ${input.refundId}: provider lookup failed`);
+  }
+  if (found && found.status === "Pending") throw new PaymentRefundError("REFUND_PROVIDER_UNVERIFIED", `Refund ${input.refundId}: provider still pending`);
+  if (input.action === "mark_succeeded") {
+    if (!found || found.status !== "Succeeded" || !found.providerRefundRef || (input.providerRefundRef && input.providerRefundRef !== found.providerRefundRef)) {
+      throw new PaymentRefundError("REFUND_PROVIDER_MISMATCH", `Refund ${input.refundId}: provider record does not show this refund succeeded`);
+    }
+    input = { ...input, providerRefundRef: found.providerRefundRef };
+  } else if (found && found.status === "Succeeded") {
+    throw new PaymentRefundError("REFUND_PROVIDER_MISMATCH", `Refund ${input.refundId}: provider record shows this refund succeeded`);
+  }
   const updated =
     input.action === "mark_succeeded"
       ? await markSucceeded(row.id, input.providerRefundRef ?? null, ["MANUAL_REVIEW"], input.userId, input.note)

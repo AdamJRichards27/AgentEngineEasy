@@ -4,11 +4,11 @@ import { test, before, after, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq, inArray } from "drizzle-orm";
-import { db, entitlementGrants, payments, paymentRefunds, serviceOrders } from "@aee/db";
+import { db, entitlementGrants, payments, paymentRefunds, serviceOrders, users } from "@aee/db";
 import { MockPaymentProvider, StripePaymentProvider, RefundRejectedError } from "@aee/integration-payments";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { reconcileRefunds } from "../../lib/paymentRefunds.js";
-import { cleanupBrokerages, createBrokerageWithUsers, createListedProperty, type DevLoginResult } from "./testSupport.js";
+import { cleanupBrokerages, createBrokerageWithUsers, createListedProperty, devLogin, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32 ? process.env.SESSION_SECRET : "test-only-session-secret-not-for-real-use-0123456789";
@@ -57,6 +57,15 @@ const rows = async (paymentId: number) => db.select().from(paymentRefunds).where
 const calls = () => refundSpy.mock.callCount();
 const json = async (r: Response) => (await r.json()) as { code?: string; refund?: { id: number; status: string; amountCents: number; idempotencyKey: string }; payment?: { status: string; refundedCents: number }; replayed?: boolean };
 const soon = (ms = 2 * 60_000) => new Date(Date.now() + ms);
+let admin2Cache: DevLoginResult | undefined;
+/** A second Brokerage Administrator in brokerage A (independent reviewer). */
+async function secondAdmin(): Promise<DevLoginResult> {
+  if (!admin2Cache) {
+    admin2Cache = await devLogin(baseUrl, { email: `rl-admin2-${suffix}@example.com`, firstName: "Second", lastName: "Admin", brokerageName: `RL A ${suffix}` });
+    await db.update(users).set({ role: "Brokerage Administrator" }).where(eq(users.id, admin2Cache.user.id));
+  }
+  return admin2Cache;
+}
 
 before(async () => {
   const { configureEvents } = await import("../../lib/events.js");
@@ -230,13 +239,29 @@ describe("refund ledger: reconciliation", { concurrency: false }, () => {
     const id = r.refund!.id;
     assert.equal((await call("POST", `/payments/refunds/${id}/resolve`, A.admin.cookie, { action: "mark_succeeded", note: "checked in dashboard" })).status, 400, "ref required");
     assert.equal((await call("POST", `/payments/refunds/${id}/resolve`, A.agent.cookie, { action: "mark_failed", note: "x" })).status, 403, "admin only");
-    const ok = await call("POST", `/payments/refunds/${id}/resolve`, A.admin.cookie, { action: "mark_succeeded", providerRefundRef: `re_manual_${suffix}`, note: "checked in dashboard" });
+    // Owner 27 Oct (b): the requester never resolves. (c): with no provider lookup the outcome can't be
+    // verified, so even an independent administrator is refused and the refund stays held and reserved.
+    const self = await call("POST", `/payments/refunds/${id}/resolve`, A.admin.cookie, { action: "mark_succeeded", providerRefundRef: `re_manual_${suffix}`, note: "checked in dashboard" });
+    assert.equal(self.status, 403, await self.clone().text());
+    assert.equal((await json(self)).code, "REFUND_RESOLVER_IS_REQUESTER");
+    const other = await secondAdmin();
+    proto.lookupRefund = undefined;
+    try {
+      const held = await call("POST", `/payments/refunds/${id}/resolve`, other.cookie, { action: "mark_succeeded", providerRefundRef: `re_manual_${suffix}`, note: "checked in dashboard" });
+      assert.equal(held.status, 409, await held.clone().text());
+      assert.equal((await json(held)).code, "REFUND_PROVIDER_UNVERIFIED");
+    } finally {
+      proto.lookupRefund = original;
+    }
+    assert.equal((await db.select().from(paymentRefunds).where(eq(paymentRefunds.id, id)))[0].status, "MANUAL_REVIEW");
+    assert.equal((await pay(p.id)).refundedCents, 0, "nothing moves without a verified provider record");
+    // Once the provider can be asked: the mock has no record of this refund, so FAILED is the verified outcome.
+    const ok = await call("POST", `/payments/refunds/${id}/resolve`, other.cookie, { action: "mark_failed", note: "provider has no such refund" });
     assert.equal(ok.status, 200, await ok.clone().text());
-    assert.equal((await pay(p.id)).refundedCents, 250);
-    const again = await call("POST", `/payments/refunds/${id}/resolve`, A.admin.cookie, { action: "mark_failed", note: "oops" });
+    const again = await call("POST", `/payments/refunds/${id}/resolve`, other.cookie, { action: "mark_failed", note: "oops" });
     assert.equal(again.status, 409);
     assert.equal((await json(again)).code, "REFUND_ALREADY_RESOLVED");
-    assert.equal((await pay(p.id)).refundedCents, 250);
+    assert.equal((await pay(p.id)).refundedCents, 0);
   });
 
   test("10. webhook: a partial refund updates that row only; duplicate is a no-op; unknown refund -> EXTERNAL MANUAL_REVIEW", async () => {
@@ -384,4 +409,87 @@ describe("refund ledger: access, schema, adapter", { concurrency: false }, () =>
 
 after(async () => {
   if (created.length) await db.delete(paymentRefunds).where(inArray(paymentRefunds.paymentId, created)).catch(() => undefined);
+});
+
+// Owner 27 Oct refund rules on the refund ledger's manual review:
+// (b) an independent Brokerage Administrator resolves; the requester never does;
+// (c) a resolution must match the provider's verified record; with no way to
+//     verify (adapter without lookup) the refund stays held and reserved;
+// (e) a provider "Succeeded" with no refund reference never moves the ledger.
+describe("refund ledger: Owner 27 Oct review rules", { concurrency: false }, () => {
+  let admin2: DevLoginResult;
+  before(async () => {
+    admin2 = await secondAdmin();
+  });
+  const resolve = (id: number, cookie: string, body: Record<string, unknown>) => call("POST", `/payments/refunds/${id}/resolve`, cookie, body);
+  const refundRow = async (id: number) => (await db.select().from(paymentRefunds).where(eq(paymentRefunds.id, id)))[0];
+  /** A refund the provider never received, sent to MANUAL_REVIEW (lookup: not found, outside the idempotency window). */
+  async function heldNotAtProvider(amountCents: number) {
+    const p = await paidPayment();
+    MockPaymentProvider.nextRefundBehaviour = "throw";
+    const r = await json(await refund(p.id, { amountCents }));
+    await db.update(paymentRefunds).set({ submittedAt: new Date(Date.now() - 25 * 3600_000) }).where(eq(paymentRefunds.id, r.refund!.id));
+    const s = await reconcileRefunds({ now: soon(), onlyPaymentIds: [p.id] });
+    assert.equal(s.manualReview, 1);
+    return { p, id: r.refund!.id };
+  }
+
+  test("R-b. the administrator who requested the refund cannot resolve it (403); an independent administrator can", async () => {
+    const { p, id } = await heldNotAtProvider(150);
+    for (const action of ["mark_failed", "mark_succeeded"]) {
+      const self = await resolve(id, A.admin.cookie, { action, note: "self review", providerRefundRef: `re_self_${suffix}` });
+      assert.equal(self.status, 403, `${action}: ${await self.clone().text()}`);
+      assert.equal((await json(self)).code, "REFUND_RESOLVER_IS_REQUESTER");
+    }
+    assert.equal((await refundRow(id)).status, "MANUAL_REVIEW", "nothing changes");
+    const ok = await resolve(id, admin2.cookie, { action: "mark_failed", note: "provider has no such refund" });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    assert.equal((await refundRow(id)).status, "FAILED");
+    assert.equal((await pay(p.id)).refundedCents, 0);
+  });
+
+  test("R-c1. a resolution that contradicts the provider's record is refused; refund stays held, ledger unchanged", async () => {
+    const { p, id } = await heldNotAtProvider(175);
+    const bad = await resolve(id, admin2.cookie, { action: "mark_succeeded", providerRefundRef: `re_typed_${suffix}`, note: "says it is done" });
+    assert.equal(bad.status, 409, await bad.clone().text());
+    assert.equal((await json(bad)).code, "REFUND_PROVIDER_MISMATCH");
+    assert.equal((await refundRow(id)).status, "MANUAL_REVIEW");
+    assert.equal((await pay(p.id)).refundedCents, 0, "an unverified success never moves refunded_cents");
+  });
+
+  test("R-c2. no provider lookup available: neither outcome can be verified, so the refund stays held and reserved", async () => {
+    const p = await paidPayment();
+    MockPaymentProvider.nextRefundBehaviour = "throw";
+    const r = await json(await refund(p.id, { amountCents: 125 }));
+    const proto = MockPaymentProvider.prototype as unknown as { lookupRefund?: unknown };
+    const original = proto.lookupRefund;
+    proto.lookupRefund = undefined;
+    try {
+      assert.equal((await reconcileRefunds({ now: soon(), onlyPaymentIds: [p.id] })).manualReview, 1);
+      for (const action of ["mark_succeeded", "mark_failed"]) {
+        const res = await resolve(r.refund!.id, admin2.cookie, { action, providerRefundRef: `re_unverified_${suffix}`, note: "checked in dashboard" });
+        assert.equal(res.status, 409, `${action}: ${await res.clone().text()}`);
+        assert.equal((await json(res)).code, "REFUND_PROVIDER_UNVERIFIED");
+      }
+    } finally {
+      proto.lookupRefund = original;
+    }
+    assert.equal((await refundRow(r.refund!.id)).status, "MANUAL_REVIEW");
+    assert.equal((await pay(p.id)).refundedCents, 0);
+  });
+
+  test("R-e. provider says Succeeded but returns no refund reference: the ledger does not move; the refund is held", async () => {
+    const p = await paidPayment();
+    const m = mock.method(MockPaymentProvider.prototype, "refund", async () => ({ providerRefundRef: "", status: "Succeeded" as const }));
+    let id: number;
+    try {
+      const r = await json(await refund(p.id, { amountCents: 110 }));
+      id = r.refund!.id;
+    } finally {
+      m.mock.restore();
+    }
+    const row = await refundRow(id!);
+    assert.notEqual(row.status, "SUCCEEDED", "an unreferenced success is not verified");
+    assert.equal((await pay(p.id)).refundedCents, 0);
+  });
 });

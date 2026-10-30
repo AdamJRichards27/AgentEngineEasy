@@ -149,7 +149,11 @@ export async function refundCardCharge(actor: RecoveryActor, chargeId: number, i
   try {
     const result = await paymentProvider.refund({ providerChargeRef: charge.providerChargeRef!, amountCents: claimed.refund.amountCents, idempotencyKey, aeRefundId: claimed.refund.id });
     providerRefundRef = result.providerRefundRef || null;
-    if (result.status === "Succeeded") status = "SUCCEEDED";
+    // Owner 27 Oct (c)/(e): a success with no provider refund reference is not verified; hold it UNKNOWN.
+    if (result.status === "Succeeded" && !providerRefundRef) {
+      status = "UNKNOWN";
+      failureMessage = "Provider reported success without a refund reference";
+    } else if (result.status === "Succeeded") status = "SUCCEEDED";
     else if (result.status === "Failed") {
       status = "FAILED";
       failureMessage = sanitiseFailureMessage(result.failureReason ?? "Refund declined by the provider");
