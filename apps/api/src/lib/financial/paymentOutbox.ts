@@ -28,7 +28,8 @@
 // below where a payment request's OWN outcome (not just an outbox
 // mechanics detail) changes — see events.ts.
 
-import { eq, and, lte, like, desc } from "drizzle-orm";
+import { eq, and, lte, like, desc, isNull, notLike, or } from "drizzle-orm";
+import { MandateProviderNotReachedError } from "@aee/integration-mandate-payments";
 import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import { incrementCounter, logger } from "@aee/events";
 import {
@@ -38,6 +39,7 @@ import {
   pcFeeAuthorities,
   financialLedgerEvents,
   auditLogs,
+  settlementStatements,
   type FinancialPaymentRequest,
   type FinancialPaymentOutbox,
 } from "@aee/db";
@@ -263,7 +265,9 @@ function backoffMinutesFor(attempts: number): number {
  * future write-off path), not another automatic retry.
  */
 export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox, opts: { initiatedByUserId?: number | null } = {}): Promise<DispatchOutcome> {
-  if (outboxEntry.status === "DISPATCHED") return { outboxEntry, paymentRequest: null };
+  // Owner t211u item 3: only a PENDING entry is ever sent. DISPATCHED is done; FAILED covers both an
+  // exhausted entry and a HELD_UNCERTAIN hold, which only a Brokerage Administrator resolves.
+  if (outboxEntry.status !== "PENDING") return { outboxEntry, paymentRequest: null };
   // t183u item 6: never send to anything but the sandbox mandate provider. The entry is left exactly
   // as it was (no attempt counted, nothing sent) so a misconfiguration can never burn its budget.
   if (!mandateProviderPermitted()) {
@@ -273,7 +277,17 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox, o
   if (outboxEntry.action !== "SCHEDULE_DEBIT") {
     throw new Error(`dispatchOutboxEntry does not yet handle action ${outboxEntry.action}.`);
   }
+  // t211u item 3: a previous dispatch claimed this entry and never finished (the process died or
+  // stalled after it may have reached the provider). The outcome is uncertain: hold, never resend.
+  if ((outboxEntry.lastError ?? "").startsWith(IN_FLIGHT_PREFIX)) {
+    if (Date.now() - outboxEntry.updatedAt.getTime() < IN_FLIGHT_STALE_MS) return { outboxEntry, paymentRequest: null };
+    const [req] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, outboxEntry.paymentRequestId));
+    if (!req) return { outboxEntry, paymentRequest: null };
+    return holdUncertainDispatch(outboxEntry, req, new Error("a previous dispatch was interrupted after claiming the send"), opts.initiatedByUserId ?? null);
+  }
 
+  // Set once the provider may have been reached. From then on, nothing below may re-arm a retry.
+  let providerMayHaveBeenReached = false;
   try {
     const [request] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, outboxEntry.paymentRequestId));
     if (!request) throw new Error(`Payment request ${outboxEntry.paymentRequestId} not found.`);
@@ -285,10 +299,21 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox, o
       throw new Error(`Payment request ${request.id} has no active mandate to debit.`);
     }
 
-    // Owner t210u: once the provider is called, an error means the outcome is UNCERTAIN (the debit
-    // may have been accepted). Never auto-resend: hold it for Brokerage Administrator review.
+    // Claim the send (one dispatcher only). If this process dies after the claim, the stale claim
+    // is held by the next dispatch instead of being resent.
+    const [claimed] = await db
+      .update(financialPaymentOutbox)
+      .set({ lastError: `${IN_FLIGHT_PREFIX}${new Date().toISOString()}`, nextAttemptAt: new Date(Date.now() + IN_FLIGHT_STALE_MS), updatedAt: new Date() })
+      .where(and(eq(financialPaymentOutbox.id, outboxEntry.id), eq(financialPaymentOutbox.status, "PENDING"), notLikeOrNull(financialPaymentOutbox.lastError, `${IN_FLIGHT_PREFIX}%`)))
+      .returning();
+    if (!claimed) return { outboxEntry, paymentRequest: null };
+    outboxEntry = claimed;
+
+    // Owner t210u/t211u: once the provider is called, an error means the outcome is UNCERTAIN (the
+    // debit may have been accepted) unless the adapter has definitive evidence it never left AE.
     let result: Awaited<ReturnType<typeof mandatePaymentProvider.scheduleDebit>>;
     try {
+      providerMayHaveBeenReached = true;
       result = await mandatePaymentProvider.scheduleDebit({
         mandateProviderRef: authority.mandateProviderRef,
         amountCents: request.amountCents,
@@ -297,53 +322,84 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox, o
         description: `PC success fee — payment request #${request.id}`,
       });
     } catch (providerErr) {
+      if (providerErr instanceof MandateProviderNotReachedError) {
+        providerMayHaveBeenReached = false;
+        throw providerErr;
+      }
       return await holdUncertainDispatch(outboxEntry, request, providerErr as Error, opts.initiatedByUserId ?? null);
     }
 
-    const [dispatchedEntry] = await db
-      .update(financialPaymentOutbox)
-      .set({ status: "DISPATCHED", dispatchedAt: new Date(), updatedAt: new Date() })
-      .where(eq(financialPaymentOutbox.id, outboxEntry.id))
-      .returning();
+    // The provider accepted. Record it atomically; if AE cannot, hold (the debit exists at the provider).
+    let recorded: { dispatchedEntry: FinancialPaymentOutbox; updatedRequest: FinancialPaymentRequest };
+    try {
+      recorded = await db.transaction(async (tx) => {
+        const [dispatchedEntry] = await tx
+          .update(financialPaymentOutbox)
+          .set({ status: "DISPATCHED", dispatchedAt: new Date(), lastError: null, updatedAt: new Date() })
+          .where(eq(financialPaymentOutbox.id, outboxEntry.id))
+          .returning();
+        const [updatedRequest] = await tx
+          .update(financialPaymentRequests)
+          .set({
+            status: "DEBIT_SCHEDULED",
+            provider: mandatePaymentProvider.name,
+            providerRequestRef: result.providerRequestRef,
+            providerStatus: result.status,
+            scheduledAt: result.scheduledFor ?? new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(financialPaymentRequests.id, request.id))
+          .returning();
+        if (!dispatchedEntry || !updatedRequest) throw new Error("dispatch record not written");
+        return { dispatchedEntry, updatedRequest };
+      });
+    } catch (recordErr) {
+      return await holdUncertainDispatch(
+        outboxEntry,
+        request,
+        new Error(`provider accepted debit ${result.providerRequestRef} but AE could not record it: ${(recordErr as Error).message}`),
+        opts.initiatedByUserId ?? null,
+      );
+    }
+    const { dispatchedEntry, updatedRequest } = recorded;
 
-    const [updatedRequest] = await db
-      .update(financialPaymentRequests)
-      .set({
-        status: "DEBIT_SCHEDULED",
-        provider: mandatePaymentProvider.name,
-        providerRequestRef: result.providerRequestRef,
-        providerStatus: result.status,
-        scheduledAt: result.scheduledFor ?? new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(financialPaymentRequests.id, request.id))
-      .returning();
+    // Best effort after the committed dispatch: never let these re-arm a send.
+    try {
+      await recordLedgerEvent({
+        brokerageId: updatedRequest.brokerageId,
+        propertyId: updatedRequest.propertyId,
+        transactionId: updatedRequest.transactionId,
+        eventType: "PC_FEE_DEBIT_SCHEDULED",
+        amountCents: updatedRequest.amountCents,
+        sourceRecordType: "PAYMENT_REQUEST",
+        sourceRecordId: String(updatedRequest.id),
+        actorType: "SYSTEM",
+        correlationId: outboxEntry.correlationId,
+      });
 
-    await recordLedgerEvent({
-      brokerageId: updatedRequest.brokerageId,
-      propertyId: updatedRequest.propertyId,
-      transactionId: updatedRequest.transactionId,
-      eventType: "PC_FEE_DEBIT_SCHEDULED",
-      amountCents: updatedRequest.amountCents,
-      sourceRecordType: "PAYMENT_REQUEST",
-      sourceRecordId: String(updatedRequest.id),
-      actorType: "SYSTEM",
-      correlationId: outboxEntry.correlationId,
-    });
-
-    await emitFinancialEvent({
-      eventType: "FINANCIAL_PAYMENT_SCHEDULED",
-      brokerageId: updatedRequest.brokerageId,
-      propertyId: updatedRequest.propertyId,
-      transactionId: updatedRequest.transactionId,
-      actorType: "SYSTEM",
-      source: "api:financial:dispatchOutboxEntry",
-      correlationId: outboxEntry.correlationId,
-      payload: { paymentRequestId: updatedRequest.id, amountCents: updatedRequest.amountCents, kind: updatedRequest.kind },
-    });
+      await emitFinancialEvent({
+        eventType: "FINANCIAL_PAYMENT_SCHEDULED",
+        brokerageId: updatedRequest.brokerageId,
+        propertyId: updatedRequest.propertyId,
+        transactionId: updatedRequest.transactionId,
+        actorType: "SYSTEM",
+        source: "api:financial:dispatchOutboxEntry",
+        correlationId: outboxEntry.correlationId,
+        payload: { paymentRequestId: updatedRequest.id, amountCents: updatedRequest.amountCents, kind: updatedRequest.kind },
+      });
+    } catch (sideEffectErr) {
+      logger.error("financial_payment_debit_scheduled_side_effect_failed", { outboxEntryId: outboxEntry.id, error: (sideEffectErr as Error).message });
+    }
 
     return { outboxEntry: dispatchedEntry, paymentRequest: updatedRequest };
   } catch (err) {
+    if (providerMayHaveBeenReached) {
+      // Unreachable by design (every post-call path returns), kept as a hard stop: the in-flight
+      // claim stays, so the next dispatch holds this entry instead of resending it.
+      logger.error("financial_payment_outbox_post_provider_error", { outboxEntryId: outboxEntry.id, error: (err as Error).message });
+      return { outboxEntry, paymentRequest: null };
+    }
+    // t211u item 3: definitively never reached the provider, so an automatic retry is allowed.
     const attempts = outboxEntry.attempts + 1;
     const exhausted = attempts >= outboxEntry.maxAttempts;
     const [updatedEntry] = await db
@@ -352,7 +408,7 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox, o
         attempts,
         status: exhausted ? "FAILED" : "PENDING",
         nextAttemptAt: exhausted ? outboxEntry.nextAttemptAt : new Date(Date.now() + backoffMinutesFor(attempts) * 60 * 1000),
-        lastError: (err as Error).message,
+        lastError: `${PRE_DISPATCH_PREFIX}${(err as Error).message}`,
         updatedAt: new Date(),
       })
       .where(eq(financialPaymentOutbox.id, outboxEntry.id))
@@ -413,6 +469,12 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox, o
 
 /** Marker on a held outbox entry's lastError (no new status or column: Owner t210u, no schema change). */
 export const HELD_UNCERTAIN_PREFIX = "HELD_UNCERTAIN: ";
+/** t211u item 3: lastError of an entry that failed before reaching the provider (eligible for automatic retry). */
+export const PRE_DISPATCH_PREFIX = "PRE_DISPATCH: ";
+/** t211u item 3: lastError while a dispatcher holds the send. A stale claim is held, never resent. */
+export const IN_FLIGHT_PREFIX = "IN_FLIGHT: ";
+export const IN_FLIGHT_STALE_MS = 10 * 60 * 1000;
+const notLikeOrNull = (col: typeof financialPaymentOutbox.lastError, pattern: string) => or(isNull(col), notLike(col, pattern))!;
 
 /**
  * Owner t210u: the provider call errored, so the debit may or may not exist. Stop and flag for a
@@ -426,7 +488,7 @@ async function holdUncertainDispatch(outboxEntry: FinancialPaymentOutbox, reques
   const { heldEntry, heldRequest } = await db.transaction(async (tx) => {
     const [heldEntry] = await tx
       .update(financialPaymentOutbox)
-      .set({ status: "FAILED", attempts: outboxEntry.attempts + 1, lastError: `${HELD_UNCERTAIN_PREFIX}${message}`, updatedAt: new Date() })
+      .set({ status: "FAILED", attempts: outboxEntry.attempts + 1, lastError: `${HELD_UNCERTAIN_PREFIX}${message}`, heldByUserId: raisedByUserId, heldAt: new Date(), updatedAt: new Date() })
       .where(and(eq(financialPaymentOutbox.id, outboxEntry.id), eq(financialPaymentOutbox.status, "PENDING")))
       .returning();
     const [heldRequest] = await tx
@@ -535,7 +597,7 @@ export async function cancelScheduledDebit(input: {
   if (!request.providerRequestRef) throw new Error(`Payment request ${input.paymentRequestId} has no providerRequestRef to cancel.`);
 
   if (!mandateProviderPermitted()) throw new Error("Mandate provider not permitted: only the sandbox provider may cancel debits.");
-  await mandatePaymentProvider.cancelScheduledDebit(request.providerRequestRef);
+  await mandatePaymentProvider.cancelScheduledDebit(request.providerRequestRef, { idempotencyKey: `cancel:${request.id}:${request.providerRequestRef}` });
 
   const [updated] = await db
     .update(financialPaymentRequests)
@@ -582,7 +644,7 @@ export async function reverseDebit(input: { paymentRequestId: number; reason: st
   }
 
   if (!mandateProviderPermitted()) throw new Error("Mandate provider not permitted: only the sandbox provider may reverse debits.");
-  await mandatePaymentProvider.reverseDebit(request.providerRequestRef, request.amountCents, input.reason);
+  await mandatePaymentProvider.reverseDebit(request.providerRequestRef, request.amountCents, input.reason, { idempotencyKey: `reverse:${request.id}:${request.providerRequestRef}` });
 
   const [updated] = await db
     .update(financialPaymentRequests)
@@ -648,6 +710,33 @@ export async function heldDebitProviderStatus(entry: FinancialPaymentOutbox): Pr
   }
 }
 
+async function assertHeldDebitStillCollectable(paymentRequestId: number): Promise<void> {
+  const [req] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, paymentRequestId));
+  if (!req) throw new HeldDebitRefusal(404, "NOT_FOUND", "Not found.");
+  const [authority] = req.pcFeeAuthorityId ? await db.select().from(pcFeeAuthorities).where(eq(pcFeeAuthorities.id, req.pcFeeAuthorityId)) : [undefined];
+  const now = Date.now();
+  const authorityValid =
+    authority != null &&
+    authority.status === "ACTIVE" &&
+    authority.revokedAt == null &&
+    (authority.expiresAt == null || authority.expiresAt.getTime() > now) &&
+    (authority.effectiveDate == null || authority.effectiveDate.getTime() <= now) &&
+    authority.authorisedPaymentMethod === "GENERAL_ACCOUNT_DEBIT_MANDATE" &&
+    authority.mandateProviderRef != null;
+  if (!authorityValid) {
+    throw new HeldDebitRefusal(409, "HELD_DEBIT_AUTHORITY_INVALID", "The payment authority is no longer valid; this debit cannot be confirmed as scheduled. Cancel it with the provider, then record FAILED.");
+  }
+  if (req.transactionId == null) throw new HeldDebitRefusal(409, "HELD_DEBIT_STATEMENT_NOT_ISSUED", "The fee has no issued settlement statement.");
+  const [issued] = await db
+    .select({ id: settlementStatements.id })
+    .from(settlementStatements)
+    .where(and(eq(settlementStatements.transactionId, req.transactionId), eq(settlementStatements.status, "ISSUED")))
+    .limit(1);
+  if (!issued) {
+    throw new HeldDebitRefusal(409, "HELD_DEBIT_STATEMENT_NOT_ISSUED", "The fee's settlement statement is no longer issued; this debit cannot be confirmed as scheduled.");
+  }
+}
+
 const isHeld = (e: FinancialPaymentOutbox) => e.status === "FAILED" && (e.lastError ?? "").startsWith(HELD_UNCERTAIN_PREFIX);
 
 export async function resolveHeldDebit(input: { brokerageId: number; actorUserId: number; outboxEntryId: number; outcome: "SCHEDULED" | "FAILED"; reason: string }) {
@@ -666,10 +755,14 @@ export async function resolveHeldDebit(input: { brokerageId: number; actorUserId
     .where(and(eq(auditLogs.action, "financial_payment_debit_dispatch_held"), eq(auditLogs.recordType, "financial_payment_request"), eq(auditLogs.recordId, String(entry.paymentRequestId))))
     .orderBy(desc(auditLogs.id))
     .limit(1);
-  const raisedBy = hold?.userId ?? null;
+  const raisedBy = entry.heldByUserId ?? hold?.userId ?? null;
   if (raisedBy != null && raisedBy === input.actorUserId) {
     throw new HeldDebitRefusal(403, "HELD_DEBIT_RESOLVER_IS_RAISER", "The user who raised this held debit cannot resolve it.");
   }
+  // Owner t211u item 2: a resolution never overrides the mandatory safeguards. Confirming a debit as
+  // scheduled requires the authority to still be valid and the fee's settlement statement to still be
+  // the issued one (the same gates collection needed). Recording FAILED needs neither: it sends nothing.
+  if (input.outcome === "SCHEDULED") await assertHeldDebitStillCollectable(entry.paymentRequestId);
 
   const provider = await heldDebitProviderStatus(entry);
   if (provider.status === "Unavailable") throw new HeldDebitRefusal(409, "HELD_DEBIT_PROVIDER_STATUS_UNAVAILABLE", "The provider's record could not be read; nothing changed.");

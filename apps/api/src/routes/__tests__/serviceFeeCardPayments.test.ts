@@ -20,7 +20,7 @@ import {
 } from "@aee/db";
 import { paymentProvider } from "../../lib/paymentProvider.js";
 import { reverseDebit, scheduleDebitForPaymentRequest } from "../../lib/financial/paymentOutbox.js";
-import { cleanupBrokerages } from "./testSupport.js";
+import { cleanupBrokerages, forceAuthorityFixture } from "./testSupport.js";
 import {
   activeDebitAuthority,
   call,
@@ -399,7 +399,7 @@ describe("t180u slice 6: stored-card and brokerage payments", { concurrency: fal
     const card4 = await saveCard("Agent", w.X.agent.user.id);
     const a4 = await cardAuthorityViaApi(w, { payerType: "Agent", paymentMethodId: card4.id });
     const c4 = await ready(a4.id, "CardExpired");
-    await db.update(pcFeeAuthorities).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(pcFeeAuthorities.id, a4.id));
+    await forceAuthorityFixture(a4.id, { expiresAt: new Date(Date.now() - 1000) });
     assert.equal((await collect(w, w.crew, c4)).json.code, "SERVICE_FEE_AUTHORITY_INVALID");
     assert.equal((await charges(c3)).length + (await charges(c4)).length, 0);
   });

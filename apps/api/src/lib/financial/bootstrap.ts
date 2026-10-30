@@ -16,6 +16,7 @@ import { registerHandler, logger, type DomainEvent } from "@aee/events";
 import { finalizeCommissionForSettlement, ensurePcSuccessFeeRequest } from "./settlement.js";
 import { createPcFeeCalculation } from "./pcFeeCalculations.js";
 import { dispatchPendingPaymentOutbox } from "./paymentOutbox.js";
+import { reconcileProviderManagedDebits } from "./ddReconciliation.js";
 
 // Same order of magnitude as registerExceptionEngine's own
 // SCAN_INTERVAL_MS (15 min) — the payment outbox's own backoff already
@@ -132,6 +133,8 @@ export function registerFinancialEngine(options: RegisterFinancialEngineOptions 
 
   intervalHandle = setInterval(() => {
     dispatchPendingPaymentOutbox().catch((err) => logger.error("financial_engine_payment_outbox_sweep_failed", { error: err }));
+    // Owner t211u item 4: reconcile provider-managed direct-debit status (read-only; never sends).
+    reconcileProviderManagedDebits().catch((err) => logger.error("financial_engine_dd_reconciliation_failed", { error: err }));
   }, OUTBOX_SWEEP_INTERVAL_MS);
   // Never hold the process open just for this timer (matches
   // registerExceptionEngine's own intervalHandle.unref?.() convention).

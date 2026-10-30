@@ -65,13 +65,52 @@ export interface MandateWebhookResult {
   disputeReason?: string;
 }
 
+/**
+ * Owner t211u item 3: thrown by an adapter ONLY when it has definitive evidence the request never
+ * left AE (for example a connection refused before any bytes were sent, or a client-side
+ * validation failure). AE may then retry automatically under the same idempotency key. Any other
+ * error from a provider call is treated as an uncertain outcome and held for review.
+ */
+export class MandateProviderNotReachedError extends Error {
+  readonly notReached = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "MandateProviderNotReachedError";
+  }
+}
+
+/** Every call that can move money or change a debit carries an idempotency key (Owner t211u item 3). */
+export interface ProviderCallOptions {
+  idempotencyKey: string;
+}
+
+/** Owner t211u item 4: who retries a failed direct debit. AE never re-collects a provider-managed debit. */
+export type MandateRetryManagement = "PROVIDER_MANAGED" | "NONE";
+
+/** Read-only provider view of one debit, for AE's status reconciliation. */
+export interface ProviderDebitStatus {
+  providerRequestRef: string;
+  status: MandateDebitStatus | "RetryScheduled";
+  /** The provider's own attempt count so far. */
+  attempt: number;
+  /** When status is RetryScheduled: the provider's next attempt. */
+  nextAttemptAt?: Date | null;
+  /** When status is Failed: true once the provider has stopped retrying. */
+  final?: boolean;
+  failureReason?: string;
+}
+
 export interface MandatePaymentProvider {
   name: string;
+  /** Owner t211u item 4. Providers that retry failed debits themselves declare PROVIDER_MANAGED. */
+  readonly retryManagement?: MandateRetryManagement;
   scheduleDebit(input: DebitRequest): Promise<DebitResult>;
   /** Only valid while the debit is still "Scheduled" — once it has started Processing there is nothing left to cancel, only reverseDebit. */
-  cancelScheduledDebit(providerRequestRef: string): Promise<void>;
+  cancelScheduledDebit(providerRequestRef: string, options: ProviderCallOptions): Promise<void>;
   /** Unwinds an already-cleared ("Paid") debit. */
-  reverseDebit(providerRequestRef: string, amountCents: number, reason: string): Promise<void>;
+  reverseDebit(providerRequestRef: string, amountCents: number, reason: string, options: ProviderCallOptions): Promise<void>;
+  /** Read-only: the provider's current status for one debit (null if it has no record). Never sends. */
+  getDebitStatus?(providerRequestRef: string): Promise<ProviderDebitStatus | null>;
   // Same shape as PaymentProvider/BillingProvider's own verifyWebhookSignature — payload should
   // be the raw request body whenever the provider signs raw bytes.
   verifyWebhookSignature(payload: unknown, signature: string): boolean;
@@ -120,7 +159,13 @@ export interface SandboxMandatePaymentProviderConfig {
  */
 export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
   name = "sandbox";
+  /** The sandbox models a provider that retries failed direct debits itself (t211u item 4). */
+  readonly retryManagement: MandateRetryManagement = "PROVIDER_MANAGED";
   private scheduled = new Map<string, { mandateProviderRef: string; amountCents: number; status: MandateDebitStatus }>();
+  /** Sandbox-only simulated provider progress (retries, outcomes) per providerRequestRef; null = "no record". */
+  private simulated = new Map<string, ProviderDebitStatus | null>();
+  /** idempotency key -> completed cancel/reverse call (replayed, never repeated). */
+  private completedCalls = new Set<string>();
   private idempotencyIndex = new Map<string, string>(); // idempotencyKey -> providerRequestRef
   private readonly configuredWebhookSecret: string | undefined;
   private readonly configuredWebhooksEnabled: boolean | undefined;
@@ -162,18 +207,43 @@ export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
     return ref && rec ? { providerRequestRef: ref, status: rec.status } : null;
   }
 
-  async cancelScheduledDebit(providerRequestRef: string): Promise<void> {
+  async getDebitStatus(providerRequestRef: string): Promise<ProviderDebitStatus | null> {
+    if (this.simulated.has(providerRequestRef)) {
+      const sim = this.simulated.get(providerRequestRef)!;
+      return sim ? { ...sim, providerRequestRef } : null;
+    }
+    const rec = this.scheduled.get(providerRequestRef);
+    return rec ? { providerRequestRef, status: rec.status, attempt: 1 } : null;
+  }
+
+  /**
+   * SANDBOX/TEST ONLY: simulate the provider's own progress for a debit (a provider-managed retry,
+   * payment, final failure), or null for "no record". Nothing is sent anywhere.
+   */
+  simulateDebitStatus(providerRequestRef: string, status: Omit<ProviderDebitStatus, "providerRequestRef"> | null): void {
+    this.simulated.set(providerRequestRef, status ? { ...status, providerRequestRef } : null);
+    const rec = this.scheduled.get(providerRequestRef);
+    if (rec && status && status.status !== "RetryScheduled") rec.status = status.status;
+  }
+
+  async cancelScheduledDebit(providerRequestRef: string, options: ProviderCallOptions): Promise<void> {
+    if (!options?.idempotencyKey) throw new Error("cancelScheduledDebit requires an idempotencyKey.");
+    if (this.completedCalls.has(`cancel:${options.idempotencyKey}`)) return;
     const entry = this.scheduled.get(providerRequestRef);
     if (!entry) throw new Error(`Unknown providerRequestRef: ${providerRequestRef}`);
     if (entry.status !== "Scheduled") {
       throw new Error(`Cannot cancel a debit in status ${entry.status} (only a still-Scheduled debit can be cancelled).`);
     }
     this.scheduled.delete(providerRequestRef);
+    this.completedCalls.add(`cancel:${options.idempotencyKey}`);
   }
 
-  async reverseDebit(providerRequestRef: string, _amountCents: number, _reason: string): Promise<void> {
+  async reverseDebit(providerRequestRef: string, _amountCents: number, _reason: string, options: ProviderCallOptions): Promise<void> {
+    if (!options?.idempotencyKey) throw new Error("reverseDebit requires an idempotencyKey.");
+    if (this.completedCalls.has(`reverse:${options.idempotencyKey}`)) return;
     const entry = this.scheduled.get(providerRequestRef);
     if (!entry) throw new Error(`Unknown providerRequestRef: ${providerRequestRef}`);
+    this.completedCalls.add(`reverse:${options.idempotencyKey}`);
     // The sandbox doesn't model post-reversal provider state beyond
     // acknowledging the call succeeded — the caller (lib/financial/
     // paymentOutbox.ts's reverseDebit) is the source of truth for the

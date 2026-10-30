@@ -12,6 +12,7 @@
  *   0022 documents ownership-mode CHECK
  *   0024 grow_call_transcriptions unique (call_session_id, recording_reference)
  *   0025 unique open CREATE_GROW_COMMITMENT proposal per (brokerage, resource)
+ *   0044 one ACTIVE pc_fee_authorities row per agent (partial unique index)
  *   0035 platform_owners / platform_owner_audit present when the journal
  *        when has already been passed (silent-skip hazard)
  *   0036 appraisals / communication_participants tenant backfill: row
@@ -190,6 +191,17 @@ const checks = [
             group by action_key, brokerage_id, resource_id having count(*) > 1
           ) duplicates`,
     remedy: "Expire or reject the duplicate open proposals, keeping one per resource.",
+  },
+  {
+    migration: "0044",
+    table: "pc_fee_authorities",
+    description: "one ACTIVE PC fee authority per agent (pc_fee_authorities_one_active_per_agent_idx)",
+    sql: `select count(*)::int as count from (
+            select 1 from pc_fee_authorities
+            where status = 'ACTIVE'
+            group by agent_user_id having count(*) > 1
+          ) duplicates`,
+    remedy: "Run scripts/sql/pc-fee-authority-duplicate-check.sql, then have a Brokerage Administrator keep one ACTIVE authority per agent (mark the others REPLACED) before migrating.",
   },
 ];
 

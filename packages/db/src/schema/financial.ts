@@ -379,6 +379,8 @@ export const pcFeeAuthorities = pgTable(
   (table) => ({
     agentVersionIdx: uniqueIndex("pc_fee_authorities_agent_version_idx").on(table.agentUserId, table.version),
     agentStatusIdx: index("pc_fee_authorities_agent_status_idx").on(table.agentUserId, table.status),
+    // Owner t211u (0044): at most one ACTIVE authority per agent, enforced by the database.
+    oneActivePerAgent: uniqueIndex("pc_fee_authorities_one_active_per_agent_idx").on(table.agentUserId).where(sql`${table.status} = 'ACTIVE'`),
     brokerageStatusIdx: index("pc_fee_authorities_brokerage_status_idx").on(table.brokerageId, table.status),
     methodCheck: check("pc_fee_authorities_method_check", sql`${table.authorisedPaymentMethod} in ('GENERAL_ACCOUNT_DEBIT_MANDATE', 'STORED_CARD')`),
     payerTypeCheck: check("pc_fee_authorities_payer_type_check", sql`${table.payerType} in ('Agent', 'Brokerage')`),
@@ -543,6 +545,9 @@ export const financialPaymentOutbox = pgTable(
     nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
     lastError: text("last_error"),
     dispatchedAt: timestamp("dispatched_at"),
+    // Owner t211u (0044): who raised a HELD_UNCERTAIN hold (null = system) and when; the resolver may not be the raiser.
+    heldByUserId: integer("held_by_user_id").references(() => users.id),
+    heldAt: timestamp("held_at"),
 
     idempotencyKey: text("idempotency_key").notNull(),
     correlationId: text("correlation_id"),

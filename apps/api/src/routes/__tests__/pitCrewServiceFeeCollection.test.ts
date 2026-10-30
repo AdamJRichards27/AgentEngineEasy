@@ -32,7 +32,7 @@ import {
   type IssuedSettlementStatementRecord,
   type SettlementStatementLookup,
 } from "../../lib/settlementStatementGate.js";
-import { cleanupBrokerages, createBrokerageWithUsers, createTransactionFromListedProperty, devLogin, type DevLoginResult } from "./testSupport.js";
+import { cleanupBrokerages, createBrokerageWithUsers, createTransactionFromListedProperty, devLogin, type DevLoginResult, forceAuthorityFixture } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -307,7 +307,7 @@ describe("t177u(1): Pit Crew service-fee collection after verified settlement", 
   });
 
   test("fee cap: the authority's maximum is applied and verified", async () => {
-    await db.update(pcFeeAuthorities).set({ maximumAmountCents: 50_000 }).where(eq(pcFeeAuthorities.id, authorityId));
+    await forceAuthorityFixture(authorityId, { maximumAmountCents: 50_000 });
     try {
       const c = await feeChain("capped");
       assert.equal(c.pcCalc.grossFeeCents, 50_000, "computed fee capped");
@@ -315,10 +315,10 @@ describe("t177u(1): Pit Crew service-fee collection after verified settlement", 
       assert.equal((await collect(c.transactionId, crew.cookie)).status, 200);
       // A later, lower cap means the stored fee no longer matches the terms -> refuse.
       const d = await feeChain("cap-lowered");
-      await db.update(pcFeeAuthorities).set({ maximumAmountCents: 40_000 }).where(eq(pcFeeAuthorities.id, authorityId));
+      await forceAuthorityFixture(authorityId, { maximumAmountCents: 40_000 });
       assert.equal(await code(await collect(d.transactionId, crew.cookie)), "SERVICE_FEE_NOT_VERIFIED");
     } finally {
-      await db.update(pcFeeAuthorities).set({ maximumAmountCents: 1_000_000 }).where(eq(pcFeeAuthorities.id, authorityId));
+      await forceAuthorityFixture(authorityId, { maximumAmountCents: 1_000_000 });
     }
   });
 
@@ -332,11 +332,11 @@ describe("t177u(1): Pit Crew service-fee collection after verified settlement", 
       ["not yet effective", { effectiveDate: new Date(Date.now() + 86_400_000) }],
     ];
     for (const [label, patch] of cases) {
-      await db.update(pcFeeAuthorities).set(patch).where(eq(pcFeeAuthorities.id, authorityId));
+      await forceAuthorityFixture(authorityId, patch);
       const r = await collect(c.transactionId, crew.cookie);
       assert.equal(r.status, 409, label);
       assert.equal(await code(r), "SERVICE_FEE_AUTHORITY_INVALID", label);
-      await db.update(pcFeeAuthorities).set({ ...restore, effectiveDate: new Date(Date.now() - 86_400_000) }).where(eq(pcFeeAuthorities.id, authorityId));
+      await forceAuthorityFixture(authorityId, { ...restore, effectiveDate: new Date(Date.now() - 86_400_000) });
     }
     await db.update(financialPaymentRequests).set({ payerUserId: otherAgent.user.id }).where(eq(financialPaymentRequests.id, c.requestId));
     assert.equal(await code(await collect(c.transactionId, crew.cookie)), "SERVICE_FEE_AUTHORITY_INVALID", "payer must be the authority's agent");

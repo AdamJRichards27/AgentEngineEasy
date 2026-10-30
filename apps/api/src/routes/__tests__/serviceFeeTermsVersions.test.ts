@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 import { db, financialPaymentOutbox, pcFeeAuthorities } from "@aee/db";
 import { collectionTimingFor } from "../../lib/financial/pcFeeTerms.js";
 import { createPcFeeAuthority } from "../../lib/financial/pcFeeAuthorities.js";
-import { cleanupBrokerages } from "./testSupport.js";
+import { cleanupBrokerages, forceAuthorityFixture } from "./testSupport.js";
 import { activeDebitAuthority, call, confirmBoth, feeChain, makeWorld, prepareAndIssue, TERMS, type Chain, type World } from "./serviceFeeStatementFixtures.js";
 
 process.env.SESSION_SECRET =
@@ -89,7 +89,7 @@ describe("S4 (t183u 4-5): executed terms gate immediate collection; versions imm
 
   test("defence in depth: a legacy row with immediate versions but no evidence keeps the notice period on issue", async () => {
     const a = await activeDebitAuthority(w, { ...IMMEDIATE });
-    await db.update(pcFeeAuthorities).set({ signedEvidenceRef: null }).where(eq(pcFeeAuthorities.id, a.id)); // simulates a pre-S4 row
+    await forceAuthorityFixture(a.id, { signedEvidenceRef: null }); // simulates a pre-S4 row
     const { c, collection } = await issued(a.id, "NoEvidence");
     assert.equal(collection.outcome, "notice_started", JSON.stringify(collection));
     assert.equal((await outbox(c)).length, 0, "nothing collected on issue");

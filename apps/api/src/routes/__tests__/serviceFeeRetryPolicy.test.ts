@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import { db, financialCardCharges, financialPaymentRequests, paymentMethods, pcFeeAuthorities } from "@aee/db";
 import { paymentProvider } from "../../lib/paymentProvider.js";
 import * as policy from "../../lib/financial/retryBackoff.js";
-import { cleanupBrokerages } from "./testSupport.js";
+import { cleanupBrokerages, forceAuthorityFixture } from "./testSupport.js";
 import {
   cardAuthorityViaApi,
   collect,
@@ -190,7 +190,7 @@ describe("S3 (t183u 3): payment retry policy", { concurrency: false }, () => {
 
   for (const [label, invalidate] of [
     ["revoked", async (x: { authorityId: number }) => db.update(pcFeeAuthorities).set({ status: "REVOKED", revokedAt: new Date() }).where(eq(pcFeeAuthorities.id, x.authorityId))],
-    ["expired", async (x: { authorityId: number }) => db.update(pcFeeAuthorities).set({ expiresAt: new Date(Date.now() - MIN) }).where(eq(pcFeeAuthorities.id, x.authorityId))],
+    ["expired", async (x: { authorityId: number }) => forceAuthorityFixture(x.authorityId, { expiresAt: new Date(Date.now() - MIN) })],
     ["replaced by a newer authority", async () => cardAuthority()],
     ["nominated card removed", async (x: { cardId: number }) => db.update(paymentMethods).set({ isActive: false }).where(eq(paymentMethods.id, x.cardId))],
   ] as Array<[string, (x: { authorityId: number; cardId: number }) => Promise<unknown>]>) {

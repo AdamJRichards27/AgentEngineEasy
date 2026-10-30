@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
 import { auditLogs, db, financialPaymentOutbox, financialPaymentRequests, pcFeeAuthorities, transactionFees, transactions } from "@aee/db";
-import { cleanupBrokerages } from "./testSupport.js";
+import { cleanupBrokerages, forceAuthorityFixture } from "./testSupport.js";
 import { activeDebitAuthority, call, collect, confirm, confirmBoth, elapseNotice, feeChain, issue, makeWorld, prepare, prepareAndIssue, request, type World } from "./serviceFeeStatementFixtures.js";
 
 process.env.SESSION_SECRET =
@@ -119,10 +119,10 @@ describe("t180u slice 4: statement issue drives collection", { concurrency: fals
       assert.equal((await request(c.requestId)).status, "CALCULATED");
       const refused = await db.select().from(auditLogs).where(and(eq(auditLogs.action, "pit_crew_service_fee_auto_collection_refused"), eq(auditLogs.recordId, String(c.transactionId))));
       assert.equal(refused.length, 1);
-      await db.update(pcFeeAuthorities).set({ revokedAt: null, status: "ACTIVE", expiresAt: new Date(Date.now() - 1000) }).where(eq(pcFeeAuthorities.id, authorityId));
+      await forceAuthorityFixture(authorityId, { revokedAt: null, status: "ACTIVE", expiresAt: new Date(Date.now() - 1000) });
       assert.equal((await collect(w, w.crew, c)).json.code, "SERVICE_FEE_AUTHORITY_INVALID");
     } finally {
-      await db.update(pcFeeAuthorities).set({ revokedAt: null, status: "ACTIVE", expiresAt: null }).where(eq(pcFeeAuthorities.id, authorityId));
+      await forceAuthorityFixture(authorityId, { revokedAt: null, status: "ACTIVE", expiresAt: null });
     }
   });
 
