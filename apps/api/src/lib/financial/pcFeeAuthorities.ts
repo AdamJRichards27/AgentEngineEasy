@@ -32,7 +32,7 @@ import { db, pcFeeAuthorities, financialLedgerEvents, paymentMethods, type PcFee
 import { FinancialControlError } from "./agreements.js";
 import { emitFinancialEvent } from "./events.js";
 import { noteFinancialPcFeeAuthorityIsolationRejection } from "./isolationRejection.js";
-import { isKnownAgreementTerms, isKnownMandateTerms } from "./pcFeeTerms.js";
+import { hasSignedAcceptanceEvidence, isKnownAgreementTerms, isKnownMandateTerms } from "./pcFeeTerms.js";
 
 async function recordLedgerEvent(input: {
   brokerageId: number;
@@ -157,6 +157,12 @@ export async function createPcFeeAuthority(input: CreatePcFeeAuthorityInput): Pr
   }
   if (input.mandateTermsVersion != null && !isKnownMandateTerms(input.mandateTermsVersion)) {
     throw new FinancialControlError("INVALID_TERMS_VERSION", "Unknown payment mandate terms version.");
+  }
+  // #245 S4 (t183u 4-5): versioned terms are executed terms. Signed acceptance evidence is required
+  // to draft them; the effective date is fixed at approval. Changing terms later means a new
+  // authority (no edit route exists).
+  if ((input.agreementTermsVersion != null || input.mandateTermsVersion != null) && !hasSignedAcceptanceEvidence(input.signedEvidenceRef)) {
+    throw new FinancialControlError("TERMS_ACCEPTANCE_EVIDENCE_REQUIRED", "Signed acceptance evidence (signedEvidenceRef) is required for versioned agreement/mandate terms.");
   }
 
   const version = await nextPcFeeAuthorityVersion(input.agentUserId);

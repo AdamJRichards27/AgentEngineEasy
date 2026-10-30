@@ -32,7 +32,7 @@ import { noteFinancialCommissionAgreementIsolationRejection } from "./isolationR
 /** `db` or a transaction handle, so a caller can put the write and its audit row in one DB transaction (t177u). */
 export type FinancialDbExecutor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES" | "CUSTODY_BOUNDARY_VIOLATION" | "INVALID_PAYMENT_METHOD" | "INVALID_TERMS_VERSION";
+export type FinancialControlErrorReason = "NOT_FOUND" | "INVALID_STATUS" | "SEPARATION_OF_DUTIES" | "CUSTODY_BOUNDARY_VIOLATION" | "INVALID_PAYMENT_METHOD" | "INVALID_TERMS_VERSION" | "TERMS_ACCEPTANCE_EVIDENCE_REQUIRED";
 
 export class FinancialControlError extends Error {
   reason: FinancialControlErrorReason;

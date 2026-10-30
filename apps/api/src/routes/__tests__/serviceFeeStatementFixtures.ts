@@ -93,7 +93,10 @@ export const MANDATE_REF_PREFIX = "sandbox-mandate-t180u";
  * including a stored-card one, exactly as production does. The fixture used to force status ACTIVE
  * directly, which left card and direct-debit authorities ACTIVE together, a state production cannot reach.
  */
-export async function activeDebitAuthority(w: World, overrides: { agreementTermsVersion?: string; mandateTermsVersion?: string } = {}) {
+export async function activeDebitAuthority(
+  w: World,
+  overrides: { agreementTermsVersion?: string; mandateTermsVersion?: string; signedEvidenceRef?: string | null; effectiveDate?: Date | null } = {},
+) {
   const a = await createPcFeeAuthority({
     brokerageId: w.X.brokerageId,
     agentUserId: w.X.agent.user.id,

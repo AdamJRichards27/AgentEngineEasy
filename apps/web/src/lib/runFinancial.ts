@@ -220,6 +220,7 @@ export function timingText(t: ServiceFeeSummary["collectionTiming"] | undefined)
     AGREEMENT_TERMS_REQUIRE_NOTICE: "the signed agreement requires notice",
     MANDATE_TERMS_UNVERSIONED: "the mandate predates versioned terms",
     MANDATE_TERMS_REQUIRE_NOTICE: "the mandate requires notice",
+    TERMS_ACCEPTANCE_UNEVIDENCED: "signed acceptance of the terms is not on record",
   };
   return `Notice period applies${t.noticeReason && why[t.noticeReason] ? ` (${why[t.noticeReason]})` : ""}`;
 }

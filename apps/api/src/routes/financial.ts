@@ -199,7 +199,7 @@ function handleFinancialControlError(err: unknown, res: Response): boolean {
           ? 403
           : err.reason === "CUSTODY_BOUNDARY_VIOLATION"
             ? 400
-            : err.reason === "INVALID_PAYMENT_METHOD" || err.reason === "INVALID_TERMS_VERSION"
+            : err.reason === "INVALID_PAYMENT_METHOD" || err.reason === "INVALID_TERMS_VERSION" || err.reason === "TERMS_ACCEPTANCE_EVIDENCE_REQUIRED"
               ? 422
               : 409;
     res.status(status).json({ error: err.message, reason: err.reason });

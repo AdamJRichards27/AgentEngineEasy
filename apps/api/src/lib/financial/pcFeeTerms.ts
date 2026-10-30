@@ -32,7 +32,12 @@ export interface CollectionTiming {
   agreementTermsVersion: string | null;
   mandateTermsVersion: string | null;
   /** Why the notice period applies (absent for IMMEDIATE). */
-  noticeReason?: "AGREEMENT_TERMS_UNVERSIONED" | "AGREEMENT_TERMS_REQUIRE_NOTICE" | "MANDATE_TERMS_UNVERSIONED" | "MANDATE_TERMS_REQUIRE_NOTICE";
+  noticeReason?:
+    | "AGREEMENT_TERMS_UNVERSIONED"
+    | "AGREEMENT_TERMS_REQUIRE_NOTICE"
+    | "MANDATE_TERMS_UNVERSIONED"
+    | "MANDATE_TERMS_REQUIRE_NOTICE"
+    | "TERMS_ACCEPTANCE_UNEVIDENCED";
 }
 
 export function isKnownAgreementTerms(v: string): boolean {
@@ -42,8 +47,22 @@ export function isKnownMandateTerms(v: string): boolean {
   return Object.prototype.hasOwnProperty.call(PC_FEE_MANDATE_TERMS, v);
 }
 
-/** Fail closed: IMMEDIATE only when both signed terms versions are known and both expressly permit it. */
-export function collectionTimingFor(authority: { agreementTermsVersion: string | null; mandateTermsVersion: string | null }): CollectionTiming {
+/** Signed acceptance evidence present (a non-blank reference). */
+export function hasSignedAcceptanceEvidence(ref: string | null | undefined): boolean {
+  return typeof ref === "string" && ref.trim().length > 0;
+}
+
+/**
+ * Fail closed: IMMEDIATE only when both terms versions are known and both expressly permit it, AND
+ * the terms were EXECUTED: signed acceptance evidence and an effective date are on the authority
+ * (#245 S4, Owner t183u item 4). Anything else keeps the agreed notice period.
+ */
+export function collectionTimingFor(authority: {
+  agreementTermsVersion: string | null;
+  mandateTermsVersion: string | null;
+  signedEvidenceRef: string | null;
+  effectiveDate: Date | null;
+}): CollectionTiming {
   const a = authority.agreementTermsVersion ?? null;
   const m = authority.mandateTermsVersion ?? null;
   const base = { agreementTermsVersion: a, mandateTermsVersion: m };
@@ -51,5 +70,8 @@ export function collectionTimingFor(authority: { agreementTermsVersion: string |
   if (!PC_FEE_AGREEMENT_TERMS[a]!.immediateOnStatementIssue) return { rule: "NOTICE_PERIOD", ...base, noticeReason: "AGREEMENT_TERMS_REQUIRE_NOTICE" };
   if (!m || !isKnownMandateTerms(m)) return { rule: "NOTICE_PERIOD", ...base, noticeReason: "MANDATE_TERMS_UNVERSIONED" };
   if (!PC_FEE_MANDATE_TERMS[m]!.immediateOnStatementIssue) return { rule: "NOTICE_PERIOD", ...base, noticeReason: "MANDATE_TERMS_REQUIRE_NOTICE" };
+  if (!hasSignedAcceptanceEvidence(authority.signedEvidenceRef) || authority.effectiveDate == null) {
+    return { rule: "NOTICE_PERIOD", ...base, noticeReason: "TERMS_ACCEPTANCE_UNEVIDENCED" };
+  }
   return { rule: "IMMEDIATE_ON_STATEMENT_ISSUE", ...base };
 }

@@ -71,7 +71,7 @@ after(async () => {
 
 describe("t181u(A): collection timing follows the signed agreement AND mandate terms", { concurrency: false }, () => {
   test("rule table fails closed: immediate only when both versions are known and both permit it", () => {
-    const t = (a: string | null, m: string | null) => collectionTimingFor({ agreementTermsVersion: a, mandateTermsVersion: m });
+    const t = (a: string | null, m: string | null) => collectionTimingFor({ agreementTermsVersion: a, mandateTermsVersion: m, signedEvidenceRef: "synthetic-signed", effectiveDate: new Date() });
     assert.equal(t(TERMS.agreementImmediate, TERMS.mandateImmediate).rule, "IMMEDIATE_ON_STATEMENT_ISSUE");
     assert.equal(t(TERMS.agreementImmediate, TERMS.mandateNotice).noticeReason, "MANDATE_TERMS_REQUIRE_NOTICE");
     assert.equal(t(TERMS.agreementNotice, TERMS.mandateImmediate).noticeReason, "AGREEMENT_TERMS_REQUIRE_NOTICE");
