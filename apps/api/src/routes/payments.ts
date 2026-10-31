@@ -22,14 +22,11 @@ import {
 // router is what actually charges a stored payment method against them.
 export const paymentsRouter = Router();
 
-// Owner t223u (31 Oct 2026): service orders and payments are Run-only. Every authenticated route
-// needs run.access (requireEntitlement's 403) after requireAuth and before the handler's tenant
-// check, matching routes/aml.ts and routes/transactions.ts. Grow-only and unsubscribed brokerages
-// are refused at the server whatever the UI shows. POST /webhook stays signature-authenticated.
-// Executing a charge additionally needs an authorised role: Brokerage Administrator or Agent.
-// Pit Crew may read but never execute a charge (Owner t212u: Pit Crew requests, never executes).
-// Same const name and placement as #245 (run/s1) so the two branches merge without conflict.
+// S-1 (transaction-services spec): service orders are a Run surface; checked after auth, before any id lookup.
 const requiresRunAccess = requireEntitlement("run.access");
+// Owner t223u: payment methods are Run-only too, and executing a charge needs Brokerage Administrator
+// or Agent (Pit Crew may read, never execute). #245 enforces the stricter "listing agent or same-brokerage
+// BA" inside the charge handler; on merge keep #245's charge route line (this role check is then redundant).
 const requireChargeRole = requireRole("Brokerage Administrator", "Agent");
 
 const addPaymentMethodSchema = z.object({
