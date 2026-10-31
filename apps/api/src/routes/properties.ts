@@ -1,3 +1,4 @@
+import { agreementWriteAuthority, answerAgreementAuthority, callerHasRunAccess } from "../lib/agencyAgreementAuthority.js";
 import { Router } from "express";
 import { eq, and, inArray, ne, ilike, or } from "drizzle-orm";
 import { z } from "zod";
@@ -372,6 +373,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
+  const runAccess = await callerHasRunAccess(user);
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
   if (!property) {
     res.status(404).json({ error: "Not found" });
@@ -467,7 +469,8 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
     nextActions: steps
       .sort((a, b) => a.sequence - b.sequence)
       .map((s) => ({ label: s.label, status: s.status, blockedReason: s.blockedReason })),
-    documentPackage: docPackage
+    // t221u: agreement data is Run; a caller without run.access gets neither the package nor the terms.
+    documentPackage: docPackage && runAccess
       ? {
           id: docPackage.id,
           status: docPackage.status,
@@ -482,7 +485,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
             : null,
         }
       : null,
-    agencyAgreementTerms: agreementTerms ?? null,
+    agencyAgreementTerms: runAccess ? (agreementTerms ?? null) : null,
     appraisal,
   });
 });
@@ -639,6 +642,9 @@ propertiesRouter.post("/:id/ready-to-list", requireAuth, requiresRunAccess, asyn
     res.status(404).json({ error: "Not found" });
     return;
   }
+  // t221u: Ready to List creates the agency-agreement package, so it needs written authority:
+  // Brokerage Administrator or the property's agent (lib/agencyAgreementAuthority.ts).
+  if (!(await answerAgreementAuthority(res, await agreementWriteAuthority(user, id)))) return;
 
   // R-F31: never walk a later stage back to Ready to List. Refusal is the
   // same 400 { error: string } this handler already uses (no 409 stage

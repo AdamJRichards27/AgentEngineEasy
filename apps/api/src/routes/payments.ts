@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, paymentMethods } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
 import {
   addPaymentMethod,
@@ -21,6 +22,16 @@ import {
 // router is what actually charges a stored payment method against them.
 export const paymentsRouter = Router();
 
+// Owner t223u (31 Oct 2026): service orders and payments are Run-only. Every authenticated route
+// needs run.access (requireEntitlement's 403) after requireAuth and before the handler's tenant
+// check, matching routes/aml.ts and routes/transactions.ts. Grow-only and unsubscribed brokerages
+// are refused at the server whatever the UI shows. POST /webhook stays signature-authenticated.
+// Executing a charge additionally needs an authorised role: Brokerage Administrator or Agent.
+// Pit Crew may read but never execute a charge (Owner t212u: Pit Crew requests, never executes).
+// Same const name and placement as #245 (run/s1) so the two branches merge without conflict.
+const requiresRunAccess = requireEntitlement("run.access");
+const requireChargeRole = requireRole("Brokerage Administrator", "Agent");
+
 const addPaymentMethodSchema = z.object({
   scope: z.enum(["Mine", "Brokerage"]).default("Mine"),
   providerCustomerRef: z.string().min(1),
@@ -33,7 +44,7 @@ const addPaymentMethodSchema = z.object({
 // method to their own record; a Brokerage-scoped method requires Brokerage
 // Administrator and is scoped to the caller's own brokerage. This prevents
 // one agent from attaching (or worse, viewing) another agent's stored card.
-paymentsRouter.post("/payment-methods", requireAuth, async (req, res) => {
+paymentsRouter.post("/payment-methods", requireAuth, requiresRunAccess, async (req, res) => {
   const parsed = addPaymentMethodSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -72,7 +83,7 @@ paymentsRouter.post("/payment-methods", requireAuth, async (req, res) => {
 // needs to see both to know what a ServiceOrder will actually charge
 // (lib/payments.ts currently always resolves to the agent's own default;
 // brokerage-level charging is modelled in the schema for later use).
-paymentsRouter.get("/payment-methods", requireAuth, async (req, res) => {
+paymentsRouter.get("/payment-methods", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const [mine, brokerage] = await Promise.all([
     listPaymentMethods("Agent", user.id),
@@ -81,7 +92,7 @@ paymentsRouter.get("/payment-methods", requireAuth, async (req, res) => {
   res.json({ mine, brokerage });
 });
 
-paymentsRouter.delete("/payment-methods/:id", requireAuth, async (req, res) => {
+paymentsRouter.delete("/payment-methods/:id", requireAuth, requiresRunAccess, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
 
@@ -110,7 +121,7 @@ paymentsRouter.delete("/payment-methods/:id", requireAuth, async (req, res) => {
 
 // Actually charges the default stored method for the ServiceOrder's
 // property agent — idempotent (see lib/payments.ts chargeServiceOrder).
-paymentsRouter.post("/service-orders/:id/charge", requireAuth, async (req, res) => {
+paymentsRouter.post("/service-orders/:id/charge", requireAuth, requiresRunAccess, requireChargeRole, async (req, res) => {
   const serviceOrderId = Number(req.params.id);
   const user = req.authedUser!;
   try {
@@ -129,7 +140,7 @@ paymentsRouter.post("/service-orders/:id/charge", requireAuth, async (req, res) 
   }
 });
 
-paymentsRouter.get("/service-orders/:id/payments", requireAuth, async (req, res) => {
+paymentsRouter.get("/service-orders/:id/payments", requireAuth, requiresRunAccess, async (req, res) => {
   const serviceOrderId = Number(req.params.id);
   const user = req.authedUser!;
   const rows = await listPaymentsForServiceOrder(serviceOrderId, user.brokerageId);
@@ -160,7 +171,7 @@ paymentsRouter.post("/webhook", async (req, res) => {
 // Refund — restricted to Brokerage Administrators, matching the AML
 // exception-resolution precedent for anything that reverses a recorded
 // financial outcome.
-paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
+paymentsRouter.post("/:paymentId/refund", requireAuth, requiresRunAccess, requireRole(...BROKERAGE_ADMIN_ROLES), async (req, res) => {
   const paymentId = Number(req.params.paymentId);
   const amountCents = typeof req.body?.amountCents === "number" ? req.body.amountCents : undefined;
   const user = req.authedUser!;
@@ -182,7 +193,7 @@ paymentsRouter.post("/:paymentId/refund", requireAuth, requireRole(...BROKERAGE_
 // Read-only, mirrors GET /aml/service-orders/by-property/:propertyId's
 // shape for a single order (used by the workspace to refresh one row after
 // charging without refetching the whole property's list).
-paymentsRouter.get("/service-orders/:id", requireAuth, async (req, res) => {
+paymentsRouter.get("/service-orders/:id", requireAuth, requiresRunAccess, async (req, res) => {
   const id = Number(req.params.id);
   const user = req.authedUser!;
   const serviceOrder = await getServiceOrderForBrokerage(id, user.brokerageId);
