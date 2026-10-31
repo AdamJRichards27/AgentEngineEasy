@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   db, entitlementGrants, subscriptions, parties, growCallSessions, growCallTranscriptions, documents, platformOwners, ENTITLEMENT_KEYS,
 } from "@aee/db";
@@ -144,10 +144,12 @@ test("free run.access inventory: classifies migration grants; protects trial, pl
   const owner = await brokerage("inv-owner", true);
   await db.insert(platformOwners).values({ userId: owner.admin.user.id });
   const qa = await brokerage("inv-QA", true);
-  const before = await db.select().from(entitlementGrants);
+  // Scoped to this test's tenants: other test files run concurrently against the same throwaway DB.
+  const mine = [lose, paid, trial, owner, qa].map((x) => x.brokerageId);
+  const snapshot = async () => JSON.stringify(await db.select().from(entitlementGrants).where(inArray(entitlementGrants.brokerageId, mine)).orderBy(entitlementGrants.id));
+  const before = await snapshot();
   const plan = await planFreeRunAccessRemoval({ protectBrokerageIds: [qa.brokerageId] });
-  const after = await db.select().from(entitlementGrants);
-  assert.equal(after.length, before.length, "inventory writes nothing");
+  assert.equal(await snapshot(), before, "inventory writes nothing");
   const cls = (id: number) => plan.rows.find((r) => r.brokerageId === id)?.classification;
   assert.equal(cls(lose.brokerageId), "WOULD_LOSE_RUN_ACCESS");
   assert.equal(cls(paid.brokerageId), "REDUNDANT_PAID_RUN");

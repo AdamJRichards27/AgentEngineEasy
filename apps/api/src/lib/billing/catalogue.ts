@@ -1,5 +1,5 @@
 import { db, products, prices, entitlementDefinitions, productEntitlements } from "@aee/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { ENTITLEMENT_KEYS } from "@aee/db";
 import { logger } from "@aee/events";
 
@@ -75,15 +75,21 @@ export function isOfferedProductCode(code: string): boolean {
   return OFFERED_PRODUCT_CODES.includes(code);
 }
 
-async function ensureProduct(code: string, name: string, description: string): Promise<number> {
-  const [existing] = await db.select().from(products).where(eq(products.code, code));
+// t222u: the seed is check-then-insert with no unique constraints, so two concurrent callers (two
+// instances booting, or test files seeding in parallel) could both insert. It now runs in one
+// transaction holding a transaction-scoped advisory lock, so callers are serialised.
+type Exec = Pick<typeof db, "select" | "insert" | "update">;
+const CATALOGUE_SEED_LOCK_KEY = 0x41455f63; // "AE_c"
+
+async function ensureProduct(code: string, name: string, description: string, exec: Exec = db): Promise<number> {
+  const [existing] = await exec.select().from(products).where(eq(products.code, code));
   if (existing) return existing.id;
-  const [created] = await db.insert(products).values({ code, name, description, status: "Active" }).returning();
+  const [created] = await exec.insert(products).values({ code, name, description, status: "Active" }).returning();
   return created.id;
 }
 
-async function ensurePrice(productId: number, amountCents: number, billingInterval: string): Promise<void> {
-  const [existing] = await db
+async function ensurePrice(productId: number, amountCents: number, billingInterval: string, exec: Exec = db): Promise<void> {
+  const [existing] = await exec
     .select()
     .from(prices)
     .where(and(eq(prices.productId, productId), eq(prices.billingInterval, billingInterval), eq(prices.status, "Active")));
@@ -93,7 +99,7 @@ async function ensurePrice(productId: number, amountCents: number, billingInterv
     }
     return;
   }
-  await db.insert(prices).values({
+  await exec.insert(prices).values({
     productId,
     amountCents,
     billingInterval,
@@ -102,48 +108,55 @@ async function ensurePrice(productId: number, amountCents: number, billingInterv
   });
 }
 
-async function ensureEntitlementDefinition(key: string, description: string): Promise<number> {
-  const [existing] = await db.select().from(entitlementDefinitions).where(eq(entitlementDefinitions.key, key));
+async function ensureEntitlementDefinition(key: string, description: string, exec: Exec = db): Promise<number> {
+  const [existing] = await exec.select().from(entitlementDefinitions).where(eq(entitlementDefinitions.key, key));
   if (existing) {
     // Descriptions are operator-facing: a key whose capability has since shipped
     // (grow.calling.transcription) must not keep describing itself as reserved on
     // an already-seeded database. Only the description is refreshed here.
     if (existing.description !== description) {
-      await db.update(entitlementDefinitions).set({ description }).where(eq(entitlementDefinitions.id, existing.id));
+      await exec.update(entitlementDefinitions).set({ description }).where(eq(entitlementDefinitions.id, existing.id));
     }
     return existing.id;
   }
-  const [created] = await db.insert(entitlementDefinitions).values({ key, name: key, description }).returning();
+  const [created] = await exec.insert(entitlementDefinitions).values({ key, name: key, description }).returning();
   return created.id;
 }
 
-async function ensureProductEntitlement(productId: number, entitlementDefinitionId: number): Promise<void> {
-  const [existing] = await db
+async function ensureProductEntitlement(productId: number, entitlementDefinitionId: number, exec: Exec = db): Promise<void> {
+  const [existing] = await exec
     .select()
     .from(productEntitlements)
     .where(and(eq(productEntitlements.productId, productId), eq(productEntitlements.entitlementDefinitionId, entitlementDefinitionId)));
   if (existing) return;
-  await db.insert(productEntitlements).values({ productId, entitlementDefinitionId, enabled: true });
+  await exec.insert(productEntitlements).values({ productId, entitlementDefinitionId, enabled: true });
 }
 
 export async function ensureCatalogueSeeded(): Promise<void> {
-  const growProductId = await ensureProduct(GROW_PRODUCT_CODE, "Grow", "Relationship, prospecting and opportunity management add-on.");
-  const starterProductId = await ensureProduct(STARTER_PRODUCT_CODE, "Starter", "Core Agent Engine RUN platform.");
-  const bundleProductId = await ensureProduct(BUNDLE_PRODUCT_CODE, "Pro + Grow Bundle", "Agent Engine Pro (RUN) with Grow included.");
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${CATALOGUE_SEED_LOCK_KEY})`);
+    await seedCatalogue(tx);
+  });
+}
 
-  await ensurePrice(growProductId, CATALOGUE_PRICES_CENTS[GROW_PRODUCT_CODE]!, "month");
-  await ensurePrice(starterProductId, CATALOGUE_PRICES_CENTS[STARTER_PRODUCT_CODE]!, "month");
-  await ensurePrice(bundleProductId, CATALOGUE_PRICES_CENTS[BUNDLE_PRODUCT_CODE]!, "month");
+async function seedCatalogue(exec: Exec): Promise<void> {
+  const growProductId = await ensureProduct(GROW_PRODUCT_CODE, "Grow", "Relationship, prospecting and opportunity management add-on.", exec);
+  const starterProductId = await ensureProduct(STARTER_PRODUCT_CODE, "Starter", "Core Agent Engine RUN platform.", exec);
+  const bundleProductId = await ensureProduct(BUNDLE_PRODUCT_CODE, "Pro + Grow Bundle", "Agent Engine Pro (RUN) with Grow included.", exec);
+
+  await ensurePrice(growProductId, CATALOGUE_PRICES_CENTS[GROW_PRODUCT_CODE]!, "month", exec);
+  await ensurePrice(starterProductId, CATALOGUE_PRICES_CENTS[STARTER_PRODUCT_CODE]!, "month", exec);
+  await ensurePrice(bundleProductId, CATALOGUE_PRICES_CENTS[BUNDLE_PRODUCT_CODE]!, "month", exec);
 
   const entitlementDefIds: Record<string, number> = {};
   for (const key of ENTITLEMENT_KEYS) {
-    entitlementDefIds[key] = await ensureEntitlementDefinition(key, ENTITLEMENT_DEFS[key]);
+    entitlementDefIds[key] = await ensureEntitlementDefinition(key, ENTITLEMENT_DEFS[key], exec);
   }
 
   // Grow: only the 13 grow.* keys - never run.access. Purchasing Grow standalone must never
   // grant RUN/Pit Crew/Financial access (AE GROW Priority 0.5 Stop Condition 7 territory).
   for (const key of GROW_ENTITLEMENT_KEYS) {
-    await ensureProductEntitlement(growProductId, entitlementDefIds[key]);
+    await ensureProductEntitlement(growProductId, entitlementDefIds[key], exec);
   }
   // Starter (RUN): run.access AND every grow.* key. Owner decision (t220u, 2026-10-31): Run includes
   // every Grow feature (AI and calling included, still subject to the usage limits in lib/ai/usageLimits.ts
@@ -154,11 +167,11 @@ export async function ensureCatalogueSeeded(): Promise<void> {
   // The separate migration run.access grant (lib/billing/runAccessBackfill.ts) is NOT a subscription and
   // still grants no Grow: unsubscribed brokerages get no paid Grow access.
   for (const key of ENTITLEMENT_KEYS) {
-    await ensureProductEntitlement(starterProductId, entitlementDefIds[key]);
+    await ensureProductEntitlement(starterProductId, entitlementDefIds[key], exec);
   }
   // Bundle: the full union - every grow.* key AND run.access, matching "Pro + Grow".
   for (const key of ENTITLEMENT_KEYS) {
-    await ensureProductEntitlement(bundleProductId, entitlementDefIds[key]);
+    await ensureProductEntitlement(bundleProductId, entitlementDefIds[key], exec);
   }
 }
 
