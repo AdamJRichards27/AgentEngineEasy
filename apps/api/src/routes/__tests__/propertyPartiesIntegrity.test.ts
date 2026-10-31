@@ -163,14 +163,18 @@ test("grow_relationships reconciliation dry run classifies rows and writes nothi
     { brokerageId: bid, partyId: lead, propertyId: pOther, relationshipType: "buyer", status: "Active" },
   ]).returning({ id: growRelationships.id });
   const grIds = rows.map((r) => r.id);
-  const beforePP = (await pool.query("SELECT count(*)::int AS n FROM property_parties")).rows[0].n;
+  const ppCount = async () => (await pool.query("SELECT count(*)::int AS n FROM property_parties WHERE property_id = ANY($1::int[])", [[p1, p2, pOther]])).rows[0].n;
+  const beforePP = await ppCount();
 
   const client = await pool.connect();
   let g3: any[] = [];
   let g2: any[] = [];
   try {
     await client.query("BEGIN READ ONLY");
-    await client.query(RECON[0]);
+    const g1 = (await client.query(RECON[0])).rows;
+    const cats = new Set(g1.map((r) => r.category));
+    for (const c of ["genuine_property_link", "other:pre_property", "other:non_link_type", "other:historical_or_pending"]) assert.ok(cats.has(c), `G1 category ${c}`);
+    assert.equal((await client.query(RECON[4])).rowCount, 0, "rollback rehearsal: no run has executed");
     g2 = (await client.query(RECON[1].replace("FROM grow_relationships gr\n)", `FROM grow_relationships gr WHERE gr.id = ANY('{${grIds.join(",")}}'::int[])\n)`))).rows;
     g3 = (await client.query(RECON[2])).rows.filter((r) => [p1, p2, pOther].includes(r.property_id));
     await client.query(RECON[3]);
@@ -194,6 +198,6 @@ test("grow_relationships reconciliation dry run classifies rows and writes nothi
     g3.map((r) => `${r.property_id}:${r.party_id}:${r.role}:${r.is_primary}:${r.source_grow_relationship_ids.length}`).sort(),
     [`${p1}:${owner}:Owner:true:2`, `${p2}:${tenant}:Tenant:false:1`].sort(),
   );
-  assert.equal((await pool.query("SELECT count(*)::int AS n FROM property_parties")).rows[0].n, beforePP, "dry run inserted nothing");
+  assert.equal(await ppCount(), beforePP, "dry run inserted nothing");
   assert.equal((await db.select().from(growRelationships).where(inArray(growRelationships.id, grIds))).length, grIds.length, "grow_relationships untouched");
 });

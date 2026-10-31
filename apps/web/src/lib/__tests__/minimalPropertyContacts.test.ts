@@ -44,7 +44,8 @@ test("appraisal candidates are one per contact", () => {
 
 test("link body carries the chosen role; no default role exists", () => {
   assert.deepEqual(linkContactBody(5, 7, "Buyer"), { propertyId: 5, partyId: 7, role: "Buyer" });
-  assert.ok(!PROPERTY_PARTY_ROLES.includes("Owner" as never));
+  assert.ok(PROPERTY_PARTY_ROLES.includes("Owner") && PROPERTY_PARTY_ROLES.includes("Landlord") && PROPERTY_PARTY_ROLES.includes("Tenant"));
+  assert.ok(!PROPERTY_PARTY_ROLES.includes("Occupier" as never));
 });
 
 test("failure text by status", () => {

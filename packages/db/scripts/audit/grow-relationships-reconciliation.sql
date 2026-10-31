@@ -5,11 +5,21 @@
 --   seller, vendor  -> Seller | buyer -> Buyer
 --   everything else, property-less rows, and non-Active rows -> not mapped (kept as-is)
 
--- G1. Inventory by type and status, with/without property.
-SELECT relationship_type, status, (property_id IS NOT NULL) AS has_property, count(*) AS rows
+-- G1. Inventory, classifying each row as a GENUINE PROPERTY LINK (a current,
+-- property-bound holding/party role that property_parties can represent) or
+-- OTHER (pipeline/interest, history, pre-property, or unresolved). Only
+-- genuine_property_link rows are ever candidates for consolidation.
+SELECT
+  CASE
+    WHEN property_id IS NULL THEN 'other:pre_property'
+    WHEN relationship_type NOT IN ('owner','co_owner','landlord','tenant','seller','vendor','buyer') THEN 'other:non_link_type'
+    WHEN status <> 'Active' OR valid_to IS NOT NULL THEN 'other:historical_or_pending'
+    ELSE 'genuine_property_link'
+  END AS category,
+  relationship_type, status, count(*) AS rows
 FROM grow_relationships
-GROUP BY relationship_type, status, (property_id IS NOT NULL)
-ORDER BY relationship_type, status, has_property;
+GROUP BY 1, relationship_type, status
+ORDER BY 1, relationship_type, status;
 
 -- G2. Per-row classification (counts).
 WITH m AS (
@@ -69,3 +79,15 @@ SELECT pp.role, count(*) AS links
 FROM property_parties pp
 WHERE NOT EXISTS (SELECT 1 FROM grow_relationships gr WHERE gr.property_id = pp.property_id AND gr.party_id = pp.party_id)
 GROUP BY pp.role ORDER BY links DESC;
+
+-- R0. ROLLBACK REHEARSAL (read-only). An approved consolidation run would tag
+-- each inserted property_parties row via an audit_logs entry
+-- (action 'property_party_reconciled', record_id = property_parties.id,
+-- provider_reference = runId). Rolling back = delete
+-- exactly the property_parties ids recorded for that runId and nothing else.
+-- This query shows what such a rollback would remove for a given run id.
+-- (No run has ever executed, so it returns 0 rows.)
+SELECT al.record_id AS property_party_id
+FROM audit_logs al
+WHERE al.action = 'property_party_reconciled'
+  AND al.provider_reference = 'REPLACE-WITH-RUN-ID';

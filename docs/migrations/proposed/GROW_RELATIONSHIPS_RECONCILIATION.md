@@ -27,6 +27,15 @@ t226u found that contact detail read only `grow_relationships`, so links made on
 | former_owner, prospective_buyer, prospective_seller, appraisal_contact, investor, developer, referrer, related_party, unknown_pending_review | — (not mapped) | Grow pipeline and history semantics; keep in Grow |
 | any, with property_id NULL | — | Pre-property relationship; keep |
 
+## Genuine property links vs other relationships (t230u)
+The audit (G1) puts every grow_relationships row into exactly one category:
+- **`genuine_property_link`:** has a property, is Active with no `valid_to`, and its type is a current holding or party role (owner, co_owner, landlord, tenant, seller, vendor, buyer). Only these rows are candidates.
+- **`other:pre_property`:** no property; a person-first relationship.
+- **`other:non_link_type`:** interest, pipeline, history or third-party types (prospective_*, former_owner, appraisal_contact, investor, developer, referrer, related_party, unknown_pending_review, occupier).
+- **`other:historical_or_pending`:** Historical, PendingReview, or has `valid_to`.
+
+`other:*` rows are never copied, changed or deleted.
+
 ## Dry run
 `packages/db/scripts/audit/grow-relationships-reconciliation.sql` (SELECT only; ids and counts):
 - **G1:** inventory.
@@ -52,7 +61,20 @@ t226u found that contact detail read only `grow_relationships`, so links made on
 1. Run the audit and dry run read-only per environment, then attach G1–G4.
 2. Owner decides seller/vendor, occupier and the review rows.
 3. Apply 0047 first, so the backfill cannot create duplicates.
-4. Run a one-off script: `INSERT … SELECT` from G3 with `ON CONFLICT DO NOTHING` per brokerage, logging source ids to `audit_logs`. No side effects. Reversible by deleting rows created by that run id.
+4. Run a one-off script per brokerage, in one transaction:
+   - Generate a `runId`.
+   - `INSERT … SELECT` from G3 with `ON CONFLICT DO NOTHING RETURNING id`.
+   - For each returned id, write an `audit_logs` row (`action = 'property_party_reconciled'`, `record_type = 'property_party'`, `record_id = id`, `provider_reference = runId`, `previous_value` = source grow_relationship ids).
+   - No API side effects (no AML or ownership review).
+   - grow_relationships is not touched.
+
+## Rollback (reversible by construction)
+- Rollback of run X is `DELETE FROM property_parties WHERE id IN (SELECT record_id::int FROM audit_logs WHERE action='property_party_reconciled' AND provider_reference = X)`. It is followed by an audit row `property_party_reconcile_rolled_back`.
+- Only rows created by that run are removed:
+  - Pre-existing links were skipped at insert time, so they are never in the run's list.
+  - grow_relationships was never modified, so nothing needs restoring.
+- R0 in the audit SQL rehearses the rollback read-only.
+- **Caveat:** if a user edits a reconciled link afterwards (PATCH role or primary), rollback still deletes it. The script should refuse to roll back links whose audit trail shows a later `party_link_updated`, and list them for manual review instead.
 5. Going forward:
    - Either Grow writers (`POST /grow/relationships` with a property, import) also upsert the mapped property_parties link,
    - or Grow reads property_parties for these roles.
