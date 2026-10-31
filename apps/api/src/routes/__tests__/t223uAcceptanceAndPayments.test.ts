@@ -46,8 +46,10 @@ async function tenant(label: string) {
   await setGrants(b.brokerageId, RUN);
   return { ...b, pitCrew };
 }
+// connection: close — no keep-alive socket reuse, so a socket the server times out (5 s keepAliveTimeout)
+// under full-suite load cannot be reused mid-close (seen once as ECONNRESET in the Brisbane full run).
 const call = async (cookie: string, method: string, path: string, body?: unknown) => {
-  const r = await fetch(`${baseUrl}/api${path}`, { method, headers: { cookie, ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+  const r = await fetch(`${baseUrl}/api${path}`, { method, headers: { cookie, connection: "close", ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
   const text = await r.text(); let json: any = null; try { json = JSON.parse(text); } catch { /* */ }
   return { status: r.status, json, text };
 };
