@@ -185,7 +185,9 @@ authRouter.post("/dev-login", async (req, res) => {
     // lib/billing/runAccessBackfill.ts for the equivalent, idempotent backfill covering
     // brokerages that already existed before run.access was introduced. grow.access is
     // deliberately NOT auto-granted here — Grow stays purchase-gated, unchanged from before
-    // this phase.
+    // this phase. RUN-INCLUDES-GROW (t220u): Grow keys for Run come only from a Trialing/Active
+    // Starter subscription (catalogue.ts); this migration grant is not a subscription, so an
+    // unsubscribed brokerage still gets no paid Grow access.
     await db.insert(entitlementGrants).values({
       brokerageId: brokerage.id,
       entitlementKey: "run.access",

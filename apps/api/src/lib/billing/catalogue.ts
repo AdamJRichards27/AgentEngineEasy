@@ -16,10 +16,10 @@ import { ENTITLEMENT_KEYS } from "@aee/db";
  * onto both growProductId and bundleProductId in one undifferentiated loop. Now that
  * ENTITLEMENT_KEYS also includes "run.access" (packages/db/src/schema/billing.ts), that same
  * loop would have silently given every Grow-only purchaser RUN access too — exactly the product
- * boundary violation Priority 0.5 exists to prevent. GROW_ENTITLEMENT_KEYS/RUN_ENTITLEMENT_KEYS
- * below keep the two product surfaces explicitly separate: the Grow product gets only the 13
- * grow.* keys (unchanged from before this phase), the Starter/RUN product gets only run.access
- * (new), and the Pro+Grow bundle gets the full union of both — matching its name and its $289/mo
+ * boundary violation Priority 0.5 exists to prevent. GROW_ENTITLEMENT_KEYS below keeps the Grow
+ * product to the grow.* keys only (Grow never grants run.access). RUN-INCLUDES-GROW (t220u,
+ * 2026-10-31): the Starter/RUN product now gets the full union (run.access + every grow.* key),
+ * because Run includes Grow; the Pro+Grow bundle also gets the full union — matching its name and its $289/mo
  * price point, which has always been positioned as "Pro (RUN) + Grow" rather than Grow alone.
  */
 
@@ -46,7 +46,6 @@ const ENTITLEMENT_DEFS: Record<(typeof ENTITLEMENT_KEYS)[number], string> = {
 };
 
 const GROW_ENTITLEMENT_KEYS = ENTITLEMENT_KEYS.filter((key) => key !== "run.access");
-const RUN_ENTITLEMENT_KEYS = ["run.access"] as const;
 
 const GROW_PRODUCT_CODE = "grow";
 const STARTER_PRODUCT_CODE = "agent_engine_starter";
@@ -117,12 +116,15 @@ export async function ensureCatalogueSeeded(): Promise<void> {
   for (const key of GROW_ENTITLEMENT_KEYS) {
     await ensureProductEntitlement(growProductId, entitlementDefIds[key]);
   }
-  // Starter (RUN): only run.access. This is the product every pre-existing brokerage is
-  // presumed to already hold - see lib/billing/runAccessBackfill.ts for the non-destructive
-  // backfill that grants existing brokerages the equivalent entitlementGrants row directly
-  // (this seed only creates the catalogue rows describing the product; it does not itself
-  // grant anything to any brokerage).
-  for (const key of RUN_ENTITLEMENT_KEYS) {
+  // Starter (RUN): run.access AND every grow.* key. Owner decision (t220u, 2026-10-31): Run includes
+  // every Grow feature (AI and calling included, still subject to the usage limits in lib/ai/usageLimits.ts
+  // and any provider charges). Granted through the subscription model like every other product:
+  // applySubscriptionSnapshot grants these while the subscription is Trialing/Active and revokes them on
+  // Cancelled/Ended. Starter subscriptions synced before this change are topped up by the additive
+  // backfill in lib/billing/runIncludesGrowBackfill.ts (scripts/backfillRunIncludesGrow.ts, dry-run first).
+  // The separate migration run.access grant (lib/billing/runAccessBackfill.ts) is NOT a subscription and
+  // still grants no Grow: unsubscribed brokerages get no paid Grow access.
+  for (const key of ENTITLEMENT_KEYS) {
     await ensureProductEntitlement(starterProductId, entitlementDefIds[key]);
   }
   // Bundle: the full union - every grow.* key AND run.access, matching "Pro + Grow".
