@@ -280,7 +280,7 @@ function contactIdentityPayload(party: typeof parties.$inferSelect) {
 
 type ContactDuplicateKind = "email" | "phone";
 
-function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
+export function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
   const error =
     kind === "email"
       ? "A contact with this email already exists."
@@ -298,7 +298,7 @@ async function contactIdentityVisible(brokerageId: number, partyId: number): Pro
 }
 
 /** Null when nothing conflicts. contactId is set only when Contact 360 would return that party. */
-async function findDuplicateContact(
+export async function findDuplicateContact(
   brokerageId: number,
   kind: ContactDuplicateKind,
   value: string,

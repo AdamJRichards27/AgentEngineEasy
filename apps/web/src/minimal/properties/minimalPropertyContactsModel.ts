@@ -6,14 +6,18 @@
 //   POST /grow/contacts             existing "New contact" create (grow.contacts.manage)
 // The role is always chosen by the agent: nothing defaults to Seller/owner.
 
-export const PROPERTY_PARTY_ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
+export const PROPERTY_PARTY_ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Owner", "Landlord", "Tenant", "Other"] as const;
 export type PropertyPartyRole = (typeof PROPERTY_PARTY_ROLES)[number];
 
 export const PROPERTY_PARTY_ROLE_LABELS: Record<PropertyPartyRole, string> = {
-  Seller: "Seller / owner",
+  // t230u: Owner is its own role, so Seller no longer reads "Seller / owner".
+  Seller: "Seller",
   Buyer: "Buyer",
   Solicitor: "Solicitor",
   PowerOfAttorney: "Power of attorney",
+  Owner: "Owner",
+  Landlord: "Landlord",
+  Tenant: "Tenant",
   Other: "Other",
 };
 
@@ -175,3 +179,12 @@ export function isPropertyAlreadyLinked(links: readonly ContactPropertyLink[], p
 }
 
 export const UNLINK_CONFIRM = "Remove this link? The contact and the property are both kept.";
+
+/**
+ * t230u: link-from-contact, role/primary edit and unlink stay OFF until the
+ * security and integration tests pass in CI and the Owner enables them
+ * (VITE_PROPERTY_LINK_CONTROLS=true at build). Read-only lists always render.
+ */
+export function propertyLinkControlsEnabled(env: Record<string, unknown> | undefined = (import.meta as { env?: Record<string, unknown> }).env): boolean {
+  return env?.VITE_PROPERTY_LINK_CONTROLS === "true";
+}

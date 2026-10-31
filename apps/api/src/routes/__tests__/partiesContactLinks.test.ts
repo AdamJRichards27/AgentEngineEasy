@@ -114,7 +114,7 @@ test("PATCH link changes role and primary; duplicate role 409; validation 400", 
   assert.equal(dup.status, 409);
   assert.equal(dup.json.code, "PROPERTY_PARTY_LINK_EXISTS");
   assert.equal((await call(b.agent.cookie, "PATCH", `/parties/link/${id}`, {})).status, 400);
-  assert.equal((await call(b.agent.cookie, "PATCH", `/parties/link/${id}`, { role: "Landlord-ish" })).status, 400);
+  assert.equal((await call(b.agent.cookie, "PATCH", `/parties/link/${id}`, { role: "Occupier" })).status, 400);
   assert.equal((await call(b.agent.cookie, "PATCH", `/parties/link/${id}`, { role: "Seller", propertyId: 1 })).status, 400, "strict body");
   // Unlink removes only the link; the contact remains and other links stay.
   assert.equal((await call(b.agent.cookie, "DELETE", `/parties/link/${id}`)).status, 204);
@@ -143,4 +143,34 @@ test("by-contact and PATCH: hidden property, unsubscribed brokerage and other br
   }
   const link = (await call(a.admin.cookie, "GET", `/parties/by-contact/${a.partyId}`)).json.properties[0];
   assert.equal(link.isPrimary, true, "unsubscribed PATCH changed nothing; later entitled PATCH did");
+});
+
+test("t230u: create-and-link refuses a duplicate contact (email or phone); Owner/Landlord/Tenant valid; Create Contact + Start Appraisal still work", async () => {
+  const b = await setup("Dedupe", ["run.access", ...GROW]);
+  const email = `dup-${tag}@example.com`;
+  const first = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Owner", firstName: "Uma", email, mobile: "0412 345 678" });
+  assert.equal(first.status, 201);
+  const byEmail = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email: email.toUpperCase() });
+  assert.equal(byEmail.status, 409);
+  assert.equal(byEmail.json.code, "CONTACT_DUPLICATE");
+  assert.equal(byEmail.json.kind, "email");
+  assert.equal(byEmail.json.contactId, first.json.party.id);
+  const byPhone = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma3", mobile: "+61412345678" });
+  assert.equal(byPhone.status, 409);
+  assert.equal(byPhone.json.kind, "phone");
+  // The client links the existing contact instead: no duplicate party row.
+  const linked = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Landlord" });
+  assert.equal(linked.status, 201);
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Landlord" })).status, 409, "duplicate link");
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Occupier" })).status, 400, "unknown relationship type");
+  // People "Create contact" (unchanged route) still dedupes and still creates.
+  assert.equal((await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email })).status, 409);
+  const fresh = await call(b.agent.cookie, "POST", "/grow/contacts", { name: "Vic Fresh", email: `vic-${tag}@example.com` });
+  assert.equal(fresh.status, 201);
+  const vic = fresh.json.contact.id;
+  assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: vic, role: "Seller" })).status, 201);
+  // Start Appraisal from the property screen's linked contact still works.
+  const appr = await call(b.agent.cookie, "POST", "/grow/appraisals/from-contact", { partyId: vic, propertyId: b.agentProp, entry: "property" });
+  assert.ok(appr.status === 201 || appr.status === 200, `start appraisal ${appr.status} ${JSON.stringify(appr.json)}`);
+  assert.ok(appr.json.appraisal.id > 0);
 });

@@ -143,7 +143,7 @@ test("invalid role, missing role or bad id -> 400", async () => {
   const propertyId = await createProperty(A.agent.cookie, "LE invalid");
   const partyId = await createContact(A.agent.cookie, "Invalidc");
   for (const body of [
-    { propertyId, partyId, role: "Owner" },
+    { propertyId, partyId, role: "Occupier" },
     { propertyId, partyId },
     { propertyId, partyId: -3, role: "Seller" },
     { propertyId, partyId: "abc", role: "Seller" },

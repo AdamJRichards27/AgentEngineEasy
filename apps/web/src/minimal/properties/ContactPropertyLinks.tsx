@@ -14,6 +14,7 @@ import {
   linkFailureText,
   PROPERTY_PARTY_ROLE_LABELS,
   PROPERTY_PARTY_ROLES,
+  propertyLinkControlsEnabled,
   propertySearchPath,
   type ContactPropertyRow,
 } from "./minimalPropertyContactsModel";
@@ -22,7 +23,8 @@ import {
 // with link-to-property, role/primary edit and unlink. Used on Minimal/mobile
 // Contact 360 and the desktop Grow contact detail. The server enforces
 // entitlement, brokerage and own-property scope; hidden links are never returned.
-export function ContactPropertyLinks({ partyId, canManage, headingId = "am-contact-property-links" }: { partyId: number; canManage: boolean; headingId?: string }) {
+export function ContactPropertyLinks({ partyId, canManage: canManageRaw, headingId = "am-contact-property-links" }: { partyId: number; canManage: boolean; headingId?: string }) {
+  const canManage = canManageRaw && propertyLinkControlsEnabled();
   const queryClient = useQueryClient();
   const key = ["contact-property-links", partyId];
   const [open, setOpen] = useState(false);

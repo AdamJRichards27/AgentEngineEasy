@@ -18,7 +18,7 @@ test("contact property links: labels, primary, hrefs, fallback address", () => {
     { linkId: 2, propertyId: 11, role: "Buyer", isPrimary: false, formattedAddress: null },
     { linkId: 3, propertyId: 11, role: "Legacy", isPrimary: false, formattedAddress: " " },
   ]);
-  assert.equal(links[0].roleLabel, "Seller / owner");
+  assert.equal(links[0].roleLabel, "Seller");
   assert.equal(links[0].isPrimary, true);
   assert.equal(links[0].propertyHref, "/grow/properties/10");
   assert.equal(links[1].label, "Property 11");
@@ -49,4 +49,13 @@ test("paths", () => {
   assert.equal(linkPath(9), "/parties/link/9");
   assert.equal(propertySearchPath("  1 Main St "), "/properties?q=1%20Main%20St");
   assert.equal(propertySearchPath(""), "/properties");
+});
+
+test("t230u: link controls are feature-flagged off unless VITE_PROPERTY_LINK_CONTROLS=true", async () => {
+  const { propertyLinkControlsEnabled } = await import("../../minimal/properties/minimalPropertyContactsModel");
+  assert.equal(propertyLinkControlsEnabled(undefined), false);
+  assert.equal(propertyLinkControlsEnabled({}), false);
+  assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "1" }), false);
+  assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "true" }), true);
+  assert.equal(propertyLinkControlsEnabled(), false, "default build: off");
 });

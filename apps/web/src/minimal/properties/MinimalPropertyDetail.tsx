@@ -13,6 +13,7 @@ import {
 } from "./minimalPropertyDetailModel";
 import { MinimalPropertyDetailView } from "./MinimalPropertyDetailView";
 import { MinimalPropertyContacts } from "./MinimalPropertyContacts";
+import { propertyLinkControlsEnabled } from "./minimalPropertyContactsModel";
 import "./properties.css";
 
 // AE Minimal A property detail. Rendered only inside the Minimal shell
@@ -71,7 +72,7 @@ export default function MinimalPropertyDetail() {
             propertyId={id}
             canSearch={growAccess && hasEntitlement("grow.contacts.read")}
             canCreateContact={growAccess && hasEntitlement("grow.contacts.manage")}
-            canManageLinks={hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access")}
+            canManageLinks={propertyLinkControlsEnabled() && (hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access"))}
             canStartAppraisal={growAccess && hasEntitlement("grow.opportunities.manage") && !pipeline.isLoading}
             existingAppraisalHref={model.appraisals[0]?.href ?? null}
           />

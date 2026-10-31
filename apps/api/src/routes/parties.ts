@@ -6,6 +6,7 @@ import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 import { requireAnyEntitlement } from "../middlewares/entitlement.js";
+import { duplicateContactBody, findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -62,7 +63,8 @@ const canReadPropertyContacts = requireAnyEntitlement("grow.contacts.read", "run
 const canManagePropertyContacts = requireAnyEntitlement("grow.contacts.manage", "run.access");
 
 /** property_parties.role values accepted by the API (text column; no DB enum). */
-export const PROPERTY_PARTY_ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
+// t230u: Owner, Landlord and Tenant added (role is text; no enum migration).
+export const PROPERTY_PARTY_ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Owner", "Landlord", "Tenant", "Other"] as const;
 
 // One-time party capture (Build Brief §4): minimum fields only; entity
 // structure detail (trust/company/estate) is requested only when needed.
@@ -196,6 +198,18 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
     if (!property) await notePartyPropertyIsolationRejection(parsed.data.propertyId, user.brokerageId);
     res.status(404).json({ error: "Property not found" });
     return;
+  }
+
+  // t230u: create-and-link never makes a second record for a contact that
+  // already exists in this brokerage (same email / normalised phone rule as
+  // POST /grow/contacts). The client links the existing contact instead.
+  for (const [kind, value] of [["email", parsed.data.email], ["phone", parsed.data.mobile]] as const) {
+    if (!value) continue;
+    const duplicate = await findDuplicateContact(user.brokerageId, kind, value, null);
+    if (duplicate) {
+      res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "CONTACT_DUPLICATE", kind });
+      return;
+    }
   }
 
   const [party] = await db
