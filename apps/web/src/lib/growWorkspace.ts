@@ -21,7 +21,7 @@ export const GROW_TABS: Array<{ key: GrowTab; label: string }> = [
   { key: "opportunities", label: "Opportunities" },
   { key: "contacts", label: "Contacts" },
   { key: "nurture", label: "Nurture" },
-  { key: "performance", label: "Performance" },
+  { key: "performance", label: "Business Coach" }, // t222u: renamed from "Performance" (AI Business Coach)
   { key: "askAE", label: "Ask AE" },
 ];
 

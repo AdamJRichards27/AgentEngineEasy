@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Switch, Route, Link, Redirect, useLocation, useSearch } from "wouter";
+import { selectGrowView } from "./minimal/minimalGrowNav";
 import { selectContact360View } from "./minimal/minimalContactModel";
 import { selectPropertiesView } from "./minimal/properties/minimalPropertiesModel";
 import { selectAppraisalsView } from "./minimal/appraisals/minimalAppraisalsModel";
@@ -49,6 +50,7 @@ const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
+const MinimalContacts = lazy(() => import("./minimal/MinimalContacts"));
 const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
 const MinimalProperties = lazy(() => import("./minimal/properties/MinimalProperties"));
 const MinimalAppraisals = lazy(() => import("./minimal/appraisals/MinimalAppraisals"));
@@ -396,7 +398,17 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/grow/market-activity">
             {selectMarketActivityView(minimalShell) === "minimal" ? <MinimalMarketActivity /> : <Redirect to="/grow" replace />}
           </Route>
-          <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
+          {/* t222u: People (mobile) and Relationships (desktop) link /grow?tab=contacts; mount the
+              Minimal contacts screen for it instead of always Today. Other tabs (e.g. Business Coach)
+              render the classic Grow workspace inside the Minimal shell. */}
+          <Route path="/grow">
+            {(() => {
+              const view = selectGrowView(minimalShell, search);
+              if (view === "minimal-today") return <MinimalToday />;
+              if (view === "minimal-contacts") return <MinimalContacts />;
+              return <Grow />;
+            })()}
+          </Route>
           <Route path="/grow/contacts/:id">
             {selectContact360View(minimalShell, search) === "minimal" ? <MinimalContact360 /> : <Grow />}
           </Route>

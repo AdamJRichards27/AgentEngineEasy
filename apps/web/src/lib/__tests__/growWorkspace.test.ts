@@ -101,7 +101,7 @@ test("clicking the Contacts tab returns to the contact list; other tabs only swi
 });
 
 test("tab labels", () => {
-  assert.equal(growTabLabel("performance"), "Performance");
+  assert.equal(growTabLabel("performance"), "Business Coach"); // t222u rename
   assert.equal(growTabLabel("askAE"), "Ask AE");
   assert.equal(GROW_TABS.length, 6);
 });
