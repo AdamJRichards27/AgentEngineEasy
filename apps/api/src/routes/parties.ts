@@ -58,7 +58,7 @@ export const partiesRouter = Router();
 // any number of Seller links — nothing here caps it to one.
 const addPartySchema = z.object({
   propertyId: z.number(),
-  role: z.enum(["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"]),
+  role: z.enum(["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Owner", "Landlord", "Tenant", "Other"]),
   partyType: z.enum(["Person", "Organisation", "Trust", "Estate", "Other"]).default("Person"),
   isPrimary: z.boolean().optional().default(false),
   firstName: z.string().optional(),

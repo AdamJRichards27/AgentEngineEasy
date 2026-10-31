@@ -25,7 +25,7 @@ test("linked contacts: names, role labels, null party skipped", () => {
   const linked = buildLinkedContacts(rows);
   assert.equal(linked.length, 3);
   assert.equal(linked[0].name, "Ana Synthetic");
-  assert.equal(linked[0].roleLabel, "Seller / owner");
+  assert.equal(linked[0].roleLabel, "Seller");
   assert.equal(linked[0].detail, "ana@example.test");
   assert.equal(linked[2].name, "Acme Trust");
   assert.equal(linked[0].contactHref, "/grow/contacts/7");

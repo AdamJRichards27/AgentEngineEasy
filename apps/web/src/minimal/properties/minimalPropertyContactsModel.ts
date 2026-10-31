@@ -6,14 +6,18 @@
 //   POST /grow/contacts             existing "New contact" create (grow.contacts.manage)
 // The role is always chosen by the agent: nothing defaults to Seller/owner.
 
-export const PROPERTY_PARTY_ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
+export const PROPERTY_PARTY_ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Owner", "Landlord", "Tenant", "Other"] as const;
 export type PropertyPartyRole = (typeof PROPERTY_PARTY_ROLES)[number];
 
 export const PROPERTY_PARTY_ROLE_LABELS: Record<PropertyPartyRole, string> = {
-  Seller: "Seller / owner",
+  // t228u: Owner is now its own role, so Seller no longer reads "Seller / owner".
+  Seller: "Seller",
   Buyer: "Buyer",
   Solicitor: "Solicitor",
   PowerOfAttorney: "Power of attorney",
+  Owner: "Owner",
+  Landlord: "Landlord",
+  Tenant: "Tenant",
   Other: "Other",
 };
 

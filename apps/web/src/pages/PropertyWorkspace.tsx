@@ -238,7 +238,7 @@ interface WorkspaceResponse {
   appraisal: AppraisalBlock | null;
 }
 
-const ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"] as const;
+const ROLES = ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Owner", "Landlord", "Tenant", "Other"] as const;
 const PARTY_TYPES = ["Person", "Organisation", "Trust", "Estate", "Other"] as const;
 
 function partyName(p: PartyLink["party"]): string {
