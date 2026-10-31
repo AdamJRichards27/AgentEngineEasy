@@ -28,6 +28,13 @@ export interface NormalizedSubscriptionSnapshot {
   cancelAtPeriodEnd: boolean;
   productCode: string;
   brokerageId: number;
+  /**
+   * t222u: the provider's recorded trial end, when it reports one (Stripe `trial_end`). Stored on the
+   * subscription and enforced server-side as the grant end date, so an expired trial stops granting
+   * access on its recorded date even if no provider notification ever arrives. Optional: omitted
+   * (undefined) means "not reported in this snapshot" and keeps any previously stored value.
+   */
+  trialEnd?: Date | null;
 }
 
 export interface BillingWebhookEvent {
@@ -179,6 +186,7 @@ export class StripeBillingProvider implements BillingProvider {
           status: mapStripeStatus(String(obj.status ?? "")),
           currentPeriodStart: obj.current_period_start ? new Date(Number(obj.current_period_start) * 1000) : null,
           currentPeriodEnd: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000) : null,
+          trialEnd: obj.trial_end ? new Date(Number(obj.trial_end) * 1000) : undefined,
           cancelAtPeriodEnd: Boolean(obj.cancel_at_period_end),
           productCode: metadata.productCode ?? "",
           brokerageId: Number(metadata.brokerageId ?? 0),

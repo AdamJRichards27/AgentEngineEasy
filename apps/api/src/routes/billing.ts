@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   billingWebhookEvents,
   db,
@@ -14,6 +14,7 @@ import { BROKERAGE_ADMIN_ROLES, requireAuth, requireRole } from "../middlewares/
 import { logAudit } from "../lib/audit.js";
 import { getBillingProvider } from "../lib/billing/gateway.js";
 import { applySubscriptionSnapshot } from "../lib/billing/sync.js";
+import { OFFERED_PRODUCT_CODES, isOfferedProductCode } from "../lib/billing/catalogue.js";
 import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { dispatchOperationalAlert } from "../lib/operationalAlerts.js";
 
@@ -35,7 +36,9 @@ billingRouter.get("/catalogue", requireAuth, async (_req, res) => {
     })
     .from(products)
     .leftJoin(prices, and(eq(prices.productId, products.id), eq(prices.status, "Active")))
-    .where(eq(products.status, "Active"));
+    // t222u: only products offered to NEW subscriptions (Grow, Run incl. Grow). The retired $69 Starter
+    // stays in the database for existing subscriptions but is never offered.
+    .where(and(eq(products.status, "Active"), inArray(products.code, [...OFFERED_PRODUCT_CODES])));
   res.json({ products: rows });
 });
 
@@ -61,6 +64,12 @@ billingRouter.post("/checkout", requireAuth, requireRole(...BROKERAGE_ADMIN_ROLE
   const [product] = await db.select().from(products).where(eq(products.code, productCode)).limit(1);
   if (!product) {
     res.status(404).json({ error: "Unknown product" });
+    return;
+  }
+  // t222u: a retired offer (the $69 Starter) cannot start a new subscription. Existing Starter
+  // subscriptions are untouched: they sync through the webhook, not through checkout.
+  if (!isOfferedProductCode(productCode)) {
+    res.status(410).json({ error: "This plan is no longer offered", code: "PRODUCT_NOT_OFFERED" });
     return;
   }
 

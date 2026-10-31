@@ -173,12 +173,20 @@ void runTrackedStartupTask("entitlement_catalogue_seed", () =>
 // key existed to gate anything. Fire-and-forget, non-blocking, same pattern as
 // ensureCatalogueSeeded above. See lib/billing/runAccessBackfill.ts's own module comment.
 // Readiness-tracked and alerted exactly like the catalogue seed above.
-void runTrackedStartupTask("run_access_backfill", () =>
-  ensureRunAccessBackfilled().catch((err) => {
-    logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) });
-    throw err;
-  }),
-);
+// t222u: this boot backfill is the main source of FREE run.access (it re-grants every brokerage on every
+// boot, so a removed grant would come straight back). AE_RUN_ACCESS_BOOT_BACKFILL=false switches it off;
+// unset/any other value keeps today's behaviour. Switching it off is step 1 of the Owner-approved removal
+// plan (docs/T222U_FREE_RUN_ACCESS_REMOVAL_PLAN.md); it revokes nothing by itself.
+if (process.env.AE_RUN_ACCESS_BOOT_BACKFILL !== "false") {
+  void runTrackedStartupTask("run_access_backfill", () =>
+    ensureRunAccessBackfilled().catch((err) => {
+      logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }),
+  );
+} else {
+  logger.info("boot_run_access_backfill_disabled", { reason: "AE_RUN_ACCESS_BOOT_BACKFILL=false" });
+}
 
 // Agent Engine 2.0 — Run Transaction Vertical Slice. Idempotent per-brokerage
 // install+activate sweep for the WAE Stage 2 workflow catalogue (see
