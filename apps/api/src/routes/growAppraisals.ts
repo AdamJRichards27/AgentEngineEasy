@@ -1,3 +1,4 @@
+import { rejectAgencyAgreementFields } from "../lib/agencyAgreementAuthority.js";
 import { Router } from "express";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
@@ -216,7 +217,7 @@ async function rejectInvalidPropertyEntry(
   return false;
 }
 
-growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/from-contact", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createFromContactSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -253,7 +254,7 @@ const createFromOpportunitySchema = z.object({
   opportunityId: z.coerce.number().int().positive(),
 });
 
-growAppraisalsRouter.post("/from-opportunity", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/from-opportunity", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const parsed = createFromOpportunitySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -352,7 +353,7 @@ const updateWorkspaceSchema = z.object({
   ownerUserId: z.coerce.number().int().positive().nullable().optional(),
 });
 
-growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.patch("/:id", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -380,7 +381,7 @@ growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrow
  * -----------------------------------------------------------------*/
 const statusSchema = z.object({ toStatus: z.string().min(1) });
 
-growAppraisalsRouter.post("/:id/status", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/status", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -412,7 +413,7 @@ const outcomeSchema = z.object({
   outcomeNotes: z.string().nullable().optional(),
 });
 
-growAppraisalsRouter.post("/:id/outcome", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/outcome", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -445,7 +446,7 @@ const followUpSchema = z.object({
   followUpNotes: z.string().nullable().optional(),
 });
 
-growAppraisalsRouter.post("/:id/follow-up", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/follow-up", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -477,7 +478,7 @@ const sendSchema = z.object({
   bodyText: z.string().optional(),
 });
 
-growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/send", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -504,7 +505,7 @@ growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requires
 /* ---------------------------------------------------------------------
  * Sec 12 -- AI Market Position draft.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -525,7 +526,7 @@ growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requires
 /* ---------------------------------------------------------------------
  * Sec 13/14 -- presentation document generation.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -546,7 +547,7 @@ growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGro
  * Sec 19/20 -- Grow -> Run handoff, gated behind the same run.access
  * entitlement Run uses everywhere else.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresGrowAccess, requiresRunAccess, async (req, res) => {
+growAppraisalsRouter.post("/:id/run-handoff", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -587,7 +588,7 @@ function normalizeSaleDate(saleDate: string | null | undefined): Date | null | u
   return saleDate ? new Date(saleDate) : null;
 }
 
-growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -608,7 +609,7 @@ growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAcce
   }
 });
 
-growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -660,7 +661,7 @@ const marketCompetitionSchema = z.object({
   displayOrder: z.coerce.number().int().optional(),
 });
 
-growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/market-competition", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -678,7 +679,7 @@ growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAc
   }
 });
 
-growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
