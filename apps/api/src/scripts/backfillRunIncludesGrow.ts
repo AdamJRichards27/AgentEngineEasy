@@ -16,15 +16,16 @@ async function main() {
   const r = await backfillRunSubscriptionEntitlements({ dryRun: !apply });
   const byBrokerage = new Map<number, number>();
   for (const p of r.planned) byBrokerage.set(p.brokerageId, (byBrokerage.get(p.brokerageId) ?? 0) + 1);
-  console.log(JSON.stringify({
+  process.stdout.write(`${JSON.stringify({
     mode: apply ? "APPLY" : "DRY-RUN",
     subscriptionsChecked: r.subscriptionsChecked,
     plannedGrants: r.planned.length,
     insertedGrants: r.inserted.length,
     brokerages: [...byBrokerage].map(([brokerageId, grants]) => ({ brokerageId, grants })),
     skippedLapsedTrials: r.skippedLapsedTrials,
-  }, null, 2));
-  if (!apply && r.planned.length > 0) console.log("Dry run only. Re-run with --apply (operator approval required) to insert.");
+  }, null, 2)}
+`);
+  if (!apply && r.planned.length > 0) process.stdout.write("Dry run only. Re-run with --apply (operator approval required) to insert.\n");
 }
 
-main().then(() => process.exit(0), (err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
+main().then(() => process.exit(0), (err) => { process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`); process.exit(1); });
