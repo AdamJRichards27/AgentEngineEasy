@@ -81,6 +81,7 @@ const addPartySchema = z.object({
   organisationName: z.string().optional(),
   mobile: z.string().optional(),
   email: z.string().email().optional(),
+  rejectDuplicateContact: z.boolean().optional(),
   residentialAddress: z.string().optional(),
   // AE Minimal v1.0 (Owner t149u): link an EXISTING contact instead of
   // creating one. When present, no contact fields are read and no party row
@@ -200,11 +201,15 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
     return;
   }
 
-  // t230u: create-and-link never makes a second record for a contact that
-  // already exists in this brokerage (same email / normalised phone rule as
-  // POST /grow/contacts). The client links the existing contact instead.
+  // t230u: with rejectDuplicateContact (sent by Minimal/mobile and documented
+  // in the mobile API contract), create-and-link never makes a second record
+  // for a contact that already exists in this brokerage (same email /
+  // normalised phone rule as POST /grow/contacts); the client links the
+  // existing contact instead. Opt-in so the legacy Run desktop form and
+  // existing integrations (shared household phones/emails) are unchanged;
+  // making it the default is an Owner decision.
   for (const [kind, value] of [["email", parsed.data.email], ["phone", parsed.data.mobile]] as const) {
-    if (!value) continue;
+    if (!parsed.data.rejectDuplicateContact || !value) continue;
     const duplicate = await findDuplicateContact(user.brokerageId, kind, value, null);
     if (duplicate) {
       res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "CONTACT_DUPLICATE", kind });

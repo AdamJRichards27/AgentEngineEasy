@@ -150,14 +150,16 @@ test("t230u: create-and-link refuses a duplicate contact (email or phone); Owner
   const email = `dup-${tag}@example.com`;
   const first = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Owner", firstName: "Uma", email, mobile: "0412 345 678" });
   assert.equal(first.status, 201);
-  const byEmail = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email: email.toUpperCase() });
+  const byEmail = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email: email.toUpperCase(), rejectDuplicateContact: true });
   assert.equal(byEmail.status, 409);
   assert.equal(byEmail.json.code, "CONTACT_DUPLICATE");
   assert.equal(byEmail.json.kind, "email");
   assert.equal(byEmail.json.contactId, first.json.party.id);
-  const byPhone = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma3", mobile: "+61412345678" });
+  const byPhone = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma3", mobile: "+61412345678", rejectDuplicateContact: true });
   assert.equal(byPhone.status, 409);
   assert.equal(byPhone.json.kind, "phone");
+  // Without the opt-in the legacy create-and-link (Run desktop form) is unchanged.
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Other", firstName: "Household", mobile: "+61412345678" })).status, 201);
   // The client links the existing contact instead: no duplicate party row.
   const linked = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Landlord" });
   assert.equal(linked.status, 201);
