@@ -124,3 +124,41 @@ test("other brokerage gets 404 on read, link, create and unlink", async () => {
   assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: a.adminProp, role: "Other", firstName: "X" })).status, 404);
   assert.equal((await call(o.pc.cookie, "DELETE", `/parties/link/${a.adminLinkId}`)).status, 404);
 });
+
+test("t233u: read-only user (grow.contacts.read without manage, no Run) can read but cannot link, create, unlink or create a property", async () => {
+  const b = await setup("ReadOnly", ["grow.access", "grow.contacts.read"]);
+  assert.equal((await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`)).status, 200);
+  for (const cookie of [b.admin.cookie, b.agent.cookie]) {
+    assert.equal((await call(cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Other" })).status, 403);
+    assert.equal((await call(cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Other", firstName: "RO" })).status, 403);
+    assert.equal((await call(cookie, "DELETE", `/parties/link/${b.adminLinkId}`)).status, 403);
+    assert.equal((await call(cookie, "POST", "/properties", { formattedAddress: `RO ${cookie.length} ${tag} St, Testville`, state: "NSW", suburb: "Testville", postcode: "2000" })).status, 403);
+  }
+  assert.equal((await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`)).json.parties.length, 1, "nothing changed");
+});
+
+test("t233u: POST /properties needs an active Grow or Run grant; an expired trial is refused", async () => {
+  const b = await setup("PropGate", []);
+  const body = (n: string) => ({ formattedAddress: `${n} ${tag} Gate St, Testville`, state: "NSW", suburb: "Testville", postcode: "2000" });
+  assert.equal((await call(b.admin.cookie, "POST", "/properties", body("U1"))).status, 403, "unsubscribed");
+  await db.insert(entitlementGrants).values({ brokerageId: b.brokerageId, entitlementKey: "grow.contacts.manage", granteeType: "brokerage", granteeId: b.brokerageId, sourceType: "admin_override", status: "Active", endsAt: new Date(Date.now() - 60_000) });
+  invalidateEntitlementCache(b.brokerageId);
+  assert.equal((await call(b.admin.cookie, "POST", "/properties", body("T1"))).status, 403, "expired trial");
+  await setGrants(b.brokerageId, ["grow.access", "grow.contacts.read", "grow.contacts.manage"]);
+  await db.update(entitlementGrants).set({ endsAt: new Date(Date.now() + 864e5) }).where(eq(entitlementGrants.brokerageId, b.brokerageId));
+  invalidateEntitlementCache(b.brokerageId);
+  assert.equal((await call(b.agent.cookie, "POST", "/properties", body("T2"))).status, 201, "current trial");
+  await setGrants(b.brokerageId, ["run.access"]);
+  assert.equal((await call(b.agent.cookie, "POST", "/properties", body("R1"))).status, 201, "Run");
+});
+
+test("t233u: Run-only property mutations (ownership-review, listing-details) need run.access and property visibility", async () => {
+  const b = await setup("RunMut", ["run.access", ...GROW]);
+  const lst = { salesMethod: "PrivateTreaty" };
+  // Hidden property for the Agent: 404 (before validation of the body matters).
+  assert.equal((await call(b.agent.cookie, "POST", `/properties/${b.adminProp}/ownership-review`, { notes: "x" })).status, 404);
+  assert.equal((await call(b.agent.cookie, "POST", `/properties/${b.adminProp}/listing-details`, lst)).status, 404);
+  await setGrants(b.brokerageId, GROW);
+  assert.equal((await call(b.admin.cookie, "POST", `/properties/${b.adminProp}/ownership-review`, { notes: "x" })).status, 403, "Grow-only");
+  assert.equal((await call(b.admin.cookie, "POST", `/properties/${b.adminProp}/listing-details`, lst)).status, 403, "Grow-only");
+});

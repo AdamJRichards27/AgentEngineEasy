@@ -19,7 +19,7 @@ import {
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitlement.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -200,7 +200,11 @@ function nonBlank(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-propertiesRouter.post("/", requireAuth, async (req, res) => {
+// t233u: creating a property needs an active Grow or Run subscription (or an
+// unexpired trial grant) with write access: grow.contacts.manage or
+// run.access. Unsubscribed and read-only (grow.contacts.read only) callers
+// get 403. Same rule as the /parties mutations.
+propertiesRouter.post("/", requireAuth, requireAnyEntitlement("grow.contacts.manage", "run.access"), async (req, res) => {
   const parsed = startPropertySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -530,7 +534,8 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
 // only surfaced a prompt, so resolving it is a simple acknowledgement.
 const ownershipReviewSchema = z.object({ notes: z.string().optional() });
 
-propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => {
+// t233u: Run-only property mutation; needs run.access and the property visible to the caller.
+propertiesRouter.post("/:id/ownership-review", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = ownershipReviewSchema.safeParse(req.body);
@@ -541,7 +546,7 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
   const user = req.authedUser!;
 
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
-  if (!property) {
+  if (!property || (await propertyHiddenFromCaller(user, id))) {
     res.status(404).json({ error: "Not found" });
     return;
   }
@@ -582,7 +587,8 @@ const listingDetailsSchema = z.object({
   campaignEndDate: z.coerce.date().optional(),
 });
 
-propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
+// t233u: Run-only property mutation; needs run.access and the property visible to the caller.
+propertiesRouter.post("/:id/listing-details", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = listingDetailsSchema.safeParse(req.body);
@@ -592,7 +598,7 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
   }
   const user = req.authedUser!;
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
-  if (!property) {
+  if (!property || (await propertyHiddenFromCaller(user, id))) {
     res.status(404).json({ error: "Not found" });
     return;
   }
