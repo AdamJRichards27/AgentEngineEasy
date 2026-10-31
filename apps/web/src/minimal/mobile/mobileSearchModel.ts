@@ -2,6 +2,7 @@ import type { GrowContactListItem, GrowContactListPage } from "../../lib/growCon
 import { growListPath, listSearchEmptyMessage } from "../../lib/growListQuery";
 import { buildMinimalContactRows } from "../minimalContactsModel";
 import { propertyLocationLine } from "../properties/minimalPropertiesModel";
+import type { MobilePermissions } from "./mobilePermissions";
 
 // AE Mobile (CC Task #64, M1): unified People + Properties search, v1.
 // Pure logic: no React, no network, no storage, no logging. M2 sends the
@@ -63,13 +64,36 @@ export function classifySearchQuery(query: string): SearchQueryKind {
 
 // ── The plan: which requests to send ──────────────────────────────────────
 
+// t217u: options are derived from mobilePermissions() (the same helper as the nav) and
+// can only be built by mobileSearchOptions(): the brand below has no exported key, so a
+// hand-written object literal does not type-check.
+declare const SEARCH_OPTIONS_BRAND: unique symbol;
+
 export interface SearchOptions {
-  /** From mobilePermissions().searchContacts. */
-  canSearchContacts: boolean;
-  /** From mobilePermissions().searchProperties. */
-  canSearchProperties: boolean;
+  /** mobilePermissions().searchContacts (grow.contacts.read). */
+  readonly canSearchContacts: boolean;
+  /** mobilePermissions().searchProperties. */
+  readonly canSearchProperties: boolean;
+  /** mobilePermissions().run. False: Run-only property fields are never copied into results. */
+  readonly runData: boolean;
   /** Leave false until GET /grow/contacts searches phone numbers. */
+  readonly phoneSearchSupported: boolean;
+  readonly [SEARCH_OPTIONS_BRAND]: true;
+}
+
+export interface SearchOptionsExtra {
+  /** Narrow to one source (e.g. a People-only search box). Can only remove a source, never add one. */
+  only?: "contacts" | "properties";
   phoneSearchSupported?: boolean;
+}
+
+export function mobileSearchOptions(permissions: MobilePermissions, extra: SearchOptionsExtra = {}): SearchOptions {
+  return {
+    canSearchContacts: permissions.searchContacts === true && extra.only !== "properties",
+    canSearchProperties: permissions.searchProperties === true && extra.only !== "contacts",
+    runData: permissions.run === true,
+    phoneSearchSupported: extra.phoneSearchSupported === true,
+  } as SearchOptions;
 }
 
 export interface SearchRequest {
@@ -87,6 +111,8 @@ export interface SearchPlan {
   properties: SearchRequest | null;
   /** Why no request was planned, for a non-empty query. */
   hint: SearchHint | null;
+  /** Copied from the options: whether Run-only property fields may appear in results. */
+  runData: boolean;
 }
 
 export function contactsSearchPath(query: string): string {
@@ -99,7 +125,8 @@ export function propertiesSearchPath(query: string): string {
 
 export function planSearch(raw: unknown, options: SearchOptions): SearchPlan {
   const query = cleanSearchQuery(raw);
-  if (query === null) return { query: null, kind: null, contacts: null, properties: null, hint: null };
+  const runData = options.runData === true;
+  if (query === null) return { query: null, kind: null, contacts: null, properties: null, hint: null, runData };
   const kind = classifySearchQuery(query);
   const phoneOk = options.phoneSearchSupported === true;
 
@@ -138,7 +165,7 @@ export function planSearch(raw: unknown, options: SearchOptions): SearchPlan {
       hint = "unavailable";
     }
   }
-  return { query, kind, contacts, properties, hint };
+  return { query, kind, contacts, properties, hint, runData };
 }
 
 // ── Results ───────────────────────────────────────────────────────────────
@@ -176,8 +203,10 @@ export interface SearchProperty {
   href: string;
   address: string;
   location: string;
-  stage: string;
-  listingStatus: string;
+  /** Run-only (workflow stage). Present only when the plan allows Run data. */
+  stage?: string;
+  /** Run-only (listing status). Present only when the plan allows Run data. */
+  listingStatus?: string;
 }
 
 export interface SearchGroup<T> {
@@ -202,8 +231,6 @@ export interface SearchResultsInput {
   plan: SearchPlan;
   contacts?: SearchLegOutcome<GrowContactListPage>;
   properties?: SearchLegOutcome<{ properties: unknown[] }>;
-  /** True when the user holds grow.access. Decides which property page a result opens. */
-  hasGrowAccess: boolean;
 }
 
 const HINT_MESSAGES: Record<SearchHint, string> = {
@@ -247,7 +274,7 @@ export function buildSearchResults(input: SearchResultsInput): SearchResults {
     } else if (outcome.status === "error") errors += 1;
     else if (!Array.isArray(outcome.data?.properties)) errors += 1;
     else {
-      properties = buildPropertiesGroup(outcome.data.properties, plan.query, input.hasGrowAccess);
+      properties = buildPropertiesGroup(outcome.data.properties, plan.query, plan.runData === true);
       ok += 1;
     }
   }
@@ -417,11 +444,13 @@ function readProperty(raw: unknown): ReadProperty | null {
 }
 
 /** Same destination as the existing Minimal property cards for Grow users; the Run workspace otherwise. */
-export function propertyResultHref(id: number, hasGrowAccess: boolean): string {
-  return hasGrowAccess ? `/grow/properties/${id}` : `/properties/${id}`;
+export function propertyResultHref(id: number): string {
+  // t217u: Grow is always visible, so every user opens the Grow property detail;
+  // it offers "Open in Run" itself when the user has Run.
+  return `/grow/properties/${id}`;
 }
 
-function buildPropertiesGroup(rawRows: readonly unknown[], query: string, hasGrowAccess: boolean): SearchGroup<SearchProperty> {
+function buildPropertiesGroup(rawRows: readonly unknown[], query: string, runData: boolean): SearchGroup<SearchProperty> {
   const rows = dedupeById(rawRows.map(readProperty).filter((p): p is ReadProperty => p !== null));
   const q = normaliseForMatch(query);
   const ranked = rows.map((row, index) => {
@@ -431,11 +460,11 @@ function buildPropertiesGroup(rawRows: readonly unknown[], query: string, hasGro
     const rank = tiers.length > 0 ? Math.min(...tiers) : UNMATCHED_RANK;
     const property: SearchProperty = {
       id: row.id,
-      href: propertyResultHref(row.id, hasGrowAccess),
+      href: propertyResultHref(row.id),
       address: row.formattedAddress,
       location: propertyLocationLine(row),
-      stage: row.workflowStage,
-      listingStatus: row.listingStatus,
+      // t217u: Run-only fields are copied only with Run access (run.access AND a role).
+      ...(runData ? { stage: row.workflowStage, listingStatus: row.listingStatus } : {}),
     };
     return { property, rank, index };
   });

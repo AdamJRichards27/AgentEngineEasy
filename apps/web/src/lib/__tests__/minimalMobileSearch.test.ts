@@ -11,6 +11,7 @@ import {
   cleanSearchQuery,
   createSearchSequencer,
   legOutcomeFromError,
+  mobileSearchOptions,
   planSearch,
   propertyResultHref,
   type SearchLegOutcome,
@@ -18,16 +19,20 @@ import {
   type SearchPlan,
   type SearchResults,
 } from "../../minimal/mobile/mobileSearchModel";
-import { buildMinimalPropertyCards, growSafeHref } from "../../minimal/properties/minimalPropertiesModel";
+import { buildMinimalPropertyCards } from "../../minimal/properties/minimalPropertiesModel";
+import { mobilePermissions } from "../../minimal/mobile/mobilePermissions";
 import type { GrowContactListPage } from "../../lib/growContactList";
 
 // AE Mobile (CC Task #64, M1): unified People + Properties search, v1.
 
-const BOTH: SearchOptions = { canSearchContacts: true, canSearchProperties: true };
-const CONTACTS_ONLY: SearchOptions = { canSearchContacts: true, canSearchProperties: false };
-const PROPERTIES_ONLY: SearchOptions = { canSearchContacts: false, canSearchProperties: true };
-const NEITHER: SearchOptions = { canSearchContacts: false, canSearchProperties: false };
-const BOTH_PHONE: SearchOptions = { ...BOTH, phoneSearchSupported: true };
+// t217u: options can only be built from mobilePermissions() (same helper as the nav).
+const READER = mobilePermissions(["grow.contacts.read"], "Agent");
+const NO_READER = mobilePermissions([], "Agent");
+const BOTH: SearchOptions = mobileSearchOptions(READER);
+const CONTACTS_ONLY: SearchOptions = mobileSearchOptions(READER, { only: "contacts" });
+const PROPERTIES_ONLY: SearchOptions = mobileSearchOptions(NO_READER);
+const NEITHER: SearchOptions = mobileSearchOptions(mobilePermissions(null));
+const BOTH_PHONE: SearchOptions = mobileSearchOptions(READER, { phoneSearchSupported: true });
 
 function contact(id: number, displayName: string, extra: Record<string, unknown> = {}) {
   return { id, displayName, partyType: "Person", email: null, mobile: null, roles: [], relatedPropertyCount: 0, ...extra };
@@ -59,9 +64,8 @@ function results(
   plan: SearchPlan,
   contacts?: SearchLegOutcome<GrowContactListPage>,
   properties?: SearchLegOutcome<{ properties: unknown[] }>,
-  hasGrowAccess = true,
 ): SearchResults {
-  return buildSearchResults({ plan, contacts, properties, hasGrowAccess });
+  return buildSearchResults({ plan, contacts, properties });
 }
 
 test("constants match the existing conventions", () => {
@@ -122,7 +126,7 @@ test("text query plans both requests with the exact paths", () => {
 
 test("empty or blank query plans nothing and has no hint", () => {
   for (const raw of ["", "   ", null, undefined]) {
-    assert.deepEqual(planSearch(raw, BOTH), { query: null, kind: null, contacts: null, properties: null, hint: null });
+    assert.deepEqual(planSearch(raw, BOTH), { query: null, kind: null, contacts: null, properties: null, hint: null, runData: false });
   }
 });
 
@@ -177,7 +181,7 @@ test("phone search stays off by default and says so plainly", () => {
   assert.equal(on.contacts?.path, "/grow/contacts?search=0412+345+678&limit=8");
   assert.equal(on.properties, null);
   assert.equal(on.hint, null);
-  const propsOnly = planSearch("0412 345 678", { ...PROPERTIES_ONLY, phoneSearchSupported: true });
+  const propsOnly = planSearch("0412 345 678", mobileSearchOptions(NO_READER, { phoneSearchSupported: true }));
   assert.equal(propsOnly.hint, "unavailable");
 });
 
@@ -264,9 +268,9 @@ test("matchedOn: name, email, phone, or nothing", () => {
   assert.equal(find(byName, 1).matchedOn, "name");
   assert.equal(find(byName, 2).matchedOn, "email");
   assert.equal(find(byName, 4).matchedOn, null);
-  const byPhone = results(planSearch("0412 345 678", { ...CONTACTS_ONLY, phoneSearchSupported: true }), ok(page(people)));
+  const byPhone = results(planSearch("0412 345 678", mobileSearchOptions(READER, { only: "contacts", phoneSearchSupported: true })), ok(page(people)));
   assert.equal(find(byPhone, 3).matchedOn, "phone", "0412 345 678 matches a stored +61412345678");
-  const partial = results(planSearch("345 678", { ...CONTACTS_ONLY, phoneSearchSupported: true }), ok(page(people)));
+  const partial = results(planSearch("345 678", mobileSearchOptions(READER, { only: "contacts", phoneSearchSupported: true })), ok(page(people)));
   assert.equal(partial.state === "results" ? find(partial, 3).matchedOn : "none", "phone");
 });
 
@@ -307,7 +311,7 @@ test("property results copy an allow-list of fields only: ownership data never g
     placeId: "abc",
   });
   const out = results(planSearch("given", PROPERTIES_ONLY), undefined, ok({ properties: [row] }));
-  assert.deepEqual(Object.keys(out.properties!.items[0]).sort(), ["address", "href", "id", "listingStatus", "location", "stage"]);
+  assert.deepEqual(Object.keys(out.properties!.items[0]).sort(), ["address", "href", "id", "location"]); // t217u: no Run fields without Run access
   const serialised = JSON.stringify(out);
   for (const secret of ["SECRET", "ownership", "brokerageId", "agentId", "placeId"]) {
     assert.equal(serialised.includes(secret), false, secret);
@@ -317,14 +321,13 @@ test("property results copy an allow-list of fields only: ownership data never g
 test("property links match the existing Minimal property cards", () => {
   const row = property(7, "7 Given Terrace");
   const card = buildMinimalPropertyCards([{ ...row } as never], [], [])[0];
-  const out = results(planSearch("given", PROPERTIES_ONLY), undefined, ok({ properties: [row] }), true);
+  const out = results(planSearch("given", PROPERTIES_ONLY), undefined, ok({ properties: [row] }));
   assert.equal(out.properties!.items[0].href, card.href);
   assert.equal(out.properties!.items[0].location, card.location);
-  assert.equal(propertyResultHref(7, true), "/grow/properties/7");
-  assert.equal(propertyResultHref(7, false), "/properties/7");
-  assert.equal(propertyResultHref(7, false), growSafeHref("/properties/7", true));
-  const runOnly = results(planSearch("given", PROPERTIES_ONLY), undefined, ok({ properties: [row] }), false);
-  assert.equal(runOnly.properties!.items[0].href, "/properties/7");
+  // t217u: Grow is always visible, so every user opens the Grow property detail (it offers Open in Run).
+  assert.equal(propertyResultHref(7), "/grow/properties/7");
+  const run = results(planSearch("given", mobileSearchOptions(mobilePermissions(["run.access"], "Agent"))), undefined, ok({ properties: [row] }));
+  assert.equal(run.properties!.items[0].href, "/grow/properties/7");
 });
 
 test("properties rank on address, suburb and postcode", () => {
@@ -430,5 +433,5 @@ test("pure: frozen inputs are never mutated", () => {
   const plan = deepFreeze(planSearch("smith", BOTH));
   const contacts = deepFreeze(ok(page([contact(1, "Smith"), contact(2, "Smithson", { roles: ["Seller"] })], 9)));
   const props = deepFreeze(ok({ properties: [property(1, "1 Smith St", { ownershipData: { a: 1 } })] }));
-  assert.doesNotThrow(() => buildSearchResults({ plan, contacts, properties: props, hasGrowAccess: true }));
+  assert.doesNotThrow(() => buildSearchResults({ plan, contacts, properties: props }));
 });

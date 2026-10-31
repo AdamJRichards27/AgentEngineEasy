@@ -1,5 +1,5 @@
 import { hasEntitlement } from "../../lib/productNav";
-import { GROW_ACCESS, minimalHasRunAccess } from "../minimalNav";
+import { minimalHasRunAccess } from "../minimalNav";
 
 // AE Mobile (CC Task #64, M1): who may see which mobile tab and run which
 // search request. Pure logic: no React, no network, no storage.
@@ -12,24 +12,38 @@ import { GROW_ACCESS, minimalHasRunAccess } from "../minimalNav";
 // in step by lib/__tests__/minimalMobilePermissions.test.ts, which reads that
 // file and fails if the key is missing or renamed.
 //
-// This is UI gating only. The API enforces each entitlement on every request;
-// nothing here is an access decision.
+// Owner t217u (31 Oct 2026): Grow is the entry point for every user and is always
+// visible to a signed-in brokerage user, so the Grow tabs no longer depend on
+// grow.access. Run is an optional upgrade: Run items need the run.access
+// subscription entitlement AND a brokerage role (Agent, Brokerage Administrator,
+// Pit Crew); per-item role rules (Financial, Pit Crew) stay in buildProductNavLinks.
+// Contact search keeps its action-level permission, grow.contacts.read.
+//
+// This is UI gating only. The API enforces each entitlement, role and brokerage
+// scope on every request; nothing here is an access decision.
 
 export const GROW_CONTACTS_READ = "grow.contacts.read";
 
+/** Roles that may use Run when the brokerage holds run.access (packages/db USER_ROLES). */
+export const MOBILE_RUN_ROLES: readonly string[] = ["Agent", "Brokerage Administrator", "Pit Crew"];
+
 export interface MobilePermissions {
-  /** Today tab: Grow is entitled. */
+  /** Today tab: always, for a signed-in brokerage user (Grow is always visible). */
   today: boolean;
-  /** People tab: Grow is entitled and contacts may be read. Its destination lives in Grow. */
+  /** People tab: always. Contact data still needs grow.contacts.read (searchContacts, and the API). */
   people: boolean;
-  /** Properties tab: Run or Grow is entitled (same rule as the desktop sidebar). */
+  /** Properties tab: always. Properties support Grow work (appraisals, opportunities) without Run. */
   properties: boolean;
-  /** Search tab: at least one search source is permitted. */
+  /** Search tab: always. */
   search: boolean;
-  /** Search may call GET /grow/contacts. */
+  /** Search may call GET /grow/contacts (action permission grow.contacts.read). */
   searchContacts: boolean;
-  /** Search may call GET /properties. */
+  /** Search may call GET /properties (Grow-safe fields only unless `run`). */
   searchProperties: boolean;
+  /** Run items and Run data: run.access subscription AND a brokerage role. */
+  run: boolean;
+  /** Grow-only user (no run.access): show the single "Upgrade to Run" entry. */
+  upgradeToRun: boolean;
 }
 
 const NONE: MobilePermissions = {
@@ -39,23 +53,27 @@ const NONE: MobilePermissions = {
   search: false,
   searchContacts: false,
   searchProperties: false,
+  run: false,
+  upgradeToRun: false,
 };
 
-/** Fails closed: a missing or non-array entitlement list grants nothing. */
-export function mobilePermissions(entitlements: readonly string[] | null | undefined): MobilePermissions {
+/**
+ * Fails closed: a missing or non-array entitlement list (loading, signed out, no brokerage)
+ * grants nothing. A loaded list, even an empty one, is a signed-in brokerage user: Grow shows.
+ */
+export function mobilePermissions(entitlements: readonly string[] | null | undefined, role?: string): MobilePermissions {
   if (!Array.isArray(entitlements)) return { ...NONE };
-  const ctx = { role: undefined, entitlements: [...entitlements] };
-  const grow = hasEntitlement(ctx, GROW_ACCESS);
-  const run = minimalHasRunAccess(entitlements);
-  const contactsRead = hasEntitlement(ctx, GROW_CONTACTS_READ);
-  const people = grow && contactsRead;
-  const properties = grow || run;
+  const ctx = { role, entitlements: [...entitlements] };
+  const runSubscribed = minimalHasRunAccess(entitlements);
+  const runRole = typeof role === "string" && MOBILE_RUN_ROLES.includes(role);
   return {
-    today: grow,
-    people,
-    properties,
-    search: people || properties,
-    searchContacts: people,
-    searchProperties: properties,
+    today: true,
+    people: true,
+    properties: true,
+    search: true,
+    searchContacts: hasEntitlement(ctx, GROW_CONTACTS_READ),
+    searchProperties: true,
+    run: runSubscribed && runRole,
+    upgradeToRun: !runSubscribed,
   };
 }

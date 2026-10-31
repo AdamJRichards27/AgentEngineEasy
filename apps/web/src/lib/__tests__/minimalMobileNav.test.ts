@@ -31,15 +31,16 @@ test("1. Brokerage Administrator with Grow and Run: four tabs in fixed order, fu
   assert.deepEqual(n.tabs.map((t) => t.label), ["Today", "People", "Properties", "Search"]);
   assert.deepEqual(n.tabs.map((t) => t.href), ["/grow", "/grow?tab=contacts", "/properties", null]);
   assert.deepEqual(n.tabs.map((t) => t.action), [null, null, null, "open-search"]);
+  // t217u: grouped Grow, Run, Account (Communications is a Grow feature).
   assert.deepEqual(moreLabels(n), [
     "Opportunities",
     "Appraisals",
+    "Communications",
     "Run home",
     "Run today",
     "Exceptions",
     "Financial",
     "Pit Crew",
-    "Communications",
     "Settings",
   ]);
 });
@@ -47,37 +48,36 @@ test("1. Brokerage Administrator with Grow and Run: four tabs in fixed order, fu
 test("2. Grow-only agent: four tabs, no Run links in More", () => {
   const n = nav({ entitlements: GROW_ONLY, ...on });
   assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Market Activity", "My Momentum", "Communications", "Settings"]);
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Market Activity", "My Momentum", "Communications", "Settings", "Upgrade to Run"]); // t217u
   const hrefs = n.more.map((m) => m.href);
   for (const runOnly of ["/", "/today", "/exceptions", "/financial", "/pit-crew", "/properties/start"]) {
     assert.equal(hrefs.includes(runOnly), false, runOnly);
   }
 });
 
-test("3. Run-only user: Properties and Search only; More mirrors the desktop sidebar", () => {
+test("3. Run subscriber without grow.access: keeps all four tabs and Grow (t217u)", () => {
   const n = nav({ entitlements: RUN_ONLY });
-  assert.deepEqual(tabKeys(n), ["properties", "search"]);
-  // Parity with the desktop sidebar: its Grow pages stay listed so the locked screen stays reachable.
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Run home", "Run today", "Exceptions", "Communications", "Settings"]);
+  assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Communications", "Run home", "Run today", "Exceptions", "Settings"]);
 });
 
-test("4. grow.access without grow.contacts.read: no People tab; Search still has Properties", () => {
+test("4. grow.access without grow.contacts.read: People tab still shown (t217u); the page enforces the action", () => {
   const n = nav({ entitlements: ["grow.access"] });
-  assert.deepEqual(tabKeys(n), ["today", "properties", "search"]);
+  assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
 });
 
 test("5. fails closed: loading, null, undefined, and owner without brokerage return nothing", () => {
-  const empty = { tabs: [], more: [] };
+  const empty = { tabs: [], more: [], moreGroups: [], upgrade: null };
   assert.deepEqual(nav({ entitlements: GROW_RUN, entitlementsLoading: true }), empty);
   assert.deepEqual(nav({ entitlements: null }), empty);
   assert.deepEqual(nav({ entitlements: undefined }), empty);
   assert.deepEqual(nav({ entitlements: GROW_RUN, ownerWithoutContext: true }), empty);
 });
 
-test("5b. loaded but empty entitlement list: no tabs; More mirrors the desktop sidebar", () => {
+test("5b. loaded but empty entitlement list: Grow tabs, Grow More, upgrade offered (t217u)", () => {
   const n = nav({ entitlements: [] });
-  assert.deepEqual(n.tabs, []);
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Communications", "Settings"]);
+  assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Communications", "Settings", "Upgrade to Run"]);
 });
 
 test("6. invariants across roles, entitlement sets and flags", () => {
