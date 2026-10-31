@@ -1,5 +1,5 @@
 import { hasEntitlement } from "../../lib/productNav";
-import { minimalHasRunAccess } from "../minimalNav";
+import { GROW_ACCESS, minimalHasRunAccess } from "../minimalNav";
 
 // AE Mobile (CC Task #64, M1): who may see which mobile tab and run which
 // search request. Pure logic: no React, no network, no storage.
@@ -42,7 +42,7 @@ export interface MobilePermissions {
   searchProperties: boolean;
   /** Run items and Run data: run.access subscription AND a brokerage role. */
   run: boolean;
-  /** Grow-only user (no run.access): show the single "Add Run" offer. */
+  /** Grow subscriber without run.access: show the single "Add Run" offer (t222u: not unsubscribed, not Run). */
   upgradeToRun: boolean;
 }
 
@@ -74,6 +74,6 @@ export function mobilePermissions(entitlements: readonly string[] | null | undef
     searchContacts: hasEntitlement(ctx, GROW_CONTACTS_READ),
     searchProperties: true,
     run: runSubscribed && runRole,
-    upgradeToRun: !runSubscribed,
+    upgradeToRun: !runSubscribed && hasEntitlement(ctx, GROW_ACCESS),
   };
 }

@@ -74,10 +74,10 @@ test("5. fails closed: loading, null, undefined, and owner without brokerage ret
   assert.deepEqual(nav({ entitlements: GROW_RUN, ownerWithoutContext: true }), empty);
 });
 
-test("5b. loaded but empty entitlement list: Grow tabs, Grow More, upgrade offered (t217u)", () => {
+test("5b. loaded but empty entitlement list: Grow tabs, Grow More, no upgrade (t222u: Add Run is for Grow subscribers only)", () => {
   const n = nav({ entitlements: [] });
   assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Add Run", "Communications", "Settings"]);
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Communications", "Settings"]);
 });
 
 test("6. invariants across roles, entitlement sets and flags", () => {

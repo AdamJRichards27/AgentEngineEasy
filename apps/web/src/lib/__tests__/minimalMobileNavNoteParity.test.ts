@@ -25,21 +25,22 @@ test("note: four primary tabs for every persona and role", () => {
   for (const [label, n] of all()) assert.deepEqual(n.tabs.map((t) => t.label), ["Today", "People", "Properties", "Search"], label);
 });
 
-test("note: no Performance, Nurture or Ask AE anywhere; My Momentum once, at /grow/momentum, only when available", () => {
+test("note (t222u: Performance renamed Business Coach): no Performance, Nurture or Ask AE anywhere; My Momentum once, at /grow/momentum, only when available", () => {
   for (const [label, n] of all()) {
     const labels = [...n.tabs.map((t) => t.label), ...n.more.map((m) => m.label)];
     for (const banned of ["Performance", "Nurture", "Ask AE"]) assert.ok(!labels.includes(banned), `${label}: ${banned}`);
     const mm = n.more.filter((m) => m.label === "My Momentum");
     assert.equal(mm.length, label.includes("momentum=true") ? 1 : 0, label);
     if (mm[0]) assert.equal(mm[0].href, "/grow/momentum");
-    for (const m of n.more) assert.ok(!/^\/grow\?tab=(nurture|performance|ask)/.test(m.href), `${label}: ${m.href}`);
+    for (const m of n.more) assert.ok(!/^\/grow\?tab=(nurture|ask)/.test(m.href), `${label}: ${m.href}`);
   }
 });
 
 test("note: More grouped Grow, Run, Workspace; Workspace = Communications, Settings; no duplicate labels or links", () => {
   for (const [label, n] of all()) {
-    assert.deepEqual(n.moreGroups.map((g) => g.key), ["grow", "run", "workspace"], label);
-    assert.deepEqual(n.moreGroups.map((g) => g.label), ["Grow", "Run", "Workspace"], label);
+    const keys = label.startsWith("empty") ? ["grow", "workspace"] : ["grow", "run", "workspace"]; // t222u: unsubscribed has no Run group (no Add Run)
+    assert.deepEqual(n.moreGroups.map((g) => g.key), keys, label);
+    assert.deepEqual(n.moreGroups.map((g) => g.label), keys.map((k) => k[0]!.toUpperCase() + k.slice(1)), label);
     assert.deepEqual(group(n, "workspace"), ["Communications", "Settings"], label);
     const labels = [...n.tabs.map((t) => t.label), ...n.more.map((m) => m.label)];
     assert.equal(new Set(labels).size, labels.length, `${label}: duplicate label`);
@@ -51,8 +52,11 @@ test("note: More grouped Grow, Run, Workspace; Workspace = Communications, Setti
 test("note: Run links only with run.access (by role); otherwise the Run group holds exactly one 'Add Run' offer", () => {
   assert.equal(RUN_UPGRADE_LABEL, "Add Run");
   for (const [label, n] of all()) {
-    const run = group(n, "run")!;
-    if (label.startsWith("run")) {
+    const run = group(n, "run") ?? [];
+    if (label.startsWith("empty")) {
+      assert.deepEqual(run, [], label); // t222u: unsubscribed: no Add Run
+      assert.equal(n.upgrade, null, label);
+    } else if (label.startsWith("run")) {
       assert.ok(!run.includes("Add Run"), label);
       assert.deepEqual(run.slice(0, 3), ["Run home", "Run today", "Exceptions"], label);
       assert.equal(run.includes("Financial"), label.includes("/Brokerage Administrator/"), label);

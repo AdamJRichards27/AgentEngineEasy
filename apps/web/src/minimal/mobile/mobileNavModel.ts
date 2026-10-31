@@ -86,6 +86,10 @@ export const MOBILE_MORE_GROUP_MAX_ITEMS = 5;
 export const RUN_UPGRADE_HREF = "/settings?upgrade=run";
 export const RUN_UPGRADE_LABEL = "Add Run";
 
+export const GROW_AI_USE = "grow.ai.use";
+export const BUSINESS_COACH_LABEL = "Business Coach";
+export const BUSINESS_COACH_HREF = "/grow?tab=performance";
+
 const WORKSPACE_HREFS: ReadonlySet<string> = new Set(["/communications", "/settings"]);
 
 export function buildMobileNav(input: MobileNavInput): MobileNav {
@@ -126,6 +130,15 @@ export function buildMobileNav(input: MobileNavInput): MobileNav {
     ? { key: "upgrade-run", label: RUN_UPGRADE_LABEL, href: RUN_UPGRADE_HREF, path: "/settings" }
     : null;
   if (upgrade) runItems.push(upgrade);
+  // t222u: the AI Business Coach (formerly "Performance") opens the real coach screen, the classic
+  // Grow workspace's coach tab (GrowBusinessCoachTab). Offered with grow.ai.use (UI only; the AI
+  // API enforces it). My Momentum stays its own, separate entry.
+  if (entitlements.includes(GROW_AI_USE)) {
+    const at = growItems.findIndex((i) => i.href === "/grow/momentum");
+    const coach: MobileMoreItem = { key: BUSINESS_COACH_HREF, label: BUSINESS_COACH_LABEL, href: BUSINESS_COACH_HREF, path: "/grow" };
+    if (at >= 0) growItems.splice(at + 1, 0, coach);
+    else growItems.push(coach);
+  }
 
   const moreGroups: MobileMoreGroup[] = (
     [

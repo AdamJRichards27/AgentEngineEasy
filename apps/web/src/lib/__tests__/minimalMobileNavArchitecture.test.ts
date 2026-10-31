@@ -29,17 +29,17 @@ const hrefs = (n: MobileNav) => n.more.map((m) => m.href);
 const groupKeys = (n: MobileNav) => n.moreGroups.map((g) => g.key);
 const groupLabels = (n: MobileNav, key: string) => n.moreGroups.find((g) => g.key === key)?.items.map((i) => i.label) ?? null;
 
-test("t217u-1 empty entitlements: Grow tabs visible, no Run links, one Add Run offer", () => {
+test("t217u-1 / t222u empty entitlements (unsubscribed): Grow tabs visible, no Run links, no Add Run offer", () => {
   for (const role of ROLES) {
     const n = nav({ role, entitlements: [] });
     assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"], role);
     for (const p of RUN_PATHS) assert.equal(hrefs(n).includes(p), false, `${role} ${p}`);
-    assert.deepEqual(groupKeys(n), ["grow", "run", "workspace"], role);
+    assert.deepEqual(groupKeys(n), ["grow", "workspace"], role);
     assert.deepEqual(groupLabels(n, "grow"), ["Opportunities", "Appraisals"], role);
-    assert.deepEqual(groupLabels(n, "run"), ["Add Run"], role);
+    assert.equal(groupLabels(n, "run"), null, role);
     assert.deepEqual(groupLabels(n, "workspace"), ["Communications", "Settings"], role);
-    assert.equal(n.upgrade?.href, RUN_UPGRADE_HREF, role);
-    assert.equal(n.more.filter((m) => m.label === "Add Run").length, 1, `${role}: exactly one upgrade entry`);
+    assert.equal(n.upgrade, null, role);
+    assert.equal(n.more.filter((m) => m.label === "Add Run").length, 0, `${role}: no upgrade entry when unsubscribed`);
   }
 });
 

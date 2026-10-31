@@ -32,17 +32,17 @@ test("no copies: run.access and grow.access are imported, not redefined", () => 
 
 test("permission matrix", () => {
   const cases: Array<[string, readonly string[] | null | undefined, string | undefined, typeof NONE]> = [
-    ["empty list (Grow always visible; upgrade offered)", [], "Agent", { ...GROW, upgradeToRun: true }],
+    ["empty list (Grow always visible; t222u: unsubscribed, no upgrade)", [], "Agent", GROW],
     ["null (still loading)", null, "Agent", NONE],
     ["undefined", undefined, "Agent", NONE],
     ["grow.access only", ["grow.access"], "Agent", { ...GROW, upgradeToRun: true }],
-    ["grow.contacts.read (action permission for contact search)", ["grow.contacts.read"], "Agent", { ...GROW, searchContacts: true, upgradeToRun: true }],
+    ["grow.contacts.read (action permission for contact search)", ["grow.contacts.read"], "Agent", { ...GROW, searchContacts: true }],
     ["run.access + Agent role", ["run.access"], "Agent", { ...GROW, run: true }],
     ["run.access + Pit Crew role", ["run.access"], "Pit Crew", { ...GROW, run: true }],
     ["run.access without a brokerage role", ["run.access"], undefined, GROW],
     ["run.access + unknown role", ["run.access"], "Platform Owner", GROW],
     ["run + grow + contacts, Brokerage Administrator", ["run.access", "grow.access", "grow.contacts.read"], "Brokerage Administrator", { ...GROW, searchContacts: true, run: true }],
-    ["unrelated keys only", ["grow.ai.use", "grow.calling.access"], "Agent", { ...GROW, upgradeToRun: true }],
+    ["unrelated keys only (no grow.access: not a Grow subscriber)", ["grow.ai.use", "grow.calling.access"], "Agent", GROW],
   ];
   for (const [name, entitlements, role, expected] of cases) {
     assert.deepEqual(mobilePermissions(entitlements, role), expected, name);
