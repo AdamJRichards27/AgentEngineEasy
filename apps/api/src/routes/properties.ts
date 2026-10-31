@@ -60,21 +60,27 @@ const requiresRunAccess = requireEntitlement("run.access");
 // explainEntitlementDecision lookup as the requireEntitlement middleware, so it never reads (or seeds) the
 // resolveEntitlements cache: a grant change is seen on the next request, and other checks keep their semantics.
 type PropertyAccess = "run" | "grow";
-const RUN_ONLY_PROPERTY_FIELDS = [
-  "workflowStage",
-  "amlStatusSummary",
-  "listingStatus",
-  "salesMethod",
-  "priceDisplay",
-  "campaignStartDate",
-  "campaignEndDate",
-  "ownershipData",
-  "ownershipReviewRequired",
-  "ownershipReviewedBy",
-  "ownershipReviewedAt",
-  "ownershipReviewNotes",
-  "isDraft",
+// t227u (Owner, 1 Nov 2026): the Grow projection is an ALLOWLIST (fail closed). A column added to `properties`
+// later is Run-only until it is deliberately listed here, so agreement, transaction, financial, payment and
+// compliance data can never reach a Grow-only caller by omission. Grow keeps identity, address and location only.
+export const GROW_SAFE_PROPERTY_FIELDS = [
+  "id",
+  "brokerageId",
+  "agentId",
+  "formattedAddress",
+  "placeId",
+  "suburb",
+  "state",
+  "postcode",
+  "isManualAddress",
+  "latitude",
+  "longitude",
+  "dataQualityStatus",
+  "lastEnrichedAt",
+  "createdAt",
+  "updatedAt",
 ] as const;
+const GROW_SAFE_PROPERTY_FIELD_SET: ReadonlySet<string> = new Set(GROW_SAFE_PROPERTY_FIELDS);
 const GROW_SAFE_TIMELINE_CATEGORIES = new Set(["Party", "Appraisal"]);
 const GROW_SAFE_TIMELINE_ENTRY_TYPES = new Set(["PROPERTY_CREATED"]);
 
@@ -112,8 +118,8 @@ function propertyAccessOf(res: Response): PropertyAccess {
 
 function propertyForCaller<T extends Record<string, unknown>>(row: T, access: PropertyAccess): Partial<T> {
   if (access === "run") return row;
-  const copy: Record<string, unknown> = { ...row };
-  for (const field of RUN_ONLY_PROPERTY_FIELDS) delete copy[field];
+  const copy: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(row)) if (GROW_SAFE_PROPERTY_FIELD_SET.has(field)) copy[field] = value;
   return copy as Partial<T>;
 }
 const propertyDataProvider = createPropertyDataProvider();

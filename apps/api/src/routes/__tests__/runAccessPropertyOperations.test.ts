@@ -17,6 +17,7 @@ import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
 import { db, entitlementGrants, properties } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { GROW_SAFE_PROPERTY_FIELDS } from "../properties.js";
 import { cleanupBrokerages, createBrokerageWithUsers, createListedProperty, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -40,6 +41,7 @@ const RUN_ONLY_FIELDS = [
   "ownershipReviewNotes",
   "isDraft",
 ];
+const GROW_SAFE: ReadonlySet<string> = new Set<string>(GROW_SAFE_PROPERTY_FIELDS);
 const GROW_SAFE_CATEGORIES = new Set(["Property", "Party", "Appraisal"]);
 
 let server: Server;
@@ -79,6 +81,8 @@ async function createdId(res: Response): Promise<number> {
 function assertGrowProjection(row: Record<string, unknown>, label: string) {
   for (const field of RUN_ONLY_FIELDS) assert.ok(!(field in row), `${label}: Run-only field ${field} must be omitted`);
   for (const field of ["id", "brokerageId", "formattedAddress", "suburb", "state", "postcode"]) assert.ok(field in row, `${label}: ${field} kept`);
+  // t227u: fail closed. Every key a Grow-only caller sees must be on the server's Grow allowlist.
+  for (const key of Object.keys(row)) assert.ok(GROW_SAFE.has(key), `${label}: unexpected field ${key} in the Grow projection`);
 }
 function assertFullRow(row: Record<string, unknown>, label: string) {
   for (const field of ["workflowStage", "listingStatus", "amlStatusSummary"]) assert.ok(field in row, `${label}: ${field} present with run.access`);
