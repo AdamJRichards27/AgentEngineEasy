@@ -250,7 +250,7 @@ export function signedSandboxEsignWebhookHeaders(body: string): Record<string, s
 export async function createListedProperty(
   baseUrl: string,
   cookie: string,
-  opts?: { address?: string; sellerEmail?: string; state?: string },
+  opts?: { address?: string; sellerEmail?: string; state?: string; withoutAcceptedProposal?: boolean },
 ): Promise<{ propertyId: number; sellerPartyId: number; packageId: number }> {
   const address = opts?.address ?? `${Math.floor(Math.random() * 100000)} Test Street, Testville`;
   const sellerEmail = opts?.sellerEmail ?? `seller-${Date.now()}-${Math.floor(Math.random() * 100000)}@example.com`;
@@ -292,7 +292,7 @@ export async function createListedProperty(
 
   // Owner t223u: Pit Crew activation (the launch plan auto-proposed on a fully signed agreement)
   // also needs an accepted proposal, so a "listed" fixture records one (synthetic evidence).
-  await recordAcceptedProposalFixture(propertyId, sellerParty.id);
+  if (!opts?.withoutAcceptedProposal) await recordAcceptedProposalFixture(propertyId, sellerParty.id);
 
   const sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
   if (sendRes.status !== 201) throw new Error(`send-for-signature failed: ${sendRes.status} ${await sendRes.text()}`);
