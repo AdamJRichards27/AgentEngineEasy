@@ -33,10 +33,13 @@ import {
 } from "@aee/db";
 import {
   runSignalSweep,
-  tryHoldSignalSweepLockForTests,
   resetSweepResumePointForTests,
   type SweepSummary,
 } from "../sweep.js";
+// Cross-file contention on the sweep lock: see sweepLockContention.ts. Every
+// sweep that must run, and every lock this file holds, waits out a sibling
+// file that holds the lock instead of failing on the first refusal.
+import { acquireSweepLockForTest, sweepWhenLockFree } from "./sweepLockContention.js";
 import { dismissSignal, reviewSignal, DISMISS_QUIET_PERIOD_DAYS } from "../signals.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
@@ -71,8 +74,14 @@ before(async () => {
 });
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 /* ---------------------------------------------------------------------
@@ -132,8 +141,7 @@ async function createPropertylessBuyerRelationship(brokerageId: number, partyId:
 }
 
 async function sweep(brokerageIds: number[], options: { force?: boolean; maxBrokerages?: number; afterBrokerageId?: number } = {}): Promise<SweepSummary> {
-  const result = await runSignalSweep("MANUAL", { brokerageIds, force: true, ...options });
-  assert.ok(result.ok, `sweep was skipped: ${result.ok ? "" : result.skippedReason}`);
+  const result = await sweepWhenLockFree({ brokerageIds, force: true, ...options });
   return result.summary;
 }
 
@@ -431,8 +439,7 @@ test("contactability — a DNC-LISTED contact and a fully suppressed contact get
  * -----------------------------------------------------------------*/
 
 test("single flight — a second sweep is refused while one holds the advisory lock, and the run row records the outcome", async () => {
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release, "the lock must be free at the start of this test");
+  const release = await acquireSweepLockForTest();
   try {
     const refused = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
     assert.equal(refused.ok, false);
@@ -456,15 +463,25 @@ test("stale-run recovery closes an abandoned RUNNING row without any wall-clock 
   // deliberately IN THE FUTURE: any recovery that worked by comparing
   // timestamps to "now" would refuse to touch it. Lock-based recovery does
   // not care, because holding the lock IS the proof that nothing is running.
-  const [abandoned] = await db
-    .insert(growSignalSweepRuns)
-    .values({ status: "RUNNING", trigger: "SCHEDULED", startedAt: new Date(Date.now() + 10 * 60 * 1000) })
-    .returning();
+  // Inserted while holding the lock, so it never appears in the middle of a
+  // sibling file's "lock held, nothing RUNNING" test.
+  const holder = await acquireSweepLockForTest();
+  let abandoned: typeof growSignalSweepRuns.$inferSelect;
+  try {
+    [abandoned] = await db
+      .insert(growSignalSweepRuns)
+      .values({ status: "RUNNING", trigger: "SCHEDULED", startedAt: new Date(Date.now() + 10 * 60 * 1000) })
+      .returning();
+  } finally {
+    await holder();
+  }
 
   // Recovery only runs on the UNSCOPED production path (see sweep.ts), so
   // this one sweep is unscoped — bounded to a single brokerage so it stays
   // cheap, and forced so it does real work.
-  const result = await runSignalSweep("MANUAL", { maxBrokerages: 1, afterBrokerageId: 0, force: true });
+  // If a sibling file's unscoped sweep gets there first it recovers this
+  // row the same way, so the assertions below hold either way.
+  const result = await sweepWhenLockFree({ maxBrokerages: 1, afterBrokerageId: 0, force: true });
   assert.ok(result.ok);
 
   const [recovered] = await db.select().from(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, abandoned.id));
@@ -474,18 +491,18 @@ test("stale-run recovery closes an abandoned RUNNING row without any wall-clock 
 });
 
 test("bounded and resumable — a run stops at maxBrokerages and the next run continues after the last brokerage it reached", async () => {
-  const first = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId, B.brokerageId], maxBrokerages: 1, force: true });
+  const first = await sweepWhenLockFree({ brokerageIds: [A.brokerageId, B.brokerageId], maxBrokerages: 1, force: true });
   assert.ok(first.ok);
   assert.equal(first.summary.brokeragesConsidered, 1, "the run stops at its bound");
   assert.equal(first.summary.boundedOut, true);
   const firstBrokerage = first.summary.lastBrokerageId;
 
-  const second = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId, B.brokerageId], maxBrokerages: 1, afterBrokerageId: firstBrokerage, force: true });
+  const second = await sweepWhenLockFree({ brokerageIds: [A.brokerageId, B.brokerageId], maxBrokerages: 1, afterBrokerageId: firstBrokerage, force: true });
   assert.ok(second.ok);
   assert.equal(second.summary.brokeragesConsidered, 1);
   assert.notEqual(second.summary.lastBrokerageId, firstBrokerage, "the second run resumes after the first, it does not restart");
 
-  const third = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId, B.brokerageId], maxBrokerages: 5, afterBrokerageId: second.summary.lastBrokerageId, force: true });
+  const third = await sweepWhenLockFree({ brokerageIds: [A.brokerageId, B.brokerageId], maxBrokerages: 5, afterBrokerageId: second.summary.lastBrokerageId, force: true });
   assert.ok(third.ok);
   assert.equal(third.summary.brokeragesConsidered, 0, "nothing is left after both brokerages have been swept");
   assert.equal(third.summary.boundedOut, false);
@@ -506,7 +523,7 @@ test("change detection — an unchanged brokerage is skipped on the next sweep, 
   assert.ok(marks.growRelationships, "the relationship high-water mark is recorded");
 
   // Unforced and nothing changed -> skipped without evaluating.
-  const skipped = await runSignalSweep("MANUAL", { brokerageIds: [B.brokerageId] });
+  const skipped = await sweepWhenLockFree({ brokerageIds: [B.brokerageId] });
   assert.ok(skipped.ok);
   assert.equal(skipped.summary.brokeragesSkippedUnchanged, 1, "a steady-state brokerage is skipped entirely");
   assert.equal(skipped.summary.brokeragesEvaluated, 0);
@@ -514,7 +531,7 @@ test("change detection — an unchanged brokerage is skipped on the next sweep, 
 
   // Touch a source -> evaluated again, still unforced.
   await db.update(growRelationships).set({ updatedAt: new Date() }).where(and(eq(growRelationships.brokerageId, B.brokerageId), eq(growRelationships.partyId, partyId)));
-  const reEvaluated = await runSignalSweep("MANUAL", { brokerageIds: [B.brokerageId] });
+  const reEvaluated = await sweepWhenLockFree({ brokerageIds: [B.brokerageId] });
   assert.ok(reEvaluated.ok);
   assert.equal(reEvaluated.summary.brokeragesEvaluated, 1, "a brokerage whose sources moved is evaluated");
   assert.equal(reEvaluated.summary.brokeragesSkippedUnchanged, 0);
@@ -538,7 +555,11 @@ test("set-based — the statement count for one brokerage does not scale with th
         statements += 1;
       });
       try {
-        await runSignalSweep("MANUAL", { brokerageIds: [tenant.brokerageId], force: true });
+        // Count only the attempt that ran: a refusal by a sibling file's
+        // lock is one statement and must not be added to the total.
+        await sweepWhenLockFree({ brokerageIds: [tenant.brokerageId], force: true }, () => {
+          statements = 0;
+        });
       } finally {
         uninstall();
       }

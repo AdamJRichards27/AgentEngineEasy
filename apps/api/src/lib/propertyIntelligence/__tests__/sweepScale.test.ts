@@ -14,7 +14,9 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
 import { db, setDbQueryObserver, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
-import { runSignalSweep, resetSweepResumePointForTests } from "../sweep.js";
+import { resetSweepResumePointForTests } from "../sweep.js";
+// Cross-file contention on the sweep lock: see sweepLockContention.ts.
+import { sweepWhenLockFree } from "./sweepLockContention.js";
 import { UPSERT_CHUNK_SIZE } from "../persistence.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
@@ -58,8 +60,14 @@ before(async () => {
 });
 
 after(async () => {
-  await cleanupBrokerages([T?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([T?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes within budget and issues a bounded number of statements`, async () => {
@@ -109,7 +117,7 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
   const uninstall = setDbQueryObserver(() => {
     statements += 1;
   });
-  const startedAt = Date.now();
+  let startedAt = Date.now();
   let result;
   try {
     // STAGE 2: maxCandidatesPerBrokerage is now divided FAIRLY BETWEEN RULES
@@ -123,11 +131,19 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
     // The fair-share and continuation behaviour itself is covered in
     // __tests__/rules.test.ts, where a deliberately tiny cap makes it
     // observable.
-    result = await runSignalSweep("MANUAL", {
-      brokerageIds: [T.brokerageId],
-      force: true,
-      maxCandidatesPerBrokerage: SCALE_PARTIES * 10,
-    });
+    // Waits out a sibling file holding the sweep lock. Only the attempt that
+    // runs is measured: statements and the clock restart before each try.
+    result = await sweepWhenLockFree(
+      {
+        brokerageIds: [T.brokerageId],
+        force: true,
+        maxCandidatesPerBrokerage: SCALE_PARTIES * 10,
+      },
+      () => {
+        statements = 0;
+        startedAt = Date.now();
+      },
+    );
   } finally {
     uninstall();
   }
@@ -182,9 +198,12 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
   const uninstallSteady = setDbQueryObserver(() => {
     steadyStatements += 1;
   });
-  const steadyStarted = Date.now();
+  let steadyStarted = Date.now();
   try {
-    await runSignalSweep("MANUAL", { brokerageIds: [T.brokerageId] });
+    await sweepWhenLockFree({ brokerageIds: [T.brokerageId] }, () => {
+      steadyStatements = 0;
+      steadyStarted = Date.now();
+    });
   } finally {
     uninstallSteady();
   }

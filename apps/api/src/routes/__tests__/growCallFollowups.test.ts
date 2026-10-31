@@ -8,8 +8,6 @@
  */
 import assert from "node:assert/strict";
 import { after, before, mock, test } from "node:test";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -36,25 +34,14 @@ import {
   devLogin,
   type DevLoginResult,
 } from "./testSupport.js";
+import { PARENT_BUDGET_MS, runIsolatedMockChild } from "./support/isolatedMockProcess.js";
 
 const EXPECTED_TESTS = 8;
 
 if (!process.execArgv.includes("--experimental-test-module-mocks")) {
-  test("F4.1 governed call follow-ups suite (isolated module-mock process)", async (t) => {
-    const childEnv = { ...process.env };
-    delete childEnv.NODE_TEST_CONTEXT;
-    const child = spawn(process.execPath, [
-      "--experimental-test-module-mocks",
-      "--import", fileURLToPath(new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
-      "--test", "--test-reporter=tap", "--test-timeout=120000", fileURLToPath(import.meta.url),
-    ], { env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    const exit = await new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", resolve);
-    });
+  test("F4.1 governed call follow-ups suite (isolated module-mock process)", { timeout: PARENT_BUDGET_MS }, async (t) => {
+    const { exit, output, killedAtBudget, elapsedMs } = await runIsolatedMockChild(import.meta.url, "F4.1");
+    assert.equal(killedAtBudget, false, `child killed at the ${PARENT_BUDGET_MS} ms budget after ${elapsedMs} ms; output so far:\n${output}`);
     t.diagnostic(output.split("\n").filter((line) => !line.startsWith("{\"timestamp\"")).join("\n"));
     assert.equal(exit, 0, output);
     assert.match(output, new RegExp(`# tests ${EXPECTED_TESTS}\\b`), "every F4.1 route case must actually execute");

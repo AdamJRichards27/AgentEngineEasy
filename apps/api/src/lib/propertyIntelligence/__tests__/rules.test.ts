@@ -31,7 +31,9 @@ import {
   GROW_CONSENT_CHANNELS,
   type GrowOpportunitySignal,
 } from "@aee/db";
-import { runSignalSweep, resetSweepResumePointForTests, type SweepSummary } from "../sweep.js";
+import { resetSweepResumePointForTests, type SweepSummary } from "../sweep.js";
+// Cross-file contention on the sweep lock: see sweepLockContention.ts.
+import { sweepWhenLockFree } from "./sweepLockContention.js";
 import { evaluateCandidates, EVALUATION_RULE_NAMES } from "../evaluation.js";
 import { readActiveSignalsForParty } from "../signals.js";
 import { recordObservation, ownershipStartCoverage } from "../observations.js";
@@ -70,8 +72,14 @@ before(async () => {
 });
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 /* ---------------------------------------------------------------------
@@ -142,8 +150,7 @@ async function createRelationship(input: {
 }
 
 async function sweep(brokerageIds: number[], options: { force?: boolean } = {}): Promise<SweepSummary> {
-  const result = await runSignalSweep("MANUAL", { brokerageIds, force: true, ...options });
-  assert.ok(result.ok, `sweep was skipped: ${result.ok ? "" : result.skippedReason}`);
+  const result = await sweepWhenLockFree({ brokerageIds, force: true, ...options });
   return result.summary;
 }
 
