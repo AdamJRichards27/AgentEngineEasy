@@ -27,6 +27,7 @@ import {
   automationTasks,
   automationAttentionItems,
   auditLogs,
+  paymentRefunds,
   domainEvents,
   entitlementGrants,
   aiActionRequests,
@@ -64,9 +65,19 @@ import {
   commissionCalculations,
   pcFeeAuthorities,
   pcFeeCalculations,
+  financialAmendmentAuthorities,
+  feeScheduleVersions,
+  transactionFees,
+  settlementStatements,
+  settlementConfirmations,
+  financialReceipts,
+  financialCardCharges,
+  financialCardRefunds,
   financialPaymentRequests,
   financialPaymentProviderEvents,
   financialPaymentOutbox,
+  financialReconciliationExceptions,
+  pcFeeCollectionRequests,
   financialDisputes,
   marketingPaymentRecords,
   financialDeposits,
@@ -513,9 +524,47 @@ export async function getDomainEventsForProperty(propertyId: number, eventType?:
  * block must run before the parties/users deletes further down this
  * function.
  */
+type GuardBypassTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+/**
+ * TEST FIXTURES AND TEARDOWN ONLY. Runs fn in its own transaction with
+ * session_replication_role = replica, which skips the 0044 finalised-record
+ * triggers (and FK cascades). Needs a superuser on the local/CI throwaway
+ * database; application code never uses it, and an application role cannot.
+ * Used to delete test rows and to simulate legacy states production can no
+ * longer reach (for example editing an ACTIVE authority's terms).
+ */
+export async function withFinancialGuardsBypassed<T>(fn: (tx: GuardBypassTx) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`set local session_replication_role = replica`);
+    return fn(tx);
+  });
+}
+
+/** TEST ONLY: simulate an authority state production can no longer reach (0044 freezes terms after activation). */
+export async function forceAuthorityFixture(authorityId: number, patch: Partial<typeof pcFeeAuthorities.$inferInsert>): Promise<void> {
+  await withFinancialGuardsBypassed((tx) => tx.update(pcFeeAuthorities).set(patch).where(eq(pcFeeAuthorities.id, authorityId)));
+}
+
 export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   const ids = brokerageIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
   if (ids.length === 0) return;
+
+  // t179u slice 3: statements reference payment requests, fees, commission
+  // calculations and confirmations, so they go first (lines cascade).
+  // t180u: receipts reference payment requests and statements.
+  // Owner t211u (0044): finalised financial records refuse DELETE; teardown bypasses the guards in its own transaction.
+  // t212u (0045): rows that reference payment requests / provider events.
+  await db.delete(financialReconciliationExceptions).where(inArray(financialReconciliationExceptions.brokerageId, ids));
+  await db.delete(pcFeeCollectionRequests).where(inArray(pcFeeCollectionRequests.brokerageId, ids));
+  await withFinancialGuardsBypassed((tx) => tx.delete(financialReceipts).where(inArray(financialReceipts.brokerageId, ids)));
+  await db.delete(financialCardRefunds).where(inArray(financialCardRefunds.brokerageId, ids)); // t181u phase 2a (FK to card charges)
+  await db.delete(financialCardCharges).where(inArray(financialCardCharges.brokerageId, ids));
+  await withFinancialGuardsBypassed(async (tx) => {
+    // Replica mode skips FK cascades, so the lines go explicitly first.
+    await tx.execute(sql`delete from settlement_statement_lines where statement_id in (select id from settlement_statements where brokerage_id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)}))`);
+    await tx.delete(settlementStatements).where(inArray(settlementStatements.brokerageId, ids));
+  });
+  await db.delete(settlementConfirmations).where(inArray(settlementConfirmations.brokerageId, ids));
 
   // Agent Engine 2.0 — Financial Transaction Engine (Priority 9). See this
   // function's own doc comment above for the FK ordering this block
@@ -534,15 +583,20 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     // siblings above.
     await db.delete(financialPaymentOutbox).where(inArray(financialPaymentOutbox.paymentRequestId, financialPaymentRequestIds));
   }
-  await db.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids));
+  // Owner t174u: grants reference transactions, properties, users and documents.
+  // t179u slice 2: fees, then schedules (FK order).
+  await db.delete(transactionFees).where(inArray(transactionFees.brokerageId, ids));
+  await db.delete(feeScheduleVersions).where(inArray(feeScheduleVersions.brokerageId, ids));
+  await db.delete(financialAmendmentAuthorities).where(inArray(financialAmendmentAuthorities.brokerageId, ids));
+  await withFinancialGuardsBypassed((tx) => tx.delete(financialPaymentRequests).where(inArray(financialPaymentRequests.brokerageId, ids)));
   await db.delete(pcFeeCalculations).where(inArray(pcFeeCalculations.brokerageId, ids));
-  await db.delete(pcFeeAuthorities).where(inArray(pcFeeAuthorities.brokerageId, ids));
+  await withFinancialGuardsBypassed((tx) => tx.delete(pcFeeAuthorities).where(inArray(pcFeeAuthorities.brokerageId, ids)));
   await db.delete(commissionCalculations).where(inArray(commissionCalculations.brokerageId, ids));
   await db.delete(commissionAgreements).where(inArray(commissionAgreements.brokerageId, ids));
   await db.delete(marketingPaymentRecords).where(inArray(marketingPaymentRecords.brokerageId, ids));
   await db.delete(financialDeposits).where(inArray(financialDeposits.brokerageId, ids));
   await db.delete(financialReconciliations).where(inArray(financialReconciliations.brokerageId, ids));
-  await db.delete(financialLedgerEvents).where(inArray(financialLedgerEvents.brokerageId, ids));
+  await withFinancialGuardsBypassed((tx) => tx.delete(financialLedgerEvents).where(inArray(financialLedgerEvents.brokerageId, ids)));
   await db.delete(auditReturnReminders).where(inArray(auditReturnReminders.brokerageId, ids));
   await db.delete(financialSettings).where(inArray(financialSettings.brokerageId, ids));
 
@@ -764,6 +818,9 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     const serviceOrderRows = await db.select({ id: serviceOrders.id }).from(serviceOrders).where(inArray(serviceOrders.propertyId, propertyIds));
     const serviceOrderIds = serviceOrderRows.map((s) => s.id);
     if (serviceOrderIds.length > 0) {
+      // Refund ledger (0039): payment_refunds.payment_id -> payments.id, so refund rows go first.
+      const paymentRows = await db.select({ id: payments.id }).from(payments).where(inArray(payments.serviceOrderId, serviceOrderIds));
+      if (paymentRows.length > 0) await db.delete(paymentRefunds).where(inArray(paymentRefunds.paymentId, paymentRows.map((p) => p.id)));
       await db.delete(payments).where(inArray(payments.serviceOrderId, serviceOrderIds));
     }
     await db.delete(serviceOrders).where(inArray(serviceOrders.propertyId, propertyIds));

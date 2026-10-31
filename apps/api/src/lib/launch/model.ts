@@ -555,15 +555,28 @@ export async function assignResponsibility(campaignItemId: string, brokerageId: 
   return updated;
 }
 
-export async function recordVendorAndCost(campaignItemId: string, brokerageId: number, actor: ActorRef, vendorName: string | null, costCents: number): Promise<CampaignItem> {
+export async function recordVendorAndCost(
+  campaignItemId: string,
+  brokerageId: number,
+  actor: ActorRef,
+  vendorName: string | null,
+  costCents: number,
+  // Owner t173u E: optional before/after amendment audit, written in the SAME
+  // database transaction as the cost update (a failed audit rolls it back).
+  audit?: (before: CampaignItem, after: CampaignItem, tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => Promise<void>,
+): Promise<CampaignItem> {
   const item = await loadCampaignItemInBrokerage(campaignItemId, brokerageId);
   const costApprovalRequired = costCents >= LAUNCH_VENDOR_APPROVAL_THRESHOLD_CENTS;
 
-  const [updated] = await db
-    .update(campaignItems)
-    .set({ vendorName, costCents, costApprovalRequired, updatedAt: new Date() })
-    .where(eq(campaignItems.id, campaignItemId))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(campaignItems)
+      .set({ vendorName, costCents, costApprovalRequired, updatedAt: new Date() })
+      .where(eq(campaignItems.id, campaignItemId))
+      .returning();
+    if (audit) await audit(item, row!, tx);
+    return row;
+  });
 
   const scope = { propertyId: item.propertyId, brokerageId };
   await logAudit({

@@ -4,6 +4,44 @@ import { db, offers, parties, propertyParties, properties } from "@aee/db";
 import type { Offer } from "@aee/db";
 import { publishDomainEvent, currentCorrelationId, logger } from "@aee/events";
 import { logAudit } from "./audit.js";
+import { BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
+
+/**
+ * CC #34 / Owner direction t113u D8: an offer leaves `Received` exactly once.
+ * Accept, decline and withdraw are conditional on the row still being
+ * Received; the request that finds it already moved on gets this error,
+ * which routes/offers.ts answers as 409 { code: "OFFER_STATUS_CONFLICT" }.
+ */
+export class OfferStatusConflictError extends Error {
+  readonly code = "OFFER_STATUS_CONFLICT" as const;
+  constructor(
+    readonly offerId: number,
+    readonly action: "accept" | "decline" | "withdraw",
+    readonly currentStatus: string,
+  ) {
+    super(
+      `Offer ${offerId} can no longer be ${action === "accept" ? "accepted" : action === "decline" ? "declined" : "withdrawn"}: it is already ${currentStatus}.`,
+    );
+    this.name = "OfferStatusConflictError";
+  }
+}
+
+/** Moves an offer out of Received only if it is still Received (no lost update). */
+async function transitionFromReceived(
+  offerId: number,
+  to: "Declined" | "Withdrawn",
+  action: "decline" | "withdraw",
+): Promise<Offer> {
+  const [updated] = await db
+    .update(offers)
+    .set({ status: to })
+    .where(and(eq(offers.id, offerId), eq(offers.status, "Received")))
+    .returning();
+  if (updated) return updated;
+  const [current] = await db.select({ status: offers.status }).from(offers).where(eq(offers.id, offerId));
+  if (!current) throw new Error(`Offer ${offerId} not found`);
+  throw new OfferStatusConflictError(offerId, action, current.status);
+}
 
 /**
  * Offer capture (Build Brief — Phase 7, ARCHITECTURE.md §10). Offers are
@@ -150,12 +188,8 @@ export async function listOffersForProperty(propertyId: number): Promise<Offer[]
 
 /** Buyer withdrew, or the agent is retracting an offer they entered in error. */
 export async function withdrawOffer(offerId: number, userId: number): Promise<Offer> {
-  const [offer] = await db.select().from(offers).where(eq(offers.id, offerId));
-  if (!offer) throw new Error(`Offer ${offerId} not found`);
-  if (offer.status !== "Received") {
-    throw new Error(`Offer ${offerId} cannot be withdrawn from status ${offer.status}`);
-  }
-  const [updated] = await db.update(offers).set({ status: "Withdrawn" }).where(eq(offers.id, offerId)).returning();
+  const updated = await transitionFromReceived(offerId, "Withdrawn", "withdraw");
+  const offer = updated;
   await logAudit({
     brokerageId: await brokerageIdForProperty(offer.propertyId),
     userId,
@@ -169,12 +203,8 @@ export async function withdrawOffer(offerId: number, userId: number): Promise<Of
 
 /** Seller (via the agent) declined this offer without accepting another. */
 export async function declineOffer(offerId: number, userId: number): Promise<Offer> {
-  const [offer] = await db.select().from(offers).where(eq(offers.id, offerId));
-  if (!offer) throw new Error(`Offer ${offerId} not found`);
-  if (offer.status !== "Received") {
-    throw new Error(`Offer ${offerId} cannot be declined from status ${offer.status}`);
-  }
-  const [updated] = await db.update(offers).set({ status: "Declined" }).where(eq(offers.id, offerId)).returning();
+  const updated = await transitionFromReceived(offerId, "Declined", "decline");
+  const offer = updated;
   await logAudit({
     brokerageId: await brokerageIdForProperty(offer.propertyId),
     userId,
@@ -184,6 +214,54 @@ export async function declineOffer(offerId: number, userId: number): Promise<Off
     propertyId: offer.propertyId,
   });
   return updated;
+}
+
+/**
+ * CC #34 / decisions pack BE-Q1 (Owner direction t113u D8: revocable, audited
+ * buyer links, no silent replacement). `shareToken` is the unauthenticated
+ * buyer status link. Authenticated offer reads and offer-mutation responses
+ * return this view instead of the raw row, so other users in the brokerage
+ * can no longer collect every buyer's link. The token itself is unchanged
+ * (no rotation, links already sent keep working); POST create still returns
+ * it once to the user who recorded the offer. Explicit issue/revoke routes
+ * need the offer_share_links migration and wait for Owner approval.
+ */
+export type OfferView = Omit<Offer, "shareToken">;
+
+export function toOfferView(offer: Offer): OfferView {
+  const { shareToken: _shareToken, ...view } = offer;
+  return view;
+}
+
+/**
+ * Owner t165u: "Offer prices: listing agent and authorised brokerage
+ * administrators only." "Pit Crew: read only the buyer details required for
+ * assigned, authorised transaction work." Integration review P1. Same rule as
+ * #267's canSeeOfferTerms (lib/buyerEngagement.ts on that branch): Brokerage
+ * Administrators, or the Agent who is the property's listing agent
+ * (properties.agent_id). Never Pit Crew. Kept as one small function so the
+ * two copies can be folded together when #267 and this branch meet.
+ */
+export interface OfferTermsViewer {
+  role: string;
+  userId: number;
+}
+
+export function canSeeOfferTerms(viewer: OfferTermsViewer, listingAgentId: number | null | undefined): boolean {
+  if (BROKERAGE_ADMIN_ROLES.includes(viewer.role as (typeof BROKERAGE_ADMIN_ROLES)[number])) return true;
+  return viewer.role === "Agent" && listingAgentId != null && listingAgentId === viewer.userId;
+}
+
+export type FullOfferView = OfferView & { offerTermsVisible: true };
+/** Status, ids and dates only: offerPriceCents and conditions are omitted
+ * (not nulled), so a client cannot mistake them for a real zero/empty. */
+export type RedactedOfferView = Omit<OfferView, "offerPriceCents" | "conditions"> & { offerTermsVisible: false };
+
+export function toOfferViewFor(offer: Offer, termsVisible: boolean): FullOfferView | RedactedOfferView {
+  const view = toOfferView(offer);
+  if (termsVisible) return { ...view, offerTermsVisible: true };
+  const { offerPriceCents: _price, conditions: _conditions, ...redacted } = view;
+  return { ...redacted, offerTermsVisible: false };
 }
 
 // Public, unauthenticated lookup (offers.shareToken) — deliberately returns

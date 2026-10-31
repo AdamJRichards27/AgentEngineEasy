@@ -1,0 +1,47 @@
+# GR-E2E Grow signed-in smoke. PENDING OWNER ACTIVATION — not run in GitHub CI.
+# To activate, the Owner copies this file to .github/workflows/ (needs a token with workflow scope).
+# Uses only the disposable postgres service below, synthetic data seeded by
+# the test, the repo's own dev-login (ALLOW_DEV_AUTH) and dev servers on
+# loopback, and the runner's preinstalled Chrome. No secrets, no external
+# providers; the token is read-only.
+name: Grow E2E smoke
+on:
+  pull_request:
+  workflow_dispatch: {}
+concurrency:
+  group: grow-e2e-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  grow-e2e-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aee_ci
+          POSTGRES_PASSWORD: aee_ci_password
+          POSTGRES_DB: aee_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aee_ci -d aee_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://aee_ci:aee_ci_password@localhost:5432/aee_ci
+      SESSION_SECRET: ci-only-non-production-session-secret-value-not-a-real-secret
+      NODE_ENV: test
+      ALLOW_DEV_AUTH: "true"
+      CHROME_BIN: google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 8.15.5 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @aee/db run db:migrate
+      - name: Grow authenticated smoke
+        working-directory: apps/api
+        run: npx tsx --test --test-timeout=180000 e2e/growSmoke.e2e.ts

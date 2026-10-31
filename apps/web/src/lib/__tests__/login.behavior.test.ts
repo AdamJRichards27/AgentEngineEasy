@@ -138,6 +138,9 @@ const virtualMocks: Plugin = {
     }
     if (id === "\0uat-login-query") {
       return `
+        export function useQueryClient() {
+          return { invalidateQueries: async () => {}, setQueryData() {} };
+        }
         export const useQuery = (options) => {
           const key = JSON.stringify(options.queryKey);
           const table = globalThis.__uatLoginQueries || {};

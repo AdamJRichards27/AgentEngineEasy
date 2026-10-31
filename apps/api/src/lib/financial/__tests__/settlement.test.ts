@@ -254,6 +254,12 @@ describe("createPcFeeCalculation — cross-tenant pcFeeAuthorityId is rejected (
     const finalisedCalc = calcRows.sort((a, b) => b.calculationVersion - a.calculationVersion)[0];
     assert.ok(finalisedCalc, "expected a FINALISED commission calculation from an earlier describe block in this file");
 
+    // One ACTIVE authority per agent (Owner t183u, t201u): the new version supersedes the agent's
+    // earlier ACTIVE authority from this file, as activation would.
+    await db
+      .update(pcFeeAuthorities)
+      .set({ status: "REPLACED" })
+      .where(and(eq(pcFeeAuthorities.agentUserId, A.agent.user.id), eq(pcFeeAuthorities.status, "ACTIVE")));
     const [ownAuthority] = await db
       .insert(pcFeeAuthorities)
       .values({ brokerageId: A.brokerageId, agentUserId: A.agent.user.id, version: 3, status: "ACTIVE", rateBps: 500 })

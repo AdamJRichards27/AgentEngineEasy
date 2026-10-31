@@ -1,0 +1,29 @@
+/* AE Minimal A Opportunities board (WS2). Uses the minimal.css tokens; scoped
+   under .ae-minimal so nothing applies while AE_MINIMAL_UX_ENABLED is OFF. */
+.ae-minimal .am-ws2-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; padding-bottom: 8px; }
+.ae-minimal .am-ws2-column { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px; border: 1px solid var(--am-line); border-radius: 8px; background: var(--am-wash); }
+.ae-minimal .am-ws2-column h2 { display: flex; align-items: center; justify-content: space-between; margin: 0; }
+.ae-minimal .am-ws2-column .am-data-card h3 { margin: 8px 0 0; font-size: 14px; font-weight: 600; }
+.ae-minimal .am-ws2-lost-form { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.ae-minimal .am-ws2-lost-form textarea { min-height: 64px; width: 100%; }
+.ae-minimal .am-ws2-market-deferred { margin-bottom: 14px; }
+/* Card actions wrap inside the narrow column (stage select, Mark lost, Close). */
+.ae-minimal .am-ws2-column .am-data-card { min-width: 0; }
+.ae-minimal .am-ws2-column .am-data-card-footer,
+.ae-minimal .am-ws2-column .am-card-actions { display: flex; flex: 1 1 100%; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ae-minimal .am-ws2-column .am-data-card-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.ae-minimal .am-ws2-locked { margin: 0; color: var(--am-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .ae-minimal .am-ws2-board { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* WS2 accessibility pass (19 Oct 2026): a visually hidden live region, and a
+   visible focus ring on the stage select. minimal.css sets outline:0 on
+   .am-data-select select and gives the wrapper no :focus-within style. */
+.ae-minimal .ae-ws2-vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.ae-minimal .am-ws2-column .am-data-select:focus-within { outline: 3px solid #C44F17; outline-offset: 2px; }
+/* The closed toggle keeps one label, so its pressed state must be visible. */
+.ae-minimal .am-ws2-opportunities .am-data-button[aria-pressed="true"] { border-color: #212121; color: #fff; background: #212121; }
+/* "Classic view" link to /grow/opportunities?view=full: an explicit, solid focus ring. */
+.ae-minimal .am-ws2-opportunities .am-ws2-classic-link { text-decoration: none; }
+.ae-minimal .am-ws2-opportunities .am-ws2-classic-link:focus-visible { outline: 3px solid #C44F17; outline-offset: 3px; }

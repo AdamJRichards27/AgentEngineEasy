@@ -22,6 +22,9 @@ import {
 } from "../lib/transactions.js";
 import { listConditions, addCondition, rescheduleConditionDueDate, resolveCondition, recordExchange, maybeRecordUnconditional } from "../lib/transactionConditions.js";
 import { computeFundsReconciliation } from "../lib/transactionFunds.js";
+import { transactionViewFor } from "../lib/transactionPriceAccess.js";
+import { propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
+import type { AuthedUser } from "../middlewares/auth.js";
 
 export const transactionsRouter = Router();
 
@@ -158,6 +161,15 @@ async function requireTransactionAccess(req: Request, res: Response, next: NextF
     res.status(404).json({ error: "Not found" });
     return;
   }
+  // Owner t170u (3): transaction-level permissions. An Agent who is not this
+  // property's listing agent gets the same 404 as the property and offer
+  // routes (lib/propertyVisibility own-property rule). Brokerage
+  // Administrator and Pit Crew pass; the purchase price is then shaped per
+  // caller by lib/transactionPriceAccess.
+  if (await propertyHiddenFromCaller(user, transaction.propertyId)) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   next();
 }
 
@@ -165,18 +177,18 @@ transactionsRouter.get("/by-property/:propertyId", requireAuth, requiresRunAcces
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
-  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
+  if (!(await propertyInBrokerage(propertyId, user.brokerageId)) || (await propertyHiddenFromCaller(user, propertyId))) {
     res.status(404).json({ error: "Not found" });
     return;
   }
   const transaction = await getTransactionByProperty(propertyId);
-  res.json(await transactionRead(transaction));
+  res.json(await transactionRead(transaction, user, "GET /transactions/by-property/:propertyId"));
 });
 
 transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const [transaction] = await db.select().from(transactions).where(eq(transactions.id, id));
-  res.json(await transactionRead(transaction));
+  res.json(await transactionRead(transaction, user_(req), "GET /transactions/:id"));
 });
 
 /**
@@ -186,20 +198,30 @@ transactionsRouter.get("/:id", requireAuth, requiresRunAccess, requireTransactio
  * The transaction object itself is unchanged. Close still returns the
  * string list on 409 and does not return the details. This read does not close.
  */
-async function transactionRead(transaction: Transaction | null | undefined) {
+async function transactionRead(transaction: Transaction | null | undefined, user: AuthedUser, surface: string) {
   const closure = transaction ? await readTransactionClosureBlockers(transaction) : null;
+  const view = transaction ? await transactionViewFor(user, transaction, surface) : transaction;
   return {
-    transaction,
-    fundsReconciliation: transaction ? computeFundsReconciliation(transaction) : null,
+    // Owner t170u/t172u: never the raw row; confidential financial groups
+    // only for the listing agent, Brokerage Administrators and Pit Crew with
+    // an active assignment on this transaction (lib/transactionPriceAccess).
+    transaction: view,
+    // t171u/t172u: the reconciliation is derived from commission + GST and funds,
+    // so it is withheld whenever the funds group is.
+    fundsReconciliation: transaction && view && view.financialVisibility.funds ? computeFundsReconciliation(transaction) : null,
     closureBlockers: closure ? closure.closureBlockers : null,
     closureBlockerDetails: closure ? closure.closureBlockerDetails : null,
   };
 }
 
-async function handle(fn: () => Promise<unknown>, res: Response): Promise<void> {
+function user_(req: Request): AuthedUser {
+  return req.authedUser!;
+}
+
+async function handle(fn: () => Promise<Transaction>, res: Response, req: Request): Promise<void> {
   try {
     const transaction = await fn();
-    res.json({ transaction });
+    res.json({ transaction: await transactionViewFor(user_(req), transaction, `${req.method} ${req.baseUrl}${req.route?.path ?? ""}`) });
   } catch (err) {
     if (err instanceof TransactionClosureBlockedError) {
       res.status(409).json({ error: err.message, blockers: err.blockers });
@@ -212,13 +234,13 @@ async function handle(fn: () => Promise<unknown>, res: Response): Promise<void> 
 transactionsRouter.post("/:id/contract-signed", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
-  await handle(() => recordContractSigned({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+  await handle(() => recordContractSigned({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res, req);
 });
 
 transactionsRouter.post("/:id/finance-approved", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
-  await handle(() => recordFinanceApproved({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+  await handle(() => recordFinanceApproved({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res, req);
 });
 
 const settlementScheduleSchema = z.object({ settlementDate: z.coerce.date() });
@@ -240,6 +262,7 @@ transactionsRouter.post("/:id/settlement-schedule", requireAuth, requiresRunAcce
         settlementDate: parsed.data.settlementDate,
       }),
     res,
+    req,
   );
 });
 
@@ -307,7 +330,7 @@ transactionsRouter.post(
   async (req, res) => {
     const id = accessCheckedTransactionId(req);
     const user = req.authedUser!;
-    await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+    await handle(() => completeSettlement({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res, req);
   },
 );
 
@@ -323,6 +346,7 @@ transactionsRouter.post(
     await handle(
       () => calculateCommission({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force: req.body?.force === true }),
       res,
+      req,
     );
   },
 );
@@ -352,6 +376,7 @@ transactionsRouter.post(
           amountCents: parsed.data.amountCents,
         }),
       res,
+      req,
     );
   },
 );
@@ -367,7 +392,7 @@ transactionsRouter.post(
   async (req, res) => {
     const id = accessCheckedTransactionId(req);
     const user = req.authedUser!;
-    await handle(() => recordAgentPaid({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+    await handle(() => recordAgentPaid({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res, req);
   },
 );
 
@@ -387,7 +412,7 @@ transactionsRouter.post(
     const id = accessCheckedTransactionId(req);
     const user = req.authedUser!;
     const force = req.body?.force === true;
-    await handle(() => closeTransaction({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force }), res);
+    await handle(() => closeTransaction({ transactionId: id, userId: user.id, brokerageId: user.brokerageId, force }), res, req);
   },
 );
 
@@ -482,7 +507,7 @@ transactionsRouter.post("/conditions/:conditionId/resolve", requireAuth, require
 transactionsRouter.post("/:id/exchange", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
   const id = accessCheckedTransactionId(req);
   const user = req.authedUser!;
-  await handle(() => recordExchange({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res);
+  await handle(() => recordExchange({ transactionId: id, userId: user.id, brokerageId: user.brokerageId }), res, req);
 });
 
 transactionsRouter.post("/:id/unconditional", requireAuth, requiresRunAccess, requireTransactionAccess, async (req, res) => {
@@ -501,7 +526,7 @@ transactionsRouter.post("/:id/unconditional", requireAuth, requiresRunAccess, re
       res.status(409).json({ error: "Transaction cannot be marked unconditional yet.", blockers });
       return;
     }
-    res.json({ transaction });
+    res.json({ transaction: await transactionViewFor(user, transaction, "POST /transactions/:id/unconditional") });
   } catch (err) {
     handleTransactionError(err, res);
   }
@@ -532,5 +557,6 @@ transactionsRouter.post("/:id/legal-representatives", requireAuth, requiresRunAc
         buyerSolicitorPartyId: parsed.data.buyerSolicitorPartyId,
       }),
     res,
+    req,
   );
 });

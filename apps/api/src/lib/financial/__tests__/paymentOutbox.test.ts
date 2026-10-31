@@ -7,8 +7,7 @@ import {
   createBrokerageWithUsers,
   createTransactionFromListedProperty,
   cleanupBrokerages,
-  type DevLoginResult,
-} from "../../../routes/__tests__/testSupport.js";
+  type DevLoginResult, devLogin } from "../../../routes/__tests__/testSupport.js";
 import { createCommissionCalculation } from "../calculations.js";
 import { createPcFeeCalculation } from "../pcFeeCalculations.js";
 import { ensurePcSuccessFeeRequest } from "../settlement.js";
@@ -49,14 +48,17 @@ interface Fixture {
   authorityId: number;
 }
 
-// pc_fee_authorities has a unique (agentUserId, version) index, and every
-// fixture below deliberately shares the SAME agent (there is only one
-// agent in this file's brokerage) — so each fixture's authority needs its
-// own version number rather than every one hardcoding version: 1.
+// Each fixture below has its own agent (one ACTIVE PC fee authority per
+// agent: Owner t183u, t201u). The version counter is kept so authority
+// versions stay unique even if fixtures ever share an agent again.
 let authorityVersionCounter = 0;
+let fixtureAgentCounter = 0;
 
 async function buildFixture(input: { addressSuffix: string; noticeRequiredDays: number; withMandateRef: boolean }): Promise<Fixture> {
-  const created = await createTransactionFromListedProperty(baseUrl, A.agent.cookie, {
+  // One ACTIVE PC fee authority per agent (Owner t183u, t201u): each fixture gets its own agent, so
+  // its ACTIVE authority never coexists with another fixture's ACTIVE authority for the same agent.
+  const fixtureAgent = await devLogin(baseUrl, { email: `fixture-agent-${suffix}-${++fixtureAgentCounter}@example.com`, firstName: "Fixture", lastName: `Agent${fixtureAgentCounter}`, brokerageName: `Payment Outbox Test ${suffix}` });
+  const created = await createTransactionFromListedProperty(baseUrl, fixtureAgent.cookie, {
     address: `1 Payment Outbox Test St ${suffix} ${input.addressSuffix}`,
   });
   const { propertyId, transactionId } = created;
@@ -79,7 +81,7 @@ async function buildFixture(input: { addressSuffix: string; noticeRequiredDays: 
     .insert(pcFeeAuthorities)
     .values({
       brokerageId: A.brokerageId,
-      agentUserId: A.agent.user.id,
+      agentUserId: fixtureAgent.user.id,
       version: ++authorityVersionCounter,
       status: "ACTIVE",
       rateBps: 690,

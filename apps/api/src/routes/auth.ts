@@ -3,7 +3,13 @@ import { eq, sql, and, gt, isNull, desc, count } from "drizzle-orm";
 import { z } from "zod";
 import { db, users, brokerages, invitations, passwordResetTokens, consentRecords, auditLogs, entitlementGrants, USER_ROLES } from "@aee/db";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
-import { setSessionCookie, clearSessionCookie } from "../lib/session.js";
+import { setSessionCookie, clearSessionCookie, parseCookies } from "../lib/session.js";
+import {
+  MINIMAL_UX_VIEW_COOKIE,
+  applyMinimalUxViewCookie,
+  minimalUxClientPayload,
+  resolveMinimalUx,
+} from "../lib/minimalUx.js";
 import { logAudit } from "../lib/audit.js";
 import { isDevAuthEnabled } from "../lib/env.js";
 import { incrementCounter, logger } from "@aee/events";
@@ -231,6 +237,12 @@ authRouter.get("/me", requireAuth, async (req, res) => {
   }
   const [b] = await db.select().from(brokerages).where(eq(brokerages.id, authed.brokerageId));
   const entitlements = await resolveEntitlements(authed);
+  const viewCookie = parseCookies(req.header("cookie"))[MINIMAL_UX_VIEW_COOKIE];
+  const ux = minimalUxClientPayload(resolveMinimalUx({
+    userId: row.id,
+    email: row.email,
+    viewCookie,
+  }));
   res.json({ user: {
     ...userView({ ...row, brokerageId: authed.brokerageId, role: authed.role }, b?.name),
     platformOwner: !!req.platformOwner,
@@ -238,7 +250,40 @@ authRouter.get("/me", requireAuth, async (req, res) => {
       ownerHomeBrokerageId: req.platformOwner.homeBrokerageId,
       ownerSelectedBrokerageId: req.platformOwner.selectedBrokerageId,
     } : {}),
-  }, entitlements: Array.from(entitlements) });
+  }, entitlements: Array.from(entitlements), ux });
+});
+
+const uxViewSchema = z.object({
+  variant: z.enum(["classic", "minimal"]),
+}).strict();
+
+// Classic / Minimal shell choice. Eligibility is decided here from the flag
+// and the per-user allowlist. A caller who is not eligible cannot opt in.
+// The preference cookie is scoped to this user id, so it does not follow a
+// different account on the same browser.
+authRouter.post("/ux-view", requireAuth, async (req, res) => {
+  const parsed = uxViewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Choose classic or minimal." });
+    return;
+  }
+  const authed = req.authedUser!;
+  const [row] = await db.select().from(users).where(eq(users.id, authed.id));
+  if (!row) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  const decision = resolveMinimalUx({ userId: row.id, email: row.email });
+  if (parsed.data.variant === "minimal" && !decision.eligible) {
+    res.status(403).json({
+      error: "AE Minimal is not enabled for this account.",
+      ux: { eligible: false, variant: "classic" },
+    });
+    return;
+  }
+  const variant = decision.eligible ? parsed.data.variant : "classic";
+  if (decision.eligible) applyMinimalUxViewCookie(res, row.id, variant);
+  res.json({ ux: { eligible: decision.eligible, variant } });
 });
 
 const updateOwnNameSchema = z

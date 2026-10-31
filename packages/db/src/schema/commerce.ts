@@ -56,7 +56,10 @@ export const payments = pgTable("payments", {
   provider: text("provider").notNull(),
   providerChargeRef: text("provider_charge_ref"),
   amountCents: integer("amount_cents").notNull(),
-  status: text("status").notNull().default("Pending"), // Pending | Succeeded | Failed | Refunded
+  status: text("status").notNull().default("Pending"), // Pending | Succeeded | Failed | PartiallyRefunded | Refunded
+  // Refund ledger (migration 0039, GATED: local scratch only until Owner approval for shared envs).
+  // Sum of SUCCEEDED payment_refunds rows; CHECK 0 <= refunded_cents <= amount_cents.
+  refundedCents: integer("refunded_cents").notNull().default(0),
   // Idempotency key on every charge attempt (Build Brief §21 — critical:
   // repeated button clicks must never charge twice).
   idempotencyKey: text("idempotency_key").notNull().unique(),
@@ -68,6 +71,32 @@ export const payments = pgTable("payments", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
+
+// Refund ledger (orchestrator/specs/partial-refund-ledger.md; migration 0039, GATED).
+// One row per refund attempt. In-flight rows (PENDING/SUBMITTED/UNKNOWN/MANUAL_REVIEW) reserve
+// the amount; SUCCEEDED rows are counted in payments.refunded_cents; FAILED releases it.
+export const PAYMENT_REFUND_STATUSES = ["PENDING", "SUBMITTED", "SUCCEEDED", "FAILED", "UNKNOWN", "MANUAL_REVIEW"] as const;
+export type PaymentRefundStatus = (typeof PAYMENT_REFUND_STATUSES)[number];
+export const paymentRefunds = pgTable("payment_refunds", {
+  id: serial("id").primaryKey(),
+  paymentId: integer("payment_id").notNull().references(() => payments.id),
+  brokerageId: integer("brokerage_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  status: text("status").notNull().default("PENDING"),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  provider: text("provider").notNull(),
+  providerRefundRef: text("provider_refund_ref").unique(),
+  failureReason: text("failure_reason"),
+  reason: text("reason"),
+  requestedByUserId: integer("requested_by_user_id"),
+  submittedAt: timestamp("submitted_at"),
+  resolvedAt: timestamp("resolved_at"),
+  reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
+  nextReconcileAt: timestamp("next_reconcile_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type PaymentRefund = typeof paymentRefunds.$inferSelect;
 
 export const insertPaymentMethodSchema = createInsertSchema(paymentMethods).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertServiceOrderSchema = createInsertSchema(serviceOrders).omit({ id: true, orderedAt: true, completedAt: true });

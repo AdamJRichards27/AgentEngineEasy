@@ -1,9 +1,9 @@
 import { eq, and, desc } from "drizzle-orm";
 import { db, paymentMethods, serviceOrders, payments, properties } from "@aee/db";
 import type { PaymentMethod, ServiceOrder, Payment } from "@aee/db";
-import { createPaymentProvider, type PaymentWebhookResult } from "@aee/integration-payments";
-
-const paymentProvider = createPaymentProvider();
+import type { PaymentWebhookResult } from "@aee/integration-payments";
+import { paymentProvider } from "./paymentProvider.js";
+import { requestRefund, applyProviderRefundReports, type RefundOutcome } from "./paymentRefunds.js";
 
 /**
  * Attaches an already-tokenized stored payment method (Phase 6). Real card
@@ -163,14 +163,76 @@ export interface ChargeServiceOrderResult {
  * incrementing a serviceOrderId, a stored payment method belonging to
  * brokerage A.
  */
+// S-1b: stable, client-safe codes for chargeServiceOrder failures. The route maps
+// each to a status and an agent-facing sentence (routes/payments.ts chargeErrorResponse);
+// internal detail (ids, driver text) stays server-side.
+export type ServiceOrderChargeErrorCode =
+  | "SERVICE_ORDER_NOT_FOUND"
+  | "SERVICE_ORDER_PROPERTY_MISSING"
+  | "PAYMENT_METHOD_REQUIRED"
+  | "SERVICE_ORDER_CHARGE_FORBIDDEN";
+export class ServiceOrderChargeError extends Error {
+  constructor(
+    public readonly code: ServiceOrderChargeErrorCode,
+    detail?: string,
+    /** Set only once the order is known to be in the caller's brokerage (audit context; never sent to the client). */
+    public readonly propertyId?: number,
+  ) {
+    super(detail ?? code);
+    this.name = "ServiceOrderChargeError";
+  }
+}
+
+/**
+ * Owner t174u(4) (CC #37): charging a ServiceOrder debits the listing agent's
+ * saved card, so only the listing agent of the order's property, or a
+ * Brokerage Administrator of the same brokerage, may trigger it. Pit Crew are
+ * prohibited from executing, approving or releasing payments (403); any other
+ * Agent in the brokerage gets the same 404 as a missing order (no disclosure).
+ * Cross-brokerage callers never reach this check (tenant join 404s first).
+ * Decided before the idempotent "already settled" return and before any
+ * provider call, so a denied caller learns nothing about the payment state.
+ */
+export type ChargeAuthorization = "allowed" | "forbidden" | "not_found";
+export function chargeAuthorizationFor(
+  caller: { id: number; role: string },
+  property: { agentId: number },
+): ChargeAuthorization {
+  if (caller.role === "Brokerage Administrator") return "allowed";
+  if (caller.role === "Pit Crew") return "forbidden";
+  if (caller.role === "Agent" && property.agentId === caller.id) return "allowed";
+  return "not_found";
+}
+
 export async function chargeServiceOrder(input: {
   serviceOrderId: number;
   userId: number;
+  role: string;
   brokerageId: number;
 }): Promise<ChargeServiceOrderResult> {
   const serviceOrder = await selectServiceOrderInBrokerage(input.serviceOrderId, input.brokerageId);
   if (!serviceOrder) {
-    throw new Error(`ServiceOrder ${input.serviceOrderId} not found`);
+    throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`);
+  }
+
+  const [property] = await db
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, serviceOrder.propertyId), eq(properties.brokerageId, input.brokerageId)));
+  if (!property) {
+    // Only a Brokerage Administrator learns the property record is unavailable; nobody else can be shown to be its listing agent.
+    if (input.role === "Brokerage Administrator") {
+      throw new ServiceOrderChargeError("SERVICE_ORDER_PROPERTY_MISSING", `Property ${serviceOrder.propertyId} not found`, serviceOrder.propertyId);
+    }
+    throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`, serviceOrder.propertyId);
+  }
+
+  const authorization = chargeAuthorizationFor({ id: input.userId, role: input.role }, property);
+  if (authorization === "forbidden") {
+    throw new ServiceOrderChargeError("SERVICE_ORDER_CHARGE_FORBIDDEN", undefined, serviceOrder.propertyId);
+  }
+  if (authorization === "not_found") {
+    throw new ServiceOrderChargeError("SERVICE_ORDER_NOT_FOUND", `ServiceOrder ${input.serviceOrderId} not found`, serviceOrder.propertyId);
   }
 
   const existingAttempts = await db
@@ -184,18 +246,13 @@ export async function chargeServiceOrder(input: {
     return { payment: settled, serviceOrder, created: false };
   }
 
-  const [property] = await db.select().from(properties).where(eq(properties.id, serviceOrder.propertyId));
-  if (!property) {
-    throw new Error(`Property ${serviceOrder.propertyId} not found`);
-  }
-
   // Payer resolution (Section 12): the listing agent's own stored method is
   // the default payer for a property's service charges. Team/brokerage
   // billing arrangements are real future scope (paymentMethods.payerType
   // already models Brokerage/Team/etc. for that), not built here.
   const paymentMethod = await defaultPaymentMethodFor("Agent", property.agentId);
   if (!paymentMethod) {
-    throw new Error("No default payment method on file for this agent. Add one before charging.");
+    throw new ServiceOrderChargeError("PAYMENT_METHOD_REQUIRED", undefined, serviceOrder.propertyId);
   }
 
   const attemptNumber = existingAttempts.length + 1;
@@ -263,7 +320,7 @@ export async function chargeServiceOrder(input: {
 
 export interface ProcessPaymentWebhookResult {
   processed: boolean;
-  reason?: "invalid_signature" | "payment_not_found" | "duplicate_delivery";
+  reason?: "invalid_signature" | "payment_not_found" | "duplicate_delivery" | "refund_without_detail";
   payment?: Payment;
 }
 
@@ -290,6 +347,19 @@ export async function processPaymentWebhook(
   const [payment] = await db.select().from(payments).where(eq(payments.providerChargeRef, result.providerChargeRef));
   if (!payment) {
     return { processed: false, reason: "payment_not_found" };
+  }
+
+  // Refund ledger: a refund event records each reported refund on its own payment_refunds row and
+  // recomputes the payment from the ledger (PartiallyRefunded vs Refunded). It never flips the whole
+  // payment to Refunded just because the event type is charge.refunded.
+  if (result.refunds) {
+    const changed = await applyProviderRefundReports(payment, result.refunds);
+    const [fresh] = await db.select().from(payments).where(eq(payments.id, payment.id));
+    return changed ? { processed: true, payment: fresh } : { processed: false, reason: "duplicate_delivery", payment: fresh };
+  }
+  if (result.status === "Refunded") {
+    // A provider that reports "Refunded" with no refund detail can't be reconciled to the ledger safely.
+    return { processed: false, reason: "refund_without_detail", payment };
   }
 
   if (payment.status === result.status) {
@@ -331,30 +401,33 @@ export async function processPaymentWebhook(
  * Administrator can never refund another brokerage's payment by guessing or
  * incrementing a paymentId.
  */
-export async function refundPayment(input: { paymentId: number; amountCents?: number; brokerageId: number }): Promise<Payment> {
-  const payment = await selectPaymentInBrokerage(input.paymentId, input.brokerageId);
-  if (!payment) {
-    throw new Error(`Payment ${input.paymentId} not found`);
+// S-1c: stable, client-safe codes for refundPayment failures (mapped in routes/payments.ts refundErrorResponse).
+// The class now lives with the refund ledger (lib/paymentRefunds.ts) and is re-exported here unchanged.
+import { PaymentRefundError } from "./paymentRefunds.js";
+export { PaymentRefundError, type PaymentRefundErrorCode } from "./paymentRefunds.js";
+
+// S-1d: amountCents, when present, must be a positive safe integer.
+// Refund ledger (t429u): omitted now means "the remaining amount" (amount - refunded - in-flight), not
+// payment.amountCents. The work happens in lib/paymentRefunds.ts (lock, reservation row, idempotent
+// provider call, reconciliation). This wrapper keeps the S-1c/S-1d signature and error codes.
+export async function refundPayment(input: {
+  paymentId: number;
+  amountCents?: unknown;
+  brokerageId: number;
+  userId?: number;
+  clientIdempotencyKey?: string;
+}): Promise<Payment & { refund?: RefundOutcome["refund"]; replayed?: boolean }> {
+  if (input.amountCents !== undefined && !(typeof input.amountCents === "number" && Number.isSafeInteger(input.amountCents) && input.amountCents > 0)) {
+    throw new PaymentRefundError("REFUND_AMOUNT_INVALID");
   }
-  if (payment.status !== "Succeeded") {
-    throw new Error(`Payment ${input.paymentId} is not in a refundable state (status: ${payment.status})`);
-  }
-  if (!payment.providerChargeRef) {
-    throw new Error(`Payment ${input.paymentId} has no provider charge reference to refund`);
-  }
-
-  const refundAmount = input.amountCents ?? payment.amountCents;
-  await paymentProvider.refund(payment.providerChargeRef, refundAmount);
-
-  const [updated] = await db
-    .update(payments)
-    .set({ status: "Refunded", updatedAt: new Date() })
-    .where(eq(payments.id, payment.id))
-    .returning();
-
-  await db.update(serviceOrders).set({ paymentStatus: "Refunded" }).where(eq(serviceOrders.id, payment.serviceOrderId));
-
-  return updated;
+  const outcome = await requestRefund({
+    paymentId: input.paymentId,
+    amountCents: input.amountCents as number | undefined,
+    brokerageId: input.brokerageId,
+    userId: input.userId,
+    clientIdempotencyKey: input.clientIdempotencyKey,
+  });
+  return { ...outcome.payment, refund: outcome.refund, replayed: outcome.replayed };
 }
 
 /**

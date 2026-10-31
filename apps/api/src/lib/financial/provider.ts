@@ -12,3 +12,11 @@
 import { createMandatePaymentProvider } from "@aee/integration-mandate-payments";
 
 export const mandatePaymentProvider = createMandatePaymentProvider();
+
+/**
+ * Owner t183u item 6 (#245 S5): only the sandbox mandate provider may process. The factory can only
+ * build the sandbox today; this is the defence-in-depth gate every debit call site checks first.
+ */
+export function mandateProviderPermitted(): boolean {
+  return mandatePaymentProvider.name === "sandbox";
+}

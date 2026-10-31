@@ -153,7 +153,7 @@ function opportunityListConditions(
   brokerageId: number,
   restrictTo: number[] | null,
   callerUserId: number,
-  filters: { id?: number; search?: string; type?: GrowOpportunityListTypeFilter },
+  filters: { id?: number; propertyId?: number; search?: string; type?: GrowOpportunityListTypeFilter },
 ): SQL[] {
   const conditions: SQL[] = [eq(growOpportunities.brokerageId, brokerageId)];
   const visibility = visibleOwnedOrLinkedPropertySql(
@@ -164,6 +164,11 @@ function opportunityListConditions(
   );
   if (visibility) conditions.push(visibility);
   if (filters.id !== undefined) conditions.push(eq(growOpportunities.id, filters.id));
+  // propertyId is an extra AND on top of the brokerage and visibility
+  // predicates above, never a replacement for them. A foreign, missing, or
+  // invisible property therefore yields the same empty page as `?id=` does
+  // (list semantics, no existence oracle), see GET /grow/opportunities.
+  if (filters.propertyId !== undefined) conditions.push(eq(growOpportunities.propertyId, filters.propertyId));
   if (filters.search && filters.search.length > 0) {
     const pattern = `%${filters.search}%`;
     const fullNamePattern = `%${filters.search.replace(/\s+/g, " ")}%`;
@@ -801,6 +806,21 @@ growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"),
     res.status(400).json({ error: "id must be a positive integer" });
     return;
   }
+  // propertyId: same validation as id. Filter semantics, not lookup
+  // semantics: a property in another brokerage, a missing property, and a
+  // property the caller cannot see all return 200 with a byte-identical empty
+  // page. This matches `?id=` on this list (a list filter narrows, it does
+  // not look up), costs no extra property query, and leaves the 404 for a
+  // foreign or hidden property to GET /properties/:id, which the detail page
+  // calls first. Visibility is unchanged: a property-linked opportunity
+  // still needs the property in the caller's own-property set. The constant response header
+  // `X-AE-Grow-Filters: propertyId` lets clients detect that the server
+  // honoured the filter without putting caller input in the body.
+  const propertyFilter = parseOptionalPositiveId(req.query.propertyId);
+  if (!propertyFilter.ok) {
+    res.status(400).json({ error: "propertyId must be a positive integer" });
+    return;
+  }
   const typeFilter = parseGrowOpportunityListTypeFilter(req.query.type);
   if (!typeFilter.ok) {
     res.status(400).json({ error: typeFilter.error });
@@ -810,10 +830,12 @@ growRouter.get("/opportunities", requireAuth, requireEntitlement("grow.access"),
   const restrictTo = await restrictedPropertyIdsFor(user);
   const conditions = opportunityListConditions(user.brokerageId, restrictTo, user.id, {
     id: idFilter.id ?? undefined,
+    propertyId: propertyFilter.id ?? undefined,
     search,
     type: typeFilter.filter,
   });
   const filtered = and(...conditions);
+  if (propertyFilter.id !== null) res.setHeader("X-AE-Grow-Filters", "propertyId");
   const { limit, cursor } = pageQuery.page;
   const pageWhere = cursor
     ? and(filtered, descendingKeysetBefore(growOpportunities.createdAt, growOpportunities.id, cursor))

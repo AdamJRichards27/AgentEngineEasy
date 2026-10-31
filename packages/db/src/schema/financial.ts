@@ -61,13 +61,14 @@
 // "reported"/"evidence"/"reconciled" language is used throughout —
 // never "held"/"AE trust balance"/"disbursed by AE".
 
-import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, boolean, jsonb, timestamp, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { brokerages, users } from "./users";
 import { properties } from "./property";
 import { transactions } from "./transaction";
+import { paymentMethods } from "./commerce";
 
 // ---------------------------------------------------------------------
 // Shared vocabularies
@@ -98,6 +99,11 @@ export type FinancialSnapshotState = (typeof FINANCIAL_SNAPSHOT_STATES)[number];
 
 export const PC_FEE_BASES = ["PERCENTAGE_OF_GCI", "FIXED_AMOUNT", "NONE", "MANUAL_WITH_REASON"] as const;
 export type PcFeeBasis = (typeof PC_FEE_BASES)[number];
+
+export const PC_FEE_AUTHORITY_PAYMENT_METHODS = ["GENERAL_ACCOUNT_DEBIT_MANDATE", "STORED_CARD"] as const;
+export type PcFeeAuthorityPaymentMethod = (typeof PC_FEE_AUTHORITY_PAYMENT_METHODS)[number];
+export const PC_FEE_AUTHORITY_PAYER_TYPES = ["Agent", "Brokerage"] as const;
+export type PcFeeAuthorityPayerType = (typeof PC_FEE_AUTHORITY_PAYER_TYPES)[number];
 
 export const PC_FEE_AUTHORITY_STATUSES = ["NOT_PROVIDED", "PENDING", "ACTIVE", "EXPIRED", "REVOKED", "REPLACED", "INVALID"] as const;
 export type PcFeeAuthorityStatus = (typeof PC_FEE_AUTHORITY_STATUSES)[number];
@@ -137,7 +143,7 @@ export type PaymentRequestKind = (typeof PAYMENT_REQUEST_KINDS)[number];
 export const OUTBOX_ACTIONS = ["SCHEDULE_DEBIT", "CANCEL_DEBIT", "REVERSE_DEBIT"] as const;
 export type OutboxAction = (typeof OUTBOX_ACTIONS)[number];
 
-export const OUTBOX_STATUSES = ["PENDING", "DISPATCHED", "FAILED"] as const;
+export const OUTBOX_STATUSES = ["PENDING", "DISPATCHED", "FAILED", "CANCELLED"] as const; // CANCELLED: t212u item 4, provider-confirmed cancellation of pending retries
 export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
 
 export const DISPUTE_STATUSES = ["OPEN", "UNDER_REVIEW", "RESOLVED_PAYABLE", "RESOLVED_ADJUSTED", "RESOLVED_WAIVED", "CLOSED"] as const;
@@ -338,6 +344,23 @@ export const pcFeeAuthorities = pgTable(
     // reference from a provider, or null in sandbox until one exists.
     mandateProviderRef: text("mandate_provider_ref"),
     mandateProvider: text("mandate_provider"), // e.g. "sandbox"
+    // Owner t180u(3) (slice 6, migration 0043): the SINGLE nominated payment
+    // method (D8, no fallback). GENERAL_ACCOUNT_DEBIT_MANDATE uses the mandate
+    // above; STORED_CARD names exactly one tokenised payment_methods row
+    // (provider tokens only, never card data). payer_type says whose
+    // authority covers the charge: the agent's own, or the brokerage's (D3,
+    // stored card only, Brokerage Administrator approval under a signed mandate).
+    payerType: text("payer_type").notNull().default("Agent"), // PC_FEE_AUTHORITY_PAYER_TYPES
+    paymentMethodId: integer("payment_method_id").references(() => paymentMethods.id),
+    brokerageCardApprovedByUserId: integer("brokerage_card_approved_by_user_id").references(() => users.id),
+    brokerageCardApprovedAt: timestamp("brokerage_card_approved_at"),
+    // Owner t181u(A): the signed AE agreement and payment-mandate terms
+    // versions this authority was executed under. Immediate collection on
+    // final statement issue applies only when BOTH versions expressly permit
+    // it (lib/financial/pcFeeTerms.ts); null = pre-versioned terms, which fail
+    // closed to the notice period. A terms change is a new authority version.
+    agreementTermsVersion: text("agreement_terms_version"),
+    mandateTermsVersion: text("mandate_terms_version"),
 
     maximumAmountCents: integer("maximum_amount_cents"),
     noticeRequiredDays: integer("notice_required_days").notNull().default(7),
@@ -356,7 +379,20 @@ export const pcFeeAuthorities = pgTable(
   (table) => ({
     agentVersionIdx: uniqueIndex("pc_fee_authorities_agent_version_idx").on(table.agentUserId, table.version),
     agentStatusIdx: index("pc_fee_authorities_agent_status_idx").on(table.agentUserId, table.status),
+    // Owner t211u (0044): at most one ACTIVE authority per agent, enforced by the database.
+    oneActivePerAgent: uniqueIndex("pc_fee_authorities_one_active_per_agent_idx").on(table.agentUserId).where(sql`${table.status} = 'ACTIVE'`),
     brokerageStatusIdx: index("pc_fee_authorities_brokerage_status_idx").on(table.brokerageId, table.status),
+    methodCheck: check("pc_fee_authorities_method_check", sql`${table.authorisedPaymentMethod} in ('GENERAL_ACCOUNT_DEBIT_MANDATE', 'STORED_CARD')`),
+    payerTypeCheck: check("pc_fee_authorities_payer_type_check", sql`${table.payerType} in ('Agent', 'Brokerage')`),
+    cardMethodCheck: check(
+      "pc_fee_authorities_card_method_check",
+      sql`(${table.authorisedPaymentMethod} = 'STORED_CARD') = (${table.paymentMethodId} is not null)`,
+    ),
+    brokeragePayerCheck: check("pc_fee_authorities_brokerage_payer_check", sql`${table.payerType} = 'Agent' or ${table.authorisedPaymentMethod} = 'STORED_CARD'`),
+    brokerageApprovalCheck: check(
+      "pc_fee_authorities_brokerage_approval_check",
+      sql`${table.payerType} = 'Agent' or ${table.status} <> 'ACTIVE' or (${table.brokerageCardApprovedByUserId} is not null and ${table.brokerageCardApprovedAt} is not null and ${table.signedEvidenceRef} is not null and ${table.brokerageCardApprovedByUserId} is distinct from ${table.createdByUserId})`,
+    ),
   }),
 );
 
@@ -438,6 +474,9 @@ export const financialPaymentRequests = pgTable(
     failureReason: text("failure_reason"),
     retryCount: integer("retry_count").notNull().default(0),
     maxRetries: integer("max_retries").notNull().default(3),
+    // Owner t181u(C): earliest time a RETRY_SCHEDULED stored-card fee may be
+    // attempted again (exponential backoff, capped). Null = not scheduled.
+    nextAttemptAt: timestamp("next_attempt_at"),
 
     reversedAt: timestamp("reversed_at"),
     reversalReason: text("reversal_reason"),
@@ -477,7 +516,7 @@ export const financialPaymentProviderEvents = pgTable(
     payload: jsonb("payload"),
     receivedAt: timestamp("received_at").notNull().defaultNow(),
     processedAt: timestamp("processed_at"),
-    processingStatus: text("processing_status").notNull().default("PENDING"), // PENDING | PROCESSED | FAILED
+    processingStatus: text("processing_status").notNull().default("PENDING"), // PENDING | PROCESSED | FAILED | EXCEPTION | NO_CHANGE (t212u)
     processingError: text("processing_error"),
   },
   (table) => ({
@@ -506,6 +545,9 @@ export const financialPaymentOutbox = pgTable(
     nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
     lastError: text("last_error"),
     dispatchedAt: timestamp("dispatched_at"),
+    // Owner t211u (0044): who raised a HELD_UNCERTAIN hold (null = system) and when; the resolver may not be the raiser.
+    heldByUserId: integer("held_by_user_id").references(() => users.id),
+    heldAt: timestamp("held_at"),
 
     idempotencyKey: text("idempotency_key").notNull(),
     correlationId: text("correlation_id"),
@@ -926,3 +968,73 @@ export type FinancialSettingsRow = typeof financialSettings.$inferSelect;
 // against the domains it references, mirroring commerce.ts's own pattern.
 export type { Transaction } from "./transaction";
 export type { CampaignItem } from "./launch";
+
+// ---------------------------------------------------------------------
+// Owner t212u (0045): collection REQUESTS vs execution, and BA reconciliation exceptions.
+// ---------------------------------------------------------------------
+
+/**
+ * t212u item 1: a collection request (Pit Crew, a Brokerage Administrator, the statement-issue
+ * trigger or the scheduler). Recording never calls a provider; the system payment workflow
+ * executes it after re-validating every gate. One open (PENDING/EXECUTING) request per fee.
+ */
+export const pcFeeCollectionRequests = pgTable(
+  "pc_fee_collection_requests",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    transactionId: integer("transaction_id").notNull().references(() => transactions.id),
+    paymentRequestId: integer("payment_request_id").notNull().references(() => financialPaymentRequests.id),
+    requestedByUserId: integer("requested_by_user_id").references(() => users.id),
+    requestedByRole: text("requested_by_role").notNull(),
+    trigger: text("trigger").notNull(), // collect | statement_issued | scheduler
+    status: text("status").notNull().default("PENDING"), // PENDING | EXECUTING | EXECUTED | REFUSED | FAILED
+    executedBy: text("executed_by"), // SYSTEM_PAYMENT_WORKFLOW
+    outcome: text("outcome"),
+    refusalCode: text("refusal_code"),
+    executedAt: timestamp("executed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    oneOpenPerRequest: uniqueIndex("pc_fee_collection_requests_one_open_idx")
+      .on(table.paymentRequestId)
+      .where(sql`${table.status} in ('PENDING', 'EXECUTING')`),
+    brokerageStatusIdx: index("pc_fee_collection_requests_brokerage_status_idx").on(table.brokerageId, table.status),
+  }),
+);
+export type PcFeeCollectionRequest = typeof pcFeeCollectionRequests.$inferSelect;
+
+/**
+ * t212u items 3-4: provider outcomes AE must not apply to a locked record (a "Paid" after a waiver
+ * or write-off) and unconfirmed provider cancellations. Reviewed and resolved by a Brokerage
+ * Administrator (refund assessment); the financial records themselves are never mutated here.
+ */
+export const financialReconciliationExceptions = pgTable(
+  "financial_reconciliation_exceptions",
+  {
+    id: serial("id").primaryKey(),
+    brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+    paymentRequestId: integer("payment_request_id").notNull().references(() => financialPaymentRequests.id),
+    propertyId: integer("property_id").references(() => properties.id),
+    kind: text("kind").notNull(), // PAID_AFTER_WAIVER | PAID_AFTER_WRITE_OFF | CANCELLATION_UNCONFIRMED
+    source: text("source").notNull(), // WEBHOOK | RECONCILIATION | RECOVERY
+    providerEventRowId: integer("provider_event_row_id").references(() => financialPaymentProviderEvents.id),
+    providerRequestRef: text("provider_request_ref"),
+    amountCents: integer("amount_cents"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    status: text("status").notNull().default("OPEN"), // OPEN | RESOLVED
+    refundAssessment: text("refund_assessment"), // REFUND_REQUIRED | NO_REFUND_REQUIRED | NOT_APPLICABLE
+    resolutionReason: text("resolution_reason"),
+    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    resolvedAt: timestamp("resolved_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    oneOpenPerKind: uniqueIndex("financial_reconciliation_exceptions_one_open_idx")
+      .on(table.paymentRequestId, table.kind)
+      .where(sql`${table.status} = 'OPEN'`),
+    brokerageStatusIdx: index("financial_reconciliation_exceptions_brokerage_status_idx").on(table.brokerageId, table.status),
+  }),
+);
+export type FinancialReconciliationException = typeof financialReconciliationExceptions.$inferSelect;

@@ -25,6 +25,7 @@ import { recheckExceptionsForRecord } from "./exceptions/engine.js";
 import { refreshTransactionSteps } from "./workflowSteps.js";
 import { logAudit } from "./audit.js";
 import { initiateAmlIfNeeded } from "./aml.js";
+import { OfferStatusConflictError } from "./offers.js";
 import { completeSatisfiedAutomationTasks } from "./automation/closureAutoComplete.js";
 import { MUST_COMPLETE_BEFORE_CLOSE_TASK_KEYS } from "./automation/closurePolicy.js";
 import { computeFundsReconciliation } from "./transactionFunds.js";
@@ -118,7 +119,7 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
     // Offer says Accepted but no Transaction exists (shouldn't happen
     // outside a prior crash mid-acceptance) — fall through and create it.
   } else if (offer.status !== "Received") {
-    throw new Error(`Offer ${input.offerId} cannot be accepted from status ${offer.status}`);
+    throw new OfferStatusConflictError(input.offerId, "accept", offer.status);
   }
 
   const outcome = await db.transaction(async (tx): Promise<AcceptOfferTxOutcome> => {
@@ -141,20 +142,31 @@ export async function acceptOffer(input: { offerId: number; userId: number; brok
         return { offer: lockedOffer, transaction: existingTransaction, created: false, propertyId: lockedOffer.propertyId, declinedSiblingIds: [] };
       }
     } else if (lockedOffer.status !== "Received") {
-      throw new Error(`Offer ${input.offerId} cannot be accepted from status ${lockedOffer.status}`);
+      throw new OfferStatusConflictError(input.offerId, "accept", lockedOffer.status);
+    }
+
+    // CC #34 / D8: conditional writes, so a decline or withdraw that commits
+    // after the reads above can never be overwritten. Our own offer first:
+    // if it has left Received meanwhile, the whole accept rolls back as a
+    // conflict. Siblings are declined only while still Received; one withdrawn
+    // concurrently keeps its Withdrawn status and gets no auto-decline audit.
+    if (lockedOffer.status !== "Accepted") {
+      const [claimed] = await tx
+        .update(offers)
+        .set({ status: "Accepted" })
+        .where(and(eq(offers.id, lockedOffer.id), eq(offers.status, "Received")))
+        .returning({ id: offers.id });
+      if (!claimed) {
+        const [current] = await tx.select({ status: offers.status }).from(offers).where(eq(offers.id, lockedOffer.id));
+        throw new OfferStatusConflictError(input.offerId, "accept", current?.status ?? "missing");
+      }
     }
 
     const siblingOffers = await tx
-      .select()
-      .from(offers)
-      .where(and(eq(offers.propertyId, lockedOffer.propertyId), eq(offers.status, "Received"), ne(offers.id, lockedOffer.id)));
-    for (const sibling of siblingOffers) {
-      await tx.update(offers).set({ status: "Declined" }).where(eq(offers.id, sibling.id));
-    }
-
-    if (lockedOffer.status !== "Accepted") {
-      await tx.update(offers).set({ status: "Accepted" }).where(eq(offers.id, lockedOffer.id));
-    }
+      .update(offers)
+      .set({ status: "Declined" })
+      .where(and(eq(offers.propertyId, lockedOffer.propertyId), eq(offers.status, "Received"), ne(offers.id, lockedOffer.id)))
+      .returning({ id: offers.id });
 
     const sellerLinks = await tx
       .select()

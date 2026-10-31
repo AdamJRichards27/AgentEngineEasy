@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { installSessionExpiryHandling, reloadPageRestoredFromCache } from "./lib/session";
+import "./fonts/inter/inter.css";
 import "./styles.css";
 
 // retry: false — an unauthenticated 401 (very common: it's how we detect

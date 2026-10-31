@@ -35,6 +35,7 @@
 // rule, which is what actually routes it to the Exception & Risk Engine.
 
 import { and, eq, desc } from "drizzle-orm";
+import { syncReceiptsForPaymentRequest } from "./receipts.js";
 import {
   db,
   financialPaymentRequests,
@@ -269,6 +270,8 @@ export async function applyMockPaymentStatusEvent(brokerageId: number, event: Mo
     updatedValue: reconciliation.status,
   });
 
+  // Owner t180u(2): reconciliation receipt (idempotent).
+  await syncReceiptsForPaymentRequest(request.id);
   return { outcome: matched ? "MATCHED" : "VARIANCE", paymentRequest: request, reconciliation };
 }
 

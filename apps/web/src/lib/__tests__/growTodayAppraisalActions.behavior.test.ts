@@ -243,7 +243,7 @@ function clearGlobals() {
 }
 
 test("E-2: an appraisal follow-up card links View appraisal to the workspace and View property to /properties/{id}", async () => {
-  const hooks = installGlobals(appraisalCard(), ["grow.contacts.read"]);
+  const hooks = installGlobals(appraisalCard(), ["grow.contacts.read", "run.access"]);
   try {
     await withVite(async (vite) => {
       const { GrowToday } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as {

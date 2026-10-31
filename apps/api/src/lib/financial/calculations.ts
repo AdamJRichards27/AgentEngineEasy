@@ -23,6 +23,7 @@
 import { eq, and } from "drizzle-orm";
 import { db, commissionAgreements, commissionCalculations } from "@aee/db";
 import type { CommissionAgreement, NewCommissionCalculation, CommissionCalculation, RoundingAdjustment } from "@aee/db";
+import type { FinancialDbExecutor } from "./agreements.js";
 
 export const CALCULATION_RULE_VERSION = 1;
 
@@ -168,8 +169,8 @@ export function computeCommission(agreement: CommissionAgreement, salePriceCents
   };
 }
 
-async function nextCommissionCalculationVersion(transactionId: number): Promise<number> {
-  const rows = await db
+async function nextCommissionCalculationVersion(transactionId: number, executor: FinancialDbExecutor = db): Promise<number> {
+  const rows = await executor
     .select({ calculationVersion: commissionCalculations.calculationVersion })
     .from(commissionCalculations)
     .where(eq(commissionCalculations.transactionId, transactionId));
@@ -196,19 +197,22 @@ export interface CreateCommissionCalculationInput {
  * deterministically, and persists it as the next calculationVersion for
  * this transaction. Never edits a prior row.
  */
-export async function createCommissionCalculation(input: CreateCommissionCalculationInput): Promise<CommissionCalculation> {
-  const [agreement] = await db.select().from(commissionAgreements).where(eq(commissionAgreements.id, input.commissionAgreementId));
+export async function createCommissionCalculation(
+  input: CreateCommissionCalculationInput,
+  executor: FinancialDbExecutor = db,
+): Promise<CommissionCalculation> {
+  const [agreement] = await executor.select().from(commissionAgreements).where(eq(commissionAgreements.id, input.commissionAgreementId));
   if (!agreement) throw new Error(`Commission agreement ${input.commissionAgreementId} not found.`);
   if (agreement.transactionId !== input.transactionId) {
     throw new Error(`Commission agreement ${input.commissionAgreementId} does not belong to transaction ${input.transactionId}.`);
   }
 
   const result = computeCommission(agreement, input.salePriceCentsInput);
-  const calculationVersion = await nextCommissionCalculationVersion(input.transactionId);
+  const calculationVersion = await nextCommissionCalculationVersion(input.transactionId, executor);
 
   let supersedesId: number | null = null;
   if (input.supersede) {
-    const finalisedRows = await db
+    const finalisedRows = await executor
       .select()
       .from(commissionCalculations)
       .where(and(eq(commissionCalculations.transactionId, input.transactionId), eq(commissionCalculations.state, "FINALISED")));
@@ -218,7 +222,7 @@ export async function createCommissionCalculation(input: CreateCommissionCalcula
     const current = finalisedRows.sort((a, b) => b.calculationVersion - a.calculationVersion)[0];
     if (current) {
       supersedesId = current.id;
-      await db.update(commissionCalculations).set({ state: "SUPERSEDED" }).where(eq(commissionCalculations.id, current.id));
+      await executor.update(commissionCalculations).set({ state: "SUPERSEDED" }).where(eq(commissionCalculations.id, current.id));
     }
   }
 
@@ -250,6 +254,6 @@ export async function createCommissionCalculation(input: CreateCommissionCalcula
     correlationId: input.correlationId ?? null,
   };
 
-  const [calculation] = await db.insert(commissionCalculations).values(values).returning();
+  const [calculation] = await executor.insert(commissionCalculations).values(values).returning();
   return calculation;
 }

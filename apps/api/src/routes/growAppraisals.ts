@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
-import { db, growOpportunities, properties } from "@aee/db";
+import { db, growOpportunities, parties, properties, propertyParties } from "@aee/db";
+import { selectAppraisalForBrokerageProperty } from "../lib/appraisals.js";
 import { logger } from "@aee/events";
 import { requireAuth, type AuthedUser } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
@@ -166,7 +167,54 @@ async function appraisalWriteBlocked(user: AuthedUser, appraisalId: number, res:
 const createFromContactSchema = z.object({
   partyId: z.coerce.number().int().positive(),
   propertyId: z.coerce.number().int().positive(),
+  /** D8 (SPEC-03, AB-5): "property" = started from a property via its
+   * linked contact (AE Minimal). Opt-in so the existing Contact 360 path is
+   * unchanged. */
+  entry: z.enum(["property"]).optional(),
 });
+
+/** D8 server validation for property-entry creates. Returns true when it has
+ * already answered. Order: tenant (404, no existence leak) -> link (422) ->
+ * existing appraisal (409 with its id). */
+async function rejectInvalidPropertyEntry(
+  user: AuthedUser,
+  input: { partyId: number; propertyId: number },
+  res: import("express").Response,
+): Promise<boolean> {
+  const [property] = await db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(and(eq(properties.id, input.propertyId), eq(properties.brokerageId, user.brokerageId)))
+    .limit(1);
+  if (!property || !(await assertPropertyVisibleForWrite(user, input.propertyId))) {
+    res.status(404).json({ error: "Property not found" });
+    return true;
+  }
+  const [party] = await db
+    .select({ id: parties.id })
+    .from(parties)
+    .where(and(eq(parties.id, input.partyId), eq(parties.brokerageId, user.brokerageId)))
+    .limit(1);
+  if (!party) {
+    res.status(404).json({ error: "Contact not found" });
+    return true;
+  }
+  const [link] = await db
+    .select({ id: propertyParties.id })
+    .from(propertyParties)
+    .where(and(eq(propertyParties.propertyId, input.propertyId), eq(propertyParties.partyId, input.partyId)))
+    .limit(1);
+  if (!link) {
+    res.status(422).json({ error: "This contact is not linked to the property", code: "PROPERTY_CONTACT_NOT_LINKED" });
+    return true;
+  }
+  const existing = await selectAppraisalForBrokerageProperty(input.propertyId, user.brokerageId);
+  if (existing) {
+    res.status(409).json({ error: "An appraisal already exists for this property", code: "APPRAISAL_EXISTS", appraisalId: existing.id });
+    return true;
+  }
+  return false;
+}
 
 growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
@@ -175,6 +223,7 @@ growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requ
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  if (parsed.data.entry === "property" && (await rejectInvalidPropertyEntry(user, parsed.data, res))) return;
   const [property] = await db
     .select({ id: properties.id })
     .from(properties)

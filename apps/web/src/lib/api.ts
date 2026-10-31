@@ -63,6 +63,9 @@ export class ApiError extends Error {
   // G-UAT-2 — POST /grow/contacts answers 409 with the existing party's id
   // so the Contacts form can open that Contact 360. Other error bodies omit it.
   contactId?: number;
+  // AB-3 (D8) — POST /grow/appraisals/from-contact with entry:"property"
+  // answers 409 APPRAISAL_EXISTS with the existing appraisal's id.
+  appraisalId?: number;
 
   constructor(
     status: number,
@@ -77,6 +80,7 @@ export class ApiError extends Error {
       entitlementKey?: string;
       upgrade?: EntitlementUpgrade;
       contactId?: number;
+      appraisalId?: number;
     },
   ) {
     super(technical ?? friendly);
@@ -90,6 +94,7 @@ export class ApiError extends Error {
     this.entitlementKey = extras?.entitlementKey;
     this.upgrade = extras?.upgrade;
     this.contactId = extras?.contactId;
+    this.appraisalId = extras?.appraisalId;
   }
 }
 
@@ -357,6 +362,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     let entitlementKey: string | undefined;
     let upgrade: EntitlementUpgrade | undefined;
     let contactId: number | undefined;
+    let appraisalId: number | undefined;
     try {
       const body = await res.json();
       serverMessage = typeof body?.error === "string" ? body.error : undefined;
@@ -372,6 +378,10 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
       const rawContactId = body?.contactId;
       if (typeof rawContactId === "number" && Number.isInteger(rawContactId) && rawContactId > 0) {
         contactId = rawContactId;
+      }
+      const rawAppraisalId = body?.appraisalId;
+      if (typeof rawAppraisalId === "number" && Number.isInteger(rawAppraisalId) && rawAppraisalId > 0) {
+        appraisalId = rawAppraisalId;
       }
     } catch {
       // Non-JSON error body — fall through with no server message.
@@ -390,6 +400,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
       entitlementKey,
       upgrade,
       contactId,
+      appraisalId,
     });
   }
   if (res.status === 204) {

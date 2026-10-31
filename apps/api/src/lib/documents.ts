@@ -77,54 +77,67 @@ async function loadDocumentPackageInBrokerage(packageId: number, brokerageId: nu
  * logAudit() the change (route-layer concern, matching the ownership
  * review precedent) since this function only owns the upsert itself.
  */
-export async function upsertAgencyAgreementTerms(input: {
-  propertyId: number;
-  brokerageId: number;
-  commissionType: "Percentage" | "FlatFee";
-  commissionRateBps?: number | null;
-  flatFeeCents?: number | null;
-  marketingFeeCents?: number | null;
-  agreementTermDays: number;
-  userId: number;
-}): Promise<AgencyAgreementTerms> {
+export async function upsertAgencyAgreementTerms(
+  input: {
+    propertyId: number;
+    brokerageId: number;
+    commissionType: "Percentage" | "FlatFee";
+    commissionRateBps?: number | null;
+    flatFeeCents?: number | null;
+    marketingFeeCents?: number | null;
+    agreementTermDays: number;
+    userId: number;
+  },
+  // Owner t173u E: an optional audit hook that runs INSIDE the same database
+  // transaction as the write, with the before/after rows, so a failed audit
+  // rolls the amendment back (fail closed). Existing callers pass nothing.
+  audit?: (before: AgencyAgreementTerms | null, after: AgencyAgreementTerms, tx: AgencyTermsTx) => Promise<void>,
+): Promise<AgencyAgreementTerms> {
   await assertPropertyInBrokerage(input.propertyId, input.brokerageId);
 
-  const [existing] = await db
-    .select()
-    .from(agencyAgreementTerms)
-    .where(eq(agencyAgreementTerms.propertyId, input.propertyId));
+  return db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(agencyAgreementTerms)
+      .where(eq(agencyAgreementTerms.propertyId, input.propertyId))
+      .for("update");
 
-  if (existing) {
-    const [updated] = await db
-      .update(agencyAgreementTerms)
-      .set({
+    if (existing) {
+      const [updated] = await tx
+        .update(agencyAgreementTerms)
+        .set({
+          commissionType: input.commissionType,
+          commissionRateBps: input.commissionRateBps ?? null,
+          flatFeeCents: input.flatFeeCents ?? null,
+          marketingFeeCents: input.marketingFeeCents ?? null,
+          agreementTermDays: input.agreementTermDays,
+          updatedBy: input.userId,
+          updatedAt: new Date(),
+        })
+        .where(eq(agencyAgreementTerms.id, existing.id))
+        .returning();
+      if (audit) await audit(existing, updated!, tx);
+      return updated!;
+    }
+
+    const [created] = await tx
+      .insert(agencyAgreementTerms)
+      .values({
+        propertyId: input.propertyId,
         commissionType: input.commissionType,
         commissionRateBps: input.commissionRateBps ?? null,
         flatFeeCents: input.flatFeeCents ?? null,
         marketingFeeCents: input.marketingFeeCents ?? null,
         agreementTermDays: input.agreementTermDays,
-        updatedBy: input.userId,
-        updatedAt: new Date(),
+        createdBy: input.userId,
       })
-      .where(eq(agencyAgreementTerms.id, existing.id))
       .returning();
-    return updated;
-  }
-
-  const [created] = await db
-    .insert(agencyAgreementTerms)
-    .values({
-      propertyId: input.propertyId,
-      commissionType: input.commissionType,
-      commissionRateBps: input.commissionRateBps ?? null,
-      flatFeeCents: input.flatFeeCents ?? null,
-      marketingFeeCents: input.marketingFeeCents ?? null,
-      agreementTermDays: input.agreementTermDays,
-      createdBy: input.userId,
-    })
-    .returning();
-  return created;
+    if (audit) await audit(null, created!, tx);
+    return created!;
+  });
 }
+
+export type AgencyTermsTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /** Tenant-scoped read of a property's agency-agreement terms — `null` covers both "not captured yet" and (after the tenant check) is unreachable for a cross-tenant propertyId, which throws instead. */
 export async function getAgencyAgreementTerms(propertyId: number, brokerageId: number): Promise<AgencyAgreementTerms | null> {

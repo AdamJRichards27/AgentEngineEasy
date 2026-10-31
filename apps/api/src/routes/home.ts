@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, PIT_CREW_ROLES } from "../middlewares/auth.js";
 import { getHomeSummary, getDashboardOverview } from "../lib/homeSummary.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
@@ -21,7 +21,8 @@ homeRouter.get("/summary", requireAuth, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const restrictToPropertyIds = await restrictedPropertyIdsFor(user);
   const [items, overview] = await Promise.all([
-    getHomeSummary(user.brokerageId, restrictToPropertyIds),
+    // Owner t170u (1): Pit Crew sees "Offer received" without the price.
+    getHomeSummary(user.brokerageId, restrictToPropertyIds, { offerPriceVisible: !PIT_CREW_ROLES.includes(user.role) }),
     getDashboardOverview(user.brokerageId, restrictToPropertyIds),
   ]);
   res.json({

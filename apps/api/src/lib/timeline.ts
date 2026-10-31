@@ -436,11 +436,23 @@ export async function assertPropertyInBrokerage(propertyId: number, brokerageId:
   if (!property) throw new Error(`Property ${propertyId} not found`);
 }
 
+/** Owner t165u / t170u rule 1 (kept by t172u): domain events whose payload carries an offer price or
+ * the agreed contract price. They are not "financial entitlement" events, so
+ * they are shaped separately by `offerPricesVisible`. */
+const PRICE_BEARING_EVENT_TYPES = new Set(["OFFER_RECEIVED", "OFFER_ACCEPTED"]);
+const PRICE_PAYLOAD_KEYS = ["offerPriceCents", "purchasePriceCents", "depositCents", "conditions"] as const;
+
 export async function getPropertyTimeline(
   propertyId: number,
   brokerageId: number,
   canViewFinancials: boolean,
+  // Owner t165u/t170u rule 1: competing offer prices go to the listing agent and
+  // Brokerage Administrators only. Omitted (e.g. the AI timeline tool, which
+  // this change does not edit) means Brokerage Administrator only, i.e. it
+  // follows canViewFinancials: fail closed for everyone else.
+  options: { offerPricesVisible?: boolean } = {},
 ): Promise<TimelineItem[]> {
+  const offerPricesVisible = options.offerPricesVisible ?? canViewFinancials;
   await assertPropertyInBrokerage(propertyId, brokerageId);
 
   const [eventRows, auditRows] = await Promise.all([
@@ -512,7 +524,7 @@ export async function getPropertyTimeline(
       const name = party ? partyDisplayName(party) : "a buyer";
       const payload = (row.payload ?? {}) as { offerPriceCents?: number; purchasePriceCents?: number };
       const cents = payload.offerPriceCents ?? payload.purchasePriceCents;
-      const price = typeof cents === "number" ? ` (${formatCents(cents)})` : "";
+      const price = offerPricesVisible && typeof cents === "number" ? ` (${formatCents(cents)})` : "";
       return row.eventType === "OFFER_RECEIVED" ? `Offer received from ${name}${price}` : `Offer from ${name} accepted${price}`;
     }
     if (row.eventType === "SETTLEMENT_SCHEDULED") {
@@ -608,6 +620,13 @@ export async function getPropertyTimeline(
     return SIMPLE_AUDIT_LABELS[row.action] ?? row.action.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
   }
 
+  function priceShapedPayload(eventType: string, payload: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+    if (!payload || offerPricesVisible || !PRICE_BEARING_EVENT_TYPES.has(eventType)) return payload;
+    const shaped: Record<string, unknown> = { ...payload };
+    for (const key of PRICE_PAYLOAD_KEYS) delete shaped[key];
+    return shaped;
+  }
+
   const eventItems: TimelineItem[] = eventRows.map((row) => {
     const config = TIMELINE_ENTRY_TYPES[row.eventType];
     const sensitive = config?.sensitive ?? false;
@@ -625,7 +644,7 @@ export async function getPropertyTimeline(
       },
       label: redact ? redactedLabel(row.eventType) : domainEventLabel(row),
       sensitivity: sensitive ? "SENSITIVE" : "STANDARD",
-      detail: redact ? undefined : ((row.payload as Record<string, unknown> | null) ?? undefined),
+      detail: redact ? undefined : priceShapedPayload(row.eventType, (row.payload as Record<string, unknown> | null) ?? undefined),
       refs: [],
       source: "domain_event",
     };

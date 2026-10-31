@@ -1327,7 +1327,7 @@ contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.con
   const [existing] = await db
     .select()
     .from(growContactRoles)
-    .where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.role, role)))
+    .where(and(eq(growContactRoles.partyId, partyId), eq(growContactRoles.role, role), eq(growContactRoles.brokerageId, user.brokerageId)))
     .limit(1);
   if (existing) {
     res.status(200).json({ role: existing });
@@ -1548,6 +1548,13 @@ contactsRouter.post("/:partyId/commitments", requireAuth, requireEntitlement("gr
       .limit(1);
     if (!opportunity) {
       await noteGrowOpportunityIsolationRejection(opportunityId, user.brokerageId);
+      res.status(404).json({ error: "Opportunity not found in this brokerage" });
+      return;
+    }
+    // GR-1: same owner-or-own-property rule POST /grow/activities applies.
+    // An opportunity hidden from this caller answers the same 404 as a
+    // missing one, and is not an isolation rejection (it is in-brokerage).
+    if (!(await assertOwnedOrPropertyVisibleForWrite(user, opportunity.propertyId, opportunity.ownerUserId))) {
       res.status(404).json({ error: "Opportunity not found in this brokerage" });
       return;
     }

@@ -5,6 +5,7 @@ import { apiFetch, ApiError } from "../lib/api";
 import { useEntitlements } from "../lib/session";
 import { CONTACT_ANCHORED_SECTION_BLURB, unusableSignalNotice } from "../lib/contactAnchoredSignals";
 import { GrowTableScroll } from "./GrowTableScroll";
+import { RunGatedLink } from "./RunGatedLink";
 
 // AE GROW Priority 5 Remediation — Property Intelligence. The reusable panel Contact 360
 // (Grow.tsx) and the Property Workspace (PropertyWorkspace.tsx) both embed, rather than either
@@ -615,7 +616,7 @@ export function PropertyIntelligencePanel(props: PropertyIntelligenceAnchor) {
       {entries.map((entry) => (
         <div key={entry.propertyId} className="plain-item">
           <div>
-            <Link href={`/properties/${entry.propertyId}`}>{entry.propertyAddress}</Link>{" "}
+            <RunGatedLink href={`/properties/${entry.propertyId}`} fallback={entry.propertyAddress}>{entry.propertyAddress}</RunGatedLink>{" "}
             <span className="muted">— recorded as {humanize(entry.relationshipType)}</span>
           </div>
           {entry.pendingMatches.length > 0 && (
