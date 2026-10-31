@@ -4,7 +4,8 @@ import { z } from "zod";
 import { db, parties, propertyParties, properties, workflows } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
-import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
+import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
+import { requireAnyEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -51,6 +52,14 @@ async function notePartyLinkIsolationRejection(linkId: number, brokerageId: numb
 }
 
 export const partiesRouter = Router();
+
+// t228u Priority 1: property contacts belong to Grow (kept per t223u) and Run.
+// An active grant for either product is required; an unsubscribed brokerage
+// gets 403 on reads and writes. Mutations additionally need access to the
+// specific property (own-property scope, #147): hidden properties answer 404,
+// the same as a cross-brokerage id.
+const canReadPropertyContacts = requireAnyEntitlement("grow.contacts.read", "run.access");
+const canManagePropertyContacts = requireAnyEntitlement("grow.contacts.manage", "run.access");
 
 // One-time party capture (Build Brief §4): minimum fields only; entity
 // structure detail (trust/company/estate) is requested only when needed.
@@ -101,7 +110,7 @@ async function runSellerSideEffects(propertyId: number, partyId: number, user: {
   }
 }
 
-partiesRouter.post("/", requireAuth, async (req, res) => {
+partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res) => {
   const parsed = addPartySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -111,6 +120,10 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
 
   if (parsed.data.partyId !== undefined) {
     const { propertyId, partyId, role, isPrimary } = parsed.data;
+    if (await propertyHiddenFromCaller(user, propertyId)) {
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
     // One transaction; the property row is locked FOR UPDATE so concurrent
     // submissions for the same property serialise and the duplicate check
     // below cannot race. property_parties has no unique constraint and this
@@ -176,8 +189,8 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
     .select()
     .from(properties)
     .where(and(eq(properties.id, parsed.data.propertyId), eq(properties.brokerageId, user.brokerageId)));
-  if (!property) {
-    await notePartyPropertyIsolationRejection(parsed.data.propertyId, user.brokerageId);
+  if (!property || (await propertyHiddenFromCaller(user, property.id))) {
+    if (!property) await notePartyPropertyIsolationRejection(parsed.data.propertyId, user.brokerageId);
     res.status(404).json({ error: "Property not found" });
     return;
   }
@@ -242,7 +255,7 @@ partiesRouter.post("/", requireAuth, async (req, res) => {
   res.status(201).json({ party, link });
 });
 
-partiesRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
+partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContacts, async (req, res) => {
   const propertyId = Number(req.params.propertyId);
   const user = req.authedUser!;
 
@@ -281,7 +294,7 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
 // Removing a mis-added seller/buyer link (multi-seller capture polish,
 // Phase 2) — removes the property↔party link only; the Party record itself
 // is left intact since it may be linked elsewhere or worth keeping.
-partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
+partiesRouter.delete("/link/:linkId", requireAuth, canManagePropertyContacts, async (req, res) => {
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
 
@@ -303,6 +316,10 @@ partiesRouter.delete("/link/:linkId", requireAuth, async (req, res) => {
     return;
   }
   const link = row.link;
+  if (await propertyHiddenFromCaller(user, link.propertyId)) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
 
   await db.delete(propertyParties).where(eq(propertyParties.id, linkId));
 

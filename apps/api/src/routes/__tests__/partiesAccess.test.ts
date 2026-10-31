@@ -1,0 +1,126 @@
+// t228u Priority 1: /parties property-contact routes require an active Grow or
+// Run entitlement, and link/unlink require access to the specific property
+// (own-property scope #147: hidden = 404), with brokerage isolation kept.
+// Synthetic data only.
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import type { Server } from "node:http";
+import { eq } from "drizzle-orm";
+import { db, entitlementGrants, users, ENTITLEMENT_KEYS } from "@aee/db";
+import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { createBrokerageWithUsers, cleanupBrokerages, devLogin } from "./testSupport.js";
+
+const GROW = ENTITLEMENT_KEYS.filter((k) => k !== "run.access");
+const tag = `pacc-${Date.now()}`;
+let server: Server;
+let base = "";
+const ids: number[] = [];
+
+before(async () => {
+  const { createApp } = await import("../../app.js");
+  server = createApp().listen(0);
+  await new Promise<void>((r) => server.once("listening", () => r()));
+  base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+});
+after(async () => {
+  try {
+    await cleanupBrokerages(ids);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+async function setGrants(brokerageId: number, keys: readonly string[]) {
+  await db.delete(entitlementGrants).where(eq(entitlementGrants.brokerageId, brokerageId));
+  for (const k of keys) {
+    await db.insert(entitlementGrants).values({ brokerageId, entitlementKey: k, granteeType: "brokerage", granteeId: brokerageId, sourceType: "admin_override", status: "Active" });
+  }
+  invalidateEntitlementCache(brokerageId);
+}
+
+async function call(cookie: string, method: string, path: string, body?: unknown) {
+  const r = await fetch(`${base}/api${path}`, {
+    method,
+    headers: { cookie, connection: "close", ...(body ? { "content-type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await r.text();
+  let json: any = null;
+  try { json = JSON.parse(text); } catch { /* empty */ }
+  return { status: r.status, json };
+}
+
+async function setup(label: string, keys: readonly string[]) {
+  const name = `${tag} ${label}`;
+  const b = await createBrokerageWithUsers(base, name);
+  ids.push(b.brokerageId);
+  await setGrants(b.brokerageId, ["run.access", ...GROW]);
+  const pc = await devLogin(base, { email: `pc-${name.replace(/\s+/g, "-").toLowerCase()}@example.com`, firstName: "Pit", lastName: "Crew", brokerageName: name });
+  await db.update(users).set({ role: "Pit Crew" }).where(eq(users.id, pc.user.id));
+  const mk = async (cookie: string, n: string) => {
+    const r = await call(cookie, "POST", "/properties", { formattedAddress: `${n} ${name} St, Testville`, state: "NSW", suburb: "Testville", postcode: "2000" });
+    assert.equal(r.status, 201, `create property: ${JSON.stringify(r.json)}`);
+    return r.json.property.id as number;
+  };
+  const adminProp = await mk(b.admin.cookie, "1");
+  const agentProp = await mk(b.agent.cookie, "2");
+  const c = await call(b.admin.cookie, "POST", "/parties", { propertyId: adminProp, role: "Seller", firstName: "Sam", lastName: "Synthetic" });
+  assert.equal(c.status, 201);
+  await setGrants(b.brokerageId, keys);
+  return { ...b, pc, adminProp, agentProp, partyId: c.json.party.id as number, adminLinkId: c.json.link.id as number };
+}
+
+for (const [label, keys] of [["Grow", GROW], ["Run", ["run.access"]]] as const) {
+  test(`${label}: Admin and Agent can read, link and unlink on properties they can access`, async () => {
+    const b = await setup(label, keys);
+    // Admin on own (admin) property.
+    assert.equal((await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`)).status, 200);
+    const l1 = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: b.partyId, role: "Buyer" });
+    assert.equal(l1.status, 201);
+    // Agent on own property: read, link existing, create+link, unlink.
+    assert.equal((await call(b.agent.cookie, "GET", `/parties/by-property/${b.agentProp}`)).status, 200);
+    const l2 = await call(b.agent.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: b.partyId, role: "Solicitor" });
+    assert.equal(l2.status, 201);
+    assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Other", firstName: "Ola" })).status, 201);
+    assert.equal((await call(b.agent.cookie, "DELETE", `/parties/link/${l2.json.link.id}`)).status, 204);
+    // Pit Crew is brokerage-wide.
+    assert.equal((await call(b.pc.cookie, "GET", `/parties/by-property/${b.adminProp}`)).status, 200);
+    const l3 = await call(b.pc.cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Other" });
+    assert.equal(l3.status, 201);
+    assert.equal((await call(b.pc.cookie, "DELETE", `/parties/link/${l3.json.link.id}`)).status, 204);
+  });
+}
+
+test("Agent gets 404 reading, linking, creating or unlinking on a property they cannot see", async () => {
+  const b = await setup("Scope", ["run.access", ...GROW]);
+  const before = (await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`)).json.parties.length;
+  assert.equal((await call(b.agent.cookie, "GET", `/parties/by-property/${b.adminProp}`)).status, 404);
+  assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Other" })).status, 404);
+  assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Other", firstName: "Sneaky" })).status, 404);
+  assert.equal((await call(b.agent.cookie, "DELETE", `/parties/link/${b.adminLinkId}`)).status, 404);
+  const afterRows = (await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`)).json.parties;
+  assert.equal(afterRows.length, before, "no link was added or removed");
+});
+
+test("unsubscribed brokerage gets 403 on property-contact reads and mutations", async () => {
+  const b = await setup("Unsub", []);
+  for (const cookie of [b.admin.cookie, b.agent.cookie, b.pc.cookie]) {
+    assert.equal((await call(cookie, "GET", `/parties/by-property/${b.adminProp}`)).status, 403);
+    assert.equal((await call(cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Other" })).status, 403);
+    assert.equal((await call(cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Other", firstName: "X" })).status, 403);
+    assert.equal((await call(cookie, "DELETE", `/parties/link/${b.adminLinkId}`)).status, 403);
+  }
+  await setGrants(b.brokerageId, ["run.access"]);
+  assert.equal((await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`)).json.parties.length, 1, "nothing changed while unsubscribed");
+});
+
+test("other brokerage gets 404 on read, link, create and unlink", async () => {
+  const a = await setup("IsoA", ["run.access", ...GROW]);
+  const o = await setup("IsoB", ["run.access", ...GROW]);
+  assert.equal((await call(o.admin.cookie, "GET", `/parties/by-property/${a.adminProp}`)).status, 404);
+  assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: a.adminProp, partyId: o.partyId, role: "Other" })).status, 404);
+  assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: o.adminProp, partyId: a.partyId, role: "Other" })).status, 404, "foreign contact");
+  assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: a.adminProp, role: "Other", firstName: "X" })).status, 404);
+  assert.equal((await call(o.pc.cookie, "DELETE", `/parties/link/${a.adminLinkId}`)).status, 404);
+});
