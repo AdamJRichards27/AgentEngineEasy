@@ -1,3 +1,4 @@
+import { checkCallUsage } from "./callUsage.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, or, sql } from "drizzle-orm";
 import {
@@ -77,7 +78,8 @@ export type CallTranscriptionErrorCode =
   | "CONSENT_WITHDRAWN"
   | "PROVIDER_FAILED"
   | "TENANT_MISMATCH"
-  | "LIVE_PROVIDER_DISABLED";
+  | "LIVE_PROVIDER_DISABLED"
+  | "USAGE_LIMIT_REACHED";
 
 export class CallTranscriptionError extends Error {
   constructor(
@@ -830,6 +832,11 @@ export async function initiateCallTranscription(
   const recordingVersion = source.recording.version;
   if (!recordingVersion) {
     throw new CallTranscriptionError("RECORDING_UNAVAILABLE", "The recording is unavailable for transcription.");
+  }
+  // t222u: configurable transcription limit (default unlimited; lib/telephony/callUsage.ts).
+  const transcriptionUsage = await checkCallUsage(input.brokerageId, "transcriptions");
+  if (!transcriptionUsage.allowed) {
+    throw new CallTranscriptionError("USAGE_LIMIT_REACHED", `Transcription usage limit reached for this period (${transcriptionUsage.used}/${transcriptionUsage.limit}).`);
   }
   const insertion = await db.transaction(async (tx) => {
     const [created] = await tx.insert(growCallTranscriptions).values({

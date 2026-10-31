@@ -58,6 +58,13 @@ export async function applySubscriptionSnapshot(
 
   let subscriptionId: number;
   const isNewSubscription = !existingSubscription;
+  // t222u: trials expire on their RECORDED end date, independently of provider notifications. A
+  // snapshot that reports a trial end stores it; one that omits it keeps the stored value (fail closed).
+  // While Trialing, every subscription grant carries endsAt = trialEndsAt and the resolver
+  // (grantIsCurrentlyActive) stops honouring it at that instant: no scheduler, no webhook needed.
+  const trialEndsAt: Date | null =
+    snapshot.trialEnd !== undefined ? snapshot.trialEnd : (existingSubscription?.trialEndsAt ?? null);
+  const grantEndsAt: Date | null = snapshot.status === "Trialing" ? trialEndsAt : null;
 
   if (existingSubscription) {
     subscriptionId = existingSubscription.id;
@@ -70,6 +77,7 @@ export async function applySubscriptionSnapshot(
         cancelAtPeriodEnd: snapshot.cancelAtPeriodEnd,
         cancelledAt: isTerminal ? (existingSubscription.cancelledAt ?? new Date()) : existingSubscription.cancelledAt,
         billingCustomerRef: snapshot.customerRef,
+        trialEndsAt,
         updatedAt: new Date(),
       })
       .where(eq(subscriptions.id, subscriptionId));
@@ -86,6 +94,7 @@ export async function applySubscriptionSnapshot(
         currentPeriodStart: snapshot.currentPeriodStart,
         currentPeriodEnd: snapshot.currentPeriodEnd,
         cancelAtPeriodEnd: snapshot.cancelAtPeriodEnd,
+        trialEndsAt,
       })
       .returning();
     subscriptionId = inserted.id;
@@ -170,11 +179,18 @@ export async function applySubscriptionSnapshot(
       .limit(1);
 
     if (shouldBeActive) {
-      if (!existingGrant || existingGrant.status !== "Active") {
+      const endsAtChanged = !!existingGrant && (existingGrant.endsAt?.getTime() ?? null) !== (grantEndsAt?.getTime() ?? null);
+      if (existingGrant && existingGrant.status === "Active" && endsAtChanged) {
+        // Trial end moved, or the trial converted to Active (end cleared). Not a new grant: no event.
+        await db
+          .update(entitlementGrants)
+          .set({ endsAt: grantEndsAt, updatedAt: new Date() })
+          .where(eq(entitlementGrants.id, existingGrant.id));
+      } else if (!existingGrant || existingGrant.status !== "Active") {
         if (existingGrant) {
           await db
             .update(entitlementGrants)
-            .set({ status: "Active", startsAt: new Date(), endsAt: null, limitValue: def.limitValue, updatedAt: new Date() })
+            .set({ status: "Active", startsAt: new Date(), endsAt: grantEndsAt, limitValue: def.limitValue, updatedAt: new Date() })
             .where(eq(entitlementGrants.id, existingGrant.id));
         } else {
           await db.insert(entitlementGrants).values({
@@ -185,6 +201,7 @@ export async function applySubscriptionSnapshot(
             sourceType: "subscription",
             sourceId: subscriptionId,
             status: "Active",
+            endsAt: grantEndsAt,
             limitValue: def.limitValue,
           });
         }

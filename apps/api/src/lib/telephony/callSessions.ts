@@ -1,3 +1,4 @@
+import { checkCallUsage, resolveCallUsageLimits } from "./callUsage.js";
 import { and, eq, isNull } from "drizzle-orm";
 import { noteGrowCallSessionIsolationRejection, noteGrowPartyIsolationRejection } from "../grow/isolationRejection.js";
 import { logger } from "@aee/events";
@@ -248,6 +249,21 @@ export async function createCallSession(input: CreateCallSessionInput): Promise<
       throw new GrowCallSessionValidationError(`Call consent is not eligible: ${err.reasonCode}.`);
     }
     throw err;
+  }
+
+  // t222u: configurable calling usage limits (lib/telephony/callUsage.ts). Default unlimited: with no
+  // AE_CALL_USAGE_LIMITS configured these checks always allow and add no queries. A reached call or
+  // minute limit refuses the new call; a reached recording limit leaves the call unrecorded (recording
+  // is a separate, non-blocking axis, exactly like a consent miss).
+  const usageLimits = resolveCallUsageLimits();
+  for (const metric of ["calls", "minutes"] as const) {
+    const decision = await checkCallUsage(input.brokerageId, metric, usageLimits);
+    if (!decision.allowed) {
+      throw new GrowCallSessionValidationError(`Calling usage limit reached for this period (${metric}: ${decision.used}/${decision.limit}).`);
+    }
+  }
+  if (recordingRequested && recording.permitted && !(await checkCallUsage(input.brokerageId, "recordings", usageLimits)).allowed) {
+    recording = { ...recording, permitted: false };
   }
 
   const [draft] = await db
