@@ -220,7 +220,7 @@ async function json<T>(res: Response): Promise<T> {
  * secret before constructing the signed request (without replacing an
  * explicitly configured test secret).
  */
-function signedSandboxAmlWebhookHeaders(body: string): Record<string, string> {
+export function signedSandboxAmlWebhookHeaders(body: string): Record<string, string> {
   const secret = process.env.AML_WEBHOOK_SECRET ?? "test-only-aml-webhook-secret";
   process.env.AML_WEBHOOK_SECRET = secret;
   const timestamp = String(Math.floor(Date.now() / 1000));

@@ -10,6 +10,7 @@
 // matching this app's established role-gating convention (AML-exception-
 // resolution/refund/agent-paid/close).
 
+import { manualLaunchBlockers } from "../lib/launch/manualLaunchGate.js";
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
@@ -111,6 +112,16 @@ launchRouter.post("/properties/:propertyId/launch", requireAuth, requiresRunAcce
   const propertyId = Number(req.params.propertyId);
   const user = req.authedUser!;
   try {
+    // Owner t225u: manual launch needs the signed agency agreement + completed AML, NOT an accepted proposal.
+    // An existing plan is returned unchanged (idempotent); the gate applies only to creating one.
+    const existing = await getLaunchPlanDetail(propertyId, user.brokerageId);
+    if (!existing) {
+      const blockers = await manualLaunchBlockers(propertyId, user.brokerageId);
+      if (blockers.length > 0) {
+        res.status(409).json({ error: "This listing cannot be launched yet.", code: "LAUNCH_PRECONDITIONS_NOT_MET", blockers });
+        return;
+      }
+    }
     const { plan, created } = await getOrCreateLaunchPlan(propertyId, user.brokerageId, actorFrom(user));
     res.status(created ? 201 : 200).json({ plan });
   } catch (err) {

@@ -1,6 +1,6 @@
 -- Owner t223u (31 Oct 2026): proposal acceptance evidence. PREPARED ONLY — not applied to any
--- shared/staging/production database. Numbered 0046 to sit after #245's 0037-0045; the journal
--- entry must be re-sequenced when this lands after #245 (see PR #282 notes). Additive, no backfill.
+-- shared/staging/production database. Numbered 0046 (journal idx 46, when > #245 0045) to sit after #245 0037-0045;
+-- #282 alone migrates 0000-0036 then 0046 (gap is fine: drizzle orders by "when"). Additive, no backfill.
 CREATE TABLE "proposal_acceptances" (
   "id" serial PRIMARY KEY,
   "brokerage_id" integer NOT NULL REFERENCES "brokerages"("id"),

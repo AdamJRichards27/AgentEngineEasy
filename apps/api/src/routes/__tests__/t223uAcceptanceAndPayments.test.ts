@@ -8,7 +8,7 @@ import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
 import { db, entitlementGrants, users, launchPlans, documentPackages, agencyAgreementTerms, proposalAcceptances, ENTITLEMENT_KEYS } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
-import { createBrokerageWithUsers, createListedProperty, devLogin, cleanupBrokerages, signedSandboxEsignWebhookHeaders, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers, createListedProperty, devLogin, cleanupBrokerages, signedSandboxEsignWebhookHeaders, signedSandboxAmlWebhookHeaders, type DevLoginResult } from "./testSupport.js";
 
 const GROW = ENTITLEMENT_KEYS.filter((k) => k !== "run.access");
 const RUN = ["run.access", ...GROW];
@@ -192,4 +192,33 @@ test("Pit Crew activation: accepted proposal first, then the fully signed agreem
   await signAgreement(t.admin.cookie, w.propertyId);
   for (let i = 0; i < 40 && (await plans(w.propertyId)).length === 0; i++) await new Promise((r) => setTimeout(r, 50));
   assert.equal((await plans(w.propertyId)).length, 1);
+});
+
+// ------------------------------------------------------- (C) manual launch (Owner t225u)
+test("manual launch: no accepted proposal needed; requires the fully signed agreement and completed AML (409 with blockers until then)", async () => {
+  const t = await tenant("manual");
+  const w = await wonProposal(t.admin.cookie, "Manual"); // a proposal exists but is NOT accepted
+  let r = await call(t.admin.cookie, "POST", `/properties/${w.propertyId}/launch`);
+  assert.equal(r.status, 409, r.text);
+  assert.ok(r.json.blockers.includes("AGENCY_AGREEMENT_NOT_SIGNED"), r.text);
+  await signAgreement(t.admin.cookie, w.propertyId);
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal((await plans(w.propertyId)).length, 0, "no accepted proposal: no automatic activation");
+  r = await call(t.admin.cookie, "POST", `/properties/${w.propertyId}/launch`);
+  assert.equal(r.status, 409, r.text);
+  assert.deepEqual(r.json.blockers.filter((b: string) => b.startsWith("AGENCY")), [], "agreement now signed");
+  assert.ok(r.json.blockers.some((b: string) => b.startsWith("AML_")), r.text);
+  const aml = await call(t.admin.cookie, "GET", `/aml/by-property/${w.propertyId}`);
+  for (const v of aml.json.verifications as Array<{ providerReference: string }>) {
+    const body = JSON.stringify({ providerReference: v.providerReference, outcome: "VERIFIED", reviewRequired: false });
+    const wh = await fetch(`${baseUrl}/api/aml/webhook`, { method: "POST", headers: signedSandboxAmlWebhookHeaders(body), body });
+    assert.equal(wh.status, 200);
+  }
+  r = await call(t.admin.cookie, "POST", `/properties/${w.propertyId}/launch`);
+  assert.equal(r.status, 201, r.text);
+  assert.equal((await db.select().from(proposalAcceptances).where(eq(proposalAcceptances.propertyId, w.propertyId))).length, 0, "launched without any accepted proposal");
+  assert.equal((await call(t.admin.cookie, "POST", `/properties/${w.propertyId}/launch`)).status, 200, "idempotent");
+  // Grow-only stays 403; another brokerage stays 404-shaped.
+  const other = await tenant("manual-other");
+  assert.notEqual((await call(other.admin.cookie, "POST", `/properties/${w.propertyId}/launch`)).status, 201);
 });
