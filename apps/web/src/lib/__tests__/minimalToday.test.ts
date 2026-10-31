@@ -146,7 +146,11 @@ test("the Today screen is flag-gated and does not render unconnected actions or 
   const model = readFileSync(new URL("../../minimal/minimalTodayModel.ts", import.meta.url), "utf8");
   assert.match(app, /lazy\(\(\) => import\("\.\/minimal\/MinimalToday"\)\)/);
   assert.match(app, /shouldRenderMinimalShell\(useMinimalUx\(\)\)/);
-  assert.match(app, /minimalShell \? <MinimalToday \/> : <Grow \/>/);
+  // t222u: /grow now routes through selectGrowView (Today stays the Minimal default; ?tab=contacts
+  // mounts MinimalContacts; the classic shell still renders <Grow />).
+  assert.match(app, /const view = selectGrowView\(minimalShell, search\);/);
+  assert.match(app, /if \(view === "minimal-today"\) return <MinimalToday \/>;/);
+  assert.match(app, /return <Grow \/>;/);
   assert.match(app, /lazy\(\(\) => import\("\.\/pages\/Grow"\)\)/);
   assert.match(screen, /apiFetch\("\/grow\/today"\)/);
   assert.equal(screen.includes("localStorage"), false);
