@@ -169,7 +169,7 @@ test("PUT /agency-agreement-terms/:propertyId rejects a property belonging to a 
   assert.equal(originalPut.status, 200);
 
   const crossTenant = await putAgencyTerms(B.agent.cookie, propertyId, { commissionRateBps: 999 });
-  assert.equal(crossTenant.status, 400, "upsertAgencyAgreementTerms throws, and the route maps it to 400 like every other write in this router");
+  assert.equal(crossTenant.status, 404, "t221u: the agreement authority check answers 404 (R-F40: missing and other-brokerage are one result) before any write");
   const crossTenantBody = await json<{ error: string }>(crossTenant);
   assert.match(crossTenantBody.error, /not found/i);
 
@@ -220,7 +220,7 @@ test("POST /packages/:packageId/populate rejects a package belonging to a differ
   assert.equal(termsRes.status, 200);
 
   const crossTenant = await fetch(`${baseUrl}/api/documents/packages/${packageId}/populate`, { method: "POST", headers: headersFor(B.agent.cookie) });
-  assert.equal(crossTenant.status, 400, "populateDocumentPackage throws, and the route maps every error to 400");
+  assert.equal(crossTenant.status, 404, "t221u: the agreement authority check answers 404 for another brokerage's package before generating anything");
   const body = await json<{ error: string }>(crossTenant);
   assert.match(body.error, /not found/i);
 
@@ -260,7 +260,7 @@ test("POST /packages/:packageId/send-for-signature rejects a package belonging t
   assert.equal(populateRes.status, 200);
 
   const crossTenant = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers: headersFor(B.agent.cookie) });
-  assert.equal(crossTenant.status, 400, "sendPackageForSignature throws, and the route maps every error to 400");
+  assert.equal(crossTenant.status, 404, "t221u: the agreement authority check answers 404 for another brokerage's package before sending anything");
   const body = await json<{ error: string }>(crossTenant);
   assert.match(body.error, /not found/i);
 

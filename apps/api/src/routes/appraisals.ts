@@ -4,6 +4,8 @@ import { eq } from "drizzle-orm";
 import { db, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
+import { rejectAgencyAgreementFields } from "../lib/agencyAgreementAuthority.js";
+import { resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal, finaliseAppraisal } from "../lib/appraisals.js";
 import { AppraisalLifecycleClosedError, AppraisalPricingLockedError } from "../lib/appraisalFinaliseGuard.js";
 import { noteGrowPropertyIsolationRejection } from "../lib/grow/isolationRejection.js";
@@ -98,7 +100,16 @@ async function assertPropertyInBrokerage(propertyId: number, brokerageId: number
   return true;
 }
 
-appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
+// t221u: the property appraisal (proposal) needs a subscription: Run (run.access) or Grow
+// (grow.access). A brokerage holding neither (no subscription, no trial) gets the same 403 shape
+// requireEntitlement uses. Writes also refuse agency-agreement fields (a proposal is not an agreement).
+async function requiresProposalAccess(req: import("express").Request, res: Response, next: import("express").NextFunction): Promise<void> {
+  const keys = await resolveEntitlements(req.authedUser!);
+  if (keys.has("run.access") || keys.has("grow.access")) return next();
+  res.status(403).json({ error: "Not entitled", reason: "ENTITLEMENT_MISSING", entitlementKey: "grow.access" });
+}
+
+appraisalsRouter.get("/by-property/:propertyId", requireAuth, requiresProposalAccess, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -118,7 +129,7 @@ appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) =
 
 // Idempotent start — reuses an existing in-progress appraisal for this
 // property instead of creating a second one (getOrCreateAppraisal).
-appraisalsRouter.post("/by-property/:propertyId/start", requireAuth, async (req, res) => {
+appraisalsRouter.post("/by-property/:propertyId/start", requireAuth, requiresProposalAccess, rejectAgencyAgreementFields, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -144,7 +155,7 @@ const updateAppraisalSchema = z.object({
   comparableSales: z.unknown().optional(),
 });
 
-appraisalsRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
+appraisalsRouter.post("/by-property/:propertyId", requireAuth, requiresProposalAccess, rejectAgencyAgreementFields, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const parsed = updateAppraisalSchema.safeParse(req.body);
@@ -176,7 +187,7 @@ appraisalsRouter.post("/by-property/:propertyId", requireAuth, async (req, res) 
   }
 });
 
-appraisalsRouter.post("/by-property/:propertyId/finalise", requireAuth, async (req, res) => {
+appraisalsRouter.post("/by-property/:propertyId/finalise", requireAuth, requiresProposalAccess, rejectAgencyAgreementFields, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const user = req.authedUser!;

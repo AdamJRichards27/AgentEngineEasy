@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb, index, foreignKey } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, numeric, boolean, timestamp, jsonb, index, uniqueIndex, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -217,3 +217,38 @@ export type AppraisalComparableSale = typeof appraisalComparableSales.$inferSele
 export const insertAppraisalMarketCompetitionSchema = createInsertSchema(appraisalMarketCompetition).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertAppraisalMarketCompetition = z.infer<typeof insertAppraisalMarketCompetitionSchema>;
 export type AppraisalMarketCompetition = typeof appraisalMarketCompetition.$inferSelect;
+
+/**
+ * Owner t223u (31 Oct 2026) — PROPOSAL ACCEPTANCE record.
+ * Who accepted a proposal (the owner, or an authorised representative with the basis of their
+ * authority), what evidence supports it, and when it was accepted (timezone-aware) vs recorded.
+ * Append-only: one ACTIVE row per proposal; a correction withdraws (never deletes) the row.
+ * Acceptance never creates an agency agreement. Pit Crew activation (the launch plan auto-propose)
+ * needs an ACTIVE acceptance on a WON proposal for the property AND a fully signed agreement.
+ */
+export const PROPOSAL_ACCEPTOR_CAPACITIES = ["OWNER", "AUTHORISED_REPRESENTATIVE"] as const;
+export const PROPOSAL_ACCEPTANCE_EVIDENCE_TYPES = ["SIGNED_ACCEPTANCE", "EMAIL", "RECORDED_CALL", "IN_PERSON_WITNESSED", "OTHER"] as const;
+export const proposalAcceptances = pgTable("proposal_acceptances", {
+  id: serial("id").primaryKey(),
+  brokerageId: integer("brokerage_id").notNull().references(() => brokerages.id),
+  appraisalId: integer("appraisal_id").notNull().references(() => appraisals.id),
+  propertyId: integer("property_id").notNull().references(() => properties.id),
+  acceptorCapacity: text("acceptor_capacity").notNull(),
+  acceptorPartyId: integer("acceptor_party_id").references(() => parties.id),
+  acceptorName: text("acceptor_name").notNull(),
+  authorityBasis: text("authority_basis"),
+  evidenceType: text("evidence_type").notNull(),
+  evidenceReference: text("evidence_reference").notNull(),
+  evidenceDocumentId: integer("evidence_document_id"),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }).notNull(),
+  recordedByUserId: integer("recorded_by_user_id").notNull().references(() => users.id),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  status: text("status").notNull().default("ACTIVE"),
+  withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+  withdrawnByUserId: integer("withdrawn_by_user_id").references(() => users.id),
+  withdrawnReason: text("withdrawn_reason"),
+}, (table) => ({
+  propertyIdx: index("proposal_acceptances_property_idx").on(table.brokerageId, table.propertyId),
+  oneActivePerAppraisal: uniqueIndex("proposal_acceptances_one_active_idx").on(table.appraisalId).where(sql`${table.status} = 'ACTIVE'`),
+}));
+export type ProposalAcceptance = typeof proposalAcceptances.$inferSelect;

@@ -397,7 +397,7 @@ test("the appraisal send path refuses an AI-supplied body when consent is absent
   const email = `appraisal-${Date.now()}@example.com`;
   const sentinel = `GP4-APPRAISAL-SENTINEL-${Date.now()}-do-not-log`;
   const partyId = await createContact(email);
-  const listed = await createListedProperty(baseUrl, agent.cookie, { address: `4 Appraisal Consent St ${Date.now()}` });
+  const listed = await createListedProperty(baseUrl, agent.cookie, { address: `4 Appraisal Consent St ${Date.now()}`, withoutAcceptedProposal: true });
   const created = await fetch(`${baseUrl}/api/grow/appraisals/from-contact`, {
     method: "POST",
     headers: authHeaders(agent.cookie),

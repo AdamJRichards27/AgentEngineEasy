@@ -16,6 +16,7 @@ import {
   redeemDocumentSignedDownload,
 } from "../lib/documentStorage.js";
 import { propertyDocumentInBrokerage } from "../lib/documentTenancy.js";
+import { agreementReadAuthority, agreementWriteAuthority, answerAgreementAuthority, propertyIdForPackage } from "../lib/agencyAgreementAuthority.js";
 import {
   upsertAgencyAgreementTerms,
   getAgencyAgreementTerms,
@@ -163,6 +164,8 @@ const agencyTermsSchema = z
 documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
+  // t221u: Brokerage Administrator or the property's agent (lib/agencyAgreementAuthority.ts).
+  if (!(await answerAgreementAuthority(res, await agreementWriteAuthority(req.authedUser!, propertyId)))) return;
   const parsed = agencyTermsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -188,25 +191,16 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
   }
 });
 
-// R-F40 — same 404 as GET /transactions/by-property. A missing property and
-// a property in another brokerage are one result. No isolation metric: this
-// slice does not add a tenant_isolation_rejection_total boundary.
-async function propertyInBrokerage(propertyId: number, brokerageId: number): Promise<boolean> {
-  const [property] = await db
-    .select({ id: properties.id })
-    .from(properties)
-    .where(and(eq(properties.id, propertyId), eq(properties.brokerageId, brokerageId)));
-  return property !== undefined;
-}
+// R-F40 — same 404 as GET /transactions/by-property: a missing property and a property in another
+// brokerage are one result. t221u: the check now lives in lib/agencyAgreementAuthority.ts
+// (agreementReadAuthority / agreementWriteAuthority), which also applies the #147 own-property scope.
 
 documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
-  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
+  // t221u: also hides another Agent's property (#147 own-property scope), same 404.
+  if (!(await answerAgreementAuthority(res, await agreementReadAuthority(user, propertyId)))) return;
   try {
     const terms = await getAgencyAgreementTerms(propertyId, user.brokerageId);
     res.json({ terms });
@@ -221,6 +215,10 @@ documentsRouter.post("/packages/:packageId/populate", requireAuth, requiresRunAc
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;
+  // t221u: generation and execution need written authority over the package's property.
+  const pkgPropertyId = await propertyIdForPackage(packageId, user.brokerageId);
+  if (pkgPropertyId === null) return void res.status(404).json({ error: "Not found" });
+  if (!(await answerAgreementAuthority(res, await agreementWriteAuthority(user, pkgPropertyId)))) return;
   try {
     const result = await populateDocumentPackage(packageId, user.brokerageId);
     res.json(result);
@@ -233,6 +231,10 @@ documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, req
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;
+  // t221u: generation and execution need written authority over the package's property.
+  const pkgPropertyId = await propertyIdForPackage(packageId, user.brokerageId);
+  if (pkgPropertyId === null) return void res.status(404).json({ error: "Not found" });
+  if (!(await answerAgreementAuthority(res, await agreementWriteAuthority(user, pkgPropertyId)))) return;
   try {
     const { signatureRequest, created } = await sendPackageForSignature({
       packageId,
@@ -503,10 +505,8 @@ documentsRouter.get("/packages/by-property/:propertyId", requireAuth, requiresRu
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const user = req.authedUser!;
-  if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
+  // t221u: brokerage check plus #147 own-property scope for Agents (same 404).
+  if (!(await answerAgreementAuthority(res, await agreementReadAuthority(user, propertyId)))) return;
   const result = await getPackageByProperty(propertyId, user.brokerageId);
   res.json(result);
 });
