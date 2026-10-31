@@ -30,6 +30,7 @@ export interface LinkedContact {
   name: string;
   role: string;
   roleLabel: string;
+  isPrimary: boolean;
   detail: string;
   contactHref: string;
 }
@@ -51,7 +52,8 @@ export function buildLinkedContacts(rows: readonly LinkedPartyRow[]): LinkedCont
       partyId: r.party.id,
       name: partyDisplayName(r.party),
       role: r.role,
-      roleLabel: isPropertyPartyRole(r.role) ? PROPERTY_PARTY_ROLE_LABELS[r.role] : r.role,
+      roleLabel: roleLabel(r.role),
+      isPrimary: r.isPrimary === true,
       detail: [r.party.email, r.party.mobile].map((s) => s?.trim() ?? "").filter(Boolean).join(" · "),
       contactHref: `/grow/contacts/${r.party.id}`,
     }));
@@ -101,3 +103,75 @@ export function contactSearchPath(query: string): string {
 export function linkedPartiesPath(propertyId: number): string {
   return `/parties/by-property/${propertyId}`;
 }
+
+export function roleLabel(role: string): string {
+  return isPropertyPartyRole(role) ? PROPERTY_PARTY_ROLE_LABELS[role] : role;
+}
+
+// t228u Priority 2 — the contact side of property_parties (authoritative):
+//   GET    /parties/by-contact/:partyId   properties linked to a contact (brokerage + visibility scoped)
+//   PATCH  /parties/link/:linkId          { role?, isPrimary? }
+//   DELETE /parties/link/:linkId          unlink (the contact record is kept)
+//   GET    /properties?q=                 property search for "Link to a property" (own-property scoped)
+
+export interface ContactPropertyRow {
+  linkId: number;
+  propertyId: number;
+  role: string;
+  isPrimary: boolean;
+  formattedAddress: string | null;
+  suburb?: string | null;
+}
+
+export interface ContactPropertyLink {
+  linkId: number;
+  propertyId: number;
+  role: string;
+  roleLabel: string;
+  isPrimary: boolean;
+  label: string;
+  propertyHref: string;
+}
+
+export function contactPropertiesPath(partyId: number): string {
+  return `/parties/by-contact/${partyId}`;
+}
+
+export function linkPath(linkId: number): string {
+  return `/parties/link/${linkId}`;
+}
+
+export function propertySearchPath(query: string): string {
+  const q = query.trim();
+  return q ? `/properties?q=${encodeURIComponent(q)}` : "/properties";
+}
+
+export function buildContactPropertyLinks(rows: readonly ContactPropertyRow[]): ContactPropertyLink[] {
+  return rows.map((r) => ({
+    linkId: r.linkId,
+    propertyId: r.propertyId,
+    role: r.role,
+    roleLabel: roleLabel(r.role),
+    isPrimary: r.isPrimary === true,
+    label: r.formattedAddress?.trim() || `Property ${r.propertyId}`,
+    propertyHref: `/grow/properties/${r.propertyId}`,
+  }));
+}
+
+/** Body for PATCH /parties/link/:id. Only changed fields are sent; null when nothing changed. */
+export function updateLinkBody(
+  current: { role: string; isPrimary: boolean },
+  next: { role?: string; isPrimary?: boolean },
+): { role?: PropertyPartyRole; isPrimary?: boolean } | null {
+  const body: { role?: PropertyPartyRole; isPrimary?: boolean } = {};
+  if (next.role !== undefined && next.role !== current.role && isPropertyPartyRole(next.role)) body.role = next.role;
+  if (next.isPrimary !== undefined && next.isPrimary !== current.isPrimary) body.isPrimary = next.isPrimary;
+  return Object.keys(body).length ? body : null;
+}
+
+/** Client-side duplicate guard from the contact side. */
+export function isPropertyAlreadyLinked(links: readonly ContactPropertyLink[], propertyId: number, role: string): boolean {
+  return links.some((l) => l.propertyId === propertyId && l.role === role);
+}
+
+export const UNLINK_CONFIRM = "Remove this link? The contact and the property are both kept.";

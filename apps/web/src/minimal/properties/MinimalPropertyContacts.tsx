@@ -5,6 +5,7 @@ import { ApiError, apiErrorMessage, apiFetch } from "../../lib/api";
 import type { GrowContactListItem, GrowContactListPage } from "../../lib/growContactList";
 import { builderPath } from "../appraisal/appraisalBuilderModel";
 import { resolveStartFailure, startAppraisalBody } from "./minimalPropertiesModel";
+import { PropertyLinkControls } from "./PropertyLinkControls";
 import {
   appraisalCandidates,
   buildLinkedContacts,
@@ -29,12 +30,14 @@ export interface MinimalPropertyContactsProps {
   propertyId: number;
   canSearch: boolean;
   canCreateContact: boolean;
+  /** t228u: edit role/primary and unlink (Grow contacts.manage or Run). */
+  canManageLinks?: boolean;
   canStartAppraisal: boolean;
   /** An appraisal already exists for this property (one per property). */
   existingAppraisalHref: string | null;
 }
 
-export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContact, canStartAppraisal, existingAppraisalHref }: MinimalPropertyContactsProps) {
+export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContact, canManageLinks = false, canStartAppraisal, existingAppraisalHref }: MinimalPropertyContactsProps) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [open, setOpen] = useState(false);
@@ -65,6 +68,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
     mutationFn: (body: ReturnType<typeof linkContactBody>) => apiFetch("/parties", { method: "POST", body: JSON.stringify(body) }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["minimal-property-parties", propertyId] });
+      void queryClient.invalidateQueries({ queryKey: ["contact-property-links"] });
       setNotice(`${selected?.name ?? "Contact"} linked to this property.`);
       setOpen(false);
       setSelected(null);
@@ -150,7 +154,18 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
             <li key={l.linkId} className="am-agenda-row am-linked-row" data-linked-party={l.partyId} data-linked-role={l.role}>
               <div>
                 <Link href={l.contactHref} className="am-agenda-title">{l.name}</Link>
-                <div className="am-agenda-sub">{l.roleLabel}{l.detail ? ` · ${l.detail}` : ""}</div>
+                <div className="am-agenda-sub">{l.roleLabel}{l.isPrimary ? " · Primary" : ""}{l.detail ? ` · ${l.detail}` : ""}</div>
+                {canManageLinks ? (
+                  <PropertyLinkControls
+                    linkId={l.linkId}
+                    role={l.role}
+                    isPrimary={l.isPrimary}
+                    onChanged={() => {
+                      void queryClient.invalidateQueries({ queryKey: ["minimal-property-parties", propertyId] });
+                      void queryClient.invalidateQueries({ queryKey: ["contact-property-links"] });
+                    }}
+                  />
+                ) : null}
               </div>
             </li>
           ))}
