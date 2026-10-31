@@ -72,8 +72,14 @@ before(async () => {
 });
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 /* ---------------------------------------------------------------------

@@ -46,7 +46,7 @@ import {
 import { classifySignalAnchor, CONTACT_ANCHORABLE_SIGNAL_TYPES, CONTACT_ANCHORABLE_RULE_NAMES } from "../evaluation.js";
 import { resetSweepResumePointForTests } from "../sweep.js";
 // Cross-file contention on the sweep lock: see sweepLockContention.ts.
-import { sweepWhenLockFree } from "./sweepLockContention.js";
+import { sweepWhenLockFree, acquireSweepLockForTest } from "./sweepLockContention.js";
 import { invalidateEntitlementCache } from "../../entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
@@ -102,8 +102,14 @@ async function grant(brokerageId: number, entitlementKey: string): Promise<void>
 }
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([A?.brokerageId, B?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 /* ---------------------------------------------------------------------
@@ -623,7 +629,10 @@ async function createReorderableContact(label: string): Promise<{ partyId: numbe
 
 test("W2-D: repeated reads of the same contact return byte-identical output", async () => {
   const { partyId } = await createReorderableContact("Deterministic");
-
+  // t223u: hold the database-wide sweep lock while reading, so a sibling file's UNSCOPED sweep
+  // cannot add a signal for this contact between two reads (seen once in a parallel repro).
+  const releaseSweepLock = await acquireSweepLockForTest();
+  try {
   // Ten reads. One repeat could coincide; a planner free to reorder will
   // usually do so within ten, and any single divergence fails the assertion.
   const first = await getContactPropertyIntelligenceSummary(partyId, A.brokerageId);
@@ -640,6 +649,9 @@ test("W2-D: repeated reads of the same contact return byte-identical output", as
     bodies.push(await res.text());
   }
   assert.equal(new Set(bodies).size, 1, "every HTTP response body is identical");
+  } finally {
+    await releaseSweepLock();
+  }
 });
 
 test("W2-D: the entry order is TOTAL — recorded relationships first, then address, with a unique tiebreak", async () => {

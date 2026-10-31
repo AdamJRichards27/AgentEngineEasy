@@ -88,8 +88,14 @@ after(async () => {
   delete process.env.OPERATIONAL_ALERTS_WEBHOOK_URL;
   delete process.env.OPERATIONAL_ALERTS_TOKEN;
   __resetOperationalAlertsForTesting();
-  await cleanupBrokerages([A?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([A?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 beforeEach(() => {
@@ -522,6 +528,7 @@ test("H-4 — a cursor-touch failure dispatches GROW_SIGNAL_SWEEP_CURSOR_TOUCH_F
   await db.delete(growSignalSweepCursors).where(eq(growSignalSweepCursors.brokerageId, A.brokerageId));
   const injected = failBrokeragePass(A.brokerageId, true);
   let firstRunId = "";
+  let secondRunId = "";
   try {
     const first = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
     firstRunId = first.summary.sweepRunId;
@@ -529,6 +536,7 @@ test("H-4 — a cursor-touch failure dispatches GROW_SIGNAL_SWEEP_CURSOR_TOUCH_F
     assert.equal(first.ok, true, "a cursor-touch failure must not fail the whole run");
     await settleAlerts();
     const second = await sweepExclusively({ brokerageIds: [A.brokerageId], force: true });
+    secondRunId = second.summary.sweepRunId;
     assert.equal(second.summary.errors, 1);
     await settleAlerts();
   } finally {
@@ -561,7 +569,10 @@ test("H-4 — a cursor-touch failure dispatches GROW_SIGNAL_SWEEP_CURSOR_TOUCH_F
   }
 
   const [cursor] = await db.select().from(growSignalSweepCursors).where(eq(growSignalSweepCursors.brokerageId, A.brokerageId));
-  assert.equal(cursor, undefined, "a failed cursor touch leaves last_evaluated_at unstamped");
+  // t223u: once this test releases the sweep lock, an UNSCOPED sweep in a sibling file (shared DB)
+  // may legitimately stamp A's cursor. Only a stamp by one of THIS test's failing runs is a defect.
+  assert.ok(cursor === undefined || ![firstRunId, secondRunId].includes(String(cursor.lastSweepRunId)),
+    `a failed cursor touch leaves last_evaluated_at unstamped by this test's runs (stamped by ${cursor?.lastSweepRunId})`);
   const [run] = await db.select().from(growSignalSweepRuns).where(eq(growSignalSweepRuns.id, firstRunId));
   assert.equal(run.status, "COMPLETED");
 });
