@@ -16,7 +16,7 @@ import {
   db, entitlementGrants, users, documentPackages, agencyAgreementTerms, launchPlans, pitCrewAssignments, domainEvents, ENTITLEMENT_KEYS,
 } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
-import { createBrokerageWithUsers, devLogin, cleanupBrokerages, signedSandboxEsignWebhookHeaders, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers, devLogin, cleanupBrokerages, signedSandboxEsignWebhookHeaders, recordAcceptedProposalFixture, type DevLoginResult } from "./testSupport.js";
 
 const GROW = ENTITLEMENT_KEYS.filter((k) => k !== "run.access");
 const PERSONAS = {
@@ -285,9 +285,10 @@ test("proposal submit and acceptance (send, outcome WON) create no agreement, no
   assert.ok(!ev.some((e) => e.t.startsWith("AGENCY_AGREEMENT")), JSON.stringify(ev));
 });
 
-test("Pit Crew activation gate: no launch plan after send-for-signature; created only once the agreement is fully signed", async () => {
+test("Pit Crew activation gate: no launch plan after send-for-signature; created only once the agreement is fully signed (with an accepted proposal, t223u)", async () => {
   const t = await tenant("gate", PERSONAS.Run); await finalise(t);
   const own = await propertyWithSeller(t.admin.cookie, "Gate");
+  await recordAcceptedProposalFixture(own.propertyId, own.partyId); // t223u: activation also needs an accepted proposal
   const pkg = await readyPackage(t.admin.cookie, own.propertyId);
   assert.equal((await call(t.admin.cookie, "PUT", `/documents/agency-agreement-terms/${own.propertyId}`, TERMS)).status, 200);
   assert.equal((await call(t.admin.cookie, "POST", `/documents/packages/${pkg}/populate`)).status, 200);

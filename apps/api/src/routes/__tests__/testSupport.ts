@@ -22,6 +22,7 @@ import {
   transactions,
   transactionConditions,
   appraisals,
+  proposalAcceptances,
   appraisalComparableSales,
   appraisalMarketCompetition,
   automationTasks,
@@ -288,6 +289,10 @@ export async function createListedProperty(
 
   const populateRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/populate`, { method: "POST", headers });
   if (populateRes.status !== 200) throw new Error(`populate failed: ${populateRes.status} ${await populateRes.text()}`);
+
+  // Owner t223u: Pit Crew activation (the launch plan auto-proposed on a fully signed agreement)
+  // also needs an accepted proposal, so a "listed" fixture records one (synthetic evidence).
+  await recordAcceptedProposalFixture(propertyId, sellerParty.id);
 
   const sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
   if (sendRes.status !== 201) throw new Error(`send-for-signature failed: ${sendRes.status} ${await sendRes.text()}`);
@@ -728,6 +733,12 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
     // Comparable sales and market competition reference appraisals.id with
     // ON DELETE no action (migration 0016). Clear them first or the appraisal
     // delete fails and the test process never reaches server.close().
+    // Owner t223u (0046): proposal_acceptances is append-only (DELETE refused by trigger).
+    // Teardown only: delete in its own transaction with replica mode (local/CI superuser).
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.delete(proposalAcceptances).where(inArray(proposalAcceptances.propertyId, propertyIds));
+    });
     const appraisalRows = await db.select({ id: appraisals.id }).from(appraisals).where(inArray(appraisals.propertyId, propertyIds));
     const appraisalIds = appraisalRows.map((row) => row.id);
     if (appraisalIds.length > 0) {
@@ -856,4 +867,22 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(users).where(inArray(users.brokerageId, ids));
   await db.delete(pitCrewWaitingOnSweepSettings).where(inArray(pitCrewWaitingOnSweepSettings.brokerageId, ids));
   await db.delete(brokerages).where(inArray(brokerages.id, ids));
+}
+
+/**
+ * TEST FIXTURE (Owner t223u): a WON proposal for the property plus an ACTIVE acceptance by the
+ * owner (the seller party), synthetic evidence. Written directly so suites whose tenants hold
+ * only run.access (no Grow keys) can still reach a launch plan through the real signing path.
+ */
+export async function recordAcceptedProposalFixture(propertyId: number, sellerPartyId: number | null): Promise<{ appraisalId: number }> {
+  const [property] = await db.select({ brokerageId: properties.brokerageId }).from(properties).where(eq(properties.id, propertyId));
+  if (!property) throw new Error(`fixture: property ${propertyId} not found`);
+  const [recorder] = await db.select({ id: users.id }).from(users).where(eq(users.brokerageId, property.brokerageId)).limit(1);
+  if (!recorder) throw new Error(`fixture: no user in brokerage ${property.brokerageId}`);
+  const [appraisal] = await db.insert(appraisals).values({ propertyId, brokerageId: property.brokerageId, partyId: sellerPartyId, status: "WON", outcome: "WON", outcomeAt: new Date(), createdByUserId: recorder.id, ownerUserId: recorder.id }).returning({ id: appraisals.id });
+  await db.insert(proposalAcceptances).values({
+    brokerageId: property.brokerageId, appraisalId: appraisal!.id, propertyId, acceptorCapacity: "OWNER", acceptorPartyId: sellerPartyId,
+    acceptorName: "Sam Seller (synthetic)", evidenceType: "EMAIL", evidenceReference: "synthetic-test-fixture", acceptedAt: new Date(Date.now() - 60_000), recordedByUserId: recorder.id,
+  });
+  return { appraisalId: appraisal!.id };
 }

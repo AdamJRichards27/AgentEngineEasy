@@ -10,6 +10,7 @@
 
 import { registerHandler, logger, type DomainEvent } from "@aee/events";
 import { getOrCreateLaunchPlan } from "./model.js";
+import { pitCrewActivationAllowed } from "../proposalAcceptance.js";
 
 let registered = false;
 
@@ -25,6 +26,10 @@ let registered = false;
 async function handleAgencyAgreementSigned(event: DomainEvent): Promise<void> {
   if (event.propertyId == null || event.brokerageId == null) return;
   try {
+    // Owner t223u: Pit Crew activation needs an accepted proposal AND the fully signed agreement.
+    // Without an accepted proposal the plan is not proposed here; recording the acceptance later
+    // proposes it (lib/proposalAcceptance.ts).
+    if (!(await pitCrewActivationAllowed(event.propertyId, event.brokerageId))) return;
     await getOrCreateLaunchPlan(event.propertyId, event.brokerageId, null);
   } catch (err) {
     logger.error("launch_auto_propose_failed", { propertyId: event.propertyId, error: err });

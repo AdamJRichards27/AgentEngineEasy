@@ -1,4 +1,6 @@
 import { rejectAgencyAgreementFields } from "../lib/agencyAgreementAuthority.js";
+import { recordProposalAcceptance, getActiveProposalAcceptance, ProposalAcceptanceError } from "../lib/proposalAcceptance.js";
+import { PROPOSAL_ACCEPTOR_CAPACITIES, PROPOSAL_ACCEPTANCE_EVIDENCE_TYPES } from "@aee/db";
 import { Router } from "express";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
@@ -435,6 +437,64 @@ growAppraisalsRouter.post("/:id/outcome", requireAuth, rejectAgencyAgreementFiel
     res.json({ appraisal });
   } catch (err) {
     handleGrowAppraisalError(err, res);
+  }
+});
+
+/* ---------------------------------------------------------------------
+ * Owner t223u -- proposal acceptance (owner or authorised representative,
+ * evidence, timestamp). Never creates an agency agreement. Pit Crew cannot
+ * record it. Pit Crew activation needs this AND a fully signed agreement.
+ * -----------------------------------------------------------------*/
+const acceptanceSchema = z.object({
+  acceptorCapacity: z.enum(PROPOSAL_ACCEPTOR_CAPACITIES),
+  acceptorPartyId: z.coerce.number().int().positive().nullable().optional(),
+  acceptorName: z.string().trim().min(1).max(200),
+  authorityBasis: z.string().trim().max(500).nullable().optional(),
+  evidenceType: z.enum(PROPOSAL_ACCEPTANCE_EVIDENCE_TYPES),
+  evidenceReference: z.string().trim().min(1).max(500),
+  evidenceDocumentId: z.coerce.number().int().positive().nullable().optional(),
+  acceptedAt: z.string().datetime({ offset: true }),
+}).strict();
+
+function handleAcceptanceError(err: unknown, res: import("express").Response): void {
+  if (err instanceof ProposalAcceptanceError) {
+    res.status(err.status).json({ error: err.message, code: err.code });
+    return;
+  }
+  handleGrowAppraisalError(err, res);
+}
+
+growAppraisalsRouter.post("/:id/acceptance", requireAuth, rejectAgencyAgreementFields, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+  const user = req.authedUser!;
+  if (user.role === "Pit Crew") {
+    res.status(403).json({ error: "Pit Crew cannot record a proposal acceptance." });
+    return;
+  }
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
+  const parsed = acceptanceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
+  try {
+    const result = await recordProposalAcceptance({ ...parsed.data, appraisalId, brokerageId: user.brokerageId, userId: user.id, acceptedAt: new Date(parsed.data.acceptedAt) });
+    res.status(201).json(result);
+  } catch (err) {
+    handleAcceptanceError(err, res);
+  }
+});
+
+growAppraisalsRouter.get("/:id/acceptance", requireAuth, requiresGrowAccess, async (req, res) => {
+  const user = req.authedUser!;
+  const appraisalId = readIdParam(res, req.params.id, "appraisal");
+  if (appraisalId === null) return;
+  if (await appraisalWriteBlocked(user, appraisalId, res)) return;
+  try {
+    res.json({ acceptance: await getActiveProposalAcceptance(appraisalId, user.brokerageId) });
+  } catch (err) {
+    handleAcceptanceError(err, res);
   }
 });
 
