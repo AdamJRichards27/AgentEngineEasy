@@ -1,3 +1,4 @@
+import { devLoginGrantsRunAccess } from "../lib/billing/devLoginRunAccess.js";
 import { Router, type Response } from "express";
 import { eq, sql, and, gt, isNull, desc, count } from "drizzle-orm";
 import { z } from "zod";
@@ -185,15 +186,23 @@ authRouter.post("/dev-login", async (req, res) => {
     // lib/billing/runAccessBackfill.ts for the equivalent, idempotent backfill covering
     // brokerages that already existed before run.access was introduced. grow.access is
     // deliberately NOT auto-granted here — Grow stays purchase-gated, unchanged from before
-    // this phase.
-    await db.insert(entitlementGrants).values({
-      brokerageId: brokerage.id,
-      entitlementKey: "run.access",
-      granteeType: "brokerage",
-      granteeId: brokerage.id,
-      sourceType: "migration",
-      status: "Active",
-    });
+    // this phase. RUN-INCLUDES-GROW (t220u): Grow keys for Run come only from a Trialing/Active
+    // Starter subscription (catalogue.ts); this migration grant is not a subscription, so an
+    // unsubscribed brokerage still gets no paid Grow access.
+    // Owner t225u: only where explicitly authorised (lib/billing/devLoginRunAccess.ts) — never by
+    // default on a shared environment.
+    const runDecision = devLoginGrantsRunAccess(brokerageName);
+    if (runDecision.grant) {
+      await db.insert(entitlementGrants).values({
+        brokerageId: brokerage.id,
+        entitlementKey: "run.access",
+        granteeType: "brokerage",
+        granteeId: brokerage.id,
+        sourceType: "migration",
+        status: "Active",
+      });
+    }
+    logger.info("dev_login_run_access_decision", { brokerageId: brokerage.id, granted: runDecision.grant, reason: runDecision.reason });
   } else {
     const existingInBrokerage = await db.select().from(users).where(eq(users.brokerageId, brokerage.id));
     isFirstInBrokerage = existingInBrokerage.length === 0;
