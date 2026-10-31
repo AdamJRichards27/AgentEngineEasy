@@ -6,12 +6,13 @@ import { mobilePermissions } from "./mobilePermissions";
 // no storage. M2 renders it.
 //
 // Owner t217u: the four tabs show for every signed-in brokerage user (Grow is
-// always visible). "More" is grouped Grow / Run / Account. Its links still come
+// always visible). "More" is grouped Grow / Run / Workspace (t220u: aligned with the
+// CC Task #64 v2 change note). Its links still come
 // from buildMinimalSidebar (labels, order, the Market Activity / My Momentum
 // availability flags and the Financial / Pit Crew role rules are not
 // re-derived), but Run links are offered only when mobilePermissions().run
-// (run.access AND a brokerage role). Grow-only users get one "Upgrade to Run"
-// entry in Account instead.
+// (run.access AND a brokerage role). Users without Run get one "Add Run" offer
+// in the Run group instead (words only; no pricing in the model).
 //
 // Search has no route yet (its screen is M2), so it is an action tab.
 
@@ -33,7 +34,7 @@ export interface MobileMoreItem {
   path: string;
 }
 
-export type MobileMoreGroupKey = "grow" | "run" | "account";
+export type MobileMoreGroupKey = "grow" | "run" | "workspace";
 
 export interface MobileMoreGroup {
   key: MobileMoreGroupKey;
@@ -45,9 +46,9 @@ export interface MobileNav {
   tabs: MobileNavTab[];
   /** Every More item, flattened from moreGroups in order (for current-page matching). */
   more: MobileMoreItem[];
-  /** More, grouped Grow / Run / Account. Empty groups are omitted. */
+  /** More, grouped Grow / Run / Workspace. Empty groups are omitted. */
   moreGroups: MobileMoreGroup[];
-  /** The single "Upgrade to Run" entry (also listed in the Account group), or null. */
+  /** The single "Add Run" offer (also listed in the Run group), or null. */
   upgrade: MobileMoreItem | null;
 }
 
@@ -78,13 +79,14 @@ const PRIMARY_HREFS: ReadonlySet<string> = new Set([TODAY_HREF, PEOPLE_HREF, PRO
 export const MOBILE_MORE_GROUP_MAX_ITEMS = 5;
 
 /**
- * PLACEHOLDER (t217u): there is no plan/upgrade page in the web app yet, so the upgrade
- * entry opens Settings with a marker query. Replace when a plan page exists. No pricing here.
+ * PLACEHOLDER (t217u/t220u): there is no Add Run screen in the web app at a7b2b0ef, so the
+ * offer opens Settings with a marker query (Settings ignores it). M2 points this at the Add Run
+ * screen (Claude's UX owns its content and price). No pricing here.
  */
 export const RUN_UPGRADE_HREF = "/settings?upgrade=run";
-export const RUN_UPGRADE_LABEL = "Upgrade to Run";
+export const RUN_UPGRADE_LABEL = "Add Run";
 
-const ACCOUNT_HREFS: ReadonlySet<string> = new Set(["/settings"]);
+const WORKSPACE_HREFS: ReadonlySet<string> = new Set(["/communications", "/settings"]);
 
 export function buildMobileNav(input: MobileNavInput): MobileNav {
   if (input.ownerWithoutContext || input.entitlementsLoading || !Array.isArray(input.entitlements)) {
@@ -110,26 +112,26 @@ export function buildMobileNav(input: MobileNavInput): MobileNav {
   const toItem = (l: { href: string; label: string; path: string }): MobileMoreItem => ({ key: l.href, label: l.label, href: l.href, path: l.path });
   const growItems: MobileMoreItem[] = [];
   const runItems: MobileMoreItem[] = [];
-  const accountItems: MobileMoreItem[] = [];
+  const workspaceItems: MobileMoreItem[] = [];
   for (const g of groups) {
     for (const l of minimalSidebarLinks([g])) {
       if (PRIMARY_HREFS.has(l.href) || l.href === START_PROPERTY_HREF) continue;
-      if (ACCOUNT_HREFS.has(l.href)) accountItems.push(toItem(l));
+      if (WORKSPACE_HREFS.has(l.href)) workspaceItems.push(toItem(l));
       else if (g.key === "operations") {
         if (perms.run) runItems.push(toItem(l));
-      } else growItems.push(toItem(l)); // Grow group, plus Communications (a Grow feature)
+      } else growItems.push(toItem(l));
     }
   }
   const upgrade: MobileMoreItem | null = perms.upgradeToRun
     ? { key: "upgrade-run", label: RUN_UPGRADE_LABEL, href: RUN_UPGRADE_HREF, path: "/settings" }
     : null;
-  if (upgrade) accountItems.push(upgrade);
+  if (upgrade) runItems.push(upgrade);
 
   const moreGroups: MobileMoreGroup[] = (
     [
       { key: "grow", label: "Grow", items: growItems },
       { key: "run", label: "Run", items: runItems },
-      { key: "account", label: "Account", items: accountItems },
+      { key: "workspace", label: "Workspace", items: workspaceItems },
     ] as MobileMoreGroup[]
   )
     .map((g) => ({ ...g, items: g.items.slice(0, MOBILE_MORE_GROUP_MAX_ITEMS) }))

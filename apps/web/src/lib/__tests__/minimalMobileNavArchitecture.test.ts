@@ -12,7 +12,7 @@ import { buildSearchResults, mobileSearchOptions, planSearch, propertyResultHref
 
 // Owner t217u (31 Oct 2026): Grow is the entry point and always visible; Run is an optional
 // upgrade gated by the run.access subscription entitlement AND a brokerage role permission;
-// Run subscribers keep all of Grow; Grow-only users see one "Upgrade to Run" entry.
+// Run subscribers keep all of Grow; Grow-only users see one "Add Run" offer.
 // UI model only: the server still enforces entitlements, roles and brokerage isolation.
 
 const off = { marketActivityAvailable: false, momentumAvailable: false };
@@ -29,34 +29,35 @@ const hrefs = (n: MobileNav) => n.more.map((m) => m.href);
 const groupKeys = (n: MobileNav) => n.moreGroups.map((g) => g.key);
 const groupLabels = (n: MobileNav, key: string) => n.moreGroups.find((g) => g.key === key)?.items.map((i) => i.label) ?? null;
 
-test("t217u-1 empty entitlements: Grow tabs visible, no Run, Upgrade to Run shown", () => {
+test("t217u-1 empty entitlements: Grow tabs visible, no Run links, one Add Run offer", () => {
   for (const role of ROLES) {
     const n = nav({ role, entitlements: [] });
     assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"], role);
     for (const p of RUN_PATHS) assert.equal(hrefs(n).includes(p), false, `${role} ${p}`);
-    assert.deepEqual(groupKeys(n), ["grow", "account"], role);
-    assert.deepEqual(groupLabels(n, "grow"), ["Opportunities", "Appraisals", "Communications"], role);
-    assert.deepEqual(groupLabels(n, "account"), ["Settings", "Upgrade to Run"], role);
+    assert.deepEqual(groupKeys(n), ["grow", "run", "workspace"], role);
+    assert.deepEqual(groupLabels(n, "grow"), ["Opportunities", "Appraisals"], role);
+    assert.deepEqual(groupLabels(n, "run"), ["Add Run"], role);
+    assert.deepEqual(groupLabels(n, "workspace"), ["Communications", "Settings"], role);
     assert.equal(n.upgrade?.href, RUN_UPGRADE_HREF, role);
-    assert.equal(n.more.filter((m) => m.label === "Upgrade to Run").length, 1, `${role}: exactly one upgrade entry`);
+    assert.equal(n.more.filter((m) => m.label === "Add Run").length, 1, `${role}: exactly one upgrade entry`);
   }
 });
 
 test("t217u-2 Grow-only subscriber: all Grow features discoverable (flags respected), no Run, upgrade shown", () => {
   const n = nav({ entitlements: ["grow.access", "grow.contacts.read"], ...on });
   assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
-  assert.deepEqual(groupLabels(n, "grow"), ["Opportunities", "Appraisals", "Market Activity", "My Momentum", "Communications"]);
-  assert.equal(groupLabels(n, "run"), null);
+  assert.deepEqual(groupLabels(n, "grow"), ["Opportunities", "Appraisals", "Market Activity", "My Momentum"]);
+  assert.deepEqual(groupLabels(n, "run"), ["Add Run"]);
   assert.ok(n.upgrade);
   const flagsOff = nav({ entitlements: ["grow.access"], ...off });
-  assert.deepEqual(groupLabels(flagsOff, "grow"), ["Opportunities", "Appraisals", "Communications"]);
+  assert.deepEqual(groupLabels(flagsOff, "grow"), ["Opportunities", "Appraisals"]);
 });
 
 test("t217u-3 Run subscriber WITH a role permission: Run group by role, Grow kept, no upgrade", () => {
   const agent = nav({ role: "Agent", entitlements: ["run.access"] });
   assert.deepEqual(tabKeys(agent), ["today", "people", "properties", "search"]);
   assert.deepEqual(groupLabels(agent, "run"), ["Run home", "Run today", "Exceptions"]);
-  assert.deepEqual(groupLabels(agent, "grow"), ["Opportunities", "Appraisals", "Communications"]);
+  assert.deepEqual(groupLabels(agent, "grow"), ["Opportunities", "Appraisals"]);
   assert.equal(agent.upgrade, null);
   const pitCrew = nav({ role: "Pit Crew", entitlements: ["run.access", "grow.access"] });
   assert.deepEqual(groupLabels(pitCrew, "run"), ["Run home", "Run today", "Exceptions", "Pit Crew"]);
@@ -74,9 +75,9 @@ test("t217u-4 Run subscriber WITHOUT a role permission: no Run items, and no upg
 
 test("t217u-5 Brokerage Administrator with Grow and Run: grouped More, Financial and Pit Crew present", () => {
   const n = nav({ role: "Brokerage Administrator", entitlements: ["grow.access", "grow.contacts.read", "run.access"], ...on });
-  assert.deepEqual(groupKeys(n), ["grow", "run", "account"]);
+  assert.deepEqual(groupKeys(n), ["grow", "run", "workspace"]);
   assert.deepEqual(groupLabels(n, "run"), ["Run home", "Run today", "Exceptions", "Financial", "Pit Crew"]);
-  assert.deepEqual(groupLabels(n, "account"), ["Settings"]);
+  assert.deepEqual(groupLabels(n, "workspace"), ["Communications", "Settings"]);
   assert.equal(n.upgrade, null);
 });
 
@@ -104,7 +105,7 @@ test("t217u-7 More is grouped, short, and never duplicates a primary tab", () =>
         assert.ok(n.more.length <= 3 * MOBILE_MORE_GROUP_MAX_ITEMS, `${label}: More bounded`);
         assert.equal(new Set(hrefs(n)).size, n.more.length, `${label}: unique`);
         for (const p of [...PRIMARY, "/properties/start"]) assert.equal(hrefs(n).includes(p), false, `${label}: ${p}`);
-        assert.deepEqual(n.moreGroups.map((g) => g.key), ["grow", "run", "account"].filter((k) => n.moreGroups.some((g) => g.key === k)), `${label}: group order`);
+        assert.deepEqual(n.moreGroups.map((g) => g.key), ["grow", "run", "workspace"].filter((k) => n.moreGroups.some((g) => g.key === k)), `${label}: group order`);
       }
     }
   }

@@ -42,7 +42,7 @@ export interface MobilePermissions {
   searchProperties: boolean;
   /** Run items and Run data: run.access subscription AND a brokerage role. */
   run: boolean;
-  /** Grow-only user (no run.access): show the single "Upgrade to Run" entry. */
+  /** Grow-only user (no run.access): show the single "Add Run" offer. */
   upgradeToRun: boolean;
 }
 

@@ -31,16 +31,16 @@ test("1. Brokerage Administrator with Grow and Run: four tabs in fixed order, fu
   assert.deepEqual(n.tabs.map((t) => t.label), ["Today", "People", "Properties", "Search"]);
   assert.deepEqual(n.tabs.map((t) => t.href), ["/grow", "/grow?tab=contacts", "/properties", null]);
   assert.deepEqual(n.tabs.map((t) => t.action), [null, null, null, "open-search"]);
-  // t217u: grouped Grow, Run, Account (Communications is a Grow feature).
+  // t220u: grouped Grow, Run, Workspace (v2 change note).
   assert.deepEqual(moreLabels(n), [
     "Opportunities",
     "Appraisals",
-    "Communications",
     "Run home",
     "Run today",
     "Exceptions",
     "Financial",
     "Pit Crew",
+    "Communications",
     "Settings",
   ]);
 });
@@ -48,7 +48,7 @@ test("1. Brokerage Administrator with Grow and Run: four tabs in fixed order, fu
 test("2. Grow-only agent: four tabs, no Run links in More", () => {
   const n = nav({ entitlements: GROW_ONLY, ...on });
   assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Market Activity", "My Momentum", "Communications", "Settings", "Upgrade to Run"]); // t217u
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Market Activity", "My Momentum", "Add Run", "Communications", "Settings"]); // t220u
   const hrefs = n.more.map((m) => m.href);
   for (const runOnly of ["/", "/today", "/exceptions", "/financial", "/pit-crew", "/properties/start"]) {
     assert.equal(hrefs.includes(runOnly), false, runOnly);
@@ -58,7 +58,7 @@ test("2. Grow-only agent: four tabs, no Run links in More", () => {
 test("3. Run subscriber without grow.access: keeps all four tabs and Grow (t217u)", () => {
   const n = nav({ entitlements: RUN_ONLY });
   assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Communications", "Run home", "Run today", "Exceptions", "Settings"]);
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Run home", "Run today", "Exceptions", "Communications", "Settings"]);
 });
 
 test("4. grow.access without grow.contacts.read: People tab still shown (t217u); the page enforces the action", () => {
@@ -77,7 +77,7 @@ test("5. fails closed: loading, null, undefined, and owner without brokerage ret
 test("5b. loaded but empty entitlement list: Grow tabs, Grow More, upgrade offered (t217u)", () => {
   const n = nav({ entitlements: [] });
   assert.deepEqual(tabKeys(n), ["today", "people", "properties", "search"]);
-  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Communications", "Settings", "Upgrade to Run"]);
+  assert.deepEqual(moreLabels(n), ["Opportunities", "Appraisals", "Add Run", "Communications", "Settings"]);
 });
 
 test("6. invariants across roles, entitlement sets and flags", () => {
