@@ -11,14 +11,12 @@ import { db, documents, growCallSessions, growCallTranscriptions } from "@aee/db
  *   transcriptions  grow_call_transcriptions created in the period
  * Period: the current calendar month (UTC), [start of month, start of next month).
  *
- * Limits are CONFIGURATION, not a commercial schedule: AE_CALL_USAGE_LIMITS is a JSON object such as
- * {"calls":500,"minutes":2000}. Unset, empty, invalid, or a non-positive value means UNLIMITED for that
- * metric, which is the default for every metric until an approved commercial schedule exists. There is
- * no allowance and no charge anywhere in this module.
+ * Owner t225u: METERING ONLY. The t222u configuration-only caps (AE_CALL_USAGE_LIMITS) were removed: no
+ * code path refuses a call, a recording or a transcription for usage, and no configuration can switch a
+ * cap on. Caps return only with an approved commercial policy, as reviewed code. No allowance, no charge.
  */
 export const CALL_USAGE_METRICS = ["calls", "minutes", "recordings", "transcriptions"] as const;
 export type CallUsageMetric = (typeof CALL_USAGE_METRICS)[number];
-export type CallUsageLimits = Record<CallUsageMetric, number | null>;
 
 export interface CallUsage extends Record<CallUsageMetric, number> {
   brokerageId: number;
@@ -32,19 +30,6 @@ export function callUsagePeriod(now: Date = new Date()): { periodStart: Date; pe
   return { periodStart, periodEnd };
 }
 
-export function resolveCallUsageLimits(env: Record<string, string | undefined> = process.env): CallUsageLimits {
-  const limits: CallUsageLimits = { calls: null, minutes: null, recordings: null, transcriptions: null };
-  const raw = env.AE_CALL_USAGE_LIMITS;
-  if (!raw || raw.trim() === "") return limits;
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { return limits; }
-  if (!parsed || typeof parsed !== "object") return limits;
-  for (const m of CALL_USAGE_METRICS) {
-    const v = (parsed as Record<string, unknown>)[m];
-    if (typeof v === "number" && Number.isInteger(v) && v > 0) limits[m] = v;
-  }
-  return limits;
-}
 
 export async function getCallUsage(brokerageId: number, now: Date = new Date()): Promise<CallUsage> {
   const { periodStart, periodEnd } = callUsagePeriod(now);
@@ -72,18 +57,4 @@ export async function getCallUsage(brokerageId: number, now: Date = new Date()):
 
 function sqlCeilMinutes() {
   return sql<number>`ceil(coalesce(${growCallSessions.durationSeconds}, 0) / 60.0)`;
-}
-
-export interface CallUsageDecision { allowed: boolean; metric: CallUsageMetric; used: number; limit: number | null }
-
-/** Allowed unless a limit is configured for the metric and the brokerage's usage this period has reached it. */
-export async function checkCallUsage(
-  brokerageId: number,
-  metric: CallUsageMetric,
-  limits: Partial<CallUsageLimits> = resolveCallUsageLimits(),
-): Promise<CallUsageDecision> {
-  const limit = limits[metric] ?? null;
-  if (limit === null) return { allowed: true, metric, used: 0, limit: null };
-  const usage = await getCallUsage(brokerageId);
-  return { allowed: usage[metric] < limit, metric, used: usage[metric], limit };
 }

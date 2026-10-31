@@ -15,7 +15,9 @@ import {
 } from "../../lib/billing/catalogue.js";
 import { applySubscriptionSnapshot } from "../../lib/billing/sync.js";
 import { planFreeRunAccessRemoval } from "../../lib/billing/freeRunAccessInventory.js";
-import { getCallUsage, resolveCallUsageLimits, checkCallUsage, CALL_USAGE_METRICS } from "../../lib/telephony/callUsage.js";
+import * as callUsageModule from "../../lib/telephony/callUsage.js";
+import { readFileSync } from "node:fs";
+const { getCallUsage, CALL_USAGE_METRICS } = callUsageModule;
 import { createBrokerageWithUsers, cleanupBrokerages } from "./testSupport.js";
 
 const ALL = [...ENTITLEMENT_KEYS].sort();
@@ -161,11 +163,14 @@ test("free run.access inventory: classifies migration grants; protects trial, pl
 });
 
 // ── 6. Calling metering ──────────────────────────────────────────────────────
-test("calling: limits default to unlimited/disabled; metering counts calls, minutes, recordings, transcriptions per brokerage", async () => {
+test("calling: metering only (t225u) — no configuration can cap calls, recordings or transcriptions; metering counts per brokerage", async () => {
   assert.deepEqual(CALL_USAGE_METRICS, ["calls", "minutes", "recordings", "transcriptions"]);
-  const none = resolveCallUsageLimits({});
-  for (const m of CALL_USAGE_METRICS) assert.equal(none[m], null);
-  assert.equal(resolveCallUsageLimits({ AE_CALL_USAGE_LIMITS: "not json" }).calls, null, "bad config fails open to unlimited, never invents a cap");
+  assert.equal("checkCallUsage" in callUsageModule, false, "no limit check exported");
+  assert.equal("resolveCallUsageLimits" in callUsageModule, false, "no limit configuration exported");
+  for (const f of ["../../lib/telephony/callSessions.ts", "../../lib/telephony/callTranscriptions.ts"]) {
+    const src = readFileSync(new URL(f, import.meta.url), "utf8");
+    assert.doesNotMatch(src, /callUsage|AE_CALL_USAGE_LIMITS|USAGE_LIMIT_REACHED/, `${f} has no usage cap`);
+  }
 
   const a = await brokerage("call-a"); const other = await brokerage("call-b");
   const [party] = await db.insert(parties).values({ brokerageId: a.brokerageId, firstName: "Meter", lastName: "Synthetic", mobile: "+61400111222" }).returning();
@@ -184,9 +189,4 @@ test("calling: limits default to unlimited/disabled; metering counts calls, minu
   const uo = await getCallUsage(other.brokerageId);
   assert.equal(uo.calls, 0, "brokerage isolation");
 
-  assert.equal((await checkCallUsage(a.brokerageId, "calls", {})).allowed, true, "no limits configured: allowed");
-  const capped = { calls: 2, minutes: null, recordings: null, transcriptions: null };
-  const d = await checkCallUsage(a.brokerageId, "calls", capped);
-  assert.equal(d.allowed, false); assert.equal(d.used, 2); assert.equal(d.limit, 2);
-  assert.equal((await checkCallUsage(other.brokerageId, "calls", capped)).allowed, true);
 });
