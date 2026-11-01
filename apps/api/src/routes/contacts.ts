@@ -34,6 +34,7 @@ import {
   visibleLinkedPropertySql,
   visibleOwnedOrLinkedPropertySql,
 } from "../lib/propertyVisibility.js";
+import { recordCallConsentConfirmation } from "../lib/tapToCall.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -582,6 +583,20 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
       email: parsed.email,
     })
     .returning();
+
+  // t236u: optional agent confirmation that the contact agreed to be called.
+  const rawCallConsent = (req.body as Record<string, unknown> | null)?.callConsent;
+  if (rawCallConsent && typeof rawCallConsent === "object" && !Array.isArray(rawCallConsent)) {
+    const cc = rawCallConsent as Record<string, unknown>;
+    await recordCallConsentConfirmation(db, {
+      brokerageId: user.brokerageId,
+      partyId: party.id,
+      userId: user.id,
+      confirmed: cc.confirmed === true,
+      restrictions: typeof cc.restrictions === "string" ? cc.restrictions : null,
+      doNotCall: cc.doNotCall === true,
+    });
+  }
 
   await logAudit({
     brokerageId: user.brokerageId,

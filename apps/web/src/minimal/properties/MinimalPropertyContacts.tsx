@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { TapToCall } from "../TapToCall";
 import { Link, useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../../lib/api";
@@ -170,6 +171,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
               <div>
                 <Link href={l.contactHref} className="am-agenda-title">{l.name}</Link>
                 <div className="am-agenda-sub">{l.roleLabel}{l.isPrimary ? " · Primary" : ""}{l.detail ? ` · ${l.detail}` : ""}</div>
+                <TapToCall partyId={l.partyId} enabled={canManageLinks} />
                 {canManageLinks ? (
                   <PropertyLinkControls
                     linkId={l.linkId}

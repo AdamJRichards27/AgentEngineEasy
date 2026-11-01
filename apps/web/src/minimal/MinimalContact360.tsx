@@ -5,6 +5,7 @@ import type { GrowContact360 } from "../lib/growContact360";
 import { useEntitlements } from "../lib/session";
 import { MinimalGrowSections } from "./MinimalGrowSections";
 import { ContactPropertyLinks } from "./properties/ContactPropertyLinks";
+import { TapToCall } from "./TapToCall";
 import { buildMinimalContactModel, formatContactDate, type MinimalContactModel } from "./minimalContactModel";
 
 // AE Minimal A Contact 360 (read-only). Data is the existing GET /grow/contacts/:partyId, under the same
@@ -102,7 +103,10 @@ export function MinimalContact360View({
           <dt>Email</dt>
           <dd>{model.email ?? "Not recorded"}</dd>
           <dt>Mobile</dt>
-          <dd>{model.mobile ?? "Not recorded"}</dd>
+          <dd>
+            {model.mobile ?? "Not recorded"}{" "}
+            {model.mobile && propertyLinks ? <TapToCall partyId={propertyLinks.partyId} enabled={propertyLinks.canManage} /> : null}
+          </dd>
           <dt>Last interaction</dt>
           <dd>{model.lastTouchLabel}</dd>
           <dt>Next commitment</dt>
