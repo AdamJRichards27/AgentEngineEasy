@@ -13,6 +13,9 @@ import wordmarkDark from "./brand/AE_Wordmark_Dark.png";
 import wordmarkWhite from "./brand/AE_Wordmark_White.png";
 import { MinimalSidebarIcon } from "./icons";
 import "./minimal.css";
+import "./mobile/mobileStyles";
+import { MobileBottomBar } from "./mobile/MobileBottomBar";
+import { useMobileNav } from "./mobile/useMobileNav";
 
 // AE Minimal A shell with the v1.0 grouped sidebar (V1, Owner t457u). Same
 // product routes as classic, no sample records. Run and Pit Crew show as
@@ -45,6 +48,7 @@ export default function MinimalShell({
 }) {
   const [location] = useLocation();
   const search = useSearch();
+  const mobileNav = useMobileNav();
   const routeKey = minimalRouteKey(location, search);
   const lastRouteKey = useRef<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -71,7 +75,6 @@ export default function MinimalShell({
       });
   const links = minimalSidebarLinks(groups);
   // Start property stays a sidebar-only entry, as before; the mobile bar keeps the main sections.
-  const mobileLinks = links.filter((link) => link.path !== "/properties/start");
   if (user.platformOwner) {
     groups.unshift({ key: "workspace", label: "Platform", items: [{ kind: "link", key: "/owner", path: "/owner", href: "/owner", label: "Platform Owner" }] });
     links.unshift({ path: "/owner", href: "/owner", label: "Platform Owner" });
@@ -221,22 +224,7 @@ export default function MinimalShell({
           <div className="am-content am-existing-outlet">{children}</div>
         </main>
       </div>
-      <nav className="am-mobile-nav" aria-label="Mobile navigation">
-        {mobileLinks.map((link) => {
-          const current = isCurrent(link.href);
-          return (
-            <Link
-              key={link.href}
-              href={link.href}
-              className={current ? "is-current" : undefined}
-              aria-current={current ? "page" : undefined}
-            >
-              <MinimalSidebarIcon name={link.href} />
-              {link.label}
-            </Link>
-          );
-        })}
-      </nav>
+      <MobileBottomBar nav={mobileNav} location={location} search={search} />
     </div>
   );
 }

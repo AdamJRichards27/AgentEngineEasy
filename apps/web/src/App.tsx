@@ -52,6 +52,8 @@ const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
 const MinimalContacts = lazy(() => import("./minimal/MinimalContacts"));
 const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
+const MobileSearchPage = lazy(() => import("./minimal/mobile/SearchPage"));
+const MobileMorePage = lazy(() => import("./minimal/mobile/MobileMorePage"));
 const MinimalProperties = lazy(() => import("./minimal/properties/MinimalProperties"));
 const MinimalAppraisals = lazy(() => import("./minimal/appraisals/MinimalAppraisals"));
 const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalOpportunities"));
@@ -416,6 +418,8 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
             {selectOpportunitiesView(minimalShell, search) === "minimal" ? <MinimalOpportunities /> : <Redirect to="/grow?tab=opportunities" replace />}
           </Route>
           <Route path="/grow/import" component={GrowImport} />
+          <Route path="/search">{minimalShell ? <MobileSearchPage /> : <Redirect to="/grow" replace />}</Route>
+          <Route path="/more">{minimalShell ? <MobileMorePage /> : <Redirect to="/grow" replace />}</Route>
           <Route path="/settings" component={Settings} />
           <Route path="/settings/integrations" component={SettingsIntegrations} />
           <Route path="/settings/users" component={SettingsUsers} />
