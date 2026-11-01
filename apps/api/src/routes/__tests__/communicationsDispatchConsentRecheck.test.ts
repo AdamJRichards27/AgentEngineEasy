@@ -33,11 +33,26 @@ import type { Server } from "node:http";
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, isNotNull, lte, or } from "drizzle-orm";
 import { db, communicationMessages, communicationThreads, entitlementGrants } from "@aee/db";
-import { DISPATCH_DUE_MESSAGES_LIMIT, dispatchDueMessages, resolveDispatchDueMessageLimit } from "../../lib/communications/outbox.js";
+import {
+  DISPATCH_DUE_MESSAGES_LIMIT,
+  dispatchDueMessages as dispatchDueMessagesUnlocked,
+  resolveDispatchDueMessageLimit,
+} from "../../lib/communications/outbox.js";
 import { sandboxEmailProvider } from "../../lib/communications/providers/sandboxEmail.js";
 import type { ProviderSendResult, SendEmailInput } from "../../lib/communications/providers/types.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, createListedProperty, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
+import { withExclusiveDueSweep } from "./support/commsDueSweepLock.js";
+
+// Every sweep in this file runs with a `now` up to minutes in the future and
+// selects across every brokerage, so on its own it also grabs another test
+// file's message mid-send (QUEUED with scheduledAt = now, a moment before
+// that file's route dispatches it inline) and makes that send fail with 409
+// or 422. Holding the test-only exclusive lock keeps each sweep out of
+// in-flight inline sends in files that take the shared side (see
+// support/commsDueSweepLock.ts). The function under test is unchanged.
+const dispatchDueMessages = (...args: Parameters<typeof dispatchDueMessagesUnlocked>) =>
+  withExclusiveDueSweep(() => dispatchDueMessagesUnlocked(...args));
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32

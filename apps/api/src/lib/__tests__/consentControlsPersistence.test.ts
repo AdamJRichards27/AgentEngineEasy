@@ -150,8 +150,12 @@ test(
         effectiveAt: new Date("2020-01-01T00:00:00.000Z"),
         dncrRequired: false,
         timeZone: "Etc/UTC",
+        // Equal endpoints are the evaluator's explicit full-day window. The
+        // window end is exclusive, so "00:00"-"23:59" left 23:59-00:00 UTC
+        // (09:59-10:00 AEST) outside allowed hours, and a run in that minute
+        // got OUTSIDE_ALLOWED_HOURS instead of the NO_CONSENT under test.
         allowedHoursStart: "00:00",
-        allowedHoursEnd: "23:59",
+        allowedHoursEnd: "00:00",
         recordedByUserId: user.id,
       });
       await persistence.recordConsentPolicy({
@@ -161,8 +165,9 @@ test(
         effectiveAt: new Date("2021-01-01T00:00:00.000Z"),
         dncrRequired: false,
         timeZone: "Etc/UTC",
+        // Full-day window, as above.
         allowedHoursStart: "00:00",
-        allowedHoursEnd: "23:59",
+        allowedHoursEnd: "00:00",
         recordedByUserId: user.id,
       });
       const decision = await persistence.evaluateAndRecordConsentDecision({
