@@ -39,7 +39,7 @@ export default function MinimalContact360() {
   return (
     <MinimalContact360View
       model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })}
-      propertyLinks={{ partyId, canManage: hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access") }}
+      propertyLinks={{ partyId, canManage: hasEntitlement("grow.relationships.manage") }}
     />
   );
 }

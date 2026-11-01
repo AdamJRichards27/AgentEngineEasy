@@ -5,7 +5,7 @@ import { db, parties, propertyParties, properties, workflows, auditLogs, PROPERT
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
-import { requireAnyEntitlement } from "../middlewares/entitlement.js";
+import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
@@ -126,6 +126,13 @@ function changedBody(role: string, demoted: { id: number }[], target?: { id: num
 // the same as a cross-brokerage id.
 const canReadPropertyContacts = requireAnyEntitlement("grow.contacts.read", "run.access");
 const canManagePropertyContacts = requireAnyEntitlement("grow.contacts.manage", "run.access");
+// t242u (Owner): relationship management (link, unlink, role change, primary
+// change) needs the explicit grow.relationships.manage permission PLUS access
+// to the specific property (own-property scope, brokerage isolation: 404).
+// run.access alone does NOT authorise these. Run subscriptions receive the
+// grow.* keys via Run-includes-Grow (#281 + its backfill), which is the
+// default path for Run brokerages; no new seed or migration is added here.
+const canManageRelationships = requireEntitlement("grow.relationships.manage");
 
 // t238u: one role vocabulary, owned by @aee/db (re-exported for existing importers).
 export { PROPERTY_PARTY_ROLES };
@@ -221,7 +228,7 @@ async function runSellerRemovedEffects(propertyId: number, user: Actor) {
   }
 }
 
-partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res) => {
+partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) => {
   if (invalidRole(req.body)) {
     res.status(400).json(invalidRoleBody());
     return;
@@ -309,6 +316,14 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
   if (!property || (await propertyHiddenFromCaller(user, property.id))) {
     if (!property) await notePartyPropertyIsolationRejection(parsed.data.propertyId, user.brokerageId);
     res.status(404).json({ error: "Property not found" });
+    return;
+  }
+
+  // Creating a NEW contact additionally needs contact-creation rights
+  // (grow.contacts.manage, or run.access as before): unchanged by t242u.
+  const canCreate = await explainEntitlementDecision(user, "grow.contacts.manage");
+  if (!canCreate.allowed && !(await callerHasRun(user))) {
+    res.status(403).json({ error: "Not entitled", reason: canCreate.reason, entitlementKey: "grow.contacts.manage", upgrade: { action: "grow.checkout", productCode: "grow" } });
     return;
   }
 
@@ -417,7 +432,7 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContac
 // Removing a mis-added seller/buyer link (multi-seller capture polish,
 // Phase 2) — removes the property↔party link only; the Party record itself
 // is left intact since it may be linked elsewhere or worth keeping.
-partiesRouter.delete("/link/:linkId", requireAuth, canManagePropertyContacts, async (req, res) => {
+partiesRouter.delete("/link/:linkId", requireAuth, canManageRelationships, async (req, res) => {
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
 
@@ -526,7 +541,7 @@ const updateLinkSchema = z
 // role to one this contact already holds on the property is a 409, the same
 // PROPERTY_PARTY_LINK_EXISTS answer as POST. Seller side effects run when the
 // Seller set changes.
-partiesRouter.patch("/link/:linkId", requireAuth, canManagePropertyContacts, async (req, res) => {
+partiesRouter.patch("/link/:linkId", requireAuth, canManageRelationships, async (req, res) => {
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
   if (invalidRole(req.body)) {

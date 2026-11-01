@@ -72,7 +72,7 @@ export default function MinimalPropertyDetail() {
             propertyId={id}
             canSearch={growAccess && hasEntitlement("grow.contacts.read")}
             canCreateContact={growAccess && hasEntitlement("grow.contacts.manage")}
-            canManageLinks={propertyLinkControlsEnabled() && (hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access"))}
+            canManageLinks={propertyLinkControlsEnabled() && hasEntitlement("grow.relationships.manage")}
             canStartAppraisal={growAccess && hasEntitlement("grow.opportunities.manage") && !pipeline.isLoading}
             existingAppraisalHref={model.appraisals[0]?.href ?? null}
           />
