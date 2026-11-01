@@ -12,7 +12,7 @@ import { and, eq } from "drizzle-orm";
 import { renderMetricsText, resetMetricsForTesting } from "@aee/events";
 import { db, entitlementGrants, growRelationships, users } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
-import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult, removeRelationshipManageFixture } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -172,6 +172,7 @@ test("linking a property requires grow.properties.link, and a relationship with 
   assert.equal((await linksFor(manageOnly.brokerageId, partyId, propertyId, "owner")).length, 0);
 
   const withoutManage = await createBrokerageWithUsers(baseUrl, `G-UAT-3 No Manage ${suffix}`);
+  await removeRelationshipManageFixture(withoutManage.brokerageId); // t242u: drop the test-only Run fixture grant
   try {
     const noManage = await post(withoutManage.agent.cookie, "/grow/relationships", {
       partyId: 1,
