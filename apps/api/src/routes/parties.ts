@@ -109,8 +109,13 @@ async function auditPrimaryReplaced(tx: Tx, user: Actor, propertyId: number, rol
     });
   }
 }
-function changedBody(demoted: { id: number }[]) {
-  return demoted.map((d) => ({ linkId: d.id, isPrimary: false }));
+// Contract v2 §4.4: every link whose flag changed, as {id, role, isPrimary}
+// (linkId kept as an alias). Demoted links first, then the target if it changed.
+type ChangedLink = { id: number; linkId: number; role: string; isPrimary: boolean };
+function changedBody(role: string, demoted: { id: number }[], target?: { id: number; role: string; isPrimary: boolean }): ChangedLink[] {
+  const out: ChangedLink[] = demoted.map((d) => ({ id: d.id, linkId: d.id, role, isPrimary: false }));
+  if (target) out.push({ id: target.id, linkId: target.id, role: target.role, isPrimary: target.isPrimary });
+  return out;
 }
 
 // t228u Priority 1: property contacts belong to Grow (kept per t223u) and Run.
@@ -278,7 +283,7 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
       propertyId,
     });
     if (role === "Seller") await runSellerSideEffects(propertyId, partyId, user);
-    res.status(201).json({ party: outcome.party, link: outcome.link, changed: changedBody(outcome.demoted) });
+    res.status(201).json({ party: outcome.party, link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
     return;
   }
 
@@ -345,7 +350,7 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
 
   if (parsed.data.role === "Seller") await runSellerSideEffects(parsed.data.propertyId, party.id, user);
 
-  res.status(201).json({ party, link, warnings, changed: changedBody(demoted) });
+  res.status(201).json({ party, link, warnings, changed: changedBody(link.role, demoted) });
 });
 
 // t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
@@ -593,5 +598,5 @@ partiesRouter.patch("/link/:linkId", requireAuth, canManagePropertyContacts, asy
       await runSellerRemovedEffects(outcome.link.propertyId, user);
     }
   }
-  res.json({ link: outcome.link, changed: changedBody(outcome.demoted) });
+  res.json({ link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted, outcome.link) });
 });
