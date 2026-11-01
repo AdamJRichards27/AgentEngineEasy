@@ -60,3 +60,13 @@ test("failure text by status", () => {
 test("search path encodes the query", () => {
   assert.equal(contactSearchPath(" a b@c "), "/grow/contacts?search=a%20b%40c&limit=20");
 });
+
+test("t238u: web role list is exactly the authoritative @aee/db PROPERTY_PARTY_ROLES (no drift)", async () => {
+  const fs = await import("node:fs");
+  const url = await import("node:url");
+  const src = fs.readFileSync(url.fileURLToPath(new URL("../../../../../packages/db/src/schema/property.ts", import.meta.url)), "utf8");
+  const m = src.match(/export const PROPERTY_PARTY_ROLES = \[([^\]]*)\]/);
+  assert.ok(m, "schema constant found");
+  const dbRoles = m![1].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean);
+  assert.deepEqual([...PROPERTY_PARTY_ROLES], dbRoles);
+});

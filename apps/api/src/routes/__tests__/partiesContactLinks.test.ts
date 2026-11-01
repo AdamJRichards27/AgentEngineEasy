@@ -4,8 +4,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import { eq } from "drizzle-orm";
-import { db, entitlementGrants, users, ENTITLEMENT_KEYS } from "@aee/db";
+import { and, eq, inArray } from "drizzle-orm";
+import { db, entitlementGrants, users, auditLogs, workflows, amlVerifications, ENTITLEMENT_KEYS, PROPERTY_PARTY_ROLES } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin } from "./testSupport.js";
 
@@ -195,37 +195,124 @@ test("t234u: matching email/phone is a warning, never a rejection; existing cont
   assert.ok(appr.json.appraisal.id > 0);
 });
 
-test("t234u: at most one primary per property per role (Other exempt); primary optional; enforced on create, link-existing and PATCH", async () => {
+test("t238u: setting a new primary atomically replaces the old one in the same (property, role); previous keeps the relationship; audited from/to; Other exempt", async () => {
   const b = await setup("Primary", ["run.access", ...GROW]);
   const p = b.adminProp;
-  // setup's Seller link is not primary; primary is optional.
   const s1 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Pri", isPrimary: true });
   assert.equal(s1.status, 201);
+  assert.deepEqual(s1.json.changed, []);
+  // Create path: a second primary Seller replaces the first.
   const s2 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Pri2", isPrimary: true });
-  assert.equal(s2.status, 409);
-  assert.equal(s2.json.code, "PROPERTY_PARTY_PRIMARY_EXISTS");
-  assert.equal(s2.json.existingLinkId, s1.json.link.id);
-  // The refused create left no orphan contact behind.
-  const sellers = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties.filter((x: any) => x.role === "Seller");
-  assert.equal(sellers.length, 2);
-  // Non-primary second seller is fine; a primary Buyer is fine (different role).
-  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Co" })).status, 201);
-  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Buyer", firstName: "Bea", isPrimary: true })).status, 201);
-  // Link-existing path.
+  assert.equal(s2.status, 201);
+  assert.deepEqual(s2.json.changed, [{ linkId: s1.json.link.id, isPrimary: false }]);
+  const sellers = () => call(b.admin.cookie, "GET", `/parties/by-property/${p}`).then((r) => r.json.parties.filter((x: any) => x.role === "Seller"));
+  let now = await sellers();
+  assert.equal(now.length, 3, "previous primary keeps its Seller relationship");
+  assert.deepEqual(now.filter((x: any) => x.isPrimary).map((x: any) => x.linkId), [s2.json.link.id]);
+  const audit = await db.select().from(auditLogs).where(and(eq(auditLogs.action, "party_link_primary_replaced"), eq(auditLogs.recordId, String(s1.json.link.id))));
+  assert.equal(audit.length, 1);
+  assert.deepEqual(JSON.parse(audit[0].previousValue!), { role: "Seller", isPrimary: true });
+  assert.deepEqual(JSON.parse(audit[0].updatedValue!), { role: "Seller", isPrimary: false, replacedByLinkId: s2.json.link.id });
+  assert.equal(audit[0].userId, b.admin.user.id);
+  // A different role is independent.
+  const bea = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Buyer", firstName: "Bea", isPrimary: true });
+  assert.deepEqual(bea.json.changed, []);
+  // Link-existing path replaces too.
   const le = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, partyId: b.partyId, role: "Owner", isPrimary: true });
   assert.equal(le.status, 201);
-  const other = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Owner", firstName: "Own2", isPrimary: true });
-  assert.equal(other.status, 409);
-  // PATCH: promoting the setup Seller link clashes; demote first then promote works.
-  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true })).json.code, "PROPERTY_PARTY_PRIMARY_EXISTS");
-  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${s1.json.link.id}`, { isPrimary: false })).status, 200);
-  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true })).status, 200);
-  // Re-saving the current primary is not a clash with itself.
-  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true })).status, 200);
-  // Role change onto a role that already has a primary is refused.
-  const ownLink = le.json.link.id;
-  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${ownLink}`, { role: "Buyer" })).status, 409);
-  // Other is exempt: two primaries allowed.
-  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "O1", isPrimary: true })).status, 201);
-  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "O2", isPrimary: true })).status, 201);
+  const own2 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Owner", firstName: "Own2", isPrimary: true });
+  assert.equal(own2.status, 201);
+  assert.deepEqual(own2.json.changed, [{ linkId: le.json.link.id, isPrimary: false }]);
+  // PATCH path: promoting the setup Seller replaces s2, with from/to on the update.
+  const pr = await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true });
+  assert.equal(pr.status, 200);
+  assert.deepEqual(pr.json.changed, [{ linkId: s2.json.link.id, isPrimary: false }]);
+  now = await sellers();
+  assert.deepEqual(now.filter((x: any) => x.isPrimary).map((x: any) => x.linkId), [b.adminLinkId]);
+  const upd = await db.select().from(auditLogs).where(and(eq(auditLogs.action, "party_link_updated"), eq(auditLogs.recordId, String(b.adminLinkId))));
+  assert.equal(upd.length, 1);
+  assert.deepEqual(JSON.parse(upd[0].previousValue!), { role: "Seller", isPrimary: false });
+  assert.deepEqual(JSON.parse(upd[0].updatedValue!), { role: "Seller", isPrimary: true });
+  // Re-saving the same values: 200, nothing changed, no extra audit row.
+  const same = await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true });
+  assert.equal(same.status, 200);
+  assert.deepEqual(same.json.changed, []);
+  assert.equal((await db.select().from(auditLogs).where(and(eq(auditLogs.action, "party_link_updated"), eq(auditLogs.recordId, String(b.adminLinkId))))).length, 1);
+  // Role change of a primary link onto a role with a primary replaces that one.
+  const rc = await call(b.admin.cookie, "PATCH", `/parties/link/${own2.json.link.id}`, { role: "Buyer" });
+  assert.equal(rc.status, 200);
+  assert.deepEqual(rc.json.changed, [{ linkId: bea.json.link.id, isPrimary: false }]);
+  // Invariant: at most one primary per non-exempt (property, role).
+  const all = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties;
+  for (const role of ["Seller", "Buyer", "Owner"]) assert.ok(all.filter((x: any) => x.role === role && x.isPrimary).length <= 1, role);
+  // Other is exempt: two primaries allowed, nothing replaced.
+  assert.deepEqual((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "O1", isPrimary: true })).json.changed, []);
+  assert.deepEqual((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "O2", isPrimary: true })).json.changed, []);
+});
+
+test("t238u: concurrent primary requests on one (property, role) end with exactly one primary", async () => {
+  const b = await setup("PrimaryRace", ["run.access", ...GROW]);
+  const p = b.adminProp;
+  const rs = await Promise.all([1, 2, 3, 4, 5].map((n) => call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: `Race${n}`, isPrimary: true })));
+  assert.ok(rs.every((r) => r.status === 201));
+  const rows = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties.filter((x: any) => x.role === "Seller");
+  assert.equal(rows.length, 6);
+  assert.equal(rows.filter((x: any) => x.isPrimary).length, 1);
+});
+
+test("t238u contract items 4-6: INVALID_ROLE with allowedRoles; NOTHING_TO_CHANGE; by-contact links[] + truncated", async () => {
+  const b = await setup("Contract", ["run.access", ...GROW]);
+  const bad = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Occupier", firstName: "X" });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.code, "INVALID_ROLE");
+  assert.deepEqual(bad.json.allowedRoles, [...PROPERTY_PARTY_ROLES]);
+  const badPatch = await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { role: "Occupier" });
+  assert.equal(badPatch.json.code, "INVALID_ROLE");
+  const empty = await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, {});
+  assert.equal(empty.status, 400);
+  assert.equal(empty.json.code, "NOTHING_TO_CHANGE");
+  const bc = await call(b.admin.cookie, "GET", `/parties/by-contact/${b.partyId}`);
+  assert.equal(bc.json.truncated, false);
+  assert.equal(bc.json.links.length, 1);
+  assert.equal(bc.json.links[0].linkId, b.adminLinkId);
+  assert.equal(bc.json.links[0].property.id, b.adminProp);
+  assert.equal(bc.json.links[0].property.postcode, "2000");
+  assert.equal(bc.json.properties.length, 1, "flat shape kept for the web client");
+});
+
+test("t238u: Grow-only agents record Seller relationships with no AML, ownership review, Run or Pit Crew side effects; Run callers keep them", async () => {
+  const b = await setup("GrowSeller", ["run.access", ...GROW]);
+  // A Ready-to-List workflow exists (the condition under which a Run seller triggers AML).
+  await db.insert(workflows).values({ propertyId: b.adminProp, workflowType: "ReadyToList" });
+  await setGrants(b.brokerageId, GROW);
+  const g = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Seller", firstName: "Grow", lastName: "Seller" });
+  assert.equal(g.status, 201, JSON.stringify(g.json));
+  const contact = await call(b.agent.cookie, "POST", "/grow/contacts", { name: "Gina Grow", email: `gina-${tag}@example.com` });
+  const le = await call(b.agent.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: contact.json.contact.id, role: "Seller" });
+  assert.equal(le.status, 201);
+  const re = await call(b.admin.cookie, "PATCH", `/parties/link/${g.json.link.id}`, { role: "Owner" });
+  assert.equal(re.status, 200);
+  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${g.json.link.id}`, { role: "Seller" })).status, 200);
+  const aml = await db.select().from(amlVerifications).where(inArray(amlVerifications.propertyId, [b.adminProp, b.agentProp]));
+  assert.equal(aml.length, 0, "no AML for Grow-only");
+  // Grow-only still cannot reach Run-only or Pit Crew surfaces.
+  assert.equal((await call(b.pc.cookie, "GET", "/pit-crew/workspace")).status, 403, "Pit Crew surface stays Run-only");
+  // Positive control: with run.access the same action initiates AML.
+  await setGrants(b.brokerageId, ["run.access", ...GROW]);
+  const r = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Seller", firstName: "Run", lastName: "Seller", email: `run-${tag}@example.com` });
+  assert.equal(r.status, 201);
+  const amlRun = await db.select().from(amlVerifications).where(eq(amlVerifications.partyId, r.json.party.id));
+  assert.equal(amlRun.length, 1, "Run caller keeps AML initiation");
+});
+
+test("t238u: one role vocabulary — API re-exports the @aee/db constant; the web model lists the same roles", async () => {
+  const { PROPERTY_PARTY_ROLES: apiRoles } = await import("../parties.js");
+  assert.equal(apiRoles, PROPERTY_PARTY_ROLES);
+  const fs = await import("node:fs");
+  const url = await import("node:url");
+  const root = url.fileURLToPath(new URL("../../../../../", import.meta.url));
+  const web = fs.readFileSync(`${root}apps/web/src/minimal/properties/minimalPropertyContactsModel.ts`, "utf8");
+  const m = web.match(/export const PROPERTY_PARTY_ROLES = \[([^\]]*)\]/);
+  assert.ok(m, "web constant found");
+  assert.deepEqual(m![1].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean), [...PROPERTY_PARTY_ROLES]);
 });
