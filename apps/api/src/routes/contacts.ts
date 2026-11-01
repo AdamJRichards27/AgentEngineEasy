@@ -34,6 +34,7 @@ import {
   visibleLinkedPropertySql,
   visibleOwnedOrLinkedPropertySql,
 } from "../lib/propertyVisibility.js";
+import { recordCallConsentConfirmation } from "../lib/tapToCall.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -280,7 +281,7 @@ function contactIdentityPayload(party: typeof parties.$inferSelect) {
 
 type ContactDuplicateKind = "email" | "phone";
 
-function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
+export function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
   const error =
     kind === "email"
       ? "A contact with this email already exists."
@@ -298,7 +299,7 @@ async function contactIdentityVisible(brokerageId: number, partyId: number): Pro
 }
 
 /** Null when nothing conflicts. contactId is set only when Contact 360 would return that party. */
-async function findDuplicateContact(
+export async function findDuplicateContact(
   brokerageId: number,
   kind: ContactDuplicateKind,
   value: string,
@@ -551,20 +552,22 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     return;
   }
 
-  if (parsed.email) {
-    const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", parsed.email, null);
-    if (emailDuplicate) {
-      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
+  // t234u (Owner): a matching email/phone is a potential-duplicate WARNING, not a
+  // global rejection (shared household/business details are legitimate). The
+  // first submit still answers 409 with the existing contact id so the form can
+  // offer "use existing"; resubmitting with confirmDuplicate: true creates the
+  // contact and returns the warnings alongside it.
+  const confirmDuplicate = (req.body as Record<string, unknown> | null)?.confirmDuplicate === true;
+  const duplicateWarnings: { code: "POTENTIAL_DUPLICATE_CONTACT"; kind: ContactDuplicateKind; contactId?: number }[] = [];
+  for (const [kind, value] of [["email", parsed.email], ["phone", parsed.mobile]] as const) {
+    if (!value) continue;
+    const duplicate = await findDuplicateContact(user.brokerageId, kind, value, null);
+    if (!duplicate) continue;
+    if (!confirmDuplicate) {
+      res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "POTENTIAL_DUPLICATE_CONTACT", kind, canConfirm: true });
       return;
     }
-  }
-
-  if (parsed.mobile) {
-    const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", parsed.mobile, null);
-    if (phoneDuplicate) {
-      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
-      return;
-    }
+    duplicateWarnings.push(duplicate.contactId === null ? { code: "POTENTIAL_DUPLICATE_CONTACT", kind } : { code: "POTENTIAL_DUPLICATE_CONTACT", kind, contactId: duplicate.contactId });
   }
 
   const [party] = await db
@@ -581,6 +584,20 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     })
     .returning();
 
+  // t236u: optional agent confirmation that the contact agreed to be called.
+  const rawCallConsent = (req.body as Record<string, unknown> | null)?.callConsent;
+  if (rawCallConsent && typeof rawCallConsent === "object" && !Array.isArray(rawCallConsent)) {
+    const cc = rawCallConsent as Record<string, unknown>;
+    await recordCallConsentConfirmation(db, {
+      brokerageId: user.brokerageId,
+      partyId: party.id,
+      userId: user.id,
+      confirmed: cc.confirmed === true,
+      restrictions: typeof cc.restrictions === "string" ? cc.restrictions : null,
+      doNotCall: cc.doNotCall === true,
+    });
+  }
+
   await logAudit({
     brokerageId: user.brokerageId,
     userId: user.id,
@@ -589,7 +606,7 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     recordId: String(party.id),
   });
 
-  res.status(201).json(createdContactPayload(party));
+  res.status(201).json(duplicateWarnings.length ? { ...createdContactPayload(party), warnings: duplicateWarnings } : createdContactPayload(party));
 });
 
 // PATCH /grow/contacts/:partyId — correct a contact's name, organisation,

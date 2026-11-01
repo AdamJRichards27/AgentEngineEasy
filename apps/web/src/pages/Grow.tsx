@@ -4,6 +4,7 @@ import { RunGatedLink } from "../components/RunGatedLink";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
+import { ContactPropertyLinks } from "../minimal/properties/ContactPropertyLinks";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 // AE GROW Priority 3 — Contact 360's communications section, reused unmodified here (see that
 // component's own header comment). Grow Today's Email/SMS action buttons below route into it via
@@ -3474,9 +3475,14 @@ export function GrowContactDetail({
         )}
       </section>
 
+      {/* t228u Priority 2: property_parties is the authoritative contact <-> property link. */}
+      <section className="card" data-ae-desktop-contact-property-links>
+        <ContactPropertyLinks partyId={partyId} canManage={canManageContacts || hasEntitlement("run.access")} headingId="grow-contact-property-links" />
+      </section>
+
       <section className="card">
-        <h2>Properties</h2>
-        <p className="muted">Reuses AE's canonical properties — Grow does not keep a second property record.</p>
+        <h2>Relationship records</h2>
+        <p className="muted">Grow relationship history (type, status, dates). Property roles are managed under Properties above.</p>
         {data.properties.length === 0 && <p className="empty-state">No property relationships recorded.</p>}
         {data.properties.length > 0 && (
           <GrowTableScroll>

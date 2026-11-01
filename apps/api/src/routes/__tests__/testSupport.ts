@@ -1,5 +1,6 @@
 import { eq, inArray, and, isNull, sql } from "drizzle-orm";
 import { createHmac } from "node:crypto";
+import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import {
   db,
   users,
@@ -146,7 +147,26 @@ export async function devLogin(
   }
   const cookie = extractSessionCookie(res);
   const body = (await res.json()) as { user: DevLoginUser };
+  await grantRelationshipManageForRunFixture(body.user.brokerageId);
   return { cookie, user: body.user };
+}
+
+/**
+ * t242u test fixture: relationship management (link/unlink/role/primary) now
+ * needs the explicit grow.relationships.manage key; run.access alone no longer
+ * authorises it. Run subscriptions get it via Run-includes-Grow (#281). Test
+ * brokerages created by dev-login (run.access only) model that Run customer,
+ * so they also receive grow.relationships.manage here. Tests that exercise the
+ * permission itself reset grants explicitly (partiesAccess, partiesContactLinks).
+ * Test-only: never used by the application.
+ */
+export async function grantRelationshipManageForRunFixture(brokerageId: number | null | undefined): Promise<void> {
+  if (!brokerageId) return;
+  const rows = await db.select().from(entitlementGrants).where(eq(entitlementGrants.brokerageId, brokerageId));
+  if (!rows.some((g) => g.entitlementKey === "run.access" && g.status === "Active")) return;
+  if (rows.some((g) => g.entitlementKey === "grow.relationships.manage")) return;
+  await db.insert(entitlementGrants).values({ brokerageId, entitlementKey: "grow.relationships.manage", granteeType: "brokerage", granteeId: brokerageId, sourceType: "admin_override", status: "Active" });
+  invalidateEntitlementCache(brokerageId);
 }
 
 /** Two signed-in identities in the same fresh brokerage: the first (Brokerage Administrator) and second (Agent) dev-login. */
@@ -856,4 +876,10 @@ export async function cleanupBrokerages(brokerageIds: number[]): Promise<void> {
   await db.delete(users).where(inArray(users.brokerageId, ids));
   await db.delete(pitCrewWaitingOnSweepSettings).where(inArray(pitCrewWaitingOnSweepSettings.brokerageId, ids));
   await db.delete(brokerages).where(inArray(brokerages.id, ids));
+}
+
+/** For suites that assert exact entitlement states: drop the t242u Run fixture grant again. */
+export async function removeRelationshipManageFixture(brokerageId: number): Promise<void> {
+  await db.delete(entitlementGrants).where(and(eq(entitlementGrants.brokerageId, brokerageId), eq(entitlementGrants.entitlementKey, "grow.relationships.manage"), eq(entitlementGrants.sourceType, "admin_override")));
+  invalidateEntitlementCache(brokerageId);
 }

@@ -4,6 +4,8 @@ import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowContact360 } from "../lib/growContact360";
 import { useEntitlements } from "../lib/session";
 import { MinimalGrowSections } from "./MinimalGrowSections";
+import { ContactPropertyLinks } from "./properties/ContactPropertyLinks";
+import { TapToCall } from "./TapToCall";
 import { buildMinimalContactModel, formatContactDate, type MinimalContactModel } from "./minimalContactModel";
 
 // AE Minimal A Contact 360 (read-only). Data is the existing GET /grow/contacts/:partyId, under the same
@@ -34,7 +36,12 @@ export default function MinimalContact360() {
     );
   }
   if (!detail.data) return null;
-  return <MinimalContact360View model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })} />;
+  return (
+    <MinimalContact360View
+      model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })}
+      propertyLinks={{ partyId, canManage: hasEntitlement("grow.relationships.manage"), canNote: hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access") }}
+    />
+  );
 }
 
 export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry?: () => void }) {
@@ -56,7 +63,14 @@ export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry
   );
 }
 
-export function MinimalContact360View({ model }: { model: MinimalContactModel }) {
+export function MinimalContact360View({
+  model,
+  propertyLinks,
+}: {
+  model: MinimalContactModel;
+  /** t228u: property_parties links (authoritative). Omitted in static renders. */
+  propertyLinks?: { partyId: number; canManage: boolean; canNote?: boolean };
+}) {
   return (
     <div className="am-contact" data-ae-contact="minimal">
       <MinimalGrowSections current="contacts" />
@@ -89,7 +103,10 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
           <dt>Email</dt>
           <dd>{model.email ?? "Not recorded"}</dd>
           <dt>Mobile</dt>
-          <dd>{model.mobile ?? "Not recorded"}</dd>
+          <dd>
+            {model.mobile ?? "Not recorded"}{" "}
+            {model.mobile && propertyLinks ? <TapToCall partyId={propertyLinks.partyId} enabled canNote={propertyLinks.canNote} /> : null}
+          </dd>
           <dt>Last interaction</dt>
           <dd>{model.lastTouchLabel}</dd>
           <dt>Next commitment</dt>
@@ -109,9 +126,12 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
         </section>
       ) : null}
 
+      {propertyLinks ? <ContactPropertyLinks partyId={propertyLinks.partyId} canManage={propertyLinks.canManage} /> : null}
+
+      {propertyLinks && model.properties.length === 0 ? null : (
       <section className="am-rail-section" aria-labelledby="am-contact-properties">
         <h2 id="am-contact-properties" className="am-eyebrow">
-          Properties
+          {propertyLinks ? "Other relationships" : "Properties"}
         </h2>
         {model.properties.length === 0 ? (
           <p className="am-empty-note">No active property links.</p>
@@ -137,6 +157,7 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
           </ul>
         )}
       </section>
+      )}
 
       <section className="am-rail-section" aria-labelledby="am-contact-notes">
         <h2 id="am-contact-notes" className="am-eyebrow">
