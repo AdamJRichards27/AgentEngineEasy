@@ -234,8 +234,23 @@ async function runSellerRemovedEffects(propertyId: number, user: Actor) {
 // entityDetails (trust deed / ACN), middleName, brokerageId and timestamps are
 // never returned here; the full record stays behind the Grow contact routes.
 export type PartySummary = { id: number; partyType: string; firstName: string | null; lastName: string | null; organisationName: string | null; email: string | null; mobile: string | null };
-export function partySummary(p: typeof parties.$inferSelect): PartySummary {
-  return { id: p.id, partyType: p.partyType, firstName: p.firstName, lastName: p.lastName, organisationName: p.organisationName, email: p.email, mobile: p.mobile };
+export function partySummary(p: typeof parties.$inferSelect, full = true): PartySummary {
+  return { id: p.id, partyType: p.partyType, firstName: p.firstName, lastName: p.lastName, organisationName: p.organisationName, email: full ? p.email : maskEmail(p.email), mobile: full ? p.mobile : maskPhone(p.mobile) };
+}
+// t244u E: full email/mobile only for callers with contact-read access
+// (grow.contacts.read). Others (e.g. Run without Grow contacts) see a mask.
+export function maskEmail(e: string | null): string | null {
+  if (!e) return e;
+  const at = e.indexOf("@");
+  return at > 0 ? `${e[0]}***${e.slice(at)}` : "***";
+}
+export function maskPhone(m: string | null): string | null {
+  if (!m) return m;
+  const digits = m.replace(/\D/g, "");
+  return digits.length >= 3 ? `***${digits.slice(-3)}` : "***";
+}
+async function callerCanReadContacts(user: Actor): Promise<boolean> {
+  return explainEntitlementDecision(user, "grow.contacts.read").then((d) => d.allowed).catch(() => false);
 }
 
 partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) => {
@@ -429,12 +444,13 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContac
   const partyIds = links.map((l) => l.partyId);
   const partyRows = partyIds.length ? await db.select().from(parties).where(inArray(parties.id, partyIds)) : [];
 
+  const fullContact = await callerCanReadContacts(user);
   res.json({
     parties: links.map((link) => ({
       linkId: link.id,
       role: link.role,
       isPrimary: link.isPrimary,
-      party: (() => { const p = partyRows.find((r) => r.id === link.partyId); return p ? partySummary(p) : null; })(),
+      party: (() => { const p = partyRows.find((r) => r.id === link.partyId); return p ? partySummary(p, fullContact) : null; })(),
     })),
   });
 });

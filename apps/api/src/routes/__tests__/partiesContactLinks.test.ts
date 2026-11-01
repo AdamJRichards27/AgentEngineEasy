@@ -348,3 +348,22 @@ test("t242u PII minimisation: property-contact endpoints return only the summary
   assert.equal(pia.party.mobile, "+61400000001", "mobile v5 rows and Call still get the number");
   assert.equal(pia.party.email, "pia.synthetic@example.com");
 });
+
+test("t244u E: full contact details (email/mobile) require contact-read access; Run without grow.contacts.read sees masks", async () => {
+  const b = await setup("PiiMask", ["run.access", ...GROW]);
+  const created = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Buyer", firstName: "Mia", lastName: "Synthetic", email: "mia.synthetic@example.com", mobile: "+61400000123" });
+  assert.equal(created.status, 201);
+  await setGrants(b.brokerageId, ["run.access"]);
+  const masked = await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`);
+  assert.equal(masked.status, 200);
+  const m = masked.json.parties.find((r: any) => r.party.firstName === "Mia");
+  assert.equal(m.party.email, "m***@example.com");
+  assert.equal(m.party.mobile, "***123");
+  assert.ok(!JSON.stringify(masked.json).includes("mia.synthetic@"));
+  assert.ok(!JSON.stringify(masked.json).includes("400000123"));
+  await setGrants(b.brokerageId, ["grow.contacts.read"]);
+  const full = await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`);
+  const f = full.json.parties.find((r: any) => r.party.firstName === "Mia");
+  assert.equal(f.party.email, "mia.synthetic@example.com");
+  assert.equal(f.party.mobile, "+61400000123");
+});
