@@ -170,3 +170,11 @@ test("Tap-to-Call: optional post-call note is a plain activity; never a recordin
   assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-notes`, { note: "x" })).status, 403);
   assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: true })).status, 403);
 });
+
+test("t237u: a contact created before Tap-to-Call (no consent row) is NO_CONSENT; reading status never creates consent", async () => {
+  const w = await world("Hist");
+  const h = await call(w.admin.cookie, "POST", "/grow/contacts", { name: "Hal Historical", mobile: "0400 999 000" });
+  const id = h.json.contact.id as number;
+  for (let i = 0; i < 2; i++) assert.equal((await call(w.admin.cookie, "GET", `/parties/${id}/tap-to-call`)).json.reason, "NO_CONSENT");
+  assert.equal((await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, id))).length, 0);
+});

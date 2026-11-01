@@ -12,7 +12,7 @@ export type TapToCallView =
   | { kind: "hidden" };
 
 const UNAVAILABLE: Record<string, string> = {
-  NO_CONSENT: "Calling not confirmed for this contact",
+  NO_CONSENT: "Consent not recorded",
   CONSENT_WITHDRAWN: "Consent to call withdrawn",
   DO_NOT_CALL: "Do not call",
   SUPPRESSED: "Calls suppressed",

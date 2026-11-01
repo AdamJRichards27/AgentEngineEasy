@@ -16,3 +16,7 @@ test("t236u: withdrawn, do-not-call, suppressed, DNCR and no consent never rende
   assert.equal(tapToCallView({ available: false, reason: "NO_PHONE" }).kind, "hidden");
   assert.equal(tapToCallView(null).kind, "hidden");
 });
+
+test("t237u: historical contacts with no consent record show 'Consent not recorded' (never inferred)", () => {
+  assert.deepEqual(tapToCallView({ available: false, reason: "NO_CONSENT" }), { kind: "unavailable", text: "Consent not recorded" });
+});
