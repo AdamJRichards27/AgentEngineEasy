@@ -982,9 +982,21 @@ async function flushOwnershipBackfills(
   for (const row of rows) if (!byId.has(row.id)) byId.set(row.id, row);
   const unique = [...byId.values()];
   if (unique.length === 0) return;
-  const now = new Date();
+  // grow_relationships.ownership_start_date and updated_at are `timestamp`
+  // (without time zone) holding UTC wall-clock, the convention Drizzle's own
+  // column mapping uses (Date -> toISOString()). A JS Date bound into raw SQL
+  // is serialised by node-postgres in the PROCESS-LOCAL zone with an offset,
+  // and a ::timestamp cast (or the implicit assignment cast) silently drops
+  // that offset, so a non-UTC server would store local wall-clock. Bind the
+  // instant as an ISO-8601 UTC string, read it as timestamptz (offset kept),
+  // and convert to UTC wall-clock explicitly; independent of both the Node
+  // process TZ and the database session TimeZone.
+  const nowIso = new Date().toISOString();
   const values = sql.join(
-    unique.map((row) => sql`(${row.id}::int, ${new Date(row.dateIso)}::timestamp, ${row.precision}::text)`),
+    unique.map(
+      (row) =>
+        sql`(${row.id}::int, (${new Date(row.dateIso).toISOString()}::timestamptz AT TIME ZONE 'UTC'), ${row.precision}::text)`,
+    ),
     sql`, `,
   );
   await client.execute(sql`
@@ -992,7 +1004,7 @@ async function flushOwnershipBackfills(
     SET ownership_start_date = v.ownership_start_date,
         ownership_start_source = 'import',
         ownership_start_precision = v.start_precision,
-        updated_at = ${now}
+        updated_at = (${nowIso}::timestamptz AT TIME ZONE 'UTC')
     FROM (VALUES ${values}) AS v(id, ownership_start_date, start_precision)
     WHERE g.id = v.id
       AND g.brokerage_id = ${brokerageId}
