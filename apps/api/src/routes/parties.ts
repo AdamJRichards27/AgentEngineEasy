@@ -9,6 +9,7 @@ import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitl
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
+import { addPostCallNote, recordCallConsentConfirmation, tapToCallStatus } from "../lib/tapToCall.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
@@ -160,6 +161,11 @@ const addPartySchema = z.object({
   mobile: z.string().optional(),
   email: z.string().email().optional(),
   rejectDuplicateContact: z.boolean().optional(),
+  // t236u: the creating agent's confirmation that the contact agreed to be called.
+  callConsent: z
+    .object({ confirmed: z.boolean(), restrictions: z.string().max(500).optional(), doNotCall: z.boolean().optional() })
+    .strict()
+    .optional(),
   residentialAddress: z.string().optional(),
   // AE Minimal v1.0 (Owner t149u): link an EXISTING contact instead of
   // creating one. When present, no contact fields are read and no party row
@@ -352,6 +358,9 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
         isPrimary: parsed.data.isPrimary,
       })
       .returning();
+    if (parsed.data.callConsent) {
+      await recordCallConsentConfirmation(tx, { brokerageId: user.brokerageId, partyId: party.id, userId: user.id, ...parsed.data.callConsent });
+    }
     await auditPrimaryReplaced(tx, user, property.id, parsed.data.role, demoted, link.id);
     return { party, link, demoted };
   });
@@ -616,4 +625,68 @@ partiesRouter.patch("/link/:linkId", requireAuth, canManageRelationships, async 
     }
   }
   res.json({ link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted, outcome.link) });
+});
+
+// ---------------------------------------------------------------------
+// t236u Tap-to-Call. t242u: anyone who can VIEW the contact (grow.contacts.read
+// or Run) gets the number and tel action; notes/consent stay manage-only.
+// (unsubscribed callers get 403; another brokerage's contact is 404). Nothing
+// here dials, records or completes a call.
+// ---------------------------------------------------------------------
+function readPartyId(raw: string): number | null {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 && n <= 2_147_483_647 ? n : null;
+}
+
+partiesRouter.get("/:partyId/tap-to-call", requireAuth, canReadPropertyContacts, async (req, res) => {
+  const partyId = readPartyId(req.params.partyId);
+  if (partyId === null) return void res.status(400).json({ error: "Invalid contact id" });
+  const user = req.authedUser!;
+  const status = await tapToCallStatus(user.brokerageId, partyId);
+  if (!status) {
+    await notePartyIsolationRejection(partyId, user.brokerageId);
+    return void res.status(404).json({ error: "Contact not found" });
+  }
+  res.json(status);
+});
+
+const callConsentSchema = z
+  .object({ confirmed: z.boolean(), restrictions: z.string().max(500).optional(), doNotCall: z.boolean().optional() })
+  .strict();
+partiesRouter.post("/:partyId/call-consent", requireAuth, canManagePropertyContacts, async (req, res) => {
+  const partyId = readPartyId(req.params.partyId);
+  if (partyId === null) return void res.status(400).json({ error: "Invalid contact id" });
+  const parsed = callConsentSchema.safeParse(req.body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const user = req.authedUser!;
+  const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId)));
+  if (!party) {
+    await notePartyIsolationRejection(partyId, user.brokerageId);
+    return void res.status(404).json({ error: "Contact not found" });
+  }
+  const id = await recordCallConsentConfirmation(db, { brokerageId: user.brokerageId, partyId, userId: user.id, ...parsed.data });
+  if (id === null) return void res.status(400).json({ error: "Nothing to record", code: "CALL_CONSENT_EMPTY" });
+  await logAudit({ userId: user.id, action: "call_consent_recorded", recordType: "party", recordId: String(partyId) });
+  res.status(201).json(await tapToCallStatus(user.brokerageId, partyId));
+});
+
+const callNoteSchema = z.object({ note: z.string().trim().min(1).max(2000), propertyId: z.number().int().positive().optional() }).strict();
+partiesRouter.post("/:partyId/call-notes", requireAuth, canManagePropertyContacts, async (req, res) => {
+  const partyId = readPartyId(req.params.partyId);
+  if (partyId === null) return void res.status(400).json({ error: "Invalid contact id" });
+  const parsed = callNoteSchema.safeParse(req.body);
+  if (!parsed.success) return void res.status(400).json({ error: parsed.error.flatten() });
+  const user = req.authedUser!;
+  const [party] = await db.select({ id: parties.id }).from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId)));
+  if (!party) {
+    await notePartyIsolationRejection(partyId, user.brokerageId);
+    return void res.status(404).json({ error: "Contact not found" });
+  }
+  const propertyId = parsed.data.propertyId ?? null;
+  if (propertyId !== null) {
+    const [prop] = await db.select({ id: properties.id }).from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId)));
+    if (!prop || (await propertyHiddenFromCaller(user, propertyId))) return void res.status(404).json({ error: "Property not found" });
+  }
+  const activity = await addPostCallNote({ brokerageId: user.brokerageId, partyId, propertyId, userId: user.id, note: parsed.data.note });
+  res.status(201).json({ activity });
 });
