@@ -6,7 +6,7 @@ import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 import { requireAnyEntitlement } from "../middlewares/entitlement.js";
-import { duplicateContactBody, findDuplicateContact } from "./contacts.js";
+import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -53,6 +53,47 @@ async function notePartyLinkIsolationRejection(linkId: number, brokerageId: numb
 }
 
 export const partiesRouter = Router();
+
+// t234u (Owner): matching emails / mobiles are NOT rejected — shared household
+// and business details are legitimate. Callers get potential-duplicate
+// warnings (with the existing contact id when Contact 360 would show it) and
+// are expected to offer "link existing" (POST /parties with partyId), which
+// reuses the contact id instead of creating a second record.
+export type PotentialDuplicateWarning = { code: "POTENTIAL_DUPLICATE_CONTACT"; kind: "email" | "phone"; contactId?: number };
+export async function potentialDuplicateWarnings(
+  brokerageId: number,
+  email: string | undefined | null,
+  mobile: string | undefined | null,
+): Promise<PotentialDuplicateWarning[]> {
+  const out: PotentialDuplicateWarning[] = [];
+  for (const [kind, value] of [["email", email], ["phone", mobile]] as const) {
+    if (!value) continue;
+    const dup = await findDuplicateContact(brokerageId, kind, value, null);
+    if (dup) out.push(dup.contactId === null ? { code: "POTENTIAL_DUPLICATE_CONTACT", kind } : { code: "POTENTIAL_DUPLICATE_CONTACT", kind, contactId: dup.contactId });
+  }
+  return out;
+}
+
+// t234u (Owner): at most one primary contact per property per role, where
+// applicable ("Other" groups unrelated relationships, so it is exempt).
+// Primary is optional and is a display/contact preference only: it carries
+// NO legal or signing authority (agreements, AML and signing never read it).
+export const PRIMARY_EXEMPT_ROLES: readonly string[] = ["Other"];
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+async function primaryClash(tx: Tx, propertyId: number, role: string, excludeLinkId: number | null): Promise<number | null> {
+  if (PRIMARY_EXEMPT_ROLES.includes(role)) return null;
+  const conds = [eq(propertyParties.propertyId, propertyId), eq(propertyParties.role, role), eq(propertyParties.isPrimary, true)];
+  if (excludeLinkId !== null) conds.push(ne(propertyParties.id, excludeLinkId));
+  const [row] = await tx.select({ id: propertyParties.id }).from(propertyParties).where(and(...conds)).limit(1);
+  return row ? row.id : null;
+}
+function primaryExistsBody(existingLinkId: number) {
+  return {
+    error: "This property already has a primary contact for that role",
+    code: "PROPERTY_PARTY_PRIMARY_EXISTS",
+    existingLinkId,
+  };
+}
 
 // t228u Priority 1: property contacts belong to Grow (kept per t223u) and Run.
 // An active grant for either product is required; an unsubscribed brokerage
@@ -151,6 +192,10 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
         .from(propertyParties)
         .where(and(eq(propertyParties.propertyId, propertyId), eq(propertyParties.partyId, partyId), eq(propertyParties.role, role)));
       if (existing) return { kind: "exists" as const, party, link: existing };
+      if (isPrimary) {
+        const clash = await primaryClash(tx, propertyId, role, null);
+        if (clash !== null) return { kind: "primary_exists" as const, existingLinkId: clash };
+      }
       const [link] = await tx.insert(propertyParties).values({ propertyId, partyId, role, isPrimary }).returning();
       return { kind: "created" as const, party, link };
     });
@@ -170,6 +215,10 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
         code: "PROPERTY_PARTY_LINK_EXISTS",
         link: outcome.link,
       });
+      return;
+    }
+    if (outcome.kind === "primary_exists") {
+      res.status(409).json(primaryExistsBody(outcome.existingLinkId));
       return;
     }
     await logAudit({
@@ -201,46 +250,47 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
     return;
   }
 
-  // t230u: with rejectDuplicateContact (sent by Minimal/mobile and documented
-  // in the mobile API contract), create-and-link never makes a second record
-  // for a contact that already exists in this brokerage (same email /
-  // normalised phone rule as POST /grow/contacts); the client links the
-  // existing contact instead. Opt-in so the legacy Run desktop form and
-  // existing integrations (shared household phones/emails) are unchanged;
-  // making it the default is an Owner decision.
-  for (const [kind, value] of [["email", parsed.data.email], ["phone", parsed.data.mobile]] as const) {
-    if (!parsed.data.rejectDuplicateContact || !value) continue;
-    const duplicate = await findDuplicateContact(user.brokerageId, kind, value, null);
-    if (duplicate) {
-      res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "CONTACT_DUPLICATE", kind });
-      return;
+  // t234u: never rejected for a matching email/mobile (rejectDuplicateContact
+  // is accepted for compatibility and ignored); warnings are returned instead.
+  const warnings = await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile);
+
+  const created = await db.transaction(async (tx) => {
+    // Same serialisation point as the link-existing path (primary rule).
+    await tx.select({ id: properties.id }).from(properties).where(eq(properties.id, property.id)).for("update");
+    if (parsed.data.isPrimary) {
+      const clash = await primaryClash(tx, property.id, parsed.data.role, null);
+      if (clash !== null) return { kind: "primary_exists" as const, existingLinkId: clash };
     }
+    const [party] = await tx
+      .insert(parties)
+      .values({
+        brokerageId: user.brokerageId,
+        partyType: parsed.data.partyType,
+        firstName: parsed.data.firstName,
+        middleName: parsed.data.middleName,
+        lastName: parsed.data.lastName,
+        organisationName: parsed.data.organisationName,
+        mobile: parsed.data.mobile,
+        email: parsed.data.email,
+        residentialAddress: parsed.data.residentialAddress,
+      })
+      .returning();
+    const [link] = await tx
+      .insert(propertyParties)
+      .values({
+        propertyId: parsed.data.propertyId,
+        partyId: party.id,
+        role: parsed.data.role,
+        isPrimary: parsed.data.isPrimary,
+      })
+      .returning();
+    return { kind: "created" as const, party, link };
+  });
+  if (created.kind === "primary_exists") {
+    res.status(409).json(primaryExistsBody(created.existingLinkId));
+    return;
   }
-
-  const [party] = await db
-    .insert(parties)
-    .values({
-      brokerageId: user.brokerageId,
-      partyType: parsed.data.partyType,
-      firstName: parsed.data.firstName,
-      middleName: parsed.data.middleName,
-      lastName: parsed.data.lastName,
-      organisationName: parsed.data.organisationName,
-      mobile: parsed.data.mobile,
-      email: parsed.data.email,
-      residentialAddress: parsed.data.residentialAddress,
-    })
-    .returning();
-
-  const [link] = await db
-    .insert(propertyParties)
-    .values({
-      propertyId: parsed.data.propertyId,
-      partyId: party.id,
-      role: parsed.data.role,
-      isPrimary: parsed.data.isPrimary,
-    })
-    .returning();
+  const { party, link } = created;
 
   await logAudit({
     userId: user.id,
@@ -274,7 +324,21 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
     }
   }
 
-  res.status(201).json({ party, link });
+  res.status(201).json({ party, link, warnings });
+});
+
+// t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
+// query string, so contact details stay out of URLs and access logs. Never
+// blocks; returns warnings with reusable contact ids. Same gates as create.
+const duplicateCheckSchema = z.object({ email: z.string().optional(), mobile: z.string().optional() }).strict();
+partiesRouter.post("/duplicate-check", requireAuth, canManagePropertyContacts, async (req, res) => {
+  const parsed = duplicateCheckSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+  const user = req.authedUser!;
+  res.json({ warnings: await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile) });
 });
 
 partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContacts, async (req, res) => {
@@ -447,9 +511,14 @@ partiesRouter.patch("/link/:linkId", requireAuth, canManagePropertyContacts, asy
         .where(and(eq(propertyParties.propertyId, link.propertyId), eq(propertyParties.partyId, link.partyId), eq(propertyParties.role, role)));
       if (clash) return { kind: "exists" as const };
     }
+    const isPrimary = parsed.data.isPrimary ?? link.isPrimary;
+    if (isPrimary) {
+      const other = await primaryClash(tx, link.propertyId, role, link.id);
+      if (other !== null) return { kind: "primary_exists" as const, existingLinkId: other };
+    }
     const [updated] = await tx
       .update(propertyParties)
-      .set({ role, isPrimary: parsed.data.isPrimary ?? link.isPrimary })
+      .set({ role, isPrimary })
       .where(eq(propertyParties.id, linkId))
       .returning();
     return { kind: "updated" as const, before: link, link: updated };
@@ -465,6 +534,10 @@ partiesRouter.patch("/link/:linkId", requireAuth, canManagePropertyContacts, asy
   }
   if (outcome.kind === "exists") {
     res.status(409).json({ error: "This contact is already linked to the property with that role", code: "PROPERTY_PARTY_LINK_EXISTS" });
+    return;
+  }
+  if (outcome.kind === "primary_exists") {
+    res.status(409).json(primaryExistsBody(outcome.existingLinkId));
     return;
   }
   await logAudit({

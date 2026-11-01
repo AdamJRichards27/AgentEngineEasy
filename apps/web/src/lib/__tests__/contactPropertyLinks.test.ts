@@ -59,3 +59,10 @@ test("t230u: link controls are feature-flagged off unless VITE_PROPERTY_LINK_CON
   assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "true" }), true);
   assert.equal(propertyLinkControlsEnabled(), false, "default build: off");
 });
+
+test("t234u: PROPERTY_PARTY_PRIMARY_EXISTS maps to the primary message; other 409s stay link-exists; duplicate wording offers Create anyway", async () => {
+  const m = await import("../../minimal/properties/minimalPropertyContactsModel");
+  assert.equal(m.linkFailureText({ status: 409, code: "PROPERTY_PARTY_PRIMARY_EXISTS" }, "x"), m.PRIMARY_ALREADY_SET);
+  assert.notEqual(m.linkFailureText({ status: 409, code: "PROPERTY_PARTY_LINK_EXISTS" }, "x"), m.PRIMARY_ALREADY_SET);
+  assert.match(m.POSSIBLE_DUPLICATE_CONTACT, /Create anyway/);
+});

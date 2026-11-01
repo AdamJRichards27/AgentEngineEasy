@@ -91,8 +91,15 @@ export const LINK_INVALID = "Choose a contact and the contact's relationship to 
 export const LINK_ROLE_REQUIRED = "Choose the contact's relationship to this property.";
 
 /** Friendly text for a failed link. */
+/** t234u: one primary per property per role; primary carries no legal or signing authority. */
+export const PRIMARY_ALREADY_SET = "This property already has a primary contact for that role. Remove primary from the other contact first.";
+/** t234u: a shared email/phone is a warning, not a block. */
+export const POSSIBLE_DUPLICATE_CONTACT =
+  "Possible duplicate: a contact with that email or phone already exists. Link the existing contact, or choose Create anyway if the detail is shared (household or business).";
+
 export function linkFailureText(error: { status?: number; code?: string } | null | undefined, fallback: string): string {
   if (!error) return fallback;
+  if (error.status === 409 && error.code === "PROPERTY_PARTY_PRIMARY_EXISTS") return PRIMARY_ALREADY_SET;
   if (error.status === 409) return LINK_ALREADY_EXISTS;
   if (error.status === 404) return LINK_NOT_FOUND;
   if (error.status === 403) return LINK_FORBIDDEN;

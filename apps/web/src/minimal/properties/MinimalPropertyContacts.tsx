@@ -17,6 +17,7 @@ import {
   linkContactBody,
   linkedPartiesPath,
   linkFailureText,
+  POSSIBLE_DUPLICATE_CONTACT,
   PROPERTY_PARTY_ROLE_LABELS,
   PROPERTY_PARTY_ROLES,
   type LinkedPartyRow,
@@ -51,6 +52,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPhone, setNewPhone] = useState("");
+  const [possibleDuplicate, setPossibleDuplicate] = useState(false);
 
   const linkedQuery = useQuery<{ parties: LinkedPartyRow[] }>({
     queryKey: ["minimal-property-parties", propertyId],
@@ -82,8 +84,9 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
     },
   });
 
-  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string }>({
+  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string; confirmDuplicate?: boolean }>({
     mutationFn: (input) => apiFetch("/grow/contacts", { method: "POST", body: JSON.stringify(input) }),
+    onMutate: () => setPossibleDuplicate(false),
     onSuccess: (result, input) => {
       setSelected({ id: result.contact.id, name: input.name });
       setNewOpen(false);
@@ -94,7 +97,8 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
     },
     onError: (err) => {
       if (err instanceof ApiError && err.status === 409 && typeof err.contactId === "number") {
-        setError("A contact with that email or phone already exists. Search for them and link the existing contact instead.");
+        setPossibleDuplicate(true);
+        setError(POSSIBLE_DUPLICATE_CONTACT);
         return;
       }
       setError(apiErrorMessage(err, "Couldn't create the contact. Try again."));
@@ -145,6 +149,17 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
       </div>
       {notice ? <p className="am-empty-note" role="status">{notice}</p> : null}
       {error ? <p className="am-switch-error" role="alert" data-ae-link-error>{error}</p> : null}
+      {possibleDuplicate ? (
+        <button
+          type="button"
+          className="am-data-button is-quiet"
+          data-ae-create-anyway
+          disabled={createContact.isPending}
+          onClick={() => createContact.mutate({ name: newName.trim(), email: newEmail.trim(), phone: newPhone.trim(), confirmDuplicate: true })}
+        >
+          Create anyway
+        </button>
+      ) : null}
       {linkedQuery.isLoading ? <p className="am-empty-note">Loading linked contacts…</p> : null}
       {linkedQuery.isError ? <p className="am-switch-error" role="alert">{apiErrorMessage(linkedQuery.error, "Couldn't load linked contacts.")}</p> : null}
       {linkedQuery.isSuccess && linked.length === 0 ? <p className="am-empty-note">No contact linked yet. Link a contact to start an appraisal.</p> : null}

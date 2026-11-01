@@ -551,20 +551,22 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     return;
   }
 
-  if (parsed.email) {
-    const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", parsed.email, null);
-    if (emailDuplicate) {
-      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
+  // t234u (Owner): a matching email/phone is a potential-duplicate WARNING, not a
+  // global rejection (shared household/business details are legitimate). The
+  // first submit still answers 409 with the existing contact id so the form can
+  // offer "use existing"; resubmitting with confirmDuplicate: true creates the
+  // contact and returns the warnings alongside it.
+  const confirmDuplicate = (req.body as Record<string, unknown> | null)?.confirmDuplicate === true;
+  const duplicateWarnings: { code: "POTENTIAL_DUPLICATE_CONTACT"; kind: ContactDuplicateKind; contactId?: number }[] = [];
+  for (const [kind, value] of [["email", parsed.email], ["phone", parsed.mobile]] as const) {
+    if (!value) continue;
+    const duplicate = await findDuplicateContact(user.brokerageId, kind, value, null);
+    if (!duplicate) continue;
+    if (!confirmDuplicate) {
+      res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "POTENTIAL_DUPLICATE_CONTACT", kind, canConfirm: true });
       return;
     }
-  }
-
-  if (parsed.mobile) {
-    const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", parsed.mobile, null);
-    if (phoneDuplicate) {
-      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
-      return;
-    }
+    duplicateWarnings.push(duplicate.contactId === null ? { code: "POTENTIAL_DUPLICATE_CONTACT", kind } : { code: "POTENTIAL_DUPLICATE_CONTACT", kind, contactId: duplicate.contactId });
   }
 
   const [party] = await db
@@ -589,7 +591,7 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     recordId: String(party.id),
   });
 
-  res.status(201).json(createdContactPayload(party));
+  res.status(201).json(duplicateWarnings.length ? { ...createdContactPayload(party), warnings: duplicateWarnings } : createdContactPayload(party));
 });
 
 // PATCH /grow/contacts/:partyId — correct a contact's name, organisation,

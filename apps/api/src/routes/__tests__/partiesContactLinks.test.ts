@@ -145,28 +145,46 @@ test("by-contact and PATCH: hidden property, unsubscribed brokerage and other br
   assert.equal(link.isPrimary, true, "unsubscribed PATCH changed nothing; later entitled PATCH did");
 });
 
-test("t230u: create-and-link refuses a duplicate contact (email or phone); Owner/Landlord/Tenant valid; Create Contact + Start Appraisal still work", async () => {
+test("t234u: matching email/phone is a warning, never a rejection; existing contact id offered for reuse; Owner/Landlord/Tenant valid; Create Contact + Start Appraisal still work", async () => {
   const b = await setup("Dedupe", ["run.access", ...GROW]);
   const email = `dup-${tag}@example.com`;
   const first = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Owner", firstName: "Uma", email, mobile: "0412 345 678" });
   assert.equal(first.status, 201);
+  assert.deepEqual(first.json.warnings, []);
+  // Pre-flight check: warnings with the reusable id, nothing created.
+  const check = await call(b.admin.cookie, "POST", "/parties/duplicate-check", { email: email.toUpperCase(), mobile: "+61412345678" });
+  assert.equal(check.status, 200);
+  assert.deepEqual(check.json.warnings.map((w: any) => [w.code, w.kind, w.contactId]), [
+    ["POTENTIAL_DUPLICATE_CONTACT", "email", first.json.party.id],
+    ["POTENTIAL_DUPLICATE_CONTACT", "phone", first.json.party.id],
+  ]);
+  // Shared household email: created (not rejected), with a warning — even if a client still sends the old opt-in flag.
   const byEmail = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email: email.toUpperCase(), rejectDuplicateContact: true });
-  assert.equal(byEmail.status, 409);
-  assert.equal(byEmail.json.code, "CONTACT_DUPLICATE");
-  assert.equal(byEmail.json.kind, "email");
-  assert.equal(byEmail.json.contactId, first.json.party.id);
-  const byPhone = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma3", mobile: "+61412345678", rejectDuplicateContact: true });
-  assert.equal(byPhone.status, 409);
-  assert.equal(byPhone.json.kind, "phone");
-  // Without the opt-in the legacy create-and-link (Run desktop form) is unchanged.
-  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Other", firstName: "Household", mobile: "+61412345678" })).status, 201);
+  assert.equal(byEmail.status, 201);
+  assert.notEqual(byEmail.json.party.id, first.json.party.id);
+  assert.deepEqual(byEmail.json.warnings, [{ code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email", contactId: first.json.party.id }]);
+  const byPhone = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Other", firstName: "Household", mobile: "+61412345678" });
+  assert.equal(byPhone.status, 201);
+  assert.equal(byPhone.json.warnings[0].kind, "phone");
+  // Other brokerage never sees this brokerage's contact as a duplicate (isolation).
+  const o = await setup("DedupeOther", ["run.access", ...GROW]);
+  assert.deepEqual((await call(o.admin.cookie, "POST", "/parties/duplicate-check", { email })).json.warnings, []);
+  // Unsubscribed brokerage cannot probe.
+  await setGrants(o.brokerageId, []);
+  assert.equal((await call(o.admin.cookie, "POST", "/parties/duplicate-check", { email })).status, 403);
   // The client links the existing contact instead: no duplicate party row.
   const linked = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Landlord" });
   assert.equal(linked.status, 201);
   assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Landlord" })).status, 409, "duplicate link");
   assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Occupier" })).status, 400, "unknown relationship type");
   // People "Create contact" (unchanged route) still dedupes and still creates.
-  assert.equal((await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email })).status, 409);
+  const warned = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email });
+  assert.equal(warned.status, 409);
+  assert.equal(warned.json.code, "POTENTIAL_DUPLICATE_CONTACT");
+  assert.equal(warned.json.contactId, first.json.party.id);
+  const confirmed = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email, confirmDuplicate: true });
+  assert.equal(confirmed.status, 201, "confirmed shared email is created, not rejected");
+  assert.equal(confirmed.json.warnings[0].contactId, first.json.party.id);
   const fresh = await call(b.agent.cookie, "POST", "/grow/contacts", { name: "Vic Fresh", email: `vic-${tag}@example.com` });
   assert.equal(fresh.status, 201);
   const vic = fresh.json.contact.id;
@@ -175,4 +193,39 @@ test("t230u: create-and-link refuses a duplicate contact (email or phone); Owner
   const appr = await call(b.agent.cookie, "POST", "/grow/appraisals/from-contact", { partyId: vic, propertyId: b.agentProp, entry: "property" });
   assert.ok(appr.status === 201 || appr.status === 200, `start appraisal ${appr.status} ${JSON.stringify(appr.json)}`);
   assert.ok(appr.json.appraisal.id > 0);
+});
+
+test("t234u: at most one primary per property per role (Other exempt); primary optional; enforced on create, link-existing and PATCH", async () => {
+  const b = await setup("Primary", ["run.access", ...GROW]);
+  const p = b.adminProp;
+  // setup's Seller link is not primary; primary is optional.
+  const s1 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Pri", isPrimary: true });
+  assert.equal(s1.status, 201);
+  const s2 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Pri2", isPrimary: true });
+  assert.equal(s2.status, 409);
+  assert.equal(s2.json.code, "PROPERTY_PARTY_PRIMARY_EXISTS");
+  assert.equal(s2.json.existingLinkId, s1.json.link.id);
+  // The refused create left no orphan contact behind.
+  const sellers = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties.filter((x: any) => x.role === "Seller");
+  assert.equal(sellers.length, 2);
+  // Non-primary second seller is fine; a primary Buyer is fine (different role).
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Co" })).status, 201);
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Buyer", firstName: "Bea", isPrimary: true })).status, 201);
+  // Link-existing path.
+  const le = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, partyId: b.partyId, role: "Owner", isPrimary: true });
+  assert.equal(le.status, 201);
+  const other = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Owner", firstName: "Own2", isPrimary: true });
+  assert.equal(other.status, 409);
+  // PATCH: promoting the setup Seller link clashes; demote first then promote works.
+  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true })).json.code, "PROPERTY_PARTY_PRIMARY_EXISTS");
+  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${s1.json.link.id}`, { isPrimary: false })).status, 200);
+  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true })).status, 200);
+  // Re-saving the current primary is not a clash with itself.
+  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true })).status, 200);
+  // Role change onto a role that already has a primary is refused.
+  const ownLink = le.json.link.id;
+  assert.equal((await call(b.admin.cookie, "PATCH", `/parties/link/${ownLink}`, { role: "Buyer" })).status, 409);
+  // Other is exempt: two primaries allowed.
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "O1", isPrimary: true })).status, 201);
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "O2", isPrimary: true })).status, 201);
 });
