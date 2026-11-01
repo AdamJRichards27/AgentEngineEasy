@@ -25,7 +25,7 @@ import {
   parties,
 } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
-import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult, removeRelationshipManageFixture } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -240,6 +240,7 @@ describe("GR-ISO Grow route isolation matrix", { concurrency: 1 }, () => {
     victim = await createBrokerageWithUsers(baseUrl, `GR-ISO Victim ${suffix}`);
     attacker = await createBrokerageWithUsers(baseUrl, `GR-ISO Attacker ${suffix}`);
     unentitled = await createBrokerageWithUsers(baseUrl, `GR-ISO None ${suffix}`);
+    await removeRelationshipManageFixture(unentitled.brokerageId); // t242u: unentitled means no test-only relationships grant either
     await grantAll(victim.brokerageId);
     await grantAll(attacker.brokerageId);
 
