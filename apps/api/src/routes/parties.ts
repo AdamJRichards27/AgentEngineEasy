@@ -228,6 +228,16 @@ async function runSellerRemovedEffects(propertyId: number, user: Actor) {
   }
 }
 
+
+// t242u PII minimisation: the property-contact endpoints return only what the
+// web panel, Contact 360 and mobile v5 rows read. residentialAddress,
+// entityDetails (trust deed / ACN), middleName, brokerageId and timestamps are
+// never returned here; the full record stays behind the Grow contact routes.
+export type PartySummary = { id: number; partyType: string; firstName: string | null; lastName: string | null; organisationName: string | null; email: string | null; mobile: string | null };
+export function partySummary(p: typeof parties.$inferSelect): PartySummary {
+  return { id: p.id, partyType: p.partyType, firstName: p.firstName, lastName: p.lastName, organisationName: p.organisationName, email: p.email, mobile: p.mobile };
+}
+
 partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) => {
   if (invalidRole(req.body)) {
     res.status(400).json(invalidRoleBody());
@@ -298,7 +308,7 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
       propertyId,
     });
     if (role === "Seller") await runSellerSideEffects(propertyId, partyId, user);
-    res.status(201).json({ party: outcome.party, link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
+    res.status(201).json({ party: partySummary(outcome.party), link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
     return;
   }
 
@@ -376,7 +386,7 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
 
   if (parsed.data.role === "Seller") await runSellerSideEffects(parsed.data.propertyId, party.id, user);
 
-  res.status(201).json({ party, link, warnings, changed: changedBody(link.role, demoted) });
+  res.status(201).json({ party: partySummary(party), link, warnings, changed: changedBody(link.role, demoted) });
 });
 
 // t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
@@ -424,7 +434,7 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContac
       linkId: link.id,
       role: link.role,
       isPrimary: link.isPrimary,
-      party: partyRows.find((p) => p.id === link.partyId) ?? null,
+      party: (() => { const p = partyRows.find((r) => r.id === link.partyId); return p ? partySummary(p) : null; })(),
     })),
   });
 });

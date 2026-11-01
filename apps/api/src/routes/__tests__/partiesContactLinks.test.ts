@@ -326,3 +326,25 @@ test("t238u: one role vocabulary — API re-exports the @aee/db constant; the we
   assert.ok(m, "web constant found");
   assert.deepEqual(m![1].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean), [...PROPERTY_PARTY_ROLES]);
 });
+
+test("t242u PII minimisation: property-contact endpoints return only the summary fields the UI/mobile v5 need; address and entity details never leave", async () => {
+  const b = await setup("Pii", ["run.access", ...GROW]);
+  const SUMMARY = ["email", "firstName", "id", "lastName", "mobile", "organisationName", "partyType"];
+  const created = await call(b.admin.cookie, "POST", "/parties", {
+    propertyId: b.adminProp, role: "Buyer", firstName: "Pia", lastName: "Synthetic", email: "pia.synthetic@example.com", mobile: "+61400000001",
+    residentialAddress: "1 Synthetic Secret St, Testville NSW 2000", entityDetails: { acn: "000000000", trustDeed: "synthetic" },
+  });
+  assert.equal(created.status, 201);
+  assert.deepEqual(Object.keys(created.json.party).sort(), SUMMARY);
+  const list = await call(b.admin.cookie, "GET", `/parties/by-property/${b.adminProp}`);
+  assert.equal(list.status, 200);
+  for (const row of list.json.parties) {
+    assert.deepEqual(Object.keys(row).sort(), ["isPrimary", "linkId", "party", "role"]);
+    assert.deepEqual(Object.keys(row.party).sort(), SUMMARY);
+  }
+  const body = JSON.stringify(list.json) + JSON.stringify(created.json);
+  for (const leak of ["Synthetic Secret St", "residentialAddress", "entityDetails", "trustDeed", "brokerageId", "middleName"]) assert.ok(!body.includes(leak), `leaked ${leak}`);
+  const pia = list.json.parties.find((r: any) => r.party.firstName === "Pia");
+  assert.equal(pia.party.mobile, "+61400000001", "mobile v5 rows and Call still get the number");
+  assert.equal(pia.party.email, "pia.synthetic@example.com");
+});
