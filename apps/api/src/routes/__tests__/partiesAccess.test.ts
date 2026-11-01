@@ -71,7 +71,7 @@ async function setup(label: string, keys: readonly string[]) {
   return { ...b, pc, adminProp, agentProp, partyId: c.json.party.id as number, adminLinkId: c.json.link.id as number };
 }
 
-for (const [label, keys] of [["Grow", GROW], ["Run", ["run.access"]]] as const) {
+for (const [label, keys] of [["Grow", GROW], ["Run", ["run.access", "grow.relationships.manage"]]] as const) {
   test(`${label}: Admin and Agent can read, link and unlink on properties they can access`, async () => {
     const b = await setup(label, keys);
     // Admin on own (admin) property.
@@ -161,4 +161,37 @@ test("t233u: Run-only property mutations (ownership-review, listing-details) nee
   await setGrants(b.brokerageId, GROW);
   assert.equal((await call(b.admin.cookie, "POST", `/properties/${b.adminProp}/ownership-review`, { notes: "x" })).status, 403, "Grow-only");
   assert.equal((await call(b.admin.cookie, "POST", `/properties/${b.adminProp}/listing-details`, lst)).status, 403, "Grow-only");
+});
+
+test("t242u: run.access alone does NOT authorise link, unlink, role or primary changes (403, nothing changes); reads still work", async () => {
+  const b = await setup("RunOnly", ["run.access"]);
+  const p = b.adminProp;
+  assert.equal((await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).status, 200, "Run can still read");
+  const deny = async (r: Promise<{ status: number; json: any }>, what: string) => {
+    const x = await r;
+    assert.equal(x.status, 403, what);
+    assert.equal(x.json.entitlementKey, "grow.relationships.manage", what);
+  };
+  await deny(call(b.admin.cookie, "POST", "/parties", { propertyId: p, partyId: b.partyId, role: "Buyer" }), "link existing");
+  await deny(call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "X" }), "create + link");
+  await deny(call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { role: "Owner" }), "role change");
+  await deny(call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true }), "primary change");
+  await deny(call(b.admin.cookie, "DELETE", `/parties/link/${b.adminLinkId}`), "unlink");
+  await deny(call(b.pc.cookie, "DELETE", `/parties/link/${b.adminLinkId}`), "Pit Crew unlink");
+  const rows = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties;
+  assert.deepEqual(rows.map((r: any) => [r.linkId, r.role, r.isPrimary]), [[b.adminLinkId, "Seller", false]], "nothing changed");
+});
+
+test("t242u: grow.contacts.manage without grow.relationships.manage cannot link; with it (plus property access) can; property scope still 404s", async () => {
+  const b = await setup("NoRel", GROW.filter((k) => k !== "grow.relationships.manage"));
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Buyer" })).status, 403);
+  await setGrants(b.brokerageId, ["grow.access", "grow.contacts.read", "grow.relationships.manage"]);
+  // Linking an existing contact needs only the relationship key + property access.
+  assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Buyer" })).status, 201);
+  // Creating a new contact additionally needs contact-creation rights.
+  const cn = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Other", firstName: "New" });
+  assert.equal(cn.status, 403);
+  assert.equal(cn.json.entitlementKey, "grow.contacts.manage");
+  // Property access is still required: an agent on the admin's property gets 404.
+  assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Solicitor" })).status, 404);
 });

@@ -20,9 +20,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq } from "drizzle-orm";
-import { db, domainEvents, entitlementGrants, growActivities } from "@aee/db";
+import { db, domainEvents, entitlementGrants, growActivities, parties, properties, propertyParties } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
-import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers,
+  removeRelationshipManageFixture, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -53,6 +54,9 @@ before(async () => {
 
   A = await createBrokerageWithUsers(baseUrl, brokerageAName);
   B = await createBrokerageWithUsers(baseUrl, brokerageBName);
+  // This suite asserts exact entitlement states from zero Grow keys.
+  await removeRelationshipManageFixture(A.brokerageId);
+  await removeRelationshipManageFixture(B.brokerageId);
 });
 
 after(async () => {
@@ -87,16 +91,18 @@ async function createProperty(cookie: string, address: string) {
   return property.id;
 }
 
-async function createParty(cookie: string, propertyId: number, overrides: Record<string, unknown> = {}) {
-  const res = await fetch(`${baseUrl}/api/parties`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie },
-    // "Buyer" (not "Seller") deliberately sidesteps parties.ts's Seller-only
-    // ownership-review/AML side effects, which are irrelevant to Grow.
-    body: JSON.stringify({ propertyId, role: "Buyer", firstName: "Test", lastName: "Party", ...overrides }),
-  });
-  if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
-  const { party } = (await res.json()) as { party: { id: number } };
+// t242u: /parties now needs grow.relationships.manage, which this suite grants
+// one key at a time to assert exact entitlement states. Contacts are seeded as
+// a fixture (same rows POST /parties writes) so the suite keeps testing /grow.
+async function createParty(_cookie: string, propertyId: number, overrides: Record<string, unknown> = {}) {
+  const [prop] = await db.select({ brokerageId: properties.brokerageId }).from(properties).where(eq(properties.id, propertyId));
+  if (!prop) throw new Error(`create party failed: property ${propertyId} missing`);
+  const { role, ...fields } = overrides as { role?: string } & Record<string, unknown>;
+  const [party] = await db
+    .insert(parties)
+    .values({ brokerageId: prop.brokerageId, partyType: "Person", firstName: "Test", lastName: "Party", ...(fields as object) })
+    .returning({ id: parties.id });
+  await db.insert(propertyParties).values({ propertyId, partyId: party.id, role: role ?? "Buyer" });
   return party.id;
 }
 
