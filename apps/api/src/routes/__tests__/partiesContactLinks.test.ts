@@ -204,7 +204,7 @@ test("t238u: setting a new primary atomically replaces the old one in the same (
   // Create path: a second primary Seller replaces the first.
   const s2 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Seller", firstName: "Pri2", isPrimary: true });
   assert.equal(s2.status, 201);
-  assert.deepEqual(s2.json.changed, [{ linkId: s1.json.link.id, isPrimary: false }]);
+  assert.deepEqual(s2.json.changed, [{ id: s1.json.link.id, linkId: s1.json.link.id, role: "Seller", isPrimary: false }]);
   const sellers = () => call(b.admin.cookie, "GET", `/parties/by-property/${p}`).then((r) => r.json.parties.filter((x: any) => x.role === "Seller"));
   let now = await sellers();
   assert.equal(now.length, 3, "previous primary keeps its Seller relationship");
@@ -222,11 +222,14 @@ test("t238u: setting a new primary atomically replaces the old one in the same (
   assert.equal(le.status, 201);
   const own2 = await call(b.admin.cookie, "POST", "/parties", { propertyId: p, role: "Owner", firstName: "Own2", isPrimary: true });
   assert.equal(own2.status, 201);
-  assert.deepEqual(own2.json.changed, [{ linkId: le.json.link.id, isPrimary: false }]);
+  assert.deepEqual(own2.json.changed, [{ id: le.json.link.id, linkId: le.json.link.id, role: "Owner", isPrimary: false }]);
   // PATCH path: promoting the setup Seller replaces s2, with from/to on the update.
   const pr = await call(b.admin.cookie, "PATCH", `/parties/link/${b.adminLinkId}`, { isPrimary: true });
   assert.equal(pr.status, 200);
-  assert.deepEqual(pr.json.changed, [{ linkId: s2.json.link.id, isPrimary: false }]);
+  assert.deepEqual(pr.json.changed, [
+    { id: s2.json.link.id, linkId: s2.json.link.id, role: "Seller", isPrimary: false },
+    { id: b.adminLinkId, linkId: b.adminLinkId, role: "Seller", isPrimary: true },
+  ]);
   now = await sellers();
   assert.deepEqual(now.filter((x: any) => x.isPrimary).map((x: any) => x.linkId), [b.adminLinkId]);
   const upd = await db.select().from(auditLogs).where(and(eq(auditLogs.action, "party_link_updated"), eq(auditLogs.recordId, String(b.adminLinkId))));
@@ -241,7 +244,10 @@ test("t238u: setting a new primary atomically replaces the old one in the same (
   // Role change of a primary link onto a role with a primary replaces that one.
   const rc = await call(b.admin.cookie, "PATCH", `/parties/link/${own2.json.link.id}`, { role: "Buyer" });
   assert.equal(rc.status, 200);
-  assert.deepEqual(rc.json.changed, [{ linkId: bea.json.link.id, isPrimary: false }]);
+  assert.deepEqual(rc.json.changed, [
+    { id: bea.json.link.id, linkId: bea.json.link.id, role: "Buyer", isPrimary: false },
+    { id: own2.json.link.id, linkId: own2.json.link.id, role: "Buyer", isPrimary: true },
+  ]);
   // Invariant: at most one primary per non-exempt (property, role).
   const all = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties;
   for (const role of ["Seller", "Buyer", "Owner"]) assert.ok(all.filter((x: any) => x.role === role && x.isPrimary).length <= 1, role);
