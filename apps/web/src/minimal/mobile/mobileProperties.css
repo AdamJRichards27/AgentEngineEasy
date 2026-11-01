@@ -1,0 +1,223 @@
+/* AE Mobile (CC Task #64, M5): Properties list and detail on a phone. Scoped to .ae-minimal .mob-p; colours as AE Minimal A. */
+.ae-minimal .mob-p {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px 24px;
+  box-sizing: border-box;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-p-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ae-minimal .mob-p-head-detail {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.ae-minimal .mob-p-title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.ae-minimal .mob-p-section {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+.ae-minimal .mob-p-sub {
+  margin: 4px 0 0;
+  color: #4B5563;
+  font-size: 15px;
+}
+.ae-minimal .mob-p-note {
+  margin: 0;
+  color: #4B5563;
+  font-size: 15px;
+}
+.ae-minimal .mob-p-error {
+  margin: 0 0 8px;
+  color: #B3261E;
+  font-size: 15px;
+}
+.ae-minimal .mob-p-primary,
+.ae-minimal .mob-p-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 16px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ae-minimal .mob-p-primary {
+  border: 0;
+  background: var(--am-orange-strong, #C44F17);
+  color: #FFFFFF;
+}
+.ae-minimal .mob-p-button {
+  border: 1px solid #7A8494;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-p-wide {
+  width: 100%;
+}
+.ae-minimal .mob-p-add {
+  flex: 0 0 auto;
+}
+.ae-minimal .mob-p-search {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 16px;
+}
+.ae-minimal .mob-p-list,
+.ae-minimal .mob-p-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ae-minimal .mob-p-card,
+.ae-minimal .mob-p-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  box-sizing: border-box;
+  border: 1px solid #E2E5EA;
+  border-radius: 14px;
+  background: #FFFFFF;
+}
+.ae-minimal .mob-p-open,
+.ae-minimal .mob-p-row {
+  display: flex;
+  flex-direction: column;
+  min-height: 56px;
+  justify-content: center;
+  color: inherit;
+  text-decoration: none;
+}
+.ae-minimal .mob-p-address,
+.ae-minimal .mob-p-row-title {
+  font-size: 17px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.ae-minimal .mob-p-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+  margin-top: 6px;
+  color: #4B5563;
+  font-size: 14px;
+}
+.ae-minimal .mob-p-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #F1F3F6;
+  color: #1F2937;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ae-minimal .mob-p-rowline {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.ae-minimal .mob-p-rowline > .mob-p-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ae-minimal .mob-p-contactlink {
+  flex: 0 0 auto;
+  min-width: 88px;
+}
+.ae-minimal .mob-p-form,
+.ae-minimal .mob-p-chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #E2E5EA;
+  border-radius: 14px;
+  background: #FFFFFF;
+}
+.ae-minimal .mob-p-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.ae-minimal .mob-p-input {
+  min-height: 48px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 10px;
+  font-size: 16px;
+}
+.ae-minimal .mob-p-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.ae-minimal .mob-p-actions {
+  display: flex;
+  gap: 10px;
+}
+.ae-minimal .mob-p-actions > * {
+  flex: 1 1 0;
+}
+.ae-minimal .mob-p-inline {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+.ae-minimal .mob-p-details > summary {
+  list-style: none;
+}
+.ae-minimal .mob-p-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin: 12px 0 0;
+  font-size: 15px;
+}
+.ae-minimal .mob-p-facts dt {
+  color: #4B5563;
+}
+.ae-minimal .mob-p-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ae-minimal .mob-p-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+@media (max-width: 340px) {
+  .ae-minimal .mob-p-head {
+    flex-wrap: wrap;
+  }
+  .ae-minimal .mob-p-pair {
+    grid-template-columns: 1fr;
+  }
+}
