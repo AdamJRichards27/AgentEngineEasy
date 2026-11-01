@@ -25,7 +25,7 @@ test("linked contacts: names, role labels, null party skipped", () => {
   const linked = buildLinkedContacts(rows);
   assert.equal(linked.length, 3);
   assert.equal(linked[0].name, "Ana Synthetic");
-  assert.equal(linked[0].roleLabel, "Seller / owner");
+  assert.equal(linked[0].roleLabel, "Seller");
   assert.equal(linked[0].detail, "ana@example.test");
   assert.equal(linked[2].name, "Acme Trust");
   assert.equal(linked[0].contactHref, "/grow/contacts/7");
@@ -44,7 +44,8 @@ test("appraisal candidates are one per contact", () => {
 
 test("link body carries the chosen role; no default role exists", () => {
   assert.deepEqual(linkContactBody(5, 7, "Buyer"), { propertyId: 5, partyId: 7, role: "Buyer" });
-  assert.ok(!PROPERTY_PARTY_ROLES.includes("Owner" as never));
+  assert.ok(PROPERTY_PARTY_ROLES.includes("Owner") && PROPERTY_PARTY_ROLES.includes("Landlord") && PROPERTY_PARTY_ROLES.includes("Tenant"));
+  assert.ok(!PROPERTY_PARTY_ROLES.includes("Occupier" as never));
 });
 
 test("failure text by status", () => {
@@ -58,4 +59,14 @@ test("failure text by status", () => {
 
 test("search path encodes the query", () => {
   assert.equal(contactSearchPath(" a b@c "), "/grow/contacts?search=a%20b%40c&limit=20");
+});
+
+test("t238u: web role list is exactly the authoritative @aee/db PROPERTY_PARTY_ROLES (no drift)", async () => {
+  const fs = await import("node:fs");
+  const url = await import("node:url");
+  const src = fs.readFileSync(url.fileURLToPath(new URL("../../../../../packages/db/src/schema/property.ts", import.meta.url)), "utf8");
+  const m = src.match(/export const PROPERTY_PARTY_ROLES = \[([^\]]*)\]/);
+  assert.ok(m, "schema constant found");
+  const dbRoles = m![1].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean);
+  assert.deepEqual([...PROPERTY_PARTY_ROLES], dbRoles);
 });

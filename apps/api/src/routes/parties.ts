@@ -1,11 +1,13 @@
 import { Router } from "express";
-import { eq, and, inArray, ne } from "drizzle-orm";
+import { eq, and, inArray, ne, asc } from "drizzle-orm";
 import { z } from "zod";
-import { db, parties, propertyParties, properties, workflows } from "@aee/db";
+import { db, parties, propertyParties, properties, workflows, auditLogs, PROPERTY_PARTY_ROLES, PROPERTY_PARTY_PRIMARY_EXEMPT_ROLES } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
-import { requireAnyEntitlement } from "../middlewares/entitlement.js";
+import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitlement.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
+import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -53,6 +55,69 @@ async function notePartyLinkIsolationRejection(linkId: number, brokerageId: numb
 
 export const partiesRouter = Router();
 
+// t234u (Owner): matching emails / mobiles are NOT rejected — shared household
+// and business details are legitimate. Callers get potential-duplicate
+// warnings (with the existing contact id when Contact 360 would show it) and
+// are expected to offer "link existing" (POST /parties with partyId), which
+// reuses the contact id instead of creating a second record.
+export type PotentialDuplicateWarning = { code: "POTENTIAL_DUPLICATE_CONTACT"; kind: "email" | "phone"; contactId?: number };
+export async function potentialDuplicateWarnings(
+  brokerageId: number,
+  email: string | undefined | null,
+  mobile: string | undefined | null,
+): Promise<PotentialDuplicateWarning[]> {
+  const out: PotentialDuplicateWarning[] = [];
+  for (const [kind, value] of [["email", email], ["phone", mobile]] as const) {
+    if (!value) continue;
+    const dup = await findDuplicateContact(brokerageId, kind, value, null);
+    if (dup) out.push(dup.contactId === null ? { code: "POTENTIAL_DUPLICATE_CONTACT", kind } : { code: "POTENTIAL_DUPLICATE_CONTACT", kind, contactId: dup.contactId });
+  }
+  return out;
+}
+
+// t234u (Owner): at most one primary contact per property per role, where
+// applicable ("Other" groups unrelated relationships, so it is exempt).
+// Primary is optional and is a display/contact preference only: it carries
+// NO legal or signing authority (agreements, AML and signing never read it).
+export const PRIMARY_EXEMPT_ROLES: readonly string[] = PROPERTY_PARTY_PRIMARY_EXEMPT_ROLES;
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type Actor = NonNullable<Express.Request["authedUser"]>;
+
+// t238u (Owner): setting a new primary atomically REPLACES the old one within
+// the same (property, role), inside the caller's transaction (which already
+// holds the property FOR UPDATE lock). The previous contact keeps their
+// relationship with isPrimary=false. Demotion happens BEFORE the new primary
+// is written so the proposed partial unique index (0049) is never violated.
+async function demoteOtherPrimaries(tx: Tx, propertyId: number, role: string, excludeLinkId: number | null) {
+  if (PRIMARY_EXEMPT_ROLES.includes(role)) return [] as { id: number; partyId: number }[];
+  const conds = [eq(propertyParties.propertyId, propertyId), eq(propertyParties.role, role), eq(propertyParties.isPrimary, true)];
+  if (excludeLinkId !== null) conds.push(ne(propertyParties.id, excludeLinkId));
+  return tx.update(propertyParties).set({ isPrimary: false }).where(and(...conds)).returning({ id: propertyParties.id, partyId: propertyParties.partyId });
+}
+// Same transaction as the change, so the demotion and its audit commit together.
+async function auditPrimaryReplaced(tx: Tx, user: Actor, propertyId: number, role: string, demoted: { id: number; partyId: number }[], newLinkId: number) {
+  for (const d of demoted) {
+    await tx.insert(auditLogs).values({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "party_link_primary_replaced",
+      recordType: "property_party",
+      recordId: String(d.id),
+      propertyId,
+      previousValue: JSON.stringify({ role, isPrimary: true }),
+      updatedValue: JSON.stringify({ role, isPrimary: false, replacedByLinkId: newLinkId }),
+    });
+  }
+}
+// Contract v2 §4.4: every link whose flag changed, as {id, role, isPrimary}
+// (linkId kept as an alias). Demoted links first, then the target if it changed.
+type ChangedLink = { id: number; linkId: number; role: string; isPrimary: boolean };
+function changedBody(role: string, demoted: { id: number }[], target?: { id: number; role: string; isPrimary: boolean }): ChangedLink[] {
+  const out: ChangedLink[] = demoted.map((d) => ({ id: d.id, linkId: d.id, role, isPrimary: false }));
+  if (target) out.push({ id: target.id, linkId: target.id, role: target.role, isPrimary: target.isPrimary });
+  return out;
+}
+
 // t228u Priority 1: property contacts belong to Grow (kept per t223u) and Run.
 // An active grant for either product is required; an unsubscribed brokerage
 // gets 403 on reads and writes. Mutations additionally need access to the
@@ -60,6 +125,24 @@ export const partiesRouter = Router();
 // the same as a cross-brokerage id.
 const canReadPropertyContacts = requireAnyEntitlement("grow.contacts.read", "run.access");
 const canManagePropertyContacts = requireAnyEntitlement("grow.contacts.manage", "run.access");
+// t242u (Owner): relationship management (link, unlink, role change, primary
+// change) needs the explicit grow.relationships.manage permission PLUS access
+// to the specific property (own-property scope, brokerage isolation: 404).
+// run.access alone does NOT authorise these. Run subscriptions receive the
+// grow.* keys via Run-includes-Grow (#281 + its backfill), which is the
+// default path for Run brokerages; no new seed or migration is added here.
+const canManageRelationships = requireEntitlement("grow.relationships.manage");
+
+// t238u: one role vocabulary, owned by @aee/db (re-exported for existing importers).
+export { PROPERTY_PARTY_ROLES };
+// t238u contract item 5: an unknown role is 400 INVALID_ROLE with the allowed list.
+function invalidRole(body: unknown): boolean {
+  const role = (body as { role?: unknown } | null)?.role;
+  return role !== undefined && !(PROPERTY_PARTY_ROLES as readonly unknown[]).includes(role);
+}
+function invalidRoleBody() {
+  return { error: "Unknown role", code: "INVALID_ROLE", allowedRoles: PROPERTY_PARTY_ROLES };
+}
 
 // One-time party capture (Build Brief §4): minimum fields only; entity
 // structure detail (trust/company/estate) is requested only when needed.
@@ -67,7 +150,7 @@ const canManagePropertyContacts = requireAnyEntitlement("grow.contacts.manage", 
 // any number of Seller links — nothing here caps it to one.
 const addPartySchema = z.object({
   propertyId: z.number(),
-  role: z.enum(["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"]),
+  role: z.enum(PROPERTY_PARTY_ROLES),
   partyType: z.enum(["Person", "Organisation", "Trust", "Estate", "Other"]).default("Person"),
   isPrimary: z.boolean().optional().default(false),
   firstName: z.string().optional(),
@@ -76,6 +159,7 @@ const addPartySchema = z.object({
   organisationName: z.string().optional(),
   mobile: z.string().optional(),
   email: z.string().email().optional(),
+  rejectDuplicateContact: z.boolean().optional(),
   residentialAddress: z.string().optional(),
   // AE Minimal v1.0 (Owner t149u): link an EXISTING contact instead of
   // creating one. When present, no contact fields are read and no party row
@@ -92,7 +176,20 @@ async function notePartyIsolationRejection(partyId: number, brokerageId: number)
   if (elsewhere) incrementCounter("tenant_isolation_rejection_total", { boundary: "party" });
 }
 
-async function runSellerSideEffects(propertyId: number, partyId: number, user: { id: number; brokerageId: number }) {
+// t238u (Owner): Grow-only agents may record Seller relationships. The Run
+// side effects (ownership review, AML initiation, Ready-to-List refresh) only
+// run when the caller holds run.access; a Grow-only Seller link is a plain
+// relationship. Pit Crew is never triggered from here (no path does).
+async function callerHasRun(user: Actor): Promise<boolean> {
+  // Same uncached decision the route middleware uses (requireAnyEntitlement),
+  // so the gate and the side-effect decision can never disagree.
+  return explainEntitlementDecision(user, "run.access").then((d) => d.allowed).catch(() => false);
+}
+async function runSellerSideEffects(propertyId: number, partyId: number, user: Actor) {
+  if (!(await callerHasRun(user))) {
+    logger.info("seller_side_effects_skipped_no_run_access", { propertyId, partyId, brokerageId: user.brokerageId });
+    return;
+  }
   // Re-run the ownership review-not-block check now that a seller exists
   // to compare against (Build Brief §8) — see apps/api/src/lib/ownership.ts.
   await reviewOwnershipForProperty(propertyId).catch((err) =>
@@ -109,8 +206,27 @@ async function runSellerSideEffects(propertyId: number, partyId: number, user: {
     );
   }
 }
+// A Seller link removed (or re-roled away from Seller). Same Run gate.
+async function runSellerRemovedEffects(propertyId: number, user: Actor) {
+  if (!(await callerHasRun(user))) return;
+  await reviewOwnershipForProperty(propertyId).catch((err) =>
+    logger.error("review_ownership_for_property_failed", { propertyId, error: err }),
+  );
+  if (await readyToListWorkflowExists(propertyId)) {
+    // The seller's existing AML verification record is left in place —
+    // it's history, not deleted — but the workflow steps need to reflect
+    // the current seller list.
+    await refreshReadyToListSteps(propertyId).catch((err) =>
+      logger.error("refresh_ready_to_list_steps_failed", { propertyId, error: err }),
+    );
+  }
+}
 
-partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res) => {
+partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) => {
+  if (invalidRole(req.body)) {
+    res.status(400).json(invalidRoleBody());
+    return;
+  }
   const parsed = addPartySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -145,8 +261,10 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
         .from(propertyParties)
         .where(and(eq(propertyParties.propertyId, propertyId), eq(propertyParties.partyId, partyId), eq(propertyParties.role, role)));
       if (existing) return { kind: "exists" as const, party, link: existing };
+      const demoted = isPrimary ? await demoteOtherPrimaries(tx, propertyId, role, null) : [];
       const [link] = await tx.insert(propertyParties).values({ propertyId, partyId, role, isPrimary }).returning();
-      return { kind: "created" as const, party, link };
+      await auditPrimaryReplaced(tx, user, propertyId, role, demoted, link.id);
+      return { kind: "created" as const, party, link, demoted };
     });
     if (outcome.kind === "property_missing") {
       await notePartyPropertyIsolationRejection(propertyId, user.brokerageId);
@@ -174,7 +292,7 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
       propertyId,
     });
     if (role === "Seller") await runSellerSideEffects(propertyId, partyId, user);
-    res.status(201).json({ party: outcome.party, link: outcome.link });
+    res.status(201).json({ party: outcome.party, link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
     return;
   }
 
@@ -195,30 +313,49 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
     return;
   }
 
-  const [party] = await db
-    .insert(parties)
-    .values({
-      brokerageId: user.brokerageId,
-      partyType: parsed.data.partyType,
-      firstName: parsed.data.firstName,
-      middleName: parsed.data.middleName,
-      lastName: parsed.data.lastName,
-      organisationName: parsed.data.organisationName,
-      mobile: parsed.data.mobile,
-      email: parsed.data.email,
-      residentialAddress: parsed.data.residentialAddress,
-    })
-    .returning();
+  // Creating a NEW contact additionally needs contact-creation rights
+  // (grow.contacts.manage, or run.access as before): unchanged by t242u.
+  const canCreate = await explainEntitlementDecision(user, "grow.contacts.manage");
+  if (!canCreate.allowed && !(await callerHasRun(user))) {
+    res.status(403).json({ error: "Not entitled", reason: canCreate.reason, entitlementKey: "grow.contacts.manage", upgrade: { action: "grow.checkout", productCode: "grow" } });
+    return;
+  }
 
-  const [link] = await db
-    .insert(propertyParties)
-    .values({
-      propertyId: parsed.data.propertyId,
-      partyId: party.id,
-      role: parsed.data.role,
-      isPrimary: parsed.data.isPrimary,
-    })
-    .returning();
+  // t234u: never rejected for a matching email/mobile (rejectDuplicateContact
+  // is accepted for compatibility and ignored); warnings are returned instead.
+  const warnings = await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile);
+
+  const created = await db.transaction(async (tx) => {
+    // Same serialisation point as the link-existing path (primary rule).
+    await tx.select({ id: properties.id }).from(properties).where(eq(properties.id, property.id)).for("update");
+    const demoted = parsed.data.isPrimary ? await demoteOtherPrimaries(tx, property.id, parsed.data.role, null) : [];
+    const [party] = await tx
+      .insert(parties)
+      .values({
+        brokerageId: user.brokerageId,
+        partyType: parsed.data.partyType,
+        firstName: parsed.data.firstName,
+        middleName: parsed.data.middleName,
+        lastName: parsed.data.lastName,
+        organisationName: parsed.data.organisationName,
+        mobile: parsed.data.mobile,
+        email: parsed.data.email,
+        residentialAddress: parsed.data.residentialAddress,
+      })
+      .returning();
+    const [link] = await tx
+      .insert(propertyParties)
+      .values({
+        propertyId: parsed.data.propertyId,
+        partyId: party.id,
+        role: parsed.data.role,
+        isPrimary: parsed.data.isPrimary,
+      })
+      .returning();
+    await auditPrimaryReplaced(tx, user, property.id, parsed.data.role, demoted, link.id);
+    return { party, link, demoted };
+  });
+  const { party, link, demoted } = created;
 
   await logAudit({
     userId: user.id,
@@ -228,31 +365,23 @@ partiesRouter.post("/", requireAuth, canManagePropertyContacts, async (req, res)
     propertyId: parsed.data.propertyId,
   });
 
-  if (parsed.data.role === "Seller") {
-    // Re-run the ownership review-not-block check now that a seller exists
-    // to compare against (Build Brief §8) — see apps/api/src/lib/ownership.ts.
-    await reviewOwnershipForProperty(parsed.data.propertyId).catch((err) =>
-      logger.error("review_ownership_for_property_failed", { propertyId: parsed.data.propertyId, error: err }),
-    );
+  if (parsed.data.role === "Seller") await runSellerSideEffects(parsed.data.propertyId, party.id, user);
 
-    // If Ready to List already ran for this property, a seller added
-    // afterwards still needs AML initiated and the workflow steps
-    // recomputed — Ready to List itself only covers sellers present at the
-    // time it was triggered.
-    if (await readyToListWorkflowExists(parsed.data.propertyId)) {
-      await initiateAmlIfNeeded({
-        propertyId: parsed.data.propertyId,
-        partyId: party.id,
-        userId: user.id,
-        brokerageId: user.brokerageId,
-      }).catch((err) => logger.error("initiate_aml_if_needed_failed", { propertyId: parsed.data.propertyId, partyId: party.id, error: err }));
-      await refreshReadyToListSteps(parsed.data.propertyId).catch((err) =>
-        logger.error("refresh_ready_to_list_steps_failed", { propertyId: parsed.data.propertyId, error: err }),
-      );
-    }
+  res.status(201).json({ party, link, warnings, changed: changedBody(link.role, demoted) });
+});
+
+// t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
+// query string, so contact details stay out of URLs and access logs. Never
+// blocks; returns warnings with reusable contact ids. Same gates as create.
+const duplicateCheckSchema = z.object({ email: z.string().optional(), mobile: z.string().optional() }).strict();
+partiesRouter.post("/duplicate-check", requireAuth, canManagePropertyContacts, async (req, res) => {
+  const parsed = duplicateCheckSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
   }
-
-  res.status(201).json({ party, link });
+  const user = req.authedUser!;
+  res.json({ warnings: await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile) });
 });
 
 partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContacts, async (req, res) => {
@@ -294,7 +423,7 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContac
 // Removing a mis-added seller/buyer link (multi-seller capture polish,
 // Phase 2) — removes the property↔party link only; the Party record itself
 // is left intact since it may be linked elsewhere or worth keeping.
-partiesRouter.delete("/link/:linkId", requireAuth, canManagePropertyContacts, async (req, res) => {
+partiesRouter.delete("/link/:linkId", requireAuth, canManageRelationships, async (req, res) => {
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
 
@@ -331,19 +460,160 @@ partiesRouter.delete("/link/:linkId", requireAuth, canManagePropertyContacts, as
     propertyId: link.propertyId,
   });
 
-  if (link.role === "Seller") {
-    await reviewOwnershipForProperty(link.propertyId).catch((err) =>
-      logger.error("review_ownership_for_property_failed", { propertyId: link.propertyId, error: err }),
-    );
-    if (await readyToListWorkflowExists(link.propertyId)) {
-      // The seller's existing AML verification record is left in place —
-      // it's history, not deleted — but the workflow steps need to reflect
-      // the current seller list.
-      await refreshReadyToListSteps(link.propertyId).catch((err) =>
-        logger.error("refresh_ready_to_list_steps_failed", { propertyId: link.propertyId, error: err }),
-      );
-    }
-  }
+  if (link.role === "Seller") await runSellerRemovedEffects(link.propertyId, user);
 
   res.status(204).end();
+});
+
+// t228u Priority 2: the contact side of property_parties (authoritative for
+// contact <-> property). Lists every property the caller can see that this
+// contact is linked to, with role and primary flag. The contact must be in
+// the caller's brokerage (404 otherwise); links on properties hidden by
+// own-property scope (#147) are omitted, not revealed.
+export const BY_CONTACT_LIMIT = 100;
+partiesRouter.get("/by-contact/:partyId", requireAuth, canReadPropertyContacts, async (req, res) => {
+  const partyId = Number(req.params.partyId);
+  const user = req.authedUser!;
+  if (!Number.isInteger(partyId) || partyId <= 0) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [party] = await db
+    .select({ id: parties.id })
+    .from(parties)
+    .where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId)));
+  if (!party) {
+    await notePartyIsolationRejection(partyId, user.brokerageId);
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const restrictTo = await restrictedPropertyIdsFor(user);
+  const rows = await db
+    .select({
+      linkId: propertyParties.id,
+      propertyId: propertyParties.propertyId,
+      role: propertyParties.role,
+      isPrimary: propertyParties.isPrimary,
+      createdAt: propertyParties.createdAt,
+      formattedAddress: properties.formattedAddress,
+      suburb: properties.suburb,
+      state: properties.state,
+      postcode: properties.postcode,
+    })
+    .from(propertyParties)
+    .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+    .where(and(eq(propertyParties.partyId, partyId), eq(properties.brokerageId, user.brokerageId)))
+    .orderBy(asc(propertyParties.propertyId), asc(propertyParties.id));
+  const visible = restrictTo === null ? rows : rows.filter((r) => restrictTo.includes(r.propertyId));
+  // t238u contract item 4: additive `links` (nested property, capped at
+  // BY_CONTACT_LIMIT, `truncated` when more exist). `properties` (flat) is kept
+  // unchanged for the existing web client.
+  const capped = visible.slice(0, BY_CONTACT_LIMIT);
+  res.json({
+    partyId,
+    properties: visible,
+    links: capped.map((r) => ({
+      linkId: r.linkId,
+      role: r.role,
+      isPrimary: r.isPrimary,
+      createdAt: r.createdAt,
+      property: { id: r.propertyId, formattedAddress: r.formattedAddress, suburb: r.suburb, state: r.state, postcode: r.postcode },
+    })),
+    truncated: visible.length > BY_CONTACT_LIMIT,
+  });
+});
+
+const updateLinkSchema = z
+  .object({ role: z.enum(PROPERTY_PARTY_ROLES).optional(), isPrimary: z.boolean().optional() })
+  .strict();
+
+// t228u Priority 2: change a link's role and/or primary flag. Same gates as
+// unlink (Grow or Run manage, brokerage, own-property scope). Changing the
+// role to one this contact already holds on the property is a 409, the same
+// PROPERTY_PARTY_LINK_EXISTS answer as POST. Seller side effects run when the
+// Seller set changes.
+partiesRouter.patch("/link/:linkId", requireAuth, canManageRelationships, async (req, res) => {
+  const linkId = Number(req.params.linkId);
+  const user = req.authedUser!;
+  if (invalidRole(req.body)) {
+    res.status(400).json(invalidRoleBody());
+    return;
+  }
+  const parsed = updateLinkSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+  // t238u contract item 6: an empty change is 400 NOTHING_TO_CHANGE.
+  if (parsed.data.role === undefined && parsed.data.isPrimary === undefined) {
+    res.status(400).json({ error: "role or isPrimary is required", code: "NOTHING_TO_CHANGE" });
+    return;
+  }
+  const outcome = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ link: propertyParties })
+      .from(propertyParties)
+      .innerJoin(properties, eq(propertyParties.propertyId, properties.id))
+      .where(and(eq(propertyParties.id, linkId), eq(properties.brokerageId, user.brokerageId)));
+    if (!row) return { kind: "missing" as const };
+    const link = row.link;
+    if (await propertyHiddenFromCaller(user, link.propertyId)) return { kind: "hidden" as const };
+    // Same serialisation point as POST's duplicate guard.
+    await tx.select({ id: properties.id }).from(properties).where(eq(properties.id, link.propertyId)).for("update");
+    const role = parsed.data.role ?? link.role;
+    if (role !== link.role) {
+      const [clash] = await tx
+        .select({ id: propertyParties.id })
+        .from(propertyParties)
+        .where(and(eq(propertyParties.propertyId, link.propertyId), eq(propertyParties.partyId, link.partyId), eq(propertyParties.role, role)));
+      if (clash) return { kind: "exists" as const };
+    }
+    const isPrimary = parsed.data.isPrimary ?? link.isPrimary;
+    // Same values again: 200, no write, no audit row.
+    if (role === link.role && isPrimary === link.isPrimary) return { kind: "unchanged" as const, link };
+    const demoted = isPrimary ? await demoteOtherPrimaries(tx, link.propertyId, role, link.id) : [];
+    const [updated] = await tx
+      .update(propertyParties)
+      .set({ role, isPrimary })
+      .where(eq(propertyParties.id, linkId))
+      .returning();
+    await auditPrimaryReplaced(tx, user, link.propertyId, role, demoted, link.id);
+    // t238u contract item 11: from/to on the update audit, same transaction.
+    await tx.insert(auditLogs).values({
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "party_link_updated",
+      recordType: "property_party",
+      recordId: String(linkId),
+      propertyId: link.propertyId,
+      previousValue: JSON.stringify({ role: link.role, isPrimary: link.isPrimary }),
+      updatedValue: JSON.stringify({ role, isPrimary }),
+    });
+    return { kind: "updated" as const, before: link, link: updated, demoted };
+  });
+  if (outcome.kind === "missing") {
+    await notePartyLinkIsolationRejection(linkId, user.brokerageId);
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (outcome.kind === "hidden") {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (outcome.kind === "exists") {
+    res.status(409).json({ error: "This contact is already linked to the property with that role", code: "PROPERTY_PARTY_LINK_EXISTS" });
+    return;
+  }
+  if (outcome.kind === "unchanged") {
+    res.json({ link: outcome.link, changed: [] });
+    return;
+  }
+  if (outcome.before.role !== outcome.link.role) {
+    if (outcome.link.role === "Seller") {
+      await runSellerSideEffects(outcome.link.propertyId, outcome.link.partyId, user);
+    } else if (outcome.before.role === "Seller") {
+      await runSellerRemovedEffects(outcome.link.propertyId, user);
+    }
+  }
+  res.json({ link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted, outcome.link) });
 });

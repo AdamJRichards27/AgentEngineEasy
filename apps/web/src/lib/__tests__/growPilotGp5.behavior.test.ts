@@ -209,7 +209,8 @@ const contactMocks: Plugin = {
       source === "../components/GrowContactConsentPanel" ||
       source === "../components/GrowPendingCommitmentProposals" ||
       source === "../components/ErrorBoundary" ||
-      source === "../components/GrowContactEditForm"
+      source === "../components/GrowContactEditForm" ||
+      source === "../minimal/properties/ContactPropertyLinks"
     ) {
       return "\0gp5-components";
     }
@@ -272,6 +273,7 @@ const contactMocks: Plugin = {
     if (id === "\0gp5-components") {
       return `
         export const AskAgentEngine = () => null;
+        export const ContactPropertyLinks = () => null;
         export const ContactCommunicationsSection = () => null;
         export const PropertyIntelligencePanel = () => null;
         export const GrowContactConsentPanel = () => null;

@@ -128,13 +128,25 @@ export const parties = pgTable("parties", {
 
 // The join that makes "enter once, reuse everywhere" real. A seller entered
 // against a property is never re-entered for AML, agency agreement, or contract.
+//
+// t238u: THE single authoritative role vocabulary for property_parties.role,
+// shared by DB (proposed CHECK 0048 lists exactly these), API (routes/parties.ts
+// imports this constant) and web/mobile (drift-tested against this list).
+// role is a text column (no Postgres enum), so changing this list needs no
+// enum migration; the proposed CHECK constraint must be updated with it.
 export const PROPERTY_PARTY_ROLES = [
   "Seller",
   "Buyer",
   "Solicitor",
   "PowerOfAttorney",
+  "Owner",
+  "Landlord",
+  "Tenant",
   "Other",
 ] as const;
+export type PropertyPartyRole = (typeof PROPERTY_PARTY_ROLES)[number];
+/** Roles exempt from the one-primary-per-(property, role) rule. */
+export const PROPERTY_PARTY_PRIMARY_EXEMPT_ROLES: readonly PropertyPartyRole[] = ["Other"];
 
 export const propertyParties = pgTable("property_parties", {
   id: serial("id").primaryKey(),
