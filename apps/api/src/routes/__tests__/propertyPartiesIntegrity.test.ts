@@ -168,6 +168,10 @@ test("grow_relationships reconciliation dry run classifies rows and writes nothi
     // t234u: a second would-be primary Tenant on p2 means neither converted Tenant is primary.
     { brokerageId: bid, partyId: lead, propertyId: p2, relationshipType: "tenant", status: "Active", isPrimary: true },
     { brokerageId: bid, partyId: tenant, propertyId: p2, relationshipType: "occupier", status: "Active" },
+    // t244u: referrer is person-level; a low-confidence owner is not a verified property; unknown types never become Other.
+    { brokerageId: bid, partyId: lead, propertyId: p2, relationshipType: "referrer", status: "Active" },
+    { brokerageId: bid, partyId: lead, propertyId: p2, relationshipType: "owner", status: "Active", confidenceScore: "0.5" },
+    { brokerageId: bid, partyId: lead, propertyId: p2, relationshipType: "mystery_type", status: "Active" },
   ]).returning({ id: growRelationships.id });
   const grIds = rows.map((r) => r.id);
   const ppCount = async () => (await pool.query("SELECT count(*)::int AS n FROM property_parties WHERE property_id = ANY($1::int[])", [[p1, p2, pOther]])).rows[0].n;
@@ -192,19 +196,24 @@ test("grow_relationships reconciliation dry run classifies rows and writes nothi
   }
   const byAction = Object.fromEntries(g2.map((r) => [`${r.action}:${r.target_role ?? "-"}`, Number(r.rows)]));
   assert.deepEqual(byAction, {
-    "insert:Owner": 2,
+    "insert:Owner": 1,
     "insert:Tenant": 2,
-    "review:seller_manual_no_aml:Seller": 1,
-    "keep:no_property:Buyer": 1,
+    "review:co_owner:-": 1,
+    "review:occupier:-": 1,
+    "review:seller_vendor_no_aml:-": 2,
+    "review:unverified_property:Owner": 1,
+    "review:unrecognised_type:-": 1,
+    "prospecting:-": 1,
+    "person_level:-": 1,
+    "opportunity_intelligence:no_property:Buyer": 1,
     "keep:not_active:Tenant": 1,
-    "keep:type_not_mapped:-": 2,
     "review:brokerage_mismatch:Buyer": 1,
-    "skip:already_linked:Seller": 1,
   });
-  // owner + co_owner collapse into one Owner link; primary carried.
+  assert.ok(!g2.some((r) => r.target_role === "Other" || r.target_role === "Seller"), "t244u: never Other, never Seller");
+  // t244u: only the verified Active owner converts (co_owner goes to review); primary carried.
   assert.deepEqual(
     g3.map((r) => `${r.property_id}:${r.party_id}:${r.role}:${r.is_primary}:${r.source_grow_relationship_ids.length}`).sort(),
-    [`${p1}:${owner}:Owner:true:2`, `${p2}:${tenant}:Tenant:false:1`, `${p2}:${lead}:Tenant:true:1`].sort(),
+    [`${p1}:${owner}:Owner:true:1`, `${p2}:${tenant}:Tenant:false:1`, `${p2}:${lead}:Tenant:true:1`].sort(),
   );
   assert.equal(await ppCount(), beforePP, "dry run inserted nothing");
   assert.equal((await db.select().from(growRelationships).where(inArray(growRelationships.id, grIds))).length, grIds.length, "grow_relationships untouched");

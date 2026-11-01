@@ -2,7 +2,20 @@
 
 **Status: plan and read-only dry run only. No data migration is executed and none is proposed without separate Owner approval.**
 
-## Decision (t242u): cautious mapping ADOPTED
+## AUTHORITATIVE (t244u): supersedes every mapping below, including t242u's "cautious mapping ADOPTED"
+- `property_parties` holds **only property-specific** relationships. Relationships without a verified property stay **Grow opportunity intelligence**. **No new permanent relationship table.**
+- **Auto-conversion candidates:** only owner → Owner, tenant → Tenant, landlord → Landlord and buyer → Buyer. A row qualifies only if it is Active, has no valid_to, and its property is **verified**: the property exists, shares a brokerage with the row and the party, and confidence_score is NULL (manual) or ≥ 0.9. ⚠ The threshold is an Owner decision.
+- **review:** co_owner, former_owner, occupier, appraisal_contact, seller, vendor (`review:seller_vendor_no_aml`), investor, developer, related_party, unknown*, unrecognised types, unverified property and brokerage mismatch.
+- **prospecting:** prospective_buyer, prospective_seller. **person_level:** referrer. **opportunity_intelligence:** any row with no property.
+- **Never Other.** No Seller/Vendor conversion, so no AML or Pit Crew triggers.
+- **Preservation:** proposed `0050_property_parties_provenance.sql` adds nullable columns: relationship_status, valid_from, valid_to, ownership_start_date, confidence_score, role_detail and source_grow_relationship_ids. It has an exact rollback, is unapplied, and has been rehearsed on disposable DBs only.
+- Signal rules and import paths are unchanged; grow_relationships is never edited or deleted.
+- **Dry run:** `grow-relationships-reconciliation.sql` (t244u buckets).
+- **Conversion and rollback rehearsal:** `t244u-disposable-inventory.sh`. It inserts G3 with provenance and an audit tag, then deletes by runId, leaving a delta of 0. 0050 is dropped again to restore the original columns.
+- **Real environments:** wait for the admin's read-only role. Execution needs separate Owner approval.
+
+
+## Decision (t242u): cautious mapping ADOPTED (SUPERSEDED by t244u above)
 The Owner adopted the **cautious mapping** on 2026-11-01:
 - **Mapped (insert-only, when a backfill is separately approved):** owner/co_owner → Owner; landlord → Landlord; tenant → Tenant; buyer → Buyer.
 - **Seller/vendor → REVIEW, not mapped.** A Seller link is never created by reconciliation, so no ownership review, AML, Pit Crew or Run side effects can fire.
