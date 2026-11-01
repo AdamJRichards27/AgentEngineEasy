@@ -135,10 +135,11 @@ test("by-contact and PATCH: hidden property, unsubscribed brokerage and other br
   await setGrants(a.brokerageId, []);
   assert.equal((await call(a.admin.cookie, "GET", `/parties/by-contact/${a.partyId}`)).status, 403);
   assert.equal((await call(a.admin.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { isPrimary: true })).status, 403);
-  // t242u: Run-only can read but cannot change a link.
+  // t246u: a Run-only (legacy) Brokerage Administrator has Run contact-management
+  // rights, so the relationship permission is derived (Pit Crew is covered in partiesAccess).
   await setGrants(a.brokerageId, ["run.access"]);
   assert.equal((await call(a.admin.cookie, "GET", `/parties/by-contact/${a.partyId}`)).status, 200);
-  assert.equal((await call(a.admin.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { isPrimary: true })).status, 403);
+  assert.equal((await call(a.admin.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { isPrimary: true })).status, 200);
   // Grow (incl. grow.relationships.manage), and Run with the relationship key, both allowed.
   for (const keys of [GROW, ["run.access", "grow.relationships.manage"]]) {
     await setGrants(a.brokerageId, keys);

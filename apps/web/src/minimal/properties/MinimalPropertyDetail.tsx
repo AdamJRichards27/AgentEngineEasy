@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../../lib/api";
 import type { AppraisalListRow } from "../../lib/appraisalUi";
-import { useEntitlements } from "../../lib/session";
+import { useEntitlements, useSession } from "../../lib/session";
+import { canManageRelationships } from "../../lib/relationshipPermission";
 import {
   buildMinimalPropertyDetail,
   classifyPropertyOpportunityPage,
@@ -24,6 +25,7 @@ export default function MinimalPropertyDetail() {
   const params = useParams<{ id: string }>();
   const id = parseDetailId(params.id);
   const { hasEntitlement } = useEntitlements();
+  const session = useSession();
   const growAccess = hasEntitlement("grow.access");
 
   const property = useQuery<{ property: MinimalPropertyDetailRow }>({
@@ -72,7 +74,7 @@ export default function MinimalPropertyDetail() {
             propertyId={id}
             canSearch={growAccess && hasEntitlement("grow.contacts.read")}
             canCreateContact={growAccess && hasEntitlement("grow.contacts.manage")}
-            canManageLinks={propertyLinkControlsEnabled() && hasEntitlement("grow.relationships.manage")}
+            canManageLinks={propertyLinkControlsEnabled() && canManageRelationships(hasEntitlement, session.user?.role)}
             canStartAppraisal={growAccess && hasEntitlement("grow.opportunities.manage") && !pipeline.isLoading}
             existingAppraisalHref={model.appraisals[0]?.href ?? null}
           />
