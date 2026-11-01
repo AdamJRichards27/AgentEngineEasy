@@ -1,0 +1,257 @@
+/* AE Mobile (CC Task #64, M3). Phone Today styles. One file. Every class starts with mob-t and is
+ * scoped to .ae-minimal. minimal.css and the M2 mobile.css are not edited. Colours use the existing
+ * Minimal tokens with literal fallbacks. Orange text and controls use --am-orange-strong (AA on
+ * white); the approved orange is never used for text, and white text is never placed on it.
+ * Focus rings come from the existing .ae-minimal :is(a, button, ...):focus-visible rule; nothing here
+ * removes an outline. Targets: 320 to 430 px wide. Tap targets 44 px or more, rows 56 px or more,
+ * the main action 48 px or more. */
+
+.ae-minimal .mob-t {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 16px 92px 16px;
+}
+.ae-minimal .mob-t-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ae-minimal .mob-t-date {
+  font-size: 14px;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-title {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.2;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-t-note {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 16px;
+}
+.ae-minimal .mob-t-error {
+  margin: 0;
+  font-size: 15px;
+  color: #B3261E;
+}
+
+/* The one next action */
+.ae-minimal .mob-t-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 16px;
+}
+.ae-minimal .mob-t-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ae-minimal .mob-t-kicker-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--am-orange-strong, #C44F17);
+}
+.ae-minimal .mob-t-hero-name {
+  margin: 2px 0 0 0;
+  font-size: 22px;
+  line-height: 1.25;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-t-hero-action {
+  margin: 4px 0 0 0;
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-t-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  margin-top: 8px;
+  padding: 0 18px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: var(--am-orange-strong, #C44F17);
+  color: #FFFFFF;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+}
+.ae-minimal .mob-t-details summary {
+  padding: 14px 0;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ae-minimal .mob-t-details-body p {
+  margin: 0 0 8px 0;
+  font-size: 15px;
+  line-height: 1.4;
+  color: #2B3340;
+}
+.ae-minimal .mob-t-details-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--am-muted, #4A5361);
+}
+
+/* Lists of people and commitments: one tap target per row */
+.ae-minimal .mob-t-section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ae-minimal .mob-t-section {
+  margin: 0;
+  font-size: 18px;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-t-list {
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.ae-minimal .mob-t-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 10px 14px;
+  box-sizing: border-box;
+  border-bottom: 1px solid #E2E5EA;
+  color: inherit;
+  text-decoration: none;
+  font-size: 16px;
+}
+.ae-minimal .mob-t-avatar {
+  flex: 0 0 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #FDEEE5;
+  color: #8F3208;
+  font-size: 15px;
+  font-weight: 700;
+}
+.ae-minimal .mob-t-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ae-minimal .mob-t-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ae-minimal .mob-t-action {
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-context {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-warning {
+  margin: 4px 0 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #B3261E;
+}
+.ae-minimal .mob-t-side {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  text-align: right;
+}
+.ae-minimal .mob-t-kind {
+  margin-top: 1px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-when {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-when.is-overdue {
+  color: #B3261E;
+}
+
+/* Buttons and the footer line */
+.ae-minimal .mob-t-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ae-minimal .mob-t-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-t-link {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: #A83F0C;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Narrow phones (320 to 340 px): give the text room */
+@media (max-width: 340px) {
+  .ae-minimal .mob-t-avatar {
+    display: none;
+  }
+  .ae-minimal .mob-t-row {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .ae-minimal .mob-t-title {
+    font-size: 24px;
+  }
+}
