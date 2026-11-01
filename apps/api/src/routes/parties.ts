@@ -6,7 +6,7 @@ import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 import { requireAnyEntitlement } from "../middlewares/entitlement.js";
-import { hasEntitlement } from "../lib/entitlements/resolver.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
@@ -174,7 +174,9 @@ async function notePartyIsolationRejection(partyId: number, brokerageId: number)
 // run when the caller holds run.access; a Grow-only Seller link is a plain
 // relationship. Pit Crew is never triggered from here (no path does).
 async function callerHasRun(user: Actor): Promise<boolean> {
-  return hasEntitlement(user, "run.access").catch(() => false);
+  // Same uncached decision the route middleware uses (requireAnyEntitlement),
+  // so the gate and the side-effect decision can never disagree.
+  return explainEntitlementDecision(user, "run.access").then((d) => d.allowed).catch(() => false);
 }
 async function runSellerSideEffects(propertyId: number, partyId: number, user: Actor) {
   if (!(await callerHasRun(user))) {
