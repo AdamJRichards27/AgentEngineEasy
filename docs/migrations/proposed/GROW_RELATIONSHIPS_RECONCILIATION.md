@@ -2,6 +2,14 @@
 
 **Status: plan and read-only dry run only. No data migration is executed and none is proposed without separate Owner approval.**
 
+## Decision (t242u): cautious mapping ADOPTED
+The Owner adopted the **cautious mapping** on 2026-11-01:
+- **Mapped (insert-only, when a backfill is separately approved):** owner/co_owner → Owner; landlord → Landlord; tenant → Tenant; buyer → Buyer.
+- **Seller/vendor → REVIEW, not mapped.** A Seller link is never created by reconciliation, so no ownership review, AML, Pit Crew or Run side effects can fire.
+- **Ambiguous records → REVIEW:** occupier, cross-brokerage, property-less, Historical/PendingReview/valid_to and every non-link type.
+- **No conversion.** This decision changes no data. grow_relationships is not edited or deleted, and no backfill or migration runs. Any future backfill needs separate Owner approval and must run on a disposable DB first.
+
+
 ## Why
 Two tables relate contacts to properties:
 - **`property_parties`:** Run plus the Minimal property screen. Now authoritative (PR B: `/parties/by-contact`).
@@ -21,9 +29,9 @@ t226u found that contact detail read only `grow_relationships`, so links made on
 | owner, co_owner | **Owner** | Both collapse to one Owner link per (property, party). isPrimary is the OR of the sources. |
 | landlord | **Landlord** | |
 | tenant | **Tenant** | |
-| seller, vendor | **Seller** | ⚠ Seller links trigger ownership review and, after Ready to List, AML. A backfill must **not** run those side effects (direct insert, not via the API). Decide whether to map these at all. |
+| seller, vendor | **Seller** | ⚠ Seller links trigger ownership review and, after Ready to List, AML. A backfill must **not** run those side effects (direct insert, not via the API). **Adopted (t242u): not mapped; sent to review.** |
 | buyer | **Buyer** | |
-| occupier | — (not mapped) | Ambiguous (owner-occupier or tenant); keep in Grow. Decision. |
+| occupier | — (not mapped) | Ambiguous (owner-occupier or tenant); keep in Grow. **Adopted (t242u): review.** |
 | former_owner, prospective_buyer, prospective_seller, appraisal_contact, investor, developer, referrer, related_party, unknown_pending_review | — (not mapped) | Grow pipeline and history semantics; keep in Grow |
 | any, with property_id NULL | — | Pre-property relationship; keep |
 
