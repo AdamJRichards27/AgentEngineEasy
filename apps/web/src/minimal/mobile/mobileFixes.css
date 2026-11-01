@@ -1,0 +1,50 @@
+/* AE Mobile (CC Task #64): phone-only size fixes for EXISTING controls, found in the real app at 320 to 430 px.
+   Nothing here edits an existing file: these rules sit after the existing ones and use a doubled class so they win over
+   stylesheets that load later (the property page's own sheet loads when its route does). Each target is the existing class. */
+@media (max-width: 760px) {
+  .ae-minimal.ae-minimal .am-classic-switch {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .ae-minimal.ae-minimal .am-back-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .ae-minimal.ae-minimal .am-data-button {
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+  .ae-minimal.ae-minimal .am-agenda-title {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .ae-minimal.ae-minimal input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .ae-minimal.ae-minimal select,
+  .ae-minimal.ae-minimal textarea,
+  .ae-minimal.ae-minimal .am-data-actions button {
+    min-height: 44px;
+    font-size: 16px;
+    box-sizing: border-box;
+  }
+  /* Inline text links in the existing property screens (an appraisal link in a card's meta line, "Open the appraisal" in a note). */
+  .ae-minimal.ae-minimal .am-data-card-meta a,
+  .ae-minimal.ae-minimal .am-empty-note a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  /* The classic Grow screens (Business Coach, Opportunities) open inside the shell. Their plain "Import" link is 17 px high. */
+  .ae-minimal.ae-minimal a[href="/grow/import"] {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  /* The classic tab bar still lists Nurture, a placeholder that is not offered on a phone. It has no attribute to select on, so it is hidden
+     by position: today, opportunities, appraisals link, contacts, NURTURE (5th). A test computes this position from the app's own tab list. */
+  .ae-minimal.ae-minimal .grow-tabs .pc-tab:nth-child(5) {
+    display: none;
+  }
+}
