@@ -628,8 +628,9 @@ partiesRouter.patch("/link/:linkId", requireAuth, canManageRelationships, async 
 });
 
 // ---------------------------------------------------------------------
-// t236u Tap-to-Call. Authorised = Grow contacts manage or Run (read-only and
-// unsubscribed callers get 403; another brokerage's contact is 404). Nothing
+// t236u Tap-to-Call. t242u: anyone who can VIEW the contact (grow.contacts.read
+// or Run) gets the number and tel action; notes/consent stay manage-only.
+// (unsubscribed callers get 403; another brokerage's contact is 404). Nothing
 // here dials, records or completes a call.
 // ---------------------------------------------------------------------
 function readPartyId(raw: string): number | null {
@@ -637,7 +638,7 @@ function readPartyId(raw: string): number | null {
   return Number.isInteger(n) && n > 0 && n <= 2_147_483_647 ? n : null;
 }
 
-partiesRouter.get("/:partyId/tap-to-call", requireAuth, canManagePropertyContacts, async (req, res) => {
+partiesRouter.get("/:partyId/tap-to-call", requireAuth, canReadPropertyContacts, async (req, res) => {
   const partyId = readPartyId(req.params.partyId);
   if (partyId === null) return void res.status(400).json({ error: "Invalid contact id" });
   const user = req.authedUser!;

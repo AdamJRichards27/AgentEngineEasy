@@ -79,9 +79,10 @@ const OPS: Record<string, (who: W, t: W) => Promise<number>> = {
   "tap-to-call": async (who, t) => (await call(who.admin.cookie, "GET", `/parties/${t.partyId}/tap-to-call`)).status,
   "unlink": async (who, t) => (await call(who.admin.cookie, "DELETE", `/parties/link/${t.linkId}`)).status,
 };
-const READS = new Set(["property->contacts", "contact->properties"]);
+const READS = new Set(["property->contacts", "contact->properties", "tap-to-call"]); // t242u: read-only can Call
 
-for (const [persona, keys] of [["Run", ["run.access"]], ["Grow-only", GROW], ["unsubscribed", []], ["read-only", READ_ONLY]] as const) {
+const RUN_ONLY_DENIED = new Set(["create+link", "link existing", "role", "primary", "unlink"]);
+for (const [persona, keys] of [["Run", ["run.access", "grow.relationships.manage"]], ["Run-only", ["run.access"]], ["Grow-only", GROW], ["unsubscribed", []], ["read-only", READ_ONLY]] as const) {
   test(`access matrix: ${persona}`, async () => {
     const w = await world(`M-${persona}`);
     await setGrants(w.brokerageId, keys);
@@ -91,6 +92,7 @@ for (const [persona, keys] of [["Run", ["run.access"]], ["Grow-only", GROW], ["u
     for (const op of Object.keys(OPS)) {
       if (persona === "unsubscribed") expected[op] = 403;
       else if (persona === "read-only") expected[op] = READS.has(op) ? 200 : 403;
+      else if (persona.startsWith("Run-only")) expected[op] = RUN_ONLY_DENIED.has(op) ? 403 : 200;
       else expected[op] = op === "create+link" || op === "link existing" ? 201 : op === "unlink" ? 204 : 200;
     }
     assert.deepEqual(got, expected);
@@ -144,7 +146,7 @@ test("t239u: Call (tel:) is shown for every accessible phone despite DNC, suppre
   assert.equal((await db.select().from(growActivities).where(eq(growActivities.partyId, w.partyId))).length, acts);
 });
 
-test("t239u: unauthorised callers still get no number: unsubscribed 403, read-only 403, cross-brokerage 404, unauthenticated 401", async () => {
+test("t242u: unauthorised callers still get no number: unsubscribed 403, cross-brokerage 404, unauthenticated 401 (read-only now CAN call)", async () => {
   const w = await world("TTCDeny");
   const x = await world("TTCOther");
   const other = await call(x.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
@@ -152,10 +154,6 @@ test("t239u: unauthorised callers still get no number: unsubscribed 403, read-on
   assert.equal(other.json.telHref, undefined);
   const anon = await fetch(`${base}/api/parties/${w.partyId}/tap-to-call`, { headers: { connection: "close" } });
   assert.equal(anon.status, 401);
-  await setGrants(w.brokerageId, READ_ONLY);
-  const ro = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
-  assert.equal(ro.status, 403);
-  assert.equal(ro.json.telHref, undefined);
   await setGrants(w.brokerageId, []);
   const un = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
   assert.equal(un.status, 403);
@@ -179,3 +177,16 @@ test("Tap-to-Call: optional post-call note is a plain activity; never a recordin
   assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: true })).status, 403);
 });
 
+
+test("t242u: read-only users can Call a contact they can view (number + tel action) but still cannot edit, link, note or confirm", async () => {
+  const w = await world("TTCReadOnly");
+  await setGrants(w.brokerageId, READ_ONLY);
+  const ro = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(ro.status, 200);
+  assert.equal(ro.json.available, true);
+  assert.match(ro.json.telHref, /^tel:/);
+  assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-notes`, { note: "x" })).status, 403);
+  assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: true })).status, 403);
+  assert.equal((await call(w.admin.cookie, "PATCH", `/parties/link/${w.linkId}`, { isPrimary: true })).status, 403);
+  assert.equal((await call(w.admin.cookie, "DELETE", `/parties/link/${w.linkId}`)).status, 403);
+});

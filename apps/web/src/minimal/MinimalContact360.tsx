@@ -39,7 +39,7 @@ export default function MinimalContact360() {
   return (
     <MinimalContact360View
       model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })}
-      propertyLinks={{ partyId, canManage: hasEntitlement("grow.relationships.manage") }}
+      propertyLinks={{ partyId, canManage: hasEntitlement("grow.relationships.manage"), canNote: hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access") }}
     />
   );
 }
@@ -69,7 +69,7 @@ export function MinimalContact360View({
 }: {
   model: MinimalContactModel;
   /** t228u: property_parties links (authoritative). Omitted in static renders. */
-  propertyLinks?: { partyId: number; canManage: boolean };
+  propertyLinks?: { partyId: number; canManage: boolean; canNote?: boolean };
 }) {
   return (
     <div className="am-contact" data-ae-contact="minimal">
@@ -105,7 +105,7 @@ export function MinimalContact360View({
           <dt>Mobile</dt>
           <dd>
             {model.mobile ?? "Not recorded"}{" "}
-            {model.mobile && propertyLinks ? <TapToCall partyId={propertyLinks.partyId} enabled={propertyLinks.canManage} /> : null}
+            {model.mobile && propertyLinks ? <TapToCall partyId={propertyLinks.partyId} enabled canNote={propertyLinks.canNote} /> : null}
           </dd>
           <dt>Last interaction</dt>
           <dd>{model.lastTouchLabel}</dd>

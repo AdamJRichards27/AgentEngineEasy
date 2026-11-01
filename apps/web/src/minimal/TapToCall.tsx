@@ -8,7 +8,9 @@ import { tapToCallPath, tapToCallView, type TapToCallStatus } from "./tapToCallM
 // server returns a number. t239u: no consent/DNC gating, warning or
 // confirmation before the dialler; the agent is responsible for compliance.
 // Optional post-call note.
-export function TapToCall({ partyId, enabled }: { partyId: number; enabled: boolean }) {
+// t242u: `enabled` = caller can VIEW the contact (read-only included); `canNote`
+// = caller can manage contacts (notes are writes).
+export function TapToCall({ partyId, enabled, canNote = false }: { partyId: number; enabled: boolean; canNote?: boolean }) {
   const status = useQuery<TapToCallStatus>({
     queryKey: ["tap-to-call", partyId],
     queryFn: () => apiFetch(tapToCallPath(partyId)),
@@ -29,8 +31,8 @@ export function TapToCall({ partyId, enabled }: { partyId: number; enabled: bool
   return (
     <span data-ae-tap-to-call="available">
       <a className="am-data-button is-quiet" href={view.href} data-ae-tel>Call</a>
-      <button type="button" className="am-data-button is-quiet" data-ae-call-note="open" onClick={() => { setNoteOpen((o) => !o); setMsg(null); }}>Add call note</button>
-      {noteOpen ? (
+      {canNote ? <button type="button" className="am-data-button is-quiet" data-ae-call-note="open" onClick={() => { setNoteOpen((o) => !o); setMsg(null); }}>Add call note</button> : null}
+      {canNote && noteOpen ? (
         <form onSubmit={(e) => { e.preventDefault(); if (note.trim()) save.mutate(note.trim()); }}>
           <input aria-label="Call note (optional)" value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} />
           <button type="submit" className="am-data-button" disabled={save.isPending}>Save note</button>

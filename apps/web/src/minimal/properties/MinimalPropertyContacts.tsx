@@ -171,7 +171,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
               <div>
                 <Link href={l.contactHref} className="am-agenda-title">{l.name}</Link>
                 <div className="am-agenda-sub">{l.roleLabel}{l.isPrimary ? " · Primary" : ""}{l.detail ? ` · ${l.detail}` : ""}</div>
-                <TapToCall partyId={l.partyId} enabled={canManageLinks} />
+                <TapToCall partyId={l.partyId} enabled canNote={canCreateContact} />
                 {canManageLinks ? (
                   <PropertyLinkControls
                     linkId={l.linkId}
