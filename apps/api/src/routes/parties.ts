@@ -5,7 +5,7 @@ import { db, parties, propertyParties, properties, workflows, auditLogs, PROPERT
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
-import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitlement.js";
+import { requireAnyEntitlement, requireRelationshipManage } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
@@ -129,10 +129,12 @@ const canManagePropertyContacts = requireAnyEntitlement("grow.contacts.manage", 
 // t242u (Owner): relationship management (link, unlink, role change, primary
 // change) needs the explicit grow.relationships.manage permission PLUS access
 // to the specific property (own-property scope, brokerage isolation: 404).
-// run.access alone does NOT authorise these. Run subscriptions receive the
-// grow.* keys via Run-includes-Grow (#281 + its backfill), which is the
-// default path for Run brokerages; no new seed or migration is added here.
-const canManageRelationships = requireEntitlement("grow.relationships.manage");
+// run.access alone does NOT authorise these. t246u: a Run-entitled Agent or
+// Brokerage Administrator (the roles with Run contact-management rights) is
+// derived as authorised, so legacy Run brokerages keep link capability without
+// #281 or a seeded grant; Pit Crew needs the explicit key. See
+// middlewares/entitlement.ts requireRelationshipManage.
+const canManageRelationships = requireRelationshipManage();
 
 // t238u: one role vocabulary, owned by @aee/db (re-exported for existing importers).
 export { PROPERTY_PARTY_ROLES };

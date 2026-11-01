@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowContact360 } from "../lib/growContact360";
-import { useEntitlements } from "../lib/session";
+import { useEntitlements, useSession } from "../lib/session";
+import { canManageRelationships } from "../lib/relationshipPermission";
 import { MinimalGrowSections } from "./MinimalGrowSections";
 import { ContactPropertyLinks } from "./properties/ContactPropertyLinks";
 import { TapToCall } from "./TapToCall";
@@ -16,6 +17,7 @@ import { buildMinimalContactModel, formatContactDate, type MinimalContactModel }
 export default function MinimalContact360() {
   const params = useParams<{ id: string }>();
   const { hasEntitlement } = useEntitlements();
+  const session = useSession();
   const partyId = /^\d+$/.test(params.id ?? "") ? Number(params.id) : null;
   const detail = useQuery<GrowContact360>({
     queryKey: ["grow-contact", partyId],
@@ -39,7 +41,7 @@ export default function MinimalContact360() {
   return (
     <MinimalContact360View
       model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })}
-      propertyLinks={{ partyId, canManage: hasEntitlement("grow.relationships.manage"), canNote: hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access") }}
+      propertyLinks={{ partyId, canManage: canManageRelationships(hasEntitlement, session.user?.role), canNote: hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access") }}
     />
   );
 }
