@@ -109,49 +109,57 @@ test("access matrix: cross-brokerage caller gets 404 on every op against another
   assert.equal(rows[0].role, "Seller");
 });
 
-test("Tap-to-Call: consent captured at create (timestamp + agent + restrictions); tel: shown without per-call re-confirmation; hidden on withdrawal, do-not-call, suppression, DNCR listed or no consent", async () => {
+test("t239u: Call (tel:) is shown for every accessible phone despite DNC, suppression, DNCR listing, withdrawn or absent consent; reading never writes consent", async () => {
   const w = await world("TTC");
   const s1 = await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
   assert.equal(s1.status, 200);
-  assert.equal(s1.json.available, true);
-  assert.equal(s1.json.telHref, "tel:0400000111");
-  assert.equal(s1.json.confirmedByUserId, w.admin.user.id);
-  assert.ok(!Number.isNaN(Date.parse(s1.json.confirmedAt)));
-  // No re-confirmation per call: repeated reads stay available and write nothing.
-  const before = (await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, w.partyId))).length;
-  for (let i = 0; i < 3; i++) assert.equal((await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).json.available, true);
-  assert.equal((await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, w.partyId))).length, before);
-
-  // Restrictions recorded via People create; restriction text returned.
-  const g = await call(w.agent.cookie, "POST", "/grow/contacts", { name: "Rae Restricted", mobile: "+61 400 222 333", callConsent: { confirmed: true, restrictions: "Weekdays after 5pm only" } });
-  assert.equal(g.status, 201);
-  const gs = (await call(w.agent.cookie, "GET", `/parties/${g.json.contact.id}/tap-to-call`)).json;
-  assert.equal(gs.available, true);
-  assert.equal(gs.telHref, "tel:+61400222333");
-  assert.equal(gs.restrictions, "Weekdays after 5pm only");
-
-  // No consent / no phone.
+  assert.deepEqual(s1.json, { available: true, reason: "AVAILABLE", telHref: "tel:0400000111" });
+  // No consent record at all (historical or never captured): still callable.
   const n = await call(w.agent.cookie, "POST", "/grow/contacts", { name: "Ned NoConsent", mobile: "0400 333 444" });
-  assert.equal((await call(w.agent.cookie, "GET", `/parties/${n.json.contact.id}/tap-to-call`)).json.reason, "NO_CONSENT");
-  assert.equal((await call(w.agent.cookie, "GET", `/parties/${w.spareId}/tap-to-call`)).json.reason, "NO_PHONE");
-
-  // Do-not-call preference recorded later hides it.
+  const ns = (await call(w.agent.cookie, "GET", `/parties/${n.json.contact.id}/tap-to-call`)).json;
+  assert.deepEqual([ns.available, ns.telHref], [true, "tel:0400333444"]);
+  assert.equal((await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, n.json.contact.id))).length, 0, "nothing backfilled");
+  // Do-not-call preference: still callable, no warning fields.
+  const g = await call(w.agent.cookie, "POST", "/grow/contacts", { name: "Rae Restricted", mobile: "+61 400 222 333" });
   const d = await call(w.agent.cookie, "POST", `/parties/${g.json.contact.id}/call-consent`, { confirmed: false, doNotCall: true, restrictions: "Asked not to be called" });
   assert.equal(d.status, 201);
-  assert.deepEqual([d.json.available, d.json.reason], [false, "DO_NOT_CALL"]);
-  assert.equal(d.json.telHref, undefined);
-
-  // Withdrawal (existing consent model) hides it.
+  assert.deepEqual(d.json, { available: true, reason: "AVAILABLE", telHref: "tel:+61400222333" });
+  // Withdrawn consent: still callable; the withdrawal row is left untouched.
   await db.insert(growContactChannelConsents).values({ brokerageId: w.brokerageId, partyId: w.partyId, channel: "PHONE_CALL", state: "WITHDRAWN", source: "MANUAL", captureMethod: "test", purpose: "TAP_TO_CALL", scope: "PHONE_CALL", recordedByUserId: w.admin.user.id, withdrawnAt: new Date(), withdrawnByUserId: w.admin.user.id, withdrawalReason: "synthetic" });
-  assert.equal((await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).json.reason, "CONSENT_WITHDRAWN");
-
-  // Suppression and DNCR listing hide it, even with fresh consent.
-  const sp = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.propertyId, role: "Other", firstName: "Sup", mobile: "0400 555 666", callConsent: { confirmed: true } });
+  const consentRows = await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, w.partyId));
+  assert.equal((await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).json.available, true);
+  assert.deepEqual(await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, w.partyId)), consentRows, "consent rows unchanged");
+  // Active suppression and DNCR LISTED: still callable.
+  const sp = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.propertyId, role: "Other", firstName: "Sup", mobile: "0400 555 666" });
   await db.insert(growContactChannelSuppressions).values({ brokerageId: w.brokerageId, partyId: sp.json.party.id, channel: "PHONE_CALL", state: "SUPPRESSED", reason: "synthetic", recordedByUserId: w.admin.user.id });
-  assert.equal((await call(w.agent.cookie, "GET", `/parties/${sp.json.party.id}/tap-to-call`)).json.reason, "SUPPRESSED");
-  const dn = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.propertyId, role: "Other", firstName: "Dnc", mobile: "0400 777 888", callConsent: { confirmed: true } });
+  assert.equal((await call(w.agent.cookie, "GET", `/parties/${sp.json.party.id}/tap-to-call`)).json.telHref, "tel:0400555666");
+  const dn = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.propertyId, role: "Other", firstName: "Dnc", mobile: "0400 777 888" });
   await db.insert(growContactDncrStatuses).values({ brokerageId: w.brokerageId, partyId: dn.json.party.id, channel: "PHONE_CALL", status: "LISTED", source: "MANUAL", recordedByUserId: w.admin.user.id });
-  assert.equal((await call(w.agent.cookie, "GET", `/parties/${dn.json.party.id}/tap-to-call`)).json.reason, "DNCR_LISTED");
+  assert.equal((await call(w.agent.cookie, "GET", `/parties/${dn.json.party.id}/tap-to-call`)).json.telHref, "tel:0400777888");
+  // No phone: nothing to call.
+  assert.deepEqual((await call(w.agent.cookie, "GET", `/parties/${w.spareId}/tap-to-call`)).json, { available: false, reason: "NO_PHONE" });
+  // Repeated reads write nothing (no auto-record / auto-complete).
+  const acts = (await db.select().from(growActivities).where(eq(growActivities.partyId, w.partyId))).length;
+  for (let i = 0; i < 3; i++) await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal((await db.select().from(growActivities).where(eq(growActivities.partyId, w.partyId))).length, acts);
+});
+
+test("t239u: unauthorised callers still get no number: unsubscribed 403, read-only 403, cross-brokerage 404, unauthenticated 401", async () => {
+  const w = await world("TTCDeny");
+  const x = await world("TTCOther");
+  const other = await call(x.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(other.status, 404);
+  assert.equal(other.json.telHref, undefined);
+  const anon = await fetch(`${base}/api/parties/${w.partyId}/tap-to-call`, { headers: { connection: "close" } });
+  assert.equal(anon.status, 401);
+  await setGrants(w.brokerageId, READ_ONLY);
+  const ro = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(ro.status, 403);
+  assert.equal(ro.json.telHref, undefined);
+  await setGrants(w.brokerageId, []);
+  const un = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(un.status, 403);
+  assert.equal(un.json.telHref, undefined);
 });
 
 test("Tap-to-Call: optional post-call note is a plain activity; never a recording or completion; read-only cannot add one", async () => {
@@ -171,10 +179,3 @@ test("Tap-to-Call: optional post-call note is a plain activity; never a recordin
   assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: true })).status, 403);
 });
 
-test("t237u: a contact created before Tap-to-Call (no consent row) is NO_CONSENT; reading status never creates consent", async () => {
-  const w = await world("Hist");
-  const h = await call(w.admin.cookie, "POST", "/grow/contacts", { name: "Hal Historical", mobile: "0400 999 000" });
-  const id = h.json.contact.id as number;
-  for (let i = 0; i < 2; i++) assert.equal((await call(w.admin.cookie, "GET", `/parties/${id}/tap-to-call`)).json.reason, "NO_CONSENT");
-  assert.equal((await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, id))).length, 0);
-});

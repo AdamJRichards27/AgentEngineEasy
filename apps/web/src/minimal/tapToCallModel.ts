@@ -1,23 +1,13 @@
-// t236u Tap-to-Call view model. The server decides; this only maps its answer.
+// Tap-to-Call view model. t239u (Owner, FINAL): no consent, DNC, suppression
+// or preference blocking and no warnings; the agent is responsible for
+// compliance. The server only answers for authorised callers; this maps its answer.
 export type TapToCallStatus = {
   available: boolean;
-  reason: "AVAILABLE" | "NO_PHONE" | "NO_CONSENT" | "CONSENT_WITHDRAWN" | "DO_NOT_CALL" | "SUPPRESSED" | "DNCR_LISTED";
+  reason: "AVAILABLE" | "NO_PHONE";
   telHref?: string;
-  restrictions?: string | null;
 };
 
-export type TapToCallView =
-  | { kind: "call"; href: string; restrictions: string | null }
-  | { kind: "unavailable"; text: string }
-  | { kind: "hidden" };
-
-const UNAVAILABLE: Record<string, string> = {
-  NO_CONSENT: "Consent not recorded",
-  CONSENT_WITHDRAWN: "Consent to call withdrawn",
-  DO_NOT_CALL: "Do not call",
-  SUPPRESSED: "Calls suppressed",
-  DNCR_LISTED: "On the Do Not Call Register",
-};
+export type TapToCallView = { kind: "call"; href: string } | { kind: "hidden" };
 
 export function tapToCallPath(partyId: number): string {
   return `/parties/${partyId}/tap-to-call`;
@@ -25,9 +15,8 @@ export function tapToCallPath(partyId: number): string {
 
 /** Only a server-issued tel: href is ever rendered; anything else is never a link. */
 export function tapToCallView(status: TapToCallStatus | null | undefined): TapToCallView {
-  if (!status || status.reason === "NO_PHONE") return { kind: "hidden" };
-  if (status.available && typeof status.telHref === "string" && /^tel:\+?\d{6,}$/.test(status.telHref)) {
-    return { kind: "call", href: status.telHref, restrictions: status.restrictions ?? null };
+  if (status && status.available && typeof status.telHref === "string" && /^tel:\+?\d{6,}$/.test(status.telHref)) {
+    return { kind: "call", href: status.telHref };
   }
-  return { kind: "unavailable", text: UNAVAILABLE[status.reason] ?? "Calling unavailable" };
+  return { kind: "hidden" };
 }

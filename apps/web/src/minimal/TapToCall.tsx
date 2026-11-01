@@ -3,9 +3,11 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import { tapToCallPath, tapToCallView, type TapToCallStatus } from "./tapToCallModel";
 
-// t236u: a plain tel: link (the device dials; nothing here auto-dials, records
-// or completes a call). Rendered only for authorised agents (`enabled`), and
-// only when the server says calling is allowed. Optional post-call note.
+// A plain tel: link (the device dials; nothing here auto-dials, records or
+// completes a call). Rendered for authorised agents (`enabled`) whenever the
+// server returns a number. t239u: no consent/DNC gating, warning or
+// confirmation before the dialler; the agent is responsible for compliance.
+// Optional post-call note.
 export function TapToCall({ partyId, enabled }: { partyId: number; enabled: boolean }) {
   const status = useQuery<TapToCallStatus>({
     queryKey: ["tap-to-call", partyId],
@@ -24,11 +26,9 @@ export function TapToCall({ partyId, enabled }: { partyId: number; enabled: bool
   if (!enabled || !status.isSuccess) return null;
   const view = tapToCallView(status.data);
   if (view.kind === "hidden") return null;
-  if (view.kind === "unavailable") return <span className="am-agenda-sub" data-ae-tap-to-call="unavailable">{view.text}</span>;
   return (
     <span data-ae-tap-to-call="available">
       <a className="am-data-button is-quiet" href={view.href} data-ae-tel>Call</a>
-      {view.restrictions ? <span className="am-agenda-sub"> {view.restrictions}</span> : null}
       <button type="button" className="am-data-button is-quiet" data-ae-call-note="open" onClick={() => { setNoteOpen((o) => !o); setMsg(null); }}>Add call note</button>
       {noteOpen ? (
         <form onSubmit={(e) => { e.preventDefault(); if (note.trim()) save.mutate(note.trim()); }}>

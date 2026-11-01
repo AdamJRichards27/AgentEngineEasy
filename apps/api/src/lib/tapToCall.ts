@@ -2,48 +2,28 @@
 // (grow_contact_channel_consents, grow_contact_channel_suppressions,
 // grow_contact_dncr_statuses); NO new table or migration.
 //
-// Rules (Owner t236u):
-// - When an agent creates a contact they may confirm the contact agreed to be
-//   called. One PHONE_CALL consent row records it: captured_at (timestamp),
-//   recorded_by_user_id (confirming agent), evidence.restrictions (any
-//   communication restrictions, free text), evidence.doNotCall (boolean).
-// - No re-confirmation per call; nothing here dials. The client renders a
-//   plain tel: link; the device's own dialler places the call.
-// - The action is hidden when consent is withdrawn, absent, a do-not-call
-//   restriction is recorded, an active PHONE_CALL suppression exists, or the
-//   latest DNCR status is LISTED.
-// - Calls are never recorded and never auto-marked complete. An optional
-//   post-call note is a plain grow_activities row the agent chooses to add.
-import { and, desc, eq, inArray } from "drizzle-orm";
+// t239u (Owner, FINAL) supersedes the t236u consent gating: the tel: link is
+// shown whenever the authorised caller can access a phone number; nothing here
+// dials, records or completes a call. Consent capture (recordCallConsentConfirmation)
+// is kept as optional record-keeping only and is never read for gating.
+import { and, eq } from "drizzle-orm";
 import {
   db,
   growActivities,
   growContactChannelConsents,
-  growContactChannelSuppressions,
-  growContactDncrStatuses,
   parties,
 } from "@aee/db";
 
 export const TAP_TO_CALL_CHANNEL = "PHONE_CALL";
 export const CALL_CONSENT_SOURCE = "AGENT_CONFIRMATION";
 
-export type TapToCallReason =
-  | "AVAILABLE"
-  | "NO_PHONE"
-  | "NO_CONSENT"
-  | "CONSENT_WITHDRAWN"
-  | "DO_NOT_CALL"
-  | "SUPPRESSED"
-  | "DNCR_LISTED";
+export type TapToCallReason = "AVAILABLE" | "NO_PHONE";
 
 export interface TapToCallStatus {
   available: boolean;
   reason: TapToCallReason;
   /** Only when available. */
   telHref?: string;
-  confirmedAt?: string;
-  confirmedByUserId?: number;
-  restrictions?: string | null;
 }
 
 export interface CallConsentInput {
@@ -88,8 +68,14 @@ export async function recordCallConsentConfirmation(
   return row?.id ?? null;
 }
 
-const ENABLING_STATES = ["EXPRESS", "INFERRED", "NOT_REQUIRED"];
-
+// t239u (Owner, FINAL): the Call action is shown for every phone number the
+// authorised caller can access. Consent, withdrawn consent, do-not-call,
+// suppression, DNCR and communication preferences are NOT read here and never
+// block, warn or ask for confirmation; the agent is responsible for compliance.
+// Existing consent/preference rows are left untouched (no delete, no backfill).
+// Access control is unchanged: the route still requires auth plus
+// grow.contacts.manage or run.access, and the party must be in the caller's
+// brokerage (otherwise null -> 404, no number).
 export async function tapToCallStatus(brokerageId: number, partyId: number): Promise<TapToCallStatus | null> {
   const [party] = await db
     .select({ id: parties.id, mobile: parties.mobile })
@@ -98,62 +84,7 @@ export async function tapToCallStatus(brokerageId: number, partyId: number): Pro
   if (!party) return null;
   const tel = telHrefFor(party.mobile);
   if (!tel) return { available: false, reason: "NO_PHONE" };
-
-  const [consent] = await db
-    .select()
-    .from(growContactChannelConsents)
-    .where(
-      and(
-        eq(growContactChannelConsents.brokerageId, brokerageId),
-        eq(growContactChannelConsents.partyId, partyId),
-        inArray(growContactChannelConsents.channel, ["PHONE_CALL", "VOICE_CALL"]),
-      ),
-    )
-    .orderBy(desc(growContactChannelConsents.capturedAt), desc(growContactChannelConsents.id))
-    .limit(1);
-  const evidence = (consent?.evidence ?? {}) as { restrictions?: string | null; doNotCall?: boolean };
-  if (consent && (consent.state === "WITHDRAWN" || consent.withdrawnAt)) return { available: false, reason: "CONSENT_WITHDRAWN" };
-  if (evidence.doNotCall) return { available: false, reason: "DO_NOT_CALL", restrictions: evidence.restrictions ?? null };
-
-  const [suppression] = await db
-    .select({ state: growContactChannelSuppressions.state, expiresAt: growContactChannelSuppressions.expiresAt })
-    .from(growContactChannelSuppressions)
-    .where(
-      and(
-        eq(growContactChannelSuppressions.brokerageId, brokerageId),
-        eq(growContactChannelSuppressions.partyId, partyId),
-        inArray(growContactChannelSuppressions.channel, ["PHONE_CALL", "VOICE_CALL"]),
-      ),
-    )
-    .orderBy(desc(growContactChannelSuppressions.effectiveAt), desc(growContactChannelSuppressions.id))
-    .limit(1);
-  if (suppression && suppression.state === "SUPPRESSED" && (!suppression.expiresAt || suppression.expiresAt > new Date())) {
-    return { available: false, reason: "SUPPRESSED" };
-  }
-
-  const [dncr] = await db
-    .select({ status: growContactDncrStatuses.status })
-    .from(growContactDncrStatuses)
-    .where(
-      and(
-        eq(growContactDncrStatuses.brokerageId, brokerageId),
-        eq(growContactDncrStatuses.partyId, partyId),
-        inArray(growContactDncrStatuses.channel, ["PHONE_CALL", "VOICE_CALL"]),
-      ),
-    )
-    .orderBy(desc(growContactDncrStatuses.checkedAt), desc(growContactDncrStatuses.id))
-    .limit(1);
-  if (dncr?.status === "LISTED") return { available: false, reason: "DNCR_LISTED" };
-
-  if (!consent || !ENABLING_STATES.includes(consent.state)) return { available: false, reason: "NO_CONSENT" };
-  return {
-    available: true,
-    reason: "AVAILABLE",
-    telHref: tel,
-    confirmedAt: consent.capturedAt.toISOString(),
-    confirmedByUserId: consent.recordedByUserId,
-    restrictions: evidence.restrictions ?? null,
-  };
+  return { available: true, reason: "AVAILABLE", telHref: tel };
 }
 
 /** Optional post-call note. Never a recording, never a completion. */
