@@ -79,3 +79,30 @@ The audit (G1) puts every grow_relationships row into exactly one category:
    - Either Grow writers (`POST /grow/relationships` with a property, import) also upsert the mapped property_parties link,
    - or Grow reads property_parties for these roles.
    - Pick one, to avoid drift. **Decision.**
+
+---
+
+# t234u: reviewed mapping (supersedes the open decisions above)
+
+Owner decisions (t234u item 3) and how the dry run applies them:
+
+| grow type | Dry-run action | Why |
+|---|---|---|
+| owner, co_owner | insert → **Owner** (collapsed) | Genuine current holding |
+| landlord | insert → **Landlord** | |
+| tenant | insert → **Tenant** | |
+| buyer | insert → **Buyer** | |
+| seller, vendor | **review:seller_manual_no_aml**, never inserted | A Seller link can start ownership review and, after Ready to List, AML. Historical conversion must **not** trigger AML or Pit Crew activation, so these rows are listed for an agent to confirm through the normal UI, where AML runs as it does today |
+| occupier | keep (type_not_mapped) | Ambiguous: preserved in Grow |
+| all other types, property-less rows, Historical/PendingReview/`valid_to` rows | keep | Unrelated or ambiguous: preserved |
+| brokerage mismatch | review | |
+
+## Additional rules
+- **Primary:** a converted link is primary only if the source was primary, the property has no existing primary for that role, and no other candidate for the same (property, role) also wants primary. Otherwise the link is inserted as non-primary. This matches 0049 and #285, and primary carries no legal or signing authority.
+- **No side effects:** the conversion is a direct `INSERT … ON CONFLICT DO NOTHING` from G3. It never calls `/parties`, `runSellerSideEffects`, `initiateAmlIfNeeded`, `refreshReadyToListSteps`, or any Pit Crew or agreement code. Because Sellers are excluded, a later Ready-to-List refresh cannot pick up a converted Seller either.
+- **No deletion or edit of grow_relationships.**
+- Contacts are never merged. Shared emails and phones are legitimate (t234u item 1).
+
+The synthetic dry run (`propertyPartiesIntegrity.test.ts`, UTC and Brisbane) covers: owner+co_owner collapsed (primary carried), two Tenants with only the single would-be primary marked, the vendor sent to review, occupier and prospective_buyer kept, the Historical tenant kept, the property-less buyer kept, and the cross-brokerage buyer sent to review. Nothing is written.
+
+**Execution status:** not requested. It needs the env counts, then 0047/0049, then separate Owner approval.

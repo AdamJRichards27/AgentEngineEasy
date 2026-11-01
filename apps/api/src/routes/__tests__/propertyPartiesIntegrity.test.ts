@@ -21,6 +21,8 @@ const AUDIT = statements(read("packages/db/scripts/audit/property-parties-audit.
 const RECON = statements(read("packages/db/scripts/audit/grow-relationships-reconciliation.sql"), /;\s*$/m);
 const M0047 = statements(read("docs/migrations/proposed/0047_property_parties_unique_role.sql"), /--> statement-breakpoint/);
 const M0048 = statements(read("docs/migrations/proposed/0048_property_parties_role_check.sql"), /--> statement-breakpoint/);
+const M0049 = statements(read("docs/migrations/proposed/0049_property_parties_one_primary_per_role.sql"), /--> statement-breakpoint/);
+const ENV_COUNTS = read("packages/db/scripts/audit/property-parties-env-counts.sql").replace(/^\s*--.*$/gm, "").trim().replace(/;\s*$/, "");
 
 const tag = `ppint-${Date.now()}`;
 let server: Server;
@@ -161,6 +163,11 @@ test("grow_relationships reconciliation dry run classifies rows and writes nothi
     { brokerageId: bid, partyId: lead, propertyId: p2, relationshipType: "prospective_buyer", status: "Active" },
     { brokerageId: bid, partyId: lead, propertyId: null, relationshipType: "buyer", status: "Active" },
     { brokerageId: bid, partyId: lead, propertyId: pOther, relationshipType: "buyer", status: "Active" },
+    // t234u: an unlinked vendor is listed for manual review, never auto-inserted (no AML from history).
+    { brokerageId: bid, partyId: tenant, propertyId: p2, relationshipType: "vendor", status: "Active" },
+    // t234u: a second would-be primary Tenant on p2 means neither converted Tenant is primary.
+    { brokerageId: bid, partyId: lead, propertyId: p2, relationshipType: "tenant", status: "Active", isPrimary: true },
+    { brokerageId: bid, partyId: tenant, propertyId: p2, relationshipType: "occupier", status: "Active" },
   ]).returning({ id: growRelationships.id });
   const grIds = rows.map((r) => r.id);
   const ppCount = async () => (await pool.query("SELECT count(*)::int AS n FROM property_parties WHERE property_id = ANY($1::int[])", [[p1, p2, pOther]])).rows[0].n;
@@ -186,18 +193,62 @@ test("grow_relationships reconciliation dry run classifies rows and writes nothi
   const byAction = Object.fromEntries(g2.map((r) => [`${r.action}:${r.target_role ?? "-"}`, Number(r.rows)]));
   assert.deepEqual(byAction, {
     "insert:Owner": 2,
-    "insert:Tenant": 1,
+    "insert:Tenant": 2,
+    "review:seller_manual_no_aml:Seller": 1,
     "keep:no_property:Buyer": 1,
     "keep:not_active:Tenant": 1,
-    "keep:type_not_mapped:-": 1,
+    "keep:type_not_mapped:-": 2,
     "review:brokerage_mismatch:Buyer": 1,
     "skip:already_linked:Seller": 1,
   });
   // owner + co_owner collapse into one Owner link; primary carried.
   assert.deepEqual(
     g3.map((r) => `${r.property_id}:${r.party_id}:${r.role}:${r.is_primary}:${r.source_grow_relationship_ids.length}`).sort(),
-    [`${p1}:${owner}:Owner:true:2`, `${p2}:${tenant}:Tenant:false:1`].sort(),
+    [`${p1}:${owner}:Owner:true:2`, `${p2}:${tenant}:Tenant:false:1`, `${p2}:${lead}:Tenant:true:1`].sort(),
   );
   assert.equal(await ppCount(), beforePP, "dry run inserted nothing");
   assert.equal((await db.select().from(growRelationships).where(inArray(growRelationships.id, grIds))).length, grIds.length, "grow_relationships untouched");
+});
+
+test("t234u: proposed 0049 (one primary per property per role, Other exempt) fails closed, then enforces; env counts are ids-free; all rolled back", async () => {
+  const b = await brokerage("Prim");
+  const p = await b.prop("1");
+  const c1 = await b.party("PrimA");
+  const c2 = await b.party("PrimB");
+  await db.insert(propertyParties).values([
+    { propertyId: p, partyId: c1, role: "Owner", isPrimary: true },
+    { propertyId: p, partyId: c2, role: "Owner", isPrimary: true },
+  ]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN READ ONLY");
+    const counts = Object.fromEntries((await client.query(ENV_COUNTS)).rows.map((r) => [r.check_name, Number(r.value)]));
+    assert.ok(counts.P1_multi_primary_groups_blocks_0049 >= 1);
+    assert.deepEqual(Object.keys((await client.query(ENV_COUNTS)).rows[0]).sort(), ["check_name", "value"]);
+    await client.query("ROLLBACK");
+    const shadow = async () => {
+      await client.query("CREATE TEMP TABLE property_parties (LIKE public.property_parties INCLUDING DEFAULTS) ON COMMIT DROP");
+      await client.query("INSERT INTO property_parties SELECT * FROM public.property_parties WHERE property_id = $1", [p]);
+    };
+    await client.query("BEGIN");
+    await shadow();
+    await assert.rejects(client.query(M0049[0]), /more than one primary/);
+    await client.query("ROLLBACK");
+    await client.query("BEGIN");
+    await shadow();
+    await client.query("UPDATE property_parties SET is_primary = false WHERE property_id = $1 AND party_id = $2", [p, c2]);
+    for (const s of M0049) await client.query(s);
+    await client.query("SAVEPOINT a");
+    await assert.rejects(client.query("INSERT INTO property_parties (property_id, party_id, role, is_primary) VALUES ($1, $2, 'Owner', true)", [p, c2]), /property_parties_one_primary_per_role/);
+    await client.query("ROLLBACK TO SAVEPOINT a");
+    await client.query("INSERT INTO property_parties (property_id, party_id, role, is_primary) VALUES ($1, $2, 'Other', true), ($1, $3, 'Other', true)", [p, c1, c2]);
+    await client.query("INSERT INTO property_parties (property_id, party_id, role, is_primary) VALUES ($1, $2, 'Tenant', false)", [p, c2]);
+    await client.query("ROLLBACK");
+  } finally {
+    await client.query("ROLLBACK").catch(() => undefined);
+    client.release();
+  }
+  const idx = await pool.query("SELECT 1 FROM pg_indexes WHERE indexname = 'property_parties_one_primary_per_role'");
+  assert.equal(idx.rowCount, 0);
+  await db.delete(propertyParties).where(eq(propertyParties.propertyId, p));
 });

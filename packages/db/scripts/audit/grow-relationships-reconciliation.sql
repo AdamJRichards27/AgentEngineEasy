@@ -2,7 +2,12 @@
 -- SELECTs only. Executes NO data migration. Ids and counts only (no PII).
 -- Mapping (docs/migrations/proposed/GROW_RELATIONSHIPS_RECONCILIATION.md):
 --   owner, co_owner -> Owner | landlord -> Landlord | tenant -> Tenant
---   seller, vendor  -> Seller | buyer -> Buyer
+--   seller, vendor  -> Seller (t234u: NEVER auto-inserted; listed for manual
+--                     review, because a Seller link can start AML / ownership
+--                     review and historical conversion must not) | buyer -> Buyer
+--   occupier and every other type, property-less rows, non-Active rows -> kept as-is
+-- t234u: a converted row is only marked primary when it would be the ONLY
+-- primary for that (property, role); otherwise it is inserted as non-primary.
 --   everything else, property-less rows, and non-Active rows -> not mapped (kept as-is)
 
 -- G1. Inventory, classifying each row as a GENUINE PROPERTY LINK (a current,
@@ -42,6 +47,7 @@ WITH m AS (
         OR pa.brokerage_id IS DISTINCT FROM m.brokerage_id THEN 'review:brokerage_mismatch'
       WHEN EXISTS (SELECT 1 FROM property_parties pp WHERE pp.property_id = m.property_id AND pp.party_id = m.party_id AND pp.role = m.target_role)
         THEN 'skip:already_linked'
+      WHEN m.target_role = 'Seller' THEN 'review:seller_manual_no_aml'
       ELSE 'insert'
     END AS action
   FROM m
@@ -63,15 +69,23 @@ WITH m AS (
   FROM grow_relationships gr
   WHERE gr.property_id IS NOT NULL AND gr.status = 'Active' AND gr.valid_to IS NULL
 )
-SELECT m.property_id, m.party_id, m.target_role AS role, bool_or(m.is_primary) AS is_primary,
-       array_agg(m.id ORDER BY m.id) AS source_grow_relationship_ids
-FROM m
-JOIN properties pr ON pr.id = m.property_id AND pr.brokerage_id = m.brokerage_id
-JOIN parties pa ON pa.id = m.party_id AND pa.brokerage_id = m.brokerage_id
-WHERE m.target_role IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM property_parties pp WHERE pp.property_id = m.property_id AND pp.party_id = m.party_id AND pp.role = m.target_role)
-GROUP BY m.property_id, m.party_id, m.target_role
-ORDER BY m.property_id, m.party_id, role;
+, cand AS (
+  SELECT m.property_id, m.party_id, m.target_role AS role, bool_or(m.is_primary) AS wants_primary,
+         array_agg(m.id ORDER BY m.id) AS source_grow_relationship_ids
+  FROM m
+  JOIN properties pr ON pr.id = m.property_id AND pr.brokerage_id = m.brokerage_id
+  JOIN parties pa ON pa.id = m.party_id AND pa.brokerage_id = m.brokerage_id
+  WHERE m.target_role IS NOT NULL AND m.target_role <> 'Seller'
+    AND NOT EXISTS (SELECT 1 FROM property_parties pp WHERE pp.property_id = m.property_id AND pp.party_id = m.party_id AND pp.role = m.target_role)
+  GROUP BY m.property_id, m.party_id, m.target_role
+)
+SELECT c.property_id, c.party_id, c.role,
+       (c.wants_primary
+         AND NOT EXISTS (SELECT 1 FROM property_parties pp WHERE pp.property_id = c.property_id AND pp.role = c.role AND pp.is_primary)
+         AND (SELECT count(*) FROM cand c2 WHERE c2.property_id = c.property_id AND c2.role = c.role AND c2.wants_primary) = 1) AS is_primary,
+       c.source_grow_relationship_ids
+FROM cand c
+ORDER BY c.property_id, c.party_id, c.role;
 
 -- G4. property_parties links with no grow_relationships counterpart (the gap
 -- t226u found: contact detail could not see these). Informational.
