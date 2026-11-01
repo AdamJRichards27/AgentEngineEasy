@@ -28,7 +28,9 @@ test("t222u: the /grow route in App.tsx mounts MinimalContacts via selectGrowVie
   assert.ok(route.includes("<MinimalContacts />"), route);
   assert.ok(route.includes("<MinimalToday />"), route);
   assert.ok(route.includes("<Grow />"), route);
-  assert.match(appSrc, /const MinimalContacts = lazy\(\(\) => import\("\.\/minimal\/MinimalContacts"\)\)/);
+  // W-M4 (mobile wiring): the identifier and the route are unchanged; the lazy import now targets the phone/desktop chooser, which
+  // renders the existing MinimalContacts above 760 px and the phone People list at or below it.
+  assert.match(appSrc, /const MinimalContacts = lazy\(\(\) => import\("\.\/minimal\/mobile\/PeopleScreen"\)\)/);
 });
 
 test("t222u: the AI Performance entry is renamed Business Coach and routes to the coach tab", () => {
