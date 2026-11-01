@@ -15,7 +15,8 @@
     "documents:reconcile-pending": "tsx src/scripts/reconcilePendingDocumentStorage.ts",
     "reconcile-transcriptions": "tsx src/scripts/reconcileCallTranscriptions.ts",
     "backup:run": "tsx src/ops/backup/backup.ts",
-    "backup:restore": "tsx src/ops/backup/restore.ts"
+    "backup:restore": "tsx src/ops/backup/restore.ts",
+    "seed-testing-env": "tsx src/scripts/seedTestingEnv.ts"
   },
   "dependencies": {
     "@aee/db": "workspace:*",
