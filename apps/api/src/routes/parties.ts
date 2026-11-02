@@ -678,7 +678,7 @@ partiesRouter.get("/:partyId/tap-to-call", requireAuth, canReadPropertyContacts,
   const partyId = readPartyId(req.params.partyId);
   if (partyId === null) return void res.status(400).json({ error: "Invalid contact id" });
   const user = req.authedUser!;
-  const status = await tapToCallStatus(user.brokerageId, partyId);
+  const status = await tapToCallStatus(user.brokerageId, partyId, { fullContact: await callerCanReadContacts(user), restrictToPropertyIds: null /* t249u: visibility mirrors GET /grow/contacts/:id (brokerage-wide); property-scoped variant kept in lib for Owner decision */ });
   if (!status) {
     await notePartyIsolationRejection(partyId, user.brokerageId);
     return void res.status(404).json({ error: "Contact not found" });
@@ -703,7 +703,7 @@ partiesRouter.post("/:partyId/call-consent", requireAuth, canManagePropertyConta
   const id = await recordCallConsentConfirmation(db, { brokerageId: user.brokerageId, partyId, userId: user.id, ...parsed.data });
   if (id === null) return void res.status(400).json({ error: "Nothing to record", code: "CALL_CONSENT_EMPTY" });
   await logAudit({ userId: user.id, action: "call_consent_recorded", recordType: "party", recordId: String(partyId) });
-  res.status(201).json(await tapToCallStatus(user.brokerageId, partyId));
+  res.status(201).json(await tapToCallStatus(user.brokerageId, partyId, { fullContact: await callerCanReadContacts(user), restrictToPropertyIds: null /* t249u: visibility mirrors GET /grow/contacts/:id (brokerage-wide); property-scoped variant kept in lib for Owner decision */ }));
 });
 
 const callNoteSchema = z.object({ note: z.string().trim().min(1).max(2000), propertyId: z.number().int().positive().optional() }).strict();

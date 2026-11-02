@@ -115,9 +115,11 @@ test("access matrix: cross-brokerage caller gets 404 on every op against another
 
 test("t239u: Call (tel:) is shown for every accessible phone despite DNC, suppression, DNCR listing, withdrawn or absent consent; reading never writes consent", async () => {
   const w = await world("TTC");
+  // t249u: Call visibility mirrors contact-read visibility (GET /grow/contacts/:id), which is brokerage-wide for the agent.
+  assert.equal((await call(w.agent.cookie, "GET", `/grow/contacts/${w.partyId}`)).status, 200);
   const s1 = await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
   assert.equal(s1.status, 200);
-  assert.deepEqual(s1.json, { available: true, reason: "AVAILABLE", telHref: "tel:0400000111" });
+  assert.deepEqual(s1.json, { available: true, reason: "AVAILABLE", masked: false, display: "0400 000 111", telHref: "tel:0400000111" });
   // No consent record at all (historical or never captured): still callable.
   const n = await call(w.agent.cookie, "POST", "/grow/contacts", { name: "Ned NoConsent", mobile: "0400 333 444" });
   const ns = (await call(w.agent.cookie, "GET", `/parties/${n.json.contact.id}/tap-to-call`)).json;
@@ -127,7 +129,7 @@ test("t239u: Call (tel:) is shown for every accessible phone despite DNC, suppre
   const g = await call(w.agent.cookie, "POST", "/grow/contacts", { name: "Rae Restricted", mobile: "+61 400 222 333" });
   const d = await call(w.agent.cookie, "POST", `/parties/${g.json.contact.id}/call-consent`, { confirmed: false, doNotCall: true, restrictions: "Asked not to be called" });
   assert.equal(d.status, 201);
-  assert.deepEqual(d.json, { available: true, reason: "AVAILABLE", telHref: "tel:+61400222333" });
+  assert.deepEqual(d.json, { available: true, reason: "AVAILABLE", masked: false, display: "+61 400 222 333", telHref: "tel:+61400222333" });
   // Withdrawn consent: still callable; the withdrawal row is left untouched.
   await db.insert(growContactChannelConsents).values({ brokerageId: w.brokerageId, partyId: w.partyId, channel: "PHONE_CALL", state: "WITHDRAWN", source: "MANUAL", captureMethod: "test", purpose: "TAP_TO_CALL", scope: "PHONE_CALL", recordedByUserId: w.admin.user.id, withdrawnAt: new Date(), withdrawnByUserId: w.admin.user.id, withdrawalReason: "synthetic" });
   const consentRows = await db.select().from(growContactChannelConsents).where(eq(growContactChannelConsents.partyId, w.partyId));
@@ -141,7 +143,7 @@ test("t239u: Call (tel:) is shown for every accessible phone despite DNC, suppre
   await db.insert(growContactDncrStatuses).values({ brokerageId: w.brokerageId, partyId: dn.json.party.id, channel: "PHONE_CALL", status: "LISTED", source: "MANUAL", recordedByUserId: w.admin.user.id });
   assert.equal((await call(w.agent.cookie, "GET", `/parties/${dn.json.party.id}/tap-to-call`)).json.telHref, "tel:0400777888");
   // No phone: nothing to call.
-  assert.deepEqual((await call(w.agent.cookie, "GET", `/parties/${w.spareId}/tap-to-call`)).json, { available: false, reason: "NO_PHONE" });
+  assert.deepEqual((await call(w.agent.cookie, "GET", `/parties/${w.spareId}/tap-to-call`)).json, { available: false, reason: "NO_PHONE", masked: false, display: null, telHref: null });
   // Repeated reads write nothing (no auto-record / auto-complete).
   const acts = (await db.select().from(growActivities).where(eq(growActivities.partyId, w.partyId))).length;
   for (let i = 0; i < 3; i++) await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
@@ -191,4 +193,38 @@ test("t242u: read-only users can Call a contact they can view (number + tel acti
   assert.equal((await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: true })).status, 403);
   assert.equal((await call(w.admin.cookie, "PATCH", `/parties/link/${w.linkId}`, { isPrimary: true })).status, 403);
   assert.equal((await call(w.admin.cookie, "DELETE", `/parties/link/${w.linkId}`)).status, 403);
+});
+
+test("t249u: Run access without contact-read gets an explicit masked state: no telHref, no full number in ANY field, consistent with the #296 list mask", async () => {
+  const w = await world("TTCMasked");
+  await setGrants(w.brokerageId, ["run.access"]);
+  const r = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { available: false, reason: "MASKED", masked: true, display: "***111", telHref: null });
+  assert.ok(!JSON.stringify(r.json).includes("0400"), "no full-number fragment anywhere in the body");
+  const list = await call(w.admin.cookie, "GET", `/parties/by-property/${w.propertyId}`);
+  const row = list.json.parties.find((p: { party: { id: number } }) => p.party.id === w.partyId);
+  assert.equal(row.party.mobile, r.json.display, "same mask as the property-contact list");
+  // call-consent (manage via run.access) must not leak through its status body either.
+  const cc = await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: true });
+  assert.equal(cc.status, 201);
+  assert.equal(cc.json.telHref, null);
+  assert.ok(!JSON.stringify(cc.json).includes("0400"));
+});
+
+test("t249u: contact-read callers (incl. read-only) get the full number and tel:; the shape is explicit", async () => {
+  const w = await world("TTCFull");
+  await setGrants(w.brokerageId, READ_ONLY);
+  const r = await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.deepEqual(r.json, { available: true, reason: "AVAILABLE", masked: false, display: "0400 000 111", telHref: "tel:0400000111" });
+});
+
+test("t249u: visibility — Call is available exactly where the contact itself is readable (GET /grow/contacts/:id); cross-brokerage 404 with no number", async () => {
+  const w = await world("TTCVis");
+  const x = await world("TTCVisOther");
+  assert.equal((await call(w.agent.cookie, "GET", `/grow/contacts/${w.partyId}`)).status, 200);
+  assert.equal((await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).status, 200);
+  const o = await call(x.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(o.status, 404);
+  assert.ok(!JSON.stringify(o.json).includes("0400"));
 });

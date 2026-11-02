@@ -21,3 +21,10 @@ test("t239u: the view has no consent/DNC/suppression states at all", async () =>
     + fs.readFileSync(url.fileURLToPath(new URL("../../minimal/TapToCall.tsx", import.meta.url)), "utf8");
   for (const s of ["NO_CONSENT", "CONSENT_WITHDRAWN", "DO_NOT_CALL", "SUPPRESSED", "DNCR_LISTED", "Consent not recorded", "confirm("]) assert.ok(!src.includes(s), s);
 });
+
+test("t249u: a masked number is NEVER a Call action, even if a malformed answer also carries a tel:", () => {
+  assert.equal(tapToCallView({ available: false, reason: "MASKED", masked: true, display: "***156", telHref: null }).kind, "hidden");
+  assert.equal(tapToCallView({ available: true, reason: "AVAILABLE", masked: true, display: "***156", telHref: "tel:0491570156" }).kind, "hidden");
+  assert.equal(tapToCallView({ available: true, reason: "MASKED", telHref: "tel:0491570156" }).kind, "hidden");
+  assert.equal(tapToCallView({ available: true, reason: "AVAILABLE", telHref: "tel:***156" }).kind, "hidden");
+});

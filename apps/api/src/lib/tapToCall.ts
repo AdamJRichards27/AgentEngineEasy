@@ -9,6 +9,7 @@
 import { and, eq } from "drizzle-orm";
 import {
   db,
+  propertyParties,
   growActivities,
   growContactChannelConsents,
   parties,
@@ -17,13 +18,27 @@ import {
 export const TAP_TO_CALL_CHANNEL = "PHONE_CALL";
 export const CALL_CONSENT_SOURCE = "AGENT_CONFIRMATION";
 
-export type TapToCallReason = "AVAILABLE" | "NO_PHONE";
+export type TapToCallReason = "AVAILABLE" | "NO_PHONE" | "MASKED";
 
+/**
+ * t249u proposal (pending Claude's agreement): every response carries all four
+ * fields. `telHref` is non-null ONLY when available; `display` is the full
+ * number only for callers with contact-read access, otherwise the same mask as
+ * the property-contact list (#296). A masked number is never callable.
+ */
 export interface TapToCallStatus {
   available: boolean;
   reason: TapToCallReason;
-  /** Only when available. */
-  telHref?: string;
+  masked: boolean;
+  display: string | null;
+  telHref: string | null;
+}
+
+/** Same mask as routes/parties.ts maskPhone (#296). */
+export function maskedPhoneDisplay(m: string | null | undefined): string | null {
+  if (!m) return null;
+  const digits = m.replace(/\D/g, "");
+  return digits.length >= 3 ? `***${digits.slice(-3)}` : "***";
 }
 
 export interface CallConsentInput {
@@ -76,15 +91,26 @@ export async function recordCallConsentConfirmation(
 // Access control is unchanged: the route still requires auth plus
 // grow.contacts.manage or run.access, and the party must be in the caller's
 // brokerage (otherwise null -> 404, no number).
-export async function tapToCallStatus(brokerageId: number, partyId: number): Promise<TapToCallStatus | null> {
+export async function tapToCallStatus(
+  brokerageId: number,
+  partyId: number,
+  access: { fullContact: boolean; restrictToPropertyIds: number[] | null } = { fullContact: false, restrictToPropertyIds: [] },
+): Promise<TapToCallStatus | null> {
   const [party] = await db
     .select({ id: parties.id, mobile: parties.mobile })
     .from(parties)
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party) return null;
+  // Property visibility: a caller restricted to their own properties gets 404 for a
+  // contact whose every property link is on a property they cannot see.
+  if (access.restrictToPropertyIds !== null) {
+    const links = await db.select({ propertyId: propertyParties.propertyId }).from(propertyParties).where(eq(propertyParties.partyId, partyId));
+    if (links.length > 0 && !links.some((l) => access.restrictToPropertyIds!.includes(l.propertyId))) return null;
+  }
   const tel = telHrefFor(party.mobile);
-  if (!tel) return { available: false, reason: "NO_PHONE" };
-  return { available: true, reason: "AVAILABLE", telHref: tel };
+  if (!tel) return { available: false, reason: "NO_PHONE", masked: false, display: null, telHref: null };
+  if (!access.fullContact) return { available: false, reason: "MASKED", masked: true, display: maskedPhoneDisplay(party.mobile), telHref: null };
+  return { available: true, reason: "AVAILABLE", masked: false, display: party.mobile!.trim(), telHref: tel };
 }
 
 /** Optional post-call note. Never a recording, never a completion. */
