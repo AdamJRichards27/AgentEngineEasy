@@ -76,10 +76,20 @@ test("Owner, Landlord and Tenant link through the API; unknown roles stay 400", 
   assert.deepEqual(roles, ["Landlord", "Owner", "Tenant", "Tenant"]);
 });
 
+async function promotedConstraintsApplied(): Promise<boolean> {
+  const r = await pool.query("select count(*)::int as n from pg_indexes where schemaname = 'public' and tablename = 'property_parties' and indexdef ilike 'create unique index%'");
+  return Number(r.rows[0].n) >= 2;
+}
+
 test("proposed 0047 fails closed on duplicates, then enforces uniqueness; 0048 CHECK; all rolled back", async () => {
   const b = await brokerage("Mig");
   const p = await b.prop("1");
   const c = await b.party("Dup");
+  // testing/r1: 0048/0049 are promoted to real migrations here, so the proposal is already enforced on this DB.
+  if (await promotedConstraintsApplied()) {
+    await assert.rejects(db.insert(propertyParties).values([{ propertyId: p, partyId: c, role: "Buyer" }, { propertyId: p, partyId: c, role: "Buyer" }]), "promoted migration enforces it");
+    return;
+  }
   await db.insert(propertyParties).values([{ propertyId: p, partyId: c, role: "Buyer" }, { propertyId: p, partyId: c, role: "Buyer" }]);
 
   const client = await pool.connect();
@@ -224,6 +234,11 @@ test("t234u: proposed 0049 (one primary per property per role, Other exempt) fai
   const p = await b.prop("1");
   const c1 = await b.party("PrimA");
   const c2 = await b.party("PrimB");
+  // testing/r1: 0048/0049 are promoted to real migrations here, so the proposal is already enforced on this DB.
+  if (await promotedConstraintsApplied()) {
+    await assert.rejects(db.insert(propertyParties).values([{ propertyId: p, partyId: c1, role: "Owner", isPrimary: true }, { propertyId: p, partyId: c2, role: "Owner", isPrimary: true }]), "promoted migration enforces it");
+    return;
+  }
   await db.insert(propertyParties).values([
     { propertyId: p, partyId: c1, role: "Owner", isPrimary: true },
     { propertyId: p, partyId: c2, role: "Owner", isPrimary: true },

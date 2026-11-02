@@ -217,13 +217,13 @@ async function main() {
   } finally {
     closeSync(fd);
   }
-  console.log(JSON.stringify({ event: "synthetic_seed_complete", database: dbName, ...counts, credentialsFile: credPath, credentialsMode: "0600" }));
+  process.stdout.write(`${JSON.stringify({ event: "synthetic_seed_complete", database: dbName, ...counts, credentialsFile: credPath, credentialsMode: "0600" })}\n`);
   process.exit(0);
 }
 
 if (process.argv[1] && /seedTestingEnv\.(ts|js|mjs)$/.test(process.argv[1])) {
   main().catch((err) => {
-    console.error("seed-testing-env refused or failed:", err instanceof Error ? err.message : String(err));
+    process.stderr.write(`seed-testing-env refused or failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
 }

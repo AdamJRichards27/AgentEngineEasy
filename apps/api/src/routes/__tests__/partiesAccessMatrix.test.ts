@@ -81,7 +81,9 @@ const OPS: Record<string, (who: W, t: W) => Promise<number>> = {
 };
 const READS = new Set(["property->contacts", "contact->properties", "tap-to-call"]); // t242u: read-only can Call
 
-const RUN_ONLY_DENIED = new Set(["create+link", "link existing", "role", "primary", "unlink"]);
+// testing/r1 (#297 t246u): the matrix acts as the Brokerage Administrator, whose run.access now DERIVES
+// relationship management (legacy Run). Pit Crew/read-only denial is covered in partiesAccess.test.ts.
+const RUN_ONLY_DENIED = new Set<string>();
 for (const [persona, keys] of [["Run", ["run.access", "grow.relationships.manage"]], ["Run-only", ["run.access"]], ["Grow-only", GROW], ["unsubscribed", []], ["read-only", READ_ONLY]] as const) {
   test(`access matrix: ${persona}`, async () => {
     const w = await world(`M-${persona}`);
@@ -92,7 +94,7 @@ for (const [persona, keys] of [["Run", ["run.access", "grow.relationships.manage
     for (const op of Object.keys(OPS)) {
       if (persona === "unsubscribed") expected[op] = 403;
       else if (persona === "read-only") expected[op] = READS.has(op) ? 200 : 403;
-      else if (persona.startsWith("Run-only")) expected[op] = RUN_ONLY_DENIED.has(op) ? 403 : 200;
+      else if (persona.startsWith("Run-only") && RUN_ONLY_DENIED.has(op)) expected[op] = 403;
       else expected[op] = op === "create+link" || op === "link existing" ? 201 : op === "unlink" ? 204 : 200;
     }
     assert.deepEqual(got, expected);
