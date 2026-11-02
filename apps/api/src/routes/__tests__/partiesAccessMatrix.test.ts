@@ -5,7 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { eq } from "drizzle-orm";
-import { db, entitlementGrants, users, growActivities, growContactChannelConsents, growContactChannelSuppressions, growContactDncrStatuses, ENTITLEMENT_KEYS } from "@aee/db";
+import { db, parties as partiesTable, entitlementGrants, users, growActivities, growContactChannelConsents, growContactChannelSuppressions, growContactDncrStatuses, ENTITLEMENT_KEYS } from "@aee/db";
 import { and } from "drizzle-orm";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin } from "./testSupport.js";
@@ -227,4 +227,38 @@ test("t249u: visibility — Call is available exactly where the contact itself i
   const o = await call(x.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
   assert.equal(o.status, 404);
   assert.ok(!JSON.stringify(o.json).includes("0400"));
+});
+
+test("t253u: server applies the mobile usable-number rule — extension stripped from display and tel:, repeated-digit and bad-length numbers are NO_PHONE (never masked, never callable)", async () => {
+  const w = await world("TTCRule");
+  await setGrants(w.brokerageId, READ_ONLY);
+  const setMobile = (m: string) => db.update(partiesTable).set({ mobile: m }).where(eq(partiesTable.id, w.partyId));
+  await setMobile("0491 570 156 ext 12");
+  assert.deepEqual((await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).json, { available: true, reason: "AVAILABLE", masked: false, display: "0491 570 156", telHref: "tel:0491570156" });
+  for (const bad of ["0000000", "12345", "+1234567890123456", "n/a"]) {
+    await setMobile(bad);
+    assert.deepEqual((await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).json, { available: false, reason: "NO_PHONE", masked: false, display: null, telHref: null }, bad);
+  }
+  // Run-only caller on an unusable number: NO_PHONE too (nothing to mask, nothing leaked).
+  await setGrants(w.brokerageId, ["run.access"]);
+  assert.equal((await call(w.admin.cookie, "GET", `/parties/${w.partyId}/tap-to-call`)).json.reason, "NO_PHONE");
+});
+
+test("t253u: Run-only (no contact-read) — GET tap-to-call AND call-consent 201 are masked; read-only with contact-read keeps calling; DNC never blocks", async () => {
+  const w = await world("TTCRunOnly");
+  await setGrants(w.brokerageId, ["run.access"]);
+  for (const r of [
+    await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`),
+    await call(w.admin.cookie, "POST", `/parties/${w.partyId}/call-consent`, { confirmed: false, doNotCall: true }),
+  ]) {
+    assert.ok(r.status === 200 || r.status === 201, String(r.status));
+    assert.equal(r.json.masked, true);
+    assert.equal(r.json.telHref, null);
+    assert.equal(r.json.available, false);
+    assert.ok(!/0400\s?000|0400000111/.test(JSON.stringify(r.json)), "no full number in any field");
+  }
+  await setGrants(w.brokerageId, READ_ONLY);
+  const ro = await call(w.agent.cookie, "GET", `/parties/${w.partyId}/tap-to-call`);
+  assert.equal(ro.json.reason, "AVAILABLE", "DNC recorded above does not block; read-only with contact-read can call");
+  assert.equal(ro.json.telHref, "tel:0400000111");
 });

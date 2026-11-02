@@ -9,7 +9,6 @@
 import { and, eq } from "drizzle-orm";
 import {
   db,
-  propertyParties,
   growActivities,
   growContactChannelConsents,
   parties,
@@ -47,13 +46,31 @@ export interface CallConsentInput {
   doNotCall?: boolean;
 }
 
-/** tel: URI with only digits and a leading +; null when nothing dialable remains. */
+/**
+ * t253u: the SAME usable-number rule as the mobile client (apps/web/src/minimal/mobile/mobileCalling.ts
+ * usableNumber, read-only reference; kept in step by tapToCallUsableNumber.test.ts). Text from the first
+ * letter, # or * on is an extension or a note ("0491 570 156 ext 12") and is never dialled. A leading + is
+ * kept; every other symbol is dropped. 6 to 15 digits; not one digit repeated ("0000000").
+ * The tel: URI is NOT normalised to E.164: an Australian national number stays national ("tel:0491570156").
+ */
+export const USABLE_MIN_DIGITS = 6;
+export const USABLE_MAX_DIGITS = 15;
+export function usableNumber(raw: string | null | undefined): { display: string; dial: string } | null {
+  if (raw === null || raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  const cut = trimmed.search(/[A-Za-z#*]/);
+  const dialled = cut === -1 ? trimmed : trimmed.slice(0, cut);
+  const digits = dialled.replace(/\D/g, "");
+  if (digits.length < USABLE_MIN_DIGITS || digits.length > USABLE_MAX_DIGITS) return null;
+  if (/^(\d)\1+$/.test(digits)) return null;
+  return { display: dialled.trim().replace(/\s+/g, " "), dial: `${dialled.trim().startsWith("+") ? "+" : ""}${digits}` };
+}
+
+/** tel: URI for a usable number; null otherwise. */
 export function telHrefFor(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const t = raw.trim();
-  const digits = t.replace(/[^\d]/g, "");
-  if (digits.length < 6) return null;
-  return `tel:${t.startsWith("+") ? "+" : ""}${digits}`;
+  const u = usableNumber(raw);
+  return u ? `tel:${u.dial}` : null;
 }
 
 /** Records the creating agent's confirmation. No-op unless confirmed or a restriction is given. */
@@ -94,23 +111,19 @@ export async function recordCallConsentConfirmation(
 export async function tapToCallStatus(
   brokerageId: number,
   partyId: number,
-  access: { fullContact: boolean; restrictToPropertyIds: number[] | null } = { fullContact: false, restrictToPropertyIds: [] },
+  access: { fullContact: boolean },
 ): Promise<TapToCallStatus | null> {
   const [party] = await db
     .select({ id: parties.id, mobile: parties.mobile })
     .from(parties)
     .where(and(eq(parties.id, partyId), eq(parties.brokerageId, brokerageId)));
   if (!party) return null;
-  // Property visibility: a caller restricted to their own properties gets 404 for a
-  // contact whose every property link is on a property they cannot see.
-  if (access.restrictToPropertyIds !== null) {
-    const links = await db.select({ propertyId: propertyParties.propertyId }).from(propertyParties).where(eq(propertyParties.partyId, partyId));
-    if (links.length > 0 && !links.some((l) => access.restrictToPropertyIds!.includes(l.propertyId))) return null;
-  }
-  const tel = telHrefFor(party.mobile);
-  if (!tel) return { available: false, reason: "NO_PHONE", masked: false, display: null, telHref: null };
+  // t250u/t253u (Owner, FINAL): no own-property restriction — Call is available on every contact the caller may view.
+  const usable = usableNumber(party.mobile);
+  if (!usable) return { available: false, reason: "NO_PHONE", masked: false, display: null, telHref: null };
+  // Contact-read decides (same check as #296 list masking). Without it: masked display, never a number or tel:.
   if (!access.fullContact) return { available: false, reason: "MASKED", masked: true, display: maskedPhoneDisplay(party.mobile), telHref: null };
-  return { available: true, reason: "AVAILABLE", masked: false, display: party.mobile!.trim(), telHref: tel };
+  return { available: true, reason: "AVAILABLE", masked: false, display: usable.display, telHref: `tel:${usable.dial}` };
 }
 
 /** Optional post-call note. Never a recording, never a completion. */
