@@ -5,7 +5,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { and, eq, inArray } from "drizzle-orm";
-import { db, entitlementGrants, users, auditLogs, workflows, amlVerifications, ENTITLEMENT_KEYS, PROPERTY_PARTY_ROLES } from "@aee/db";
+import { db, entitlementGrants, users, auditLogs, workflows, amlVerifications, ENTITLEMENT_KEYS, PROPERTY_PARTY_ROLES, properties as propertiesTable, propertyParties as propertyPartiesTable } from "@aee/db";
+import { BY_CONTACT_LIMIT } from "../parties.js";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin } from "./testSupport.js";
 
@@ -367,4 +368,50 @@ test("t244u E: full contact details (email/mobile) require contact-read access; 
   const f = full.json.parties.find((r: any) => r.party.firstName === "Mia");
   assert.equal(f.party.email, "mia.synthetic@example.com");
   assert.equal(f.party.mobile, "+61400000123");
+});
+
+test("t253u: by-contact pagination — links capped at limit with truncated, total = caller-visible links only, legacy properties[] stays uncapped", async () => {
+  const b = await setup("Cap", ["run.access", ...GROW]);
+  assert.equal(BY_CONTACT_LIMIT, 100);
+  const [adminRow] = await db.select({ id: users.id }).from(users).where(eq(users.id, b.admin.user.id));
+  const extra = BY_CONTACT_LIMIT + 4; // + the setup link on adminProp = 105 admin-visible links
+  const props = await db
+    .insert(propertiesTable)
+    .values(Array.from({ length: extra }, (_, i) => ({ brokerageId: b.brokerageId, agentId: adminRow.id, formattedAddress: `${i + 10} Cap ${tag} St, Testville`, suburb: "Testville", state: "NSW", postcode: "2000" })))
+    .returning({ id: propertiesTable.id });
+  await db.insert(propertyPartiesTable).values(props.map((p) => ({ propertyId: p.id, partyId: b.partyId, role: "Owner" })));
+  // One link on the AGENT's own property: the only one the agent (own-property scope) can see.
+  assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: b.partyId, role: "Tenant" })).status, 201);
+  const all = await call(b.admin.cookie, "GET", `/parties/by-contact/${b.partyId}`);
+  assert.equal(all.status, 200);
+  assert.equal(all.json.limit, 100);
+  assert.equal(all.json.total, extra + 2);
+  assert.equal(all.json.truncated, true);
+  assert.equal(all.json.links.length, 100);
+  assert.equal(all.json.properties.length, extra + 2, "legacy flat array stays uncapped");
+  const agent = await call(b.agent.cookie, "GET", `/parties/by-contact/${b.partyId}`);
+  assert.equal(agent.status, 200);
+  assert.deepEqual([agent.json.total, agent.json.truncated, agent.json.links.length, agent.json.limit], [1, false, 1, 100], "hidden-property links are never counted");
+});
+
+test("t253u: duplicate-check stays brokerage-scoped and omits the matched contactId for callers without contact-read", async () => {
+  const b = await setup("DupRead", ["run.access", ...GROW]);
+  const email = `dupread-${tag}@example.com`;
+  const first = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Owner", firstName: "Ola", email, mobile: "0413 222 333" });
+  assert.equal(first.status, 201);
+  const full = await call(b.admin.cookie, "POST", "/parties/duplicate-check", { email, mobile: "0413222333" });
+  assert.deepEqual(full.json.warnings, [
+    { code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email", contactId: first.json.party.id },
+    { code: "POTENTIAL_DUPLICATE_CONTACT", kind: "phone", contactId: first.json.party.id },
+  ]);
+  await setGrants(b.brokerageId, ["run.access"]); // Run-only: may create, but sees masked contact PII
+  const runOnly = await call(b.admin.cookie, "POST", "/parties/duplicate-check", { email, mobile: "0413222333" });
+  assert.equal(runOnly.status, 200);
+  assert.deepEqual(runOnly.json.warnings, [
+    { code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email" },
+    { code: "POTENTIAL_DUPLICATE_CONTACT", kind: "phone" },
+  ]);
+  assert.ok(!JSON.stringify(runOnly.json).includes(String(first.json.party.id)) || String(first.json.party.id).length < 2, "no contact id");
+  const o = await setup("DupReadOther", ["run.access", ...GROW]);
+  assert.deepEqual((await call(o.admin.cookie, "POST", "/parties/duplicate-check", { email, mobile: "0413222333" })).json.warnings, [], "other brokerage never matches");
 });

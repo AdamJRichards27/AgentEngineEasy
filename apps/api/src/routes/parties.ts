@@ -417,7 +417,11 @@ partiesRouter.post("/duplicate-check", requireAuth, canManagePropertyContacts, a
     return;
   }
   const user = req.authedUser!;
-  res.json({ warnings: await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile) });
+  const warnings = await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile);
+  // t253u: matching stays brokerage-scoped. A caller without contact-read (e.g. Run-only, who sees masked
+  // contact PII under #296) learns only that a match exists (kind), never which contact it is.
+  const canRead = await callerCanReadContacts(user);
+  res.json({ warnings: canRead ? warnings : warnings.map(({ code, kind }) => ({ code, kind })) });
 });
 
 partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContacts, async (req, res) => {
@@ -556,7 +560,11 @@ partiesRouter.get("/by-contact/:partyId", requireAuth, canReadPropertyContacts, 
       createdAt: r.createdAt,
       property: { id: r.propertyId, formattedAddress: r.formattedAddress, suburb: r.suburb, state: r.state, postcode: r.postcode },
     })),
+    // t253u: reliable counts for the client. `total` counts ONLY links the caller may see
+    // (after the own-property filter); hidden-property links are never counted or revealed.
     truncated: visible.length > BY_CONTACT_LIMIT,
+    total: visible.length,
+    limit: BY_CONTACT_LIMIT,
   });
 });
 
