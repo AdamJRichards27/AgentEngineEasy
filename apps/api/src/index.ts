@@ -9,7 +9,7 @@ import { logger } from "@aee/events";
 import { createApp } from "./app.js";
 import { configureEvents } from "./lib/events.js";
 import { ensureCatalogueSeeded } from "./lib/billing/catalogue.js";
-import { ensureRunAccessBackfilled } from "./lib/billing/runAccessBackfill.js";
+import { maybeRunAccessBootBackfill, runAccessBootBackfillEnabled } from "./lib/billing/devLoginRunAccess.js";
 import { assertSessionSecretConfigured } from "./lib/session.js";
 import { assertCorsConfigured } from "./lib/cors.js";
 import { assertMetricsAuthConfigured } from "./lib/metricsAuth.js";
@@ -173,12 +173,19 @@ void runTrackedStartupTask("entitlement_catalogue_seed", () =>
 // key existed to gate anything. Fire-and-forget, non-blocking, same pattern as
 // ensureCatalogueSeeded above. See lib/billing/runAccessBackfill.ts's own module comment.
 // Readiness-tracked and alerted exactly like the catalogue seed above.
-void runTrackedStartupTask("run_access_backfill", () =>
-  ensureRunAccessBackfilled().catch((err) => {
-    logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) });
-    throw err;
-  }),
-);
+// t222u/t249u: this boot backfill is the main source of FREE run.access (it grants every brokerage
+// with no run.access row on every boot). SAFE BY DEFAULT: it runs only when
+// AE_RUN_ACCESS_BOOT_BACKFILL=true (see lib/billing/devLoginRunAccess.ts). Disabling it revokes nothing.
+if (runAccessBootBackfillEnabled()) {
+  void runTrackedStartupTask("run_access_backfill", () =>
+    maybeRunAccessBootBackfill().then(() => undefined).catch((err) => {
+      logger.error("boot_ensure_run_access_backfilled_failed", { error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }),
+  );
+} else {
+  logger.info("boot_run_access_backfill_disabled", { reason: "AE_RUN_ACCESS_BOOT_BACKFILL is not \"true\"" });
+}
 
 // Agent Engine 2.0 — Run Transaction Vertical Slice. Idempotent per-brokerage
 // install+activate sweep for the WAE Stage 2 workflow catalogue (see
