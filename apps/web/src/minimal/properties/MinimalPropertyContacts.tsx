@@ -34,12 +34,17 @@ export interface MinimalPropertyContactsProps {
   canCreateContact: boolean;
   /** t228u: edit role/primary and unlink (Grow contacts.manage or Run). */
   canManageLinks?: boolean;
+  /**
+   * Embedded in the mobile property screen, which already renders one Call action and one set of relationship controls per contact: suppress
+   * this panel's OWN Tap-to-Call and relationship controls so a phone never shows two. Default false: nothing changes on desktop.
+   */
+  suppressCallAndLinkControls?: boolean;
   canStartAppraisal: boolean;
   /** An appraisal already exists for this property (one per property). */
   existingAppraisalHref: string | null;
 }
 
-export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContact, canManageLinks = false, canStartAppraisal, existingAppraisalHref }: MinimalPropertyContactsProps) {
+export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContact, canManageLinks = false, suppressCallAndLinkControls = false, canStartAppraisal, existingAppraisalHref }: MinimalPropertyContactsProps) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [open, setOpen] = useState(false);
@@ -171,8 +176,8 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
               <div>
                 <Link href={l.contactHref} className="am-agenda-title">{l.name}</Link>
                 <div className="am-agenda-sub">{l.roleLabel}{l.isPrimary ? " · Primary" : ""}{l.detail ? ` · ${l.detail}` : ""}</div>
-                <TapToCall partyId={l.partyId} enabled canNote={canCreateContact} />
-                {canManageLinks ? (
+                {suppressCallAndLinkControls ? null : <TapToCall partyId={l.partyId} enabled canNote={canCreateContact} />}
+                {canManageLinks && !suppressCallAndLinkControls ? (
                   <PropertyLinkControls
                     linkId={l.linkId}
                     role={l.role}
