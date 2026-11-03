@@ -195,3 +195,28 @@ export const UNLINK_CONFIRM = "Remove this link? The contact and the property ar
 export function propertyLinkControlsEnabled(env: Record<string, unknown> | undefined = (import.meta as { env?: Record<string, unknown> }).env): boolean {
   return env?.VITE_PROPERTY_LINK_CONTROLS === "true";
 }
+
+/**
+ * t261u duplicate panel contract (DUPLICATE-PANEL-CONTRACT.md, agreed direction with Claude, review 9 section 5):
+ * - "Open existing contact": only when the server returned the matched contactId (the caller has contact-read);
+ * - "Create anyway": always (resubmits with confirmDuplicate);
+ * - "Use <name>": only for relationship managers (canManageRelationships) AND when the id is present;
+ * - never "Link existing"; with no id the text names no one and there is no link.
+ */
+export const DUPLICATE_SEEN_TEXT = "Possible duplicate: a contact with that email or phone already exists. Open the existing contact, or choose Create anyway if the detail is shared (household or business).";
+export const DUPLICATE_SEEN_MANAGER_TEXT = "Possible duplicate: a contact with that email or phone already exists. Use the existing contact, open it, or choose Create anyway if the detail is shared (household or business).";
+export const DUPLICATE_HIDDEN_TEXT = "Possible duplicate: a contact with that email or phone may already exist. Choose Create anyway if the detail is shared (household or business).";
+export interface DuplicatePanel {
+  text: string;
+  existingContactId: number | null;
+  openHref: string | null;
+  canUseExisting: boolean;
+  canCreateAnyway: true;
+}
+export function duplicatePanel(error: { status?: number; code?: string; contactId?: number } | null | undefined, canManageRelationships: boolean): DuplicatePanel | null {
+  if (!error || error.status !== 409) return null;
+  const id = typeof error.contactId === "number" && Number.isInteger(error.contactId) && error.contactId > 0 ? error.contactId : null;
+  if (error.code !== "POTENTIAL_DUPLICATE_CONTACT" && id === null) return null;
+  if (id === null) return { text: DUPLICATE_HIDDEN_TEXT, existingContactId: null, openHref: null, canUseExisting: false, canCreateAnyway: true };
+  return { text: canManageRelationships ? DUPLICATE_SEEN_MANAGER_TEXT : DUPLICATE_SEEN_TEXT, existingContactId: id, openHref: `/grow/contacts/${id}`, canUseExisting: canManageRelationships, canCreateAnyway: true };
+}

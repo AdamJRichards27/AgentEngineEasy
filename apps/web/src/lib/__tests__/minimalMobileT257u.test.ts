@@ -19,9 +19,4 @@ test("phone rule matches the 24 shared vectors except the recorded partial-mask 
   assert.deepEqual(diffs, PHONE_KNOWN_GAP);
 });
 
-test("container passes canManageRelationships from grow.relationships.manage; view hides the Link block when false", () => {
-  const c = read("../../minimal/mobile/MobilePropertyContacts.tsx");
-  assert.match(c, /canManageRelationships=\{entitlements\.includes\(GROW_RELATIONSHIPS_MANAGE\)\}/);
-  const v = read("../../minimal/mobile/MobilePropertyContactsView.tsx");
-  assert.match(v, /p\.canManageRelationships === false \? null : p\.legacyActions/);
-});
+// t261u (review 9 R6): the source-text check that was here is replaced by the behaviour test in minimalPropertyDuplicatePanel.test.ts.

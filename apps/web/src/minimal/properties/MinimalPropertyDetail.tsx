@@ -87,6 +87,7 @@ export default function MinimalPropertyDetail() {
                 canSearch={growAccess && hasEntitlement("grow.contacts.read")}
                 canCreateContact={growAccess && hasEntitlement("grow.contacts.manage")}
                 canManageLinks={propertyLinkControlsEnabled() && canManageRelationships(hasEntitlement, session.user?.role)}
+                canManageRelationships={canManageRelationships(hasEntitlement, session.user?.role)}
                 suppressCallAndLinkControls
                 canStartAppraisal={false}
                 existingAppraisalHref={null}
@@ -99,6 +100,7 @@ export default function MinimalPropertyDetail() {
               canSearch={growAccess && hasEntitlement("grow.contacts.read")}
               canCreateContact={growAccess && hasEntitlement("grow.contacts.manage")}
               canManageLinks={propertyLinkControlsEnabled() && canManageRelationships(hasEntitlement, session.user?.role)}
+              canManageRelationships={canManageRelationships(hasEntitlement, session.user?.role)}
               canStartAppraisal={growAccess && hasEntitlement("grow.opportunities.manage") && !pipeline.isLoading}
               existingAppraisalHref={model.appraisals[0]?.href ?? null}
             />
