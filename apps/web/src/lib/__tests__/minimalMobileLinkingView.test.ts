@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Link } from "wouter";
 import { LINKING_OFF, MobileContactView, type ContactLinkingProps, type MobileContactViewProps } from "../../minimal/mobile/MobileContactView";
+import { canManageRelationships } from "../relationshipPermission";
 import { MobileLinkPicker, type MobileLinkPickerProps, type PickerCreateProps } from "../../minimal/mobile/MobileLinkPicker";
 import { MobilePropertyContactsView, type MobilePropertyContactsViewProps, type PropertyAppraisalProps } from "../../minimal/mobile/MobilePropertyContactsView";
 import { buildMobileContactLayout } from "../../minimal/mobile/mobileContactLayout";
@@ -444,4 +445,35 @@ test("the container: the duplicate comes from the 409, the name is asked only wi
   assert.match(src, /confirmDuplicate: true/, "Create anyway resubmits with confirmation");
   assert.equal(/duplicateId|setDuplicateId|onEdit/.test(src), false, "C1's separate id state and Change details are gone");
   assert.equal(/Search for them and link the existing contact instead/.test(src), false, "the old dead-end sentence is gone");
+});
+
+// ── Who may manage relationships: the phone follows the SHARED rule ────────────────────────────────────────────────
+
+const OFF_FLAGS: LinkingFlags = { ...ON, contactLinkProperty: false, contactEditRole: false, contactUnlink: false, contactEditPrimary: false, contactCanonicalRead: false, propertyLinkContact: false, propertyEditRole: false, propertyUnlink: false, propertyEditPrimary: false };
+
+test("the shared rule: the key, or run.access for an Agent or Brokerage Administrator; Pit Crew, read-only and unsubscribed users may not", () => {
+  const has = (...keys: string[]) => (k: string) => keys.includes(k);
+  assert.equal(canManageRelationships(has("grow.relationships.manage"), "Agent"), true, "the explicit key");
+  assert.equal(canManageRelationships(has("run.access"), "Agent"), true, "Run Agent");
+  assert.equal(canManageRelationships(has("run.access"), "Brokerage Administrator"), true, "Run Administrator");
+  assert.equal(canManageRelationships(has("run.access"), "Pit Crew"), false, "Pit Crew");
+  assert.equal(canManageRelationships(has("run.access"), null), false, "role not loaded");
+  assert.equal(canManageRelationships(has("grow.access", "grow.contacts.read"), "Agent"), false, "read-only");
+  assert.equal(canManageRelationships(has(), "Agent"), false, "unsubscribed");
+});
+
+test("the legacy link/add block on the phone's property page follows canManageRelationships: hidden when false, shown when true, unchanged when not given", () => {
+  const legacy = "LEGACY-LINK-AND-ADD-BLOCK";
+  const view = (canManage?: boolean) => text(propertyView({ legacyActions: legacy as never, capabilities: linkingCapabilities(MANAGER, OFF_FLAGS), canManageRelationships: canManage }));
+  assert.doesNotMatch(view(false), /LEGACY-LINK-AND-ADD-BLOCK/, "a user without relationship-management is not offered Link a contact");
+  assert.match(view(true), /LEGACY-LINK-AND-ADD-BLOCK/);
+  assert.match(view(undefined), /LEGACY-LINK-AND-ADD-BLOCK/, "a caller that does not pass the prop sees no change");
+});
+
+test("the container derives the decision from the shared helper with the session role, and the raw-key rule is gone", () => {
+  const src = readFileSync(new URL("../../minimal/mobile/MobilePropertyContacts.tsx", import.meta.url), "utf8");
+  assert.match(src, /import \{ canManageRelationships \} from "\.\.\/\.\.\/lib\/relationshipPermission";/);
+  assert.match(src, /const canManageRel = canManageRelationships\(\(key\) => entitlements\.includes\(key\), user\?\.role\);/);
+  assert.equal(/entitlements\.includes\(GROW_RELATIONSHIPS_MANAGE\)/.test(src), false, "no raw key check");
+  assert.match(src, /canManageRelationships=\{canManageRel\}/, "the view receives the same decision that gates Use <name>");
 });

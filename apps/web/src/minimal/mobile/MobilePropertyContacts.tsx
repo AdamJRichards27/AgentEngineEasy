@@ -16,7 +16,7 @@ import { useCallReturn } from "./useCallReturn";
 import { changeRoleRequest, linkRequest, duplicateContactWarning, linkingCapabilities, linkingFailureText, roleChoices, setPrimaryRequest, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
 import { mobilePermissions } from "./mobilePermissions";
 import { useLinkPicker } from "./useLinkPicker";
-import { GROW_RELATIONSHIPS_MANAGE } from "./mobileLinkingConfig";
+import { canManageRelationships } from "../../lib/relationshipPermission";
 
 // AE Mobile (CC Task #64, M4 linking): the contacts on a property's page. The container.
 //
@@ -43,7 +43,9 @@ export interface MobilePropertyContactsProps {
 export default function MobilePropertyContacts({ propertyId, propertyLabel, canStartAppraisal, canCreateContact, existingAppraisalHref, legacyActions }: MobilePropertyContactsProps) {
   const { entitlements } = useEntitlements();
   const { user } = useSession();
-  const canManageRel = entitlements.includes(GROW_RELATIONSHIPS_MANAGE);
+  // The SHARED rule (lib/relationshipPermission.ts, the one desktop and the server follow): the explicit key, or run.access for an Agent or
+  // Brokerage Administrator; run.access alone (Pit Crew) is not enough. Not re-derived here.
+  const canManageRel = canManageRelationships((key) => entitlements.includes(key), user?.role);
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [panel, setPanel] = useState<PropertyLinkPanel | null>(null);
