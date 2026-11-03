@@ -1,6 +1,6 @@
 import { Link } from "wouter";
 import type { PickerRow } from "./useLinkPicker";
-import type { DuplicateContactWarning } from "./mobileLinking";
+import type { DuplicatePanel } from "../properties/minimalPropertyContactsModel";
 
 // AE Mobile (CC Task #64, M4 linking): choose an existing property or contact, say how they relate, and link them.
 // Presentational: no hooks, no network. The agent searches, taps one result (nothing is pre-selected), chooses the
@@ -16,14 +16,15 @@ export interface PickerCreateProps {
   creating: boolean;
   error: string | null;
   /**
-   * After a 409 duplicate. ONE warning with up to three actions, whatever the user may see:
-   *  - "Open existing contact": only when the server revealed the contact's id (it does so only to a caller with contact-read), so `existingHref` is set;
-   *  - "Use <name>" (link the existing contact): only when `onUseExisting` is given, i.e. the user may manage relationships AND the id is known;
+   * After a 409 duplicate: the decision of the SHARED `duplicatePanel()` (properties/minimalPropertyContactsModel.ts), the same function the
+   * preserved panel on desktop uses. This view only draws it; it decides nothing. Up to three actions, in this order:
+   *  - "Open existing contact": only when `duplicate.openHref` is set (the server revealed the id, i.e. the caller has contact-read);
+   *  - "Use <name>": only when `duplicate.canUseExisting` (id present AND the user may manage relationships) and `onUseExisting` is given;
    *  - "Create anyway": always.
-   * Without an id nothing about the existing contact is shown: no name, no id, no link.
+   * Never "Link existing". Without an id the text names no one and nothing links.
    */
-  duplicate?: DuplicateContactWarning | null;
-  /** The existing contact's name once known (only ever fetched when the id was revealed). */
+  duplicate?: DuplicatePanel | null;
+  /** The existing contact's name, fetched only when `duplicate.canUseExisting`. */
   duplicateName?: string | null;
   onUseExisting?: (() => void) | null;
   onCreateAnyway?: () => void;
@@ -134,19 +135,16 @@ export function MobileLinkPicker(p: MobileLinkPickerProps) {
             ) : null}
             {p.create.duplicate ? (
               <div className="mob-c-warning" role="alert" data-ae-duplicate-warning>
-                <p>
-                  {p.create.duplicate.existingContactId !== null && p.create.duplicateName ? `${p.create.duplicateName} is already a contact with that email or phone.` : p.create.duplicate.text}
-                  {p.create.duplicate.existingContactId !== null ? <span data-ae-existing-contact-id> Contact #{p.create.duplicate.existingContactId}.</span> : null}
-                </p>
+                <p>{p.create.duplicate.text}</p>
                 <div className="mob-c-form-actions">
-                  {p.create.duplicate.existingHref ? (
-                    <Link href={p.create.duplicate.existingHref} className="mob-c-button" data-ae-open-existing-contact>
+                  {p.create.duplicate.openHref ? (
+                    <Link href={p.create.duplicate.openHref} className="mob-c-button" data-ae-open-existing-contact>
                       Open existing contact
                     </Link>
                   ) : null}
-                  {p.create.onUseExisting && p.create.duplicate.existingContactId !== null ? (
+                  {p.create.duplicate.canUseExisting && p.create.duplicate.existingContactId !== null && p.create.onUseExisting ? (
                     <button type="button" className="mob-c-primary" data-ae-use-existing onClick={p.create.onUseExisting}>
-                      {p.create.duplicateName ? `Use ${p.create.duplicateName}` : "Use existing contact"}
+                      Use {p.create.duplicateName ?? "the existing contact"}
                     </button>
                   ) : null}
                   <button type="button" className="mob-c-button" data-ae-create-anyway disabled={p.create.creating} onClick={p.create.onCreateAnyway}>

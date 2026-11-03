@@ -13,10 +13,11 @@ import { MobilePropertyContactsView, type PropertyLinkPanel } from "./MobileProp
 import { callPlan, mayCallFromProperty, numbersOf } from "./mobileCalling";
 import { mobileLinkedContacts, type ContactCallState } from "./mobilePropertyContactRows";
 import { useCallReturn } from "./useCallReturn";
-import { changeRoleRequest, linkRequest, duplicateContactWarning, linkingCapabilities, linkingFailureText, roleChoices, setPrimaryRequest, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
+import { changeRoleRequest, linkRequest, linkingCapabilities, linkingFailureText, roleChoices, setPrimaryRequest, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
 import { mobilePermissions } from "./mobilePermissions";
 import { useLinkPicker } from "./useLinkPicker";
 import { canManageRelationships } from "../../lib/relationshipPermission";
+import { duplicatePanel, type DuplicatePanel } from "../properties/minimalPropertyContactsModel";
 
 // AE Mobile (CC Task #64, M4 linking): the contacts on a property's page. The container.
 //
@@ -57,7 +58,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
   const [createOpen, setCreateOpen] = useState(false);
   const [fields, setFields] = useState({ name: "", email: "", phone: "" });
   const [createError, setCreateError] = useState<string | null>(null);
-  const [duplicate, setDuplicate] = useState<ReturnType<typeof duplicateContactWarning>>(null);
+  const [duplicate, setDuplicate] = useState<DuplicatePanel | null>(null);
   const [created, setCreated] = useState<{ id: number; name: string } | null>(null);
 
   const linked = useQuery<{ parties: LinkedPartyRow[] }>({
@@ -105,7 +106,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
       setDuplicate(null);
     },
     onError: (err) => {
-      const dup = err instanceof ApiError ? duplicateContactWarning(err) : null;
+      const dup = err instanceof ApiError ? duplicatePanel(err, canManageRel) : null;
       if (dup) {
         setCreateError(null);
         setDuplicate(dup);
@@ -122,7 +123,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
   const existing = useQuery<GrowContact360>({
     queryKey: ["grow-contact", existingContactId],
     queryFn: () => apiFetch<GrowContact360>(`/grow/contacts/${existingContactId}`),
-    enabled: existingContactId !== null,
+    enabled: duplicate?.canUseExisting === true && existingContactId !== null,
     staleTime: 60_000,
     retry: false,
   });
@@ -224,9 +225,9 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
                     error: createError,
                     duplicate,
                     duplicateName: existingName,
-                    // "Use name" links the existing contact: only for a user who may manage relationships, and only when the server revealed the id.
+                    // "Use <name>" links the existing contact: the SHARED duplicatePanel() decides (relationship-management AND the revealed id).
                     onUseExisting:
-                      canManageRel && existingContactId !== null
+                      duplicate?.canUseExisting && existingContactId !== null
                         ? () => {
                             setCreated({ id: existingContactId, name: existingName ?? "Existing contact" });
                             setPickedId(existingContactId);

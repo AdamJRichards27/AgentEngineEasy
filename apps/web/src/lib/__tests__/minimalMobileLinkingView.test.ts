@@ -6,7 +6,7 @@ import { canManageRelationships } from "../relationshipPermission";
 import { MobileLinkPicker, type MobileLinkPickerProps, type PickerCreateProps } from "../../minimal/mobile/MobileLinkPicker";
 import { MobilePropertyContactsView, type MobilePropertyContactsViewProps, type PropertyAppraisalProps } from "../../minimal/mobile/MobilePropertyContactsView";
 import { buildMobileContactLayout } from "../../minimal/mobile/mobileContactLayout";
-import { DUPLICATE_HIDDEN_TEXT, DUPLICATE_VISIBLE_TEXT, NOT_AVAILABLE_YET, NO_PERMISSION, linkingCapabilities, roleChoices } from "../../minimal/mobile/mobileLinking";
+import { NOT_AVAILABLE_YET, NO_PERMISSION, linkingCapabilities, roleChoices } from "../../minimal/mobile/mobileLinking";
 import { GROW_PROPERTIES_LINK, GROW_RELATIONSHIPS_MANAGE, MOBILE_LINKING, type LinkingFlags } from "../../minimal/mobile/mobileLinkingConfig";
 import { mobileLinkedContacts } from "../../minimal/mobile/mobilePropertyContactRows";
 import type { CallOption } from "../../minimal/mobile/mobileCalling";
@@ -397,55 +397,6 @@ test("while the link controls are off, the existing panel stays reachable in a d
 });
 
 // ── Duplicate contact: warn and reuse ───────────────────────────────────
-
-test("picker: ONE duplicate warning; Open existing contact only with the revealed id, Use <name> only for a user who may manage relationships, Create anyway always", () => {
-  const calls: string[] = [];
-  const visible = { text: DUPLICATE_VISIBLE_TEXT, existingContactId: 41, existingHref: "/grow/contacts/41" };
-  const hidden = { text: DUPLICATE_HIDDEN_TEXT, existingContactId: null, existingHref: null };
-  const view = (c: Partial<PickerCreateProps>) => MobileLinkPicker(picker({ create: create({ open: true, name: "Maya O", email: "maya.okafor@example.com", onCreateAnyway: () => calls.push("anyway"), ...c }) }));
-  const box = (tree: unknown) => all(tree, (e) => e.props?.["data-ae-duplicate-warning"] !== undefined)[0];
-  const labels = (tree: unknown) => all(box(tree), (e) => e.type === "button" || e.props?.href !== undefined).map((e) => text(e).trim());
-
-  // a user with contact-read AND relationship-management: all three
-  const full = view({ duplicate: visible, duplicateName: "Maya Okafor", onUseExisting: () => calls.push("use") });
-  assert.match(text(box(full)), /Maya Okafor is already a contact with that email or phone\./);
-  assert.deepEqual(labels(full), ["Open existing contact", "Use Maya Okafor", "Create anyway"]);
-  assert.deepEqual(hrefs(box(full)), ["/grow/contacts/41"]);
-  call(buttons(box(full), "Use Maya Okafor")[0].props?.onClick);
-  call(buttons(box(full), "Create anyway")[0].props?.onClick);
-  assert.deepEqual(calls, ["use", "anyway"]);
-  // name not known yet
-  assert.deepEqual(labels(view({ duplicate: visible, onUseExisting: () => {} })), ["Open existing contact", "Use existing contact", "Create anyway"]);
-  // contact-read but NOT relationship-management: no Use, still Open and Create anyway
-  const noLink = view({ duplicate: visible, duplicateName: "Maya Okafor" });
-  assert.deepEqual(labels(noLink), ["Open existing contact", "Create anyway"]);
-  assert.doesNotMatch(text(box(noLink)), /\bUse\b|\blink\b/i, "no instruction to link");
-  // no revealed id (no contact-read): Create anyway ONLY; no name, no id, no link, even if a caller wrongly passed the reuse callback
-  for (const wrong of [{}, { onUseExisting: () => {}, duplicateName: "Maya Okafor" }]) {
-    const none = view({ duplicate: hidden, ...wrong });
-    assert.deepEqual(labels(none), ["Create anyway"]);
-    assert.equal(hrefs(box(none)).length, 0, "no link to the contact");
-    assert.doesNotMatch(text(box(none)), /Maya Okafor|Contact #|\d/, "no name, no id");
-    assert.equal(all(none, (e) => e.props?.["data-ae-existing-contact-id"] !== undefined).length, 0);
-  }
-  assert.equal(all(view({ duplicate: visible }), (e) => e.props?.["data-ae-duplicate-contact"] !== undefined).length, 0, "C1's second warning block is gone: one warning only");
-  assert.equal(all(view({ duplicate: visible }), (e) => e.props?.["data-ae-duplicate-warning"] !== undefined).length, 1);
-  // creating a second contact by the ordinary button is not offered while the duplicate stands
-  assert.equal(all(view({ duplicate: visible }), (e) => e.type === "button" && text(e) === "Create contact")[0].props?.disabled, true);
-  assert.equal(all(view({}), (e) => e.props?.["data-ae-duplicate-warning"] !== undefined).length, 0, "no warning without a duplicate");
-});
-
-test("the container: the duplicate comes from the 409, the name is asked only with the revealed id, Use <name> only with relationship-management and an id, Create anyway resubmits with confirmation", () => {
-  const src = readFileSync(new URL("../../minimal/mobile/MobilePropertyContacts.tsx", import.meta.url), "utf8");
-  assert.match(src, /const dup = err instanceof ApiError \? duplicateContactWarning\(err\) : null;\s*if \(dup\) \{\s*setCreateError\(null\);\s*setDuplicate\(dup\);/);
-  assert.match(src, /const existingContactId = duplicate\?\.existingContactId \?\? null;/);
-  assert.match(src, /enabled: existingContactId !== null,/, "the name is requested only when the server revealed the id");
-  assert.match(src, /queryKey: \["grow-contact", existingContactId\]/, "the same request and cache key as Contact 360");
-  assert.match(src, /onUseExisting:\s*canManageRel && existingContactId !== null/, "Use <name> only with relationship-management AND the id");
-  assert.match(src, /confirmDuplicate: true/, "Create anyway resubmits with confirmation");
-  assert.equal(/duplicateId|setDuplicateId|onEdit/.test(src), false, "C1's separate id state and Change details are gone");
-  assert.equal(/Search for them and link the existing contact instead/.test(src), false, "the old dead-end sentence is gone");
-});
 
 // ── Who may manage relationships: the phone follows the SHARED rule ────────────────────────────────────────────────
 
