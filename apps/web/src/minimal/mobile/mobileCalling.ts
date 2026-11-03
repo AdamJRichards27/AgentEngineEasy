@@ -38,6 +38,15 @@ const MIN_DIGITS = 6;
 const MAX_DIGITS = 15;
 
 /**
+ * True when the text is a number the server has MASKED because the user may not see it (#296 returns "***123", and a mask can be partial:
+ * "0491 570 ***", "04** *** 156", "XXXX XXX 156", "••• 123"). Mask characters, or a run of two or more X, mean "hidden": such text is never a
+ * telephone number, however many digits remain.
+ */
+export function isMaskedNumber(raw: string | null | undefined): boolean {
+  return typeof raw === "string" && /[*•●∗⁎·…]|[xX]{2,}/.test(raw);
+}
+
+/**
  * A number the dialler can use, or null. Text from the first letter on is an extension or a note ("0491 570 156 ext 12", "n/a") and is
  * never dialled. A leading + is kept; every other symbol is dropped. 6 to 15 digits; not one digit repeated ("0000000").
  */
@@ -45,6 +54,8 @@ export function usableNumber(raw: string | null | undefined): { display: string;
   if (raw === null || raw === undefined) return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
+  // A masked number is NEVER dialled, whatever digits survive the mask: "0491 570 ***" must not become tel:0491570.
+  if (isMaskedNumber(trimmed)) return null;
   const cut = trimmed.search(/[A-Za-z#*]/);
   const dialled = cut === -1 ? trimmed : trimmed.slice(0, cut);
   const digits = dialled.replace(/\D/g, "");

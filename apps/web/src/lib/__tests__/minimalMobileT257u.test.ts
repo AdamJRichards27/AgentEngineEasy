@@ -12,7 +12,7 @@ const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8"
 // Known phone-side gap on this base (#295 mobileCalling.ts, Claude's file, NOT edited here): the two partial masks
 // still give a link on the phone. The server rejects them. Claude's C4 is expected to close this; when it lands,
 // empty PHONE_KNOWN_GAP and this test then requires all 24.
-const PHONE_KNOWN_GAP = ["0491 570 ***", "0491 570 15•"];
+const PHONE_KNOWN_GAP: string[] = [];
 test("phone rule matches the 24 shared vectors except the recorded partial-mask gap", () => {
   assert.equal(VECTORS.length, 24);
   const diffs = VECTORS.filter((v) => { const u = usableNumber(v.input); return (u ? `tel:${u.dial}` : null) !== v.expected_telHref; }).map((v) => v.input);
