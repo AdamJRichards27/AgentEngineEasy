@@ -23,6 +23,7 @@ import {
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
 import { resolveTimeZone } from "../lib/commandCentre/timezone.js";
@@ -559,10 +560,16 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
   // contact and returns the warnings alongside it.
   const confirmDuplicate = (req.body as Record<string, unknown> | null)?.confirmDuplicate === true;
   const duplicateWarnings: { code: "POTENTIAL_DUPLICATE_CONTACT"; kind: ContactDuplicateKind; contactId?: number }[] = [];
+  // t256u: matching stays brokerage-scoped; the matched contact's id is returned only to a caller with
+  // contact-read (same rule as POST /parties/duplicate-check). Without it the caller learns that a match
+  // exists, never which contact, and can still create anyway (confirmDuplicate).
+  let canReadContacts: boolean | null = null;
   for (const [kind, value] of [["email", parsed.email], ["phone", parsed.mobile]] as const) {
     if (!value) continue;
-    const duplicate = await findDuplicateContact(user.brokerageId, kind, value, null);
-    if (!duplicate) continue;
+    const found = await findDuplicateContact(user.brokerageId, kind, value, null);
+    if (!found) continue;
+    if (canReadContacts === null) canReadContacts = await explainEntitlementDecision(user, "grow.contacts.read").then((d) => d.allowed).catch(() => false);
+    const duplicate = { contactId: canReadContacts ? found.contactId : null };
     if (!confirmDuplicate) {
       res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "POTENTIAL_DUPLICATE_CONTACT", kind, canConfirm: true });
       return;

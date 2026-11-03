@@ -13,7 +13,7 @@ import { MobilePropertyContactsView, type PropertyLinkPanel } from "./MobileProp
 import { callPlan, numbersOf } from "./mobileCalling";
 import { mobileLinkedContacts, type ContactCallState } from "./mobilePropertyContactRows";
 import { useCallReturn } from "./useCallReturn";
-import { changeRoleRequest, linkRequest, linkingCapabilities, linkingFailureText, roleChoices, setPrimaryRequest, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
+import { changeRoleRequest, linkRequest, duplicateContactWarning, linkingCapabilities, linkingFailureText, roleChoices, setPrimaryRequest, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
 import { mobilePermissions } from "./mobilePermissions";
 import { GROW_CONTACTS_READ } from "./mobilePeopleConfig";
 import { useLinkPicker } from "./useLinkPicker";
@@ -24,7 +24,7 @@ import { useLinkPicker } from "./useLinkPicker";
 //   - the list reads what the existing panel reads (GET /parties/by-property/:id), under its own cache key;
 //   - Start appraisal is the existing request (POST /grow/appraisals/from-contact), with the existing failure handling
 //     (one appraisal per property: an existing one is opened instead);
-//   - Add new contact is the existing request (POST /grow/contacts), with the existing duplicate answer (409: link the existing one);
+//   - Add new contact is the existing request (POST /grow/contacts), with the existing duplicate answer (409: "Open existing contact" only when the server returned its id, else none; "Create anyway" resubmits with confirmDuplicate);
 //   - link, change role and unlink are the canonical property_parties operations, OFF until the backend supports them in both directions.
 // Nothing is updated before the server accepts it. It is mounted by the wiring change only while the link controls are on; until
 // then the existing panel keeps serving phones.
@@ -54,6 +54,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
   const [createOpen, setCreateOpen] = useState(false);
   const [fields, setFields] = useState({ name: "", email: "", phone: "" });
   const [createError, setCreateError] = useState<string | null>(null);
+  const [duplicate, setDuplicate] = useState<ReturnType<typeof duplicateContactWarning>>(null);
   const [created, setCreated] = useState<{ id: number; name: string } | null>(null);
 
   const linked = useQuery<{ parties: LinkedPartyRow[] }>({
@@ -90,7 +91,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
       setAppraisalError(failure.text);
     },
   });
-  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string }>({
+  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string; confirmDuplicate?: boolean }>({
     mutationFn: (input) => apiFetch("/grow/contacts", { method: "POST", body: JSON.stringify(input) }),
     onSuccess: (result, input) => {
       setCreated({ id: result.contact.id, name: input.name });
@@ -98,12 +99,16 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
       setCreateOpen(false);
       setFields({ name: "", email: "", phone: "" });
       setCreateError(null);
+      setDuplicate(null);
     },
     onError: (err) => {
-      if (err instanceof ApiError && err.status === 409 && typeof err.contactId === "number") {
-        setCreateError("A contact with that email or phone already exists. Search for them and link the existing contact instead.");
+      const dup = err instanceof ApiError ? duplicateContactWarning(err) : null;
+      if (dup) {
+        setCreateError(null);
+        setDuplicate(dup);
         return;
       }
+      setDuplicate(null);
       setCreateError(apiErrorMessage(err, "Couldn't create the contact. Try again."));
     },
   });
@@ -116,6 +121,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
     setCreated(null);
     setCreateOpen(false);
     setCreateError(null);
+    setDuplicate(null);
     picker.reset();
   };
   const refresh = () => {
@@ -199,22 +205,34 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
                     phone: fields.phone,
                     creating: createContact.isPending,
                     error: createError,
+                    duplicate,
                     onOpen: () => {
                       setCreateOpen(true);
                       setCreateError(null);
+                      setDuplicate(null);
                     },
-                    onField: (field, value) => setFields((f) => ({ ...f, [field]: value })),
+                    onField: (field, value) => {
+                      setDuplicate(null);
+                      setFields((f) => ({ ...f, [field]: value }));
+                    },
                     onSubmit: () => {
                       const name = fields.name.trim();
                       if (!name) {
                         setCreateError("Enter a name for the new contact.");
                         return;
                       }
+                      setDuplicate(null);
                       createContact.mutate({ name, email: fields.email.trim(), phone: fields.phone.trim() });
+                    },
+                    onCreateAnyway: () => {
+                      const name = fields.name.trim();
+                      if (!name || !duplicate) return;
+                      createContact.mutate({ name, email: fields.email.trim(), phone: fields.phone.trim(), confirmDuplicate: true });
                     },
                     onCancel: () => {
                       setCreateOpen(false);
                       setCreateError(null);
+                      setDuplicate(null);
                     },
                   }
                 : null,

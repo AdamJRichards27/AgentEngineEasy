@@ -1,4 +1,6 @@
+import { Link } from "wouter";
 import type { PickerRow } from "./useLinkPicker";
+import type { DuplicateContactWarning } from "./mobileLinking";
 
 // AE Mobile (CC Task #64, M4 linking): choose an existing property or contact, say how they relate, and link them.
 // Presentational: no hooks, no network. The agent searches, taps one result (nothing is pre-selected), chooses the
@@ -13,6 +15,9 @@ export interface PickerCreateProps {
   phone: string;
   creating: boolean;
   error: string | null;
+  /** t256u: set after a 409 duplicate; offers "Open existing contact" (only with existingHref) and "Create anyway". */
+  duplicate?: DuplicateContactWarning | null;
+  onCreateAnyway?: () => void;
   onOpen: () => void;
   onField: (field: "name" | "email" | "phone", value: string) => void;
   onSubmit: () => void;
@@ -117,6 +122,24 @@ export function MobileLinkPicker(p: MobileLinkPickerProps) {
               <p className="mob-c-warning" role="alert">
                 {p.create.error}
               </p>
+            ) : null}
+            {p.create.duplicate ? (
+              <div className="mob-c-warning" role="alert" data-ae-duplicate-warning>
+                <p>
+                  {p.create.duplicate.text}
+                  {p.create.duplicate.existingContactId !== null ? <span data-ae-existing-contact-id> Contact #{p.create.duplicate.existingContactId}.</span> : null}
+                </p>
+                <div className="mob-c-form-actions">
+                  {p.create.duplicate.existingHref ? (
+                    <Link href={p.create.duplicate.existingHref} className="mob-c-button" data-ae-open-existing-contact>
+                      Open existing contact
+                    </Link>
+                  ) : null}
+                  <button type="button" className="mob-c-button" data-ae-create-anyway disabled={p.create.creating} onClick={p.create.onCreateAnyway}>
+                    Create anyway
+                  </button>
+                </div>
+              </div>
             ) : null}
             <div className="mob-c-form-actions">
               <button type="button" className="mob-c-primary" disabled={p.create.creating} onClick={p.create.onSubmit}>

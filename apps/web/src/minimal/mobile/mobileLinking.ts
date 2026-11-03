@@ -149,3 +149,22 @@ export function unlinkConfirmText(contactName: string, propertyLabel: string): s
 export function linkingFailureText(error: { status?: number } | null | undefined, fallback: string): string {
   return linkFailureText(error ?? null, fallback);
 }
+
+/** t256u: the "Add new contact" duplicate warning. Two actions only: "Open existing contact" (only when the server
+ *  returned the matched contactId, i.e. the caller has contact-read) and "Create anyway" (confirmDuplicate). There is
+ *  never a "Link existing" action here. Without a contactId no identity and no navigation is revealed. */
+export const DUPLICATE_VISIBLE_TEXT = "A contact with that email or phone already exists.";
+export const DUPLICATE_HIDDEN_TEXT = "A contact with that email or phone may already exist. You can still create this contact.";
+export interface DuplicateContactWarning {
+  text: string;
+  existingContactId: number | null;
+  existingHref: string | null;
+}
+export function duplicateContactWarning(error: { status?: number; code?: string; contactId?: number } | null | undefined): DuplicateContactWarning | null {
+  if (!error || error.status !== 409) return null;
+  const id = typeof error.contactId === "number" && Number.isInteger(error.contactId) && error.contactId > 0 ? error.contactId : null;
+  if (error.code !== "POTENTIAL_DUPLICATE_CONTACT" && id === null) return null;
+  return id === null
+    ? { text: DUPLICATE_HIDDEN_TEXT, existingContactId: null, existingHref: null }
+    : { text: DUPLICATE_VISIBLE_TEXT, existingContactId: id, existingHref: `/grow/contacts/${id}` };
+}
