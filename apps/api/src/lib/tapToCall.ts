@@ -55,10 +55,14 @@ export interface CallConsentInput {
  */
 export const USABLE_MIN_DIGITS = 6;
 export const USABLE_MAX_DIGITS = 15;
+export const MASK_CHARS = /[*\u2022\u25CF\u2217\u204E\u00B7\u2026]/;
 export function usableNumber(raw: string | null | undefined): { display: string; dial: string } | null {
   if (raw === null || raw === undefined) return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
+  // t257u (shared vectors, review 8 D9): any mask character, or a run of two or more X, anywhere means the
+  // stored value is masked or partial ("0491 570 ***", "0491 570 15•", "XXXX XXX 156"): never a call link.
+  if (MASK_CHARS.test(trimmed) || /[Xx]{2,}/.test(trimmed)) return null;
   const cut = trimmed.search(/[A-Za-z#*]/);
   const dialled = cut === -1 ? trimmed : trimmed.slice(0, cut);
   const digits = dialled.replace(/\D/g, "");
@@ -122,7 +126,7 @@ export async function tapToCallStatus(
   const usable = usableNumber(party.mobile);
   if (!usable) return { available: false, reason: "NO_PHONE", masked: false, display: null, telHref: null };
   // Contact-read decides (same check as #296 list masking). Without it: masked display, never a number or tel:.
-  if (!access.fullContact) return { available: false, reason: "MASKED", masked: true, display: maskedPhoneDisplay(party.mobile), telHref: null };
+  if (!access.fullContact) return { available: false, reason: "MASKED", masked: true, display: maskedPhoneDisplay(usable.dial) /* t257u D10: from the dialled part only, never the extension */, telHref: null };
   return { available: true, reason: "AVAILABLE", masked: false, display: usable.display, telHref: `tel:${usable.dial}` };
 }
 

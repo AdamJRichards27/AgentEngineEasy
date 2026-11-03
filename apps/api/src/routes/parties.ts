@@ -403,7 +403,9 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
 
   if (parsed.data.role === "Seller") await runSellerSideEffects(parsed.data.propertyId, party.id, user);
 
-  res.status(201).json({ party: partySummary(party), link, warnings, changed: changedBody(link.role, demoted) });
+  // t257u (review 8 D3): the create-new 201 follows the pre-flight rule: matched contactId only with contact-read.
+  const visibleWarnings = (await callerCanReadContacts(user)) ? warnings : warnings.map(({ code, kind }) => ({ code, kind }));
+  res.status(201).json({ party: partySummary(party), link, warnings: visibleWarnings, changed: changedBody(link.role, demoted) });
 });
 
 // t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
@@ -683,6 +685,7 @@ partiesRouter.get("/:partyId/tap-to-call", requireAuth, canReadPropertyContacts,
     await notePartyIsolationRejection(partyId, user.brokerageId);
     return void res.status(404).json({ error: "Contact not found" });
   }
+  res.set("Cache-Control", "no-store");
   res.json(status);
 });
 
@@ -703,6 +706,7 @@ partiesRouter.post("/:partyId/call-consent", requireAuth, canManagePropertyConta
   const id = await recordCallConsentConfirmation(db, { brokerageId: user.brokerageId, partyId, userId: user.id, ...parsed.data });
   if (id === null) return void res.status(400).json({ error: "Nothing to record", code: "CALL_CONSENT_EMPTY" });
   await logAudit({ userId: user.id, action: "call_consent_recorded", recordType: "party", recordId: String(partyId) });
+  res.set("Cache-Control", "no-store");
   res.status(201).json(await tapToCallStatus(user.brokerageId, partyId, { fullContact: await callerCanReadContacts(user) }));
 });
 

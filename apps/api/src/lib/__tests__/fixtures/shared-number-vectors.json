@@ -1,0 +1,125 @@
+{
+ "purpose": "Shared Tap-to-Call number vectors: the phone's usableNumber/telHref rule. The server's telHrefFor/usableNumber must return the same for every row. Rule: cut text from the first letter, # or *; reject any mask character (* • ● ∗ ⁎ · …) or a run of two or more X; keep a leading +; 6 to 15 digits; reject a single repeated digit.",
+ "vectors": [
+  {
+   "input": "0491 570 156",
+   "expected_telHref": "tel:0491570156",
+   "note": "ordinary national mobile"
+  },
+  {
+   "input": "+61 491 570 156",
+   "expected_telHref": "tel:+61491570156",
+   "note": "leading + kept"
+  },
+  {
+   "input": "(07) 5550 0123",
+   "expected_telHref": "tel:0755500123",
+   "note": "brackets and spaces dropped"
+  },
+  {
+   "input": "0491 570 156 ext 12",
+   "expected_telHref": "tel:0491570156",
+   "note": "extension cut at the first letter"
+  },
+  {
+   "input": "0491 570 156 x12",
+   "expected_telHref": "tel:0491570156",
+   "note": "extension cut"
+  },
+  {
+   "input": "07 5550 0123 #4",
+   "expected_telHref": "tel:0755500123",
+   "note": "# starts a note: cut"
+  },
+  {
+   "input": "+61 491 570 156#2",
+   "expected_telHref": "tel:+61491570156",
+   "note": "# cut, + kept"
+  },
+  {
+   "input": "12345",
+   "expected_telHref": null,
+   "note": "5 digits: too short"
+  },
+  {
+   "input": "n/a",
+   "expected_telHref": null,
+   "note": "no digits"
+  },
+  {
+   "input": "ext 12",
+   "expected_telHref": null,
+   "note": "nothing before the extension"
+  },
+  {
+   "input": "0000000",
+   "expected_telHref": null,
+   "note": "one repeated digit"
+  },
+  {
+   "input": "9999 9999",
+   "expected_telHref": null,
+   "note": "one repeated digit"
+  },
+  {
+   "input": "+61 1111 1111",
+   "expected_telHref": "tel:+6111111111",
+   "note": "not one repeated digit (61 then 1s)"
+  },
+  {
+   "input": "+123456789012345",
+   "expected_telHref": "tel:+123456789012345",
+   "note": "15 digits: allowed"
+  },
+  {
+   "input": "+1234567890123456",
+   "expected_telHref": null,
+   "note": "16 digits: too long"
+  },
+  {
+   "input": "***123",
+   "expected_telHref": null,
+   "note": "mask character"
+  },
+  {
+   "input": "0491 570 ***",
+   "expected_telHref": null,
+   "note": "PARTIAL MASK: 7 digits survive; must be rejected (Grok's proposed server rule returns tel:0491570)"
+  },
+  {
+   "input": "04** *** 156",
+   "expected_telHref": null,
+   "note": "mask character"
+  },
+  {
+   "input": "XXXX XXX 156",
+   "expected_telHref": null,
+   "note": "run of X"
+  },
+  {
+   "input": "••• 123",
+   "expected_telHref": null,
+   "note": "mask character"
+  },
+  {
+   "input": "0491 570 15•",
+   "expected_telHref": null,
+   "note": "PARTIAL MASK (Grok's proposed server rule returns tel:049157015)"
+  },
+  {
+   "input": "…156",
+   "expected_telHref": null,
+   "note": "mask character"
+  },
+  {
+   "input": "",
+   "expected_telHref": null,
+   "note": "empty"
+  },
+  {
+   "input": "   ",
+   "expected_telHref": null,
+   "note": "blank"
+  }
+ ]
+}
