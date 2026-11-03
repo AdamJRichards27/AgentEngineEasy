@@ -17,6 +17,7 @@ import { changeRoleRequest, linkRequest, duplicateContactWarning, linkingCapabil
 import { mobilePermissions } from "./mobilePermissions";
 import { GROW_CONTACTS_READ } from "./mobilePeopleConfig";
 import { useLinkPicker } from "./useLinkPicker";
+import { GROW_RELATIONSHIPS_MANAGE } from "./mobileLinkingConfig";
 
 // AE Mobile (CC Task #64, M4 linking): the contacts on a property's page. The container.
 //
@@ -155,6 +156,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
       loading={linked.isLoading}
       error={linked.isError ? { text: apiErrorMessage(linked.error, "Couldn't load the contacts."), onRetry: () => void linked.refetch() } : null}
       capabilities={linkingCapabilities(entitlements)}
+      canManageRelationships={entitlements.includes(GROW_RELATIONSHIPS_MANAGE)}
       panel={panel}
       submitting={write.isPending}
       opError={opError}

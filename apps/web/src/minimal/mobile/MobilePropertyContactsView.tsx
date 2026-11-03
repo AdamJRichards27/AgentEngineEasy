@@ -44,6 +44,8 @@ export interface MobilePropertyContactsViewProps {
   loading: boolean;
   error: { text: string; onRetry: () => void } | null;
   capabilities: LinkingCapabilities;
+  /** t257u (review 8 D6): false hides "Link a contact" (and the legacy link/add block) for a user without relationship-manage. */
+  canManageRelationships?: boolean;
   panel: PropertyLinkPanel | null;
   submitting: boolean;
   /** A failed link, role change or unlink, in plain words. */
@@ -212,7 +214,7 @@ export function MobilePropertyContactsView(p: MobilePropertyContactsViewProps) {
 
       {p.callOffer ? <CallReturnPrompt offer={p.callOffer} onDismiss={p.onDismissOffer} /> : null}
 
-      {p.legacyActions && !caps.propertyLinkContact.enabled ? (
+      {p.canManageRelationships === false ? null : p.legacyActions && !caps.propertyLinkContact.enabled ? (
         <details className="mob-c-legacy" data-ae-legacy-contact-actions>
           <summary className="mob-c-button mob-c-wide">Link or add a contact</summary>
           {p.legacyActions}
