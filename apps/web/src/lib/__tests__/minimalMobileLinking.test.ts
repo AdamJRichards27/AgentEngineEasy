@@ -126,14 +126,17 @@ test("no request names a brokerage, a user or a tenant, and there is no request 
   }
 });
 
-test("who sees Call beside a property's contacts: anyone who may read contacts (including a read-only agent) or has Run; nobody else; consent is not part of it", () => {
+test("who sees Call beside a property's contacts: only those who may READ CONTACTS (a read-only agent included); Run access alone is not enough; consent is not part of it", () => {
   assert.equal(mayCallFromProperty(["grow.access", "grow.contacts.read"]), true, "read-only agent with contact read");
   assert.equal(mayCallFromProperty(["grow.access", "grow.contacts.read", "grow.contacts.manage", "grow.activities.manage"]), true);
-  assert.equal(mayCallFromProperty(["run.access"]), true, "Run access");
+  assert.equal(mayCallFromProperty(["run.access", "grow.contacts.read"]), true, "Run with contact read (the Run bundle holds the key)");
+  assert.equal(mayCallFromProperty(["run.access"]), false, "Run access alone: a Run-only user sees masked numbers and is never offered a call");
   assert.equal(mayCallFromProperty(["grow.access"]), false, "Grow without contact read");
   assert.equal(mayCallFromProperty([]), false, "unsubscribed");
   for (const missing of [null, undefined]) assert.equal(mayCallFromProperty(missing), false, "fails closed while permissions load");
   assert.equal(mayCallFromProperty.length, 1, "takes entitlements only: no consent input");
+  const src = readFileSync(new URL("../../minimal/mobile/mobileCalling.ts", import.meta.url), "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(src, /minimalHasRunAccess|run\.access/, "no Run-access path to a call in the calling code");
 });
 
 test("the contact's property links are read from property_parties, defensively", () => {

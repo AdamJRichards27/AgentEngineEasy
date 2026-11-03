@@ -11,7 +11,6 @@
 //   - Logging a call is optional. Nothing is recorded or marked completed automatically.
 // The agent is responsible for complying with applicable consent, privacy, telemarketing and Do Not Call requirements.
 
-import { minimalHasRunAccess } from "../minimalNav";
 import { GROW_CONTACTS_READ } from "./mobilePeopleConfig";
 
 export interface PhoneNumber {
@@ -74,12 +73,13 @@ export function numbersOf(contact: { mobile?: string | null }): PhoneNumber[] {
 }
 
 /**
- * Who sees Call beside a property's linked contacts: an agent who may read contacts (`grow.contacts.read`, including a read-only agent) or
- * who has Run access. Display only: the server decides what a user may be shown. Contact 360 needs no rule here because the server only
- * returns the contact to someone who may read it. Consent is not part of it.
+ * Who sees Call beside a property's linked contacts: an agent who may READ CONTACTS (`grow.contacts.read`, a read-only agent included), and
+ * nobody else. Run access alone is not enough: a Run-only user is shown masked numbers and is never offered a call. Display only: the server
+ * masks the number for such a user and the phone never relies on that. Contact 360 needs no rule here because the server only returns the
+ * contact to someone who may read it. Consent is not part of it.
  */
 export function mayCallFromProperty(entitlements: readonly string[] | null | undefined): boolean {
-  return Array.isArray(entitlements) && (entitlements.includes(GROW_CONTACTS_READ) || minimalHasRunAccess(entitlements));
+  return Array.isArray(entitlements) && entitlements.includes(GROW_CONTACTS_READ);
 }
 
 /** One Call option for every usable number, in the order given; the same number held twice is one button. */
