@@ -16,6 +16,8 @@ import { LINK_ALREADY_EXISTS, LINK_FORBIDDEN, LINK_INVALID, LINK_NOT_FOUND, LINK
 
 const ALL_ON: LinkingFlags = { contactLinkProperty: true, contactEditRole: true, contactUnlink: true, contactEditPrimary: true, contactCanonicalRead: true, propertyLinkContact: true, propertyEditRole: true, propertyEditPrimary: true, propertyUnlink: true };
 const EXPANDED: LinkContract = { expandedRolesAccepted: true };
+// Tests that are about the contract pass it explicitly, so they hold whether or not the shipped constant (and the server) has the expanded roles yet.
+const NOT_EXPANDED: LinkContract = { expandedRolesAccepted: false };
 const MANAGER = [GROW_RELATIONSHIPS_MANAGE, GROW_PROPERTIES_LINK];
 const ok = (r: { ok: boolean }) => { assert.equal(r.ok, true, JSON.stringify(r)); return (r as { ok: true; request: { path: string; method: string; body?: Record<string, unknown> } }).request; };
 const bad = (r: { ok: boolean }) => { assert.equal(r.ok, false, JSON.stringify(r)); return (r as { ok: false; error: string }).error; };
@@ -81,7 +83,7 @@ test("link an existing contact, from a contact or a property: the same single re
 
 test("the approved roles are refused until the server validates them, then accepted", () => {
   for (const role of ROLES_APPROVED_PENDING) {
-    assert.equal(bad(linkRequest(77, 12, role, [])), LINK_ROLE_REQUIRED, role);
+    assert.equal(bad(linkRequest(77, 12, role, [], NOT_EXPANDED)), LINK_ROLE_REQUIRED, role);
     assert.deepEqual(ok(linkRequest(77, 12, role, [], EXPANDED)).body, { propertyId: 77, partyId: 12, role });
   }
 });
@@ -95,10 +97,10 @@ test("a repeat is stopped before the server has to: same contact, same property,
 });
 
 test("change a role: only the role is sent, from the offered list, and not to the role it already has", () => {
-  assert.deepEqual(ok(changeRoleRequest(31, "Buyer", "Seller")), { path: "/parties/link/31", method: "PATCH", body: { role: "Buyer" } });
+  assert.deepEqual(ok(changeRoleRequest(31, "Buyer", "Seller", NOT_EXPANDED)), { path: "/parties/link/31", method: "PATCH", body: { role: "Buyer" } });
   assert.equal(bad(changeRoleRequest(31, "Seller", "Seller")), SAME_ROLE);
   assert.equal(bad(changeRoleRequest(31, "", "Seller")), LINK_ROLE_REQUIRED);
-  assert.equal(bad(changeRoleRequest(31, "Tenant", "Seller")), LINK_ROLE_REQUIRED, "approved but not yet validated by the server");
+  assert.equal(bad(changeRoleRequest(31, "Tenant", "Seller", NOT_EXPANDED)), LINK_ROLE_REQUIRED, "approved but not yet validated by the server");
   assert.equal(ok(changeRoleRequest(31, "Tenant", "Seller", EXPANDED)).body?.role, "Tenant");
   assert.match(bad(changeRoleRequest(0, "Buyer", null)), /couldn’t be found/);
 });

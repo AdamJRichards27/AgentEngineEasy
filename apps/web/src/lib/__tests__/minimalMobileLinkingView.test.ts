@@ -125,7 +125,7 @@ test("edit role: a choice from the role list, saved through the form; the expand
   call(form.props?.onSubmit, { preventDefault: () => {} });
   assert.deepEqual([changed, saved], [["Landlord"], 1]);
   assert.equal(all(section, (e) => e.type === "input").length, 0, "no free-text role: property_parties holds a role from the list");
-  const asShipped = props(contactView(linking({ panel: { kind: "edit", relationshipId: 32 }, roleOptions: roleChoices() })));
+  const asShipped = props(contactView(linking({ panel: { kind: "edit", relationshipId: 32 }, roleOptions: roleChoices({ expandedRolesAccepted: false }) })));
   assert.equal(/Landlord/.test(text(asShipped)), false, "Owner, Landlord and Tenant are not offered ahead of the server");
 });
 
