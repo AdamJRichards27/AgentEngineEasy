@@ -104,9 +104,10 @@ test("linking: three canonical requests on property_parties, a change appears on
   }
   const containers = [code("MobileContact.tsx"), code("MobilePropertyContacts.tsx")];
   for (const c of containers) assert.match(c, /onSuccess: \(\) => \{\s*(closeLinkPanel|close)\(\);/, "the panel closes only on success");
-  assert.match(code("MobileContact.tsx"), /linkingCapabilities\(entitlements\)/);
-  assert.match(code("MobilePropertyContacts.tsx"), /linkingCapabilities\(entitlements\)/);
-  assert.doesNotMatch(containers.join("\n"), /linkingCapabilities\(entitlements,/, "the containers never pass their own flags");
+  assert.match(code("MobileContact.tsx"), /linkingCapabilities\(entitlements, undefined, user\?\.role\)/);
+  assert.match(code("MobilePropertyContacts.tsx"), /linkingCapabilities\(entitlements, undefined, user\?\.role\)/);
+  assert.doesNotMatch(containers.join("\n"), /linkingCapabilities\(entitlements, (?!undefined)/, "the containers never pass their own flags (flags stay the config's: undefined = the default)");
+  assert.doesNotMatch(containers.join("\n"), /linkingCapabilities\(entitlements\)/, "the role is always passed, so the shared relationship rule applies");
   assert.match(code("MobileContact.tsx"), /enabled: partyId !== null && MOBILE_LINKING\.contactCanonicalRead/, "the canonical read is not requested while its flag is off");
 });
 

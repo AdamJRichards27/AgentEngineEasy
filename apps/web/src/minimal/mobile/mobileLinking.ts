@@ -1,4 +1,5 @@
 import { GROW_PROPERTIES_LINK, GROW_RELATIONSHIPS_MANAGE, LINK_ROLE_LABELS, MOBILE_LINKING, MOBILE_LINK_CONTRACT, ROLES_ACCEPTED_NOW, ROLES_APPROVED_PENDING, type LinkContract, type LinkRole, type LinkingFlags } from "./mobileLinkingConfig";
+import { canManageRelationships } from "../../lib/relationshipPermission";
 import { LINK_ALREADY_EXISTS, LINK_ROLE_REQUIRED, linkFailureText } from "../properties/minimalPropertyContactsModel";
 
 // AE Mobile (CC Task #64, M4 linking): the link, change-role and unlink requests the phone may send, and when each control may be
@@ -40,15 +41,21 @@ const NEEDS: Record<LinkingAction, readonly string[]> = {
   propertyUnlink: [GROW_RELATIONSHIPS_MANAGE],
 };
 
-/** Off unless the backend is ready (flag) AND the user holds the keys. Fails closed on a missing entitlement list. */
-export function linkingCapabilities(entitlements: readonly string[] | null | undefined, flags: LinkingFlags = MOBILE_LINKING): LinkingCapabilities {
+/**
+ * Off unless the backend is ready (flag) AND the user may do it. Fails closed on a missing entitlement list.
+ * "May manage relationships" is the SHARED rule (lib/relationshipPermission.ts: the key, or run.access for an Agent or Brokerage Administrator;
+ * run.access alone, such as Pit Crew, is not enough), the same rule the server enforces on the canonical routes: it is not re-derived from a raw
+ * key. Any OTHER key an action needs (grow.properties.link for contactLinkProperty) is still required as before.
+ */
+export function linkingCapabilities(entitlements: readonly string[] | null | undefined, flags: LinkingFlags = MOBILE_LINKING, role?: string | null): LinkingCapabilities {
   const out = {} as LinkingCapabilities;
+  const has = (key: string) => Array.isArray(entitlements) && entitlements.includes(key);
   for (const action of Object.keys(NEEDS) as LinkingAction[]) {
     if (!flags[action]) {
       out[action] = { enabled: false, reason: NOT_AVAILABLE_YET };
       continue;
     }
-    const held = Array.isArray(entitlements) && NEEDS[action].every((key) => entitlements.includes(key));
+    const held = Array.isArray(entitlements) && NEEDS[action].every((key) => (key === GROW_RELATIONSHIPS_MANAGE ? canManageRelationships(has, role) : has(key)));
     out[action] = held ? { enabled: true, reason: null } : { enabled: false, reason: NO_PERMISSION };
   }
   return out;

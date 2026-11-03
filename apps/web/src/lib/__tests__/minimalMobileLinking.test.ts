@@ -8,7 +8,7 @@ import {
 import { mayCallFromProperty } from "../../minimal/mobile/mobileCalling";
 import {
   CHOOSE_CONTACT, CHOOSE_PROPERTY, NOT_AVAILABLE_YET, NO_PERMISSION, SAME_ROLE,
-  canonicalContactLinksPath, changeRoleRequest, linkRequest, linkRoleLabel, setPrimaryRequest, linkingCapabilities, linkingFailureText, parseContactLinks, roleChoices, unlinkConfirmText, unlinkRequest, type KnownLink,
+  canonicalContactLinksPath, changeRoleRequest, linkRequest, linkRoleLabel, setPrimaryRequest, linkingCapabilities, linkingFailureText, parseContactLinks, roleChoices, unlinkConfirmText, unlinkRequest, type KnownLink, type LinkingAction,
 } from "../../minimal/mobile/mobileLinking";
 import { LINK_ALREADY_EXISTS, LINK_FORBIDDEN, LINK_INVALID, LINK_NOT_FOUND, LINK_ROLE_REQUIRED } from "../../minimal/properties/minimalPropertyContactsModel";
 
@@ -189,4 +189,36 @@ test("drift: no control can be switched on before the server routes, permissions
     assert.ok(hasEntitlement, "the /parties routes must check an entitlement (today any signed-in brokerage user can use them)");
   }
   // With every flag off there is nothing to assert about the server: it may already support all of it. The flags move only in a reviewed change.
+});
+
+// ── Relationship-management in the capability table is the SHARED rule ───────────────────────────────────────────────
+
+test("capabilities follow the shared rule: the key, or run.access for an Agent or Brokerage Administrator; Pit Crew, read-only, unsubscribed and an unloaded role do not", () => {
+  const REL: LinkingAction[] = ["contactEditRole", "contactUnlink", "contactEditPrimary", "propertyLinkContact", "propertyEditRole", "propertyEditPrimary", "propertyUnlink"];
+  const on = (ents: string[] | null, role?: string | null) => linkingCapabilities(ents, ALL_ON, role);
+  const allEnabled = (caps: ReturnType<typeof linkingCapabilities>, actions: LinkingAction[]) => actions.every((a) => caps[a].enabled);
+  const noneEnabled = (caps: ReturnType<typeof linkingCapabilities>, actions: LinkingAction[]) => actions.every((a) => !caps[a].enabled && caps[a].reason === NO_PERMISSION);
+  assert.equal(allEnabled(on([GROW_RELATIONSHIPS_MANAGE]), REL), true, "the explicit key, whatever the role");
+  assert.equal(allEnabled(on(["run.access"], "Agent"), REL), true, "Run Agent: the server allows it");
+  assert.equal(allEnabled(on(["run.access"], "Brokerage Administrator"), REL), true, "Run Administrator");
+  assert.equal(noneEnabled(on(["run.access"], "Pit Crew"), REL), true, "Pit Crew: run.access alone is not enough");
+  assert.equal(noneEnabled(on(["run.access"], null), REL), true, "role not loaded: closed");
+  assert.equal(noneEnabled(on(["run.access"]), REL), true, "no role given: closed");
+  assert.equal(noneEnabled(on(["grow.access", "grow.contacts.read"], "Agent"), REL), true, "read-only");
+  assert.equal(noneEnabled(on([], "Agent"), REL), true, "unsubscribed");
+  assert.equal(noneEnabled(on(null, "Agent"), REL), true, "no entitlement list: closed");
+  // contactLinkProperty also needs grow.properties.link, a separate and deliberate UI requirement that is unchanged here
+  assert.equal(on(["run.access"], "Agent").contactLinkProperty.enabled, false, "Run Agent without grow.properties.link");
+  assert.equal(on(["run.access", GROW_PROPERTIES_LINK], "Agent").contactLinkProperty.enabled, true);
+  assert.equal(on([GROW_RELATIONSHIPS_MANAGE, GROW_PROPERTIES_LINK]).contactLinkProperty.enabled, true);
+  // a flag that is OFF stays off whatever the user may do
+  assert.equal(linkingCapabilities([GROW_RELATIONSHIPS_MANAGE, GROW_PROPERTIES_LINK], { ...ALL_ON, contactUnlink: false }, "Agent").contactUnlink.reason, NOT_AVAILABLE_YET);
+});
+
+test("both production callers pass the session role to the capability table", () => {
+  for (const file of ["MobileContact.tsx", "MobilePropertyContacts.tsx"]) {
+    const src = readFileSync(new URL(`../../minimal/mobile/${file}`, import.meta.url), "utf8");
+    assert.match(src, /linkingCapabilities\(entitlements, undefined, user\?\.role\)/, file);
+    assert.equal(/linkingCapabilities\(entitlements\)/.test(src), false, `${file}: no call without the role`);
+  }
 });

@@ -170,7 +170,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
       contacts={contacts}
       loading={linked.isLoading}
       error={linked.isError ? { text: apiErrorMessage(linked.error, "Couldn't load the contacts."), onRetry: () => void linked.refetch() } : null}
-      capabilities={linkingCapabilities(entitlements)}
+      capabilities={linkingCapabilities(entitlements, undefined, user?.role)}
       canManageRelationships={canManageRel}
       panel={panel}
       submitting={write.isPending}

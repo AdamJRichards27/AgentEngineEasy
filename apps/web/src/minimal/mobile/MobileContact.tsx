@@ -172,7 +172,7 @@ export default function MobileContact() {
       }}
       onDismissOffer={callReturn.dismiss}
       linking={{
-        capabilities: linkingCapabilities(entitlements),
+        capabilities: linkingCapabilities(entitlements, undefined, user?.role),
         panel,
         error: linkError,
         submitting: write.isPending,
