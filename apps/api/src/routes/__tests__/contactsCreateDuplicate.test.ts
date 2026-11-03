@@ -110,3 +110,40 @@ test("t256u: duplicate match stays brokerage-scoped; no-dup create unaffected; n
   await setGrants(o.brokerageId, WITHOUT("grow.contacts.manage"));
   assert.equal((await call(o.admin.cookie, "POST", "/grow/contacts", { name: "B Two", email: `x-${email}` })).status, 403);
 });
+
+// t261u (review 9 R4): PATCH /grow/contacts/:id duplicate 409 follows the same rule as create.
+for (const c of CASES) {
+  test(`t261u: edit duplicate (${c.label}) — 409 contactId ${c.visible ? "returned" : "omitted"}; brokerage-scoped`, async () => {
+    const b = await createBrokerageWithUsers(base, `${tag} edit ${c.label}`);
+    ids.push(b.brokerageId);
+    await setGrants(b.brokerageId, GROW);
+    const email = `edit-${c.label}-${tag}@example.com`;
+    const a = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Edit Target", email, phone: "0413777888" });
+    const other = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Edit Other", email: `other-${email}` });
+    assert.equal(a.status, 201);
+    assert.equal(other.status, 201);
+    const targetId = a.json.contact.id as number;
+    await setGrants(b.brokerageId, c.keys);
+    for (const body of [{ email: email.toUpperCase() }, { mobile: "0413 777 888" }]) {
+      const r = await call(b.admin.cookie, "PATCH", `/grow/contacts/${other.json.contact.id}`, body);
+      assert.equal(r.status, 409, `${JSON.stringify(body)} ${JSON.stringify(r.json)}`);
+      if (c.visible) assert.equal(r.json.contactId, targetId);
+      else {
+        assert.equal("contactId" in r.json, false, "no identity without contact-read");
+        assert.equal(JSON.stringify(r.json).includes(String(targetId)), false);
+      }
+    }
+  });
+}
+
+test("t261u: edit duplicate never matches another brokerage's contact", async () => {
+  const a = await createBrokerageWithUsers(base, `${tag} editA`);
+  const o = await createBrokerageWithUsers(base, `${tag} editB`);
+  ids.push(a.brokerageId, o.brokerageId);
+  await setGrants(a.brokerageId, GROW);
+  await setGrants(o.brokerageId, GROW);
+  const email = `editscope-${tag}@example.com`;
+  assert.equal((await call(a.admin.cookie, "POST", "/grow/contacts", { name: "A Edit", email })).status, 201);
+  const mine = await call(o.admin.cookie, "POST", "/grow/contacts", { name: "B Edit", email: `b-${email}` });
+  assert.equal((await call(o.admin.cookie, "PATCH", `/grow/contacts/${mine.json.contact.id}`, { email })).status, 200);
+});

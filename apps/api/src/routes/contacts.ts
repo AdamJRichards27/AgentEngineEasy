@@ -282,6 +282,13 @@ function contactIdentityPayload(party: typeof parties.$inferSelect) {
 
 type ContactDuplicateKind = "email" | "phone";
 
+/** t261u (review 9 R4): the matched contact's id is shown only to a caller holding contact-read (exact grant), on every duplicate path. */
+async function duplicateIdForCaller(user: Parameters<typeof explainEntitlementDecision>[0], contactId: number | null): Promise<number | null> {
+  if (contactId === null) return null;
+  const canRead = await explainEntitlementDecision(user, "grow.contacts.read").then((d) => d.allowed).catch(() => false);
+  return canRead ? contactId : null;
+}
+
 export function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
   const error =
     kind === "email"
@@ -679,7 +686,7 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
   if (emailKeyChanged && next.email) {
     const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", next.email, party.id);
     if (emailDuplicate) {
-      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
+      res.status(409).json(duplicateContactBody("email", await duplicateIdForCaller(user, emailDuplicate.contactId)));
       return;
     }
   }
@@ -688,7 +695,7 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
   if (phoneKeyChanged && next.mobile) {
     const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", next.mobile, party.id);
     if (phoneDuplicate) {
-      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
+      res.status(409).json(duplicateContactBody("phone", await duplicateIdForCaller(user, phoneDuplicate.contactId)));
       return;
     }
   }
