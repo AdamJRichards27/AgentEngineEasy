@@ -217,7 +217,7 @@ function propertyView(o: Partial<MobilePropertyContactsViewProps> = {}) {
 
 test("a property lists every linked contact with their role, and opens each in one tap", () => {
   const tree = propertyView();
-  for (const re of [/Maya Okafor/, /Seller/, /Power of attorney/, /0491 570 156/]) assert.match(text(tree), re);
+  for (const re of [/Maya Okafor/, /Seller \/ owner/, /Power of attorney/, /0491 570 156/]) assert.match(text(tree), re);
   assert.deepEqual(hrefs(tree).filter((h) => h.startsWith("/grow/contacts")), ["/grow/contacts/12", "/grow/contacts/13"]);
   assert.match(text(propertyView({ contacts: [] })), /No contact linked yet\. Link a contact to start an appraisal\./);
 });
