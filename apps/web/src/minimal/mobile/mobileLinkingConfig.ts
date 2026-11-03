@@ -64,7 +64,7 @@ export interface LinkContract {
   /** True only when the server's role list includes Owner, Landlord and Tenant. A test compares this with the real server files. */
   expandedRolesAccepted: boolean;
 }
-export const MOBILE_LINK_CONTRACT: LinkContract = { expandedRolesAccepted: false };
+export const MOBILE_LINK_CONTRACT: LinkContract = { expandedRolesAccepted: true };
 
 export const LINK_ROLE_LABELS: Readonly<Record<LinkRole, string>> = {
   Seller: "Seller",

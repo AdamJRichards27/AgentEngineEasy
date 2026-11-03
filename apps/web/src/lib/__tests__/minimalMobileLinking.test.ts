@@ -171,9 +171,7 @@ test("drift: the existing routes, entitlement keys and role list are the real se
   assert.ok(keys.includes(GROW_PROPERTIES_LINK));
   const serverRoles = [...(/export const PROPERTY_PARTY_ROLES = \[([\s\S]*?)\] as const/.exec(schema)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   const serverHasExpanded = ROLES_APPROVED_PENDING.every((r) => serverRoles.includes(r));
-  // One direction only: the phone may be more cautious than the server, never less. A server that already accepts Owner, Landlord and Tenant
-  // is fine with the phone not offering them yet; a phone that offers them while the server refuses them is a bug.
-  if (MOBILE_LINK_CONTRACT.expandedRolesAccepted) assert.ok(serverHasExpanded, "the phone offers Owner, Landlord and Tenant, so the server's role list must contain them");
+  assert.equal(serverHasExpanded, MOBILE_LINK_CONTRACT.expandedRolesAccepted, "the phone offers Owner, Landlord and Tenant exactly when the server's role list contains them");
   assert.deepEqual(serverRoles.filter((r) => (ROLES_ACCEPTED_NOW as readonly string[]).includes(r)), [...ROLES_ACCEPTED_NOW]);
 });
 
