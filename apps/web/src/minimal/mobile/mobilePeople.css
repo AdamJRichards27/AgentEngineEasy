@@ -482,3 +482,8 @@
 .ae-minimal .mob-c-manage > .mob-c-pad {
   padding: 10px 0 0 0;
 }
+
+/* Duplicate contact: warn and offer to reuse the existing one. */
+.ae-minimal .mob-c-duplicate {
+  border-color: var(--am-orange-strong, #C44F17);
+}

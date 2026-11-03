@@ -5,11 +5,12 @@ import { LINKING_OFF, MobileContactView, type ContactLinkingProps, type MobileCo
 import { MobileLinkPicker, type MobileLinkPickerProps, type PickerCreateProps } from "../../minimal/mobile/MobileLinkPicker";
 import { MobilePropertyContactsView, type MobilePropertyContactsViewProps, type PropertyAppraisalProps } from "../../minimal/mobile/MobilePropertyContactsView";
 import { buildMobileContactLayout } from "../../minimal/mobile/mobileContactLayout";
-import { NOT_AVAILABLE_YET, NO_PERMISSION, linkingCapabilities, roleChoices } from "../../minimal/mobile/mobileLinking";
+import { DUPLICATE_HIDDEN_TEXT, DUPLICATE_VISIBLE_TEXT, NOT_AVAILABLE_YET, NO_PERMISSION, linkingCapabilities, roleChoices } from "../../minimal/mobile/mobileLinking";
 import { GROW_PROPERTIES_LINK, GROW_RELATIONSHIPS_MANAGE, MOBILE_LINKING, type LinkingFlags } from "../../minimal/mobile/mobileLinkingConfig";
 import { mobileLinkedContacts } from "../../minimal/mobile/mobilePropertyContactRows";
 import type { CallOption } from "../../minimal/mobile/mobileCalling";
 import type { GrowContact360 } from "../growContact360";
+import { readFileSync } from "node:fs";
 import { all, hrefs, links, text } from "./mobileTreeHelpers";
 
 // AE Mobile (CC Task #64, M4 linking): the link controls on Contact 360 and on a property, as drawn.
@@ -53,7 +54,8 @@ const call = (fn: unknown, ...a: unknown[]) => (fn as (...x: unknown[]) => void)
 test("Contact 360 lists each canonical link with its role in plain words, and opens the property in one tap", () => {
   const section = props(contactView(LINKING_OFF));
   assert.match(text(section), /7 Jacaranda Street/);
-  assert.match(text(section), /Seller \/ owner · Primary/);
+  assert.match(text(section), /Seller · Primary/);
+  assert.doesNotMatch(text(section), /Seller \/ owner/, "the approved label is Seller");
   assert.match(text(section), /Tenant/);
   assert.deepEqual(hrefs(section), ["/grow/properties/77", "/grow/properties/78"]);
   assert.deepEqual(links(section).map((l) => l.props?.["aria-label"]), ["Open 7 Jacaranda Street", "Open 22 Banksia Avenue"]);
@@ -184,13 +186,13 @@ test("picker: Add new contact is the existing panel's own function: closed, a Na
   assert.equal(opened, 1);
   const fields: string[] = [];
   let submitted = 0;
-  const open = MobileLinkPicker(picker({ create: create({ open: true, name: "Zed", email: "z@example.com", phone: "0400", error: "A contact with that email or phone already exists. Search for them and link the existing contact instead.", onField: (f, v) => fields.push(`${f}=${v}`), onSubmit: () => { submitted++; } }) }));
+  const open = MobileLinkPicker(picker({ create: create({ open: true, name: "Zed", email: "z@example.com", phone: "0400", error: "Couldn't create the contact. Try again.", onField: (f, v) => fields.push(`${f}=${v}`), onSubmit: () => { submitted++; } }) }));
   assert.deepEqual(all(open, (e) => e.type === "input" && e.props?.type !== "search").map((e) => e.props?.["aria-label"]), ["Name", "Email", "Phone"]);
   for (const input of all(open, (e) => e.type === "input" && e.props?.type !== "search")) call(input.props?.onChange, { target: { value: "x" } });
   assert.deepEqual(fields, ["name=x", "email=x", "phone=x"]);
   call(buttons(open, "Create contact")[0].props?.onClick);
   assert.equal(submitted, 1);
-  assert.match(text(open), /already exists\. Search for them and link the existing contact instead\./);
+  assert.match(text(open), /Couldn't create the contact\. Try again\./);
   assert.equal(all(MobileLinkPicker(picker({ create: create({ open: true, creating: true }) })), (e) => e.type === "button" && /Creating/.test(text(e)))[0].props?.disabled, true);
   const withCreated = MobileLinkPicker(picker({ createdRow: { id: 55, title: "Zed Zane", subtitle: "New contact" }, rows: [{ id: 1, title: "A", subtitle: "" }], selectedId: 55, choice: "Buyer" }));
   assert.deepEqual(all(withCreated, (e) => e.props?.role === "option").map((o) => text(o).slice(0, 8)), ["Zed Zane", "A"]);
@@ -217,7 +219,8 @@ function propertyView(o: Partial<MobilePropertyContactsViewProps> = {}) {
 
 test("a property lists every linked contact with their role, and opens each in one tap", () => {
   const tree = propertyView();
-  for (const re of [/Maya Okafor/, /Seller \/ owner/, /Power of attorney/, /0491 570 156/]) assert.match(text(tree), re);
+  for (const re of [/Maya Okafor/, /Seller/, /Power of attorney/, /0491 570 156/]) assert.match(text(tree), re);
+  assert.doesNotMatch(text(tree), /Seller \/ owner/, "the approved label is Seller, whatever the desktop model says");
   assert.deepEqual(hrefs(tree).filter((h) => h.startsWith("/grow/contacts")), ["/grow/contacts/12", "/grow/contacts/13"]);
   assert.match(text(propertyView({ contacts: [] })), /No contact linked yet\. Link a contact to start an appraisal\./);
 });
@@ -291,7 +294,7 @@ test("one appraisal per property: an existing one is opened instead; without per
 test("linking a contact opens the picker with the roles; Add new contact is available inside it", () => {
   const tree = propertyView({ panel: { kind: "link" }, picker: picker({ title: "Link a contact", searchLabel: "Search contacts", create: create() }) });
   const form = all(tree, (e) => e.type === "form" && e.props?.["aria-label"] === "Link a contact")[0];
-  assert.match(text(all(form, (e) => e.type === "select")[0]), /Seller \/ owner/);
+  assert.match(text(all(form, (e) => e.type === "select")[0]), /Seller/);
   assert.equal(all(form, (e) => e.props?.["data-ae-new-contact"] !== undefined).length, 1);
 });
 
@@ -390,4 +393,55 @@ test("while the link controls are off, the existing panel stays reachable in a d
   assert.equal(buttons(manage[0], "Unlink").length, 1);
   const open = all(propertyView({ panel: { kind: "unlink", linkId: 32 } }), (e) => e.type === "details" && String(e.props?.className) === "mob-c-manage");
   assert.deepEqual(open.map((d) => d.props?.open), [false, true], "the one being acted on stays open");
+});
+
+// ── Duplicate contact: warn and reuse ───────────────────────────────────
+
+test("picker: ONE duplicate warning; Open existing contact only with the revealed id, Use <name> only for a user who may manage relationships, Create anyway always", () => {
+  const calls: string[] = [];
+  const visible = { text: DUPLICATE_VISIBLE_TEXT, existingContactId: 41, existingHref: "/grow/contacts/41" };
+  const hidden = { text: DUPLICATE_HIDDEN_TEXT, existingContactId: null, existingHref: null };
+  const view = (c: Partial<PickerCreateProps>) => MobileLinkPicker(picker({ create: create({ open: true, name: "Maya O", email: "maya.okafor@example.com", onCreateAnyway: () => calls.push("anyway"), ...c }) }));
+  const box = (tree: unknown) => all(tree, (e) => e.props?.["data-ae-duplicate-warning"] !== undefined)[0];
+  const labels = (tree: unknown) => all(box(tree), (e) => e.type === "button" || e.props?.href !== undefined).map((e) => text(e).trim());
+
+  // a user with contact-read AND relationship-management: all three
+  const full = view({ duplicate: visible, duplicateName: "Maya Okafor", onUseExisting: () => calls.push("use") });
+  assert.match(text(box(full)), /Maya Okafor is already a contact with that email or phone\./);
+  assert.deepEqual(labels(full), ["Open existing contact", "Use Maya Okafor", "Create anyway"]);
+  assert.deepEqual(hrefs(box(full)), ["/grow/contacts/41"]);
+  call(buttons(box(full), "Use Maya Okafor")[0].props?.onClick);
+  call(buttons(box(full), "Create anyway")[0].props?.onClick);
+  assert.deepEqual(calls, ["use", "anyway"]);
+  // name not known yet
+  assert.deepEqual(labels(view({ duplicate: visible, onUseExisting: () => {} })), ["Open existing contact", "Use existing contact", "Create anyway"]);
+  // contact-read but NOT relationship-management: no Use, still Open and Create anyway
+  const noLink = view({ duplicate: visible, duplicateName: "Maya Okafor" });
+  assert.deepEqual(labels(noLink), ["Open existing contact", "Create anyway"]);
+  assert.doesNotMatch(text(box(noLink)), /\bUse\b|\blink\b/i, "no instruction to link");
+  // no revealed id (no contact-read): Create anyway ONLY; no name, no id, no link, even if a caller wrongly passed the reuse callback
+  for (const wrong of [{}, { onUseExisting: () => {}, duplicateName: "Maya Okafor" }]) {
+    const none = view({ duplicate: hidden, ...wrong });
+    assert.deepEqual(labels(none), ["Create anyway"]);
+    assert.equal(hrefs(box(none)).length, 0, "no link to the contact");
+    assert.doesNotMatch(text(box(none)), /Maya Okafor|Contact #|\d/, "no name, no id");
+    assert.equal(all(none, (e) => e.props?.["data-ae-existing-contact-id"] !== undefined).length, 0);
+  }
+  assert.equal(all(view({ duplicate: visible }), (e) => e.props?.["data-ae-duplicate-contact"] !== undefined).length, 0, "C1's second warning block is gone: one warning only");
+  assert.equal(all(view({ duplicate: visible }), (e) => e.props?.["data-ae-duplicate-warning"] !== undefined).length, 1);
+  // creating a second contact by the ordinary button is not offered while the duplicate stands
+  assert.equal(all(view({ duplicate: visible }), (e) => e.type === "button" && text(e) === "Create contact")[0].props?.disabled, true);
+  assert.equal(all(view({}), (e) => e.props?.["data-ae-duplicate-warning"] !== undefined).length, 0, "no warning without a duplicate");
+});
+
+test("the container: the duplicate comes from the 409, the name is asked only with the revealed id, Use <name> only with relationship-management and an id, Create anyway resubmits with confirmation", () => {
+  const src = readFileSync(new URL("../../minimal/mobile/MobilePropertyContacts.tsx", import.meta.url), "utf8");
+  assert.match(src, /const dup = err instanceof ApiError \? duplicateContactWarning\(err\) : null;\s*if \(dup\) \{\s*setCreateError\(null\);\s*setDuplicate\(dup\);/);
+  assert.match(src, /const existingContactId = duplicate\?\.existingContactId \?\? null;/);
+  assert.match(src, /enabled: existingContactId !== null,/, "the name is requested only when the server revealed the id");
+  assert.match(src, /queryKey: \["grow-contact", existingContactId\]/, "the same request and cache key as Contact 360");
+  assert.match(src, /onUseExisting:\s*canManageRel && existingContactId !== null/, "Use <name> only with relationship-management AND the id");
+  assert.match(src, /confirmDuplicate: true/, "Create anyway resubmits with confirmation");
+  assert.equal(/duplicateId|setDuplicateId|onEdit/.test(src), false, "C1's separate id state and Change details are gone");
+  assert.equal(/Search for them and link the existing contact instead/.test(src), false, "the old dead-end sentence is gone");
 });

@@ -11,6 +11,9 @@
 //   - Logging a call is optional. Nothing is recorded or marked completed automatically.
 // The agent is responsible for complying with applicable consent, privacy, telemarketing and Do Not Call requirements.
 
+import { minimalHasRunAccess } from "../minimalNav";
+import { GROW_CONTACTS_READ } from "./mobilePeopleConfig";
+
 export interface PhoneNumber {
   /** "Mobile", and later "Work", "Home". Names the number on the button. */
   label: string;
@@ -68,6 +71,15 @@ export function usableNumber(raw: string | null | undefined): { display: string;
 /** Every telephone number the contact record holds. Today the record holds one (`mobile`); more are listed here as the record gains them. */
 export function numbersOf(contact: { mobile?: string | null }): PhoneNumber[] {
   return [{ label: "Mobile", number: contact.mobile }];
+}
+
+/**
+ * Who sees Call beside a property's linked contacts: an agent who may read contacts (`grow.contacts.read`, including a read-only agent) or
+ * who has Run access. Display only: the server decides what a user may be shown. Contact 360 needs no rule here because the server only
+ * returns the contact to someone who may read it. Consent is not part of it.
+ */
+export function mayCallFromProperty(entitlements: readonly string[] | null | undefined): boolean {
+  return Array.isArray(entitlements) && (entitlements.includes(GROW_CONTACTS_READ) || minimalHasRunAccess(entitlements));
 }
 
 /** One Call option for every usable number, in the order given; the same number held twice is one button. */

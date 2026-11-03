@@ -15,8 +15,17 @@ export interface PickerCreateProps {
   phone: string;
   creating: boolean;
   error: string | null;
-  /** t256u: set after a 409 duplicate; offers "Open existing contact" (only with existingHref) and "Create anyway". */
+  /**
+   * After a 409 duplicate. ONE warning with up to three actions, whatever the user may see:
+   *  - "Open existing contact": only when the server revealed the contact's id (it does so only to a caller with contact-read), so `existingHref` is set;
+   *  - "Use <name>" (link the existing contact): only when `onUseExisting` is given, i.e. the user may manage relationships AND the id is known;
+   *  - "Create anyway": always.
+   * Without an id nothing about the existing contact is shown: no name, no id, no link.
+   */
   duplicate?: DuplicateContactWarning | null;
+  /** The existing contact's name once known (only ever fetched when the id was revealed). */
+  duplicateName?: string | null;
+  onUseExisting?: (() => void) | null;
   onCreateAnyway?: () => void;
   onOpen: () => void;
   onField: (field: "name" | "email" | "phone", value: string) => void;
@@ -126,7 +135,7 @@ export function MobileLinkPicker(p: MobileLinkPickerProps) {
             {p.create.duplicate ? (
               <div className="mob-c-warning" role="alert" data-ae-duplicate-warning>
                 <p>
-                  {p.create.duplicate.text}
+                  {p.create.duplicate.existingContactId !== null && p.create.duplicateName ? `${p.create.duplicateName} is already a contact with that email or phone.` : p.create.duplicate.text}
                   {p.create.duplicate.existingContactId !== null ? <span data-ae-existing-contact-id> Contact #{p.create.duplicate.existingContactId}.</span> : null}
                 </p>
                 <div className="mob-c-form-actions">
@@ -135,6 +144,11 @@ export function MobileLinkPicker(p: MobileLinkPickerProps) {
                       Open existing contact
                     </Link>
                   ) : null}
+                  {p.create.onUseExisting && p.create.duplicate.existingContactId !== null ? (
+                    <button type="button" className="mob-c-primary" data-ae-use-existing onClick={p.create.onUseExisting}>
+                      {p.create.duplicateName ? `Use ${p.create.duplicateName}` : "Use existing contact"}
+                    </button>
+                  ) : null}
                   <button type="button" className="mob-c-button" data-ae-create-anyway disabled={p.create.creating} onClick={p.create.onCreateAnyway}>
                     Create anyway
                   </button>
@@ -142,7 +156,7 @@ export function MobileLinkPicker(p: MobileLinkPickerProps) {
               </div>
             ) : null}
             <div className="mob-c-form-actions">
-              <button type="button" className="mob-c-primary" disabled={p.create.creating} onClick={p.create.onSubmit}>
+              <button type="button" className="mob-c-primary" disabled={p.create.creating || p.create.duplicate != null} onClick={p.create.onSubmit}>
                 {p.create.creating ? "Creating…" : "Create contact"}
               </button>
               <button type="button" className="mob-c-button" onClick={p.create.onCancel}>

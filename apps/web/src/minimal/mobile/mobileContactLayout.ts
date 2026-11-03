@@ -44,7 +44,7 @@ export interface MobilePropertyLink {
   /** The canonical link id (property_parties) when the row is canonical; otherwise the legacy relationship id, for the list key only. */
   key: number;
   label: string;
-  /** "Co-owner", or "Related party · Executor" (legacy); "Seller / owner" (canonical). Never the raw stored value. */
+  /** "Co-owner", or "Related party · Executor" (legacy); "Seller" (canonical). Never the raw stored value. */
   relationship: string;
   /** The legacy free-text role on its own, or null. Canonical rows carry roleValue instead. */
   role: string | null;

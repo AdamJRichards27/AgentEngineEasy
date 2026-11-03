@@ -73,11 +73,12 @@ test("only the containers and the picker hook call the API", () => {
   assert.equal(list.length, 1);
   assert.ok(list[0].startsWith("peoplePath({ search: committed, role, cursor: pageParam }"), list[0]);
   const prop = [...code("MobilePropertyContacts.tsx").matchAll(/apiFetch(?:<[^>]+>)?\(([^)]*\)?)\)/g)].map((m) => m[1].replace(/\s+/g, " ").trim());
-  assert.equal(prop.length, 4, "the list, the one link-operation helper, and the two PRESERVED existing requests: calling needs no request");
+  assert.equal(prop.length, 5, "the list, the one link-operation helper, the two PRESERVED existing requests, and the duplicate's name for the warning (Contact 360's own request): calling needs no request");
   assert.equal(prop[0], "linkedPartiesPath(propertyId)");
-  assert.ok(prop[1].startsWith("request.path, { method: request.method, body: request.body === undefined ? undefined : JSON.stringify(request.body"), prop[2]);
+  assert.ok(prop[1].startsWith("request.path, { method: request.method, body: request.body === undefined ? undefined : JSON.stringify(request.body"), prop[1]);
   assert.ok(prop[2].startsWith('"/grow/appraisals/from-contact", { method: "POST", body: JSON.stringify(startAppraisalBody(partyId, propertyId'), prop[2]);
   assert.ok(prop[3].startsWith('"/grow/contacts", { method: "POST", body: JSON.stringify(input'), prop[3]);
+  assert.equal(prop[4], "`/grow/contacts/${existingContactId}`");
   const contactCanon = [...code("MobileContact.tsx").matchAll(/apiFetch\(([^)]*\)?)\)/g)].map((m) => m[1].replace(/\s+/g, " ").trim());
   assert.equal(contactCanon.length, 3, "contact, the canonical read (never enabled while its flag is off), the write helper");
   assert.equal(contactCanon[1], "canonicalContactLinksPath(partyId as number)");

@@ -67,7 +67,7 @@ export interface LinkContract {
 export const MOBILE_LINK_CONTRACT: LinkContract = { expandedRolesAccepted: false };
 
 export const LINK_ROLE_LABELS: Readonly<Record<LinkRole, string>> = {
-  Seller: "Seller / owner",
+  Seller: "Seller",
   Buyer: "Buyer",
   Solicitor: "Solicitor",
   PowerOfAttorney: "Power of attorney",

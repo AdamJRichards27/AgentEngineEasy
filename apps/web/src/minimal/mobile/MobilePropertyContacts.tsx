@@ -4,18 +4,17 @@ import { useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../../lib/api";
+import type { GrowContact360 } from "../../lib/growContact360";
 import { useEntitlements, useSession } from "../../lib/session";
-import { minimalHasRunAccess } from "../minimalNav";
 import { builderPath } from "../appraisal/appraisalBuilderModel";
 import { resolveStartFailure, startAppraisalBody } from "../properties/minimalPropertiesModel";
 import { appraisalCandidates, linkedPartiesPath, type LinkedPartyRow } from "../properties/minimalPropertyContactsModel";
 import { MobilePropertyContactsView, type PropertyLinkPanel } from "./MobilePropertyContactsView";
-import { callPlan, numbersOf } from "./mobileCalling";
+import { callPlan, mayCallFromProperty, numbersOf } from "./mobileCalling";
 import { mobileLinkedContacts, type ContactCallState } from "./mobilePropertyContactRows";
 import { useCallReturn } from "./useCallReturn";
 import { changeRoleRequest, linkRequest, duplicateContactWarning, linkingCapabilities, linkingFailureText, roleChoices, setPrimaryRequest, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
 import { mobilePermissions } from "./mobilePermissions";
-import { GROW_CONTACTS_READ } from "./mobilePeopleConfig";
 import { useLinkPicker } from "./useLinkPicker";
 import { GROW_RELATIONSHIPS_MANAGE } from "./mobileLinkingConfig";
 
@@ -44,6 +43,7 @@ export interface MobilePropertyContactsProps {
 export default function MobilePropertyContacts({ propertyId, propertyLabel, canStartAppraisal, canCreateContact, existingAppraisalHref, legacyActions }: MobilePropertyContactsProps) {
   const { entitlements } = useEntitlements();
   const { user } = useSession();
+  const canManageRel = entitlements.includes(GROW_RELATIONSHIPS_MANAGE);
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [panel, setPanel] = useState<PropertyLinkPanel | null>(null);
@@ -68,7 +68,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
 
   // Tap-to-Call beside each contact: a Call button for every usable number, for an agent who may see the contact. Nothing is requested for it
   // (the number is already in the rows above) and nothing about consent is read. The agent is responsible for their own compliance.
-  const canSeeContacts = entitlements.includes(GROW_CONTACTS_READ) || minimalHasRunAccess(entitlements);
+  const canSeeContacts = mayCallFromProperty(entitlements);
   const callState: Record<number, ContactCallState> = {};
   if (canSeeContacts) for (const c of contacts) callState[c.linkId] = { options: callPlan(numbersOf({ mobile: c.mobile }), c.name).options };
   const callReturn = useCallReturn();
@@ -114,7 +114,20 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
     },
   });
 
+  // The existing contact's name, for the warning. Only asked when the server revealed the contact's id, which it does only to a caller who may
+  // read contacts; without an id nothing is requested and nothing about the contact is shown. The same request and cache key as Contact 360.
+  const existingContactId = duplicate?.existingContactId ?? null;
+  const existing = useQuery<GrowContact360>({
+    queryKey: ["grow-contact", existingContactId],
+    queryFn: () => apiFetch<GrowContact360>(`/grow/contacts/${existingContactId}`),
+    enabled: existingContactId !== null,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const existingName = existing.data?.contact.displayName?.trim() || null;
+
   const close = () => {
+    setDuplicate(null);
     setPanel(null);
     setOpError(null);
     setPickedId(null);
@@ -156,7 +169,7 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
       loading={linked.isLoading}
       error={linked.isError ? { text: apiErrorMessage(linked.error, "Couldn't load the contacts."), onRetry: () => void linked.refetch() } : null}
       capabilities={linkingCapabilities(entitlements)}
-      canManageRelationships={entitlements.includes(GROW_RELATIONSHIPS_MANAGE)}
+      canManageRelationships={canManageRel}
       panel={panel}
       submitting={write.isPending}
       opError={opError}
@@ -208,6 +221,19 @@ export default function MobilePropertyContacts({ propertyId, propertyLabel, canS
                     creating: createContact.isPending,
                     error: createError,
                     duplicate,
+                    duplicateName: existingName,
+                    // "Use name" links the existing contact: only for a user who may manage relationships, and only when the server revealed the id.
+                    onUseExisting:
+                      canManageRel && existingContactId !== null
+                        ? () => {
+                            setCreated({ id: existingContactId, name: existingName ?? "Existing contact" });
+                            setPickedId(existingContactId);
+                            setDuplicate(null);
+                            setCreateOpen(false);
+                            setFields({ name: "", email: "", phone: "" });
+                            setCreateError(null);
+                          }
+                        : null,
                     onOpen: () => {
                       setCreateOpen(true);
                       setCreateError(null);

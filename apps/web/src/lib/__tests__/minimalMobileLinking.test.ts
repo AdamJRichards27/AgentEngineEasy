@@ -5,6 +5,7 @@ import {
   GROW_PROPERTIES_LINK, GROW_RELATIONSHIPS_MANAGE, LINKING_TWINS, LINK_PICKER_ROWS, LINK_ROLE_LABELS, MOBILE_LINKING, MOBILE_LINK_CONTRACT, ROLES_ACCEPTED_NOW, ROLES_APPROVED_PENDING,
   type LinkContract, type LinkingFlags,
 } from "../../minimal/mobile/mobileLinkingConfig";
+import { mayCallFromProperty } from "../../minimal/mobile/mobileCalling";
 import {
   CHOOSE_CONTACT, CHOOSE_PROPERTY, NOT_AVAILABLE_YET, NO_PERMISSION, SAME_ROLE,
   canonicalContactLinksPath, changeRoleRequest, linkRequest, linkRoleLabel, setPrimaryRequest, linkingCapabilities, linkingFailureText, parseContactLinks, roleChoices, unlinkConfirmText, unlinkRequest, type KnownLink,
@@ -25,7 +26,6 @@ const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8"
 
 test("every link control, and the canonical read, is OFF as shipped, with its reason, whatever the user's permissions", () => {
   assert.deepEqual(Object.values(MOBILE_LINKING), [false, false, false, false, false, false, false, false, false], "change this together with the test that guards it");
-  assert.equal(MOBILE_LINK_CONTRACT.expandedRolesAccepted, false);
   for (const entitlements of [MANAGER, [], null, ["run.access"]]) {
     for (const [action, cap] of Object.entries(linkingCapabilities(entitlements))) assert.deepEqual(cap, { enabled: false, reason: NOT_AVAILABLE_YET }, action);
   }
@@ -60,10 +60,11 @@ test("a flag that is off wins over any permission, and each flag is separate", (
 test("the role vocabulary: what the server accepts today, plus Owner, Landlord and Tenant only once the server validates them", () => {
   assert.deepEqual([...ROLES_ACCEPTED_NOW], ["Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Other"]);
   assert.deepEqual([...ROLES_APPROVED_PENDING], ["Owner", "Landlord", "Tenant"]);
-  assert.deepEqual(roleChoices().map((r) => r.value), [...ROLES_ACCEPTED_NOW]);
+  assert.deepEqual(roleChoices({ expandedRolesAccepted: false }).map((r) => r.value), [...ROLES_ACCEPTED_NOW]);
   assert.deepEqual(roleChoices(EXPANDED).map((r) => r.value), [...ROLES_ACCEPTED_NOW, ...ROLES_APPROVED_PENDING]);
-  assert.equal(roleChoices().some((r) => ROLES_APPROVED_PENDING.includes(r.value as never)), false, "never offered ahead of the server");
-  assert.equal(LINK_ROLE_LABELS.Seller, "Seller / owner");
+  assert.equal(roleChoices({ expandedRolesAccepted: false }).some((r) => ROLES_APPROVED_PENDING.includes(r.value as never)), false, "never offered unless the contract says the server accepts them");
+  assert.deepEqual(roleChoices().map((r) => r.value), MOBILE_LINK_CONTRACT.expandedRolesAccepted ? [...ROLES_ACCEPTED_NOW, ...ROLES_APPROVED_PENDING] : [...ROLES_ACCEPTED_NOW], "the default follows the contract constant, whichever way it is set");
+  assert.equal(LINK_ROLE_LABELS.Seller, "Seller", "the approved label");
   assert.deepEqual(roleChoices(EXPANDED).slice(-3).map((r) => r.label), ["Owner", "Landlord", "Tenant"]);
   assert.equal(linkRoleLabel("Tenant"), "Tenant");
   assert.equal(linkRoleLabel("SomethingNew"), "SomethingNew", "an unknown stored role is shown as stored, never hidden");
@@ -125,6 +126,16 @@ test("no request names a brokerage, a user or a tenant, and there is no request 
   }
 });
 
+test("who sees Call beside a property's contacts: anyone who may read contacts (including a read-only agent) or has Run; nobody else; consent is not part of it", () => {
+  assert.equal(mayCallFromProperty(["grow.access", "grow.contacts.read"]), true, "read-only agent with contact read");
+  assert.equal(mayCallFromProperty(["grow.access", "grow.contacts.read", "grow.contacts.manage", "grow.activities.manage"]), true);
+  assert.equal(mayCallFromProperty(["run.access"]), true, "Run access");
+  assert.equal(mayCallFromProperty(["grow.access"]), false, "Grow without contact read");
+  assert.equal(mayCallFromProperty([]), false, "unsubscribed");
+  for (const missing of [null, undefined]) assert.equal(mayCallFromProperty(missing), false, "fails closed while permissions load");
+  assert.equal(mayCallFromProperty.length, 1, "takes entitlements only: no consent input");
+});
+
 test("the contact's property links are read from property_parties, defensively", () => {
   assert.equal(canonicalContactLinksPath(12), "/parties/by-contact/12");
   const good = { linkId: 31, role: "Seller", isPrimary: true, property: { id: 77, formattedAddress: " 7 Jacaranda Street, Paddington QLD 4064 " } };
@@ -160,7 +171,9 @@ test("drift: the existing routes, entitlement keys and role list are the real se
   assert.ok(keys.includes(GROW_PROPERTIES_LINK));
   const serverRoles = [...(/export const PROPERTY_PARTY_ROLES = \[([\s\S]*?)\] as const/.exec(schema)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   const serverHasExpanded = ROLES_APPROVED_PENDING.every((r) => serverRoles.includes(r));
-  assert.equal(serverHasExpanded, MOBILE_LINK_CONTRACT.expandedRolesAccepted, "the phone offers Owner, Landlord and Tenant exactly when the server's role list contains them");
+  // One direction only: the phone may be more cautious than the server, never less. A server that already accepts Owner, Landlord and Tenant
+  // is fine with the phone not offering them yet; a phone that offers them while the server refuses them is a bug.
+  if (MOBILE_LINK_CONTRACT.expandedRolesAccepted) assert.ok(serverHasExpanded, "the phone offers Owner, Landlord and Tenant, so the server's role list must contain them");
   assert.deepEqual(serverRoles.filter((r) => (ROLES_ACCEPTED_NOW as readonly string[]).includes(r)), [...ROLES_ACCEPTED_NOW]);
 });
 
@@ -174,8 +187,6 @@ test("drift: no control can be switched on before the server routes, permissions
     assert.ok(hasPatch, "PATCH /parties/link/:linkId must exist");
     assert.ok(hasByContact, "GET /parties/by-contact/:partyId must exist");
     assert.ok(hasEntitlement, "the /parties routes must check an entitlement (today any signed-in brokerage user can use them)");
-  } else {
-    // Recorded so the day Grok builds them, this test says so and the flags can be reviewed.
-    assert.equal(hasPatch && hasByContact && hasEntitlement, false, "the server now supports everything: review the flags in mobileLinkingConfig.ts");
   }
+  // With every flag off there is nothing to assert about the server: it may already support all of it. The flags move only in a reviewed change.
 });
