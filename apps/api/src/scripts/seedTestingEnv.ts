@@ -39,7 +39,7 @@ import { openSync, writeSync, closeSync, fchmodSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { sql, like, notLike } from "drizzle-orm";
-import { db, users, brokerages, entitlementGrants, properties, parties, propertyParties, ENTITLEMENT_KEYS } from "@aee/db";
+import { db, users, brokerages, entitlementGrants, properties, parties, propertyParties, growContactChannelConsents, growContactChannelSuppressions, growContactDncrStatuses, ENTITLEMENT_KEYS } from "@aee/db";
 import { hashPassword, passwordPolicyViolation } from "../lib/auth/password.js";
 
 export const SYNTH_PREFIX = "SYNTH ";
@@ -62,8 +62,8 @@ const ROLES = ["Owner", "Seller", "Buyer", "Tenant", "Landlord", "Solicitor", "P
 const GROW_KEYS = ENTITLEMENT_KEYS.filter((k) => k.startsWith("grow.") && k !== "grow.calling.recording" && k !== "grow.calling.transcription");
 const READ_ONLY_KEYS = ["grow.access", "grow.contacts.read", "grow.propertyIntelligence.read"];
 
-type Profile = "admin" | "grow" | "run" | "readonly" | "unsubscribed";
-interface Account { handle: string; first: string; last: string; role: "Agent" | "Brokerage Administrator"; profile: Profile }
+type Profile = "admin" | "grow" | "run" | "runonly" | "readonly" | "unsubscribed";
+interface Account { handle: string; first: string; last: string; role: "Agent" | "Brokerage Administrator" | "Pit Crew"; profile: Profile }
 interface Plan { name: string; mode: "user" | "brokerage-grow" | "legacy-run"; accounts: Account[]; properties: number; contacts: number }
 
 export const PLAN: Plan[] = [
@@ -77,6 +77,8 @@ export const PLAN: Plan[] = [
       { handle: "run2.a", first: "Rory", last: "Run", role: "Agent", profile: "run" },
       { handle: "readonly.a", first: "Rita", last: "Readonly", role: "Agent", profile: "readonly" },
       { handle: "unsub.a", first: "Ulla", last: "Unsubscribed", role: "Agent", profile: "unsubscribed" },
+      // t257u: Pit Crew without contact-read (Tap-to-Call MASKED case).
+      { handle: "pitcrew.a", first: "Pia", last: "Crew", role: "Pit Crew", profile: "runonly" },
     ],
   },
   {
@@ -95,6 +97,21 @@ export const PLAN: Plan[] = [
   },
 ];
 
+/** t257u: named scenario contacts (fictional ACMA (07) 5550 9xxx range, outside the generated 5550 0xxx numbers). */
+export const SCENARIOS: { last: string; mobile: string | null; state?: "withdrawn" | "noconsent" | "suppressed" | "register" }[] = [
+  { last: "Extension", mobile: "(07) 5550 9001 ext 12" },
+  { last: "HashNote", mobile: "(07) 5550 9002 #4" },
+  { last: "NoPhone", mobile: null },
+  { last: "NotApplicable", mobile: "n/a" },
+  { last: "TooShort", mobile: "12345" },
+  { last: "PartialMask", mobile: "(07) 5550 9***" },
+  { last: "International", mobile: "+61 7 5550 9007" },
+  { last: "Withdrawn", mobile: "(07) 5550 9008", state: "withdrawn" },
+  { last: "NoConsent", mobile: "(07) 5550 9009", state: "noconsent" },
+  { last: "Suppressed", mobile: "(07) 5550 9010", state: "suppressed" },
+  { last: "OnRegister", mobile: "(07) 5550 9011", state: "register" },
+];
+
 export function generatePassword(): string {
   for (;;) {
     const p = randomBytes(18).toString("base64url");
@@ -107,6 +124,7 @@ export function keysFor(profile: Profile): string[] {
     case "admin": return ["run.access", ...GROW_KEYS];
     case "run": return ["run.access", ...GROW_KEYS]; // Pro + Grow bundle shape, simulated (no billing)
     case "grow": return [...GROW_KEYS];
+    case "runonly": return ["run.access"];
     case "readonly": return [...READ_ONLY_KEYS];
     case "unsubscribed": return [];
   }
@@ -145,7 +163,7 @@ async function main() {
   fchmodSync(fd, 0o600);
   writeSync(fd, `# AE testing credentials (synthetic accounts) for database ${dbName}. Keep private; delete after distribution.\n`);
   let phone = 0;
-  const counts = { brokerages: 0, users: 0, grants: 0, properties: 0, contacts: 0, links: 0 };
+  const counts = { brokerages: 0, users: 0, grants: 0, properties: 0, contacts: 0, scenarios: 0, links: 0 };
   try {
     for (const plan of PLAN) {
       const [b] = await db.insert(brokerages).values({ name: plan.name }).returning();
@@ -158,6 +176,7 @@ async function main() {
       else await grant("run.access", "brokerage", b.id, "Revoked"); // blocks the boot-time run.access backfill
       if (plan.mode === "brokerage-grow") for (const k of GROW_KEYS) await grant(k, "brokerage", b.id);
       const agentIds: number[] = [];
+      let readonlyId: number | null = null;
       for (const a of plan.accounts) {
         const email = `${a.handle}@${EMAIL_DOMAIN}`;
         const password = generatePassword();
@@ -167,7 +186,8 @@ async function main() {
         }).returning();
         counts.users++;
         if (plan.mode === "user") for (const k of keysFor(a.profile)) await grant(k, "user", u.id);
-        if (a.profile !== "readonly" && a.profile !== "unsubscribed") agentIds.push(u.id);
+        if (a.profile === "readonly" && readonlyId === null) readonlyId = u.id;
+        if (a.profile !== "readonly" && a.profile !== "unsubscribed" && a.role !== "Pit Crew") agentIds.push(u.id);
         writeSync(fd, `${plan.name}\t${a.profile}\t${a.role}\t${email}\t${password}\n`);
       }
       const propIds: { id: number; agentId: number }[] = [];
@@ -211,6 +231,27 @@ async function main() {
       // A contact linked to two properties (two-way relationship checks).
       if (propIds.length > 1) {
         await db.insert(propertyParties).values({ propertyId: propIds[1].id, partyId: partyIds[0], role: "Buyer", isPrimary: false }).onConflictDoNothing();
+        counts.links++;
+      }
+      // t257u (review 8 section 5): named scenario contacts, per brokerage, for Tap-to-Call and consent cases.
+      const recorder = agentIds[0];
+      const scenarioIds: number[] = [];
+      for (const sc of SCENARIOS) {
+        const [c] = await db.insert(parties).values({ brokerageId: b.id, partyType: "Person", firstName: "Scenario", lastName: sc.last, mobile: sc.mobile, email: null }).returning();
+        scenarioIds.push(c.id);
+        counts.contacts++;
+        counts.scenarios++;
+        const common = { brokerageId: b.id, partyId: c.id, channel: "PHONE_CALL", recordedByUserId: recorder };
+        if (sc.state === "withdrawn") await db.insert(growContactChannelConsents).values({ ...common, state: "WITHDRAWN", source: "SYNTHETIC_SEED", captureMethod: "SYNTHETIC_SEED", purpose: "TAP_TO_CALL", scope: "PHONE_CALL", withdrawnAt: new Date(), withdrawnByUserId: recorder, withdrawalReason: "Synthetic: contact withdrew consent" });
+        if (sc.state === "noconsent") await db.insert(growContactChannelConsents).values({ ...common, state: "NONE", source: "SYNTHETIC_SEED", captureMethod: "SYNTHETIC_SEED", purpose: "TAP_TO_CALL", scope: "PHONE_CALL" });
+        if (sc.state === "suppressed") await db.insert(growContactChannelSuppressions).values({ ...common, state: "SUPPRESSED", reason: "Synthetic: do not call" });
+        if (sc.state === "register") await db.insert(growContactDncrStatuses).values({ ...common, status: "LISTED", source: "SYNTHETIC_SEED" });
+      }
+      // t257u: the read-only agent owns one property with a linked scenario contact (can open a property page).
+      if (readonlyId !== null) {
+        const [p] = await db.insert(properties).values({ brokerageId: b.id, agentId: readonlyId, formattedAddress: `1 Readonly Lane, ${SUBURBS[0][0]} QLD ${SUBURBS[0][1]}`, suburb: SUBURBS[0][0], state: "QLD", postcode: SUBURBS[0][1], isManualAddress: true }).returning();
+        counts.properties++;
+        await db.insert(propertyParties).values({ propertyId: p.id, partyId: scenarioIds[0], role: "Owner", isPrimary: true });
         counts.links++;
       }
     }
