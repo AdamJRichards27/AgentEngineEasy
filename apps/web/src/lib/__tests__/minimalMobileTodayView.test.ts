@@ -95,11 +95,18 @@ test("no Why this disclosure when there is nothing more to say", () => {
   assert.equal(all(view(bare), (e) => e.type === "details").length, 0);
 });
 
-test("a consent warning on the next action is visible and announced", () => {
+test("the contactability note on the next action is kept, visible, and ordinary advisory text: not an alert, not interrupting a screen reader", () => {
   const blocked = summary([person(1, "Maya", { recommendedAction: "Call her", contactability: "do_not_contact", contactabilityNote: "Must not be contacted." })]);
-  const alert = all(view(blocked), (e) => e.props?.role === "alert");
-  assert.equal(alert.length, 1);
-  assert.equal(text(alert[0]), "Must not be contacted.");
+  const tree = view(blocked);
+  const notes = all(tree, (e) => e.props?.className === "mob-t-warning");
+  assert.equal(notes.length, 1, "the note is still there");
+  assert.equal(text(notes[0]), "Must not be contacted.");
+  assert.equal(notes[0].type, "p");
+  assert.equal(notes[0].props?.role, undefined, "no role at all: read in place with the card");
+  assert.equal(all(tree, (e) => e.props?.role === "alert" || e.props?.role === "status" || e.props?.["aria-live"] !== undefined).length, 0, "nothing on the screen interrupts a screen reader");
+  const action = all(tree, (e) => e.props?.className === "mob-t-primary");
+  assert.equal(action.length, 1, "the note gates nothing: the card's action is still offered");
+  assert.equal(all(view(summary([person(2, "Sam", { recommendedAction: "Call him" })])), (e) => e.props?.className === "mob-t-warning").length, 0, "no note where the server sent none");
 });
 
 test("commitments: Overdue then Today, each row one link to that person's record, in the product's words", () => {

@@ -60,11 +60,9 @@ function Hero({ hero }: { hero: MobileTodayHero }) {
       <h2 className="mob-t-hero-name">{hero.name}</h2>
       {hero.context ? <div className="mob-t-context">{hero.context}</div> : null}
       <p className="mob-t-hero-action">{hero.action}</p>
-      {hero.warning ? (
-        <p className="mob-t-warning" role="alert">
-          {hero.warning}
-        </p>
-      ) : null}
+      {/* The server's contactability note: advisory information, kept visible. Ordinary text, not an alert: a screen reader reads it in place
+          with the rest of the card and is not interrupted by it. It gates nothing here. */}
+      {hero.warning ? <p className="mob-t-warning">{hero.warning}</p> : null}
       {hero.href ? (
         <Link href={hero.href} className="mob-t-primary">
           {hero.actionLabel ?? "Open"}
