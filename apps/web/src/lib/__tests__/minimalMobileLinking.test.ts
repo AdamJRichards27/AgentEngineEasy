@@ -6,6 +6,7 @@ import {
   type LinkContract, type LinkingFlags,
 } from "../../minimal/mobile/mobileLinkingConfig";
 import { mayCallFromProperty } from "../../minimal/mobile/mobileCalling";
+import { builtRelationshipControlGroup, MOBILE_RELATIONSHIP_CONTROL_FLAGS } from "../relationshipControlFlags";
 import {
   CHOOSE_CONTACT, CHOOSE_PROPERTY, NOT_AVAILABLE_YET, NO_PERMISSION, SAME_ROLE,
   canonicalContactLinksPath, changeRoleRequest, linkRequest, linkRoleLabel, setPrimaryRequest, linkingCapabilities, linkingFailureText, parseContactLinks, roleChoices, unlinkConfirmText, unlinkRequest, type KnownLink, type LinkingAction,
@@ -222,4 +223,42 @@ test("both production callers pass the session role to the capability table", ()
     assert.match(src, /linkingCapabilities\(entitlements, undefined, user\?\.role\)/, file);
     assert.equal(/linkingCapabilities\(entitlements\)/.test(src), false, `${file}: no call without the role`);
   }
+});
+
+// ── The phone follows the relationship-control activation group (Grok's guard: desktop flag + eight mobile flags, all or nothing) ───────────
+
+test("the phone follows the activation group: controls are enabled only when the WHOLE group is on; every partial state leaves them off", () => {
+  const MGR = [GROW_RELATIONSHIPS_MANAGE, GROW_PROPERTIES_LINK];
+  const mobileWith = (on: readonly string[]): LinkingFlags => ({ ...MOBILE_LINKING, ...Object.fromEntries(MOBILE_RELATIONSHIP_CONTROL_FLAGS.map((k) => [k, on.includes(k)])) }) as LinkingFlags;
+  const caps = (desktop: boolean, mobile: LinkingFlags) => linkingCapabilities(MGR, builtRelationshipControlGroup({ VITE_PROPERTY_LINK_CONTROLS: desktop ? "true" : "false" }, mobile).mobile);
+  const enabledCount = (c: ReturnType<typeof linkingCapabilities>) => MOBILE_RELATIONSHIP_CONTROL_FLAGS.filter((k) => c[k].enabled).length;
+  assert.equal(enabledCount(caps(false, mobileWith([]))), 0, "all OFF");
+  assert.equal(enabledCount(caps(true, mobileWith([...MOBILE_RELATIONSHIP_CONTROL_FLAGS]))), 8, "all ON: the whole group");
+  assert.equal(enabledCount(caps(true, mobileWith([]))), 0, "desktop ON, mobile OFF: refused, nothing is enabled on the phone");
+  assert.equal(enabledCount(caps(false, mobileWith([...MOBILE_RELATIONSHIP_CONTROL_FLAGS]))), 0, "mobile ON, desktop OFF: refused");
+  for (const one of MOBILE_RELATIONSHIP_CONTROL_FLAGS) {
+    assert.equal(enabledCount(caps(true, mobileWith([one]))), 0, `desktop ON and only ${one} ON: refused`);
+    assert.equal(enabledCount(caps(false, mobileWith([one]))), 0, `only ${one} ON: refused`);
+    assert.equal(enabledCount(caps(true, mobileWith(MOBILE_RELATIONSHIP_CONTROL_FLAGS.filter((k) => k !== one)))), 0, `everything but ${one} ON: refused`);
+  }
+  // a refused state reports the NOT-AVAILABLE reason, not a permission reason
+  assert.equal(caps(true, mobileWith([])).propertyEditRole.reason, NOT_AVAILABLE_YET);
+});
+
+test("contactCanonicalRead is a READ flag, not part of the activation group: the guard never changes it", () => {
+  assert.equal((MOBILE_RELATIONSHIP_CONTROL_FLAGS as readonly string[]).includes("contactCanonicalRead"), false);
+  const g = builtRelationshipControlGroup({ VITE_PROPERTY_LINK_CONTROLS: "true" }, { ...MOBILE_LINKING, contactCanonicalRead: true });
+  assert.equal(g.mobile.contactCanonicalRead, true, "left exactly as configured, even when the group is refused");
+});
+
+test("the shipped phone is guarded end to end: the capability default is the group, and no other production code reads a relationship flag directly", () => {
+  const dir = new URL("../../minimal/mobile/", import.meta.url);
+  const code = (f: string) => readFileSync(new URL(f, dir), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.match(code("mobileLinking.ts"), /flags: LinkingFlags = builtRelationshipControlGroup\(\)\.mobile/);
+  for (const f of ["MobileContact.tsx", "MobilePropertyContacts.tsx", "MobileContactView.tsx", "MobilePropertyContactsView.tsx", "MobileLinkPicker.tsx", "useLinkPicker.ts"]) {
+    const reads = [...code(f).matchAll(/MOBILE_LINKING\.(\w+)/g)].map((m) => m[1]);
+    assert.deepEqual(reads.filter((k) => k !== "contactCanonicalRead"), [], `${f} reads only the canonical READ flag directly`);
+  }
+  assert.equal(MOBILE_LINKING.contactCanonicalRead, false);
+  for (const k of MOBILE_RELATIONSHIP_CONTROL_FLAGS) assert.equal(MOBILE_LINKING[k], false, `${k} is OFF`);
 });

@@ -1,3 +1,4 @@
+import { builtRelationshipControlGroup } from "../../lib/relationshipControlFlags";
 import { GROW_PROPERTIES_LINK, GROW_RELATIONSHIPS_MANAGE, LINK_ROLE_LABELS, MOBILE_LINKING, MOBILE_LINK_CONTRACT, ROLES_ACCEPTED_NOW, ROLES_APPROVED_PENDING, type LinkContract, type LinkRole, type LinkingFlags } from "./mobileLinkingConfig";
 import { canManageRelationships } from "../../lib/relationshipPermission";
 import { LINK_ALREADY_EXISTS, LINK_ROLE_REQUIRED, linkFailureText } from "../properties/minimalPropertyContactsModel";
@@ -47,7 +48,7 @@ const NEEDS: Record<LinkingAction, readonly string[]> = {
  * run.access alone, such as Pit Crew, is not enough), the same rule the server enforces on the canonical routes: it is not re-derived from a raw
  * key. Any OTHER key an action needs (grow.properties.link for contactLinkProperty) is still required as before.
  */
-export function linkingCapabilities(entitlements: readonly string[] | null | undefined, flags: LinkingFlags = MOBILE_LINKING, role?: string | null): LinkingCapabilities {
+export function linkingCapabilities(entitlements: readonly string[] | null | undefined, flags: LinkingFlags = builtRelationshipControlGroup().mobile, role?: string | null): LinkingCapabilities {
   const out = {} as LinkingCapabilities;
   const has = (key: string) => Array.isArray(entitlements) && entitlements.includes(key);
   for (const action of Object.keys(NEEDS) as LinkingAction[]) {
