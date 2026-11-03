@@ -1,3 +1,4 @@
+import { MOBILE_LINKING } from "../../minimal/mobile/mobileLinkingConfig";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -56,7 +57,10 @@ test("t230u: link controls are feature-flagged off unless VITE_PROPERTY_LINK_CON
   assert.equal(propertyLinkControlsEnabled(undefined), false);
   assert.equal(propertyLinkControlsEnabled({}), false);
   assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "1" }), false);
-  assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "true" }), true);
+  // t263u: the desktop flag alone is a MIXED state (mobile relationship flags OFF) and resolves OFF; with the whole group ON it is ON.
+  assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "true" }), false);
+  const allOn = Object.fromEntries(Object.keys(MOBILE_LINKING).map((k) => [k, k !== "contactCanonicalRead"])) as typeof MOBILE_LINKING;
+  assert.equal(propertyLinkControlsEnabled({ VITE_PROPERTY_LINK_CONTROLS: "true" }, allOn), true);
   assert.equal(propertyLinkControlsEnabled(), false, "default build: off");
 });
 

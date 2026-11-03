@@ -1,3 +1,5 @@
+import { desktopLinkControlsRequested, resolveRelationshipControlGroup } from "../../lib/relationshipControlFlags";
+import { MOBILE_LINKING, type LinkingFlags } from "../mobile/mobileLinkingConfig";
 // AE Minimal v1.0 — Link a Contact on the Grow property detail (Owner t148u/t149u).
 // Existing routes only:
 //   GET  /parties/by-property/:id   linked contacts (brokerage + visibility scoped)
@@ -192,8 +194,9 @@ export const UNLINK_CONFIRM = "Remove this link? The contact and the property ar
  * security and integration tests pass in CI and the Owner enables them
  * (VITE_PROPERTY_LINK_CONTROLS=true at build). Read-only lists always render.
  */
-export function propertyLinkControlsEnabled(env: Record<string, unknown> | undefined = (import.meta as { env?: Record<string, unknown> }).env): boolean {
-  return env?.VITE_PROPERTY_LINK_CONTROLS === "true";
+export function propertyLinkControlsEnabled(env: Record<string, unknown> | undefined = (import.meta as { env?: Record<string, unknown> }).env, mobile: LinkingFlags = MOBILE_LINKING): boolean {
+  // t263u: part of the relationship-control activation group; a mixed state resolves OFF (lib/relationshipControlFlags.ts).
+  return resolveRelationshipControlGroup(desktopLinkControlsRequested(env), mobile).desktop;
 }
 
 /**
