@@ -9,7 +9,7 @@ import { requireAnyEntitlement, requireRelationshipManage } from "../middlewares
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { findDuplicateContact } from "./contacts.js";
 import { logAudit } from "../lib/audit.js";
-import { addPostCallNote, recordCallConsentConfirmation, tapToCallStatus } from "../lib/tapToCall.js";
+import { addPostCallNote, recordCallConsentConfirmation, tapToCallStatus, usableNumber, maskedPhoneDisplay } from "../lib/tapToCall.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
@@ -248,8 +248,9 @@ export function maskEmail(e: string | null): string | null {
 }
 export function maskPhone(m: string | null): string | null {
   if (!m) return m;
-  const digits = m.replace(/\D/g, "");
-  return digits.length >= 3 ? `***${digits.slice(-3)}` : "***";
+  // t263u: same rule as Tap-to-Call (D10): last three digits of the DIALLED part only, never an extension or a note.
+  const u = usableNumber(m);
+  return u ? (maskedPhoneDisplay(u.dial) as string) : "***";
 }
 async function callerCanReadContacts(user: Actor): Promise<boolean> {
   return explainEntitlementDecision(user, "grow.contacts.read").then((d) => d.allowed).catch(() => false);
@@ -325,7 +326,7 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
       propertyId,
     });
     if (role === "Seller") await runSellerSideEffects(propertyId, partyId, user);
-    res.status(201).json({ party: partySummary(outcome.party), link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
+    res.status(201).json({ party: partySummary(outcome.party, await callerCanReadContacts(user)), link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
     return;
   }
 
@@ -405,7 +406,7 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
 
   // t257u (review 8 D3): the create-new 201 follows the pre-flight rule: matched contactId only with contact-read.
   const visibleWarnings = (await callerCanReadContacts(user)) ? warnings : warnings.map(({ code, kind }) => ({ code, kind }));
-  res.status(201).json({ party: partySummary(party), link, warnings: visibleWarnings, changed: changedBody(link.role, demoted) });
+  res.status(201).json({ party: partySummary(party, await callerCanReadContacts(user)), link, warnings: visibleWarnings, changed: changedBody(link.role, demoted) });
 });
 
 // t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
