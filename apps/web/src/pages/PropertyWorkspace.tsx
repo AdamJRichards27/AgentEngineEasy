@@ -3,7 +3,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary";
 import { apiFetch, apiErrorMessage } from "../lib/api";
-import { useSession } from "../lib/session";
+import { useEntitlements, useSession } from "../lib/session";
+import { canManageRelationships } from "../lib/relationshipPermission";
+import { createNewBody, linkExistingBody, runContactDetail, runContactName, runDuplicatePanel, shouldSearch, RUN_NO_MATCH_TEXT, type DuplicateWarning, type RunContactSummary } from "../lib/runAddPerson";
 import { runPartyPrimaryMarker } from "../lib/runPartyPrimary";
 
 // t273u (X12): read-only Primary marker on Run's party rows (sellers and other parties).
@@ -392,15 +394,6 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const requestAml = useMutation({
     mutationFn: (partyId: number) => apiFetch("/aml/request", { method: "POST", body: JSON.stringify({ propertyId, partyId }) }),
     onSuccess: invalidateCloseState,
-  });
-
-  const addParty = useMutation({
-    mutationFn: (input: Record<string, unknown>) =>
-      apiFetch("/parties", { method: "POST", body: JSON.stringify({ propertyId, ...input }) }),
-    onSuccess: () => {
-      setShowAddParty(false);
-      invalidate();
-    },
   });
 
   // Phase 5: agency agreement terms capture, template population, and
@@ -1034,7 +1027,14 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
             + Add Person
           </button>
         ) : (
-          <AddPartyForm onCancel={() => setShowAddParty(false)} onSubmit={(input) => addParty.mutate(input)} />
+          <AddPartyForm
+            propertyId={propertyId}
+            onCancel={() => setShowAddParty(false)}
+            onDone={() => {
+              setShowAddParty(false);
+              invalidate();
+            }}
+          />
         )}
       </section>
 
@@ -1296,12 +1296,17 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
 // captured once against the property and reused everywhere downstream
 // (AML, agency agreement, contract) via the PropertyParty join.
 function AddPartyForm({
+  propertyId,
   onCancel,
-  onSubmit,
+  onDone,
 }: {
+  propertyId: number;
   onCancel: () => void;
-  onSubmit: (input: Record<string, unknown>) => void;
+  onDone: () => void;
 }) {
+  const { user } = useSession();
+  const { hasEntitlement } = useEntitlements();
+  const canManage = canManageRelationships(hasEntitlement, user?.role);
   const [role, setRole] = useState<(typeof ROLES)[number]>("Seller");
   const [partyType, setPartyType] = useState<(typeof PARTY_TYPES)[number]>("Person");
   const [firstName, setFirstName] = useState("");
@@ -1309,21 +1314,80 @@ function AddPartyForm({
   const [organisationName, setOrganisationName] = useState("");
   const [email, setEmail] = useState("");
   const [mobile, setMobile] = useState("");
+  // t274u R03: search for and select an existing contact first.
+  const [q, setQ] = useState("");
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [dupWarnings, setDupWarnings] = useState<DuplicateWarning[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const submit = () => {
-    onSubmit({
-      role,
-      partyType,
-      firstName: firstName || undefined,
-      lastName: lastName || undefined,
-      organisationName: organisationName || undefined,
-      email: email || undefined,
-      mobile: mobile || undefined,
-    });
+  const search = useQuery({
+    queryKey: ["run-add-person-search", q.trim()],
+    queryFn: () => apiFetch<{ contacts: RunContactSummary[] }>("/parties/search", { method: "POST", body: JSON.stringify({ q: q.trim() }) }),
+    enabled: shouldSearch(q),
+  });
+  const results = shouldSearch(q) ? search.data?.contacts ?? [] : [];
+  const panel = runDuplicatePanel(dupWarnings, canManage);
+
+  const fields = () => ({
+    role,
+    partyType,
+    firstName: firstName || undefined,
+    lastName: lastName || undefined,
+    organisationName: organisationName || undefined,
+    email: email || undefined,
+    mobile: mobile || undefined,
+  });
+
+  const run = async (body: Record<string, unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch("/parties", { method: "POST", body: JSON.stringify(body) });
+      onDone();
+    } catch (e) {
+      const err = e as { status?: number; code?: string };
+      if (err.status === 409 && err.code === "POTENTIAL_DUPLICATE_CONTACT") {
+        // Server-side guard caught a duplicate (e.g. created meanwhile): re-read the
+        // masked warnings through the same pre-flight so the panel follows the t261u rule.
+        const check = await apiFetch<{ warnings: DuplicateWarning[] }>("/parties/duplicate-check", {
+          method: "POST",
+          body: JSON.stringify({ email: email || undefined, mobile: mobile || undefined }),
+        }).catch(() => ({ warnings: [] as DuplicateWarning[] }));
+        setDupWarnings(check.warnings.length ? check.warnings : [{ code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email" }]);
+      } else {
+        setError(apiErrorMessage(e, "Couldn't add this person. Try again."));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const linkSelected = (partyId: number) => run(linkExistingBody(propertyId, partyId, role));
+
+  const createNew = async (confirmed: boolean) => {
+    if (!confirmed && (email || mobile)) {
+      // Existing pre-flight; never blocks by itself.
+      try {
+        const check = await apiFetch<{ warnings: DuplicateWarning[] }>("/parties/duplicate-check", {
+          method: "POST",
+          body: JSON.stringify({ email: email || undefined, mobile: mobile || undefined }),
+        });
+        if (check.warnings.length > 0) {
+          setDupWarnings(check.warnings);
+          return;
+        }
+      } catch {
+        /* the server-side guard on POST still applies */
+      }
+    }
+    setDupWarnings(null);
+    await run(createNewBody(propertyId, fields(), confirmed));
   };
 
   return (
-    <div className="card stack">
+    <div className="card stack" data-ae-run-add-person>
       <div className="inline-form">
         <label>
           Role
@@ -1335,52 +1399,122 @@ function AddPartyForm({
             ))}
           </select>
         </label>
-        <label>
-          Type
-          <select value={partyType} onChange={(e) => setPartyType(e.target.value as (typeof PARTY_TYPES)[number])}>
-            {PARTY_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
-      {partyType === "Person" ? (
+      <label>
+        Find an existing contact
+        <input
+          id="run-add-person-search"
+          value={q}
+          placeholder="Name, email or mobile"
+          onChange={(e) => {
+            setQ(e.target.value);
+            setSelectedId(null);
+          }}
+        />
+      </label>
+      {shouldSearch(q) && !search.isLoading ? (
+        results.length > 0 ? (
+          <ul className="stack" data-ae-run-existing-results>
+            {results.map((c) => (
+              <li key={c.id}>
+                <label>
+                  <input type="radio" name="run-existing-contact" data-ae-run-existing-choice={c.id} checked={selectedId === c.id} onChange={() => setSelectedId(c.id)} />{" "}
+                  {runContactName(c)}
+                  {runContactDetail(c) ? <span className="muted"> {runContactDetail(c)}</span> : null}
+                </label>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted" data-ae-run-no-match>{RUN_NO_MATCH_TEXT}</p>
+        )
+      ) : null}
+      {selectedId !== null ? (
         <div className="inline-form">
-          <label>
-            First name
-            <input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
-          </label>
-          <label>
-            Last name
-            <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
-          </label>
+          <button className="btn btn-primary" data-ae-run-link-existing disabled={busy} onClick={() => linkSelected(selectedId)}>
+            Link selected contact
+          </button>
+        </div>
+      ) : null}
+      {!showCreate ? (
+        <div className="inline-form">
+          <button className="btn btn-secondary" data-ae-run-show-create onClick={() => setShowCreate(true)}>
+            Create a new contact
+          </button>
+          <button className="btn btn-link" onClick={onCancel}>
+            Cancel
+          </button>
         </div>
       ) : (
-        <label>
-          {partyType} name
-          <input value={organisationName} onChange={(e) => setOrganisationName(e.target.value)} />
-        </label>
+        <div className="stack" data-ae-run-create-new>
+          <label>
+            Type
+            <select value={partyType} onChange={(e) => setPartyType(e.target.value as (typeof PARTY_TYPES)[number])}>
+              {PARTY_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+          {partyType === "Person" ? (
+            <div className="inline-form">
+              <label>
+                First name
+                <input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+              </label>
+              <label>
+                Last name
+                <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
+              </label>
+            </div>
+          ) : (
+            <label>
+              {partyType} name
+              <input value={organisationName} onChange={(e) => setOrganisationName(e.target.value)} />
+            </label>
+          )}
+          <div className="inline-form">
+            <label>
+              Email
+              <input value={email} onChange={(e) => { setEmail(e.target.value); setDupWarnings(null); }} />
+            </label>
+            <label>
+              Mobile
+              <input value={mobile} onChange={(e) => { setMobile(e.target.value); setDupWarnings(null); }} />
+            </label>
+          </div>
+          {panel ? (
+            <div className="notice" role="alert" data-ae-run-duplicate>
+              <p>{panel.text}</p>
+              <div className="inline-form">
+                {panel.canUseExisting && panel.existingContactId !== null ? (
+                  <button className="btn btn-primary" data-ae-run-use-existing disabled={busy} onClick={() => linkSelected(panel.existingContactId!)}>
+                    Use existing contact
+                  </button>
+                ) : null}
+                {panel.openHref ? (
+                  <a className="btn btn-secondary" data-ae-run-open-existing href={panel.openHref}>
+                    Open existing
+                  </a>
+                ) : null}
+                <button className="btn btn-secondary" data-ae-run-create-anyway disabled={busy} onClick={() => createNew(true)}>
+                  Create anyway
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <div className="inline-form">
+            <button className="btn btn-primary" disabled={busy} onClick={() => createNew(false)}>
+              Save
+            </button>
+            <button className="btn btn-link" onClick={onCancel}>
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
-      <div className="inline-form">
-        <label>
-          Email
-          <input value={email} onChange={(e) => setEmail(e.target.value)} />
-        </label>
-        <label>
-          Mobile
-          <input value={mobile} onChange={(e) => setMobile(e.target.value)} />
-        </label>
-      </div>
-      <div className="inline-form">
-        <button className="btn btn-primary" onClick={submit}>
-          Save
-        </button>
-        <button className="btn btn-link" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
+      {error ? <p className="error" role="alert">{error}</p> : null}
     </div>
   );
 }

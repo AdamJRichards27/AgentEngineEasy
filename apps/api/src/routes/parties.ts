@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, inArray, ne, asc } from "drizzle-orm";
+import { eq, and, inArray, ne, asc, ilike, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, parties, propertyParties, properties, workflows, auditLogs, PROPERTY_PARTY_ROLES, PROPERTY_PARTY_PRIMARY_EXEMPT_ROLES } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
@@ -163,6 +163,12 @@ const addPartySchema = z.object({
   mobile: z.string().optional(),
   email: z.string().email().optional(),
   rejectDuplicateContact: z.boolean().optional(),
+  // t274u R03: the Run "+ Add Person" form sends duplicateGuard: "confirm". A
+  // matching email/mobile then returns 409 POTENTIAL_DUPLICATE_CONTACT (nothing
+  // created) until the caller re-sends with confirmNewContact: true ("Create
+  // anyway"). Other callers keep the t234u warn-only behaviour.
+  duplicateGuard: z.literal("confirm").optional(),
+  confirmNewContact: z.boolean().optional(),
   // t236u: the creating agent's confirmation that the contact agreed to be called.
   callConsent: z
     .object({ confirmed: z.boolean(), restrictions: z.string().max(500).optional(), doNotCall: z.boolean().optional() })
@@ -358,6 +364,16 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
   // t234u: never rejected for a matching email/mobile (rejectDuplicateContact
   // is accepted for compatibility and ignored); warnings are returned instead.
   const warnings = await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile);
+  if (parsed.data.duplicateGuard === "confirm" && !parsed.data.confirmNewContact && warnings.length > 0) {
+    // Same masking rule as the pre-flight: the matched contactId only with contact-read.
+    const canRead = await callerCanReadContacts(user);
+    res.status(409).json({
+      error: "A contact with this email or mobile already exists. Select the existing contact, or confirm to create a new one.",
+      code: "POTENTIAL_DUPLICATE_CONTACT",
+      warnings: canRead ? warnings : warnings.map(({ code, kind }) => ({ code, kind })),
+    });
+    return;
+  }
 
   const created = await db.transaction(async (tx) => {
     // Same serialisation point as the link-existing path (primary rule).
@@ -407,6 +423,38 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
   // t257u (review 8 D3): the create-new 201 follows the pre-flight rule: matched contactId only with contact-read.
   const visibleWarnings = (await callerCanReadContacts(user)) ? warnings : warnings.map(({ code, kind }) => ({ code, kind }));
   res.status(201).json({ party: partySummary(party, await callerCanReadContacts(user)), link, warnings: visibleWarnings, changed: changedBody(link.role, demoted) });
+});
+
+// t274u R03: existing-contact search for the Run "+ Add Person" picker. Body,
+// not query string (contact details stay out of URLs and logs). Brokerage
+// scoped; same gate as linking (Pit Crew refused). Name match for everyone;
+// email/mobile match only for callers with contact-read, and email/mobile in
+// the results are masked for everyone else (Run-only masking).
+const partySearchSchema = z.object({ q: z.string().trim().min(2).max(100) }).strict();
+partiesRouter.post("/search", requireAuth, canManageRelationships, async (req, res) => {
+  const parsed = partySearchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+  const user = req.authedUser!;
+  const canRead = await callerCanReadContacts(user);
+  const q = parsed.data.q.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const pattern = `%${q}%`;
+  const nameMatch = [
+    ilike(parties.firstName, pattern),
+    ilike(parties.lastName, pattern),
+    ilike(parties.organisationName, pattern),
+    sql`(coalesce(${parties.firstName}, '') || ' ' || coalesce(${parties.lastName}, '')) ilike ${pattern}`,
+  ];
+  const contactMatch = canRead ? [ilike(parties.email, pattern), ilike(parties.mobile, pattern)] : [];
+  const rows = await db
+    .select()
+    .from(parties)
+    .where(and(eq(parties.brokerageId, user.brokerageId), or(...nameMatch, ...contactMatch)))
+    .orderBy(asc(parties.lastName), asc(parties.firstName), asc(parties.id))
+    .limit(10);
+  res.json({ contacts: rows.map((p) => partySummary(p, canRead)) });
 });
 
 // t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
