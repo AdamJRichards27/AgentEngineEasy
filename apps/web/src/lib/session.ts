@@ -111,7 +111,8 @@ export function useEntitlements() {
     select: (data) => data?.entitlements ?? [],
     retry: false,
   });
-  const entitlements = query.data ?? [];
+  // Defensive: only an array is an entitlement list (a test harness that ignores `select` hands back the user).
+  const entitlements = Array.isArray(query.data) ? query.data : [];
   return {
     entitlements,
     isLoading: query.isLoading,
