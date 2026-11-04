@@ -5,7 +5,7 @@ import { CONTACT360_FULL_VIEW_QUERY, formatContactDate } from "../minimalContact
 import { roleLabel } from "./mobileLabels";
 import { propertyResultHref } from "./mobileSearchModel";
 import { linkRoleLabel, type CanonicalContactLink } from "./mobileLinking";
-import { buildGrowInterest, growRelationshipText, type GrowInterestRow } from "../../lib/growInterest";
+import { buildGrowInterest, growRelationshipText, type CanonicalLinkLike, type GrowInterestRow } from "../../lib/growInterest";
 import { HISTORY_VISIBLE, PROPERTY_RELATIONSHIP_LABELS } from "./mobilePeopleConfig";
 
 // AE Mobile (CC Task #64, M4): the phone Contact 360 layout, as one pure function. No React, no network, no
@@ -118,6 +118,11 @@ export interface MobileContactOptions {
   canonicalStatus?: "loading" | "error" | null;
   /** What the by-contact response said about itself (truncated, total, unreadable rows). */
   canonicalMeta?: { truncated: boolean; total: number | null; skipped: number } | null;
+  /**
+   * EVERY property link (propertyId, role) from the by-contact response's uncapped list. Decides only "Also listed under Properties", so that label
+   * never depends on the 100-link display cap. Null or omitted: the displayed (capped) links are used, as before.
+   */
+  canonicalMatchLinks?: readonly CanonicalLinkLike[] | null;
 }
 
 /** The sentence under Properties when it shows less than there is. */
@@ -264,7 +269,7 @@ export function buildMobileContactLayout(data: GrowContact360, options: MobileCo
       propertyId: p.propertyId,
     }));
   const propertiesList = propertiesState === "legacy" ? legacyRows : propertiesState === "ready" ? canonicalRows : [];
-  const interest = propertiesState === "ready" && canonical ? buildGrowInterest(data.properties, canonical, propertyRelationshipText, propertyResultHref) : { rows: [], alsoListedCount: 0 };
+  const interest = propertiesState === "ready" && canonical ? buildGrowInterest(data.properties, options.canonicalMatchLinks ?? canonical, propertyRelationshipText, propertyResultHref) : { rows: [], alsoListedCount: 0 };
   const propertiesNotice =
     propertiesState === "ready" ? propertiesNoticeText(canonicalRows.length, options.canonicalMeta) : propertiesState === "error" ? "Couldn't load this contact's property links." : propertiesState === "loading" ? "Loading property links…" : null;
   return {

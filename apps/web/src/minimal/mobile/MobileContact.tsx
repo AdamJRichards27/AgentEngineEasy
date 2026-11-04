@@ -162,6 +162,7 @@ export default function MobileContact() {
     canonicalLinks,
     canonicalStatus,
     canonicalMeta: canonicalResult ? { truncated: canonicalResult.truncated, total: canonicalResult.total, skipped: canonicalResult.skipped } : null,
+    canonicalMatchLinks: canonicalResult ? canonicalResult.matchLinks : null,
   });
   // What this contact is already linked to, for the repeat guard: canonical rows only.
   const known: KnownLink[] = layout.properties.filter((p) => p.canonical && p.propertyId !== null && p.roleValue !== null).map((p) => ({ linkId: p.key, propertyId: p.propertyId as number, partyId: partyId as number, role: p.roleValue as string }));

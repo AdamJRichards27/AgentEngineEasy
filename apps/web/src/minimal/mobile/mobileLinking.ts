@@ -2,6 +2,7 @@ import { builtRelationshipControlGroup } from "../../lib/relationshipControlFlag
 import { GROW_PROPERTIES_LINK, GROW_RELATIONSHIPS_MANAGE, LINK_ROLE_LABELS, MOBILE_LINKING, MOBILE_LINK_CONTRACT, ROLES_ACCEPTED_NOW, ROLES_APPROVED_PENDING, type LinkContract, type LinkRole, type LinkingFlags } from "./mobileLinkingConfig";
 import { canManageRelationships } from "../../lib/relationshipPermission";
 import { LINK_ALREADY_EXISTS, LINK_ROLE_REQUIRED, linkFailureText } from "../properties/minimalPropertyContactsModel";
+import type { CanonicalLinkLike } from "./mobileGrowInterest";
 
 // AE Mobile (CC Task #64, M4 linking): the link, change-role and unlink requests the phone may send, and when each control may be
 // enabled, as pure functions. No React, no network, no storage.
@@ -145,6 +146,27 @@ export interface ContactLinksResult {
   limit: number | null;
   /** Rows the phone could not read: counted, never dropped silently. */
   skipped: number;
+  /**
+   * EVERY property link this caller may see, as (propertyId, role) and nothing else, from the response's uncapped `properties[]` (the same
+   * list the desktop reads). Used ONLY to decide "Also listed under Properties", so that result never depends on the 100-link display cap.
+   * Null when the response does not carry the list (an older server): matching then falls back to the capped `links`.
+   */
+  matchLinks: CanonicalLinkLike[] | null;
+}
+
+/**
+ * Reads the uncapped `properties[]` rows defensively, keeping ONLY propertyId and role. Nothing else in a row (address, dates, ids) is kept,
+ * so the matching set carries no more than the capped list already shows. A malformed row is dropped; a non-array gives null.
+ */
+export function parsePropertyMatchLinks(data: unknown): CanonicalLinkLike[] | null {
+  const rows = typeof data === "object" && data !== null ? (data as Record<string, unknown>).properties : undefined;
+  if (!Array.isArray(rows)) return null;
+  const out: CanonicalLinkLike[] = [];
+  for (const r of rows) {
+    const row = typeof r === "object" && r !== null ? (r as Record<string, unknown>) : null;
+    if (row && positive(row.propertyId) && typeof row.role === "string" && row.role.trim().length > 0) out.push({ propertyId: row.propertyId, role: row.role.trim() });
+  }
+  return out;
 }
 
 export function parseContactLinksResult(data: unknown): ContactLinksResult {
@@ -158,6 +180,7 @@ export function parseContactLinksResult(data: unknown): ContactLinksResult {
     total: wholeNumber(obj.total) && obj.total >= links.length ? obj.total : null,
     limit: positive(obj.limit) ? obj.limit : null,
     skipped: raw - links.length,
+    matchLinks: parsePropertyMatchLinks(data),
   };
 }
 
