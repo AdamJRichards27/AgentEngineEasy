@@ -27,6 +27,7 @@ import {
 import {
   recordStartupTaskFailure,
   runTrackedStartupTask,
+  STARTUP_TASK_RETRY_DELAYS_MS,
   failedStartupTaskNames,
   __resetStartupHealthForTesting,
 } from "../../lib/startupHealth.js";
@@ -289,9 +290,17 @@ test("a failed readiness-tracked startup task makes readiness unavailable and na
 });
 
 test("runTrackedStartupTask never rejects, records failures, and clears on success", async () => {
-  await runTrackedStartupTask("run_access_backfill", async () => {
-    throw new Error("simulated seed failure");
-  });
+  // t266u T-2: use the injectable timer, so the test keeps the real retry schedule (and attempt count)
+  // without sleeping it out (~47s of real setTimeout, which a VM pause pushed past the 120s test timeout).
+  const waited: number[] = [];
+  await runTrackedStartupTask(
+    "run_access_backfill",
+    async () => {
+      throw new Error("simulated seed failure");
+    },
+    { sleep: async (ms) => { waited.push(ms); } },
+  );
+  assert.deepEqual(waited, [...STARTUP_TASK_RETRY_DELAYS_MS]);
   assert.deepEqual(failedStartupTaskNames(), ["run_access_backfill"]);
   assert.equal((await checkReadiness()).status, "unavailable");
   await runTrackedStartupTask("run_access_backfill", async () => undefined);

@@ -76,7 +76,9 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
   // one or the rule correctly abstains and this file would measure nothing.
   const ownershipStartDate = new Date(Date.now() - 11 * 365 * MS_PER_DAY);
 
-  const seedStarted = Date.now();
+  // t266u T-1: time with the monotonic clock (performance.now), not Date.now: a VM pause or clock step
+  // moved the wall clock by ~490s mid-sweep and failed the budget although the test itself ran 15s.
+  const seedStarted = performance.now();
   for (let offset = 0; offset < SCALE_PARTIES; offset += SEED_BATCH) {
     const size = Math.min(SEED_BATCH, SCALE_PARTIES - offset);
     const partyRows = await db
@@ -110,14 +112,14 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
       })),
     );
   }
-  const seedMs = Date.now() - seedStarted;
+  const seedMs = performance.now() - seedStarted;
 
   // --- the measured sweep ---
   let statements = 0;
   const uninstall = setDbQueryObserver(() => {
     statements += 1;
   });
-  let startedAt = Date.now();
+  let startedAt = performance.now();
   let result;
   try {
     // STAGE 2: maxCandidatesPerBrokerage is now divided FAIRLY BETWEEN RULES
@@ -141,13 +143,13 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
       },
       () => {
         statements = 0;
-        startedAt = Date.now();
+        startedAt = performance.now();
       },
     );
   } finally {
     uninstall();
   }
-  const elapsedMs = Date.now() - startedAt;
+  const elapsedMs = performance.now() - startedAt;
 
   assert.ok(result.ok, "the sweep must not be skipped");
   const summary = result.ok ? result.summary : null;
@@ -198,16 +200,16 @@ test(`scale sanity — one sweep over ~${SCALE_PARTIES} candidates completes wit
   const uninstallSteady = setDbQueryObserver(() => {
     steadyStatements += 1;
   });
-  let steadyStarted = Date.now();
+  let steadyStarted = performance.now();
   try {
     await sweepWhenLockFree({ brokerageIds: [T.brokerageId] }, () => {
       steadyStatements = 0;
-      steadyStarted = Date.now();
+      steadyStarted = performance.now();
     });
   } finally {
     uninstallSteady();
   }
-  const steadyMs = Date.now() - steadyStarted;
+  const steadyMs = performance.now() - steadyStarted;
   assert.ok(steadyStatements < 15, `a steady-state sweep of an unchanged brokerage must be near-free, got ${steadyStatements} statements`);
   console.log(JSON.stringify({ event: "signal_sweep_steady_state", statements: steadyStatements, sweepMs: steadyMs }));
 });
