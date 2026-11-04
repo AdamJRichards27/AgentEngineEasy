@@ -4,6 +4,13 @@ import { AskAgentEngine } from "../components/AskAgentEngine";
 import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
+import { runPartyPrimaryMarker } from "../lib/runPartyPrimary";
+
+// t273u (X12): read-only Primary marker on Run's party rows (sellers and other parties).
+export function RunPrimaryMarker({ isPrimary }: { isPrimary: boolean }) {
+  const label = runPartyPrimaryMarker({ isPrimary });
+  return label ? <span className="pill pill-info" data-ae-run-primary style={{ marginLeft: "0.5rem" }}>{label}</span> : null;
+}
 import { transactionPanelActionVisibility } from "../lib/transactionPanelActions";
 import { closeBlockedReason, closeTransactionDisabled, visibleClosureBlockerRows, type ClosureBlockerDetail } from "../lib/closureBlockers";
 import { fundsReconciliationLabel, type FundsReconciliationView } from "../lib/fundsReconciliation";
@@ -905,7 +912,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
               <li key={p.linkId}>
                 <div>
                   {partyName(p.party)}
-                  {p.isPrimary ? " (primary)" : ""}
+                  <RunPrimaryMarker isPrimary={p.isPrimary} />
                   {p.amlStatus && <span className={amlPillClass(p.amlStatus)} style={{ marginLeft: "0.5rem" }}>{amlStatusCopy(p.amlStatus)}</span>}
                   <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
                     Remove
@@ -964,6 +971,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
                 <li key={p.linkId}>
                   <div>
                     {p.role}: {partyName(p.party)}
+                    <RunPrimaryMarker isPrimary={p.isPrimary} />
                     {p.amlStatus && <span className={amlPillClass(p.amlStatus)} style={{ marginLeft: "0.5rem" }}>{amlStatusCopy(p.amlStatus)}</span>}
                     <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
                       Remove
