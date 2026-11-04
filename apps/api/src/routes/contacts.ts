@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import {
+  auditLogs,
   db,
   growActivities,
   growCommitments,
@@ -23,7 +24,7 @@ import {
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { auditAuthorityAction, entitlementOrAuthority, readWithOptionalAuthority, ownedPartyIdsSql, pitCrewScopeRefusal, recordContactOwner } from "../lib/contactAuthority.js";
+import { auditAuthorityAction, entitlementOrAuthority, isPitCrew, ownedPartyIds, ownedPartyIdsSql, readWithOptionalAuthority, pitCrewScopeRefusal, recordContactOwner } from "../lib/contactAuthority.js";
 import { auditDuplicateOverride, gateNewContact, visibleDuplicates } from "../lib/contactDuplicates.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
@@ -1135,43 +1136,183 @@ const csvCell = (v: unknown) => {
   const safe = /^[=+\-@\t\r]/.test(t) ? `'${t}` : t;
   return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 };
-contactsRouter.get("/export", requireAuth, entitlementOrAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
-  const user = req.authedUser!;
-  const ownerId = req.actingFor?.owner.id ?? user.id;
-  const rows = await db
-    .select({
-      id: parties.id,
-      partyType: parties.partyType,
-      firstName: parties.firstName,
-      lastName: parties.lastName,
-      organisationName: parties.organisationName,
-      email: parties.email,
-      mobile: parties.mobile,
-    })
+// Owner t276u: exports are DELIVERED TO THE CONTACT OWNER by default.
+//   POST /exports           prepare (owner = caller; Pit Crew: the named owner on recorded
+//                           authority). Returns metadata only — never the data.
+//   GET  /exports           exports the caller owns or initiated (metadata only).
+//   GET  /exports/:id/download   the owner downloads. Anyone else (e.g. the Pit Crew initiator)
+//                           only after the owner records a separate release to that user.
+//   POST /exports/:id/release    owner-only: explicit release to a named user (reason).
+//   GET  /export            legacy direct download: owner only (Pit Crew refused).
+// Each export is identified by its contact_export_prepared audit row; the scope (owner's
+// contact ids at preparation, fixed field list) is stored there. Every download records the
+// actual recipient, requester (owner), initiating user, owner, scope and timestamp.
+// No schema: audit_logs rows only.
+const EXPORT_TTL_DAYS = 7;
+type ExportMeta = { owner: number; requestedBy: number; initiatedBy: number; initiatedByRole: string; authorityRef: string | null; scope: { kind: "owner_contacts"; fields: readonly string[]; partyIds: number[] }; preparedAt: string };
+
+async function exportRows(brokerageId: number, partyIds: number[]) {
+  if (partyIds.length === 0) return [];
+  return db
+    .select({ id: parties.id, partyType: parties.partyType, firstName: parties.firstName, lastName: parties.lastName, organisationName: parties.organisationName, email: parties.email, mobile: parties.mobile })
     .from(parties)
-    .where(and(eq(parties.brokerageId, user.brokerageId), sql`${parties.id} in ${ownedPartyIdsSql(user.brokerageId, ownerId)}`))
+    .where(and(eq(parties.brokerageId, brokerageId), inArray(parties.id, partyIds)))
     .orderBy(asc(parties.id));
-  await logAudit({
-    brokerageId: user.brokerageId,
-    userId: user.id,
-    action: "contacts_exported",
-    recordType: "contact_export",
-    recordId: String(ownerId),
-    providerReference: `owner:${ownerId}`,
-    updatedValue: JSON.stringify({
-      rows: rows.length,
-      fields: EXPORT_FIELDS,
-      requestedBy: ownerId,
-      performedBy: user.id,
-      recipient: ownerId,
-      authorityRef: req.actingFor?.authorityRef ?? null,
-    }),
-  });
+}
+
+async function prepareExport(req: import("express").Request, ownerId: number): Promise<{ exportId: number; meta: ExportMeta }> {
+  const user = req.authedUser!;
+  const partyIds = (await ownedPartyIds(user.brokerageId, ownerId)).sort((x, y) => x - y);
+  const meta: ExportMeta = {
+    owner: ownerId,
+    requestedBy: ownerId,
+    initiatedBy: user.id,
+    initiatedByRole: user.role,
+    authorityRef: req.actingFor?.authorityRef ?? null,
+    scope: { kind: "owner_contacts", fields: EXPORT_FIELDS, partyIds },
+    preparedAt: new Date().toISOString(),
+  };
+  const exportId = await logAudit(
+    { brokerageId: user.brokerageId, userId: user.id, action: "contact_export_prepared", recordType: "contact_export", recordId: String(ownerId), providerReference: `owner:${ownerId}`, updatedValue: JSON.stringify(meta) },
+    { strict: true },
+  );
+  return { exportId: exportId!, meta };
+}
+
+async function loadExport(brokerageId: number, exportId: number): Promise<{ meta: ExportMeta; createdAt: Date } | null> {
+  const [row] = await db
+    .select({ updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.id, exportId), eq(auditLogs.brokerageId, brokerageId), eq(auditLogs.action, "contact_export_prepared")))
+    .limit(1);
+  if (!row?.updatedValue) return null;
+  return { meta: JSON.parse(row.updatedValue) as ExportMeta, createdAt: row.createdAt };
+}
+
+async function releasedTo(brokerageId: number, exportId: number, ownerId: number, recipientId: number): Promise<number | null> {
+  const [row] = await db
+    .select({ id: auditLogs.id })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, brokerageId), eq(auditLogs.action, "contact_export_released"), eq(auditLogs.recordType, "contact_export"), eq(auditLogs.recordId, String(exportId)), eq(auditLogs.userId, ownerId), eq(auditLogs.providerReference, `recipient:${recipientId}`)))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+async function sendExport(req: import("express").Request, res: import("express").Response, exportId: number, meta: ExportMeta, releaseAuditId: number | null) {
+  const user = req.authedUser!;
+  const rows = await exportRows(user.brokerageId, meta.scope.partyIds);
+  await logAudit(
+    {
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "contacts_exported",
+      recordType: "contact_export",
+      recordId: String(exportId),
+      providerReference: `owner:${meta.owner}`,
+      updatedValue: JSON.stringify({
+        exportId,
+        rows: rows.length,
+        recipient: { userId: user.id, role: user.role },
+        requestedBy: meta.requestedBy,
+        initiatedBy: meta.initiatedBy,
+        owner: meta.owner,
+        scope: { kind: meta.scope.kind, fields: meta.scope.fields, partyCount: meta.scope.partyIds.length },
+        releaseAuditId,
+        authorityRef: meta.authorityRef,
+        at: new Date().toISOString(),
+      }),
+    },
+    { strict: true },
+  );
   const csv = [EXPORT_FIELDS.join(","), ...rows.map((r) => EXPORT_FIELDS.map((f) => csvCell(r[f])).join(","))].join("\r\n") + "\r\n";
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="contacts-owner-${ownerId}.csv"`);
+  res.setHeader("Content-Disposition", `attachment; filename="contacts-owner-${meta.owner}-export-${exportId}.csv"`);
   res.setHeader("Cache-Control", "no-store");
   res.send(csv);
+}
+
+const exportGate = entitlementOrAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read"));
+
+contactsRouter.post("/exports", requireAuth, exportGate, async (req, res) => {
+  const user = req.authedUser!;
+  const ownerId = req.actingFor?.owner.id ?? user.id;
+  const { exportId, meta } = await prepareExport(req, ownerId);
+  res.status(201).json({ exportId, owner: ownerId, deliveredTo: ownerId, initiatedBy: user.id, rows: meta.scope.partyIds.length, fields: EXPORT_FIELDS, status: "ready_for_owner", expiresInDays: EXPORT_TTL_DAYS });
+});
+
+contactsRouter.get("/exports", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const rows = await db
+    .select({ id: auditLogs.id, updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "contact_export_prepared"), or(eq(auditLogs.providerReference, `owner:${user.id}`), eq(auditLogs.userId, user.id))))
+    .orderBy(desc(auditLogs.id))
+    .limit(50);
+  res.json({
+    exports: rows.map((r) => {
+      const m = JSON.parse(r.updatedValue ?? "{}") as ExportMeta;
+      return { exportId: r.id, owner: m.owner, initiatedBy: m.initiatedBy, rows: m.scope?.partyIds?.length ?? 0, preparedAt: r.createdAt, mine: m.owner === user.id };
+    }),
+  });
+});
+
+contactsRouter.post("/exports/:exportId/release", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const exportId = parsePositiveId(req.params.exportId);
+  const recipientUserId = Number(req.body?.recipientUserId);
+  const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+  const ex = exportId ? await loadExport(user.brokerageId, exportId) : null;
+  if (!ex) {
+    res.status(404).json({ error: "Export not found" });
+    return;
+  }
+  if (isPitCrew(user) || ex.meta.owner !== user.id) {
+    res.status(403).json({ error: "Only the contact owner can release an export to someone else.", code: "EXPORT_RELEASE_OWNER_ONLY" });
+    return;
+  }
+  if (!Number.isInteger(recipientUserId) || recipientUserId !== ex.meta.initiatedBy || recipientUserId === user.id || reason.length < 5 || reason.length > 500) {
+    res.status(422).json({ error: "Release names the user who initiated the export and gives a reason (5-500 characters).", code: "EXPORT_RELEASE_INVALID" });
+    return;
+  }
+  const releaseId = await logAudit(
+    { brokerageId: user.brokerageId, userId: user.id, action: "contact_export_released", recordType: "contact_export", recordId: String(exportId), providerReference: `recipient:${recipientUserId}`, updatedValue: JSON.stringify({ exportId, owner: user.id, recipient: recipientUserId, reason }) },
+    { strict: true },
+  );
+  res.status(201).json({ exportId, releasedTo: recipientUserId, releaseAuditId: releaseId });
+});
+
+contactsRouter.get("/exports/:exportId/download", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const exportId = parsePositiveId(req.params.exportId);
+  const ex = exportId ? await loadExport(user.brokerageId, exportId) : null;
+  if (!ex) {
+    res.status(404).json({ error: "Export not found" });
+    return;
+  }
+  if (Date.now() - ex.createdAt.getTime() > EXPORT_TTL_DAYS * 86_400_000) {
+    res.status(410).json({ error: "This export has expired. Prepare a new one.", code: "EXPORT_EXPIRED" });
+    return;
+  }
+  if (ex.meta.owner === user.id) {
+    await sendExport(req, res, exportId!, ex.meta, null);
+    return;
+  }
+  const release = await releasedTo(user.brokerageId, exportId!, ex.meta.owner, user.id);
+  if (!release) {
+    res.status(403).json({ error: "This export is delivered to the contact owner. Downloading it needs the owner's separate release.", code: "EXPORT_DELIVERED_TO_OWNER" });
+    return;
+  }
+  await sendExport(req, res, exportId!, ex.meta, release);
+});
+
+contactsRouter.get("/export", requireAuth, exportGate, async (req, res) => {
+  const user = req.authedUser!;
+  if (isPitCrew(user)) {
+    res.status(403).json({ error: "Exports are delivered to the contact owner. Prepare one with POST /grow/contacts/exports.", code: "EXPORT_DELIVERED_TO_OWNER" });
+    return;
+  }
+  const { exportId, meta } = await prepareExport(req, user.id);
+  await sendExport(req, res, exportId, meta, null);
 });
 
 contactsRouter.get("/:partyId", requireAuth, readWithOptionalAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
