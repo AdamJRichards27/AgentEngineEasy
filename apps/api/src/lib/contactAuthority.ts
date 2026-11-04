@@ -22,6 +22,12 @@ import { db, users } from "@aee/db";
 import type { AuthedUser } from "../middlewares/auth.js";
 import { explainEntitlementDecision } from "./entitlements/resolver.js";
 import { logAudit } from "./audit.js";
+import { fieldNames, sealedOrWithheld } from "./auditValueVault.js";
+
+function sealedText(v: unknown): string {
+  const sealed = sealedOrWithheld(v);
+  return typeof sealed === "string" ? sealed : JSON.stringify(sealed);
+}
 
 export const PIT_CREW_ROLE = "Pit Crew";
 export const CONTACT_OWNER_ROLES = ["Agent", "Brokerage Administrator"] as const;
@@ -158,7 +164,7 @@ export function readWithOptionalAuthority(key: string, normal: (req: Request, re
     isPitCrew(req.authedUser) && req.get(ON_BEHALF_HEADER) ? pc(req, res, next) : normal(req, res, next);
 }
 
-/** Audit one authority-backed action: requester, performer, time (row created_at), before/after. */
+/** Audit one authority-backed action: requester, performer, time (row created_at), before/after (encrypted). */
 export async function auditAuthorityAction(
   req: Request,
   input: { action: string; recordType: string; recordId: string | number; propertyId?: number | null; before?: unknown; after?: unknown },
@@ -172,9 +178,11 @@ export async function auditAuthorityAction(
     recordType: input.recordType,
     recordId: String(input.recordId),
     propertyId: input.propertyId ?? null,
-    previousValue: input.before === undefined ? undefined : JSON.stringify(input.before),
+    // t276u: values encrypted at rest (lib/auditValueVault.ts); metadata stays readable.
+    previousValue: input.before === undefined || input.before === null ? undefined : sealedText(input.before),
     updatedValue: JSON.stringify({
-      after: input.after ?? null,
+      after: sealedOrWithheld(input.after),
+      fields: [...new Set([...fieldNames(input.before), ...fieldNames(input.after)])].sort(),
       requestedBy: a ? { userId: a.owner.id } : { userId: user.id },
       performedBy: { userId: user.id, role: user.role },
       authorityRef: a?.authorityRef ?? null,
@@ -216,20 +224,80 @@ export async function pitCrewScopeRefusal(req: Request, scope: { partyIds?: numb
 
 
 /**
- * t275u: sending or issuing a proposal or agreement is an agent authorisation. Agent and
- * Brokerage Administrator hold it; Pit Crew never does, whatever authority it carries.
+ * Owner t276u: final sending of a proposal (appraisal) or a listing agreement / document
+ * package is an AGENT authorisation. Brokerage Administrators keep oversight and review but
+ * cannot send by role (an administrator who is the record's own listing agent / appraisal
+ * owner sends as that agent). Anyone else may send only on a delegation the owning agent has
+ * explicitly recorded for that one record (audit_logs action send_authority_delegated,
+ * provider_reference "delegate:<userId>", latest delegated/revoked event wins). Pit Crew never
+ * sends, delegated or not. No schema: delegations live in audit_logs.
  */
-export const SEND_AUTHORISATION_ROLES: readonly string[] = ["Agent", "Brokerage Administrator"];
-export function requireSendAuthorisation() {
-  return (req: Request, res: Response, next: NextFunction) => {
+export const SEND_AUTHORISATION_ROLES: readonly string[] = ["Agent"];
+export const SEND_DELEGATE_ROLES: readonly string[] = ["Agent", "Brokerage Administrator"];
+export type SendRecordType = "appraisal" | "document_package";
+
+/** The agent who owns the record (appraisal owner / listing agent of the package's property). */
+export async function sendRecordOwner(brokerageId: number, recordType: SendRecordType, recordId: number): Promise<number | null> {
+  const rows = (
+    recordType === "appraisal"
+      ? await db.execute(sql`select owner_user_id as owner from appraisals where id = ${recordId} and brokerage_id = ${brokerageId}`)
+      : await db.execute(sql`select p.agent_id as owner from document_packages dp join properties p on p.id = dp.property_id where dp.id = ${recordId} and p.brokerage_id = ${brokerageId}`)
+  ).rows as { owner: number | null }[];
+  return rows[0]?.owner == null ? null : Number(rows[0].owner);
+}
+
+/** Latest recorded delegation for (record, delegate), still valid only if made by the current owner. */
+export async function activeSendDelegation(brokerageId: number, recordType: SendRecordType, recordId: number, delegateId: number): Promise<{ auditId: number; delegatorId: number } | null> {
+  const owner = await sendRecordOwner(brokerageId, recordType, recordId);
+  if (owner === null) return null;
+  const rows = (
+    await db.execute(sql`select id, action, user_id from audit_logs
+      where brokerage_id = ${brokerageId} and record_type = ${recordType} and record_id = ${String(recordId)}
+        and provider_reference = ${`delegate:${delegateId}`} and action in ('send_authority_delegated','send_authority_revoked')
+      order by created_at desc, id desc limit 1`)
+  ).rows as { id: number; action: string; user_id: number }[];
+  const r = rows[0];
+  if (!r || r.action !== "send_authority_delegated" || Number(r.user_id) !== owner) return null;
+  return { auditId: Number(r.id), delegatorId: owner };
+}
+
+export const SEND_AUTHORISATION_REQUIRED = "SEND_AUTHORISATION_REQUIRED";
+export function requireSendAuthorisation(recordType: SendRecordType, param: string) {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const user = req.authedUser;
-    if (!user || !SEND_AUTHORISATION_ROLES.includes(user.role)) {
+    const refuseSend = (reason: string) =>
       res.status(403).json({
-        error: "Sending needs agent authorisation. Return it to the agent for review and sending.",
-        code: "SEND_AUTHORISATION_REQUIRED",
+        error:
+          reason === "ADMIN_REVIEW_ONLY"
+            ? "Administrators can review this but not send it. The agent sends it, or records a delegation to you first."
+            : "Sending needs agent authorisation. Return it to the agent for review and sending.",
+        code: SEND_AUTHORISATION_REQUIRED,
+        reason,
       });
-      return;
+    if (!user) return refuseSend("ROLE");
+    if (isPitCrew(user)) return refuseSend("PIT_CREW");
+    if (SEND_AUTHORISATION_ROLES.includes(user.role)) return next();
+    const id = Number(req.params[param]);
+    // A malformed id is not a send: let the route answer its own 400.
+    if (!/^\d+$/.test(String(req.params[param] ?? "")) || id <= 0 || id > 2_147_483_647) return next();
+    // A Brokerage Administrator who is the record's own agent (listing agent / appraisal
+    // owner) sends as that agent — not by administrator role. (Open Owner decision t276u.)
+    if (user.role === "Brokerage Administrator" && (await sendRecordOwner(user.brokerageId, recordType, id).catch(() => null)) === user.id) return next();
+    if (Number.isInteger(id) && id > 0 && SEND_DELEGATE_ROLES.includes(user.role)) {
+      const d = await activeSendDelegation(user.brokerageId, recordType, id, user.id).catch(() => null);
+      if (d) {
+        await logAudit({
+          brokerageId: user.brokerageId,
+          userId: user.id,
+          action: "send_on_delegated_authority",
+          recordType,
+          recordId: String(id),
+          updatedValue: JSON.stringify({ delegatedBy: { userId: d.delegatorId }, delegationAuditId: d.auditId, performedBy: { userId: user.id, role: user.role } }),
+          providerReference: `delegation:${d.auditId}`,
+        });
+        return next();
+      }
     }
-    next();
+    return refuseSend(user.role === "Brokerage Administrator" ? "ADMIN_REVIEW_ONLY" : "ROLE");
   };
 }

@@ -253,7 +253,7 @@ documentsRouter.post("/packages/:packageId/populate", requireAuth, requiresRunAc
   }
 });
 
-documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, requireSendAuthorisation(), requiresRunAccess, async (req, res) => {
+documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, requireSendAuthorisation("document_package", "packageId"), requiresRunAccess, async (req, res) => {
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;
