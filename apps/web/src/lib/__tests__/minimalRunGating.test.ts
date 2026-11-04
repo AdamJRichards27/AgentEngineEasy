@@ -95,5 +95,5 @@ test("Contact 360: linked properties link to the Run workspace only with run.acc
   assert.equal(buildMinimalContactModel(contact, { runAccess: true }).properties[0].href, "/properties/3");
   assert.equal(buildMinimalContactModel(contact).properties[0].label, "18 Campbell St", "the address still shows");
   const screen = readFileSync(new URL("../../minimal/MinimalContact360.tsx", import.meta.url), "utf8");
-  assert.match(screen, /buildMinimalContactModel\(detail\.data, \{ runAccess: hasEntitlement\("run\.access"\) \}\)/);
+  assert.match(screen, /buildMinimalContactModel\(detail\.data, \{\s+runAccess: hasEntitlement\("run\.access"\),/);
 });

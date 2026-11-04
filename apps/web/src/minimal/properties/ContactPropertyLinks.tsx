@@ -66,7 +66,7 @@ export function ContactPropertyLinks({ partyId, canManage: canManageRaw, heading
   return (
     <section className="am-rail-section" aria-labelledby={headingId} data-ae-contact-property-links={partyId}>
       <div className="am-section-head">
-        <h2 id={headingId} className="am-eyebrow">Properties</h2>
+        <h2 id={headingId} className="am-eyebrow">Properties{linksQuery.isSuccess ? <span data-ae-properties-count>{` (${links.length})`}</span> : null}</h2>
         {canManage && !open ? (
           <button type="button" className="am-data-button" data-ae-link-property="open" onClick={() => { setOpen(true); setError(null); }}>
             Link to a property
