@@ -35,7 +35,7 @@ import {
 } from "@aee/domain";
 import { appraisalLifecycleClosed } from "../lib/appraisalFinaliseGuard.js";
 import { requireAuth } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { denyRelationshipWriteBarredRoles, requireEntitlement } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision, resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
 import {
@@ -358,6 +358,7 @@ growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"),
 growRouter.post(
   "/relationships",
   requireAuth,
+  denyRelationshipWriteBarredRoles(),
   requireEntitlement("grow.relationships.manage"),
   async (req, res) => {
     const user = req.authedUser!;
@@ -487,6 +488,7 @@ growRouter.post(
 growRouter.patch(
   "/relationships/:id",
   requireAuth,
+  denyRelationshipWriteBarredRoles(),
   requireEntitlement("grow.relationships.manage"),
   async (req, res) => {
     const user = req.authedUser!;

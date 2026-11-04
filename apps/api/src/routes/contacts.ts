@@ -22,7 +22,7 @@ import {
   type GrowConsentChannel,
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { denyRelationshipWriteBarredRoles, requireEntitlement } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
@@ -1417,7 +1417,7 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
 // Deliberately does not merge records and does not auto-infer anything — every row here is an
 // explicit user action. Both partyId and relatedPartyId are validated against the caller's own
 // brokerage before the row is created.
-contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/:partyId/relationships", requireAuth, denyRelationshipWriteBarredRoles(), requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const relatedPartyId = parsePositiveId(req.body?.relatedPartyId);
@@ -1491,7 +1491,7 @@ contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("
 
 // DELETE /grow/contacts/relationships/:id — remove a household relationship. Does not affect
 // either party record and does not cascade into any other Grow data.
-contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.delete("/relationships/:id", requireAuth, denyRelationshipWriteBarredRoles(), requireEntitlement("grow.contacts.manage"), async (req, res) => {
   const user = req.authedUser!;
   const id = parsePositiveId(req.params.id);
   if (id === null) {

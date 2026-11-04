@@ -84,11 +84,12 @@ for (const [label, keys] of [["Grow", GROW], ["Run", ["run.access", "grow.relati
     assert.equal(l2.status, 201);
     assert.equal((await call(b.agent.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Other", firstName: "Ola" })).status, 201);
     assert.equal((await call(b.agent.cookie, "DELETE", `/parties/link/${l2.json.link.id}`)).status, 204);
-    // Pit Crew is brokerage-wide.
+    // Pit Crew reads brokerage-wide but (Owner t274u) never links or unlinks,
+    // even with grow.relationships.manage.
     assert.equal((await call(b.pc.cookie, "GET", `/parties/by-property/${b.adminProp}`)).status, 200);
     const l3 = await call(b.pc.cookie, "POST", "/parties", { propertyId: b.adminProp, partyId: b.partyId, role: "Other" });
-    assert.equal(l3.status, 201);
-    assert.equal((await call(b.pc.cookie, "DELETE", `/parties/link/${l3.json.link.id}`)).status, 204);
+    assert.equal(l3.status, 403);
+    assert.equal((await call(b.pc.cookie, "DELETE", `/parties/link/${b.adminLinkId}`)).status, 403);
   });
 }
 
@@ -122,7 +123,9 @@ test("other brokerage gets 404 on read, link, create and unlink", async () => {
   assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: a.adminProp, partyId: o.partyId, role: "Other" })).status, 404);
   assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: o.adminProp, partyId: a.partyId, role: "Other" })).status, 404, "foreign contact");
   assert.equal((await call(o.admin.cookie, "POST", "/parties", { propertyId: a.adminProp, role: "Other", firstName: "X" })).status, 404);
-  assert.equal((await call(o.pc.cookie, "DELETE", `/parties/link/${a.adminLinkId}`)).status, 404);
+  assert.equal((await call(o.admin.cookie, "DELETE", `/parties/link/${a.adminLinkId}`)).status, 404);
+  // t274u: a foreign Pit Crew is refused by role first (403, no existence leak either way).
+  assert.equal((await call(o.pc.cookie, "DELETE", `/parties/link/${a.adminLinkId}`)).status, 403);
 });
 
 test("t233u: read-only user (grow.contacts.read without manage, no Run) can read but cannot link, create, unlink or create a property", async () => {
@@ -184,7 +187,7 @@ test("t246u: legacy Run brokerage (run.access only, no grow.* keys, no fixture g
   await ok(call(b.agent.cookie, "DELETE", `/parties/link/${b.adminLinkId}`), 404, "agent unlink on hidden property");
 });
 
-test("t246u/t242u: run.access alone does NOT authorise relationship changes: Pit Crew (no Run contact-management rights) gets 403 and nothing changes; reads still work", async () => {
+test("t246u/t242u/t274u: Pit Crew gets 403 on every relationship change (run.access alone or with grow.relationships.manage) and nothing changes; reads still work", async () => {
   const b = await setup("RunOnly", ["run.access"]);
   await removeRelationshipManageFixture(b.brokerageId);
   const p = b.adminProp;
@@ -192,7 +195,7 @@ test("t246u/t242u: run.access alone does NOT authorise relationship changes: Pit
   const deny = async (r: Promise<{ status: number; json: any }>, what: string) => {
     const x = await r;
     assert.equal(x.status, 403, what);
-    assert.equal(x.json.entitlementKey, "grow.relationships.manage", what);
+    assert.equal(x.json.code, "RELATIONSHIP_WRITE_ROLE_BARRED", what);
   };
   await deny(call(b.pc.cookie, "POST", "/parties", { propertyId: p, partyId: b.partyId, role: "Buyer" }), "link existing");
   await deny(call(b.pc.cookie, "POST", "/parties", { propertyId: p, role: "Other", firstName: "X" }), "create + link");
@@ -201,10 +204,11 @@ test("t246u/t242u: run.access alone does NOT authorise relationship changes: Pit
   await deny(call(b.pc.cookie, "DELETE", `/parties/link/${b.adminLinkId}`), "unlink");
   const rows = (await call(b.admin.cookie, "GET", `/parties/by-property/${p}`)).json.parties;
   assert.deepEqual(rows.map((r: any) => [r.linkId, r.role, r.isPrimary]), [[b.adminLinkId, "Seller", false]], "nothing changed");
-  // An explicit grow.relationships.manage grant still authorises Pit Crew.
+  // Owner t274u: an explicit grow.relationships.manage grant no longer authorises Pit Crew.
   await setGrants(b.brokerageId, ["run.access", "grow.relationships.manage"]);
   const l = await call(b.pc.cookie, "POST", "/parties", { propertyId: p, partyId: b.partyId, role: "Other" });
-  assert.equal(l.status, 201);
+  assert.equal(l.status, 403);
+  assert.equal(l.json.code, "RELATIONSHIP_WRITE_ROLE_BARRED");
 });
 
 test("t246u: a revoked/expired run.access grant does not derive relationship management (403)", async () => {

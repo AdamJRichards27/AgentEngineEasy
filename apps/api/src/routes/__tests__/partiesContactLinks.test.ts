@@ -131,7 +131,9 @@ test("by-contact and PATCH: hidden property, unsubscribed brokerage and other br
   assert.equal((await call(a.agent.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { isPrimary: true })).status, 404);
   // Other brokerage.
   assert.equal((await call(o.admin.cookie, "GET", `/parties/by-contact/${a.partyId}`)).status, 404);
-  assert.equal((await call(o.pc.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { role: "Buyer" })).status, 404);
+  assert.equal((await call(o.admin.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { role: "Buyer" })).status, 404);
+  // t274u: a foreign Pit Crew is refused by role first.
+  assert.equal((await call(o.pc.cookie, "PATCH", `/parties/link/${a.adminLinkId}`, { role: "Buyer" })).status, 403);
   // Unsubscribed.
   await setGrants(a.brokerageId, []);
   assert.equal((await call(a.admin.cookie, "GET", `/parties/by-contact/${a.partyId}`)).status, 403);

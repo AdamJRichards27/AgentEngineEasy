@@ -5,7 +5,7 @@ import { db, growOpportunities, parties, properties, propertyParties } from "@ae
 import { selectAppraisalForBrokerageProperty } from "../lib/appraisals.js";
 import { logger } from "@aee/events";
 import { requireAuth, type AuthedUser } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { denyRelationshipWriteBarredRoles, requireEntitlement } from "../middlewares/entitlement.js";
 import { AppraisalLifecycleClosedError, AppraisalPricingLockedError } from "../lib/appraisalFinaliseGuard.js";
 import {
   AppraisalAccessError,
@@ -546,7 +546,7 @@ growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGro
  * Sec 19/20 -- Grow -> Run handoff, gated behind the same run.access
  * entitlement Run uses everywhere else.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresGrowAccess, requiresRunAccess, async (req, res) => {
+growAppraisalsRouter.post("/:id/run-handoff", requireAuth, denyRelationshipWriteBarredRoles(), requiresGrowAccess, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;

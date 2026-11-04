@@ -83,18 +83,54 @@ export function requireAnyEntitlement(...entitlementKeys: EntitlementKey[]) {
  *   2. run.access granted AND the user's role carries Run contact-management
  *      rights (Agent or Brokerage Administrator).
  *
- * run.access alone is NOT enough: Pit Crew (Run support role, no contact
- * management) needs the explicit key. Read-only Grow callers (contacts.read
+ * run.access alone is NOT enough. Pit Crew is refused outright, even with the
+ * explicit key (Owner t274u). Read-only Grow callers (contacts.read
  * without manage, no Run) are still refused. Property visibility and brokerage
  * isolation are enforced by the route itself (404), unchanged.
  */
 export const RUN_CONTACT_MANAGE_ROLES = ["Agent", "Brokerage Administrator"] as const;
+
+// Owner t274u: Pit Crew never creates, edits or unlinks relationship records
+// (canonical property_parties links, Grow property relationships, household
+// relationships), on ANY route and REGARDLESS of the brokerage's
+// grow.relationships.manage grant. Checked before any entitlement.
+export const RELATIONSHIP_WRITE_BARRED_ROLES = ["Pit Crew"] as const;
+export const PIT_CREW_RELATIONSHIP_REFUSAL = {
+  error: "Pit Crew can view relationships but cannot create, change or remove them.",
+  code: "RELATIONSHIP_WRITE_ROLE_BARRED",
+} as const;
+
+export function isRelationshipWriteBarredRole(role: string | null | undefined): boolean {
+  return !!role && (RELATIONSHIP_WRITE_BARRED_ROLES as readonly string[]).includes(role);
+}
+
+/** For routes whose own permission is something else (grow.relationships.manage,
+ * grow.contacts.manage, run.access, grow.import.execute) but which create, edit or
+ * remove relationship records. Use before the entitlement middleware. */
+export function denyRelationshipWriteBarredRoles() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const user = req.authedUser;
+    if (!user) {
+      res.status(401).json({ error: "Not authenticated" });
+      return;
+    }
+    if (isRelationshipWriteBarredRole(user.role)) {
+      res.status(403).json(PIT_CREW_RELATIONSHIP_REFUSAL);
+      return;
+    }
+    next();
+  };
+}
 
 export function requireRelationshipManage() {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.authedUser;
     if (!user) {
       res.status(401).json({ error: "Not authenticated" });
+      return;
+    }
+    if (isRelationshipWriteBarredRole(user.role)) {
+      res.status(403).json(PIT_CREW_RELATIONSHIP_REFUSAL);
       return;
     }
     const entitlementKey = "grow.relationships.manage";

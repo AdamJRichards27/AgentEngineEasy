@@ -195,7 +195,7 @@ test("linking a property requires grow.properties.link, and a relationship with 
   assert.equal(contactOnlyBody.relationship.relationshipType, "prospective_seller");
 });
 
-test("an Agent cannot link another Agent's property, and Brokerage Administrator and Pit Crew can link any property in the brokerage", async () => {
+test("an Agent cannot link another Agent's property, Brokerage Administrator can link any property in the brokerage, and Pit Crew never can (Owner t274u)", async () => {
   const hidden = await post(agentA.cookie, "/grow/relationships", {
     partyId: contactId,
     propertyId: propertyBId,
@@ -218,7 +218,8 @@ test("an Agent cannot link another Agent's property, and Brokerage Administrator
     propertyId: propertyBId,
     relationshipType: "landlord",
   });
-  assert.equal(pitLink.status, 201, await pitLink.clone().text());
+  assert.equal(pitLink.status, 403, await pitLink.clone().text());
+  assert.equal((await linksFor(brokerageId, contactId, propertyBId, "landlord")).length, 0);
 });
 
 test("a property from another brokerage is rejected with the existing isolation response", async () => {

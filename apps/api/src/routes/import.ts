@@ -12,7 +12,7 @@ import { and, eq } from "drizzle-orm";
 import { db, importJobs, type ImportResolution } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { denyRelationshipWriteBarredRoles, requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
 import { executeImportBatch, rollbackImportJob } from "../lib/import/execute.js";
 import {
@@ -182,7 +182,7 @@ importRouter.post("/jobs/:id/resolve", requireAuth, requireEntitlement("grow.imp
 /* B.16-B.19 -- execute + rollback                                      */
 /* -------------------------------------------------------------------- */
 
-importRouter.post("/jobs/:id/execute", requireAuth, requireEntitlement("grow.import.execute"), async (req, res) => {
+importRouter.post("/jobs/:id/execute", requireAuth, denyRelationshipWriteBarredRoles(), requireEntitlement("grow.import.execute"), async (req, res) => {
   try {
     const importJobId = Number(req.params.id);
     const brokerageId = req.authedUser!.brokerageId;
@@ -226,7 +226,7 @@ importRouter.post("/jobs/:id/execute", requireAuth, requireEntitlement("grow.imp
   }
 });
 
-importRouter.post("/jobs/:id/rollback", requireAuth, requireEntitlement("grow.import.execute"), async (req, res) => {
+importRouter.post("/jobs/:id/rollback", requireAuth, denyRelationshipWriteBarredRoles(), requireEntitlement("grow.import.execute"), async (req, res) => {
   try {
     const importJobId = Number(req.params.id);
     const brokerageId = req.authedUser!.brokerageId;

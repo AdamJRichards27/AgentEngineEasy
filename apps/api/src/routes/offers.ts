@@ -1,10 +1,10 @@
 import { Router, type Response } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, offers, properties } from "@aee/db";
+import { db, offers, properties, propertyParties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { isRelationshipWriteBarredRole, PIT_CREW_RELATIONSHIP_REFUSAL, requireEntitlement } from "../middlewares/entitlement.js";
 import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
@@ -134,6 +134,22 @@ offersRouter.post("/by-property/:propertyId", requireAuth, requiresRunAccess, as
   if (!(await propertyInBrokerage(propertyId, user.brokerageId))) {
     res.status(404).json({ error: "Not found" });
     return;
+  }
+  // Owner t274u: recording an offer links the buyer to the property when it is
+  // not linked yet (lib/offers.ts). Pit Crew never creates relationship records,
+  // so Pit Crew may record an offer only for a buyer ALREADY linked as Buyer.
+  if (isRelationshipWriteBarredRole(user.role)) {
+    const buyerPartyId = parsed.data.buyerPartyId;
+    const [linked] = buyerPartyId
+      ? await db
+          .select({ id: propertyParties.id })
+          .from(propertyParties)
+          .where(and(eq(propertyParties.propertyId, propertyId), eq(propertyParties.partyId, buyerPartyId), eq(propertyParties.role, "Buyer")))
+      : [];
+    if (!linked) {
+      res.status(403).json(PIT_CREW_RELATIONSHIP_REFUSAL);
+      return;
+    }
   }
 
   try {
