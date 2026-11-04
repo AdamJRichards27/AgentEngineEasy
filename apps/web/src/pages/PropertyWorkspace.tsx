@@ -5,6 +5,7 @@ import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useEntitlements, useSession } from "../lib/session";
 import { canManageRelationships } from "../lib/relationshipPermission";
+import { useActingAuthority } from "../lib/useActingAuthority";
 import { OVERRIDE_REASON_LABEL, validOverrideReason, createNewBody, linkExistingBody, runContactDetail, runContactName, runDuplicatePanel, shouldSearch, RUN_NO_MATCH_TEXT, type DuplicateWarning, type RunContactSummary } from "../lib/runAddPerson";
 import { runPartyPrimaryMarker } from "../lib/runPartyPrimary";
 
@@ -324,7 +325,8 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   // t274u: relationship controls follow the web mirror of requireRelationshipManage
   // (never Pit Crew); the server stays authoritative.
   const { hasEntitlement: hasPartyEntitlement } = useEntitlements();
-  const canManageParties = canManageRelationships(hasPartyEntitlement, user?.role);
+  const actingAuthority = useActingAuthority();
+  const canManageParties = canManageRelationships(hasPartyEntitlement, user?.role, actingAuthority);
   const [showAddParty, setShowAddParty] = useState(false);
   const [reviewNotes, setReviewNotes] = useState("");
   const [exceptionNotes, setExceptionNotes] = useState<Record<number, string>>({});
@@ -1314,7 +1316,8 @@ function AddPartyForm({
 }) {
   const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
-  const canManage = canManageRelationships(hasEntitlement, user?.role);
+  const actingAuthority = useActingAuthority();
+  const canManage = canManageRelationships(hasEntitlement, user?.role, actingAuthority);
   const [role, setRole] = useState<(typeof ROLES)[number]>("Seller");
   const [partyType, setPartyType] = useState<(typeof PARTY_TYPES)[number]>("Person");
   const [firstName, setFirstName] = useState("");

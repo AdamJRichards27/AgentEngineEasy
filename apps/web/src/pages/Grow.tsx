@@ -1,4 +1,5 @@
 import { formatAuDateTime } from "../lib/auDateTime";
+import { useActingAuthority } from "../lib/useActingAuthority";
 import { canRecordGrowInterest, growInterestBody, growInterestErrorText, GROW_INTEREST_PATH, GROW_INTEREST_TYPE_REQUIRED } from "../lib/growInterestRecord";
 import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
@@ -3149,7 +3150,8 @@ export function GrowRecordInterestForm({ partyId, onRecorded }: { partyId: numbe
   const queryClient = useQueryClient();
   const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
-  const canRecord = canRecordGrowInterest(hasEntitlement, user?.role);
+  const actingAuthority = useActingAuthority();
+  const canRecord = canRecordGrowInterest(hasEntitlement, user?.role, actingAuthority);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<LinkableProperty[]>([]);
