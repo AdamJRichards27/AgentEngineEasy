@@ -64,8 +64,7 @@ export interface MobilePropertyContactsViewProps {
 
 export function MobilePropertyContactsView(p: MobilePropertyContactsViewProps) {
   const caps = p.capabilities;
-  const reason = caps.propertyLinkContact.reason ?? caps.propertyEditRole.reason ?? caps.propertyUnlink.reason ?? null;
-  const anyOff = !caps.propertyLinkContact.enabled || !caps.propertyEditRole.enabled || !caps.propertyUnlink.enabled;
+  // An action that is not available is NOT shown (no disabled control, no explanation): the page offers only what the user can do now.
   const ap = p.appraisal;
   return (
     <section className="mob-c-block" aria-label="Contacts" data-ae-property-contacts="mobile">
@@ -113,22 +112,28 @@ export function MobilePropertyContactsView(p: MobilePropertyContactsViewProps) {
                   </a>
                 ))}
               </div>
-              <details className="mob-c-manage" open={p.panel !== null && "linkId" in p.panel && p.panel.linkId === c.linkId}>
-                <summary className="mob-c-button mob-c-wide">Manage</summary>
-              <div className="mob-c-row-actions mob-c-pad">
-                <button type="button" className="mob-c-button" disabled={!caps.propertyEditRole.enabled} onClick={() => p.onOpen({ kind: "role", linkId: c.linkId })}>
-                  Edit role
-                </button>
-                <button type="button" className="mob-c-button" disabled={!caps.propertyUnlink.enabled} onClick={() => p.onOpen({ kind: "unlink", linkId: c.linkId })}>
-                  Unlink
-                </button>
-                {c.isPrimary ? null : (
-                  <button type="button" className="mob-c-button" disabled={!caps.propertyEditPrimary.enabled} onClick={() => p.onMakePrimary(c.linkId)}>
-                    Make primary
-                  </button>
-                )}
-              </div>
-              </details>
+              {caps.propertyEditRole.enabled || caps.propertyUnlink.enabled || (!c.isPrimary && caps.propertyEditPrimary.enabled) ? (
+                <details className="mob-c-manage" open={p.panel !== null && "linkId" in p.panel && p.panel.linkId === c.linkId}>
+                  <summary className="mob-c-button mob-c-wide">Manage</summary>
+                  <div className="mob-c-row-actions mob-c-pad">
+                    {caps.propertyEditRole.enabled ? (
+                      <button type="button" className="mob-c-button" onClick={() => p.onOpen({ kind: "role", linkId: c.linkId })}>
+                        Edit role
+                      </button>
+                    ) : null}
+                    {caps.propertyUnlink.enabled ? (
+                      <button type="button" className="mob-c-button" onClick={() => p.onOpen({ kind: "unlink", linkId: c.linkId })}>
+                        Unlink
+                      </button>
+                    ) : null}
+                    {c.isPrimary || !caps.propertyEditPrimary.enabled ? null : (
+                      <button type="button" className="mob-c-button" onClick={() => p.onMakePrimary(c.linkId)}>
+                        Make primary
+                      </button>
+                    )}
+                  </div>
+                </details>
+              ) : null}
               {p.panel?.kind === "role" && p.panel.linkId === c.linkId ? (
                 <form
                   className="mob-c-card mob-c-form"
@@ -219,15 +224,10 @@ export function MobilePropertyContactsView(p: MobilePropertyContactsViewProps) {
           <summary className="mob-c-button mob-c-wide">Link or add a contact</summary>
           {p.legacyActions}
         </details>
-      ) : (
-        <button type="button" className="mob-c-button mob-c-wide" disabled={!caps.propertyLinkContact.enabled} onClick={() => p.onOpen({ kind: "link" })}>
+      ) : caps.propertyLinkContact.enabled ? (
+        <button type="button" className="mob-c-button mob-c-wide" onClick={() => p.onOpen({ kind: "link" })}>
           Link a contact
         </button>
-      )}
-      {anyOff && reason !== null ? (
-        <p className="mob-c-note" id="mob-c-link-reason">
-          {reason}
-        </p>
       ) : null}
       {p.panel?.kind === "link" && p.picker ? <MobileLinkPicker {...p.picker} /> : null}
     </section>

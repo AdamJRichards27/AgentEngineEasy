@@ -66,24 +66,30 @@ test("while the backend cannot read canonical links, the screen shows what the p
   const section = props(contactView(linking(), false));
   assert.match(text(section), /Related party · Executor/);
   assert.equal(/Seller|Tenant/.test(text(section)), false, "no canonical row mixed in");
-  for (const b of [...buttons(section, "Edit role"), ...buttons(section, "Unlink")]) assert.equal(b.props?.disabled, true, "a legacy row has no canonical link to act on, even with every flag on");
-  assert.equal(buttons(section, "Link a property")[0].props?.disabled, false, "linking a new canonical link is separate from showing old rows");
+  for (const label of ["Edit role", "Unlink", "Make primary"]) assert.equal(buttons(section, label).length, 0, `${label}: a Grow-only row has no canonical link to act on, so it is not drawn, even with every flag on`);
+  assert.equal(buttons(section, "Link a property").length, 1, "linking a new canonical link is separate from showing old rows");
+  assert.notEqual(buttons(section, "Link a property")[0].props?.disabled, true);
+  assert.deepEqual(hrefs(section), ["/grow/properties/77"], "the Grow row itself is unchanged: shown, one tap, read-only");
 });
 
-test("as shipped every control is disabled, says why once, and opens nothing", () => {
+test("as shipped nothing unavailable is drawn: no disabled control, no explanation, nothing opens, and the rows are unchanged", () => {
   const opened: unknown[] = [];
   const section = props(contactView({ ...LINKING_OFF, onOpen: (p) => opened.push(p) }));
-  for (const label of ["Edit role", "Unlink", "Link a property"]) for (const b of buttons(section, label)) assert.equal(b.props?.disabled, true, label);
-  assert.equal(buttons(section, "Edit role").length, 2, "one per property");
-  assert.deepEqual(all(section, (e) => e.props?.id === "mob-c-link-reason").map((e) => text(e)), [NOT_AVAILABLE_YET]);
+  for (const label of ["Edit role", "Unlink", "Make primary", "Link a property"]) assert.equal(buttons(section, label).length, 0, label);
+  assert.equal(all(section, (e) => e.type === "button" && e.props?.disabled === true).length, 0, "no disabled control anywhere in the section");
+  assert.equal(all(section, (e) => e.props?.id === "mob-c-link-reason").length, 0, "no reason line");
+  assert.equal(text(section).includes(NOT_AVAILABLE_YET), false);
   assert.equal(all(section, (e) => e.type === "form" || e.props?.role === "alertdialog").length, 0);
+  assert.deepEqual(hrefs(section), ["/grow/properties/77", "/grow/properties/78"], "the approved layout: both property rows are still there, one tap each");
   assert.deepEqual(opened, []);
 });
 
-test("a read-only agent sees the same controls disabled with a permission reason", () => {
+test("a read-only agent sees none of those controls: not disabled, not explained, simply not offered", () => {
   const section = props(contactView(linking({}, ["grow.access", "grow.contacts.read"])));
-  for (const b of all(section, (e) => e.type === "button" && ["Edit role", "Unlink", "Link a property"].includes(text(e)))) assert.equal(b.props?.disabled, true);
-  assert.deepEqual(all(section, (e) => e.props?.id === "mob-c-link-reason").map((e) => text(e)), [NO_PERMISSION]);
+  for (const label of ["Edit role", "Unlink", "Make primary", "Link a property"]) assert.equal(buttons(section, label).length, 0, label);
+  assert.equal(all(section, (e) => e.type === "button" && e.props?.disabled === true).length, 0);
+  assert.equal(all(section, (e) => e.props?.id === "mob-c-link-reason").length, 0);
+  assert.equal(text(section).includes(NO_PERMISSION), false);
 });
 
 test("an authorised agent: buttons are enabled and open the right panel for the right link", () => {
@@ -92,7 +98,7 @@ test("an authorised agent: buttons are enabled and open the right panel for the 
   assert.equal(all(section, (e) => e.props?.id === "mob-c-link-reason").length, 0, "nothing to explain");
   const edit = buttons(section, "Edit role");
   const unlink = buttons(section, "Unlink");
-  for (const b of [...edit, ...unlink, ...buttons(section, "Link a property")]) assert.equal(b.props?.disabled, false);
+  for (const b of [...edit, ...unlink, ...buttons(section, "Link a property")]) assert.notEqual(b.props?.disabled, true, "offered and usable");
   call(edit[1].props?.onClick);
   call(unlink[0].props?.onClick);
   call(buttons(section, "Link a property")[0].props?.onClick);
@@ -226,19 +232,24 @@ test("a property lists every linked contact with their role, and opens each in o
   assert.match(text(propertyView({ contacts: [] })), /No contact linked yet\. Link a contact to start an appraisal\./);
 });
 
-test("as shipped, Edit role, Unlink and Link a contact are disabled with one reason; a read-only agent sees the permission reason", () => {
+test("as shipped, Edit role, Unlink, Make primary and Link a contact are not drawn; a read-only agent sees none of them either; the contacts and Call are unaffected", () => {
   const off = propertyView({ capabilities: linkingCapabilities(MANAGER) });
-  for (const label of ["Unlink", "Link a contact", "Edit role"]) for (const b of buttons(off, label)) assert.equal(b.props?.disabled, true, label);
-  assert.deepEqual(all(off, (e) => e.props?.id === "mob-c-link-reason").map((e) => text(e)), [NOT_AVAILABLE_YET]);
+  for (const label of ["Edit role", "Unlink", "Make primary", "Link a contact"]) assert.equal(buttons(off, label).length, 0, label);
+  assert.equal(all(off, (e) => e.type === "summary").length, 0, "no empty Manage disclosure either");
+  assert.equal(all(off, (e) => e.type === "button" && e.props?.disabled === true && /Edit role|Unlink|Make primary|Link a contact/.test(text(e))).length, 0);
+  assert.equal(all(off, (e) => e.props?.id === "mob-c-link-reason").length, 0);
+  assert.equal(text(off).includes(NOT_AVAILABLE_YET), false);
+  assert.equal(all(off, (e) => e.props?.["data-ae-call-contact"] !== undefined).length, all(propertyView(), (e) => e.props?.["data-ae-call-contact"] !== undefined).length, "Call is unaffected");
   const readOnly = propertyView({ capabilities: linkingCapabilities(["grow.access"], ON) });
-  assert.deepEqual(all(readOnly, (e) => e.props?.id === "mob-c-link-reason").map((e) => text(e)), [NO_PERMISSION]);
+  for (const label of ["Edit role", "Unlink", "Make primary", "Link a contact"]) assert.equal(buttons(readOnly, label).length, 0, `read-only ${label}`);
+  assert.equal(text(readOnly).includes(NO_PERMISSION), false);
   assert.deepEqual(Object.values(MOBILE_LINKING).filter(Boolean), []);
 });
 
 test("the same four operations are enabled together for a full-permission agent, and open the right panel for the right link", () => {
   const opened: unknown[] = [];
   const tree = propertyView({ onOpen: (p) => opened.push(p) });
-  for (const label of ["Edit role", "Unlink", "Link a contact"]) for (const b of buttons(tree, label)) assert.equal(b.props?.disabled, false, label);
+  for (const label of ["Edit role", "Unlink", "Link a contact"]) for (const b of buttons(tree, label)) assert.notEqual(b.props?.disabled, true, label);
   call(buttons(tree, "Edit role")[1].props?.onClick);
   call(buttons(tree, "Unlink")[0].props?.onClick);
   call(buttons(tree, "Link a contact")[0].props?.onClick);
@@ -361,16 +372,15 @@ test("back from a call on the property page: Log call opens Contact 360's call f
   assert.equal(all(propertyView(), (e) => e.props?.["data-ae-call-return"] !== undefined).length, 0);
 });
 
-test("the primary contact is marked, and Make primary is offered for the others: disabled as shipped, enabled with the backend", () => {
+test("the primary contact is marked, and Make primary is offered for the others only when it can be used", () => {
   const tree = propertyView({ capabilities: linkingCapabilities(MANAGER) });
-  assert.equal(all(tree, (e) => e.props?.className === "mob-c-primary-chip").length, 1);
+  assert.equal(all(tree, (e) => e.props?.className === "mob-c-primary-chip").length, 1, "the Primary chip is information, not a control: still shown as shipped");
   assert.match(text(all(tree, (e) => e.props?.className === "mob-c-primary-chip")[0]), /Primary/);
-  const make = buttons(tree, "Make primary");
-  assert.equal(make.length, 1, "not offered on the contact that is already primary");
-  assert.equal(make[0].props?.disabled, true);
+  assert.equal(buttons(tree, "Make primary").length, 0, "as shipped it is not drawn");
   const picked: number[] = [];
   const on = propertyView({ onMakePrimary: (id) => picked.push(id) });
-  assert.equal(buttons(on, "Make primary")[0].props?.disabled, false);
+  assert.equal(buttons(on, "Make primary").length, 1, "not offered on the contact that is already primary");
+  assert.notEqual(buttons(on, "Make primary")[0].props?.disabled, true);
   call(buttons(on, "Make primary")[0].props?.onClick);
   assert.deepEqual(picked, [32]);
 });
@@ -427,4 +437,18 @@ test("the container derives the decision from the shared helper with the session
   assert.match(src, /const canManageRel = canManageRelationships\(\(key\) => entitlements\.includes\(key\), user\?\.role\);/);
   assert.equal(/entitlements\.includes\(GROW_RELATIONSHIPS_MANAGE\)/.test(src), false, "no raw key check");
   assert.match(src, /canManageRelationships=\{canManageRel\}/, "the view receives the same decision that gates Use <name>");
+});
+
+test("partly available: only the allowed actions are drawn, never a disabled stand-in for the others", () => {
+  const only = (flags: Partial<typeof ON>, entitlements: string[] = MANAGER) => linkingCapabilities(entitlements, { ...ON, ...Object.fromEntries(Object.keys(ON).map((k) => [k, false])), ...flags } as typeof ON);
+  const editOnly = propertyView({ capabilities: only({ propertyEditRole: true }) });
+  assert.equal(buttons(editOnly, "Edit role").length, 2, "one per contact");
+  for (const label of ["Unlink", "Make primary", "Link a contact"]) assert.equal(buttons(editOnly, label).length, 0, label);
+  assert.equal(all(editOnly, (e) => e.type === "button" && e.props?.disabled === true).filter((b) => /Edit role|Unlink|Make primary|Link a contact/.test(text(b))).length, 0);
+  const unlinkOnly = props(contactView(linking({ capabilities: only({ contactUnlink: true }) })));
+  assert.equal(buttons(unlinkOnly, "Unlink").length, 2);
+  for (const label of ["Edit role", "Make primary", "Link a property"]) assert.equal(buttons(unlinkOnly, label).length, 0, label);
+  const linkOnly = props(contactView(linking({ capabilities: only({ contactLinkProperty: true }) })));
+  assert.equal(buttons(linkOnly, "Link a property").length, 1);
+  assert.equal(buttons(linkOnly, "Edit role").length + buttons(linkOnly, "Unlink").length, 0);
 });

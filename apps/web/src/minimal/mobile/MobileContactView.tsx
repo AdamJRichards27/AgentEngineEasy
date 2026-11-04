@@ -323,6 +323,11 @@ export function MobileContactView(p: MobileContactViewProps) {
               );
               const lk = p.linking;
               const here = lk.panel !== null && lk.panel.kind !== "link" && lk.panel.relationshipId === prop.key ? lk.panel : null;
+              // Only what the user can do NOW is shown: a Grow-only row has no canonical link to act on, and an action the permission or the flag
+              // does not allow is not drawn at all (no disabled control, no explanation).
+              const canEdit = prop.canonical && lk.capabilities.contactEditRole.enabled;
+              const canUnlink = prop.canonical && lk.capabilities.contactUnlink.enabled;
+              const canPrimary = prop.canonical && !prop.primary && lk.capabilities.contactEditPrimary.enabled;
               return (
                 <div key={prop.key} className="mob-c-linkblock">
                   {prop.href ? (
@@ -332,19 +337,25 @@ export function MobileContactView(p: MobileContactViewProps) {
                   ) : (
                     <div className="mob-c-row">{text}</div>
                   )}
-                  <div className="mob-c-row-actions mob-c-pad">
-                    <button type="button" className="mob-c-button" disabled={!lk.capabilities.contactEditRole.enabled || !prop.canonical} onClick={() => lk.onOpen({ kind: "edit", relationshipId: prop.key })}>
-                      Edit role
-                    </button>
-                    <button type="button" className="mob-c-button" disabled={!lk.capabilities.contactUnlink.enabled || !prop.canonical} onClick={() => lk.onOpen({ kind: "unlink", relationshipId: prop.key })}>
-                      Unlink
-                    </button>
-                    {prop.primary ? null : (
-                      <button type="button" className="mob-c-button" disabled={!lk.capabilities.contactEditPrimary.enabled || !prop.canonical} onClick={() => lk.onMakePrimary(prop.key)}>
-                        Make primary
-                      </button>
-                    )}
-                  </div>
+                  {canEdit || canUnlink || canPrimary ? (
+                    <div className="mob-c-row-actions mob-c-pad">
+                      {canEdit ? (
+                        <button type="button" className="mob-c-button" onClick={() => lk.onOpen({ kind: "edit", relationshipId: prop.key })}>
+                          Edit role
+                        </button>
+                      ) : null}
+                      {canUnlink ? (
+                        <button type="button" className="mob-c-button" onClick={() => lk.onOpen({ kind: "unlink", relationshipId: prop.key })}>
+                          Unlink
+                        </button>
+                      ) : null}
+                      {canPrimary ? (
+                        <button type="button" className="mob-c-button" onClick={() => lk.onMakePrimary(prop.key)}>
+                          Make primary
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {here?.kind === "unlink" ? (
                     <div className="mob-c-card mob-c-confirm" role="alertdialog" aria-label="Confirm unlink">
                       <p className="mob-c-next-title">{unlinkConfirmText(layout.name, prop.label)}</p>
@@ -404,13 +415,10 @@ export function MobileContactView(p: MobileContactViewProps) {
             })}
           </div>
         )}
-        <button type="button" className="mob-c-button mob-c-wide" disabled={!p.linking.capabilities.contactLinkProperty.enabled} onClick={() => p.linking.onOpen({ kind: "link" })}>
-          Link a property
-        </button>
-        {!p.linking.capabilities.contactLinkProperty.enabled || !p.linking.capabilities.contactEditRole.enabled || !p.linking.capabilities.contactUnlink.enabled ? (
-          <p className="mob-c-note" id="mob-c-link-reason">
-            {p.linking.capabilities.contactLinkProperty.reason ?? p.linking.capabilities.contactEditRole.reason ?? p.linking.capabilities.contactUnlink.reason}
-          </p>
+        {p.linking.capabilities.contactLinkProperty.enabled ? (
+          <button type="button" className="mob-c-button mob-c-wide" onClick={() => p.linking.onOpen({ kind: "link" })}>
+            Link a property
+          </button>
         ) : null}
         {p.linking.panel?.kind === "link" && p.linking.picker ? <MobileLinkPicker {...p.linking.picker} /> : null}
       </section>
