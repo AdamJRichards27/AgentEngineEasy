@@ -1,6 +1,8 @@
 // Owner t275u: Business Coach and Ask AE are agent-facing. Server-side rule:
-//   - role Agent, and not a read-only agent (an Agent holding neither run.access
-//     nor grow.access — e.g. a grow.contacts.read-only seat);
+//   - role Agent, and not a read-only agent: the Agent must hold run.access, or
+//     grow.access plus at least one Grow write key (contacts/relationships/
+//     opportunities/activities manage). A seat with only read keys
+//     (grow.access + grow.contacts.read ...) is read-only and refused READ_ONLY;
 //   - Pit Crew: never;
 //   - Brokerage Administrator: only when separately and explicitly authorised —
 //     listed by user id in AE_AGENT_AI_ADMIN_USER_IDS (comma-separated, deploy config;
@@ -9,6 +11,8 @@
 import type { NextFunction, Request, Response } from "express";
 import type { AuthedUser } from "../middlewares/auth.js";
 import { explainEntitlementDecision } from "./entitlements/resolver.js";
+
+export const GROW_WRITE_KEYS = ["grow.contacts.manage", "grow.relationships.manage", "grow.opportunities.manage", "grow.activities.manage"] as const;
 
 export const AGENT_AI_REFUSAL_CODE = "AGENT_AI_AGENT_ONLY";
 
@@ -29,10 +33,11 @@ export async function agentAiAccess(user: AuthedUser): Promise<AgentAiDecision> 
     return explicitlyAuthorisedAdmins().has(user.id) ? { allowed: true } : { allowed: false, reason: "ADMIN_NOT_AUTHORISED" };
   }
   if (user.role !== "Agent") return { allowed: false, reason: "ROLE" };
-  const [run, grow] = await Promise.all(
-    (["run.access", "grow.access"] as const).map((k) => explainEntitlementDecision(user, k).then((d) => d.allowed).catch(() => false)),
-  );
-  return run || grow ? { allowed: true } : { allowed: false, reason: "READ_ONLY" };
+  const has = (k: string) => explainEntitlementDecision(user, k as never).then((d) => d.allowed).catch(() => false);
+  if (await has("run.access")) return { allowed: true };
+  if (!(await has("grow.access"))) return { allowed: false, reason: "READ_ONLY" };
+  const writes = await Promise.all(GROW_WRITE_KEYS.map(has));
+  return writes.some(Boolean) ? { allowed: true } : { allowed: false, reason: "READ_ONLY" };
 }
 
 export function requireAgentAi() {

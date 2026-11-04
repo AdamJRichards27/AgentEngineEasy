@@ -98,6 +98,11 @@ test("t275u Ask AE / Business Coach: Pit Crew, admins (by default) and read-only
   await setGrants(w.brokerageId, ["grow.contacts.read"]);
   const ro = await ask(w.agent.cookie);
   assert.deepEqual([ro.status, ro.json.code, ro.json.reason], [403, AGENT_ONLY, "READ_ONLY"]);
+  // Read-only seat shaped like the testing seed (grow.access + read keys, no write key).
+  await setGrants(w.brokerageId, ["grow.access", "grow.contacts.read", "grow.propertyIntelligence.read"]);
+  const ro2 = await ask(w.agent.cookie);
+  assert.deepEqual([ro2.status, ro2.json.code, ro2.json.reason], [403, AGENT_ONLY, "READ_ONLY"]);
+  assert.equal((await caps(w.agent.cookie)).agentAiAllowed, false);
   await setGrants(w.brokerageId, ["run.access", ...GROW]);
   // An administrator separately and explicitly authorised passes the gate.
   process.env.AE_AGENT_AI_ADMIN_USER_IDS = String(w.admin.user.id);
