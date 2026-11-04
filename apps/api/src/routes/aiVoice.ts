@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { requireAgentAi } from "../lib/agentAiAccess.js";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -179,7 +180,7 @@ function mapTranscriptionProviderError(res: Response, error: TranscriptionProvid
   });
 }
 
-aiVoiceRouter.post("/transcribe", requireAuth, voiceUpload.single("audio"), async (req, res) => {
+aiVoiceRouter.post("/transcribe", requireAuth, requireAgentAi(), voiceUpload.single("audio"), async (req, res) => {
   const authedUser = req.authedUser;
   if (authedUser === undefined) {
     res.status(401).json({ error: "Not authenticated" });
