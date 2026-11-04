@@ -13,7 +13,8 @@ test("t274u item 3: Record Grow interest posts one Grow relationship only (never
 
 test("t274u item 3: visibility mirrors the server — grow.relationships.manage, never Pit Crew", () => {
   assert.equal(canRecordGrowInterest(has(["grow.relationships.manage"]), "Agent"), true);
-  assert.equal(canRecordGrowInterest(has(["grow.relationships.manage"]), "Pit Crew"), false);
+  assert.equal(canRecordGrowInterest(has(["grow.relationships.manage"]), "Pit Crew", null), false, "t275u: Pit Crew without authority");
+  assert.equal(canRecordGrowInterest(has([]), "Pit Crew", { ownerId: 2, ownerName: "Ava", authorityRef: "INS-1" }), true, "t275u: with recorded owner authority (server checks the owner's entitlement)");
   assert.equal(canRecordGrowInterest(has(["run.access"]), "Agent"), false);
 });
 

@@ -26,6 +26,7 @@ import {
 } from "./lib/minimalUx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OwnerContextBanner } from "./components/OwnerContextBanner";
+import { PitCrewAuthorityBar } from "./components/PitCrewAuthorityBar";
 import type { SessionUser } from "./lib/session";
 
 // I-18 — each authenticated page is its own chunk. Pre-session pages stay
@@ -209,6 +210,7 @@ function AuthenticatedExperience({
   const page = (
     <>
       {user?.platformOwner && <OwnerContextBanner user={user} />}
+      {user?.role === "Pit Crew" && <PitCrewAuthorityBar />}
       {!ownerWithoutContext && (!user.firstName?.trim() || !user.lastName?.trim()) && (
         <section className="card" role="status">
           <h2>Complete your profile</h2>

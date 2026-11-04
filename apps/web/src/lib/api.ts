@@ -1,3 +1,4 @@
+import { actingAuthorityHeaders, AUTHORITY_REF_HEADER, ON_BEHALF_HEADER } from "./actingAuthority";
 // Thrown by apiFetch on any non-2xx response. Carries the HTTP status so
 // callers can special-case auth (401) without string-matching a message,
 // and a `.friendly` message that's safe to show an agent directly — see
@@ -327,6 +328,10 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   if (method !== "GET" && method !== "HEAD" && (ownerPath === "/owner" || ownerPath.startsWith("/owner/"))) {
     headers.set("X-AEE-Owner-Action", "1");
   }
+  // t275u: Pit Crew's recorded contact-owner authority (server validates and audits it).
+  headers.delete(ON_BEHALF_HEADER);
+  headers.delete(AUTHORITY_REF_HEADER);
+  for (const [k, v] of Object.entries(actingAuthorityHeaders())) headers.set(k, v);
   if (method !== "GET" && method !== "HEAD" && ownerSelectedBrokerageId !== null) {
     headers.set("X-AEE-Owner-Brokerage", String(ownerSelectedBrokerageId));
   }

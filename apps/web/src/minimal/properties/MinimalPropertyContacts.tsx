@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { OVERRIDE_REASON_LABEL, validOverrideReason } from "../../lib/runAddPerson";
 import { TapToCall } from "../TapToCall";
 import { Link, useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -61,6 +62,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPhone, setNewPhone] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
   const [possibleDuplicate, setPossibleDuplicate] = useState<DuplicatePanel | null>(null);
 
   const linkedQuery = useQuery<{ parties: LinkedPartyRow[] }>({
@@ -93,7 +95,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
     },
   });
 
-  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string; confirmDuplicate?: boolean }>({
+  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string; duplicateOverride?: { reason: string } }>({
     mutationFn: (input) => apiFetch("/grow/contacts", { method: "POST", body: JSON.stringify(input) }),
     onMutate: () => setPossibleDuplicate(null),
     onSuccess: (result, input) => {
@@ -177,7 +179,9 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
             setPossibleDuplicate(null);
             setNewOpen(false);
           }}
-          onCreateAnyway={() => createContact.mutate({ name: newName.trim(), email: newEmail.trim(), phone: newPhone.trim(), confirmDuplicate: true })}
+          reason={overrideReason}
+          onReasonChange={setOverrideReason}
+          onCreateAnyway={() => createContact.mutate({ name: newName.trim(), email: newEmail.trim(), phone: newPhone.trim(), duplicateOverride: { reason: overrideReason.trim() } })}
         />
       ) : null}
       {linkedQuery.isLoading ? <p className="am-empty-note">Loading linked contacts…</p> : null}
@@ -285,7 +289,9 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
 }
 
 /** t261u: the preserved panel's duplicate warning, presentational (no hooks) so its contract is tested by behaviour. */
-export function DuplicatePanelView(p: { panel: DuplicatePanel; existingName: string; creating: boolean; onUseExisting: () => void; onCreateAnyway: () => void }) {
+export function DuplicatePanelView(p: { panel: DuplicatePanel; existingName: string; creating: boolean; reason?: string; onReasonChange?: (reason: string) => void; onUseExisting: () => void; onCreateAnyway: () => void }) {
+  // t275u: Create anyway is an audited override and needs a reason (server enforces it too).
+  const reason = p.reason ?? "";
   return (
     <div className="am-data-actions" role="alert" data-ae-duplicate-panel>
       <p className="am-switch-error" data-ae-link-error>{p.panel.text}</p>
@@ -299,7 +305,11 @@ export function DuplicatePanelView(p: { panel: DuplicatePanel; existingName: str
           Use {p.existingName}
         </button>
       ) : null}
-      <button type="button" className="am-data-button is-quiet" data-ae-create-anyway disabled={p.creating} onClick={p.onCreateAnyway}>
+      <label className="am-field">
+        <span>{OVERRIDE_REASON_LABEL}</span>
+        <input data-ae-override-reason value={reason} maxLength={500} onChange={(e) => p.onReasonChange?.(e.target.value)} />
+      </label>
+      <button type="button" className="am-data-button is-quiet" data-ae-create-anyway disabled={p.creating || !validOverrideReason(reason)} onClick={p.onCreateAnyway}>
         Create anyway
       </button>
     </div>

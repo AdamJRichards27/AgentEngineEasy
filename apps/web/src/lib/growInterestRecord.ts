@@ -2,15 +2,16 @@
 // from "Link property". It writes ONE Grow relationship (POST /grow/relationships)
 // and never a canonical property_parties link; "Link property" writes only the
 // canonical link. Neither action creates both record types.
-import { RELATIONSHIP_WRITE_BARRED_ROLES } from "./relationshipPermission";
+import { AUTHORITY_REQUIRED_ROLES } from "./relationshipPermission";
+import { getActingAuthority, type ActingAuthority } from "./actingAuthority";
 
 export const GROW_INTEREST_PATH = "/grow/relationships";
 export const GROW_INTEREST_DUPLICATE_TEXT = "This interest is already recorded for this contact.";
 export const GROW_INTEREST_TYPE_REQUIRED = "Choose the kind of interest.";
 
-/** Mirrors the server: grow.relationships.manage, never Pit Crew (Owner t274u). */
-export function canRecordGrowInterest(hasEntitlement: (key: string) => boolean, role: string | null | undefined): boolean {
-  if (role && (RELATIONSHIP_WRITE_BARRED_ROLES as readonly string[]).includes(role)) return false;
+/** Mirrors the server (t275u): grow.relationships.manage; Pit Crew only with a contact owner's recorded authority. */
+export function canRecordGrowInterest(hasEntitlement: (key: string) => boolean, role: string | null | undefined, actingAuthority: ActingAuthority | null = getActingAuthority()): boolean {
+  if (role && (AUTHORITY_REQUIRED_ROLES as readonly string[]).includes(role)) return actingAuthority !== null;
   return hasEntitlement("grow.relationships.manage");
 }
 

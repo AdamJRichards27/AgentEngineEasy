@@ -14,6 +14,13 @@ export type AiSurfaceAvailability = "available" | "hidden" | "unavailable";
 export interface AiCapabilitiesLike {
   copilotEnabled: boolean;
   businessCoachEnabled: boolean;
+  /** t275u: false for Pit Crew, read-only agents and (unless explicitly authorised) administrators. */
+  agentAiAllowed?: boolean;
+}
+
+/** t275u: Ask AE and the Business Coach are agent-facing; the server enforces it on /ai/ask. */
+export function aiAgentOnlyRefused(capabilities: AiCapabilitiesLike | undefined): boolean {
+  return capabilities?.agentAiAllowed === false;
 }
 
 export interface AiSurface {
@@ -34,7 +41,13 @@ export function aiSurfaceAvailability(capabilities: AiCapabilitiesLike | undefin
 }
 
 /** What a Grow surface says when its own feature flag is off. */
-export function aiSurfaceUnavailableCopy(isCoach: boolean): { title: string; body: string } {
+export function aiSurfaceUnavailableCopy(isCoach: boolean, agentOnly = false): { title: string; body: string } {
+  if (agentOnly) {
+    return {
+      title: isCoach ? "Business Coach" : "Ask AE",
+      body: `${isCoach ? "The Business Coach" : "Ask AE"} is available to agents only. The rest of Grow is unaffected.`,
+    };
+  }
   return isCoach
     ? {
         title: "Business Coach",

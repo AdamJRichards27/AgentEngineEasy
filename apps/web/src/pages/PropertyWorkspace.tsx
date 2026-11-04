@@ -5,7 +5,7 @@ import { PropertyAppraisalSummary } from "../components/PropertyAppraisalSummary
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useEntitlements, useSession } from "../lib/session";
 import { canManageRelationships } from "../lib/relationshipPermission";
-import { createNewBody, linkExistingBody, runContactDetail, runContactName, runDuplicatePanel, shouldSearch, RUN_NO_MATCH_TEXT, type DuplicateWarning, type RunContactSummary } from "../lib/runAddPerson";
+import { OVERRIDE_REASON_LABEL, validOverrideReason, createNewBody, linkExistingBody, runContactDetail, runContactName, runDuplicatePanel, shouldSearch, RUN_NO_MATCH_TEXT, type DuplicateWarning, type RunContactSummary } from "../lib/runAddPerson";
 import { runPartyPrimaryMarker } from "../lib/runPartyPrimary";
 
 // t273u (X12): read-only Primary marker on Run's party rows (sellers and other parties).
@@ -1327,6 +1327,7 @@ function AddPartyForm({
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [dupWarnings, setDupWarnings] = useState<DuplicateWarning[] | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -1361,9 +1362,9 @@ function AddPartyForm({
         // masked warnings through the same pre-flight so the panel follows the t261u rule.
         const check = await apiFetch<{ warnings: DuplicateWarning[] }>("/parties/duplicate-check", {
           method: "POST",
-          body: JSON.stringify({ email: email || undefined, mobile: mobile || undefined }),
+          body: JSON.stringify({ email: email || undefined, mobile: mobile || undefined, firstName: firstName || undefined, lastName: lastName || undefined }),
         }).catch(() => ({ warnings: [] as DuplicateWarning[] }));
-        setDupWarnings(check.warnings.length ? check.warnings : [{ code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email" }]);
+        setDupWarnings(check.warnings.length ? check.warnings : [{ code: "POTENTIAL_DUPLICATE_CONTACT", kind: "name" }]);
       } else {
         setError(apiErrorMessage(e, "Couldn't add this person. Try again."));
       }
@@ -1391,7 +1392,7 @@ function AddPartyForm({
       }
     }
     setDupWarnings(null);
-    await run(createNewBody(propertyId, fields(), confirmed));
+    await run(createNewBody(propertyId, fields(), confirmed ? overrideReason : null));
   };
 
   return (
@@ -1506,7 +1507,11 @@ function AddPartyForm({
                     Open existing
                   </a>
                 ) : null}
-                <button className="btn btn-secondary" data-ae-run-create-anyway disabled={busy} onClick={() => createNew(true)}>
+                <label>
+                  {OVERRIDE_REASON_LABEL}
+                  <input data-ae-run-override-reason value={overrideReason} maxLength={500} onChange={(e) => setOverrideReason(e.target.value)} />
+                </label>
+                <button className="btn btn-secondary" data-ae-run-create-anyway disabled={busy || !validOverrideReason(overrideReason)} onClick={() => createNew(true)}>
                   Create anyway
                 </button>
               </div>

@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createNewBody, linkExistingBody, runContactDetail, runContactName, runDuplicatePanel, shouldSearch } from "../runAddPerson";
+import { validOverrideReason, createNewBody, linkExistingBody, runContactDetail, runContactName, runDuplicatePanel, shouldSearch } from "../runAddPerson";
 
 test("t274u R03: selecting an existing contact posts partyId (no new contact fields)", () => {
   assert.deepEqual(linkExistingBody(7, 42, "Buyer"), { propertyId: 7, partyId: 42, role: "Buyer" });
 });
 
-test("t274u R03: create-new always asks the server to guard duplicates; Create anyway confirms", () => {
-  assert.deepEqual(createNewBody(7, { role: "Seller", firstName: "A" }, false), { propertyId: 7, role: "Seller", firstName: "A", duplicateGuard: "confirm" });
-  assert.equal(createNewBody(7, {}, true).confirmNewContact, true);
+test("t275u: create-new relies on the server's default duplicate block; Create anyway sends the recorded reason only when valid", () => {
+  assert.deepEqual(createNewBody(7, { role: "Seller", firstName: "A" }), { propertyId: 7, role: "Seller", firstName: "A" });
+  assert.deepEqual(createNewBody(7, {}, "  Different Lena  ").duplicateOverride, { reason: "Different Lena" });
+  assert.equal("duplicateOverride" in createNewBody(7, {}, "no"), false, "a too-short reason is never sent");
+  assert.equal(validOverrideReason("abcd"), false);
+  assert.equal(validOverrideReason("abcde"), true);
 });
 
 test("t274u R03: duplicate panel — contactId present offers Use/Open existing; masked (no id) offers only Create anyway", () => {
