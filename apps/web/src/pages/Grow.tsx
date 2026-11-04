@@ -1,3 +1,4 @@
+import { formatAuDateTime } from "../lib/auDateTime";
 import { canRecordGrowInterest, growInterestBody, growInterestErrorText, GROW_INTEREST_PATH, GROW_INTEREST_TYPE_REQUIRED } from "../lib/growInterestRecord";
 import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
@@ -287,7 +288,7 @@ const GrowRelationshipCells = memoRow(function GrowRelationshipCells({ relations
 const GrowActivityItem = memoRow(function GrowActivityItem({ activity }: { activity: GrowActivity }) {
   return (
     <>
-      <span className="when">{new Date(activity.occurredAt).toLocaleString()}</span>
+      <span className="when">{formatAuDateTime(activity.occurredAt)}</span>
       <div className="eyebrow">{growActivityTypeLabel(activity.activityType)}</div>
       <p style={activity.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{activity.summary}</p>
     </>
@@ -3668,7 +3669,7 @@ export function GrowContactDetail({
           <ul className="timeline">
             {data.timeline.map((e) => (
               <li key={e.id}>
-                <span className="when">{new Date(e.occurredAt).toLocaleString()}</span>
+                <span className="when">{formatAuDateTime(e.occurredAt)}</span>
                 <div className="eyebrow">{e.type.replace(/_/g, " ")}</div>
                 <p style={{ whiteSpace: "pre-wrap" }}>{e.summary}</p>
               </li>
@@ -3685,7 +3686,7 @@ export function GrowContactDetail({
           <ul className="timeline">
             {data.activities.map((a) => (
               <li key={a.id}>
-                <span className="when">{new Date(a.occurredAt).toLocaleString()}</span>
+                <span className="when">{formatAuDateTime(a.occurredAt)}</span>
                 <div className="eyebrow">{growActivityTypeLabel(a.activityType)}</div>
                 <p style={a.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{a.summary}</p>
               </li>
