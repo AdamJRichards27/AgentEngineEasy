@@ -1,3 +1,4 @@
+import { GROW_INTEREST_NOTE, GROW_INTEREST_TITLE } from "./mobileGrowInterest";
 import type { ReactNode } from "react";
 import { Link } from "wouter";
 import { CallReturnPrompt } from "./CallReturnPrompt";
@@ -56,6 +57,8 @@ export interface MobileContactViewProps {
   layout: MobileContactLayout;
   historyExpanded: boolean;
   onToggleHistory: () => void;
+  /** Try the by-contact request again after a failure (canonical read ON only). */
+  onRetryProperties?: () => void;
   form: ContactFormState | null;
   formError: string | null;
   submitting: boolean;
@@ -276,8 +279,33 @@ export function MobileContactView(p: MobileContactViewProps) {
 
       <section className="mob-c-block" aria-label="Properties">
         <h2 className="mob-c-section">Properties</h2>
+        {layout.propertiesNotice ? (
+          <p className="mob-c-note" role={layout.propertiesState === "error" ? "alert" : "status"} data-ae-properties-notice>
+            {layout.propertiesNotice}
+            {layout.propertiesState === "error" && p.onRetryProperties ? (
+              <>
+                {" "}
+                <button type="button" className="mob-c-link" onClick={p.onRetryProperties}>
+                  Try again
+                </button>
+              </>
+            ) : null}
+            {layout.propertiesState === "ready" || layout.propertiesState === "error" ? (
+              <>
+                {" "}
+                <Link href={layout.fullRecordHref} className="mob-c-link">
+                  Open full record
+                </Link>
+              </>
+            ) : null}
+          </p>
+        ) : null}
         {layout.properties.length === 0 ? (
-          <p className="mob-c-note">No active property links.</p>
+          layout.propertiesState === "legacy" ? (
+            <p className="mob-c-note">No active property links.</p>
+          ) : layout.propertiesState === "ready" ? (
+            <p className="mob-c-note">No property links.</p>
+          ) : null
         ) : (
           <div className="mob-c-list">
             {layout.properties.map((prop) => {
@@ -383,6 +411,41 @@ export function MobileContactView(p: MobileContactViewProps) {
         ) : null}
         {p.linking.panel?.kind === "link" && p.linking.picker ? <MobileLinkPicker {...p.linking.picker} /> : null}
       </section>
+
+      {layout.propertiesState === "ready" && (layout.interest.length > 0 || layout.interestMatchedNote) ? (
+        <section className="mob-c-block" aria-label={GROW_INTEREST_TITLE} data-ae-grow-interest>
+          <h2 className="mob-c-section">{GROW_INTEREST_TITLE}</h2>
+          <p className="mob-c-note">{GROW_INTEREST_NOTE}</p>
+          {layout.interest.length > 0 ? (
+            <div className="mob-c-list">
+              {layout.interest.map((row) => {
+                const text = (
+                  <span className="mob-c-row-main">
+                    <span className="mob-c-row-title">{row.label}</span>
+                    <span className="mob-c-row-sub">
+                      {row.relationship} · {row.kindLabel}
+                    </span>
+                  </span>
+                );
+                return row.href ? (
+                  <Link key={row.key} href={row.href} className="mob-c-row mob-c-link-row" aria-label={`Open ${row.label}`}>
+                    {text}
+                  </Link>
+                ) : (
+                  <div key={row.key} className="mob-c-row">
+                    {text}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {layout.interestMatchedNote ? (
+            <p className="mob-c-note" data-ae-interest-matched>
+              {layout.interestMatchedNote}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="mob-c-block" aria-label="History">
         <h2 className="mob-c-section">History</h2>

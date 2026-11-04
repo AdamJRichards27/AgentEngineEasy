@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { buildMobileContactLayout } from "../../minimal/mobile/mobileContactLayout";
-import { parseContactLinks } from "../../minimal/mobile/mobileLinking";
+import { parseContactLinks, parseContactLinksResult } from "../../minimal/mobile/mobileLinking";
 import { MOBILE_LINKING } from "../../minimal/mobile/mobileLinkingConfig";
 import { buildContactPropertyLinks, type ContactPropertyRow } from "../../minimal/properties/minimalPropertyContactsModel";
 import type { GrowContact360 } from "../growContact360";
@@ -48,4 +48,8 @@ test("X13 by design: with the canonical read OFF the phone shows the older list 
   assert.equal(MOBILE_LINKING.contactCanonicalRead, false, "and the flag is OFF");
 });
 
-test.todo("over the cap the phone must SAY so: 'Showing 100 of {total}' from the server's total/limit/truncated, never a silent cut (display work still to build, behind the OFF flag)");
+test("over the cap the phone SAYS so ('Showing 100 of 105') instead of cutting silently, using the server's total", () => {
+  const r = parseContactLinksResult(overCap);
+  const notice = buildMobileContactLayout(legacy, { now: NOW, canLog: true, canonicalLinks: r.links, canonicalMeta: { truncated: r.truncated, total: r.total, skipped: r.skipped } }).propertiesNotice;
+  assert.equal(notice, "Showing 100 of 105 property links. Open the full record to see all of them.");
+});

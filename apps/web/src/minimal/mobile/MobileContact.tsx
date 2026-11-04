@@ -9,7 +9,7 @@ import { useEntitlements, useSession } from "../../lib/session";
 import { MobileGrowSections } from "./MobileGrowSections";
 import { useCallReturn } from "./useCallReturn";
 import { MobileContactMessage, MobileContactView, type ContactLinkPanel } from "./MobileContactView";
-import { canonicalContactLinksPath, changeRoleRequest, linkRequest, setPrimaryRequest, linkingCapabilities, linkingFailureText, parseContactLinks, roleChoices, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
+import { canonicalContactLinksPath, changeRoleRequest, linkRequest, setPrimaryRequest, linkingCapabilities, linkingFailureText, parseContactLinksResult, roleChoices, unlinkRequest, type KnownLink, type LinkRequest } from "./mobileLinking";
 import { MOBILE_LINKING } from "./mobileLinkingConfig";
 import { CONTACT_NOT_FOUND, contactLoadMessage } from "./mobileContactMessages";
 import { mobilePermissions } from "./mobilePermissions";
@@ -82,7 +82,11 @@ export default function MobileContact() {
     queryFn: () => apiFetch(canonicalContactLinksPath(partyId as number)),
     enabled: partyId !== null && MOBILE_LINKING.contactCanonicalRead,
   });
-  const canonicalLinks = MOBILE_LINKING.contactCanonicalRead && canonical.isSuccess ? parseContactLinks(canonical.data) : null;
+  const canonicalOn = MOBILE_LINKING.contactCanonicalRead;
+  const canonicalResult = canonicalOn && canonical.isSuccess ? parseContactLinksResult(canonical.data) : null;
+  const canonicalLinks = canonicalResult ? canonicalResult.links : null;
+  // With the read ON, a request that has not finished or has failed is SAID on screen; the older Grow list is never shown in its place.
+  const canonicalStatus: "loading" | "error" | null = canonicalOn && !canonicalResult ? (canonical.isError ? "error" : "loading") : null;
 
   useEffect(() => {
     if (opened.current || !detail.data || !hasEntitlement(GROW_ACTIVITIES_MANAGE)) return;
@@ -156,6 +160,8 @@ export default function MobileContact() {
     canLog: hasEntitlement(GROW_ACTIVITIES_MANAGE),
     expandedHistory: historyExpanded,
     canonicalLinks,
+    canonicalStatus,
+    canonicalMeta: canonicalResult ? { truncated: canonicalResult.truncated, total: canonicalResult.total, skipped: canonicalResult.skipped } : null,
   });
   // What this contact is already linked to, for the repeat guard: canonical rows only.
   const known: KnownLink[] = layout.properties.filter((p) => p.canonical && p.propertyId !== null && p.roleValue !== null).map((p) => ({ linkId: p.key, propertyId: p.propertyId as number, partyId: partyId as number, role: p.roleValue as string }));
@@ -225,6 +231,7 @@ export default function MobileContact() {
       layout={layout}
       historyExpanded={historyExpanded}
       onToggleHistory={() => setHistoryExpanded((v) => !v)}
+      onRetryProperties={() => void canonical.refetch()}
       form={form}
       formError={formError}
       submitting={write.isPending && pending === null}

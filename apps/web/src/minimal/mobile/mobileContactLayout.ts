@@ -5,6 +5,7 @@ import { CONTACT360_FULL_VIEW_QUERY, formatContactDate } from "../minimalContact
 import { roleLabel } from "./mobileLabels";
 import { propertyResultHref } from "./mobileSearchModel";
 import { linkRoleLabel, type CanonicalContactLink } from "./mobileLinking";
+import { buildGrowInterest, matchedNoteText, type GrowInterestRow } from "./mobileGrowInterest";
 import { HISTORY_VISIBLE, PROPERTY_RELATIONSHIP_LABELS } from "./mobilePeopleConfig";
 
 // AE Mobile (CC Task #64, M4): the phone Contact 360 layout, as one pure function. No React, no network, no
@@ -80,6 +81,17 @@ export interface MobileContactLayout {
   openCommitmentCount: number;
   closedCommitmentCount: number;
   properties: MobilePropertyLink[];
+  /**
+   * "legacy": the canonical read is OFF (as shipped); `properties` is the payload's Active Grow links, exactly as before, and there is no interest list.
+   * "loading" / "error" / "ready": the canonical read is ON; `properties` is property_parties only.
+   */
+  propertiesState: "legacy" | "loading" | "error" | "ready";
+  /** A plain sentence when the Properties list shows less than there is, or could not be loaded. Null otherwise. */
+  propertiesNotice: string | null;
+  /** Grow interest & history: Grow's records that are not current property links (only when `propertiesState` is "ready"). */
+  interest: GrowInterestRow[];
+  /** Said, not hidden: how many Grow rows are the same fact as a property listed above. */
+  interestMatchedNote: string | null;
   history: MobileHistoryRow[];
   historyHiddenCount: number;
   fullRecordHref: string;
@@ -98,6 +110,20 @@ export interface MobileContactOptions {
    * payload's links are shown as they come, read-only.
    */
   canonicalLinks?: readonly CanonicalContactLink[] | null;
+  /** The canonical read is ON and the response is not here yet / failed. Ignored when `canonicalLinks` is given. */
+  canonicalStatus?: "loading" | "error" | null;
+  /** What the by-contact response said about itself (truncated, total, unreadable rows). */
+  canonicalMeta?: { truncated: boolean; total: number | null; skipped: number } | null;
+}
+
+/** The sentence under Properties when it shows less than there is. */
+export function propertiesNoticeText(shown: number, meta: { truncated: boolean; total: number | null; skipped: number } | null | undefined): string | null {
+  if (!meta) return null;
+  const parts: string[] = [];
+  if (meta.total !== null && meta.total > shown) parts.push(`Showing ${shown} of ${meta.total} property links.`);
+  else if (meta.truncated) parts.push(`Showing the first ${shown} property links.`);
+  if (meta.skipped > 0) parts.push(`${meta.skipped} ${meta.skipped === 1 ? "link" : "links"} couldn't be shown.`);
+  return parts.length === 0 ? null : `${parts.join(" ")} Open the full record to see all of them.`;
 }
 
 function initialsOf(name: string): string {
@@ -210,6 +236,37 @@ export function buildMobileContactLayout(data: GrowContact360, options: MobileCo
 
   const call = callPlan(numbersOf(data.contact), name);
   const nextStep = chooseNextStep(data, openRows, canLog, now);
+  // PROPERTIES = property_parties only once the canonical read is on; until then (as shipped) the payload's Active Grow links, unchanged.
+  const canonical = options.canonicalLinks ?? null;
+  const propertiesState: MobileContactLayout["propertiesState"] = canonical ? "ready" : options.canonicalStatus === "loading" ? "loading" : options.canonicalStatus === "error" ? "error" : "legacy";
+  const canonicalRows: MobilePropertyLink[] = (canonical ?? []).map((l) => ({
+    key: l.linkId,
+    label: l.address,
+    relationship: linkRoleLabel(l.role),
+    role: null,
+    roleValue: l.role,
+    primary: l.isPrimary,
+    href: propertyResultHref(l.propertyId),
+    canonical: true,
+    propertyId: l.propertyId,
+  }));
+  const legacyRows: MobilePropertyLink[] = data.properties
+    .filter((p) => p.status === "Active")
+    .map((p) => ({
+      key: p.relationshipId,
+      label: p.propertyAddress ?? "Not linked to a property",
+      relationship: propertyRelationshipText(p.relationshipType, p.role),
+      role: p.role !== null && p.role.trim().length > 0 ? p.role.trim() : null,
+      roleValue: null,
+      primary: p.isPrimary,
+      href: p.propertyId === null ? null : propertyResultHref(p.propertyId),
+      canonical: false,
+      propertyId: p.propertyId,
+    }));
+  const propertiesList = propertiesState === "legacy" ? legacyRows : propertiesState === "ready" ? canonicalRows : [];
+  const interest = propertiesState === "ready" && canonical ? buildGrowInterest(data.properties, canonical, propertyRelationshipText, propertyResultHref) : { rows: [], matchedCount: 0 };
+  const propertiesNotice =
+    propertiesState === "ready" ? propertiesNoticeText(canonicalRows.length, options.canonicalMeta) : propertiesState === "error" ? "Couldn't load this contact's property links." : propertiesState === "loading" ? "Loading property links…" : null;
   return {
     id: data.contact.id,
     name,
@@ -221,31 +278,11 @@ export function buildMobileContactLayout(data: GrowContact360, options: MobileCo
     commitments: openRows.filter((r) => r.id !== nextStep.commitmentId),
     openCommitmentCount: openRows.length,
     closedCommitmentCount: data.commitments.filter((c) => c.status !== "Open").length,
-    properties: options.canonicalLinks
-      ? options.canonicalLinks.map((l) => ({
-          key: l.linkId,
-          label: l.address,
-          relationship: linkRoleLabel(l.role),
-          role: null,
-          roleValue: l.role,
-          primary: l.isPrimary,
-          href: propertyResultHref(l.propertyId),
-          canonical: true,
-          propertyId: l.propertyId,
-        }))
-      : data.properties
-          .filter((p) => p.status === "Active")
-          .map((p) => ({
-            key: p.relationshipId,
-            label: p.propertyAddress ?? "Not linked to a property",
-            relationship: propertyRelationshipText(p.relationshipType, p.role),
-            role: p.role !== null && p.role.trim().length > 0 ? p.role.trim() : null,
-            roleValue: null,
-            primary: p.isPrimary,
-            href: p.propertyId === null ? null : propertyResultHref(p.propertyId),
-            canonical: false,
-            propertyId: p.propertyId,
-          })),
+    properties: propertiesList,
+    propertiesState,
+    propertiesNotice,
+    interest: interest.rows,
+    interestMatchedNote: matchedNoteText(interest.matchedCount),
     history: shown,
     historyHiddenCount: history.length - shown.length,
     fullRecordHref: `${growContactPath(data.contact.id)}?${CONTACT360_FULL_VIEW_QUERY}`,

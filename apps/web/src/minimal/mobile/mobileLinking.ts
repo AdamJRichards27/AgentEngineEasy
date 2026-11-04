@@ -135,6 +135,32 @@ export interface CanonicalContactLink {
   address: string;
 }
 
+/** What the by-contact response says about itself, so the screen can SAY when it shows less than there is. */
+export interface ContactLinksResult {
+  links: CanonicalContactLink[];
+  /** The server capped `links`. */
+  truncated: boolean;
+  /** The server's count of ALL links this caller may see. Null when absent or not believable (smaller than what was shown). */
+  total: number | null;
+  limit: number | null;
+  /** Rows the phone could not read: counted, never dropped silently. */
+  skipped: number;
+}
+
+export function parseContactLinksResult(data: unknown): ContactLinksResult {
+  const obj = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {};
+  const raw = Array.isArray(obj.links) ? obj.links.length : 0;
+  const links = parseContactLinks(data);
+  const wholeNumber = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
+  return {
+    links,
+    truncated: obj.truncated === true,
+    total: wholeNumber(obj.total) && obj.total >= links.length ? obj.total : null,
+    limit: positive(obj.limit) ? obj.limit : null,
+    skipped: raw - links.length,
+  };
+}
+
 /** Reads the proposed response defensively: a row that is not what the contract says is dropped, never guessed. */
 export function parseContactLinks(data: unknown): CanonicalContactLink[] {
   const rows = typeof data === "object" && data !== null && Array.isArray((data as { links?: unknown }).links) ? (data as { links: unknown[] }).links : [];
