@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
-import { db, growOpportunities, parties, properties, propertyParties } from "@aee/db";
+import { appraisals, db, growOpportunities, parties, properties, propertyParties } from "@aee/db";
 import { selectAppraisalForBrokerageProperty } from "../lib/appraisals.js";
 import { logger } from "@aee/events";
 import { requireAuth, type AuthedUser } from "../middlewares/auth.js";
-import { denyRelationshipWriteBarredRoles, requireEntitlement } from "../middlewares/entitlement.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+import { auditAuthorityAction, entitlementOrAuthority, readWithOptionalAuthority, pitCrewScopeRefusal, requireSendAuthorisation } from "../lib/contactAuthority.js";
 import { AppraisalLifecycleClosedError, AppraisalPricingLockedError } from "../lib/appraisalFinaliseGuard.js";
 import {
   AppraisalAccessError,
@@ -131,14 +132,43 @@ function handleGrowAppraisalError(err: unknown, res: import("express").Response)
   res.status(500).json({ error: GENERIC_APPRAISAL_ERROR });
 }
 
-const requiresRunAccess = requireEntitlement("run.access");
+const requiresRunAccess = entitlementOrAuthority("run.access", requireEntitlement("run.access"));
 // WP1 P1-1: every Appraisal Workspace route is a Grow surface, so every route requires
 // grow.access (checked before any work). Every mutating route additionally requires
 // grow.opportunities.manage -- the same "manage" key Grow uses for its own opportunity
 // pipeline writes (routes/grow.ts). /:id/run-handoff keeps run.access AND requires
 // grow.access, because the Grow -> Run handoff originates in Grow.
-const requiresGrowAccess = requireEntitlement("grow.access");
-const requiresGrowManage = requireEntitlement("grow.opportunities.manage");
+// t275u: Pit Crew prepares and edits proposals (appraisals) only on an agent's
+// recorded authority, under that agent's entitlements; sending is agent-only.
+const requiresGrowAccess = entitlementOrAuthority("grow.access", requireEntitlement("grow.access"));
+const requiresGrowRead = readWithOptionalAuthority("grow.access", requireEntitlement("grow.access"));
+const requiresGrowManage = entitlementOrAuthority("grow.opportunities.manage", requireEntitlement("grow.opportunities.manage"));
+
+/**
+ * t275u: Pit Crew works on an appraisal (proposal) only for the agent it acts for —
+ * the appraisal's owner or the listing agent. Anything else is the usual 404.
+ * Non-Pit-Crew callers pass straight through.
+ */
+async function pitCrewAppraisalScope(req: import("express").Request, res: import("express").Response, next: import("express").NextFunction) {
+  const acting = req.actingFor;
+  if (!acting) return next();
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return next();
+  const [row] = await db
+    .select({ ownerUserId: appraisals.ownerUserId, agentId: properties.agentId })
+    .from(appraisals)
+    .leftJoin(properties, eq(properties.id, appraisals.propertyId))
+    .where(and(eq(appraisals.id, id), eq(appraisals.brokerageId, req.authedUser!.brokerageId)))
+    .limit(1);
+  if (row && row.ownerUserId !== acting.owner.id && row.agentId !== acting.owner.id) {
+    res.status(404).json({ error: "Appraisal not found", code: "CONTACT_OWNER_OUT_OF_SCOPE" });
+    return;
+  }
+  if (row && req.method !== "GET") {
+    await auditAuthorityAction(req, { action: "appraisal_changed_on_authority", recordType: "appraisal", recordId: id, after: { route: req.route?.path ?? req.path, method: req.method } });
+  }
+  next();
+}
 
 /**
  * True when this response has already been sent. A missing appraisal is left
@@ -223,6 +253,11 @@ growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requ
     res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
     return;
   }
+  const fromContactScope = await pitCrewScopeRefusal(req, { partyIds: [parsed.data.partyId], propertyId: parsed.data.propertyId });
+  if (fromContactScope) {
+    res.status(fromContactScope.status).json(fromContactScope.body);
+    return;
+  }
   if (parsed.data.entry === "property" && (await rejectInvalidPropertyEntry(user, parsed.data, res))) return;
   const [property] = await db
     .select({ id: properties.id })
@@ -241,8 +276,9 @@ growAppraisalsRouter.post("/from-contact", requireAuth, requiresGrowAccess, requ
       partyId: parsed.data.partyId,
       propertyId: parsed.data.propertyId,
       brokerageId: user.brokerageId,
-      userId: user.id,
+      userId: req.actingFor?.owner.id ?? user.id,
     });
+    if (req.actingFor) await auditAuthorityAction(req, { action: "appraisal_created_on_authority", recordType: "appraisal", recordId: appraisal.id, after: { propertyId: appraisal.propertyId } });
     res.status(201).json({ appraisal });
   } catch (err) {
     handleGrowAppraisalError(err, res);
@@ -270,6 +306,10 @@ growAppraisalsRouter.post("/from-opportunity", requireAuth, requiresGrowAccess, 
   // 409. One they cannot see — another agent's unlinked opportunity, or one
   // tied to a property outside their own-property set — is the same 404 as
   // a missing opportunity.
+  if (opportunity && req.actingFor && opportunity.ownerUserId !== req.actingFor.owner.id) {
+    res.status(404).json({ error: "Opportunity not found", code: "CONTACT_OWNER_OUT_OF_SCOPE" });
+    return;
+  }
   if (opportunity && !(await assertOwnedOrPropertyVisibleForWrite(user, opportunity.propertyId, opportunity.ownerUserId))) {
     res.status(404).json({ error: "Opportunity not found" });
     return;
@@ -278,8 +318,9 @@ growAppraisalsRouter.post("/from-opportunity", requireAuth, requiresGrowAccess, 
     const appraisal = await createAppraisalFromOpportunity({
       opportunityId: parsed.data.opportunityId,
       brokerageId: user.brokerageId,
-      userId: user.id,
+      userId: req.actingFor?.owner.id ?? user.id,
     });
+    if (req.actingFor) await auditAuthorityAction(req, { action: "appraisal_created_on_authority", recordType: "appraisal", recordId: appraisal.id, after: { propertyId: appraisal.propertyId } });
     res.status(201).json({ appraisal });
   } catch (err) {
     handleGrowAppraisalError(err, res);
@@ -294,7 +335,7 @@ const pipelineQuerySchema = z.object({
   ownerUserId: z.coerce.number().int().positive().optional(),
 });
 
-growAppraisalsRouter.get("/pipeline", requireAuth, requiresGrowAccess, async (req, res) => {
+growAppraisalsRouter.get("/pipeline", requireAuth, requiresGrowRead, async (req, res) => {
   const user = req.authedUser!;
   const parsed = pipelineQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -317,7 +358,7 @@ growAppraisalsRouter.get("/pipeline", requireAuth, requiresGrowAccess, async (re
 /* ---------------------------------------------------------------------
  * Sec 9 -- the Appraisal Workspace itself.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.get("/:id", requireAuth, requiresGrowAccess, async (req, res) => {
+growAppraisalsRouter.get("/:id", requireAuth, requiresGrowRead, pitCrewAppraisalScope, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -352,7 +393,7 @@ const updateWorkspaceSchema = z.object({
   ownerUserId: z.coerce.number().int().positive().nullable().optional(),
 });
 
-growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -380,7 +421,7 @@ growAppraisalsRouter.patch("/:id", requireAuth, requiresGrowAccess, requiresGrow
  * -----------------------------------------------------------------*/
 const statusSchema = z.object({ toStatus: z.string().min(1) });
 
-growAppraisalsRouter.post("/:id/status", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/status", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -412,7 +453,7 @@ const outcomeSchema = z.object({
   outcomeNotes: z.string().nullable().optional(),
 });
 
-growAppraisalsRouter.post("/:id/outcome", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/outcome", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -445,7 +486,7 @@ const followUpSchema = z.object({
   followUpNotes: z.string().nullable().optional(),
 });
 
-growAppraisalsRouter.post("/:id/follow-up", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/follow-up", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -477,7 +518,7 @@ const sendSchema = z.object({
   bodyText: z.string().optional(),
 });
 
-growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/send", requireAuth, requireSendAuthorisation(), requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -504,7 +545,7 @@ growAppraisalsRouter.post("/:id/send", requireAuth, requiresGrowAccess, requires
 /* ---------------------------------------------------------------------
  * Sec 12 -- AI Market Position draft.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -525,7 +566,7 @@ growAppraisalsRouter.post("/:id/market-position/generate", requireAuth, requires
 /* ---------------------------------------------------------------------
  * Sec 13/14 -- presentation document generation.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -546,7 +587,7 @@ growAppraisalsRouter.post("/:id/presentation/generate", requireAuth, requiresGro
  * Sec 19/20 -- Grow -> Run handoff, gated behind the same run.access
  * entitlement Run uses everywhere else.
  * -----------------------------------------------------------------*/
-growAppraisalsRouter.post("/:id/run-handoff", requireAuth, denyRelationshipWriteBarredRoles(), requiresGrowAccess, requiresRunAccess, async (req, res) => {
+growAppraisalsRouter.post("/:id/run-handoff", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresRunAccess, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -587,7 +628,7 @@ function normalizeSaleDate(saleDate: string | null | undefined): Date | null | u
   return saleDate ? new Date(saleDate) : null;
 }
 
-growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -608,7 +649,7 @@ growAppraisalsRouter.post("/:id/comparable-sales", requireAuth, requiresGrowAcce
   }
 });
 
-growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -631,7 +672,7 @@ growAppraisalsRouter.patch("/:id/comparable-sales/:saleId", requireAuth, require
   }
 });
 
-growAppraisalsRouter.delete("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.delete("/:id/comparable-sales/:saleId", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -660,7 +701,7 @@ const marketCompetitionSchema = z.object({
   displayOrder: z.coerce.number().int().optional(),
 });
 
-growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -678,7 +719,7 @@ growAppraisalsRouter.post("/:id/market-competition", requireAuth, requiresGrowAc
   }
 });
 
-growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;
@@ -698,7 +739,7 @@ growAppraisalsRouter.patch("/:id/market-competition/:itemId", requireAuth, requi
   }
 });
 
-growAppraisalsRouter.delete("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.delete("/:id/market-competition/:itemId", requireAuth, requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;

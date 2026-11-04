@@ -4,7 +4,16 @@ import { z } from "zod";
 import { db, offers, properties, propertyParties } from "@aee/db";
 import { incrementCounter, logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
-import { isRelationshipWriteBarredRole, PIT_CREW_RELATIONSHIP_REFUSAL, requireEntitlement } from "../middlewares/entitlement.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+import { isPitCrew } from "../lib/contactAuthority.js";
+import { auditDuplicateOverride, gateNewContact } from "../lib/contactDuplicates.js";
+
+// Owner t274u/t275u: transaction administration is unchanged — Pit Crew records an
+// offer only from a buyer already linked to the property as Buyer.
+const PIT_CREW_OFFER_REFUSAL = {
+  error: "Pit Crew can record an offer only for a buyer already linked to this property.",
+  code: "PIT_CREW_LINKED_BUYER_ONLY",
+} as const;
 import { createOffer, listOffersForProperty, withdrawOffer, declineOffer, getOfferByShareToken } from "../lib/offers.js";
 import { acceptOffer } from "../lib/transactions.js";
 
@@ -138,7 +147,7 @@ offersRouter.post("/by-property/:propertyId", requireAuth, requiresRunAccess, as
   // Owner t274u: recording an offer links the buyer to the property when it is
   // not linked yet (lib/offers.ts). Pit Crew never creates relationship records,
   // so Pit Crew may record an offer only for a buyer ALREADY linked as Buyer.
-  if (isRelationshipWriteBarredRole(user.role)) {
+  if (isPitCrew(user)) {
     const buyerPartyId = parsed.data.buyerPartyId;
     const [linked] = buyerPartyId
       ? await db
@@ -147,11 +156,20 @@ offersRouter.post("/by-property/:propertyId", requireAuth, requiresRunAccess, as
           .where(and(eq(propertyParties.propertyId, propertyId), eq(propertyParties.partyId, buyerPartyId), eq(propertyParties.role, "Buyer")))
       : [];
     if (!linked) {
-      res.status(403).json(PIT_CREW_RELATIONSHIP_REFUSAL);
+      res.status(403).json(PIT_CREW_OFFER_REFUSAL);
       return;
     }
   }
 
+  // t275u: an inline buyer is a new contact — the shared duplicate service applies.
+  const newBuyer = !parsed.data.buyerPartyId && parsed.data.buyer ? parsed.data.buyer : null;
+  const dupGate = newBuyer
+    ? await gateNewContact(req, { firstName: newBuyer.firstName, lastName: newBuyer.lastName, email: newBuyer.email, mobile: newBuyer.mobile }, "offers")
+    : null;
+  if (dupGate && !dupGate.ok) {
+    res.status(dupGate.status).json(dupGate.body);
+    return;
+  }
   try {
     const offer = await createOffer({
       propertyId,
@@ -162,6 +180,7 @@ offersRouter.post("/by-property/:propertyId", requireAuth, requiresRunAccess, as
       userId: user.id,
       brokerageId: user.brokerageId,
     });
+    if (dupGate && offer.buyerPartyId) await auditDuplicateOverride(req, dupGate, offer.buyerPartyId, "offers", propertyId);
     res.status(201).json({ offer });
   } catch (err) {
     handleOfferError(err, res);

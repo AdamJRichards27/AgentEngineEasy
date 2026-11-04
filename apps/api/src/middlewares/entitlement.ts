@@ -2,6 +2,8 @@ import type { Request, Response, NextFunction } from "express";
 import type { EntitlementKey } from "@aee/db";
 import { logger } from "@aee/events";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
+import { isPitCrew, resolveAuthority } from "../lib/contactAuthority.js";
+import type { AuthedUser } from "./auth.js";
 
 /**
  * The fourth access question (entitlement), alongside requireAuth/requireRole's authentication
@@ -90,38 +92,11 @@ export function requireAnyEntitlement(...entitlementKeys: EntitlementKey[]) {
  */
 export const RUN_CONTACT_MANAGE_ROLES = ["Agent", "Brokerage Administrator"] as const;
 
-// Owner t274u: Pit Crew never creates, edits or unlinks relationship records
-// (canonical property_parties links, Grow property relationships, household
-// relationships), on ANY route and REGARDLESS of the brokerage's
-// grow.relationships.manage grant. Checked before any entitlement.
-export const RELATIONSHIP_WRITE_BARRED_ROLES = ["Pit Crew"] as const;
-export const PIT_CREW_RELATIONSHIP_REFUSAL = {
-  error: "Pit Crew can view relationships but cannot create, change or remove them.",
-  code: "RELATIONSHIP_WRITE_ROLE_BARRED",
-} as const;
-
-export function isRelationshipWriteBarredRole(role: string | null | undefined): boolean {
-  return !!role && (RELATIONSHIP_WRITE_BARRED_ROLES as readonly string[]).includes(role);
-}
-
-/** For routes whose own permission is something else (grow.relationships.manage,
- * grow.contacts.manage, run.access, grow.import.execute) but which create, edit or
- * remove relationship records. Use before the entitlement middleware. */
-export function denyRelationshipWriteBarredRoles() {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const user = req.authedUser;
-    if (!user) {
-      res.status(401).json({ error: "Not authenticated" });
-      return;
-    }
-    if (isRelationshipWriteBarredRole(user.role)) {
-      res.status(403).json(PIT_CREW_RELATIONSHIP_REFUSAL);
-      return;
-    }
-    next();
-  };
-}
-
+// Owner t275u (replaces the t274u blanket block): Pit Crew may create, edit and
+// unlink relationship records ONLY on the recorded authority of the contact
+// owner (lib/contactAuthority.ts). The owner, not Pit Crew, must hold the
+// relationship permission; each route then checks the target contacts/property
+// are within the owner's scope.
 export function requireRelationshipManage() {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.authedUser;
@@ -129,29 +104,35 @@ export function requireRelationshipManage() {
       res.status(401).json({ error: "Not authenticated" });
       return;
     }
-    if (isRelationshipWriteBarredRole(user.role)) {
-      res.status(403).json(PIT_CREW_RELATIONSHIP_REFUSAL);
-      return;
+    let subject: AuthedUser = user;
+    if (isPitCrew(user)) {
+      const a = await resolveAuthority(req);
+      if ("status" in a) {
+        res.status(a.status).json(a.body);
+        return;
+      }
+      req.actingFor = a;
+      subject = a.owner;
     }
     const entitlementKey = "grow.relationships.manage";
     try {
-      const explicit = await explainEntitlementDecision(user, entitlementKey);
+      const explicit = await explainEntitlementDecision(subject, entitlementKey);
       if (explicit.allowed) {
         next();
         return;
       }
-      if ((RUN_CONTACT_MANAGE_ROLES as readonly string[]).includes(user.role)) {
-        const run = await explainEntitlementDecision(user, "run.access");
+      if ((RUN_CONTACT_MANAGE_ROLES as readonly string[]).includes(subject.role)) {
+        const run = await explainEntitlementDecision(subject, "run.access");
         if (run.allowed) {
           next();
           return;
         }
       }
       res.status(403).json({
-        error: "Not entitled",
+        error: subject === user ? "Not entitled" : "The named contact owner does not have access to this action.",
         reason: explicit.reason,
         entitlementKey,
-        upgrade: { action: "grow.checkout", productCode: "grow" },
+        ...(subject === user ? { upgrade: { action: "grow.checkout", productCode: "grow" } } : { code: "CONTACT_OWNER_NOT_ENTITLED" }),
       });
     } catch (err) {
       logger.error("require_entitlement_middleware_failed_closed", { entitlementKey, userId: user.id, error: err });

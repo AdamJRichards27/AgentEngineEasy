@@ -153,7 +153,7 @@ test("by-contact and PATCH: hidden property, unsubscribed brokerage and other br
   assert.equal(link.isPrimary, true, "unsubscribed PATCH changed nothing; later entitled PATCH did");
 });
 
-test("t234u: matching email/phone is a warning, never a rejection; existing contact id offered for reuse; Owner/Landlord/Tenant valid; Create Contact + Start Appraisal still work", async () => {
+test("t275u: shared duplicate service on POST /parties — matching email/phone blocks (409) with the reusable id; override needs a reason and is audited; Owner/Landlord/Tenant valid; Create Contact + Start Appraisal still work", async () => {
   const b = await setup("Dedupe", ["run.access", ...GROW]);
   const email = `dup-${tag}@example.com`;
   const first = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.adminProp, role: "Owner", firstName: "Uma", email, mobile: "0412 345 678" });
@@ -166,14 +166,24 @@ test("t234u: matching email/phone is a warning, never a rejection; existing cont
     ["POTENTIAL_DUPLICATE_CONTACT", "email", first.json.party.id],
     ["POTENTIAL_DUPLICATE_CONTACT", "phone", first.json.party.id],
   ]);
-  // Shared household email: created (not rejected), with a warning — even if a client still sends the old opt-in flag.
+  // Blocked by default — even with the old opt-in flags.
   const byEmail = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email: email.toUpperCase(), rejectDuplicateContact: true });
-  assert.equal(byEmail.status, 201);
-  assert.notEqual(byEmail.json.party.id, first.json.party.id);
-  assert.deepEqual(byEmail.json.warnings, [{ code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email", contactId: first.json.party.id }]);
+  assert.equal(byEmail.status, 409);
+  assert.equal(byEmail.json.code, "POTENTIAL_DUPLICATE_CONTACT");
+  assert.equal(byEmail.json.contactId, first.json.party.id);
+  const legacyConfirm = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email, confirmNewContact: true });
+  assert.equal(legacyConfirm.status, 409);
+  assert.equal(legacyConfirm.json.code, "DUPLICATE_OVERRIDE_REASON_REQUIRED");
+  const overridden = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Tenant", firstName: "Uma2", email, duplicateOverride: { reason: "Shared household email" } });
+  assert.equal(overridden.status, 201);
+  assert.notEqual(overridden.json.party.id, first.json.party.id);
+  assert.deepEqual(overridden.json.warnings, [{ code: "POTENTIAL_DUPLICATE_CONTACT", kind: "email", contactId: first.json.party.id }]);
+  const [audit] = await db.select().from(auditLogs).where(and(eq(auditLogs.action, "contact_duplicate_override"), eq(auditLogs.recordId, String(overridden.json.party.id))));
+  assert.ok(audit, "override audited");
+  assert.match(String(audit.updatedValue), /Shared household email/);
   const byPhone = await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, role: "Other", firstName: "Household", mobile: "+61412345678" });
-  assert.equal(byPhone.status, 201);
-  assert.equal(byPhone.json.warnings[0].kind, "phone");
+  assert.equal(byPhone.status, 409);
+  assert.equal(byPhone.json.kind, "phone");
   // Other brokerage never sees this brokerage's contact as a duplicate (isolation).
   const o = await setup("DedupeOther", ["run.access", ...GROW]);
   assert.deepEqual((await call(o.admin.cookie, "POST", "/parties/duplicate-check", { email })).json.warnings, []);
@@ -185,13 +195,13 @@ test("t234u: matching email/phone is a warning, never a rejection; existing cont
   assert.equal(linked.status, 201);
   assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Landlord" })).status, 409, "duplicate link");
   assert.equal((await call(b.admin.cookie, "POST", "/parties", { propertyId: b.agentProp, partyId: first.json.party.id, role: "Occupier" })).status, 400, "unknown relationship type");
-  // People "Create contact" (unchanged route) still dedupes and still creates.
+  // People "Create contact" uses the same service.
   const warned = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email });
   assert.equal(warned.status, 409);
   assert.equal(warned.json.code, "POTENTIAL_DUPLICATE_CONTACT");
   assert.equal(warned.json.contactId, first.json.party.id);
-  const confirmed = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email, confirmDuplicate: true });
-  assert.equal(confirmed.status, 201, "confirmed shared email is created, not rejected");
+  const confirmed = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Uma Again", email, duplicateOverride: { reason: "Shared household email" } });
+  assert.equal(confirmed.status, 201, "overridden shared email is created");
   assert.equal(confirmed.json.warnings[0].contactId, first.json.party.id);
   const fresh = await call(b.agent.cookie, "POST", "/grow/contacts", { name: "Vic Fresh", email: `vic-${tag}@example.com` });
   assert.equal(fresh.status, 201);

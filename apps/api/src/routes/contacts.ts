@@ -22,7 +22,9 @@ import {
   type GrowConsentChannel,
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
-import { denyRelationshipWriteBarredRoles, requireEntitlement } from "../middlewares/entitlement.js";
+import { requireEntitlement } from "../middlewares/entitlement.js";
+import { auditAuthorityAction, entitlementOrAuthority, readWithOptionalAuthority, ownedPartyIdsSql, pitCrewScopeRefusal, recordContactOwner } from "../lib/contactAuthority.js";
+import { auditDuplicateOverride, gateNewContact, visibleDuplicates } from "../lib/contactDuplicates.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
@@ -431,7 +433,7 @@ function changedContactFields(before: ContactEditValues, after: ContactEditValue
 // GET /grow/contacts — list/search, for the Grow Contacts entry point and any "find a contact"
 // picker elsewhere in Grow. Always scoped to the caller's own brokerage; a client-supplied
 // brokerageId is never trusted (matches every other Grow route in routes/grow.ts).
-contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
+contactsRouter.get("/", requireAuth, readWithOptionalAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
   const pageQuery = readGrowListPageQuery(req.query);
   if (!pageQuery.ok) {
@@ -447,6 +449,8 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
   const role = typeof req.query.role === "string" ? req.query.role : undefined;
 
   const conditions = [eq(parties.brokerageId, brokerageId)];
+  // t275u: Pit Crew sees only the contacts of the owner it acts for.
+  if (req.actingFor) conditions.push(sql`${parties.id} in ${ownedPartyIdsSql(brokerageId, req.actingFor.owner.id)}`);
   if (excludeParty.id !== null) conditions.push(sql`${parties.id} <> ${excludeParty.id}`);
   if (search.length > 0) {
     const pattern = `%${search}%`;
@@ -552,7 +556,7 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
 // matching normalised phone in this brokerage is a 409 with that contact's id,
 // the same response the new-contact form already turns into "This contact
 // already exists." The phone is stored as typed; only the comparison is normalised.
-contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const parsed = parseContactCreateBody(req.body);
   if (!parsed.ok) {
@@ -560,28 +564,15 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     return;
   }
 
-  // t234u (Owner): a matching email/phone is a potential-duplicate WARNING, not a
-  // global rejection (shared household/business details are legitimate). The
-  // first submit still answers 409 with the existing contact id so the form can
-  // offer "use existing"; resubmitting with confirmDuplicate: true creates the
-  // contact and returns the warnings alongside it.
-  const confirmDuplicate = (req.body as Record<string, unknown> | null)?.confirmDuplicate === true;
-  const duplicateWarnings: { code: "POTENTIAL_DUPLICATE_CONTACT"; kind: ContactDuplicateKind; contactId?: number }[] = [];
-  // t256u: matching stays brokerage-scoped; the matched contact's id is returned only to a caller with
-  // contact-read (same rule as POST /parties/duplicate-check). Without it the caller learns that a match
-  // exists, never which contact, and can still create anyway (confirmDuplicate).
-  let canReadContacts: boolean | null = null;
-  for (const [kind, value] of [["email", parsed.email], ["phone", parsed.mobile]] as const) {
-    if (!value) continue;
-    const found = await findDuplicateContact(user.brokerageId, kind, value, null);
-    if (!found) continue;
-    if (canReadContacts === null) canReadContacts = await explainEntitlementDecision(user, "grow.contacts.read").then((d) => d.allowed).catch(() => false);
-    const duplicate = { contactId: canReadContacts ? found.contactId : null };
-    if (!confirmDuplicate) {
-      res.status(409).json({ ...duplicateContactBody(kind, duplicate.contactId), code: "POTENTIAL_DUPLICATE_CONTACT", kind, canConfirm: true });
-      return;
-    }
-    duplicateWarnings.push(duplicate.contactId === null ? { code: "POTENTIAL_DUPLICATE_CONTACT", kind } : { code: "POTENTIAL_DUPLICATE_CONTACT", kind, contactId: duplicate.contactId });
+  // t275u (Owner): the shared duplicate service (lib/contactDuplicates.ts) blocks a
+  // name/email/mobile match by default (409 DUPLICATE_CONTACT with matches, ids only
+  // for callers who may see them); a genuine duplicate needs duplicateOverride.reason
+  // from an authorised user and is audited. (Replaces the t234u confirmDuplicate path;
+  // confirmDuplicate without a reason now answers DUPLICATE_OVERRIDE_REASON_REQUIRED.)
+  const dupGate = await gateNewContact(req, { firstName: parsed.firstName, lastName: parsed.lastName, organisationName: parsed.organisationName, email: parsed.email, mobile: parsed.mobile }, "grow_contacts");
+  if (!dupGate.ok) {
+    res.status(dupGate.status).json(dupGate.body);
+    return;
   }
 
   const [party] = await db
@@ -620,7 +611,11 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     recordId: String(party.id),
   });
 
-  res.status(201).json(duplicateWarnings.length ? { ...createdContactPayload(party), warnings: duplicateWarnings } : createdContactPayload(party));
+  await auditDuplicateOverride(req, dupGate, party.id, "grow_contacts");
+  await recordContactOwner(req, party.id);
+  // An overridden create echoes the (masked) matches it overrode, as the t234u warnings did.
+  const overrideWarnings = dupGate.overridden ? await visibleDuplicates(req, dupGate.hits) : [];
+  res.status(201).json(overrideWarnings.length ? { ...createdContactPayload(party), warnings: overrideWarnings } : createdContactPayload(party));
 });
 
 // PATCH /grow/contacts/:partyId — correct a contact's name, organisation,
@@ -639,7 +634,7 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
 // route does not copy, move, or rewrite consent, DNC, or suppression rows.
 // A new email or phone therefore has no consent row and marketing fails closed.
 // The audit row lists changed column names only — never the values.
-contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.patch("/:partyId", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   if (!partyId) {
@@ -656,6 +651,13 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
     await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const parsed = parseContactPatchBody(req.body);
@@ -724,6 +726,11 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
     recordId: String(updated.id),
     updatedValue: JSON.stringify({ fields: changed }),
   });
+  // t275u: before/after with requester and performer when Pit Crew acts on an owner's authority.
+  if (req.actingFor) {
+    const pick = (o: Record<string, unknown>) => Object.fromEntries(changed.map((f) => [f, o[f] ?? null]));
+    await auditAuthorityAction(req, { action: "grow_contact_updated_on_authority", recordType: "party", recordId: updated.id, before: pick(before as unknown as Record<string, unknown>), after: pick(next as unknown as Record<string, unknown>) });
+  }
 
   res.json(contactIdentityPayload(updated));
 });
@@ -1116,7 +1123,58 @@ async function buildContactability(brokerageId: number, partyId: number) {
 // opportunities, recent activities/commitments, the Relationship Timeline, and the
 // deterministic Contact Intelligence Summary — matching the "understand this relationship in
 // seconds" UX goal (§11) rather than a screen that fires off five separate requests.
-contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
+// t275u (Owner): contact export, scoped and audited. The caller exports only the
+// contacts of the owner it acts for — Pit Crew: the named owner (recorded authority,
+// owner's grow.contacts.read); an agent or admin: their own contacts. Field-level
+// limit: identity and contact fields only (no notes, consent or call data). Every
+// export writes contacts_exported with requester, performer, recipient and row count.
+const EXPORT_FIELDS = ["id", "partyType", "firstName", "lastName", "organisationName", "email", "mobile"] as const;
+const csvCell = (v: unknown) => {
+  const t = v === null || v === undefined ? "" : String(v);
+  // Formula-injection guard for spreadsheet consumers.
+  const safe = /^[=+\-@\t\r]/.test(t) ? `'${t}` : t;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+};
+contactsRouter.get("/export", requireAuth, entitlementOrAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
+  const user = req.authedUser!;
+  const ownerId = req.actingFor?.owner.id ?? user.id;
+  const rows = await db
+    .select({
+      id: parties.id,
+      partyType: parties.partyType,
+      firstName: parties.firstName,
+      lastName: parties.lastName,
+      organisationName: parties.organisationName,
+      email: parties.email,
+      mobile: parties.mobile,
+    })
+    .from(parties)
+    .where(and(eq(parties.brokerageId, user.brokerageId), sql`${parties.id} in ${ownedPartyIdsSql(user.brokerageId, ownerId)}`))
+    .orderBy(asc(parties.id));
+  await logAudit({
+    brokerageId: user.brokerageId,
+    userId: user.id,
+    action: "contacts_exported",
+    recordType: "contact_export",
+    recordId: String(ownerId),
+    providerReference: `owner:${ownerId}`,
+    updatedValue: JSON.stringify({
+      rows: rows.length,
+      fields: EXPORT_FIELDS,
+      requestedBy: ownerId,
+      performedBy: user.id,
+      recipient: ownerId,
+      authorityRef: req.actingFor?.authorityRef ?? null,
+    }),
+  });
+  const csv = [EXPORT_FIELDS.join(","), ...rows.map((r) => EXPORT_FIELDS.map((f) => csvCell(r[f])).join(","))].join("\r\n") + "\r\n";
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="contacts-owner-${ownerId}.csv"`);
+  res.setHeader("Cache-Control", "no-store");
+  res.send(csv);
+});
+
+contactsRouter.get("/:partyId", requireAuth, readWithOptionalAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
   const user = req.authedUser!;
   const brokerageId = user.brokerageId;
   const partyId = parsePositiveId(req.params.partyId);
@@ -1130,6 +1188,13 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     await noteGrowPartyIsolationRejection(partyId, brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
+  }
+  {
+    const scopeRefusal = req.actingFor ? await pitCrewScopeRefusal(req, { partyIds: [partyId] }) : null;
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   // The contact stays brokerage-wide. Property-linked rows are limited to
@@ -1339,13 +1404,20 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
 // may hold several roles at once; assigning a role it already holds is a no-op (the unique
 // index on (partyId, role) is the enforcement, this just makes re-assigning harmless rather than
 // a 500).
-contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/:partyId/roles", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const role = typeof req.body?.role === "string" ? req.body.role : undefined;
   if (!partyId || !role || !(GROW_CONTACT_ROLES as readonly string[]).includes(role)) {
     res.status(400).json({ error: `role must be one of: ${GROW_CONTACT_ROLES.join(", ")}` });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
@@ -1377,17 +1449,25 @@ contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.con
     recordId: String(inserted.id),
     updatedValue: JSON.stringify({ partyId, role }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_role_assigned_on_authority", recordType: "party", recordId: partyId, after: { role } });
   res.status(201).json({ role: inserted });
 });
 
 // DELETE /grow/contacts/:partyId/roles/:role
-contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.delete("/:partyId/roles/:role", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const role = req.params.role;
   if (partyId === null) {
     res.status(400).json({ error: "Invalid contact id" });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const [existing] = await db
@@ -1410,6 +1490,7 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
     recordId: String(existing.id),
     previousValue: JSON.stringify({ partyId: existing.partyId, role: existing.role }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_role_removed_on_authority", recordType: "party", recordId: existing.partyId, before: { role: existing.role }, after: null });
   res.status(204).send();
 });
 
@@ -1417,7 +1498,7 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
 // Deliberately does not merge records and does not auto-infer anything — every row here is an
 // explicit user action. Both partyId and relatedPartyId are validated against the caller's own
 // brokerage before the row is created.
-contactsRouter.post("/:partyId/relationships", requireAuth, denyRelationshipWriteBarredRoles(), requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/:partyId/relationships", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const relatedPartyId = parsePositiveId(req.body?.relatedPartyId);
@@ -1434,6 +1515,13 @@ contactsRouter.post("/:partyId/relationships", requireAuth, denyRelationshipWrit
   if (partyId === relatedPartyId) {
     res.status(400).json({ error: "A contact cannot have a relationship with itself" });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId, relatedPartyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const [party, relatedParty] = await Promise.all([
@@ -1486,12 +1574,13 @@ contactsRouter.post("/:partyId/relationships", requireAuth, denyRelationshipWrit
     recordId: String(inserted.id),
     updatedValue: JSON.stringify({ partyId, relatedPartyId, relationshipType }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_relationship_created_on_authority", recordType: "grow_contact_relationship", recordId: inserted.id, after: { partyId, relatedPartyId, relationshipType } });
   res.status(201).json({ relationship: inserted });
 });
 
 // DELETE /grow/contacts/relationships/:id — remove a household relationship. Does not affect
 // either party record and does not cascade into any other Grow data.
-contactsRouter.delete("/relationships/:id", requireAuth, denyRelationshipWriteBarredRoles(), requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.delete("/relationships/:id", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const id = parsePositiveId(req.params.id);
   if (id === null) {
@@ -1508,6 +1597,13 @@ contactsRouter.delete("/relationships/:id", requireAuth, denyRelationshipWriteBa
     res.status(404).json({ error: "Relationship not found in this brokerage" });
     return;
   }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [existing.partyId, existing.relatedPartyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
+  }
   await db.delete(growContactRelationships).where(eq(growContactRelationships.id, id));
   await logAudit({
     brokerageId: user.brokerageId,
@@ -1521,6 +1617,7 @@ contactsRouter.delete("/relationships/:id", requireAuth, denyRelationshipWriteBa
       relationshipType: existing.relationshipType,
     }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_relationship_removed_on_authority", recordType: "grow_contact_relationship", recordId: existing.id, before: { partyId: existing.partyId, relatedPartyId: existing.relatedPartyId, relationshipType: existing.relationshipType }, after: null });
   res.status(204).send();
 });
 

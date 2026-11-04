@@ -134,7 +134,7 @@ async function createParty(cookie: string, propertyId: number, overrides: Record
   const res = await fetch(`${baseUrl}/api/parties`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ propertyId, role: "Buyer", firstName: "Test", lastName: "Party", ...overrides }),
+    body: JSON.stringify({ propertyId, role: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "Test", lastName: "Party", duplicateOverride: { reason: "t275u fixture: a separate synthetic contact" }, ...overrides }),
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   const { party } = (await res.json()) as { party: { id: number } };
@@ -153,7 +153,7 @@ async function createPartyWithoutCallEvidence(cookie: string, propertyId: number
   const res = await fetch(`${baseUrl}/api/parties`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ propertyId, role: "Buyer", firstName: "Evidence", lastName: "Fixture", ...overrides }),
+    body: JSON.stringify({ propertyId, role: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "Evidence", lastName: "Fixture", duplicateOverride: { reason: "t275u fixture: a separate synthetic contact" }, ...overrides }),
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   const { party } = (await res.json()) as { party: { id: number } };

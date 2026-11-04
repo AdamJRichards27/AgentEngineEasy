@@ -83,7 +83,12 @@ for (const c of CASES) {
     assert.equal(phoneDup.status, 409);
     assert.equal("contactId" in phoneDup.json, c.visible);
 
-    const anyway = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Dup Licate", email, confirmDuplicate: true });
+    // t275u: Create anyway needs a recorded reason (shared duplicate service).
+    const noReason = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Dup Licate", email, confirmDuplicate: true });
+    assert.equal(noReason.status, 409);
+    assert.equal(noReason.json.code, "DUPLICATE_OVERRIDE_REASON_REQUIRED");
+    assert.equal("contactId" in noReason.json, c.visible);
+    const anyway = await call(b.admin.cookie, "POST", "/grow/contacts", { name: "Dup Licate", email, confirmDuplicate: true, duplicateOverride: { reason: "Different person, same shared inbox" } });
     assert.equal(anyway.status, 201, JSON.stringify(anyway.json));
     assert.notEqual(anyway.json.contact.id, originalId);
     const w = anyway.json.warnings as { code: string; contactId?: number }[];

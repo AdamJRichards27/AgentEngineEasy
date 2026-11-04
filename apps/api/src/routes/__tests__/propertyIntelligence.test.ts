@@ -148,7 +148,7 @@ async function createParty(cookie: string, propertyId: number, overrides: Record
   const res = await fetch(`${baseUrl}/api/parties`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ propertyId, role: "Seller", firstName: "Test", lastName: "Contact", ...overrides }),
+    body: JSON.stringify({ propertyId, role: "Seller", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "Test", lastName: "Contact", ...overrides }),
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   const { party } = (await res.json()) as { party: { id: number } };

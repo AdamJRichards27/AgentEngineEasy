@@ -87,7 +87,7 @@ async function createParty(cookie: string, propertyId: number, overrides: Record
   const res = await fetch(`${baseUrl}/api/parties`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ propertyId, role: "Seller", firstName: "Lou", lastName: "Vendor", ...overrides }),
+    body: JSON.stringify({ propertyId, role: "Seller", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "Lou", lastName: "Vendor", ...overrides }),
   });
   assert.equal(res.status, 201, await res.clone().text());
   const { party } = (await res.json()) as { party: { id: number } };

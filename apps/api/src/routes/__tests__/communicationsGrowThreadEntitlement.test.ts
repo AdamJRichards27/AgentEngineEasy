@@ -88,6 +88,8 @@ async function createParty(cookie: string, propertyId: number): Promise<number> 
     lastName: "Thread",
     email: `wp1-grow-thread-${suffix}@example.com`,
     mobile: "0400111222",
+    // t275u: deliberately the same person each time; recorded duplicate override.
+    duplicateOverride: { reason: "t275u fixture: same synthetic contact per test" },
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   return ((await res.json()) as { party: { id: number } }).party.id;

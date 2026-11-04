@@ -350,7 +350,7 @@ test("offers: an out-of-range offer price (accepted as an int by the route schem
   const res = await fetch(`${baseUrl}/api/offers/by-property/${propertyId}`, {
     method: "POST",
     headers: { cookie, "content-type": "application/json" },
-    body: JSON.stringify({ offerPriceCents: INT4_OVERFLOW, buyer: { firstName: "Bob", lastName: "Buyer" } }),
+    body: JSON.stringify({ offerPriceCents: INT4_OVERFLOW, buyer: { firstName: "Bob", lastName: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid` } }),
   });
   await assertGenericServerError(res, "POST /api/offers/by-property/:id");
 });
@@ -361,7 +361,7 @@ test("offers: typed/expected domain errors keep their own 400 and their own mess
   const res = await fetch(`${baseUrl}/api/offers/by-property/${propertyId}`, {
     method: "POST",
     headers: { cookie, "content-type": "application/json" },
-    body: JSON.stringify({ offerPriceCents: 100000, buyer: { firstName: "Bob", lastName: "Buyer" } }),
+    body: JSON.stringify({ offerPriceCents: 100000, buyer: { firstName: "Bob", lastName: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid` } }),
   });
   assert.equal(res.status, 400, await res.clone().text());
   const body = await assertNoInternalDetail(res, "offers typed error");

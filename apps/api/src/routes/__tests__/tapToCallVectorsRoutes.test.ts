@@ -111,11 +111,11 @@ test("t257u D3: POST /parties create-new 201 warnings omit contactId without con
   assert.equal(orig.status, 201);
   const prop = await call(b.admin.cookie, "POST", "/properties", { formattedAddress: `1 ${tag} St, Testville`, state: "NSW", suburb: "Testville", postcode: "2000" });
   assert.equal(prop.status, 201);
-  const withRead = await call(b.admin.cookie, "POST", "/parties", { propertyId: prop.json.property.id, role: "Buyer", firstName: "Dup", lastName: "One", email });
+  const withRead = await call(b.admin.cookie, "POST", "/parties", { propertyId: prop.json.property.id, role: "Buyer", firstName: "Dup", lastName: "One", email, duplicateOverride: { reason: "t275u: a genuinely different person" } });
   assert.equal(withRead.status, 201, JSON.stringify(withRead.json));
   assert.equal(withRead.json.warnings[0].contactId, orig.json.contact.id);
   await setGrants(b.brokerageId, ["run.access"]);
-  const runOnly = await call(b.admin.cookie, "POST", "/parties", { propertyId: prop.json.property.id, role: "Buyer", firstName: "Dup", lastName: "Two", email });
+  const runOnly = await call(b.admin.cookie, "POST", "/parties", { propertyId: prop.json.property.id, role: "Buyer", firstName: "Dup", lastName: "Two", email, duplicateOverride: { reason: "t275u: a genuinely different person" } });
   assert.equal(runOnly.status, 201, JSON.stringify(runOnly.json));
   assert.ok(runOnly.json.warnings.length >= 1);
   for (const w of runOnly.json.warnings) assert.equal("contactId" in w, false);

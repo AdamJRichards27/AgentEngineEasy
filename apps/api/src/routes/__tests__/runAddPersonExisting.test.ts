@@ -98,7 +98,7 @@ test("t274u R03: POST /parties/search finds existing contacts by name, brokerage
   assert.equal((await call(w.agent.cookie, "POST", "/parties/search", { q: "L" })).status, 400);
 });
 
-test("t274u R03: selecting an existing contact links it (no new party); duplicateGuard confirm refuses a duplicate create with 409 until Create anyway", async () => {
+test("t274u R03: selecting an existing contact links it (no new party); duplicate create is refused with 409 until Create anyway with a reason (t275u)", async () => {
   const w = await world("Guard");
   const before = (await db.select().from(parties).where(eq(parties.brokerageId, w.brokerageId))).length;
   const link = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.adminProp, partyId: w.partyId, role: "Buyer" });
@@ -111,16 +111,20 @@ test("t274u R03: selecting an existing contact links it (no new party); duplicat
   assert.equal(dup.json.warnings[0].contactId, w.partyId);
   assert.equal((await db.select().from(parties).where(eq(parties.brokerageId, w.brokerageId))).length, before, "nothing created on 409");
   assert.equal((await linkRows(w.adminProp)).length, 1);
-  const anyway = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.adminProp, role: "Seller", partyType: "Person", firstName: "Lena", lastName: "Again", email, duplicateGuard: "confirm", confirmNewContact: true });
+  // t275u: Create anyway needs a recorded reason.
+  const noReason = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.adminProp, role: "Seller", partyType: "Person", firstName: "Lena", lastName: "Again", email, duplicateGuard: "confirm", confirmNewContact: true });
+  assert.equal(noReason.status, 409, noReason.text);
+  assert.equal(noReason.json.code, "DUPLICATE_OVERRIDE_REASON_REQUIRED");
+  const anyway = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.adminProp, role: "Seller", partyType: "Person", firstName: "Lena", lastName: "Again", email, confirmNewContact: true, duplicateOverride: { reason: "Second Lena, shared email" } });
   assert.equal(anyway.status, 201, anyway.text);
   assert.notEqual(anyway.json.party.id, w.partyId);
   // No match: guard does not block.
   const fresh = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.adminProp, role: "Other", partyType: "Person", firstName: "Nova", email: `nova-${tag}@example.com`, duplicateGuard: "confirm" });
   assert.equal(fresh.status, 201, fresh.text);
-  // Callers without the guard keep the t234u warn-only behaviour.
+  // t275u: blocking is the default for every caller (no opt-in needed).
   const legacy = await call(w.admin.cookie, "POST", "/parties", { propertyId: w.adminProp, role: "Other", partyType: "Person", firstName: "Legacy", email });
-  assert.equal(legacy.status, 201);
-  assert.equal(legacy.json.warnings.length, 1);
+  assert.equal(legacy.status, 409);
+  assert.equal(legacy.json.code, "POTENTIAL_DUPLICATE_CONTACT");
 });
 
 test("t274u R03: Run-only caller gets the 409 without the matched contactId (masking)", async () => {

@@ -8,6 +8,8 @@ import { restrictedPropertyIdsFor, propertyHiddenFromCaller } from "../lib/prope
 import { requireAnyEntitlement, requireRelationshipManage } from "../middlewares/entitlement.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { findDuplicateContact } from "./contacts.js";
+import { auditAuthorityAction, ownedPartyIdsSql, pitCrewScopeRefusal, recordContactOwner, requirePitCrewAuthority } from "../lib/contactAuthority.js";
+import { auditDuplicateOverride, findContactDuplicates, gateNewContact, visibleDuplicates } from "../lib/contactDuplicates.js";
 import { logAudit } from "../lib/audit.js";
 import { addPostCallNote, recordCallConsentConfirmation, tapToCallStatus, usableNumber, maskedPhoneDisplay } from "../lib/tapToCall.js";
 import { reviewOwnershipForProperty } from "../lib/ownership.js";
@@ -280,6 +282,12 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
       res.status(404).json({ error: "Property not found" });
       return;
     }
+    // t275u: Pit Crew only on the owner's authority, for the owner's contact and listing.
+    const linkScope = await pitCrewScopeRefusal(req, { partyIds: [partyId], propertyId });
+    if (linkScope) {
+      res.status(linkScope.status).json(linkScope.body);
+      return;
+    }
     // One transaction; the property row is locked FOR UPDATE so concurrent
     // submissions for the same property serialise and the duplicate check
     // below cannot race. property_parties has no unique constraint and this
@@ -331,6 +339,7 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
       recordId: String(partyId),
       propertyId,
     });
+    if (req.actingFor) await auditAuthorityAction(req, { action: "party_linked_on_authority", recordType: "property_party", recordId: outcome.link.id, propertyId, after: { partyId, role, isPrimary } });
     if (role === "Seller") await runSellerSideEffects(propertyId, partyId, user);
     res.status(201).json({ party: partySummary(outcome.party, await callerCanReadContacts(user)), link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted) });
     return;
@@ -361,17 +370,18 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
     return;
   }
 
-  // t234u: never rejected for a matching email/mobile (rejectDuplicateContact
-  // is accepted for compatibility and ignored); warnings are returned instead.
-  const warnings = await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile);
-  if (parsed.data.duplicateGuard === "confirm" && !parsed.data.confirmNewContact && warnings.length > 0) {
-    // Same masking rule as the pre-flight: the matched contactId only with contact-read.
-    const canRead = await callerCanReadContacts(user);
-    res.status(409).json({
-      error: "A contact with this email or mobile already exists. Select the existing contact, or confirm to create a new one.",
-      code: "POTENTIAL_DUPLICATE_CONTACT",
-      warnings: canRead ? warnings : warnings.map(({ code, kind }) => ({ code, kind })),
-    });
+  // t275u: Pit Crew may create a contact only on the owner's authority, for the owner's listing.
+  const newScope = await pitCrewScopeRefusal(req, { propertyId: property.id });
+  if (newScope) {
+    res.status(newScope.status).json(newScope.body);
+    return;
+  }
+  // t275u: shared duplicate service — a name/email/mobile match blocks by default (409);
+  // only duplicateOverride.reason from an authorised user creates, and it is audited.
+  // (duplicateGuard / confirmNewContact from t274u are accepted; without a reason they 409.)
+  const dupGate = await gateNewContact(req, { firstName: parsed.data.firstName, lastName: parsed.data.lastName, organisationName: parsed.data.organisationName, email: parsed.data.email, mobile: parsed.data.mobile }, "parties");
+  if (!dupGate.ok) {
+    res.status(dupGate.status).json(dupGate.body);
     return;
   }
 
@@ -420,8 +430,11 @@ partiesRouter.post("/", requireAuth, canManageRelationships, async (req, res) =>
 
   if (parsed.data.role === "Seller") await runSellerSideEffects(parsed.data.propertyId, party.id, user);
 
-  // t257u (review 8 D3): the create-new 201 follows the pre-flight rule: matched contactId only with contact-read.
-  const visibleWarnings = (await callerCanReadContacts(user)) ? warnings : warnings.map(({ code, kind }) => ({ code, kind }));
+  await auditDuplicateOverride(req, dupGate, party.id, "parties", parsed.data.propertyId);
+  await recordContactOwner(req, party.id);
+  if (req.actingFor) await auditAuthorityAction(req, { action: "party_created_on_authority", recordType: "property_party", recordId: link.id, propertyId: parsed.data.propertyId, after: { partyId: party.id, role: link.role } });
+  // warnings kept for client compatibility: a create now only happens with no match or an audited override.
+  const visibleWarnings = dupGate.ok && dupGate.overridden ? await visibleDuplicates(req, dupGate.hits) : [];
   res.status(201).json({ party: partySummary(party, await callerCanReadContacts(user)), link, warnings: visibleWarnings, changed: changedBody(link.role, demoted) });
 });
 
@@ -451,7 +464,7 @@ partiesRouter.post("/search", requireAuth, canManageRelationships, async (req, r
   const rows = await db
     .select()
     .from(parties)
-    .where(and(eq(parties.brokerageId, user.brokerageId), or(...nameMatch, ...contactMatch)))
+    .where(and(eq(parties.brokerageId, user.brokerageId), or(...nameMatch, ...contactMatch), req.actingFor ? sql`${parties.id} in ${ownedPartyIdsSql(user.brokerageId, req.actingFor.owner.id)}` : sql`true`))
     .orderBy(asc(parties.lastName), asc(parties.firstName), asc(parties.id))
     .limit(10);
   res.json({ contacts: rows.map((p) => partySummary(p, canRead)) });
@@ -460,19 +473,22 @@ partiesRouter.post("/search", requireAuth, canManageRelationships, async (req, r
 // t234u: pre-flight duplicate check for create forms (mobile + web). Body, not
 // query string, so contact details stay out of URLs and access logs. Never
 // blocks; returns warnings with reusable contact ids. Same gates as create.
-const duplicateCheckSchema = z.object({ email: z.string().optional(), mobile: z.string().optional() }).strict();
-partiesRouter.post("/duplicate-check", requireAuth, canManagePropertyContacts, async (req, res) => {
+const duplicateCheckSchema = z
+  .object({ email: z.string().optional(), mobile: z.string().optional(), firstName: z.string().optional(), lastName: z.string().optional(), organisationName: z.string().optional() })
+  .strict();
+partiesRouter.post("/duplicate-check", requireAuth, requirePitCrewAuthority(), canManagePropertyContacts, async (req, res) => {
   const parsed = duplicateCheckSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
   }
   const user = req.authedUser!;
-  const warnings = await potentialDuplicateWarnings(user.brokerageId, parsed.data.email, parsed.data.mobile);
-  // t253u: matching stays brokerage-scoped. A caller without contact-read (e.g. Run-only, who sees masked
-  // contact PII under #296) learns only that a match exists (kind), never which contact it is.
-  const canRead = await callerCanReadContacts(user);
-  res.json({ warnings: canRead ? warnings : warnings.map(({ code, kind }) => ({ code, kind })) });
+  // t275u: the shared duplicate service (name, email, mobile). t253u masking kept: a caller
+  // without contact-read (Run-only) learns only that a match exists (kind); Pit Crew sees an
+  // id only for its acting owner's contacts.
+  const hits = await findContactDuplicates(user.brokerageId, parsed.data);
+  const visible = await visibleDuplicates(req, hits);
+  res.json({ warnings: visible.map((v) => (v.contactId === undefined ? { code: "POTENTIAL_DUPLICATE_CONTACT", kind: v.kind } : { code: "POTENTIAL_DUPLICATE_CONTACT", kind: v.kind, contactId: v.contactId })) });
 });
 
 partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContacts, async (req, res) => {
@@ -515,7 +531,23 @@ partiesRouter.get("/by-property/:propertyId", requireAuth, canReadPropertyContac
 // Removing a mis-added seller/buyer link (multi-seller capture polish,
 // Phase 2) — removes the property↔party link only; the Party record itself
 // is left intact since it may be linked elsewhere or worth keeping.
+
+// t275u: Pit Crew may change or remove a link only on its listing owner's authority.
+async function pitCrewLinkRefusal(req: import("express").Request, linkId: number) {
+  if (!Number.isInteger(linkId) || linkId <= 0) return null;
+  const [row] = await db.select({ propertyId: propertyParties.propertyId }).from(propertyParties).where(eq(propertyParties.id, linkId));
+  if (!row) return null;
+  return pitCrewScopeRefusal(req, { propertyId: row.propertyId });
+}
+
 partiesRouter.delete("/link/:linkId", requireAuth, canManageRelationships, async (req, res) => {
+  {
+    const refusal = await pitCrewLinkRefusal(req, Number(req.params.linkId));
+    if (refusal) {
+      res.status(refusal.status).json(refusal.body);
+      return;
+    }
+  }
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
 
@@ -552,6 +584,7 @@ partiesRouter.delete("/link/:linkId", requireAuth, canManageRelationships, async
     propertyId: link.propertyId,
   });
 
+  if (req.actingFor) await auditAuthorityAction(req, { action: "party_link_removed_on_authority", recordType: "property_party", recordId: linkId, propertyId: link.propertyId, before: { partyId: link.partyId, role: link.role, isPrimary: link.isPrimary }, after: null });
   if (link.role === "Seller") await runSellerRemovedEffects(link.propertyId, user);
 
   res.status(204).end();
@@ -629,6 +662,13 @@ const updateLinkSchema = z
 // PROPERTY_PARTY_LINK_EXISTS answer as POST. Seller side effects run when the
 // Seller set changes.
 partiesRouter.patch("/link/:linkId", requireAuth, canManageRelationships, async (req, res) => {
+  {
+    const refusal = await pitCrewLinkRefusal(req, Number(req.params.linkId));
+    if (refusal) {
+      res.status(refusal.status).json(refusal.body);
+      return;
+    }
+  }
   const linkId = Number(req.params.linkId);
   const user = req.authedUser!;
   if (invalidRole(req.body)) {
@@ -711,6 +751,7 @@ partiesRouter.patch("/link/:linkId", requireAuth, canManageRelationships, async 
       await runSellerRemovedEffects(outcome.link.propertyId, user);
     }
   }
+  if (req.actingFor) await auditAuthorityAction(req, { action: "party_link_updated_on_authority", recordType: "property_party", recordId: linkId, propertyId: outcome.link.propertyId, before: { role: outcome.before.role, isPrimary: outcome.before.isPrimary }, after: { role: outcome.link.role, isPrimary: outcome.link.isPrimary } });
   res.json({ link: outcome.link, changed: changedBody(outcome.link.role, outcome.demoted, outcome.link) });
 });
 
