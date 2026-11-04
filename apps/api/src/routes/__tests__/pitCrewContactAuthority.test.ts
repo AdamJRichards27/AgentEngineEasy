@@ -13,6 +13,10 @@ import { and } from "drizzle-orm";
 import { db, entitlementGrants, users, properties, parties, auditLogs, ENTITLEMENT_KEYS, growRelationships, growContactRelationships, propertyParties, GROW_CONTACT_RELATIONSHIP_TYPES, GROW_RELATIONSHIP_TYPES } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { createBrokerageWithUsers, cleanupBrokerages, devLogin } from "./testSupport.js";
+import { openAuditValue } from "../../lib/auditValueVault.js";
+
+// t276u: before/after values are encrypted at rest; synthetic test-only key.
+process.env.AE_AUDIT_VALUE_KEY = "3".repeat(64);
 
 const GROW = ENTITLEMENT_KEYS.filter((k) => k !== "run.access");
 const tag = `pcauth-${Date.now()}`;
@@ -82,7 +86,13 @@ const INVALID = "CONTACT_OWNER_AUTHORITY_INVALID";
 const OUT = "CONTACT_OWNER_AUTHORITY_OUT_OF_SCOPE";
 const auth = (ownerId: number, ref = "INSTR-2026-001 phone instruction") => ({ "x-ae-on-behalf-of": String(ownerId), "x-ae-authority-ref": ref });
 const auditFor = async (action: string) =>
-  (await db.select().from(auditLogs).where(eq(auditLogs.action, action))).map((r) => ({ ...r, v: JSON.parse(r.updatedValue ?? "{}"), p: r.previousValue ? JSON.parse(r.previousValue) : null }));
+  (await db.select().from(auditLogs).where(eq(auditLogs.action, action))).map((r) => {
+    // t276u: stored values are envelopes; the raw row never carries plaintext values.
+    const v = JSON.parse(r.updatedValue ?? "{}");
+    if (typeof v.after === "string") v.after = openAuditValue(v.after);
+    const p = r.previousValue ? (r.previousValue.startsWith("enc:v1:") ? openAuditValue(r.previousValue) : JSON.parse(r.previousValue)) : null;
+    return { ...r, v, p };
+  });
 
 test("t275u authority: without authority every Pit Crew change is 403 AUTHORITY_REQUIRED and nothing is written (all entitlements held)", async () => {
   const w = await world("NoAuth");
@@ -256,7 +266,10 @@ test("t275u: sending is agent-only — Pit Crew cannot send an appraisal or a do
       assert.equal(r.status, 403, `${path}: ${r.text}`);
       assert.equal(r.json?.code, "SEND_AUTHORISATION_REQUIRED", path);
     }
-    const a = await call(w.admin.cookie, "POST", path, {});
+    // t276u: administrators review but do not send by role.
+    const adm = await call(w.admin.cookie, "POST", path, {});
+    assert.deepEqual([adm.status, adm.json?.code, adm.json?.reason], [403, "SEND_AUTHORISATION_REQUIRED", "ADMIN_REVIEW_ONLY"], path);
+    const a = await call(w.agent.cookie, "POST", path, {});
     assert.notEqual(a.json?.code, "SEND_AUTHORISATION_REQUIRED", path);
   }
   // Preparing listing agreements needs authority, scoped to the owner's listing.
@@ -283,18 +296,28 @@ test("t275u: import jobs and contact export are scoped to the owner Pit Crew act
   // The agent's own contact (linked to the agent's listing) must never appear in the admin's export.
   const agentNew = await call(w.agent.cookie, "POST", "/parties", { propertyId: w.agentProp, role: "Seller", partyType: "Person", firstName: "Ada", lastName: `Agentown${tag}`, email: `ada-export-${tag}@example.com` });
   assert.equal(agentNew.status, 201, agentNew.text);
-  const asAdmin = await call(w.pc.cookie, "GET", "/grow/contacts/export", undefined, auth(w.admin.user.id));
+  // t276u: Pit Crew prepares on authority; the export is delivered to the owner, never to Pit Crew.
+  const direct = await call(w.pc.cookie, "GET", "/grow/contacts/export", undefined, auth(w.admin.user.id));
+  assert.deepEqual([direct.status, direct.json?.code], [403, "EXPORT_DELIVERED_TO_OWNER"]);
+  const prepAdmin = await call(w.pc.cookie, "POST", "/grow/contacts/exports", {}, auth(w.admin.user.id));
+  assert.equal(prepAdmin.status, 201, prepAdmin.text);
+  assert.equal(prepAdmin.json.deliveredTo, w.admin.user.id);
+  assert.equal(prepAdmin.text.includes("Linkform"), false, "prepare returns metadata only");
+  const pcDl = await call(w.pc.cookie, "GET", `/grow/contacts/exports/${prepAdmin.json.exportId}/download`, undefined, auth(w.admin.user.id));
+  assert.deepEqual([pcDl.status, pcDl.json?.code], [403, "EXPORT_DELIVERED_TO_OWNER"]);
+  const asAdmin = await call(w.admin.cookie, "GET", `/grow/contacts/exports/${prepAdmin.json.exportId}/download`);
   assert.equal(asAdmin.status, 200, asAdmin.text);
   assert.match(asAdmin.text, /^id,partyType,firstName,lastName,organisationName,email,mobile\r\n/);
   assert.ok(asAdmin.text.includes(String(w.partyId)), "owner's contact exported");
   assert.equal(asAdmin.text.includes(`Agentown${tag}`), false, "another agent's contact never exported");
   assert.equal(/notes|consent/i.test(asAdmin.text.split("\r\n")[0]), false, "field-level limit");
-  const asAgent = await call(w.pc.cookie, "GET", "/grow/contacts/export", undefined, auth(w.agent.user.id));
+  const prepAgent = await call(w.pc.cookie, "POST", "/grow/contacts/exports", {}, auth(w.agent.user.id));
+  const asAgent = await call(w.agent.cookie, "GET", `/grow/contacts/exports/${prepAgent.json.exportId}/download`);
   assert.ok(asAgent.text.includes(`Agentown${tag}`));
   assert.equal(asAgent.text.includes("Linkform"), false);
-  const ex = (await auditFor("contacts_exported")).filter((a) => a.userId === w.pc.user.id);
+  const ex = (await auditFor("contacts_exported")).filter((a) => a.v.initiatedBy === w.pc.user.id);
   assert.equal(ex.length, 2);
-  assert.deepEqual(new Set(ex.map((a) => a.v.recipient)), new Set([w.admin.user.id, w.agent.user.id]));
+  assert.deepEqual(new Set(ex.map((a) => a.v.recipient.userId)), new Set([w.admin.user.id, w.agent.user.id]));
   // Agents export only their own contacts.
   const own = await call(w.agent.cookie, "GET", "/grow/contacts/export");
   assert.equal(own.status, 200);
