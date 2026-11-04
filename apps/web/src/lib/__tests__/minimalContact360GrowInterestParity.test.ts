@@ -22,7 +22,7 @@ function desktop(data: GrowContact360, byContact: { properties: { propertyId: nu
 }
 function phone(data: GrowContact360, byContact: unknown) {
   const r = parseContactLinksResult(byContact);
-  return buildMobileContactLayout(data, { now: NOW, canLog: true, canonicalLinks: r.links, canonicalMeta: { truncated: r.truncated, total: r.total, skipped: r.skipped } });
+  return buildMobileContactLayout(data, { now: NOW, canLog: true, canonicalLinks: r.links, canonicalMeta: { truncated: r.truncated, total: r.total, skipped: r.skipped }, canonicalMatchLinks: r.matchLinks });
 }
 
 for (const [grow, by] of [
@@ -83,4 +83,15 @@ test("desktop screen: one Grow interest & history section with its own count, th
   assert.equal(json.includes("Other relationships"), false);
   const src = readFileSync(new URL("../../minimal/MinimalContact360.tsx", import.meta.url), "utf8");
   assert.equal(src.includes("relationshipType}"), false, "the desktop never renders the raw stored type");
+});
+
+test("t271u: over the 100-link cap (Claude's real 130-link fixture, Owner link #120) desktop and phone still agree, label included", () => {
+  const data = read("e47-grow-contact-over100.json") as GrowContact360;
+  const byContact = read("e47-by-contact-over100.json");
+  assert.equal(byContact.links.length, 100);
+  assert.equal(byContact.properties.length, 130);
+  const d = desktop(data, byContact).growInterest!;
+  const m = phone(data, byContact);
+  assert.deepEqual(d.rows.map(pick), m.interest.map(pick));
+  assert.ok(d.rows.some((r) => r.alsoListed), "the Grow owner whose canonical link is beyond the cap is labelled on both");
 });
