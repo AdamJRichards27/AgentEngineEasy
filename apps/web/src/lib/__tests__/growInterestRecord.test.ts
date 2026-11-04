@@ -21,3 +21,9 @@ test("t274u item 3: duplicate (409) reads as already recorded", () => {
   assert.equal(growInterestErrorText(409, "x"), GROW_INTEREST_DUPLICATE_TEXT);
   assert.equal(growInterestErrorText(500, "x"), "x");
 });
+
+test("t274u item 3: Relationship records label uses the Grow wording", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../../pages/Grow.tsx", import.meta.url), "utf8");
+  assert.match(src, /\{growPropertyRelationshipLabel\(p\.relationshipType\)\}/);
+  assert.match(src, /\["prospective_seller", "Future seller"\]/);
+});

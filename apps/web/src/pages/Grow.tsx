@@ -3009,6 +3009,12 @@ export const GROW_PROPERTY_RELATIONSHIP_OPTIONS = [
   ["unknown_pending_review", "Unknown, pending review"],
 ] as const;
 
+// t274u item 3: Relationship records show the Grow wording (e.g. "Future seller"), not the stored key.
+export function growPropertyRelationshipLabel(type: string): string {
+  const hit = GROW_PROPERTY_RELATIONSHIP_OPTIONS.find(([value]) => value === type);
+  return hit ? hit[1] : type;
+}
+
 // G-UAT-3 — Contact 360 "Link property".
 // t273u (X10 fix): the link is a canonical property_parties link made through
 // the existing POST /parties path ({ propertyId, partyId, role }), with that
@@ -3632,7 +3638,7 @@ export function GrowContactDetail({
                     )}
                   </td>
                   <td>
-                    {p.relationshipType}
+                    {growPropertyRelationshipLabel(p.relationshipType)}
                     {p.isPrimary ? " (primary)" : ""}
                   </td>
                   <td>{p.role ?? "–"}</td>
