@@ -10,8 +10,8 @@ import { buildContactPropertyLinks, type ContactPropertyRow } from "../../minima
 import type { GrowContact360 } from "../growContact360";
 import { all, hrefs, text } from "./mobileTreeHelpers";
 
-// Contact 360 on the phone: PROPERTIES (canonical, property_parties) and GROW INTEREST & HISTORY (what Grow recorded that is not a current property
-// link), separate and labelled. Every response below is REAL, captured from the Release 1 backend (synthetic data). The canonical value is handed to
+// Contact 360 on the phone (revision 2, the Owner's decisions): PROPERTIES (canonical, property_parties) and GROW INTEREST & HISTORY (every Grow row,
+// separate and labelled; a row that matches a property above stays visible with "Also listed under Properties"; the two counts are never added). Every response below is REAL, captured from the Release 1 backend (synthetic data). The canonical value is handed to
 // the layout as an argument; no flag is changed and MOBILE_LINKING is never edited: contactCanonicalRead stays OFF.
 const read = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/real-api/${name}`, import.meta.url), "utf8"));
 const byContact5 = read("r1-by-contact-5.json");
@@ -46,23 +46,25 @@ test("FLAG OFF (as shipped): the screen is exactly what it was: Active Grow link
   assert.equal(l.propertiesState, "legacy");
   assert.deepEqual(l.properties.map((p) => p.canonical), l.properties.map(() => false));
   assert.equal(l.properties.length, legacy5.properties.filter((r) => r.status === "Active").length, "Active rows only, as before");
-  assert.deepEqual([l.interest, l.interestMatchedNote, l.propertiesNotice], [[], null, null]);
+  assert.deepEqual([l.interest, l.propertiesCount, l.interestCount, l.propertiesNotice], [[], null, 0, null]);
   const tree = view(l);
   assert.equal(section(tree, GROW_INTEREST_TITLE), undefined, "no Grow interest & history section while the read is OFF");
   assert.equal(all(tree, (e) => e.props?.["data-ae-properties-notice"] !== undefined).length, 0);
   assert.match(text(section(tree, "Properties")), /Seller/);
 });
 
-test("FLAG ON, ready: Properties = the canonical link only; every Grow row is under Grow interest & history or counted; nothing is shown twice", () => {
+test("FLAG ON, ready: Properties = the canonical link only; EVERY Grow row is under Grow interest & history; a matching row is labelled, never dropped", () => {
   const l = ready(legacy5, byContact5);
   assert.equal(l.propertiesState, "ready");
   assert.deepEqual(l.properties.map((p) => [p.relationship, p.canonical, p.propertyId]), [["Buyer", true, 2]]);
-  assert.equal(l.interest.length + (l.interestMatchedNote ? 1 : 0), legacy5.properties.length, "6 listed + 1 matched = all 7 Grow rows");
-  assert.equal(l.interestMatchedNote, "1 Grow record matches a property listed above, so it is not repeated here.");
-  assert.equal(l.interest.some((r) => r.relationship === "Buyer" && r.propertyId === 2), false, "the Grow Buyer that IS the canonical link is not repeated");
-  assert.ok(l.interest.some((r) => r.relationship === "Seller" && r.propertyId === 2), "a DIFFERENT fact at the same property (Seller) is kept, as a Grow record");
-  const byKind = Object.fromEntries(l.interest.map((r) => [r.relationship, r.kindLabel]));
-  assert.deepEqual(byKind, { Seller: "Grow record", Owner: "Grow record", "Related party · Executor": "Interest", "Prospective buyer": "Interest", Referrer: "Interest", "Former owner": "Past" });
+  assert.equal(l.interest.length, legacy5.properties.length, "all 7 Grow rows are listed: none is left out");
+  const buyer = l.interest.find((r) => r.relationship === "Buyer" && r.propertyId === 2);
+  assert.deepEqual([buyer?.alsoListed, buyer?.kindLabel], [true, "Grow record"], "the Grow Buyer that IS the canonical link stays visible, labelled, with its original Grow classification");
+  const seller = l.interest.find((r) => r.relationship === "Seller" && r.propertyId === 2);
+  assert.deepEqual([seller?.alsoListed, seller?.kindLabel], [false, "Grow record"], "a DIFFERENT fact at the same property (Seller) is not labelled");
+  assert.deepEqual(l.interest.filter((r) => r.alsoListed).length, 1);
+  assert.deepEqual(l.interest.map((r) => [r.relationship, r.kindLabel]).sort(), [["Buyer", "Grow record"], ["Former owner", "Past"], ["Owner", "Grow record"], ["Prospective buyer", "Interest"], ["Referrer", "Interest"], ["Related party \u00b7 Executor", "Interest"], ["Seller", "Grow record"]]);
+  assert.deepEqual([l.propertiesCount, l.interestCount], [1, 7], "two separate counts");
 });
 
 test("the screen: two separate sections; historical and Grow rows are never in Properties and are labelled so they cannot read as current", () => {
@@ -70,14 +72,48 @@ test("the screen: two separate sections; historical and Grow rows are never in P
   const props = text(section(tree, "Properties"));
   const interest = text(section(tree, GROW_INTEREST_TITLE));
   assert.match(props, /Buyer/);
-  for (const never of ["Former owner", "Past", "Grow record", "Interest", "Executor", "Referrer"]) assert.doesNotMatch(props, new RegExp(never), `Properties must not contain "${never}"`);
-  assert.match(interest, /Former owner · Past/);
-  assert.match(interest, /Owner · Grow record/);
-  assert.match(interest, /Prospective buyer · Interest/);
-  assert.match(interest, /Related party · Executor · Interest/);
+  for (const never of ["Former owner", "Past", "Grow record", "Interest", "Executor", "Referrer", "Also listed"]) assert.doesNotMatch(props, new RegExp(never), `Properties must not contain "${never}"`);
+  assert.match(interest, /Former owner \u00b7 Past/);
+  assert.match(interest, /Owner \u00b7 Grow record/);
+  assert.match(interest, /Prospective buyer \u00b7 Interest/);
+  assert.match(interest, /Related party \u00b7 Executor \u00b7 Interest/);
+  assert.match(interest, /Buyer \u00b7 Grow record/, "the matching Buyer is shown with its Grow classification");
   assert.match(interest, /These are not current property links\./);
-  assert.match(interest, /1 Grow record matches a property listed above/);
-  assert.deepEqual(hrefs(section(tree, GROW_INTEREST_TITLE)).sort(), ["/grow/properties/2", "/grow/properties/5", "/grow/properties/6", "/grow/properties/8", "/grow/properties/9"], "each Grow row with a property opens it; the person-level Referrer opens nothing");
+  assert.equal((interest.match(/Also listed under Properties/g) ?? []).length, 1, "the label appears once, on the matching row only");
+  assert.doesNotMatch(interest, /not repeated here|matches? a propert/, "the old 'left out' sentence is gone: nothing is left out");
+  const tags = all(section(tree, GROW_INTEREST_TITLE), (e) => e.props?.["data-ae-also-listed"] !== undefined);
+  assert.deepEqual(tags.map((t) => text(t)), ["Also listed under Properties"]);
+  assert.deepEqual(hrefs(section(tree, GROW_INTEREST_TITLE)).sort(), ["/grow/properties/2", "/grow/properties/2", "/grow/properties/5", "/grow/properties/6", "/grow/properties/8", "/grow/properties/9"], "each Grow row with a property opens it; the person-level Referrer opens nothing");
+});
+
+test("COUNTS stay SEPARATE: the canonical property count and the Grow record count are shown apart and never added together", () => {
+  const t5 = view(ready(legacy5, byContact5));
+  assert.equal(text(all(t5, (e) => e.props?.["data-ae-properties-count"] !== undefined)[0]).trim(), "(1)");
+  assert.equal(text(all(t5, (e) => e.props?.["data-ae-interest-count"] !== undefined)[0]).trim(), "(7)");
+  assert.doesNotMatch(text(t5), /\(8\)|\b8 relationships/, "no combined 1 + 7");
+  const t1 = view(ready(legacy1, overCap));
+  assert.equal(text(all(t1, (e) => e.props?.["data-ae-properties-count"] !== undefined)[0]).trim(), "(105)", "the property count is the server's TOTAL, not the 100 shown");
+  assert.equal(text(all(t1, (e) => e.props?.["data-ae-interest-count"] !== undefined)[0]).trim(), "(2)");
+  assert.doesNotMatch(text(t1), /\b107\b/, "no combined 105 + 2");
+  const noGrow = ready({ ...legacy5, properties: [] } as GrowContact360, byContact5);
+  assert.deepEqual([noGrow.propertiesCount, noGrow.interestCount], [1, 0], "removing every Grow row does not change the property count");
+  assert.equal(layoutFor(legacy5, { canonicalLinks: [], canonicalMeta: { truncated: false, total: 0, skipped: 0 } }).propertiesCount, 0);
+  assert.equal(layoutFor(legacy5, { canonicalStatus: "loading" }).propertiesCount, null, "no count while the canonical list is not here");
+});
+
+test("the Owner's classification decisions on the real screen: unknown type To review, former owner Past, pending review first, nothing dropped", () => {
+  const rows = [
+    { ...legacy5.properties[0], relationshipId: 901, relationshipType: "mystery_type", status: "Active", propertyId: 9, propertyAddress: "9 Unknown Way", role: null },
+    { ...legacy5.properties[0], relationshipId: 902, relationshipType: "former_owner", status: "Active", propertyId: 9, propertyAddress: "9 Former Way", role: null },
+    { ...legacy5.properties[0], relationshipId: 903, relationshipType: "buyer", status: "PendingReview", propertyId: 9, propertyAddress: "9 Pending Way", role: null },
+    { ...legacy5.properties[0], relationshipId: 904, relationshipType: "former_owner", status: "PendingReview", propertyId: 9, propertyAddress: "9 Pending Former Way", role: null },
+  ];
+  const l = ready({ ...legacy5, properties: rows } as GrowContact360, byContact5);
+  const by = Object.fromEntries(l.interest.map((r) => [r.label, `${r.relationship} \u00b7 ${r.kindLabel}`]));
+  assert.deepEqual(by, { "9 Unknown Way": "Mystery type \u00b7 To review", "9 Former Way": "Former owner \u00b7 Past", "9 Pending Way": "Buyer \u00b7 To review", "9 Pending Former Way": "Former owner \u00b7 To review" });
+  assert.equal(l.interest.length, 4, "none dropped");
+  const interest = text(section(view(l), GROW_INTEREST_TITLE));
+  for (const line of Object.values(by)) assert.ok(interest.includes(line), line);
 });
 
 test("role labels and the Primary indicator: the role is the approved word, and Primary appears exactly where the server says so", () => {
@@ -97,6 +133,7 @@ test("PAGINATION: over the cap the phone says 'Showing 100 of 105' and offers th
   const l = ready(legacy1, overCap);
   assert.equal(l.properties.length, 100);
   assert.equal(l.propertiesNotice, "Showing 100 of 105 property links. Open the full record to see all of them.");
+  assert.deepEqual([l.propertiesCount, l.interestCount], [105, 2], "the property count is the total; the Grow count is separate");
   assert.equal(layoutFor(legacy1).propertiesNotice, null, "flag OFF: no notice (nothing canonical is shown)");
   const tree = view(l);
   const notice = all(tree, (e) => e.props?.["data-ae-properties-notice"] !== undefined)[0];
@@ -144,7 +181,8 @@ test("a contact with no canonical links says so, and still shows its Grow intere
   assert.equal(l.properties.length, 0);
   assert.match(text(section(view(l), "Properties")), /No property links\./);
   assert.equal(l.interest.length, legacy5.properties.length, "nothing matches, so all 7 are listed");
-  assert.equal(l.interestMatchedNote, null);
+  assert.equal(l.interest.some((r) => r.alsoListed), false, "with no canonical links nothing is labelled");
+  assert.deepEqual([l.propertiesCount, l.interestCount], [0, 7]);
 });
 
 test("the work stays behind the EXISTING flag: contactCanonicalRead is OFF, the screen asks for the canonical list only when it is on, and nothing overrides it", () => {

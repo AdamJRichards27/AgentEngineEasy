@@ -1,19 +1,32 @@
 import type { GrowContact360 } from "../../lib/growContact360";
+import { PROPERTY_RELATIONSHIP_LABELS } from "./mobilePeopleConfig";
 
 // AE Mobile (Release 1, Contact 360): "Grow interest & history", as one pure function. No React, no network, no storage.
 //
 // Two different kinds of information, never mixed (Less Tech, Not More):
 //   PROPERTIES  = current property relationships, from property_parties (the one canonical table). Shown elsewhere.
-//   GROW INTEREST & HISTORY = what Grow has recorded that is NOT a current property link: interest, prospecting, past relationships, and Grow's
-//   own records. Every row is labelled so it can never be read as current ownership or a current property link.
+//   GROW INTEREST & HISTORY = everything Grow recorded about this person's relationships with properties: interest, prospecting, past
+//   relationships and Grow's own records. Every row is labelled so it can never be read as current ownership.
 //
-// Nothing is silently dropped. A Grow row is left out of the list ONLY when it is the very same fact as a canonical link shown in Properties, and
-// then it is COUNTED and SAID ("1 Grow record matches a property listed above"). The match is deliberately narrow (PROVISIONAL until Grok
-// confirms the contract): an Active row, the same property, and a type whose name is a canonical role the Owner approved for automatic mapping
-// (owner, tenant, landlord, buyer). Seller, vendor, co-owner, occupier and every other type are never treated as a match.
+// Owner decisions built in (revision 2):
+//   - NOTHING IS LEFT OUT. A Grow row that is the same fact as a property listed under Properties stays visible, carries the label
+//     "Also listed under Properties", and KEEPS its original Grow classification (matching never changes it).
+//   - The matching rule only decides that label. It is deliberately narrow and still PROVISIONAL until Grok confirms the contract: an Active
+//     row, the same property, and a type whose name is a canonical role the Owner approved for automatic mapping (owner, tenant, landlord,
+//     buyer) equal to the canonical role. Seller, vendor, co-owner, occupier and every other type are never matched.
+//   - The Grow record count and the canonical property count are SEPARATE numbers and are never added together.
+//
+// Classification, in strict order of precedence:
+//   1. status PendingReview                         -> To review   (pending review takes priority over everything)
+//   2. an UNKNOWN relationship type                 -> To review   (a type this list does not know, or unknown_pending_review)
+//   3. any other status that is not Active          -> Past        (Historical, ended, merged ...)
+//   4. former_owner                                 -> Past
+//   5. a type that SOUNDS current (owner, co_owner, occupier, tenant, landlord, buyer, seller, vendor) -> Grow record
+//   6. every other known type                       -> Interest
 
 export const GROW_INTEREST_TITLE = "Grow interest & history";
 export const GROW_INTEREST_NOTE = "From Grow: interest, prospecting and past relationships. These are not current property links.";
+export const ALSO_LISTED_LABEL = "Also listed under Properties";
 
 export type GrowInterestKind = "record" | "interest" | "review" | "past";
 export interface GrowInterestRow {
@@ -22,15 +35,18 @@ export interface GrowInterestRow {
   /** "Prospective buyer", "Related party · Executor" ... never the raw stored value. */
   relationship: string;
   kind: GrowInterestKind;
-  /** "Grow record", "Interest", "To review" or "Past". */
+  /** "Grow record", "Interest", "To review" or "Past": the ORIGINAL Grow classification, unchanged by matching. */
   kindLabel: string;
+  /** True when this row is the same fact as a property listed under Properties. Shown, never hidden. */
+  alsoListed: boolean;
   href: string | null;
   propertyId: number | null;
 }
 export interface GrowInterest {
+  /** EVERY Grow row, none left out. */
   rows: GrowInterestRow[];
-  /** Grow rows left out because each is the same fact as a canonical link above. Counted, never hidden. */
-  matchedCount: number;
+  /** How many of them carry the "Also listed under Properties" label. */
+  alsoListedCount: number;
 }
 
 type GrowRelationship = GrowContact360["properties"][number];
@@ -42,18 +58,24 @@ export interface CanonicalLinkLike {
 const CANONICAL_ROLE_OF: Readonly<Record<string, string>> = { owner: "Owner", tenant: "Tenant", landlord: "Landlord", buyer: "Buyer" };
 /** Types that SOUND like a current property relationship: shown as "Grow record" so they are never read as current. */
 const CURRENT_SOUNDING = new Set(["owner", "co_owner", "occupier", "tenant", "landlord", "buyer", "seller", "vendor"]);
+const KNOWN_TYPES = new Set(Object.keys(PROPERTY_RELATIONSHIP_LABELS));
 const KIND_LABEL: Readonly<Record<GrowInterestKind, string>> = { record: "Grow record", interest: "Interest", review: "To review", past: "Past" };
 const KIND_RANK: Readonly<Record<GrowInterestKind, number>> = { record: 0, interest: 1, review: 2, past: 3 };
 
+/** True for a type this phone does not know, and for the stored "unknown_pending_review". */
+export function isUnknownRelationshipType(relationshipType: string): boolean {
+  return relationshipType === "unknown_pending_review" || !KNOWN_TYPES.has(relationshipType);
+}
+
 export function growInterestKind(status: string, relationshipType: string): GrowInterestKind {
   if (status === "PendingReview") return "review";
+  if (isUnknownRelationshipType(relationshipType)) return "review";
   if (status !== "Active") return "past"; // Historical, ended, merged ...: not current
   if (relationshipType === "former_owner") return "past";
-  if (relationshipType === "unknown_pending_review") return "review";
   return CURRENT_SOUNDING.has(relationshipType) ? "record" : "interest";
 }
 
-/** True when this Grow row is the same fact as a canonical link (see the file header for the deliberately narrow rule). */
+/** True when this Grow row is the same fact as a canonical link (see the file header for the deliberately narrow rule). It only adds a label. */
 export function matchesCanonicalLink(row: Pick<GrowRelationship, "status" | "propertyId" | "relationshipType">, links: readonly CanonicalLinkLike[]): boolean {
   const role = CANONICAL_ROLE_OF[row.relationshipType];
   if (!role || row.status !== "Active" || row.propertyId === null) return false;
@@ -66,30 +88,20 @@ export function buildGrowInterest(
   describe: (relationshipType: string, role: string | null) => string,
   propertyHref: (propertyId: number) => string,
 ): GrowInterest {
-  const out: GrowInterestRow[] = [];
-  let matchedCount = 0;
-  for (const r of rows) {
-    if (matchesCanonicalLink(r, canonical)) {
-      matchedCount++;
-      continue;
-    }
+  const out: GrowInterestRow[] = rows.map((r) => {
     const kind = growInterestKind(r.status, r.relationshipType);
-    out.push({
+    return {
       key: r.relationshipId,
       label: r.propertyAddress ?? "Not linked to a property",
       relationship: describe(r.relationshipType, r.role),
       kind,
       kindLabel: KIND_LABEL[kind],
+      alsoListed: matchesCanonicalLink(r, canonical),
       href: r.propertyId === null ? null : propertyHref(r.propertyId),
       propertyId: r.propertyId,
-    });
-  }
+    };
+  });
   // stable: Grow records and interest first, then to-review, then past; the order within a group is the server's
   const ranked = out.map((row, i) => ({ row, i })).sort((a, b) => KIND_RANK[a.row.kind] - KIND_RANK[b.row.kind] || a.i - b.i).map((x) => x.row);
-  return { rows: ranked, matchedCount };
-}
-
-export function matchedNoteText(count: number): string | null {
-  if (count <= 0) return null;
-  return count === 1 ? "1 Grow record matches a property listed above, so it is not repeated here." : `${count} Grow records match properties listed above, so they are not repeated here.`;
+  return { rows: ranked, alsoListedCount: ranked.filter((r) => r.alsoListed).length };
 }

@@ -5,7 +5,7 @@ import { CONTACT360_FULL_VIEW_QUERY, formatContactDate } from "../minimalContact
 import { roleLabel } from "./mobileLabels";
 import { propertyResultHref } from "./mobileSearchModel";
 import { linkRoleLabel, type CanonicalContactLink } from "./mobileLinking";
-import { buildGrowInterest, matchedNoteText, type GrowInterestRow } from "./mobileGrowInterest";
+import { buildGrowInterest, type GrowInterestRow } from "./mobileGrowInterest";
 import { HISTORY_VISIBLE, PROPERTY_RELATIONSHIP_LABELS } from "./mobilePeopleConfig";
 
 // AE Mobile (CC Task #64, M4): the phone Contact 360 layout, as one pure function. No React, no network, no
@@ -90,8 +90,12 @@ export interface MobileContactLayout {
   propertiesNotice: string | null;
   /** Grow interest & history: Grow's records that are not current property links (only when `propertiesState` is "ready"). */
   interest: GrowInterestRow[];
-  /** Said, not hidden: how many Grow rows are the same fact as a property listed above. */
-  interestMatchedNote: string | null;
+  /**
+   * The two counts, SEPARATE and never added together: the canonical property count (the server's total when it gave one, else the rows shown;
+   * null until the canonical list is ready) and the number of Grow rows listed.
+   */
+  propertiesCount: number | null;
+  interestCount: number;
   history: MobileHistoryRow[];
   historyHiddenCount: number;
   fullRecordHref: string;
@@ -264,7 +268,7 @@ export function buildMobileContactLayout(data: GrowContact360, options: MobileCo
       propertyId: p.propertyId,
     }));
   const propertiesList = propertiesState === "legacy" ? legacyRows : propertiesState === "ready" ? canonicalRows : [];
-  const interest = propertiesState === "ready" && canonical ? buildGrowInterest(data.properties, canonical, propertyRelationshipText, propertyResultHref) : { rows: [], matchedCount: 0 };
+  const interest = propertiesState === "ready" && canonical ? buildGrowInterest(data.properties, canonical, propertyRelationshipText, propertyResultHref) : { rows: [], alsoListedCount: 0 };
   const propertiesNotice =
     propertiesState === "ready" ? propertiesNoticeText(canonicalRows.length, options.canonicalMeta) : propertiesState === "error" ? "Couldn't load this contact's property links." : propertiesState === "loading" ? "Loading property links…" : null;
   return {
@@ -282,7 +286,8 @@ export function buildMobileContactLayout(data: GrowContact360, options: MobileCo
     propertiesState,
     propertiesNotice,
     interest: interest.rows,
-    interestMatchedNote: matchedNoteText(interest.matchedCount),
+    propertiesCount: propertiesState === "ready" ? Math.max(options.canonicalMeta?.total ?? 0, canonicalRows.length) : null,
+    interestCount: interest.rows.length,
     history: shown,
     historyHiddenCount: history.length - shown.length,
     fullRecordHref: `${growContactPath(data.contact.id)}?${CONTACT360_FULL_VIEW_QUERY}`,

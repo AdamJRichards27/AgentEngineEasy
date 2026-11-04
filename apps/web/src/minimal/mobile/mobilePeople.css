@@ -204,6 +204,12 @@
   font-size: 18px;
   color: var(--am-ink, #14181F);
 }
+
+/* The count beside a section heading (Contact 360): quiet, so the heading stays the heading. */
+.ae-minimal .mob-c-count {
+  font-weight: 400;
+  color: var(--am-muted, #4A5361);
+}
 .ae-minimal .mob-c-next-title {
   margin: 0;
   font-size: 18px;

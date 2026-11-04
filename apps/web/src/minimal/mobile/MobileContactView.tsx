@@ -1,4 +1,4 @@
-import { GROW_INTEREST_NOTE, GROW_INTEREST_TITLE } from "./mobileGrowInterest";
+import { ALSO_LISTED_LABEL, GROW_INTEREST_NOTE, GROW_INTEREST_TITLE } from "./mobileGrowInterest";
 import type { ReactNode } from "react";
 import { Link } from "wouter";
 import { CallReturnPrompt } from "./CallReturnPrompt";
@@ -278,7 +278,10 @@ export function MobileContactView(p: MobileContactViewProps) {
       ) : null}
 
       <section className="mob-c-block" aria-label="Properties">
-        <h2 className="mob-c-section">Properties</h2>
+        <h2 className="mob-c-section">
+          Properties
+          {layout.propertiesCount !== null ? <span className="mob-c-count" data-ae-properties-count>{` (${layout.propertiesCount})`}</span> : null}
+        </h2>
         {layout.propertiesNotice ? (
           <p className="mob-c-note" role={layout.propertiesState === "error" ? "alert" : "status"} data-ae-properties-notice>
             {layout.propertiesNotice}
@@ -412,9 +415,12 @@ export function MobileContactView(p: MobileContactViewProps) {
         {p.linking.panel?.kind === "link" && p.linking.picker ? <MobileLinkPicker {...p.linking.picker} /> : null}
       </section>
 
-      {layout.propertiesState === "ready" && (layout.interest.length > 0 || layout.interestMatchedNote) ? (
+      {layout.propertiesState === "ready" && layout.interest.length > 0 ? (
         <section className="mob-c-block" aria-label={GROW_INTEREST_TITLE} data-ae-grow-interest>
-          <h2 className="mob-c-section">{GROW_INTEREST_TITLE}</h2>
+          <h2 className="mob-c-section">
+            {GROW_INTEREST_TITLE}
+            <span className="mob-c-count" data-ae-interest-count>{` (${layout.interestCount})`}</span>
+          </h2>
           <p className="mob-c-note">{GROW_INTEREST_NOTE}</p>
           {layout.interest.length > 0 ? (
             <div className="mob-c-list">
@@ -425,6 +431,11 @@ export function MobileContactView(p: MobileContactViewProps) {
                     <span className="mob-c-row-sub">
                       {row.relationship} · {row.kindLabel}
                     </span>
+                    {row.alsoListed ? (
+                      <span className="mob-c-row-sub" data-ae-also-listed>
+                        {ALSO_LISTED_LABEL}
+                      </span>
+                    ) : null}
                   </span>
                 );
                 return row.href ? (
@@ -438,11 +449,6 @@ export function MobileContactView(p: MobileContactViewProps) {
                 );
               })}
             </div>
-          ) : null}
-          {layout.interestMatchedNote ? (
-            <p className="mob-c-note" data-ae-interest-matched>
-              {layout.interestMatchedNote}
-            </p>
           ) : null}
         </section>
       ) : null}
