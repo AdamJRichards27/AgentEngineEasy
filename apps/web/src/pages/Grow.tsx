@@ -2982,6 +2982,31 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
   );
 }
 
+// Hand-mirror of GROW_RELATIONSHIP_TYPES (packages/db/src/schema/grow.ts):
+// the words for stored Grow relationship types. t273u: the Link property form
+// no longer posts these (it makes canonical property_parties links with
+// PROPERTY_PARTY_ROLES), but they remain the agreed wording for existing Grow
+// history rows; the phone's PROPERTY_RELATIONSHIP_LABELS drift test pins them.
+export const GROW_PROPERTY_RELATIONSHIP_OPTIONS = [
+  ["owner", "Owner"],
+  ["co_owner", "Co-owner"],
+  ["former_owner", "Former owner"],
+  ["occupier", "Occupier"],
+  ["tenant", "Tenant"],
+  ["landlord", "Landlord"],
+  ["buyer", "Buyer"],
+  ["prospective_buyer", "Prospective buyer"],
+  ["seller", "Seller"],
+  ["prospective_seller", "Future seller"],
+  ["appraisal_contact", "Appraisal contact"],
+  ["vendor", "Vendor"],
+  ["investor", "Investor"],
+  ["developer", "Developer"],
+  ["referrer", "Referrer"],
+  ["related_party", "Related party"],
+  ["unknown_pending_review", "Unknown, pending review"],
+] as const;
+
 // G-UAT-3 — Contact 360 "Link property".
 // t273u (X10 fix): the link is a canonical property_parties link made through
 // the existing POST /parties path ({ propertyId, partyId, role }), with that
