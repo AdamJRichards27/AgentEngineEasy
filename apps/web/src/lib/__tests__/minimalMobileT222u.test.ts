@@ -11,7 +11,7 @@ import { growTabLabel } from "../growWorkspace";
 // "Business Coach" and opens the real coach screen; My Momentum stays separate; "Add Run" only
 // for Grow subscribers (not unsubscribed, not Run) and never the mock checkout.
 
-const GROW = ["grow.access", "grow.contacts.read", "grow.ai.use"];
+const GROW = ["grow.access", "grow.contacts.read", "grow.activities.manage", "grow.ai.use"]; // an agent who can change things
 const appSrc = readFileSync(fileURLToPath(new URL("../../App.tsx", import.meta.url)), "utf8");
 
 test("t222u: People tab and desktop Relationships (/grow?tab=contacts) select the Minimal contacts screen", () => {
@@ -39,6 +39,7 @@ test("t222u: the AI Performance entry is renamed Business Coach and routes to th
   const coach = nav.more.filter((m) => m.label === "Business Coach");
   assert.equal(coach.length, 1);
   assert.equal(coach[0]!.href, "/grow?tab=performance");
+  assert.equal(nav.more.filter((m) => m.label === "Ask AE").length, 1, "Ask AE is offered to the same agent, once");
   assert.equal(nav.more.filter((m) => m.label === "My Momentum").length, 1, "My Momentum stays a separate entry");
   assert.ok(!nav.more.some((m) => m.label === "Performance"));
   // Without grow.ai.use the coach is not offered (UI only; the API enforces grow.ai.use).

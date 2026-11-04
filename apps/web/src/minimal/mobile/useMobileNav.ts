@@ -3,8 +3,9 @@ import { apiFetch } from "../../lib/api";
 import { useEntitlements, useSession } from "../../lib/session";
 import { marketActivityQueryPath } from "../market/minimalMarketActivityModel";
 import { isFeatureHiddenError, momentumQueryPath } from "../momentum/minimalMomentumModel";
-import { applyCoachAvailability } from "./mobileCoachAvailability";
-import { GROW_AI_USE, buildMobileNav, type MobileNav } from "./mobileNavModel";
+import { applyAiAvailability } from "./mobileCoachAvailability";
+import { buildMobileNav, type MobileNav } from "./mobileNavModel";
+import { agentToolsOffered } from "./mobilePermissions";
 
 // AE Mobile (CC Task #64, M2): the one place that builds the phone navigation for a signed-in user.
 // The bottom bar and the More screen both call it, so they always agree. It feeds the corrected PR #280
@@ -34,10 +35,11 @@ export function useMobileNav(): MobileNav {
   });
   // Business Coach is listed only where the deployment has it on. Same key and request as AskAgentEngine's own probe, so it is
   // shared; and it is asked only of a user who holds the entitlement, so nobody else sends the request.
-  const coach = useQuery<{ businessCoachEnabled?: boolean }>({
+  const ai = useQuery<{ businessCoachEnabled?: boolean; copilotEnabled?: boolean }>({
     queryKey: ["ai-capabilities"],
     queryFn: () => apiFetch("/ai/capabilities"),
-    enabled: !ownerWithoutContext && entitlements.includes(GROW_AI_USE),
+    // Asked only of someone the phone would offer the agent tools to (an agent holding grow.ai.use who is not read-only): nobody else sends it.
+    enabled: !ownerWithoutContext && agentToolsOffered(entitlements, user?.role),
     retry: false,
   });
   const nav = buildMobileNav({
@@ -48,5 +50,5 @@ export function useMobileNav(): MobileNav {
     marketActivityAvailable: market.isSuccess,
     momentumAvailable: momentum.isSuccess,
   });
-  return applyCoachAvailability(nav, coach.data?.businessCoachEnabled === true);
+  return applyAiAvailability(nav, { coachEnabled: ai.data?.businessCoachEnabled === true, askEnabled: ai.data?.copilotEnabled === true });
 }

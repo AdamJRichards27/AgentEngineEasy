@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { GROW_CONTACTS_READ, mobilePermissions } from "../../minimal/mobile/mobilePermissions";
+import { GROW_AI_USE, GROW_CONTACTS_READ, GROW_WRITE_KEYS, mobilePermissions } from "../../minimal/mobile/mobilePermissions";
 import { GROW_ACCESS, RUN_ACCESS } from "../../minimal/minimalNav";
 
 // AE Mobile (CC Task #64, M1): who may see which mobile tab and run which search request.
 
-const NONE = { today: false, people: false, properties: false, search: false, searchContacts: false, searchProperties: false, run: false, upgradeToRun: false };
+const NONE = { today: false, people: false, properties: false, search: false, searchContacts: false, searchProperties: false, run: false, upgradeToRun: false, businessCoach: false, askAe: false };
 // t217u: Grow is always visible for a signed-in brokerage user; Run needs run.access AND a brokerage role.
 const GROW = { ...NONE, today: true, people: true, properties: true, search: true, searchProperties: true };
 
@@ -15,7 +15,7 @@ test("drift: every entitlement key the mobile model relies on exists in the serv
   const block = /export const ENTITLEMENT_KEYS = \[([\s\S]*?)\] as const/.exec(source);
   assert.ok(block, "ENTITLEMENT_KEYS block found in packages/db/src/schema/billing.ts");
   const keys = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  for (const key of [GROW_CONTACTS_READ, GROW_ACCESS, RUN_ACCESS]) {
+  for (const key of [GROW_CONTACTS_READ, GROW_ACCESS, RUN_ACCESS, GROW_AI_USE, ...GROW_WRITE_KEYS]) {
     assert.ok(keys.includes(key), `${key} is in the server catalogue`);
   }
   assert.equal(GROW_CONTACTS_READ, "grow.contacts.read");

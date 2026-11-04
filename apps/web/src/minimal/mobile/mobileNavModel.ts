@@ -1,5 +1,5 @@
 import { RUN_ACCESS, buildMinimalSidebar, minimalSidebarIsCurrent, minimalSidebarLinks } from "../minimalNav";
-import { mobilePermissions } from "./mobilePermissions";
+import { GROW_AI_USE, mobilePermissions } from "./mobilePermissions";
 
 // AE Mobile (CC Task #64, M1): the four primary mobile tabs (Today, People,
 // Properties, Search) and the "More" list. Pure logic: no React, no network,
@@ -86,9 +86,11 @@ export const MOBILE_MORE_GROUP_MAX_ITEMS = 5;
 export const RUN_UPGRADE_HREF = "/settings?upgrade=run";
 export const RUN_UPGRADE_LABEL = "Add Run";
 
-export const GROW_AI_USE = "grow.ai.use";
+export { GROW_AI_USE };
 export const BUSINESS_COACH_LABEL = "Business Coach";
 export const BUSINESS_COACH_HREF = "/grow?tab=performance";
+export const ASK_AE_LABEL = "Ask AE";
+export const ASK_AE_HREF = "/grow?tab=askAE";
 
 const WORKSPACE_HREFS: ReadonlySet<string> = new Set(["/communications", "/settings"]);
 
@@ -133,11 +135,15 @@ export function buildMobileNav(input: MobileNavInput): MobileNav {
   // t222u: the AI Business Coach (formerly "Performance") opens the real coach screen, the classic
   // Grow workspace's coach tab (GrowBusinessCoachTab). Offered with grow.ai.use (UI only; the AI
   // API enforces it). My Momentum stays its own, separate entry.
-  if (entitlements.includes(GROW_AI_USE)) {
+  // The agent tools are for AGENTS: the role itself, the entitlement, and not read-only (mobilePermissions.agentToolsOffered). A Brokerage
+  // Administrator or Pit Crew does not inherit them, even in a brokerage whose subscription grants grow.ai.use to everyone.
+  const agentTools: MobileMoreItem[] = [];
+  if (perms.businessCoach) agentTools.push({ key: BUSINESS_COACH_HREF, label: BUSINESS_COACH_LABEL, href: BUSINESS_COACH_HREF, path: "/grow" });
+  if (perms.askAe) agentTools.push({ key: ASK_AE_HREF, label: ASK_AE_LABEL, href: ASK_AE_HREF, path: "/grow" });
+  if (agentTools.length > 0) {
     const at = growItems.findIndex((i) => i.href === "/grow/momentum");
-    const coach: MobileMoreItem = { key: BUSINESS_COACH_HREF, label: BUSINESS_COACH_LABEL, href: BUSINESS_COACH_HREF, path: "/grow" };
-    if (at >= 0) growItems.splice(at + 1, 0, coach);
-    else growItems.push(coach);
+    if (at >= 0) growItems.splice(at + 1, 0, ...agentTools);
+    else growItems.push(...agentTools);
   }
 
   const moreGroups: MobileMoreGroup[] = (
