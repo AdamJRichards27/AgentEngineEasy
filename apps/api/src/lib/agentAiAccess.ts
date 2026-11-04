@@ -29,10 +29,12 @@ export type AgentAiDecision = { allowed: true } | { allowed: false; reason: "PIT
 
 export async function agentAiAccess(user: AuthedUser): Promise<AgentAiDecision> {
   if (user.role === "Pit Crew") return { allowed: false, reason: "PIT_CREW" };
+  // t276u: the admin allowlist only lifts the admin role bar. It never overrides another
+  // restriction: Pit Crew is refused above, and an allow-listed admin must still pass the
+  // same read-only test as an agent (run.access, or grow.access plus a Grow write key).
   if (user.role === "Brokerage Administrator") {
-    return explicitlyAuthorisedAdmins().has(user.id) ? { allowed: true } : { allowed: false, reason: "ADMIN_NOT_AUTHORISED" };
-  }
-  if (user.role !== "Agent") return { allowed: false, reason: "ROLE" };
+    if (!explicitlyAuthorisedAdmins().has(user.id)) return { allowed: false, reason: "ADMIN_NOT_AUTHORISED" };
+  } else if (user.role !== "Agent") return { allowed: false, reason: "ROLE" };
   const has = (k: string) => explainEntitlementDecision(user, k as never).then((d) => d.allowed).catch(() => false);
   if (await has("run.access")) return { allowed: true };
   if (!(await has("grow.access"))) return { allowed: false, reason: "READ_ONLY" };
