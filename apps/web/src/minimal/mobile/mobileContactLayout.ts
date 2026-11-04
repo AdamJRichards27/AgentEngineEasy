@@ -5,7 +5,7 @@ import { CONTACT360_FULL_VIEW_QUERY, formatContactDate } from "../minimalContact
 import { roleLabel } from "./mobileLabels";
 import { propertyResultHref } from "./mobileSearchModel";
 import { linkRoleLabel, type CanonicalContactLink } from "./mobileLinking";
-import { buildGrowInterest, type GrowInterestRow } from "./mobileGrowInterest";
+import { buildGrowInterest, growRelationshipText, type GrowInterestRow } from "../../lib/growInterest";
 import { HISTORY_VISIBLE, PROPERTY_RELATIONSHIP_LABELS } from "./mobilePeopleConfig";
 
 // AE Mobile (CC Task #64, M4): the phone Contact 360 layout, as one pure function. No React, no network, no
@@ -140,13 +140,9 @@ function humanise(type: string): string {
   return spaced.length === 0 ? "Event" : spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
 }
 
-/** "Co-owner", or "Related party · Executor" when the link carries a free-text role. Never the raw stored value. */
-export function propertyRelationshipText(relationshipType: string, role: string | null): string {
-  const known = PROPERTY_RELATIONSHIP_LABELS[relationshipType];
-  const label = known ?? humanise(relationshipType);
-  const refinement = role !== null && role.trim().length > 0 ? role.trim() : null;
-  return refinement && refinement.toLowerCase() !== label.toLowerCase() ? `${label} · ${refinement}` : label;
-}
+/** Moved to the shared helper (lib/growInterest.ts); kept under its old name so every existing caller is unchanged. */
+export const propertyRelationshipText = growRelationshipText;
+
 
 function dueText(c: GrowContact360Commitment, overdue: boolean): string {
   const date = formatContactDate(c.dueAt);

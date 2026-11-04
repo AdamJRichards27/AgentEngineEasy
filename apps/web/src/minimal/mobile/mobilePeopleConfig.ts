@@ -28,25 +28,7 @@ export const CONTACT_TEXT_MAX = 2000;
  * value is snake_case ("co_owner"); a phone shows "Co-owner". lib/__tests__/minimalMobilePeopleSource.test.ts
  * reads that file and fails if the two drift.
  */
-export const PROPERTY_RELATIONSHIP_LABELS: Readonly<Record<string, string>> = {
-  owner: "Owner",
-  co_owner: "Co-owner",
-  former_owner: "Former owner",
-  occupier: "Occupier",
-  tenant: "Tenant",
-  landlord: "Landlord",
-  buyer: "Buyer",
-  prospective_buyer: "Prospective buyer",
-  seller: "Seller",
-  prospective_seller: "Future seller",
-  appraisal_contact: "Appraisal contact",
-  vendor: "Vendor",
-  investor: "Investor",
-  developer: "Developer",
-  referrer: "Referrer",
-  related_party: "Related party",
-  unknown_pending_review: "Unknown, pending review",
-};
+export { GROW_RELATIONSHIP_TYPE_LABELS as PROPERTY_RELATIONSHIP_LABELS } from "../../lib/growInterest";
 
 /** Timeline lines shown before "Show all". */
 export const HISTORY_VISIBLE = 6;
