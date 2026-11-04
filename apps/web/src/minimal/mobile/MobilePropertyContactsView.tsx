@@ -64,7 +64,9 @@ export interface MobilePropertyContactsViewProps {
 
 export function MobilePropertyContactsView(p: MobilePropertyContactsViewProps) {
   const caps = p.capabilities;
-  // An action that is not available is NOT shown (no disabled control, no explanation): the page offers only what the user can do now.
+  // An action that is not available is NOT shown (no disabled control, no explanation): the page offers only what the user can do now. The same
+  // goes for words: nobody is told to "Link a contact" unless a link control is actually offered to them below.
+  const canLink = p.canManageRelationships !== false && (caps.propertyLinkContact.enabled || p.legacyActions != null);
   const ap = p.appraisal;
   return (
     <section className="mob-c-block" aria-label="Contacts" data-ae-property-contacts="mobile">
@@ -89,7 +91,7 @@ export function MobilePropertyContactsView(p: MobilePropertyContactsViewProps) {
         </p>
       ) : null}
 
-      {!p.loading && !p.error && p.contacts.length === 0 ? <p className="mob-c-note">No contact linked yet. Link a contact to start an appraisal.</p> : null}
+      {!p.loading && !p.error && p.contacts.length === 0 ? <p className="mob-c-note">{canLink ? "No contact linked yet. Link a contact to start an appraisal." : "No contact linked yet."}</p> : null}
 
       {p.contacts.length > 0 ? (
         <div className="mob-c-list">

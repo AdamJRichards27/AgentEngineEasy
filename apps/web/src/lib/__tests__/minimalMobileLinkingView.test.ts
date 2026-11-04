@@ -452,3 +452,12 @@ test("partly available: only the allowed actions are drawn, never a disabled sta
   assert.equal(buttons(linkOnly, "Link a property").length, 1);
   assert.equal(buttons(linkOnly, "Edit role").length + buttons(linkOnly, "Unlink").length, 0);
 });
+
+test("nobody is told to 'Link a contact' unless a link control is actually offered: the empty-state sentence follows the permission", () => {
+  const sentence = /Link a contact to start an appraisal/;
+  assert.match(text(propertyView({ contacts: [] })), sentence, "an agent who can link is told how");
+  assert.match(text(propertyView({ contacts: [], capabilities: linkingCapabilities(MANAGER), legacyActions: "EXISTING PANEL" })), sentence, "the preserved link panel is offered, so the instruction stands");
+  assert.doesNotMatch(text(propertyView({ contacts: [], capabilities: linkingCapabilities(MANAGER) })), sentence, "no link control offered: no instruction");
+  assert.doesNotMatch(text(propertyView({ contacts: [], canManageRelationships: false, legacyActions: "EXISTING PANEL" })), sentence, "a user who may not manage relationships is not told to");
+  assert.match(text(propertyView({ contacts: [], capabilities: linkingCapabilities(MANAGER) })), /No contact linked yet\./, "the plain fact is still stated");
+});
