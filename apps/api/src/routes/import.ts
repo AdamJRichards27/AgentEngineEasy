@@ -8,12 +8,13 @@
 
 import { Router } from "express";
 import multer from "multer";
-import { and, eq } from "drizzle-orm";
-import { auditLogs, db, importJobs, type ImportResolution } from "@aee/db";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { auditLogs, db, importJobs, users, type ImportResolution } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { auditAuthorityAction, entitlementOrAuthority, isPitCrew } from "../lib/contactAuthority.js";
+import { auditAuthorityAction, CONTACT_OWNER_ROLES, entitlementOrAuthority, isPitCrew } from "../lib/contactAuthority.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { DUPLICATE_OVERRIDE_ROLES, findContactDuplicates, OVERRIDE_REASON_MAX, OVERRIDE_REASON_MIN, visibleDuplicates } from "../lib/contactDuplicates.js";
 import { logAudit } from "../lib/audit.js";
 import { executeImportBatch, rollbackImportJob } from "../lib/import/execute.js";
@@ -68,9 +69,56 @@ async function jobOwnerId(job: { id: number; initiatedByUserId: number }, broker
     .select({ ref: auditLogs.providerReference })
     .from(auditLogs)
     .where(and(eq(auditLogs.brokerageId, brokerageId), eq(auditLogs.action, "import_job_owner_recorded"), eq(auditLogs.recordId, String(job.id))))
+    .orderBy(desc(auditLogs.id))
     .limit(1);
   const m = /^owner:(\d+)$/.exec(row?.ref ?? "");
   return m ? Number(m[1]) : job.initiatedByUserId;
+}
+
+/*
+ * Owner t276u: imported contacts need no property relationship to have an owner. Every
+ * contact the import CREATES is recorded as the job owner's (contact_owner_recorded with
+ * source "import", the import job and the authority reference), so owner-scoped access
+ * (ownedPartyIdsSql) covers it. If the owner cannot be established — the recorded/initiating
+ * user no longer exists, is inactive, left the brokerage, is not an Agent or Brokerage
+ * Administrator, or no longer holds grow.import.execute — the import is HELD FOR REVIEW
+ * (409 IMPORT_HELD_FOR_REVIEW, audited) until an administrator or the new owning agent
+ * records an owner with POST /jobs/:id/owner.
+ */
+async function ownershipProblem(ownerId: number, brokerageId: number): Promise<string | null> {
+  const [u] = await db.select({ id: users.id, role: users.role, brokerageId: users.brokerageId, isActive: users.isActive }).from(users).where(eq(users.id, ownerId)).limit(1);
+  if (!u) return "OWNER_NOT_FOUND";
+  if (u.brokerageId !== brokerageId) return "OWNER_OTHER_BROKERAGE";
+  if (!u.isActive) return "OWNER_INACTIVE";
+  if (!(CONTACT_OWNER_ROLES as readonly string[]).includes(u.role)) return "OWNER_ROLE";
+  const d = await explainEntitlementDecision({ id: u.id, role: u.role as never, brokerageId: u.brokerageId }, "grow.import.execute").catch(() => ({ allowed: false }));
+  return d.allowed ? null : "OWNER_NOT_ENTITLED";
+}
+
+async function recordImportedOwners(req: import("express").Request, importJobId: number, brokerageId: number, ownerId: number): Promise<number> {
+  const rows = (await db.execute(sql`select distinct result_party_id as id from import_records where import_job_id = ${importJobId} and party_was_created = true and result_party_id is not null`)).rows as { id: number }[];
+  const already = new Set(
+    (
+      await db
+        .select({ id: auditLogs.recordId })
+        .from(auditLogs)
+        .where(and(eq(auditLogs.brokerageId, brokerageId), eq(auditLogs.action, "contact_owner_recorded"), eq(auditLogs.providerReference, `owner:${ownerId}`)))
+    ).map((r) => r.id),
+  );
+  const fresh = rows.map((r) => Number(r.id)).filter((id) => !already.has(String(id)));
+  if (fresh.length === 0) return 0;
+  await db.insert(auditLogs).values(
+    fresh.map((id) => ({
+      brokerageId,
+      userId: req.authedUser!.id,
+      action: "contact_owner_recorded",
+      recordType: "party",
+      recordId: String(id),
+      providerReference: `owner:${ownerId}`,
+      updatedValue: JSON.stringify({ source: "import", importJobId, requestedBy: { userId: ownerId }, performedBy: { userId: req.authedUser!.id }, authorityRef: req.actingFor?.authorityRef ?? null }),
+    })),
+  );
+  return fresh.length;
 }
 
 /** True when the response was sent: Pit Crew acting outside its owner's job (404, like a missing job). */
@@ -287,6 +335,43 @@ importRouter.post("/jobs/:id/resolve", requireAuth, importGate("grow.import.revi
 /* B.16-B.19 -- execute + rollback                                      */
 /* -------------------------------------------------------------------- */
 
+// t276u: record (or re-record) the owner of a held import. A Brokerage Administrator may
+// assign any eligible owner; an Agent may take ownership only for themselves. Pit Crew never.
+importRouter.post("/jobs/:id/owner", requireAuth, requireEntitlement("grow.import.execute"), async (req, res) => {
+  try {
+    const user = req.authedUser!;
+    const importJobId = Number(req.params.id);
+    const job = await loadJobOr404(importJobId, user.brokerageId);
+    if (!job) {
+      res.status(404).json({ error: "Import job not found." });
+      return;
+    }
+    const ownerUserId = Number(req.body?.ownerUserId);
+    const authorityRef = typeof req.body?.authorityRef === "string" ? req.body.authorityRef.trim() : "";
+    const allowed = user.role === "Brokerage Administrator" || (user.role === "Agent" && ownerUserId === user.id);
+    if (!allowed) {
+      res.status(403).json({ error: "Only an administrator, or the agent taking ownership, can record the import owner.", code: "IMPORT_OWNER_ASSIGN_FORBIDDEN" });
+      return;
+    }
+    if (!Number.isInteger(ownerUserId) || authorityRef.length < 3 || authorityRef.length > 200) {
+      res.status(400).json({ error: "ownerUserId and an authority reference (3-200 characters) are required.", code: "IMPORT_OWNER_INVALID" });
+      return;
+    }
+    const problem = await ownershipProblem(ownerUserId, user.brokerageId);
+    if (problem) {
+      res.status(422).json({ error: "That user cannot own imported contacts.", code: "IMPORT_OWNER_INVALID", reason: problem });
+      return;
+    }
+    await logAudit(
+      { brokerageId: user.brokerageId, userId: user.id, action: "import_job_owner_recorded", recordType: "ImportJob", recordId: String(importJobId), providerReference: `owner:${ownerUserId}`, updatedValue: JSON.stringify({ owner: ownerUserId, authorityRef, performedBy: user.id, source: "review" }) },
+      { strict: true },
+    );
+    res.status(201).json({ importJobId, owner: ownerUserId });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
 importRouter.post("/jobs/:id/execute", requireAuth, importGate("grow.import.execute"), async (req, res) => {
   try {
     const importJobId = Number(req.params.id);
@@ -310,6 +395,13 @@ importRouter.post("/jobs/:id/execute", requireAuth, importGate("grow.import.exec
       return;
     }
 
+    const ownerId = await jobOwnerId(job, brokerageId);
+    const problem = await ownershipProblem(ownerId, brokerageId);
+    if (problem) {
+      await logAudit({ brokerageId, userId: req.authedUser!.id, action: "import_held_for_review", recordType: "ImportJob", recordId: String(importJobId), updatedValue: JSON.stringify({ reason: problem, recordedOwner: ownerId }) });
+      res.status(409).json({ error: "This import is held for review: its contact owner cannot be established. An administrator or the owning agent must record the owner first.", code: "IMPORT_HELD_FOR_REVIEW", reason: problem });
+      return;
+    }
     const plan = await buildExecutionPlan(importJobId, brokerageId);
     // t275u: shared duplicate rule — a "create" row that matches an existing contact
     // (name, email or mobile) blocks the import until it is resolved to the existing
@@ -322,7 +414,7 @@ importRouter.post("/jobs/:id/execute", requireAuth, importGate("grow.import.exec
     const result = await executeImportBatch({
       importJobId,
       brokerageId,
-      agentId: req.actingFor?.owner.id ?? req.authedUser!.id,
+      agentId: ownerId,
       contacts: plan.contacts,
       contactProperties: plan.contactProperties,
       relationships: plan.relationships,
@@ -334,6 +426,8 @@ importRouter.post("/jobs/:id/execute", requireAuth, importGate("grow.import.exec
       recordId: String(importJobId),
       updatedValue: JSON.stringify(result),
     });
+    const ownersRecorded = await recordImportedOwners(req, importJobId, brokerageId, ownerId);
+    await logAudit({ brokerageId, userId: req.authedUser!.id, action: "import_owner_assigned", recordType: "ImportJob", recordId: String(importJobId), providerReference: `owner:${ownerId}`, updatedValue: JSON.stringify({ owner: ownerId, contactsAssigned: ownersRecorded, performedBy: req.authedUser!.id, authorityRef: req.actingFor?.authorityRef ?? null }) });
     if (req.actingFor) await auditAuthorityAction(req, { action: "import_job_executed_on_authority", recordType: "ImportJob", recordId: importJobId, after: { contactsCreated: (result as { contactsCreated?: number }).contactsCreated ?? null } });
     res.json(result);
   } catch (err) {
