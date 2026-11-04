@@ -321,6 +321,10 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
   const propertyId = Number(params.id);
   const queryClient = useQueryClient();
   const { user } = useSession();
+  // t274u: relationship controls follow the web mirror of requireRelationshipManage
+  // (never Pit Crew); the server stays authoritative.
+  const { hasEntitlement: hasPartyEntitlement } = useEntitlements();
+  const canManageParties = canManageRelationships(hasPartyEntitlement, user?.role);
   const [showAddParty, setShowAddParty] = useState(false);
   const [reviewNotes, setReviewNotes] = useState("");
   const [exceptionNotes, setExceptionNotes] = useState<Record<number, string>>({});
@@ -907,9 +911,11 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
                   {partyName(p.party)}
                   <RunPrimaryMarker isPrimary={p.isPrimary} />
                   {p.amlStatus && <span className={amlPillClass(p.amlStatus)} style={{ marginLeft: "0.5rem" }}>{amlStatusCopy(p.amlStatus)}</span>}
-                  <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
-                    Remove
-                  </button>
+                  {canManageParties && (
+                    <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
+                      Remove
+                    </button>
+                  )}
                 </div>
 
                 {/* AML exception (Phase 4): clean status by default; raw
@@ -966,9 +972,11 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
                     {p.role}: {partyName(p.party)}
                     <RunPrimaryMarker isPrimary={p.isPrimary} />
                     {p.amlStatus && <span className={amlPillClass(p.amlStatus)} style={{ marginLeft: "0.5rem" }}>{amlStatusCopy(p.amlStatus)}</span>}
-                    <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
-                      Remove
-                    </button>
+                    {canManageParties && (
+                      <button className="btn btn-link" onClick={() => removeParty.mutate(p.linkId)}>
+                        Remove
+                      </button>
+                    )}
                   </div>
 
                   {!p.amlStatus && (
@@ -1022,7 +1030,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
         )}
         </div>
 
-        {!showAddParty ? (
+        {!canManageParties ? null : !showAddParty ? (
           <button className="btn btn-secondary" onClick={() => setShowAddParty(true)}>
             + Add Person
           </button>
