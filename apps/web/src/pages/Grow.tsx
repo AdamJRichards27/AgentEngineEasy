@@ -1,3 +1,4 @@
+import { canRecordGrowInterest, growInterestBody, growInterestErrorText, GROW_INTEREST_PATH, GROW_INTEREST_TYPE_REQUIRED } from "../lib/growInterestRecord";
 import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
 import { RunGatedLink } from "../components/RunGatedLink";
@@ -3133,6 +3134,117 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
   );
 }
 
+// t274u item 3: "Record Grow interest" (future seller, prospective buyer, …).
+// Distinct from "Link property": writes only a Grow relationship through
+// POST /grow/relationships (server duplicate check: the same contact, property
+// and type is never recorded twice, 409). Never writes property_parties.
+export function GrowRecordInterestForm({ partyId, onRecorded }: { partyId: number; onRecorded: () => void }) {
+  const queryClient = useQueryClient();
+  const { user } = useSession();
+  const { hasEntitlement } = useEntitlements();
+  const canRecord = canRecordGrowInterest(hasEntitlement, user?.role);
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState<LinkableProperty[]>([]);
+  const [propertyId, setPropertyId] = useState<number | null>(null);
+  const [relationshipType, setRelationshipType] = useState<string>("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const searchProperties = useMutation({
+    mutationFn: (query: string) => apiFetch<{ properties: LinkableProperty[] }>(propertySearchPath(query)),
+    onSuccess: (result) => {
+      setResults(result.properties ?? []);
+      setErrorMessage(null);
+    },
+    onError: (error) => setErrorMessage(apiErrorMessage(error, "Couldn't load properties.")),
+  });
+  const record = useMutation({
+    mutationFn: (body: ReturnType<typeof growInterestBody>) => apiFetch(GROW_INTEREST_PATH, { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+      queryClient.invalidateQueries({ queryKey: ["grow-contacts"] });
+      queryClient.invalidateQueries({ queryKey: ["grow-relationships"] });
+      queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+      onRecorded();
+      setOpen(false);
+      setSearch("");
+      setResults([]);
+      setPropertyId(null);
+      setRelationshipType("");
+      setErrorMessage(null);
+    },
+    onError: (error) =>
+      setErrorMessage(growInterestErrorText(error instanceof ApiError ? error.status : undefined, apiErrorMessage(error, "Couldn't record this interest."))),
+  });
+
+  if (!canRecord) return null;
+
+  return (
+    <div className="grow-record-interest" data-ae-grow-record-interest>
+      <button type="button" className="btn btn-secondary btn-small" onClick={() => setOpen((value) => !value)}>
+        {open ? "Cancel" : "Record Grow interest"}
+      </button>
+      {open && (
+        <form
+          className="stack grow-inline-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!relationshipType) {
+              setErrorMessage(GROW_INTEREST_TYPE_REQUIRED);
+              return;
+            }
+            setErrorMessage(null);
+            record.mutate(growInterestBody(partyId, propertyId, relationshipType));
+          }}
+        >
+          <label htmlFor="grow-interest-type">Interest</label>
+          <select id="grow-interest-type" value={relationshipType} onChange={(event) => setRelationshipType(event.target.value)}>
+            <option value="">Choose interest…</option>
+            {GROW_PROPERTY_RELATIONSHIP_OPTIONS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <label htmlFor="grow-interest-search">Property (optional)</label>
+          <div className="grow-inline-form-row">
+            <input
+              id="grow-interest-search"
+              type="search"
+              placeholder="Address, suburb, or postcode"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <button type="button" className="btn btn-secondary btn-small" disabled={searchProperties.isPending} onClick={() => searchProperties.mutate(search.trim())}>
+              Search
+            </button>
+          </div>
+          {results.length > 0 && (
+            <ul className="item-list">
+              {results.map((property) => (
+                <li key={property.id}>
+                  <button
+                    type="button"
+                    data-ae-grow-interest-property={property.id}
+                    className={`btn btn-link btn-small${propertyId === property.id ? " active" : ""}`}
+                    onClick={() => setPropertyId((current) => (current === property.id ? null : property.id))}
+                  >
+                    {propertyId === property.id ? "✓ " : ""}
+                    {property.formattedAddress}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="btn btn-primary btn-small" type="submit" disabled={record.isPending}>
+            Record interest
+          </button>
+        </form>
+      )}
+      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+    </div>
+  );
+}
+
 function linkPropertyErrorMessage(error: unknown): string {
   if (error instanceof ApiError && error.status === 404) return "That property couldn't be found.";
   if (error instanceof ApiError && error.status === 409) return linkFailureText(error, LINK_ALREADY_EXISTS);
@@ -3536,6 +3648,7 @@ export function GrowContactDetail({
           </GrowTableScroll>
         )}
         <GrowLinkPropertyForm partyId={partyId} onLinked={invalidate} />
+        <GrowRecordInterestForm partyId={partyId} onRecorded={invalidate} />
       </section>
 
       <GrowContactAppraisalsSection partyId={partyId} linkedProperties={data.properties} />

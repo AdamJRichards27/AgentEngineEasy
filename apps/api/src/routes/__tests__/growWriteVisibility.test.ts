@@ -402,9 +402,11 @@ describe("UAT-V3 grow write visibility", { concurrency: 1 }, () => {
       relationshipType: "co_owner",
     });
     assert.equal(ownRelationship.status, 201, await ownRelationship.clone().text());
+    // t274u item 3: a contact-level "prospect" already exists (fixture above) and the
+    // same interest is never recorded twice, so this uses a different type.
     const contactRelationship = await send("POST", "/grow/relationships", agentA.cookie, {
       partyId: sharedContactId,
-      relationshipType: "prospect",
+      relationshipType: "investor",
     });
     assert.equal(contactRelationship.status, 201, await contactRelationship.clone().text());
     assert.equal(

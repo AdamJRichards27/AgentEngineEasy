@@ -442,22 +442,50 @@ growRouter.post(
       }
     }
 
-    const [inserted] = await db
-      .insert(growRelationships)
-      .values({
-        brokerageId: user.brokerageId,
-        partyId,
-        propertyId,
-        relationshipType,
-        role: typeof req.body?.role === "string" ? req.body.role : null,
-        status: "Active",
-        isPrimary: Boolean(req.body?.isPrimary),
-        confidenceScore: typeof req.body?.confidenceScore === "number" ? String(req.body.confidenceScore) : null,
-        sourceType: typeof req.body?.sourceType === "string" ? req.body.sourceType : "manual",
-        sourceEvidence: typeof req.body?.sourceEvidence === "string" ? req.body.sourceEvidence : null,
-        createdBy: user.id,
-      })
-      .returning();
+    // t274u item 3: the same interest (contact, property or none, type) is never
+    // recorded twice. Re-checked inside one transaction with the contact row
+    // locked, so concurrent submissions serialise (no unique index, no migration).
+    const outcome = await db.transaction(async (tx) => {
+      await tx.select({ id: parties.id }).from(parties).where(eq(parties.id, partyId)).for("update");
+      const [dup] = await tx
+        .select({ id: growRelationships.id })
+        .from(growRelationships)
+        .where(
+          and(
+            eq(growRelationships.brokerageId, user.brokerageId),
+            eq(growRelationships.partyId, partyId),
+            propertyId === null ? isNull(growRelationships.propertyId) : eq(growRelationships.propertyId, propertyId),
+            eq(growRelationships.relationshipType, relationshipType),
+          ),
+        )
+        .limit(1);
+      if (dup) return { duplicateId: dup.id } as const;
+      const [row] = await tx
+          .insert(growRelationships)
+        .values({
+          brokerageId: user.brokerageId,
+          partyId,
+          propertyId,
+          relationshipType,
+          role: typeof req.body?.role === "string" ? req.body.role : null,
+          status: "Active",
+          isPrimary: Boolean(req.body?.isPrimary),
+          confidenceScore: typeof req.body?.confidenceScore === "number" ? String(req.body.confidenceScore) : null,
+          sourceType: typeof req.body?.sourceType === "string" ? req.body.sourceType : "manual",
+          sourceEvidence: typeof req.body?.sourceEvidence === "string" ? req.body.sourceEvidence : null,
+          createdBy: user.id,
+        })
+        .returning();
+      return { row } as const;
+    });
+    if ("duplicateId" in outcome) {
+      res.status(409).json({
+        error: "This contact is already linked to that property with this relationship.",
+        relationshipId: outcome.duplicateId,
+      });
+      return;
+    }
+    const inserted = outcome.row;
 
     try {
       await publishDomainEvent({
