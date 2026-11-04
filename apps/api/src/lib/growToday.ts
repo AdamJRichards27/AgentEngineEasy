@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, exists, gt, isNotNull, isNull, lt, max, or, sql, type SQL } from "drizzle-orm";
-import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties } from "@aee/db";
+import { db, appraisals, growActivities, growCommitments, growOpportunities, growOpportunitySignals, growRelationships, parties, properties, propertyParties } from "@aee/db";
 import {
   EXCLUDED_ACTIVITY_KIND_MARKERS,
   MEANINGFUL_GROW_ACTIVITY_TYPES,
@@ -1154,7 +1154,19 @@ async function loadGrowTodayFirstRun(
   const contact = exists(
     db.select({ id: parties.id }).from(parties).where(eq(parties.brokerageId, brokerageId)).limit(1),
   );
-  const propertyLink = exists(
+  // t273u (X10): Contact 360 "Link property" now makes a canonical
+  // property_parties link, so a visible canonical link completes this step.
+  // A Grow relationship with a property (older path, kept as Grow history)
+  // still counts, so existing users do not see the step re-open.
+  const canonicalPropertyLink = exists(
+    db
+      .select({ id: propertyParties.id })
+      .from(propertyParties)
+      .innerJoin(properties, eq(properties.id, propertyParties.propertyId))
+      .where(and(eq(properties.brokerageId, brokerageId), visibleRequiredPropertySql(propertyParties.propertyId, restrictToPropertyIds)))
+      .limit(1),
+  );
+  const growPropertyLink = exists(
     db
       .select({ id: growRelationships.id })
       .from(growRelationships)
@@ -1167,6 +1179,7 @@ async function loadGrowTodayFirstRun(
       )
       .limit(1),
   );
+  const propertyLink = or(canonicalPropertyLink, growPropertyLink);
   const activity = exists(
     db
       .select({ id: growActivities.id })
