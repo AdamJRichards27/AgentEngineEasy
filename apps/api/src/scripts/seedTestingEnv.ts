@@ -39,7 +39,7 @@ import { openSync, writeSync, closeSync, fchmodSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { sql, like, notLike } from "drizzle-orm";
-import { db, users, brokerages, entitlementGrants, properties, parties, propertyParties, growContactChannelConsents, growContactChannelSuppressions, growContactDncrStatuses, ENTITLEMENT_KEYS } from "@aee/db";
+import { db, users, brokerages, entitlementGrants, properties, parties, propertyParties, growContactChannelConsents, growContactChannelSuppressions, growContactDncrStatuses, growRelationships, ENTITLEMENT_KEYS } from "@aee/db";
 import { hashPassword, passwordPolicyViolation } from "../lib/auth/password.js";
 
 export const SYNTH_PREFIX = "SYNTH ";
@@ -110,6 +110,32 @@ export const SCENARIOS: { last: string; mobile: string | null; state?: "withdraw
   { last: "NoConsent", mobile: "(07) 5550 9009", state: "noconsent" },
   { last: "Suppressed", mobile: "(07) 5550 9010", state: "suppressed" },
   { last: "OnRegister", mobile: "(07) 5550 9011", state: "register" },
+];
+
+// t273u: the acceptance matrix names these people (G04: Hana, Gus, Iris), so the
+// testing seed now carries them under those names in the first brokerage
+// (the one with the read-only agent) instead of testers substituting
+// "Scenario …" contacts. Consent / register states mirror the scenarios.
+export const MATRIX_CONSENT_FIXTURES: { first: string; last: string; mobile: string; state: "express" | "withdrawn" | "register" }[] = [
+  { first: "Hana", last: "Consent", mobile: "(07) 5550 9021", state: "express" },
+  { first: "Gus", last: "Withdrawn", mobile: "(07) 5550 9022", state: "withdrawn" },
+  { first: "Iris", last: "Register", mobile: "(07) 5550 9023", state: "register" },
+];
+
+// t273u: one contact that carries every Contact 360 Grow-interest case the
+// matrix compares (the "contact 5" checks: C360-12, C360-19, C360-20), so the
+// fixture exists in every fresh testing database: a canonical Buyer link, the
+// matching Active Grow buyer row ("Also listed under Properties"), an unknown
+// type marked Historical (To review), a former owner (Past), a pending-review
+// row (To review) and a prospective seller elsewhere (Interest). Grow rows are
+// Grow history only; none is a property link.
+export const MATRIX_GROW_FIXTURE = { first: "Grace", last: "Growfixture", mobile: "(07) 5550 9031" } as const;
+export const MATRIX_GROW_FIXTURE_ROWS: { property: 0 | 1; relationshipType: string; status: "Active" | "Historical" | "PendingReview" }[] = [
+  { property: 0, relationshipType: "buyer", status: "Active" },
+  { property: 0, relationshipType: "legacy_unmapped_type", status: "Historical" },
+  { property: 1, relationshipType: "former_owner", status: "Active" },
+  { property: 1, relationshipType: "owner", status: "PendingReview" },
+  { property: 1, relationshipType: "prospective_seller", status: "Active" },
 ];
 
 export function generatePassword(): string {
@@ -253,6 +279,24 @@ async function main() {
         counts.properties++;
         await db.insert(propertyParties).values({ propertyId: p.id, partyId: scenarioIds[0], role: "Owner", isPrimary: true });
         counts.links++;
+        for (const fx of MATRIX_CONSENT_FIXTURES) {
+          const [c] = await db.insert(parties).values({ brokerageId: b.id, partyType: "Person", firstName: fx.first, lastName: fx.last, mobile: fx.mobile, email: null }).returning();
+          counts.contacts++;
+          counts.scenarios++;
+          const common = { brokerageId: b.id, partyId: c.id, channel: "PHONE_CALL", recordedByUserId: recorder };
+          if (fx.state === "express") await db.insert(growContactChannelConsents).values({ ...common, state: "EXPRESS", source: "SYNTHETIC_SEED", captureMethod: "SYNTHETIC_SEED", purpose: "TAP_TO_CALL", scope: "PHONE_CALL" });
+          if (fx.state === "withdrawn") await db.insert(growContactChannelConsents).values({ ...common, state: "WITHDRAWN", source: "SYNTHETIC_SEED", captureMethod: "SYNTHETIC_SEED", purpose: "TAP_TO_CALL", scope: "PHONE_CALL", withdrawnAt: new Date(), withdrawnByUserId: recorder, withdrawalReason: "Synthetic: contact withdrew consent" });
+          if (fx.state === "register") await db.insert(growContactDncrStatuses).values({ ...common, status: "LISTED", source: "SYNTHETIC_SEED" });
+        }
+        if (propIds.length > 1) {
+          const [g] = await db.insert(parties).values({ brokerageId: b.id, partyType: "Person", firstName: MATRIX_GROW_FIXTURE.first, lastName: MATRIX_GROW_FIXTURE.last, mobile: MATRIX_GROW_FIXTURE.mobile, email: `grace.growfixture@${EMAIL_DOMAIN}` }).returning();
+          counts.contacts++;
+          await db.insert(propertyParties).values({ propertyId: propIds[0].id, partyId: g.id, role: "Buyer", isPrimary: false });
+          counts.links++;
+          for (const row of MATRIX_GROW_FIXTURE_ROWS) {
+            await db.insert(growRelationships).values({ brokerageId: b.id, partyId: g.id, propertyId: propIds[row.property].id, relationshipType: row.relationshipType, status: row.status });
+          }
+        }
       }
     }
   } finally {
