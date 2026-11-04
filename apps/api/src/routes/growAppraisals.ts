@@ -518,7 +518,7 @@ const sendSchema = z.object({
   bodyText: z.string().optional(),
 });
 
-growAppraisalsRouter.post("/:id/send", requireAuth, requireSendAuthorisation("appraisal", "id"), requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
+growAppraisalsRouter.post("/:id/send", requireAuth, requireSendAuthorisation("appraisal", "id", "grow.access"), requiresGrowAccess, pitCrewAppraisalScope, requiresGrowManage, async (req, res) => {
   const user = req.authedUser!;
   const appraisalId = readIdParam(res, req.params.id, "appraisal");
   if (appraisalId === null) return;

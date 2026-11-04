@@ -262,7 +262,7 @@ export async function activeSendDelegation(brokerageId: number, recordType: Send
 }
 
 export const SEND_AUTHORISATION_REQUIRED = "SEND_AUTHORISATION_REQUIRED";
-export function requireSendAuthorisation(recordType: SendRecordType, param: string) {
+export function requireSendAuthorisation(recordType: SendRecordType, param: string, entitlementKey: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const user = req.authedUser;
     const refuseSend = (reason: string) =>
@@ -277,6 +277,9 @@ export function requireSendAuthorisation(recordType: SendRecordType, param: stri
     if (!user) return refuseSend("ROLE");
     if (isPitCrew(user)) return refuseSend("PIT_CREW");
     if (SEND_AUTHORISATION_ROLES.includes(user.role)) return next();
+    // Not entitled to the product at all: let the route's own entitlement gate answer (403 with its key).
+    const entitled = await explainEntitlementDecision(user, entitlementKey as never).then((d) => d.allowed).catch(() => false);
+    if (!entitled) return next();
     const id = Number(req.params[param]);
     // A malformed id is not a send: let the route answer its own 400.
     if (!/^\d+$/.test(String(req.params[param] ?? "")) || id <= 0 || id > 2_147_483_647) return next();
