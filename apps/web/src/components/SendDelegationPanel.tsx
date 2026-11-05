@@ -54,8 +54,10 @@ export function SendDelegationPanelView(p: SendDelegationPanelViewProps) {
           {status.delegations.map((d) => (
             <li key={`${d.delegateUserId}-${d.grantedAt}`} data-ae-delegation={d.state}>
               <div className="pc-item-header">
-                <strong>{d.delegateName}</strong>
-                {d.delegateRole ? <span className="muted"> ({d.delegateRole})</span> : null}
+                <span>
+                  <strong>{d.delegateName}</strong>
+                  {d.delegateRole ? <span className="muted"> ({d.delegateRole})</span> : null}
+                </span>
                 <span className={pillClass(d)} data-ae-delegation-state>{DELEGATION_STATE_LABEL[d.state]}</span>
               </div>
               <p className="muted" data-ae-delegation-detail>{delegationDetail(d)}</p>

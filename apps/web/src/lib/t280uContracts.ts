@@ -155,6 +155,20 @@ export function parseAuditValues(raw: unknown): AuditValues | null {
   const by = rec(o.performedBy);
   return { auditId: num(o.auditId)!, action: str(o.action) ?? "", before: valueText(o.before), after: valueText(o.after), fields: list(o.fields).filter((f): f is string => typeof f === "string"), performedBy: by ? { userId: num(by.userId), role: str(by.role) ?? "" } : null, requestedByUserId: num(rec(o.requestedBy)?.userId), authorityRef: str(o.authorityRef) };
 }
+/** A decrypted before/after value as plain "Field: value" rows when it is a flat object of simple values; null when it is anything else (shown as text). */
+export function valueRows(text: string | null): Array<[string, string]> | null {
+  if (!text) return null;
+  try {
+    const v = JSON.parse(text) as unknown;
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+    const rows: Array<[string, string]> = [];
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (x !== null && typeof x === "object") return null;
+      rows.push([sentence(k.replace(/([a-z])([A-Z])/g, "$1 $2")), x === null || x === "" ? "(empty)" : String(x)]);
+    }
+    return rows.length > 0 ? rows : null;
+  } catch { return null; }
+}
 const sentence = (s: string): string => { const t = s.replace(/[_\-.]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase(); return t ? t[0].toUpperCase() + t.slice(1) : ""; };
 /** An audit action key as a readable sentence ("grow_contact_updated_on_authority" becomes "Grow contact updated on authority"). */
 export const actionWords = sentence;

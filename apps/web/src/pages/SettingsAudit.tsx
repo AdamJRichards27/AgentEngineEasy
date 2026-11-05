@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "../lib/api";
-import { REASON_MAX, REASON_MIN, actionWords, codeText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, reasonOk, recordWords, refusalText, when, type AuditAccess, type AuditCapabilities, type AuditEntry, type AuditValues } from "../lib/t280uContracts";
+import { REASON_MAX, REASON_MIN, actionWords, codeText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, reasonOk, recordWords, refusalText, valueRows, when, type AuditAccess, type AuditCapabilities, type AuditEntry, type AuditValues } from "../lib/t280uContracts";
 
 export interface AuditViewProps {
   caps: AuditCapabilities | null;
@@ -33,6 +33,14 @@ export interface AuditViewProps {
   onRequestConfirm: () => void;
   onRequestCancel: () => void;
   onHideValues: (auditId: number) => void;
+}
+
+/** Changed fields as plain "Field: value" lines; anything that isn't a flat set of fields stays as text. React escapes it all. */
+function ValueBlock({ text, attr }: { text: string | null; attr: "data-ae-audit-before" | "data-ae-audit-after" }) {
+  const rows = valueRows(text);
+  const marker = { [attr]: true } as Record<string, boolean>;
+  if (rows) return <div {...marker}>{rows.map(([k, v]) => <p key={k} className="muted">{k}: <strong>{v}</strong></p>)}</div>;
+  return <pre {...marker}>{text ?? "(none)"}</pre>;
 }
 
 const who = (id: number | null, names: Record<number, string>): string => (id === null ? "System" : names[id] ?? `User ${id}`);
@@ -71,8 +79,10 @@ export function AuditView(p: AuditViewProps) {
             return (
               <li key={e.auditId} data-ae-audit-entry={e.auditId}>
                 <div className="pc-item-header">
-                  <strong data-ae-audit-action>{actionWords(e.action)}</strong>
-                  <span className="muted"> · {recordWords(e.recordType, e.recordId)}</span>
+                  <span>
+                    <strong data-ae-audit-action>{actionWords(e.action)}</strong>
+                    <span className="muted"> · {recordWords(e.recordType, e.recordId)}</span>
+                  </span>
                 </div>
                 <p className="muted">{who(e.userId, p.names)} · {when(e.createdAt)}</p>
                 <p className="muted" data-ae-audit-values-state>
@@ -115,9 +125,9 @@ export function AuditView(p: AuditViewProps) {
                       </p>
                     ) : null}
                     <p><strong>Before</strong></p>
-                    <pre data-ae-audit-before>{values.before ?? "(none)"}</pre>
+                    <ValueBlock text={values.before} attr="data-ae-audit-before" />
                     <p><strong>After</strong></p>
-                    <pre data-ae-audit-after>{values.after ?? "(none)"}</pre>
+                    <ValueBlock text={values.after} attr="data-ae-audit-after" />
                     <button type="button" className="btn btn-link" onClick={() => p.onHideValues(e.auditId)}>Hide values</button>
                   </div>
                 ) : null}

@@ -44,8 +44,10 @@ export function ExportsView(p: ExportsViewProps) {
               return (
                 <li key={e.exportId} data-ae-export={e.exportId} data-ae-export-status={e.status}>
                   <div className="pc-item-header">
-                    <strong data-ae-export-scope>{exportScope(e.rows)}</strong>
-                    <span className="muted"> {e.mine ? "(your contacts)" : "(prepared for another owner)"}</span>
+                    <span>
+                      <strong data-ae-export-scope>{exportScope(e.rows)}</strong>
+                      <span className="muted"> {e.mine ? "(your contacts)" : "(prepared for another owner)"}</span>
+                    </span>
                     <span className={pill(e)} data-ae-export-pill>{EXPORT_STATUS_LABEL[e.status]}</span>
                   </div>
                   <p className="muted">
@@ -54,7 +56,7 @@ export function ExportsView(p: ExportsViewProps) {
                   </p>
                   {e.releasedTo.length > 0 ? <p className="muted" data-ae-export-released>{releasedToInitiator ? "Released to the person who prepared it." : `Released to ${e.releasedTo.length} ${e.releasedTo.length === 1 ? "person" : "people"}.`}</p> : null}
                   {e.status === "expired" ? (
-                    <p className="muted" data-ae-export-unavailable>Unavailable: this export has expired and its file has been deleted.</p>
+                    <p className="muted" data-ae-export-unavailable>Unavailable: this export has expired.</p>
                   ) : e.canDownload ? (
                     <a className="btn btn-primary btn-small" href={`/api/grow/contacts/exports/${e.exportId}/download`} data-ae-export-download onClick={p.onDownloaded}>
                       Download
