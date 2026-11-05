@@ -1,3 +1,4 @@
+import { formatAuDateTime } from "../lib/auDateTime";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "../lib/api";
@@ -194,7 +195,7 @@ export function GrowContactTranscriptPanel({
           {list.data.transcriptions.map((row) => (
             <button key={row.id} type="button" className={`grow-transcript-row${selectedId === row.id ? " active" : ""}`} onClick={() => setSelectedId(row.id)} disabled={pending}>
               <span>Call transcript</span><span className="pill">{transcriptionStatusLabel(row.processingState, row.failureReason)}</span>
-              <small>{new Date(row.createdAt).toLocaleString()}</small>
+              <small>{formatAuDateTime(row.createdAt)}</small>
             </button>
           ))}
         </div>

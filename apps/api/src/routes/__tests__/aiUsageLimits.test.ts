@@ -119,6 +119,11 @@ async function grant(brokerageId: number, entitlementKey: string) {
 async function newBrokerage(label: string): Promise<{ admin: DevLoginResult; agent: DevLoginResult; brokerageId: number }> {
   const b = await createBrokerageWithUsers(baseUrl, `AI Limits ${label} ${suffix}`);
   cleanupIds.push(b.brokerageId);
+  // t275u: Ask AE is agent-only; the admin "colleague" here is explicitly authorised
+  // (AE_AGENT_AI_ADMIN_USER_IDS), the one way an administrator gets Ask AE.
+  const ids = new Set(String(process.env.AE_AGENT_AI_ADMIN_USER_IDS ?? "").split(",").filter(Boolean));
+  ids.add(String(b.admin.user.id));
+  process.env.AE_AGENT_AI_ADMIN_USER_IDS = [...ids].join(",");
   return b;
 }
 

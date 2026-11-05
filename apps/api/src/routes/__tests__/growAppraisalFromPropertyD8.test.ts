@@ -70,7 +70,7 @@ async function createLinkedParty(cookie: string, propertyId: number): Promise<nu
   const res = await fetch(`${baseUrl}/api/parties`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ propertyId, role: "Seller", firstName: "D8", lastName: "Contact" }),
+    body: JSON.stringify({ propertyId, role: "Seller", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "D8", lastName: "Contact" }),
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   return ((await res.json()) as { party: { id: number } }).party.id;

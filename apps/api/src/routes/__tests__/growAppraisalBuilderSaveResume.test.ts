@@ -125,7 +125,7 @@ async function newAppraisal(cookie: string, label: string): Promise<{ appraisalI
     201,
   );
   const party = await json<{ party: { id: number } }>(
-    await call("POST", "/parties", cookie, { propertyId: p.property.id, role: "Seller", firstName: "AB6", lastName: "Seller" }),
+    await call("POST", "/parties", cookie, { propertyId: p.property.id, role: "Seller", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "AB6", lastName: "Seller" }),
     201,
   );
   const created = await json<{ appraisal: { id: number } }>(

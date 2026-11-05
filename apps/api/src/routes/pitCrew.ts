@@ -713,3 +713,20 @@ pitCrewRouter.get("/pit-crew/ops/waiting-on/health", requireAuth, canAccess, req
     },
   });
 });
+
+// Owner t275u: the agents a Pit Crew member can name as the contact owner whose recorded
+// authority it acts on (Agent or Brokerage Administrator, active, same brokerage). Names
+// only. Pit Crew callers only; holding this list grants nothing by itself — every change
+// still carries the owner + instruction reference and is validated and audited server-side.
+pitCrewRouter.get("/pit-crew/authority-owners", requireAuth, requireRole(...PIT_CREW_ROLES), async (req, res) => {
+  const user = req.authedUser!;
+  const { and: andOp, inArray: inArr, asc: ascOp } = await import("drizzle-orm");
+  const rows = await db
+    .select({ id: users.id, firstName: users.firstName, lastName: users.lastName, role: users.role })
+    .from(users)
+    .where(andOp(eq(users.brokerageId, user.brokerageId), eq(users.isActive, true), inArr(users.role, ["Agent", "Brokerage Administrator"])))
+    .orderBy(ascOp(users.firstName), ascOp(users.lastName), ascOp(users.id));
+  res.json({
+    owners: rows.map((r) => ({ id: r.id, name: [r.firstName, r.lastName].filter(Boolean).join(" ").trim() || `User ${r.id}`, role: r.role })),
+  });
+});

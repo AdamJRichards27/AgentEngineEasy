@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Switch, Route, Link, Redirect, useLocation, useSearch } from "wouter";
+import { selectGrowView } from "./minimal/minimalGrowNav";
 import { selectContact360View } from "./minimal/minimalContactModel";
 import { selectPropertiesView } from "./minimal/properties/minimalPropertiesModel";
 import { selectAppraisalsView } from "./minimal/appraisals/minimalAppraisalsModel";
@@ -25,6 +26,8 @@ import {
 } from "./lib/minimalUx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OwnerContextBanner } from "./components/OwnerContextBanner";
+import { PitCrewAuthorityBar } from "./components/PitCrewAuthorityBar";
+import { ExportNotifications } from "./components/ExportNotifications";
 import type { SessionUser } from "./lib/session";
 
 // I-18 — each authenticated page is its own chunk. Pre-session pages stay
@@ -46,10 +49,16 @@ const FinancialOperations = lazy(() => import("./pages/FinancialOperations"));
 const Settings = lazy(() => import("./pages/Settings"));
 const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
+const SettingsAudit = lazy(() => import("./pages/SettingsAudit"));
+const GrowExports = lazy(() => import("./pages/GrowExports"));
+const GrowHeldImports = lazy(() => import("./pages/GrowHeldImports"));
 const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
-const MinimalContact360 = lazy(() => import("./minimal/MinimalContact360"));
+const MinimalContacts = lazy(() => import("./minimal/mobile/PeopleScreen"));
+const MinimalContact360 = lazy(() => import("./minimal/mobile/ContactScreen"));
+const MobileSearchPage = lazy(() => import("./minimal/mobile/SearchPage"));
+const MobileMorePage = lazy(() => import("./minimal/mobile/MobileMorePage"));
 const MinimalProperties = lazy(() => import("./minimal/properties/MinimalProperties"));
 const MinimalAppraisals = lazy(() => import("./minimal/appraisals/MinimalAppraisals"));
 const MinimalOpportunities = lazy(() => import("./minimal/opportunities/MinimalOpportunities"));
@@ -205,6 +214,8 @@ function AuthenticatedExperience({
   const page = (
     <>
       {user?.platformOwner && <OwnerContextBanner user={user} />}
+      {user?.role === "Pit Crew" && <PitCrewAuthorityBar />}
+      {user && user.role !== "Pit Crew" && !ownerWithoutContext && <ExportNotifications />}
       {!ownerWithoutContext && (!user.firstName?.trim() || !user.lastName?.trim()) && (
         <section className="card" role="status">
           <h2>Complete your profile</h2>
@@ -396,7 +407,17 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           <Route path="/grow/market-activity">
             {selectMarketActivityView(minimalShell) === "minimal" ? <MinimalMarketActivity /> : <Redirect to="/grow" replace />}
           </Route>
-          <Route path="/grow">{minimalShell ? <MinimalToday /> : <Grow />}</Route>
+          {/* t222u: People (mobile) and Relationships (desktop) link /grow?tab=contacts; mount the
+              Minimal contacts screen for it instead of always Today. Other tabs (e.g. Business Coach)
+              render the classic Grow workspace inside the Minimal shell. */}
+          <Route path="/grow">
+            {(() => {
+              const view = selectGrowView(minimalShell, search);
+              if (view === "minimal-today") return <MinimalToday />;
+              if (view === "minimal-contacts") return <MinimalContacts />;
+              return <Grow />;
+            })()}
+          </Route>
           <Route path="/grow/contacts/:id">
             {selectContact360View(minimalShell, search) === "minimal" ? <MinimalContact360 /> : <Grow />}
           </Route>
@@ -404,9 +425,14 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
             {selectOpportunitiesView(minimalShell, search) === "minimal" ? <MinimalOpportunities /> : <Redirect to="/grow?tab=opportunities" replace />}
           </Route>
           <Route path="/grow/import" component={GrowImport} />
+          <Route path="/grow/exports" component={GrowExports} />
+          <Route path="/grow/import/held" component={GrowHeldImports} />
+          <Route path="/search">{minimalShell ? <MobileSearchPage /> : <Redirect to="/grow" replace />}</Route>
+          <Route path="/more">{minimalShell ? <MobileMorePage /> : <Redirect to="/grow" replace />}</Route>
           <Route path="/settings" component={Settings} />
           <Route path="/settings/integrations" component={SettingsIntegrations} />
           <Route path="/settings/users" component={SettingsUsers} />
+          <Route path="/settings/audit" component={SettingsAudit} />
           <Route>
             <p>Page not found.</p>
           </Route>

@@ -12,7 +12,7 @@ import { and, eq } from "drizzle-orm";
 import { renderMetricsText, resetMetricsForTesting } from "@aee/events";
 import { db, entitlementGrants, growRelationships, users } from "@aee/db";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
-import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult } from "./testSupport.js";
+import { createBrokerageWithUsers, cleanupBrokerages, devLogin, type DevLoginResult, removeRelationshipManageFixture } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -172,6 +172,7 @@ test("linking a property requires grow.properties.link, and a relationship with 
   assert.equal((await linksFor(manageOnly.brokerageId, partyId, propertyId, "owner")).length, 0);
 
   const withoutManage = await createBrokerageWithUsers(baseUrl, `G-UAT-3 No Manage ${suffix}`);
+  await removeRelationshipManageFixture(withoutManage.brokerageId); // t242u: drop the test-only Run fixture grant
   try {
     const noManage = await post(withoutManage.agent.cookie, "/grow/relationships", {
       partyId: 1,
@@ -194,7 +195,7 @@ test("linking a property requires grow.properties.link, and a relationship with 
   assert.equal(contactOnlyBody.relationship.relationshipType, "prospective_seller");
 });
 
-test("an Agent cannot link another Agent's property, and Brokerage Administrator and Pit Crew can link any property in the brokerage", async () => {
+test("an Agent cannot link another Agent's property, Brokerage Administrator can link any property in the brokerage, and Pit Crew never can (Owner t274u)", async () => {
   const hidden = await post(agentA.cookie, "/grow/relationships", {
     partyId: contactId,
     propertyId: propertyBId,
@@ -217,7 +218,8 @@ test("an Agent cannot link another Agent's property, and Brokerage Administrator
     propertyId: propertyBId,
     relationshipType: "landlord",
   });
-  assert.equal(pitLink.status, 201, await pitLink.clone().text());
+  assert.equal(pitLink.status, 403, await pitLink.clone().text());
+  assert.equal((await linksFor(brokerageId, contactId, propertyBId, "landlord")).length, 0);
 });
 
 test("a property from another brokerage is rejected with the existing isolation response", async () => {

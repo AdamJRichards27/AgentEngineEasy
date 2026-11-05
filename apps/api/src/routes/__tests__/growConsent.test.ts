@@ -127,7 +127,7 @@ async function createParty(cookie: string, propertyId: number, overrides: Record
   const res = await fetch(api("/parties"), {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ propertyId, role: "Buyer", firstName: "Test", lastName: "Contact", ...overrides }),
+    body: JSON.stringify({ propertyId, role: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "Test", lastName: "Contact", ...overrides }),
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   const { party } = (await res.json()) as { party: { id: number } };
@@ -483,7 +483,7 @@ test("every write requires grow.contacts.manage and the read requires grow.conta
     const partyRes = await fetch(api("/parties"), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: fresh.agent.cookie },
-      body: JSON.stringify({ propertyId: property.id, role: "Buyer", firstName: "Un", lastName: "Entitled" }),
+      body: JSON.stringify({ propertyId: property.id, role: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "Un", lastName: "Entitled" }),
     });
     assert.equal(partyRes.status, 201);
     const { party } = (await partyRes.json()) as { party: { id: number } };
@@ -614,7 +614,7 @@ test("with NO consent policy row present, an eligibility evaluation returns REVI
     const partyRes = await fetch(api("/parties"), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: fresh.agent.cookie },
-      body: JSON.stringify({ propertyId: property.id, role: "Buyer", firstName: "No", lastName: "Policy" }),
+      body: JSON.stringify({ propertyId: property.id, role: "Buyer", email: `fx-${Math.random().toString(36).slice(2, 10)}@example.invalid`, firstName: "No", lastName: "Policy" }),
     });
     const { party } = (await partyRes.json()) as { party: { id: number } };
 

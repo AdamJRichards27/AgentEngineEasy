@@ -1,0 +1,495 @@
+/* AE Mobile (CC Task #64, M4). Phone People list and Contact 360 styles. One file. Every class starts with
+ * mob-p (People) or mob-c (Contact) and is scoped to .ae-minimal. minimal.css and the M2 and M3 stylesheets
+ * are not edited. Colours use the existing Minimal tokens with literal fallbacks. Orange text and controls
+ * use --am-orange-strong (AA on white); the approved orange is never used for text, and white text is never
+ * placed on it. Focus rings come from the existing .ae-minimal :is(a, button, ...):focus-visible rule;
+ * nothing here removes an outline. Targets: 320 to 430 px wide. Tap targets 44 px or more, list rows 56 px
+ * or more, field text 16 px so phones do not zoom in. */
+
+/* ── People list ─────────────────────────────────────────────── */
+.ae-minimal .mob-p {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 16px 92px 16px;
+}
+.ae-minimal .mob-p-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.ae-minimal .mob-p-title {
+  margin: 0;
+  font-size: 28px;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-p-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 16px;
+}
+.ae-minimal .mob-p-note {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-p-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 16px;
+}
+.ae-minimal .mob-p-error {
+  margin: 0;
+  font-size: 15px;
+  color: #B3261E;
+}
+.ae-minimal .mob-p-list {
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.ae-minimal .mob-p-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ae-minimal .mob-p-wide {
+  width: 100%;
+}
+.ae-minimal .mob-p-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: #A83F0C;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* ── Contact 360 ─────────────────────────────────────────────── */
+.ae-minimal .mob-c {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 16px 92px 16px;
+}
+.ae-minimal .mob-c-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--am-ink, #14181F);
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.ae-minimal .mob-c-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.ae-minimal .mob-c-avatar {
+  flex: 0 0 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #FDEEE5;
+  color: #8F3208;
+  font-size: 20px;
+  font-weight: 700;
+}
+.ae-minimal .mob-c-head-main {
+  min-width: 0;
+}
+.ae-minimal .mob-c-title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-c-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0 0;
+  padding: 0;
+  list-style: none;
+}
+.ae-minimal .mob-c-chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #E8EBF0;
+  color: #2B3340;
+  font-size: 13px;
+}
+.ae-minimal .mob-c-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 16px;
+}
+.ae-minimal .mob-c-card.is-blocked {
+  border-color: #B3261E;
+}
+.ae-minimal .mob-c-call {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 18px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: var(--am-orange-strong, #C44F17);
+  color: #FFFFFF;
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.ae-minimal .mob-c-number,
+.ae-minimal .mob-c-email {
+  margin: 0;
+  font-size: 16px;
+  color: var(--am-ink, #14181F);
+  overflow-wrap: anywhere;
+}
+.ae-minimal .mob-c-note {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-c-warning {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 600;
+  color: #B3261E;
+}
+.ae-minimal .mob-c-error {
+  margin: 0;
+  font-size: 15px;
+  color: #B3261E;
+}
+.ae-minimal .mob-c-section {
+  margin: 0;
+  font-size: 18px;
+  color: var(--am-ink, #14181F);
+}
+
+/* The count beside a section heading (Contact 360): quiet, so the heading stays the heading. */
+.ae-minimal .mob-c-count {
+  font-weight: 400;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-c-next-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-c-when {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-c-when.is-overdue {
+  color: #B3261E;
+}
+.ae-minimal .mob-c-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 18px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 12px;
+  background: var(--am-orange-strong, #C44F17);
+  color: #FFFFFF;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ae-minimal .mob-c-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ae-minimal .mob-c-wide {
+  width: 100%;
+}
+.ae-minimal .mob-c-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.ae-minimal .mob-c-status {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #2B3340;
+}
+.ae-minimal .mob-c-status.is-failed {
+  color: #B3261E;
+}
+.ae-minimal .mob-c-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--am-ink, #14181F);
+}
+.ae-minimal .mob-c-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 16px;
+  font-family: inherit;
+}
+.ae-minimal .mob-c-area {
+  min-height: 104px;
+  padding: 12px 14px;
+}
+.ae-minimal .mob-c-form-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.ae-minimal .mob-c-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ae-minimal .mob-c-list {
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.ae-minimal .mob-c-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 56px;
+  padding: 10px 14px;
+  box-sizing: border-box;
+  border-bottom: 1px solid #E2E5EA;
+  color: inherit;
+  text-decoration: none;
+  font-size: 16px;
+}
+.ae-minimal .mob-c-row-main {
+  flex: 1 1 160px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ae-minimal .mob-c-row-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.ae-minimal .mob-c-row-text {
+  margin-top: 2px;
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.ae-minimal .mob-c-row-sub {
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-c-row-sub.is-overdue {
+  color: #B3261E;
+}
+.ae-minimal .mob-c-row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Narrow phones (320 to 340 px): give the text room */
+@media (max-width: 340px) {
+  .ae-minimal .mob-c-avatar {
+    display: none;
+  }
+  .ae-minimal .mob-c-title {
+    font-size: 22px;
+  }
+  .ae-minimal .mob-c-actions,
+  .ae-minimal .mob-c-form-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── Linking: contact and property link controls ────────────────── */
+.ae-minimal .mob-c-linkblock {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid #E2E5EA;
+}
+.ae-minimal .mob-c-pad {
+  padding: 0 14px 12px 14px;
+}
+.ae-minimal .mob-c-button[disabled],
+.ae-minimal .mob-c-primary[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.ae-minimal .mob-c-confirm {
+  margin: 0 14px 12px 14px;
+  border-color: #B3261E;
+}
+.ae-minimal .mob-c-pick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 14px;
+  box-sizing: border-box;
+  border: 0;
+  border-bottom: 1px solid #E2E5EA;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+.ae-minimal .mob-c-pick.is-selected {
+  background: #FDEEE5;
+  box-shadow: inset 4px 0 0 var(--am-orange-strong, #C44F17);
+}
+
+/* The property contacts section sits inside the existing property page: give it room above and below. */
+.ae-minimal .mob-c-block[data-ae-property-contacts] {
+  margin: 16px 0 12px;
+}
+.ae-minimal .mob-c-link-row[data-ae-open-appraisal] {
+  padding-left: 14px;
+}
+
+/* Tap-to-call */
+.ae-minimal .mob-c-call + .mob-c-call {
+  margin-top: 8px;
+}
+.ae-minimal .mob-c-callback {
+  border-color: var(--am-orange-strong, #C44F17);
+}
+.ae-minimal .mob-c-linkbutton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  box-sizing: border-box;
+  min-height: 48px;
+}
+.ae-minimal .mob-c-contactline {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.ae-minimal .mob-c-contactline > .mob-c-link-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ae-minimal .mob-c-callbtn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  min-width: 64px;
+  min-height: 56px;
+  margin: 4px 12px 4px 0;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: var(--am-orange-strong, #C44F17);
+  color: #FFFFFF;
+  font-size: 16px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.ae-minimal .mob-c-primary-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #FDEEE5;
+  color: #7A2E0B;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Per-contact link controls sit in a disclosure so a property with many contacts is not a wall of buttons. */
+.ae-minimal .mob-c-manage {
+  margin: 0 14px 12px 14px;
+}
+.ae-minimal .mob-c-manage > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  cursor: pointer;
+}
+.ae-minimal .mob-c-manage > .mob-c-pad {
+  padding: 10px 0 0 0;
+}
+
+/* Duplicate contact: warn and offer to reuse the existing one. */
+.ae-minimal .mob-c-duplicate {
+  border-color: var(--am-orange-strong, #C44F17);
+}

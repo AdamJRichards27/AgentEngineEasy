@@ -1,4 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { maskAuditValue } from "./auditValueVault.js";
 import {
   db,
   auditLogs,
@@ -661,7 +662,8 @@ export async function getPropertyTimeline(
         : { type: "SYSTEM", userId: null, label: "System" },
       label: redact ? (row.recordType === "risk_exception" ? redactedRiskExceptionLabel(row.action) : redactedLabel(row.action)) : auditLabel(row),
       sensitivity: sensitive ? "SENSITIVE" : "STANDARD",
-      detail: redact ? undefined : row.updatedValue ? { updatedValue: row.updatedValue } : undefined,
+      // t276u: ordinary audit views never show encrypted contact values.
+      detail: redact ? undefined : row.updatedValue ? { updatedValue: maskAuditValue(row.updatedValue) } : undefined,
       refs: [{ recordType: row.recordType, recordId: row.recordId }],
       source: "audit_log",
     };

@@ -27,7 +27,8 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { z } from "zod";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitlement.js";
+import { propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import {
   createThread,
@@ -143,26 +144,66 @@ function handleCommunicationsError(err: unknown, res: Response): boolean {
 // handleCommunicationsError, 403 in the requireEntitlement() shape).
 // ---------------------------------------------------------------------
 
+// t234u: legacy property-scoped communications (property threads, their
+// messages, recipients, templates, hub) were reachable by any authenticated
+// user in the brokerage with no subscription check, and property threads
+// ignored own-property visibility. Property threads now need Grow or Run
+// (read: grow.contacts.read | run.access; write: grow.contacts.manage |
+// run.access) AND the property visible to the caller (hidden = 404, same as
+// cross-brokerage). Contact threads keep grow.contacts.manage for writes and
+// need grow.contacts.read for reads.
+// "cancel": withdrawing an unsent message stays available on contact threads
+// (WP1 P2-3); on property threads it needs a subscription and visibility.
+type ThreadAccessMode = "read" | "write" | "cancel";
+const PROPERTY_COMMS_KEYS = {
+  read: ["grow.contacts.read", "run.access"],
+  write: ["grow.contacts.manage", "run.access"],
+} as const;
+const canReadPropertyComms = requireAnyEntitlement(...PROPERTY_COMMS_KEYS.read);
+const canWritePropertyComms = requireAnyEntitlement(...PROPERTY_COMMS_KEYS.write);
+
+async function firstAllowed(user: NonNullable<Request["authedUser"]>, keys: readonly EntitlementKeyLike[]) {
+  let reason: string | undefined;
+  for (const key of keys) {
+    const decision = await explainEntitlementDecision(user, key);
+    if (decision.allowed) return { allowed: true as const };
+    reason ??= decision.reason;
+  }
+  return { allowed: false as const, reason: reason ?? "ENTITLEMENT_MISSING" };
+}
+type EntitlementKeyLike = Parameters<typeof explainEntitlementDecision>[1];
+
 async function ensureGrowEntitlementForThread(
   req: Request,
   res: Response,
   resolveThreadId: () => Promise<number>,
+  mode: ThreadAccessMode = "write",
 ): Promise<boolean> {
   const user = req.authedUser!;
   try {
     const threadId = await resolveThreadId();
     if (!Number.isInteger(threadId) || threadId <= 0) throw new CommunicationTenancyError();
     const thread = await getThread(threadId, user.brokerageId);
-    if (thread.propertyId !== null) return true;
-    const decision = await explainEntitlementDecision(user, "grow.contacts.manage");
-    if (decision.allowed) return true;
-    res.status(403).json({
-      error: "Not entitled",
-      reason: decision.reason,
-      entitlementKey: "grow.contacts.manage",
-      upgrade: { action: "grow.checkout", productCode: "grow" },
-    });
-    return false;
+    if (thread.propertyId === null && mode === "cancel") return true;
+    const keys: readonly EntitlementKeyLike[] =
+      thread.propertyId !== null
+        ? PROPERTY_COMMS_KEYS[mode === "write" ? "write" : "read"]
+        : [mode === "read" ? "grow.contacts.read" : "grow.contacts.manage"];
+    const decision = await firstAllowed(user, keys);
+    if (!decision.allowed) {
+      res.status(403).json({
+        error: "Not entitled",
+        reason: decision.reason,
+        entitlementKey: keys[0],
+        upgrade: { action: "grow.checkout", productCode: "grow" },
+      });
+      return false;
+    }
+    if (thread.propertyId !== null && (await propertyHiddenFromCaller(user, thread.propertyId))) {
+      res.status(404).json({ error: "Not found" });
+      return false;
+    }
+    return true;
   } catch (err) {
     if (handleCommunicationsError(err, res)) return false;
     logger.error("communications_grow_thread_entitlement_failed_closed", { userId: user.id, error: err });
@@ -171,20 +212,30 @@ async function ensureGrowEntitlementForThread(
   }
 }
 
+/** Property-scoped list/create/recipients: hidden property answers 404 (same as cross-brokerage). */
+function requireVisibleProperty() {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const propertyId = parsePositiveId(req.params.propertyId);
+    if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
+    if (await propertyHiddenFromCaller(req.authedUser!, propertyId)) return void res.status(404).json({ error: "Not found" });
+    next();
+  };
+}
+
 // AE GROW Pilot Readiness WP6a (D1-residual): these gates run BEFORE the
 // route handler, so a malformed id has to be rejected here too — otherwise
 // the handler's own 400 is unreachable and the caller sees whatever this
 // gate decided instead (previously a misleading 404, via the
 // CommunicationTenancyError below, or a 500 once the id reached getMessage).
-function requireGrowForContactThreadByThreadId() {
+function requireGrowForContactThreadByThreadId(mode: ThreadAccessMode = "write") {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const threadId = parsePositiveId(req.params.threadId);
     if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
-    if (await ensureGrowEntitlementForThread(req, res, async () => threadId)) next();
+    if (await ensureGrowEntitlementForThread(req, res, async () => threadId, mode)) next();
   };
 }
 
-function requireGrowForContactThreadByMessageId() {
+function requireGrowForContactThreadByMessageId(mode: ThreadAccessMode = "write") {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.authedUser!;
     const messageId = parsePositiveId(req.params.messageId);
@@ -193,7 +244,7 @@ function requireGrowForContactThreadByMessageId() {
       await ensureGrowEntitlementForThread(req, res, async () => {
         const message = await getMessage(messageId, user.brokerageId);
         return message.threadId;
-      })
+      }, mode)
     ) {
       next();
     }
@@ -206,7 +257,7 @@ function requireGrowForContactThreadByMessageId() {
 // the caller open every property individually.
 // ---------------------------------------------------------------------
 
-communicationsRouter.get("/communications/hub", requireAuth, async (req, res) => {
+communicationsRouter.get("/communications/hub", requireAuth, canReadPropertyComms, async (req, res) => {
   const user = req.authedUser!;
   const filter = req.query.filter === "needs-attention" ? "needs-attention" : "all";
   const limitParam = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
@@ -234,7 +285,7 @@ const createThreadSchema = z.object({
   subject: z.string().min(1),
 });
 
-communicationsRouter.get("/properties/:propertyId/communications/threads", requireAuth, async (req, res) => {
+communicationsRouter.get("/properties/:propertyId/communications/threads", requireAuth, canReadPropertyComms, requireVisibleProperty(), async (req, res) => {
   const user = req.authedUser!;
   const propertyId = parsePositiveId(req.params.propertyId);
   if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
@@ -246,7 +297,7 @@ communicationsRouter.get("/properties/:propertyId/communications/threads", requi
   }
 });
 
-communicationsRouter.post("/properties/:propertyId/communications/threads", requireAuth, async (req, res) => {
+communicationsRouter.post("/properties/:propertyId/communications/threads", requireAuth, canWritePropertyComms, requireVisibleProperty(), async (req, res) => {
   const user = req.authedUser!;
   const propertyId = parsePositiveId(req.params.propertyId);
   if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
@@ -267,7 +318,7 @@ communicationsRouter.post("/properties/:propertyId/communications/threads", requ
 });
 
 // Section 11: recipient candidates resolved from the property's existing parties.
-communicationsRouter.get("/properties/:propertyId/communications/recipients", requireAuth, async (req, res) => {
+communicationsRouter.get("/properties/:propertyId/communications/recipients", requireAuth, canReadPropertyComms, requireVisibleProperty(), async (req, res) => {
   const user = req.authedUser!;
   const propertyId = parsePositiveId(req.params.propertyId);
   if (propertyId === null) return void res.status(400).json({ error: "Invalid property id." });
@@ -279,7 +330,7 @@ communicationsRouter.get("/properties/:propertyId/communications/recipients", re
   }
 });
 
-communicationsRouter.get("/communications/threads/:threadId", requireAuth, async (req, res) => {
+communicationsRouter.get("/communications/threads/:threadId", requireAuth, requireGrowForContactThreadByThreadId("read"), async (req, res) => {
   const user = req.authedUser!;
   const threadId = parsePositiveId(req.params.threadId);
   if (threadId === null) return void res.status(400).json({ error: "Invalid thread id." });
@@ -508,7 +559,7 @@ communicationsRouter.post("/communications/threads/:threadId/messages", requireA
   }
 });
 
-communicationsRouter.get("/communications/messages/:messageId", requireAuth, async (req, res) => {
+communicationsRouter.get("/communications/messages/:messageId", requireAuth, requireGrowForContactThreadByMessageId("read"), async (req, res) => {
   const user = req.authedUser!;
   const messageId = parsePositiveId(req.params.messageId);
   if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
@@ -551,7 +602,7 @@ communicationsRouter.post("/communications/messages/:messageId/approve", require
   }
 });
 
-communicationsRouter.post("/communications/messages/:messageId/cancel", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/messages/:messageId/cancel", requireAuth, requireGrowForContactThreadByMessageId("cancel"), async (req, res) => {
   const user = req.authedUser!;
   const messageId = parsePositiveId(req.params.messageId);
   if (messageId === null) return void res.status(400).json({ error: "Invalid message id." });
@@ -611,7 +662,7 @@ const createTemplateSchema = z.object({
   placeholders: z.array(z.string()).default([]),
 });
 
-communicationsRouter.get("/communications/templates", requireAuth, async (req, res) => {
+communicationsRouter.get("/communications/templates", requireAuth, canReadPropertyComms, async (req, res) => {
   const user = req.authedUser!;
   const channel = typeof req.query.channel === "string" ? req.query.channel : undefined;
   const category = typeof req.query.category === "string" ? req.query.category : undefined;
@@ -624,7 +675,7 @@ communicationsRouter.get("/communications/templates", requireAuth, async (req, r
   res.json({ templates });
 });
 
-communicationsRouter.post("/communications/templates", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/templates", requireAuth, canWritePropertyComms, async (req, res) => {
   const user = req.authedUser!;
   const body = createTemplateSchema.safeParse(req.body);
   if (!body.success) return void res.status(400).json({ error: "Invalid request." });
@@ -645,7 +696,7 @@ const createTemplateVersionSchema = z.object({
   placeholders: z.array(z.string()).optional(),
 });
 
-communicationsRouter.post("/communications/templates/:templateId/versions", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/templates/:templateId/versions", requireAuth, canWritePropertyComms, async (req, res) => {
   const user = req.authedUser!;
   const templateId = parsePositiveId(req.params.templateId);
   if (templateId === null) return void res.status(400).json({ error: "Invalid template id." });
@@ -660,7 +711,7 @@ communicationsRouter.post("/communications/templates/:templateId/versions", requ
   }
 });
 
-communicationsRouter.post("/communications/templates/:templateId/activate", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/templates/:templateId/activate", requireAuth, canWritePropertyComms, async (req, res) => {
   const user = req.authedUser!;
   const templateId = parsePositiveId(req.params.templateId);
   if (templateId === null) return void res.status(400).json({ error: "Invalid template id." });
@@ -673,7 +724,7 @@ communicationsRouter.post("/communications/templates/:templateId/activate", requ
   }
 });
 
-communicationsRouter.post("/communications/templates/:templateId/archive", requireAuth, async (req, res) => {
+communicationsRouter.post("/communications/templates/:templateId/archive", requireAuth, canWritePropertyComms, async (req, res) => {
   const user = req.authedUser!;
   const templateId = parsePositiveId(req.params.templateId);
   if (templateId === null) return void res.status(400).json({ error: "Invalid template id." });

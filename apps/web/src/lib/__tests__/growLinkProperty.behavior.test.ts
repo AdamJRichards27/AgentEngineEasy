@@ -1,8 +1,10 @@
-// G-UAT-3 — Contact 360 Link property form.
-// Hidden unless the user holds both grow.properties.link and
-// grow.relationships.manage. Submit posts to POST /grow/relationships.
-// Future seller is one of the relationship options. 404, 403 and 409
-// render a plain sentence.
+// G-UAT-3 — Contact 360 Link property form, t273u (X10 fix).
+// Shown only when canManageRelationships holds (grow.relationships.manage,
+// or run.access for Agent / Brokerage Administrator; never Pit Crew), the
+// mirror of the server's requireRelationshipManage. Submit makes a canonical
+// property_parties link through POST /parties { propertyId, partyId, role }
+// and never posts a Grow-only relationship. 404, 403 and 409 render a plain
+// sentence.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -157,7 +159,7 @@ const mocks: Plugin = {
     }
     if (id === "\0guat3-session") {
       return `
-        export const useSession = () => ({ user: { id: 1, firstName: "Sam", role: "Agent" } });
+        export const useSession = () => ({ user: { id: 1, firstName: "Sam", role: globalThis.__guat3Role ?? "Agent" } });
         export const useEntitlements = () => ({
           isLoading: false,
           hasEntitlement: (key) => globalThis.__guat3Entitlements.includes(key),
@@ -204,7 +206,7 @@ async function withVite<T>(run: (vite: ViteDevServer) => Promise<T>): Promise<T>
   }
 }
 
-const BOTH_KEYS = ["grow.properties.link", "grow.relationships.manage"];
+const BOTH_KEYS = ["grow.relationships.manage"];
 
 function install(entitlements: string[], fetchImpl: (path: string, options?: { method?: string; body?: string }) => Promise<unknown>) {
   const hooks = createHarness();
@@ -237,6 +239,7 @@ function clearGlobals() {
     "__guat3Mutations",
     "__guat3MutationCursor",
     "__guat3ApiFetch",
+    "__guat3Role",
   ]) {
     delete (globalThis as Record<string, unknown>)[key];
   }
@@ -274,19 +277,29 @@ async function searchAndSelect(hooks: ReturnType<typeof createHarness>, Form: Fo
 
 const propertyFetch = async (path: string, options?: { method?: string; body?: string }) => {
   if (path.startsWith("/properties")) return { properties: [{ id: 9, formattedAddress: "9 Future St" }] };
-  if (path === "/grow/relationships" && options?.method === "POST") return { relationship: { id: 3 } };
+  if (path === "/parties" && options?.method === "POST") return { link: { id: 3 } };
   throw new Error(`unexpected ${options?.method ?? "GET"} ${path}`);
 };
 
-test("Link property is hidden unless both keys are held", async () => {
-  for (const entitlements of [[], ["grow.properties.link"], ["grow.relationships.manage"], ["grow.contacts.manage"]]) {
-    const { hooks, calls } = install(entitlements, propertyFetch);
+test("Link property follows canManageRelationships: hidden without it, and for Pit Crew", async () => {
+  const cases: Array<{ entitlements: string[]; role: string; visible: boolean }> = [
+    { entitlements: [], role: "Agent", visible: false },
+    { entitlements: ["grow.properties.link"], role: "Agent", visible: false },
+    { entitlements: ["grow.contacts.manage"], role: "Agent", visible: false },
+    { entitlements: ["run.access"], role: "Pit Crew", visible: false },
+    { entitlements: ["grow.relationships.manage"], role: "Agent", visible: true },
+    { entitlements: ["run.access"], role: "Agent", visible: true },
+    { entitlements: ["run.access"], role: "Brokerage Administrator", visible: true },
+  ];
+  for (const item of cases) {
+    const { hooks, calls } = install(item.entitlements, propertyFetch);
+    (globalThis as Record<string, unknown>).__guat3Role = item.role;
     try {
       await withVite(async (vite) => {
         const { GrowLinkPropertyForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowLinkPropertyForm: FormComponent };
         const tree = render(hooks, GrowLinkPropertyForm, () => {});
-        assert.equal(tree, null);
-        assert.equal(button(tree, "Link property"), undefined);
+        if (item.visible) assert.ok(button(tree, "Link property"), JSON.stringify(item));
+        else assert.equal(tree, null, JSON.stringify(item));
         assert.equal(calls.length, 0);
       });
     } finally {
@@ -295,53 +308,50 @@ test("Link property is hidden unless both keys are held", async () => {
   }
 });
 
-test("submitting Link property posts the property and Future seller, then refetches Contact 360", async () => {
+test("submitting Link property makes a canonical link via POST /parties, never a Grow-only relationship", async () => {
   const { hooks, calls, invalidated, pending } = install(BOTH_KEYS, propertyFetch);
   let linked = 0;
+  const onLinked = () => {
+    linked += 1;
+  };
   try {
     await withVite(async (vite) => {
       const { GrowLinkPropertyForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowLinkPropertyForm: FormComponent };
-      const ready = await searchAndSelect(hooks, GrowLinkPropertyForm, () => {
-        linked += 1;
-      }, pending);
-      const futureSeller = findAll(ready, (element) => element.type === "option" && element.props?.value === "prospective_seller")[0];
-      assert.ok(futureSeller, "Future seller is a relationship option");
-      assert.equal(textContent(futureSeller), "Future seller");
-      assert.equal(
-        findAll(ready, (element) => element.type === "option" && element.props?.value === "spouse_partner").length,
-        0,
-        "household relationship types are not in the property form",
-      );
-      field(ready, "grow-link-property-type")!.props!.onChange!({ target: { value: "prospective_seller" } });
-      const chosen = render(hooks, GrowLinkPropertyForm, () => {
-        linked += 1;
-      });
-      const form = findAll(chosen, (element) => element.type === "form")[0];
-      form.props!.onSubmit!({ preventDefault() {} });
+      const ready = await searchAndSelect(hooks, GrowLinkPropertyForm, onLinked, pending);
+      const values = findAll(ready, (element) => element.type === "option").map((element) => element.props?.value);
+      assert.deepEqual(values, ["", "Seller", "Buyer", "Solicitor", "PowerOfAttorney", "Owner", "Landlord", "Tenant", "Other"], "only canonical property roles are offered");
+      field(ready, "grow-link-property-type")!.props!.onChange!({ target: { value: "Owner" } });
+      const chosen = render(hooks, GrowLinkPropertyForm, onLinked);
+      findAll(chosen, (element) => element.type === "form")[0].props!.onSubmit!({ preventDefault() {} });
       await Promise.all(pending);
 
-      const post = calls.find((call) => call.path === "/grow/relationships");
-      assert.ok(post, "the form posts to POST /grow/relationships");
+      const post = calls.find((call) => call.path === "/parties");
+      assert.ok(post, "the form posts to POST /parties");
       assert.equal(post.options?.method, "POST");
-      assert.deepEqual(JSON.parse(post.options!.body!), {
-        partyId: 44,
-        propertyId: 9,
-        relationshipType: "prospective_seller",
-      });
+      assert.deepEqual(JSON.parse(post.options!.body!), { propertyId: 9, partyId: 44, role: "Owner" });
+      assert.equal(calls.filter((call) => call.path.startsWith("/grow/relationships")).length, 0, "no Grow-only relationship is written");
       assert.ok(calls.some((call) => call.path === "/properties?q=Future%20St"));
-      assert.ok(
-        invalidated.some((key) => Array.isArray(key) && key[0] === "grow-contact" && key[1] === 44),
-        "Contact 360 is refetched",
-      );
-      assert.ok(
-        invalidated.some((key) => Array.isArray(key) && key.length === 1 && key[0] === "grow-relationships"),
-        "the Relationships card is invalidated",
-      );
-      assert.ok(
-        invalidated.some((key) => Array.isArray(key) && key.length === 1 && key[0] === "grow-today"),
-        "Getting started (grow-today) is invalidated after linking a property",
-      );
+      for (const key of [["grow-contact", 44], ["contact-property-links", 44], ["minimal-property-parties"], ["grow-relationships"], ["grow-today"]]) {
+        assert.ok(invalidated.some((k) => JSON.stringify(k) === JSON.stringify(key)), `invalidates ${JSON.stringify(key)}`);
+      }
       assert.equal(linked, 1);
+    });
+  } finally {
+    clearGlobals();
+  }
+});
+
+test("a role must be chosen; nothing is posted without one", async () => {
+  const { hooks, calls, pending } = install(BOTH_KEYS, propertyFetch);
+  try {
+    await withVite(async (vite) => {
+      const { GrowLinkPropertyForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowLinkPropertyForm: FormComponent };
+      const ready = await searchAndSelect(hooks, GrowLinkPropertyForm, () => {}, pending);
+      findAll(ready, (element) => element.type === "form")[0].props!.onSubmit!({ preventDefault() {} });
+      await Promise.all(pending);
+      const done = render(hooks, GrowLinkPropertyForm, () => {});
+      assert.match(textContent(done), /relationship/i);
+      assert.equal(calls.filter((call) => call.path === "/parties").length, 0);
     });
   } finally {
     clearGlobals();
@@ -357,14 +367,16 @@ test("404, 403 and 409 show a plain message", async () => {
   for (const item of cases) {
     const { hooks, pending } = install(BOTH_KEYS, async (path, options) => {
       if (path.startsWith("/properties")) return { properties: [{ id: 9, formattedAddress: "9 Future St" }] };
-      if (path === "/grow/relationships" && options?.method === "POST") throw new FakeApiError(item.status, item.friendly);
+      if (path === "/parties" && options?.method === "POST") throw new FakeApiError(item.status, item.friendly);
       throw new Error(`unexpected ${path}`);
     });
     try {
       await withVite(async (vite) => {
         const { GrowLinkPropertyForm } = (await vite.ssrLoadModule("/src/pages/Grow.tsx")) as { GrowLinkPropertyForm: FormComponent };
         const ready = await searchAndSelect(hooks, GrowLinkPropertyForm, () => {}, pending);
-        findAll(ready, (element) => element.type === "form")[0].props!.onSubmit!({ preventDefault() {} });
+        field(ready, "grow-link-property-type")!.props!.onChange!({ target: { value: "Buyer" } });
+        const chosen = render(hooks, GrowLinkPropertyForm, () => {});
+        findAll(chosen, (element) => element.type === "form")[0].props!.onSubmit!({ preventDefault() {} });
         await Promise.all(pending);
         const done = render(hooks, GrowLinkPropertyForm, () => {});
         assert.match(textContent(done), item.expected);

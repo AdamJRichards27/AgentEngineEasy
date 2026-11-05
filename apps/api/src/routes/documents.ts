@@ -2,11 +2,12 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import multer from "multer";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { db, documents, properties } from "@aee/db";
+import { db, documentPackages, documents, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
 import { logAudit } from "../lib/audit.js";
+import { auditAuthorityAction, pitCrewScopeRefusal, requirePitCrewAuthority, requireSendAuthorisation } from "../lib/contactAuthority.js";
 import {
   DocumentStorageError,
   configuredMaxDocumentBytes,
@@ -51,6 +52,24 @@ export const documentsRouter = Router();
 // appraisal presentation writes go through lib/documentStorage.ts, not
 // these routes, and no Grow page calls them.
 const requiresRunAccess = requireEntitlement("run.access");
+// t275u: Pit Crew prepares listing agreements only on its listing agent's recorded
+// authority (and that agent's Run entitlement); sending for signature is agent-only.
+const pitCrewOnAuthority = requirePitCrewAuthority("run.access");
+async function pitCrewPropertyRefused(req: Request, res: Response, propertyId: number | null): Promise<boolean> {
+  if (!req.actingFor || propertyId === null) return false;
+  const refusal = await pitCrewScopeRefusal(req, { propertyId });
+  if (!refusal) return false;
+  res.status(refusal.status).json(refusal.body);
+  return true;
+}
+async function packagePropertyId(packageId: number, brokerageId: number): Promise<number | null> {
+  const [row] = await db
+    .select({ propertyId: documentPackages.propertyId })
+    .from(documentPackages)
+    .innerJoin(properties, eq(properties.id, documentPackages.propertyId))
+    .where(and(eq(documentPackages.id, packageId), eq(properties.brokerageId, brokerageId)));
+  return row?.propertyId ?? null;
+}
 
 // AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
 // routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
@@ -160,7 +179,7 @@ const agencyTermsSchema = z
     path: ["flatFeeCents"],
   });
 
-documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, async (req, res) => {
+documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requiresRunAccess, pitCrewOnAuthority, async (req, res) => {
   const propertyId = readIdParam(res, req.params.propertyId, "property");
   if (propertyId === null) return;
   const parsed = agencyTermsSchema.safeParse(req.body);
@@ -169,6 +188,7 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
     return;
   }
   const user = req.authedUser!;
+  if (await pitCrewPropertyRefused(req, res, propertyId)) return;
 
   try {
     const terms = await upsertAgencyAgreementTerms({ propertyId, brokerageId: user.brokerageId, userId: user.id, ...parsed.data });
@@ -181,6 +201,7 @@ documentsRouter.put("/agency-agreement-terms/:propertyId", requireAuth, requires
       recordId: String(terms.id),
       propertyId,
     });
+    if (req.actingFor) await auditAuthorityAction(req, { action: "agency_agreement_terms_updated_on_authority", recordType: "agency_agreement_terms", recordId: terms.id, propertyId, after: parsed.data });
 
     res.json({ terms });
   } catch (err) {
@@ -217,19 +238,22 @@ documentsRouter.get("/agency-agreement-terms/:propertyId", requireAuth, requires
 
 // Template population — idempotent/incremental, safe to call again after
 // agency terms are captured or a prior partial run (see lib/documents.ts).
-documentsRouter.post("/packages/:packageId/populate", requireAuth, requiresRunAccess, async (req, res) => {
+documentsRouter.post("/packages/:packageId/populate", requireAuth, requiresRunAccess, pitCrewOnAuthority, async (req, res) => {
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;
+  const pkgPropertyId = req.actingFor ? await packagePropertyId(packageId, user.brokerageId) : null;
+  if (await pitCrewPropertyRefused(req, res, pkgPropertyId)) return;
   try {
     const result = await populateDocumentPackage(packageId, user.brokerageId);
+    if (req.actingFor) await auditAuthorityAction(req, { action: "document_package_populated_on_authority", recordType: "document_package", recordId: packageId, propertyId: pkgPropertyId });
     res.json(result);
   } catch (err) {
     handleDocumentError(err, res);
   }
 });
 
-documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, requiresRunAccess, async (req, res) => {
+documentsRouter.post("/packages/:packageId/send-for-signature", requireAuth, requireSendAuthorisation("document_package", "packageId", "run.access"), requiresRunAccess, async (req, res) => {
   const packageId = readIdParam(res, req.params.packageId, "document package");
   if (packageId === null) return;
   const user = req.authedUser!;

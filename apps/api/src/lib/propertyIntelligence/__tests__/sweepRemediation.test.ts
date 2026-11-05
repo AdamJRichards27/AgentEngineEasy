@@ -29,12 +29,12 @@ import {
 } from "@aee/db";
 import {
   runSignalSweep,
-  tryHoldSignalSweepLockForTests,
   resetSweepResumePointForTests,
   listBrokeragesDueForSweep,
   LOCK_LEAK_ALERT_AFTER_CONSECUTIVE_ORPHANED_SKIPS,
 } from "../sweep.js";
 import { dismissSignal } from "../signals.js";
+import { acquireSweepLockForTest, sweepWhenLockFree } from "./sweepLockContention.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "../../../routes/__tests__/testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -71,8 +71,14 @@ before(async () => {
 });
 
 after(async () => {
-  await cleanupBrokerages([A?.brokerageId, B?.brokerageId, C?.brokerageId].filter((id): id is number => typeof id === "number"));
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  // t223u: never leave the HTTP server listening if teardown fails (a throwing cleanup used to
+  // skip server.close, the child process never exited, and the runner waited until the CI job timeout).
+  try {
+    await cleanupBrokerages([A?.brokerageId, B?.brokerageId, C?.brokerageId].filter((id): id is number => typeof id === "number"));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 });
 
 /* ---------------------------------------------------------------------
@@ -136,9 +142,11 @@ async function signalsForParty(brokerageId: number, partyId: number) {
     .where(and(eq(growOpportunitySignals.brokerageId, brokerageId), eq(growOpportunitySignals.partyId, partyId)));
 }
 
+// Cross-file contention on the sweep lock: see sweepLockContention.ts. Every
+// sweep that must run, and every lock this file holds, waits out a sibling
+// file that holds the lock instead of failing on the first refusal.
 async function sweepScoped(brokerageIds: number[], options: { force?: boolean } = {}) {
-  const result = await runSignalSweep("MANUAL", { brokerageIds, force: true, ...options });
-  assert.ok(result.ok, `sweep was skipped: ${result.ok ? "" : result.skippedReason}`);
+  const result = await sweepWhenLockFree({ brokerageIds, force: true, ...options });
   return result.summary;
 }
 
@@ -242,17 +250,25 @@ test("P1-1 — a pg_try_advisory_lock statement that rejects destroys its pooled
 test("P1-1 — repeated 'already running' refusals with NO running row are alerted, not reported as the expected outcome", async () => {
   resetSweepResumePointForTests();
 
+  // Take the lock first (waiting out a sibling file's sweep), so nothing can
+  // be sweeping while the RUNNING rows are cleared below.
+  const release = await acquireSweepLockForTest();
+
   // The condition under test is "the lock is held but nothing is sweeping".
   // Any RUNNING row left behind by another suite would mask it — and is
   // itself abandoned, which is exactly what an unscoped sweep's own
-  // stale-run recovery would conclude about it.
-  await db
-    .update(growSignalSweepRuns)
-    .set({ status: "FAILED", completedAt: new Date(), errorMessage: "Abandoned: the sweep did not complete (its process stopped while running)." })
-    .where(eq(growSignalSweepRuns.status, "RUNNING"));
+  // stale-run recovery would conclude about it. This file holds the lock
+  // here, so no sibling's live run can be among them.
+  try {
+    await db
+      .update(growSignalSweepRuns)
+      .set({ status: "FAILED", completedAt: new Date(), errorMessage: "Abandoned: the sweep did not complete (its process stopped while running)." })
+      .where(eq(growSignalSweepRuns.status, "RUNNING"));
+  } catch (err) {
+    await release();
+    throw err;
+  }
 
-  const release = await tryHoldSignalSweepLockForTests();
-  assert.ok(release, "the lock must be free at the start of this test");
   let lines: Array<{ level: string; message: string }> = [];
   try {
     lines = await captureErrorLog(async () => {
@@ -275,8 +291,7 @@ test("P1-1 — repeated 'already running' refusals with NO running row are alert
   // accumulates towards the alert.
   await sweepScoped([A.brokerageId]);
   const afterSuccess = await captureErrorLog(async () => {
-    const holder = await tryHoldSignalSweepLockForTests();
-    assert.ok(holder);
+    const holder = await acquireSweepLockForTest();
     try {
       await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId] });
     } finally {
@@ -311,7 +326,9 @@ test("P1-2 — a brokerage whose pass throws is counted and skipped over; the br
   try {
     // Scoped, so it iterates A then B in ascending id order: the POISONED
     // tenant is first, and the healthy one is behind it.
-    const result = await runSignalSweep("MANUAL", { brokerageIds: [A.brokerageId, B.brokerageId], force: true });
+    // A refusal (a sibling file holds the lock) never reaches the cursor read,
+    // so the injection is still armed for the attempt that does run.
+    const result = await sweepWhenLockFree({ brokerageIds: [A.brokerageId, B.brokerageId], force: true });
     assert.ok(result.ok, "one failing tenant must not fail the whole run");
     summary = result.summary;
   } finally {
@@ -369,7 +386,11 @@ test("P1-4 — an unscoped run takes the least-recently-evaluated brokerage from
   // Before this fix the unscoped path read a module-level integer and would
   // have started at the lowest brokerage id in the database instead.
   assert.deepEqual(await listBrokeragesDueForSweep(1), [B.brokerageId]);
-  const result = await runSignalSweep("MANUAL", { maxBrokerages: 1 });
+  // If a sibling file holds the lock, wait it out; before every attempt, put
+  // B back at 1900 in case that sibling's own unscoped run took it.
+  const result = await sweepWhenLockFree({ maxBrokerages: 1 }, async () => {
+    await db.update(growSignalSweepCursors).set({ lastEvaluatedAt: new Date("1900-01-01T00:00:00Z") }).where(eq(growSignalSweepCursors.brokerageId, B.brokerageId));
+  });
   assert.ok(result.ok);
   assert.equal(result.summary.brokeragesConsidered, 1);
   assert.equal(result.summary.lastBrokerageId, B.brokerageId, "the unscoped run swept the most overdue brokerage");

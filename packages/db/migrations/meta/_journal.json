@@ -260,6 +260,27 @@
       "when": 1791843836237,
       "tag": "0036_e9_tenant_brokerage_id",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1793516764760,
+      "tag": "0048_property_parties_unique_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1793516765760,
+      "tag": "0049_property_parties_one_primary_per_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1793516766760,
+      "tag": "0050_property_parties_role_check",
+      "breakpoints": true
     }
   ]
 }

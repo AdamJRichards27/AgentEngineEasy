@@ -36,6 +36,7 @@ import {
 import { appraisalLifecycleClosed } from "../lib/appraisalFinaliseGuard.js";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { auditAuthorityAction, entitlementOrAuthority, pitCrewScopeRefusal } from "../lib/contactAuthority.js";
 import { explainEntitlementDecision, resolveEntitlements } from "../lib/entitlements/resolver.js";
 import { currentCorrelationId, logger, publishDomainEvent } from "@aee/events";
 import {
@@ -358,7 +359,8 @@ growRouter.get("/relationships", requireAuth, requireEntitlement("grow.access"),
 growRouter.post(
   "/relationships",
   requireAuth,
-  requireEntitlement("grow.relationships.manage"),
+  // t275u: Pit Crew only on the contact owner's recorded authority (owner holds the key).
+  entitlementOrAuthority("grow.relationships.manage", requireEntitlement("grow.relationships.manage")),
   async (req, res) => {
     const user = req.authedUser!;
     const partyId = Number(req.body?.partyId);
@@ -387,6 +389,12 @@ growRouter.post(
       res.status(404).json({ error: "Party not found in this brokerage" });
       return;
     }
+    // t275u: Pit Crew only for a contact the named owner owns or is assigned.
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
     if (propertyId !== null) {
       const [property] = await db.select().from(properties).where(and(eq(properties.id, propertyId), eq(properties.brokerageId, user.brokerageId))).limit(1);
       if (!property) {
@@ -407,7 +415,7 @@ growRouter.post(
       // with no propertyId keeps the manage gate only. This check runs after
       // the existing not-found responses so a hidden or cross-brokerage
       // property still answers 404 for a caller who holds the link key.
-      const linkDecision = await explainEntitlementDecision(user, "grow.properties.link");
+      const linkDecision = await explainEntitlementDecision(req.actingFor?.owner ?? user, "grow.properties.link");
       if (linkDecision.allowed === false) {
         res.status(403).json({
           error: "Not entitled",
@@ -441,22 +449,50 @@ growRouter.post(
       }
     }
 
-    const [inserted] = await db
-      .insert(growRelationships)
-      .values({
-        brokerageId: user.brokerageId,
-        partyId,
-        propertyId,
-        relationshipType,
-        role: typeof req.body?.role === "string" ? req.body.role : null,
-        status: "Active",
-        isPrimary: Boolean(req.body?.isPrimary),
-        confidenceScore: typeof req.body?.confidenceScore === "number" ? String(req.body.confidenceScore) : null,
-        sourceType: typeof req.body?.sourceType === "string" ? req.body.sourceType : "manual",
-        sourceEvidence: typeof req.body?.sourceEvidence === "string" ? req.body.sourceEvidence : null,
-        createdBy: user.id,
-      })
-      .returning();
+    // t274u item 3: the same interest (contact, property or none, type) is never
+    // recorded twice. Re-checked inside one transaction with the contact row
+    // locked, so concurrent submissions serialise (no unique index, no migration).
+    const outcome = await db.transaction(async (tx) => {
+      await tx.select({ id: parties.id }).from(parties).where(eq(parties.id, partyId)).for("update");
+      const [dup] = await tx
+        .select({ id: growRelationships.id })
+        .from(growRelationships)
+        .where(
+          and(
+            eq(growRelationships.brokerageId, user.brokerageId),
+            eq(growRelationships.partyId, partyId),
+            propertyId === null ? isNull(growRelationships.propertyId) : eq(growRelationships.propertyId, propertyId),
+            eq(growRelationships.relationshipType, relationshipType),
+          ),
+        )
+        .limit(1);
+      if (dup) return { duplicateId: dup.id } as const;
+      const [row] = await tx
+          .insert(growRelationships)
+        .values({
+          brokerageId: user.brokerageId,
+          partyId,
+          propertyId,
+          relationshipType,
+          role: typeof req.body?.role === "string" ? req.body.role : null,
+          status: "Active",
+          isPrimary: Boolean(req.body?.isPrimary),
+          confidenceScore: typeof req.body?.confidenceScore === "number" ? String(req.body.confidenceScore) : null,
+          sourceType: typeof req.body?.sourceType === "string" ? req.body.sourceType : "manual",
+          sourceEvidence: typeof req.body?.sourceEvidence === "string" ? req.body.sourceEvidence : null,
+          createdBy: req.actingFor?.owner.id ?? user.id, // t275u: recorded on an owner's authority -> the owner's
+        })
+        .returning();
+      return { row } as const;
+    });
+    if ("duplicateId" in outcome) {
+      res.status(409).json({
+        error: "This contact is already linked to that property with this relationship.",
+        relationshipId: outcome.duplicateId,
+      });
+      return;
+    }
+    const inserted = outcome.row;
 
     try {
       await publishDomainEvent({
@@ -480,6 +516,7 @@ growRouter.post(
       logger.error("publish_domain_event_failed", { eventType: "RELATIONSHIP_CREATED", error: err });
     }
 
+    if (req.actingFor) await auditAuthorityAction(req, { action: "grow_relationship_created_on_authority", recordType: "grow_relationship", recordId: inserted.id, propertyId, after: inserted });
     res.status(201).json({ relationship: inserted });
   },
 );
@@ -487,7 +524,8 @@ growRouter.post(
 growRouter.patch(
   "/relationships/:id",
   requireAuth,
-  requireEntitlement("grow.relationships.manage"),
+  // t275u: Pit Crew only on the contact owner's recorded authority (owner holds the key).
+  entitlementOrAuthority("grow.relationships.manage", requireEntitlement("grow.relationships.manage")),
   async (req, res) => {
     const user = req.authedUser!;
     const id = parsePositiveId(req.params.id);
@@ -537,6 +575,11 @@ growRouter.patch(
       res.status(404).json({ error: "Relationship not found" });
       return;
     }
+    const patchScope = await pitCrewScopeRefusal(req, { partyIds: [existing.partyId] });
+    if (patchScope) {
+      res.status(patchScope.status).json(patchScope.body);
+      return;
+    }
 
     const status = typeof rawStatus === "string" ? rawStatus : existing.status;
     // null (like an omitted role) leaves the existing role unchanged, exactly as before.
@@ -548,6 +591,7 @@ growRouter.patch(
       .set({ status, role, isPrimary, updatedAt: new Date() })
       .where(eq(growRelationships.id, id))
       .returning();
+    if (req.actingFor) await auditAuthorityAction(req, { action: "grow_relationship_updated_on_authority", recordType: "grow_relationship", recordId: id, propertyId: existing.propertyId, before: { status: existing.status, role: existing.role, isPrimary: existing.isPrimary }, after: { status, role, isPrimary } });
 
     try {
       await publishDomainEvent({

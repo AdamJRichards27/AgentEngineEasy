@@ -248,6 +248,14 @@ export const METRIC_DEFINITIONS = {
     help: "WAITING_ON items classified by the scheduled detection path only (runScheduledWaitingOnSweep, not POST /pit-crew/ops/waiting-on/sweep). surfaced is a new or materially changed sighting. deduped is an unchanged sighting suppressed by the fingerprint. Incremented by the per-brokerage counts. This path never returns, reassigns, or contacts anyone.",
     labels: { outcome: ["surfaced", "deduped"] },
   },
+  retention_sweep_run_total: {
+    help: "Scheduled retention sweeps (export expiry + audit-value purge, apps/api lib/retentionSweep.ts) by outcome. completed: every item processed. partial: some items failed and will be retried next run. failed: the run threw. skipped_overlap: a run was already in progress in this process.",
+    labels: { outcome: ["completed", "partial", "failed", "skipped_overlap"] },
+  },
+  retention_sweep_item_total: {
+    help: "Items handled by a retention sweep. kind export is a contact export past its 7-day window whose scope was deleted; kind audit_value is an audit row whose encrypted values passed retention and were replaced. outcome processed or failed (failed items are retried next run). No ids or tenant labels.",
+    labels: { kind: ["export", "audit_value"], outcome: ["processed", "failed"] },
+  },
   platform_owner_guard_total: {
     help: "Platform Owner privilege checks that failed closed. tables_missing means platform_owners was absent so nobody is an owner. audit_unavailable means a confirmed owner was refused because the mandatory audit write failed. write_denied means a cross-brokerage write was outside the allowlist. session_expired means an owner session exceeded the 12 hour absolute cap. No user, brokerage, or path labels.",
     labels: { event: ["tables_missing", "audit_unavailable", "write_denied", "session_expired"] },

@@ -1,10 +1,13 @@
 import { useState } from "react";
+import { OVERRIDE_REASON_LABEL, validOverrideReason } from "../../lib/runAddPerson";
+import { TapToCall } from "../TapToCall";
 import { Link, useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../../lib/api";
 import type { GrowContactListItem, GrowContactListPage } from "../../lib/growContactList";
 import { builderPath } from "../appraisal/appraisalBuilderModel";
 import { resolveStartFailure, startAppraisalBody } from "./minimalPropertiesModel";
+import { PropertyLinkControls } from "./PropertyLinkControls";
 import {
   appraisalCandidates,
   buildLinkedContacts,
@@ -16,6 +19,8 @@ import {
   linkContactBody,
   linkedPartiesPath,
   linkFailureText,
+  duplicatePanel,
+  type DuplicatePanel,
   PROPERTY_PARTY_ROLE_LABELS,
   PROPERTY_PARTY_ROLES,
   type LinkedPartyRow,
@@ -29,12 +34,21 @@ export interface MinimalPropertyContactsProps {
   propertyId: number;
   canSearch: boolean;
   canCreateContact: boolean;
+  /** t228u: edit role/primary and unlink (Grow contacts.manage or Run). */
+  canManageLinks?: boolean;
+  /**
+   * Embedded in the mobile property screen, which already renders one Call action and one set of relationship controls per contact: suppress
+   * this panel's OWN Tap-to-Call and relationship controls so a phone never shows two. Default false: nothing changes on desktop.
+   */
+  suppressCallAndLinkControls?: boolean;
+  /** t261u: the shared canManageRelationships(hasEntitlement, role) decision. Gates "Link a contact" and the duplicate "Use <name>". */
+  canManageRelationships?: boolean;
   canStartAppraisal: boolean;
   /** An appraisal already exists for this property (one per property). */
   existingAppraisalHref: string | null;
 }
 
-export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContact, canStartAppraisal, existingAppraisalHref }: MinimalPropertyContactsProps) {
+export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContact, canManageLinks = false, suppressCallAndLinkControls = false, canManageRelationships = false, canStartAppraisal, existingAppraisalHref }: MinimalPropertyContactsProps) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [open, setOpen] = useState(false);
@@ -48,6 +62,8 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPhone, setNewPhone] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
+  const [possibleDuplicate, setPossibleDuplicate] = useState<DuplicatePanel | null>(null);
 
   const linkedQuery = useQuery<{ parties: LinkedPartyRow[] }>({
     queryKey: ["minimal-property-parties", propertyId],
@@ -65,6 +81,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
     mutationFn: (body: ReturnType<typeof linkContactBody>) => apiFetch("/parties", { method: "POST", body: JSON.stringify(body) }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["minimal-property-parties", propertyId] });
+      void queryClient.invalidateQueries({ queryKey: ["contact-property-links"] });
       setNotice(`${selected?.name ?? "Contact"} linked to this property.`);
       setOpen(false);
       setSelected(null);
@@ -78,8 +95,9 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
     },
   });
 
-  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string }>({
+  const createContact = useMutation<{ contact: { id: number } }, unknown, { name: string; email: string; phone: string; duplicateOverride?: { reason: string } }>({
     mutationFn: (input) => apiFetch("/grow/contacts", { method: "POST", body: JSON.stringify(input) }),
+    onMutate: () => setPossibleDuplicate(null),
     onSuccess: (result, input) => {
       setSelected({ id: result.contact.id, name: input.name });
       setNewOpen(false);
@@ -89,13 +107,22 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
       setError(null);
     },
     onError: (err) => {
-      if (err instanceof ApiError && err.status === 409 && typeof err.contactId === "number") {
-        setError("A contact with that email or phone already exists. Search for them and link the existing contact instead.");
+      const dup = err instanceof ApiError ? duplicatePanel(err, canManageRelationships) : null;
+      if (dup) {
+        setPossibleDuplicate(dup);
+        setError(null);
         return;
       }
       setError(apiErrorMessage(err, "Couldn't create the contact. Try again."));
     },
   });
+
+  const existing = useQuery<{ contact: { displayName: string | null } }>({
+    queryKey: ["minimal-duplicate-existing", possibleDuplicate?.existingContactId],
+    queryFn: () => apiFetch(`/grow/contacts/${possibleDuplicate?.existingContactId}`),
+    enabled: !!possibleDuplicate?.canUseExisting && possibleDuplicate.existingContactId !== null,
+  });
+  const existingName = existing.data?.contact?.displayName?.trim() || "the existing contact";
 
   const start = useMutation({
     mutationFn: (partyId: number) =>
@@ -133,7 +160,7 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
         <h2 id="am-property-contacts" className="am-eyebrow">
           Linked contacts
         </h2>
-        {canSearch && !open ? (
+        {canSearch && canManageRelationships && !open ? (
           <button type="button" className="am-data-button" data-ae-link-contact="open" onClick={() => { setOpen(true); setError(null); setNotice(null); }}>
             Link a contact
           </button>
@@ -141,6 +168,22 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
       </div>
       {notice ? <p className="am-empty-note" role="status">{notice}</p> : null}
       {error ? <p className="am-switch-error" role="alert" data-ae-link-error>{error}</p> : null}
+      {possibleDuplicate ? (
+        <DuplicatePanelView
+          panel={possibleDuplicate}
+          existingName={existingName}
+          creating={createContact.isPending}
+          onUseExisting={() => {
+            if (possibleDuplicate.existingContactId === null) return;
+            setSelected({ id: possibleDuplicate.existingContactId, name: existingName });
+            setPossibleDuplicate(null);
+            setNewOpen(false);
+          }}
+          reason={overrideReason}
+          onReasonChange={setOverrideReason}
+          onCreateAnyway={() => createContact.mutate({ name: newName.trim(), email: newEmail.trim(), phone: newPhone.trim(), duplicateOverride: { reason: overrideReason.trim() } })}
+        />
+      ) : null}
       {linkedQuery.isLoading ? <p className="am-empty-note">Loading linked contacts…</p> : null}
       {linkedQuery.isError ? <p className="am-switch-error" role="alert">{apiErrorMessage(linkedQuery.error, "Couldn't load linked contacts.")}</p> : null}
       {linkedQuery.isSuccess && linked.length === 0 ? <p className="am-empty-note">No contact linked yet. Link a contact to start an appraisal.</p> : null}
@@ -150,7 +193,19 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
             <li key={l.linkId} className="am-agenda-row am-linked-row" data-linked-party={l.partyId} data-linked-role={l.role}>
               <div>
                 <Link href={l.contactHref} className="am-agenda-title">{l.name}</Link>
-                <div className="am-agenda-sub">{l.roleLabel}{l.detail ? ` · ${l.detail}` : ""}</div>
+                <div className="am-agenda-sub">{l.roleLabel}{l.isPrimary ? " · Primary" : ""}{l.detail ? ` · ${l.detail}` : ""}</div>
+                {suppressCallAndLinkControls ? null : <TapToCall partyId={l.partyId} enabled canNote={canCreateContact} />}
+                {canManageLinks && !suppressCallAndLinkControls ? (
+                  <PropertyLinkControls
+                    linkId={l.linkId}
+                    role={l.role}
+                    isPrimary={l.isPrimary}
+                    onChanged={() => {
+                      void queryClient.invalidateQueries({ queryKey: ["minimal-property-parties", propertyId] });
+                      void queryClient.invalidateQueries({ queryKey: ["contact-property-links"] });
+                    }}
+                  />
+                ) : null}
               </div>
             </li>
           ))}
@@ -230,5 +285,33 @@ export function MinimalPropertyContacts({ propertyId, canSearch, canCreateContac
         </div>
       ) : null}
     </section>
+  );
+}
+
+/** t261u: the preserved panel's duplicate warning, presentational (no hooks) so its contract is tested by behaviour. */
+export function DuplicatePanelView(p: { panel: DuplicatePanel; existingName: string; creating: boolean; reason?: string; onReasonChange?: (reason: string) => void; onUseExisting: () => void; onCreateAnyway: () => void }) {
+  // t275u: Create anyway is an audited override and needs a reason (server enforces it too).
+  const reason = p.reason ?? "";
+  return (
+    <div className="am-data-actions" role="alert" data-ae-duplicate-panel>
+      <p className="am-switch-error" data-ae-link-error>{p.panel.text}</p>
+      {p.panel.openHref ? (
+        <Link href={p.panel.openHref} className="am-data-button is-quiet" data-ae-open-existing-contact>
+          Open existing contact
+        </Link>
+      ) : null}
+      {p.panel.canUseExisting && p.panel.existingContactId !== null ? (
+        <button type="button" className="am-data-button is-quiet" data-ae-use-existing-contact={p.panel.existingContactId} onClick={p.onUseExisting}>
+          Use {p.existingName}
+        </button>
+      ) : null}
+      <label className="am-field">
+        <span>{OVERRIDE_REASON_LABEL}</span>
+        <input data-ae-override-reason value={reason} maxLength={500} onChange={(e) => p.onReasonChange?.(e.target.value)} />
+      </label>
+      <button type="button" className="am-data-button is-quiet" data-ae-create-anyway disabled={p.creating || !validOverrideReason(reason)} onClick={p.onCreateAnyway}>
+        Create anyway
+      </button>
+    </div>
   );
 }

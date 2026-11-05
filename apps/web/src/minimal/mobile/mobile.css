@@ -1,0 +1,297 @@
+/* AE Mobile (CC Task #64, M2). Phone styles for the new mobile views.
+ * One file. Every class starts with mob- and is scoped to .ae-minimal. minimal.css is not edited.
+ * Colours use the existing Minimal tokens with literal fallbacks. Orange text and controls use
+ * --am-orange-strong (AA on white); the approved orange is never used for text, and white text is
+ * never placed on orange, as minimalTheme.test.ts requires for minimal.css.
+ * Focus rings come from the existing .ae-minimal :is(a, button, input, ...):focus-visible rule;
+ * nothing here removes an outline.
+ * Targets: 360 to 430 px wide, checked down to 320. Tap targets 44 px or more, list rows 56 px or more,
+ * 16 px text in fields so phones do not zoom in. */
+
+/* Search bar at the top of Today (a link styled as a field). Phones only. */
+.ae-minimal .mob-searchbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  margin-bottom: 16px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 14px;
+  background: #FFFFFF;
+  color: #4A5361;
+  font-size: 16px;
+  text-decoration: none;
+}
+
+/* Bottom bar: four tabs and More. Opaque white so the current item passes 4.5:1. */
+.ae-minimal .mob-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  background: #FFFFFF;
+  border-top: 1px solid #D5D9DF;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.ae-minimal .mob-bar a {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--am-muted, #4A5361);
+  text-decoration: none;
+}
+.ae-minimal .mob-bar a.is-current {
+  color: var(--am-orange-strong, #C44F17);
+}
+
+/* Search screen */
+.ae-minimal .mob-search {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding-bottom: 84px;
+}
+.ae-minimal .mob-search-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 12px 8px 4px;
+}
+.ae-minimal .mob-icon-btn {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--am-ink, #14181F);
+  cursor: pointer;
+}
+.ae-minimal .mob-search-field {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ae-minimal .mob-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 52px;
+  padding: 0 48px 0 14px;
+  border: 1px solid #7A8494;
+  border-radius: 14px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 16px;
+}
+.ae-minimal .mob-clear {
+  position: absolute;
+  right: 2px;
+  top: 4px;
+  width: 44px;
+  height: 44px;
+}
+.ae-minimal .mob-status {
+  min-height: 24px;
+  margin: 0;
+  padding: 0 16px;
+  font-size: 14px;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-search-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 16px 24px 16px;
+}
+.ae-minimal .mob-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ae-minimal .mob-section-title {
+  margin: 0;
+  font-size: 16px;
+  color: #2B3340;
+}
+
+/* Rows: one tap target each */
+.ae-minimal .mob-list {
+  background: #FFFFFF;
+  border: 1px solid #E2E5EA;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.ae-minimal .mob-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 10px 14px;
+  box-sizing: border-box;
+  border-bottom: 1px solid #E2E5EA;
+  color: inherit;
+  text-decoration: none;
+  font-size: 16px;
+}
+.ae-minimal .mob-avatar {
+  flex: 0 0 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #FDEEE5;
+  color: #8F3208;
+  font-size: 15px;
+  font-weight: 700;
+}
+.ae-minimal .mob-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ae-minimal .mob-row-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ae-minimal .mob-row-address {
+  font-weight: 700;
+}
+.ae-minimal .mob-row-sub {
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--am-muted, #4A5361);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ae-minimal .mob-row-note {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #8F3208;
+}
+.ae-minimal .mob-row-meta {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.ae-minimal .mob-chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #E8EBF0;
+  color: #2B3340;
+  font-size: 13px;
+}
+.ae-minimal .mob-row-more,
+.ae-minimal .mob-row-stage {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-note,
+.ae-minimal .mob-hint {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--am-muted, #4A5361);
+}
+
+/* Buttons and link buttons */
+.ae-minimal .mob-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border: 1px solid #7A8494;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: var(--am-ink, #14181F);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ae-minimal .mob-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* More screen */
+.ae-minimal .mob-more {
+  padding: 16px 16px 92px 16px;
+}
+.ae-minimal .mob-more-title {
+  margin: 0 0 12px 0;
+  font-size: 28px;
+}
+.ae-minimal .mob-more-group {
+  margin-top: 20px;
+}
+.ae-minimal .mob-more-group-title {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--am-muted, #4A5361);
+}
+.ae-minimal .mob-row-plain {
+  justify-content: space-between;
+  font-weight: 600;
+}
+.ae-minimal .mob-row-static {
+  justify-content: space-between;
+  color: var(--am-muted, #4A5361);
+  font-weight: 600;
+}
+.ae-minimal .mob-row-static .mob-row-sub {
+  white-space: normal;
+  font-weight: 400;
+}
+
+/* Narrow phones (320 to 340 px): give the text room */
+@media (max-width: 340px) {
+  .ae-minimal .mob-avatar {
+    display: none;
+  }
+  .ae-minimal .mob-row {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .ae-minimal .mob-bar a {
+    font-size: 11px;
+  }
+}
+
+/* The mobile views are for phones. Above the shell's phone breakpoint they stay out of the way. */
+@media (min-width: 761px) {
+  .ae-minimal .mob-bar,
+  .ae-minimal .mob-searchbar {
+    display: none;
+  }
+}

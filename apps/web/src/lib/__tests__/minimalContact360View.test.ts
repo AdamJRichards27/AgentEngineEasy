@@ -110,13 +110,25 @@ test("flag-off behaviour: classic Grow is selected unless the Minimal shell is o
   assert.equal(selectContact360View(true, "?view=full"), "classic");
 });
 
-test("route wiring: lazy, gated by the same shell flag as Today, classic kept; view makes one GET and no storage", () => {
+test("route wiring: lazy, gated by the same shell flag as Today, classic kept; view makes the Contact 360 GET plus the SHARED by-contact query (no new request) and no storage", () => {
   const app = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
   const view = readFileSync(new URL("../../minimal/MinimalContact360.tsx", import.meta.url), "utf8");
-  assert.match(app, /lazy\(\(\) => import\("\.\/minimal\/MinimalContact360"\)\)/);
+  // W-M4 (mobile wiring): the identifier and the route are unchanged; the lazy import now targets the phone/desktop chooser, which renders
+  // this existing screen above 760 px (untouched) and the phone Contact 360 at or below it.
+  assert.match(app, /const MinimalContact360 = lazy\(\(\) => import\("\.\/minimal\/mobile\/ContactScreen"\)\)/);
+  const chooser = readFileSync(new URL("../../minimal/mobile/ContactScreen.tsx", import.meta.url), "utf8");
+  assert.match(chooser, /import MinimalContact360 from "\.\.\/MinimalContact360";/);
+  assert.match(chooser, /useIsPhone\(\) \? <MobileContact \/> : <MinimalContact360 \/>/);
   assert.match(app, /selectContact360View\(minimalShell, search\) === "minimal" \? <MinimalContact360 \/> : <Grow \/>/);
   assert.match(app, /const minimalShell = shouldRenderMinimalShell\(useMinimalUx\(\)\)/);
-  assert.deepEqual(view.match(/apiFetch\(/g), ["apiFetch("]);
+  // t267u: the second apiFetch is the by-contact query ContactPropertyLinks already makes, under the SAME key and path, so React Query
+  // shares one request; the desktop adds no network call. It feeds the shared Grow classifier's "Also listed under Properties".
+  assert.deepEqual(view.match(/apiFetch\(/g), ["apiFetch(", "apiFetch("]);
+  const links = readFileSync(new URL("../../minimal/properties/ContactPropertyLinks.tsx", import.meta.url), "utf8");
+  assert.match(links, /const key = \["contact-property-links", partyId\]/);
+  assert.match(links, /apiFetch\(contactPropertiesPath\(partyId\)\)/);
+  assert.match(view, /queryKey: \["contact-property-links", partyId\]/);
+  assert.match(view, /apiFetch\(contactPropertiesPath\(partyId as number\)\)/);
   assert.match(view, /apiFetch\(`\/grow\/contacts\/\$\{partyId\}`\)/);
   for (const banned of ["localStorage", "sessionStorage", "method:", "useMutation"]) assert.equal(view.includes(banned), false, banned);
 });

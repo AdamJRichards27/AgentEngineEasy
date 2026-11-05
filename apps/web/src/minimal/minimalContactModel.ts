@@ -6,6 +6,7 @@ import type {
   GrowContact360Property,
 } from "../lib/growContact360";
 import { growContactPath } from "../lib/growWorkspace";
+import { buildGrowInterest, growRelationshipText, type CanonicalLinkLike, type GrowInterestKind } from "../lib/growInterest";
 
 // AE Minimal A Contact 360 view model.
 // Reads the existing GET /grow/contacts/:partyId payload and only rearranges it. It invents no field:
@@ -14,10 +15,10 @@ import { growContactPath } from "../lib/growWorkspace";
 
 export type Contact360Input = Pick<GrowContact360, "roles"> & {
   contact: Pick<GrowContact360["contact"], "id" | "displayName" | "email" | "mobile">;
-  properties: Pick<
+  properties: (Pick<
     GrowContact360Property,
     "relationshipId" | "propertyId" | "propertyAddress" | "relationshipType" | "status" | "isPrimary"
-  >[];
+  > & { role?: string | null })[];
   opportunities: Pick<GrowContact360Opportunity, "id" | "status" | "stage" | "opportunityType">[];
   activities: Pick<GrowContact360Activity, "id" | "activityType" | "occurredAt" | "summary">[];
   intelligence: Pick<
@@ -54,6 +55,17 @@ export interface MinimalContactModel {
   followUp: { label: string; dueAt: string } | null;
   lastTouchLabel: string;
   properties: { key: number; label: string; relationship: string; href: string | null; primary: boolean }[];
+  /**
+   * t267u: "Grow interest & history", classified by the SHARED helper (lib/growInterest.ts), so the desktop and the phone can never
+   * disagree. EVERY Grow row (all statuses), proper-case type words with the Grow role kept, a row that is the same fact as a canonical
+   * link stays visible with "Also listed under Properties". `count` is the Grow row count, never added to the property count.
+   * Null when no canonical links were supplied (the desktop then keeps its plain "Properties" list).
+   */
+  growInterest: {
+    rows: { key: number; label: string; relationship: string; kind: GrowInterestKind; kindLabel: string; alsoListed: boolean; href: string | null }[];
+    alsoListedCount: number;
+    count: number;
+  } | null;
   openOpportunityCount: number;
   notes: { id: number; occurredAt: string; text: string }[];
   /** Read-only restatement of the server's contactability headline, or null when the payload has none. */
@@ -65,8 +77,17 @@ export interface MinimalContactModel {
 const MAX_NOTES = 5;
 
 /** Owner D5: property links open the Run workspace, so they need run.access. Default fails closed. */
-export function buildMinimalContactModel(input: Contact360Input, opts: { runAccess?: boolean } = {}): MinimalContactModel {
+export function buildMinimalContactModel(
+  input: Contact360Input,
+  opts: { runAccess?: boolean; canonicalLinks?: readonly CanonicalLinkLike[] | null } = {},
+): MinimalContactModel {
   const runAccess = opts.runAccess === true;
+  const canonical = opts.canonicalLinks ?? null;
+  // The shared helper reads only relationshipId, propertyId, propertyAddress, relationshipType, role and status.
+  const growRows = input.properties.map((p) => ({ ...p, role: p.role ?? null, validFrom: "", validTo: null }));
+  const interest = canonical
+    ? buildGrowInterest(growRows, canonical, growRelationshipText, (id) => `/properties/${id}`)
+    : null;
   const name = input.contact.displayName.trim() || "Unnamed contact";
   const days = input.intelligence.daysSinceLastInteraction;
   return {
@@ -86,10 +107,25 @@ export function buildMinimalContactModel(input: Contact360Input, opts: { runAcce
       .map((p) => ({
         key: p.relationshipId,
         label: p.propertyAddress ?? "Not linked to a property",
-        relationship: p.relationshipType,
+        relationship: growRelationshipText(p.relationshipType, p.role ?? null),
         href: p.propertyId == null || !runAccess ? null : `/properties/${p.propertyId}`,
         primary: p.isPrimary,
       })),
+    growInterest: interest
+      ? {
+          rows: interest.rows.map((r) => ({
+            key: r.key,
+            label: r.label,
+            relationship: r.relationship,
+            kind: r.kind,
+            kindLabel: r.kindLabel,
+            alsoListed: r.alsoListed,
+            href: r.href !== null && runAccess ? r.href : null,
+          })),
+          alsoListedCount: interest.alsoListedCount,
+          count: interest.rows.length,
+        }
+      : null,
     openOpportunityCount: input.opportunities.filter((o) => o.status === "Open").length,
     notes: input.activities
       .filter((a) => a.activityType === "note")

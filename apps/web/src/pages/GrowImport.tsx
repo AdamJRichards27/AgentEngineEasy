@@ -322,6 +322,7 @@ function ImportHistory({
         Bring in your existing contact and property database -- matched against what's already here, never
         overwritten blind.
       </p>
+      <p className="muted"><Link href="/grow/import/held">Imports held for review</Link></p>
 
       <section className="card">
         <h2>Start a new import</h2>

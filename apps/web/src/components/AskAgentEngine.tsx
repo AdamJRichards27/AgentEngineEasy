@@ -10,7 +10,7 @@ import { viewFromAskAgentProposal, type AskAgentCommitmentProposal } from "../li
 import { ASK_DUE_FOLLOW_UPS_QUESTION } from "../lib/growTerms";
 // AE GROW Pilot Readiness WP6b (P3-b) — the feature-flag gate below, extracted
 // so "a disabled Grow tab still says something" is unit-testable.
-import { aiSurfaceAvailability, aiSurfaceUnavailableCopy } from "../lib/aiCapability";
+import { aiAgentOnlyRefused, aiSurfaceAvailability, aiSurfaceUnavailableCopy } from "../lib/aiCapability";
 import { userVisibleAiText } from "../lib/demoAi";
 // AE GROW Priority 6 Stage E — Voice as Input. The recording lifecycle
 // itself (permission/MIME/duration/error handling, the state machine) is
@@ -162,6 +162,8 @@ interface AiCapabilities {
   // copilotEnabled so this component can gate the Business Coach on its own
   // feature flag/entitlement without a second request.
   businessCoachEnabled: boolean;
+  // t275u: false when the server's agent-only gate refuses this user.
+  agentAiAllowed?: boolean;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -419,7 +421,7 @@ export function AskAgentEngine({ contextType, contextId, growFocusItemId, mode }
     return null;
   }
   if (availability === "unavailable") {
-    const copy = aiSurfaceUnavailableCopy(isCoach);
+    const copy = aiSurfaceUnavailableCopy(isCoach, aiAgentOnlyRefused(capabilities));
     return (
       <section className="card ai-copilot">
         <h2>{copy.title}</h2>

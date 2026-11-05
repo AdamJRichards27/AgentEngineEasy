@@ -14,6 +14,7 @@ import { db, communicationMessages, communicationConsent, entitlementGrants, gro
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
 import { normalizeDestination } from "../../lib/communications/consent.js";
 import { createBrokerageWithUsers, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
+import { withInlineDispatch } from "./support/commsDueSweepLock.js";
 
 process.env.SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 32
@@ -87,6 +88,8 @@ async function createParty(cookie: string, propertyId: number): Promise<number> 
     lastName: "Thread",
     email: `wp1-grow-thread-${suffix}@example.com`,
     mobile: "0400111222",
+    // t275u: deliberately the same person each time; recorded duplicate override.
+    duplicateOverride: { reason: "t275u fixture: same synthetic contact per test" },
   });
   if (res.status !== 201) throw new Error(`create party failed: ${res.status} ${await res.text()}`);
   return ((await res.json()) as { party: { id: number } }).party.id;
@@ -173,7 +176,14 @@ test("WP1 P2-3: mutations on a contact-first (Grow) thread require grow.contacts
     scope: "OUTBOUND",
     recordedByUserId: A.agent.user.id,
   });
-  const sendRes = await post(`/communications/messages/${pending.id}/send`, A.agent.cookie, { expectedVersion: pending.version });
+  // This send queues the message (scheduledAt = now) and dispatches it inline.
+  // communicationsDispatchConsentRecheck runs dispatchDueMessages() with a
+  // future `now` across every brokerage in a parallel process, and could take
+  // the row in between, turning this into a 409/422. The shared side of the
+  // test-only sweep lock keeps that sweep out until this request completes.
+  const sendRes = await withInlineDispatch(() =>
+    post(`/communications/messages/${pending.id}/send`, A.agent.cookie, { expectedVersion: pending.version }),
+  );
   assert.equal(sendRes.status, 200, await sendRes.clone().text());
 });
 
@@ -218,7 +228,10 @@ test("WP1 P2-3: property-scoped (RUN) threads are unchanged -- a brokerage with 
     assert.equal(participantRes.status, 201, await participantRes.clone().text());
     const participantId = ((await participantRes.json()) as { id: number }).id;
     const message = await draft(run.agent.cookie, thread.id, participantId);
-    const sendRes = await post(`/communications/messages/${message.id}/send`, run.agent.cookie, { expectedVersion: message.version });
+    // Inline dispatch, guarded against a sibling file's due sweep as above.
+    const sendRes = await withInlineDispatch(() =>
+      post(`/communications/messages/${message.id}/send`, run.agent.cookie, { expectedVersion: message.version }),
+    );
     assert.equal(sendRes.status, 200, await sendRes.clone().text());
   } finally {
     await cleanupBrokerages([run.brokerageId]);

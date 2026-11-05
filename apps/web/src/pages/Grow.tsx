@@ -1,9 +1,24 @@
+import { formatAuDateTime } from "../lib/auDateTime";
+import { useActingAuthority } from "../lib/useActingAuthority";
+import { canRecordGrowInterest, growInterestBody, growInterestErrorText, GROW_INTEREST_PATH, GROW_INTEREST_TYPE_REQUIRED } from "../lib/growInterestRecord";
 import { useEffect, useState } from "react";
 import { Link, useSearch } from "wouter";
 import { RunGatedLink } from "../components/RunGatedLink";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession, useEntitlements } from "../lib/session";
+import { ContactPropertyLinks } from "../minimal/properties/ContactPropertyLinks";
+import {
+  isPropertyPartyRole,
+  LINK_ALREADY_EXISTS,
+  LINK_ROLE_REQUIRED,
+  linkContactBody,
+  linkFailureText,
+  PROPERTY_PARTY_ROLE_LABELS,
+  PROPERTY_PARTY_ROLES,
+  propertySearchPath,
+} from "../minimal/properties/minimalPropertyContactsModel";
+import { canManageRelationships } from "../lib/relationshipPermission";
 import { AskAgentEngine } from "../components/AskAgentEngine";
 // AE GROW Priority 3 — Contact 360's communications section, reused unmodified here (see that
 // component's own header comment). Grow Today's Email/SMS action buttons below route into it via
@@ -198,28 +213,6 @@ const GROW_CONTACT_RELATIONSHIP_TYPES = [
   "other",
 ] as const;
 
-// Hand-mirror of GROW_RELATIONSHIP_TYPES (packages/db/src/schema/grow.ts).
-// These are property links (POST /grow/relationships). They are not the
-// household types above (POST /grow/contacts/:partyId/relationships).
-const GROW_PROPERTY_RELATIONSHIP_OPTIONS = [
-  ["owner", "Owner"],
-  ["co_owner", "Co-owner"],
-  ["former_owner", "Former owner"],
-  ["occupier", "Occupier"],
-  ["tenant", "Tenant"],
-  ["landlord", "Landlord"],
-  ["buyer", "Buyer"],
-  ["prospective_buyer", "Prospective buyer"],
-  ["seller", "Seller"],
-  ["prospective_seller", "Future seller"],
-  ["appraisal_contact", "Appraisal contact"],
-  ["vendor", "Vendor"],
-  ["investor", "Investor"],
-  ["developer", "Developer"],
-  ["referrer", "Referrer"],
-  ["related_party", "Related party"],
-  ["unknown_pending_review", "Unknown, pending review"],
-] as const;
 
 interface LinkableProperty {
   id: number;
@@ -296,7 +289,7 @@ const GrowRelationshipCells = memoRow(function GrowRelationshipCells({ relations
 const GrowActivityItem = memoRow(function GrowActivityItem({ activity }: { activity: GrowActivity }) {
   return (
     <>
-      <span className="when">{new Date(activity.occurredAt).toLocaleString()}</span>
+      <span className="when">{formatAuDateTime(activity.occurredAt)}</span>
       <div className="eyebrow">{growActivityTypeLabel(activity.activityType)}</div>
       <p style={activity.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{activity.summary}</p>
     </>
@@ -2992,29 +2985,61 @@ function GrowContactCallPanel({ partyId, contactName }: { partyId: number; conta
   );
 }
 
-// G-UAT-3 — Contact 360 "Link property". Posts partyId, propertyId and
-// relationshipType to POST /grow/relationships. The route requires
-// grow.relationships.manage for every relationship and grow.properties.link
-// when a property id is present, so the form is shown only when both are
-// held. The property list is GET /properties (already own-property scoped
-// for Agents). The route has no notes field, so this form does not collect
-// one. Household "Add related contact" stays a separate list.
+// Hand-mirror of GROW_RELATIONSHIP_TYPES (packages/db/src/schema/grow.ts):
+// the words for stored Grow relationship types. t273u: the Link property form
+// no longer posts these (it makes canonical property_parties links with
+// PROPERTY_PARTY_ROLES), but they remain the agreed wording for existing Grow
+// history rows; the phone's PROPERTY_RELATIONSHIP_LABELS drift test pins them.
+export const GROW_PROPERTY_RELATIONSHIP_OPTIONS = [
+  ["owner", "Owner"],
+  ["co_owner", "Co-owner"],
+  ["former_owner", "Former owner"],
+  ["occupier", "Occupier"],
+  ["tenant", "Tenant"],
+  ["landlord", "Landlord"],
+  ["buyer", "Buyer"],
+  ["prospective_buyer", "Prospective buyer"],
+  ["seller", "Seller"],
+  ["prospective_seller", "Future seller"],
+  ["appraisal_contact", "Appraisal contact"],
+  ["vendor", "Vendor"],
+  ["investor", "Investor"],
+  ["developer", "Developer"],
+  ["referrer", "Referrer"],
+  ["related_party", "Related party"],
+  ["unknown_pending_review", "Unknown, pending review"],
+] as const;
+
+// t274u item 3: Relationship records show the Grow wording (e.g. "Future seller"), not the stored key.
+export function growPropertyRelationshipLabel(type: string): string {
+  const hit = GROW_PROPERTY_RELATIONSHIP_OPTIONS.find(([value]) => value === type);
+  return hit ? hit[1] : type;
+}
+
+// G-UAT-3 — Contact 360 "Link property".
+// t273u (X10 fix): the link is a canonical property_parties link made through
+// the existing POST /parties path ({ propertyId, partyId, role }), with that
+// route's permission (canManageRelationships), own-property and duplicate
+// checks. It no longer writes a Grow-only relationship, so the link shows on
+// the phone (by-contact and property page), on Run and under "Properties"
+// above. Grow-only rows made by the old path are left as they are: they stay
+// visible as Grow interest and history and are not migrated (Owner t273u).
+// Edit and unlink act on the canonical link (PropertyLinkControls under
+// Properties, flag-gated; Run's Remove). The visibility check mirrors the
+// server (lib/relationshipPermission); the server stays authoritative.
 export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; onLinked: () => void }) {
   const queryClient = useQueryClient();
+  const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
-  const canLink = hasEntitlement("grow.properties.link") && hasEntitlement("grow.relationships.manage");
+  const canLink = canManageRelationships(hasEntitlement, user?.role);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<LinkableProperty[]>([]);
   const [propertyId, setPropertyId] = useState<number | null>(null);
-  const [relationshipType, setRelationshipType] = useState<string>(GROW_PROPERTY_RELATIONSHIP_OPTIONS[0][0]);
+  const [role, setRole] = useState<string>("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
   const searchProperties = useMutation({
-    mutationFn: (query: string) => {
-      const path = query.length > 0 ? `/properties?q=${encodeURIComponent(query)}` : "/properties";
-      return apiFetch<{ properties: LinkableProperty[] }>(path);
-    },
+    mutationFn: (query: string) => apiFetch<{ properties: LinkableProperty[] }>(propertySearchPath(query)),
     onSuccess: (result) => {
       const properties = result.properties ?? [];
       setResults(properties);
@@ -3023,18 +3048,13 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
     },
     onError: (error) => setErrorMessage(apiErrorMessage(error, "Couldn't load properties.")),
   });
-
   const linkProperty = useMutation({
-    mutationFn: () =>
-      apiFetch("/grow/relationships", {
-        method: "POST",
-        body: JSON.stringify({ partyId, propertyId, relationshipType }),
-      }),
+    mutationFn: (body: ReturnType<typeof linkContactBody>) => apiFetch("/parties", { method: "POST", body: JSON.stringify(body) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+      queryClient.invalidateQueries({ queryKey: ["contact-property-links", partyId] });
+      queryClient.invalidateQueries({ queryKey: ["minimal-property-parties"] });
       queryClient.invalidateQueries({ queryKey: ["grow-contacts"] });
-      // The Relationships card and the checklist's property step stay on
-      // screen (or remount within staleTime) unless these are invalidated (UAT D5).
       queryClient.invalidateQueries({ queryKey: ["grow-relationships"] });
       queryClient.invalidateQueries({ queryKey: ["grow-today"] });
       onLinked();
@@ -3042,7 +3062,7 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
       setSearch("");
       setResults([]);
       setPropertyId(null);
-      setRelationshipType(GROW_PROPERTY_RELATIONSHIP_OPTIONS[0][0]);
+      setRole("");
       setErrorMessage(null);
     },
     onError: (error) => setErrorMessage(linkPropertyErrorMessage(error)),
@@ -3061,8 +3081,12 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
           onSubmit={(event) => {
             event.preventDefault();
             if (propertyId === null) return;
+            if (!isPropertyPartyRole(role)) {
+              setErrorMessage(LINK_ROLE_REQUIRED);
+              return;
+            }
             setErrorMessage(null);
-            linkProperty.mutate();
+            linkProperty.mutate(linkContactBody(propertyId, partyId, role));
           }}
         >
           <label htmlFor="grow-link-property-search">Property</label>
@@ -3099,15 +3123,12 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
               ))}
             </ul>
           )}
-          <label htmlFor="grow-link-property-type">Relationship</label>
-          <select
-            id="grow-link-property-type"
-            value={relationshipType}
-            onChange={(event) => setRelationshipType(event.target.value)}
-          >
-            {GROW_PROPERTY_RELATIONSHIP_OPTIONS.map(([value, label]) => (
+          <label htmlFor="grow-link-property-type">Relationship to the property</label>
+          <select id="grow-link-property-type" value={role} onChange={(event) => setRole(event.target.value)}>
+            <option value="">Choose relationship…</option>
+            {PROPERTY_PARTY_ROLES.map((value) => (
               <option key={value} value={value}>
-                {label}
+                {PROPERTY_PARTY_ROLE_LABELS[value]}
               </option>
             ))}
           </select>
@@ -3121,8 +3142,121 @@ export function GrowLinkPropertyForm({ partyId, onLinked }: { partyId: number; o
   );
 }
 
+// t274u item 3: "Record Grow interest" (future seller, prospective buyer, …).
+// Distinct from "Link property": writes only a Grow relationship through
+// POST /grow/relationships (server duplicate check: the same contact, property
+// and type is never recorded twice, 409). Never writes property_parties.
+export function GrowRecordInterestForm({ partyId, onRecorded }: { partyId: number; onRecorded: () => void }) {
+  const queryClient = useQueryClient();
+  const { user } = useSession();
+  const { hasEntitlement } = useEntitlements();
+  const actingAuthority = useActingAuthority();
+  const canRecord = canRecordGrowInterest(hasEntitlement, user?.role, actingAuthority);
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState<LinkableProperty[]>([]);
+  const [propertyId, setPropertyId] = useState<number | null>(null);
+  const [relationshipType, setRelationshipType] = useState<string>("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const searchProperties = useMutation({
+    mutationFn: (query: string) => apiFetch<{ properties: LinkableProperty[] }>(propertySearchPath(query)),
+    onSuccess: (result) => {
+      setResults(result.properties ?? []);
+      setErrorMessage(null);
+    },
+    onError: (error) => setErrorMessage(apiErrorMessage(error, "Couldn't load properties.")),
+  });
+  const record = useMutation({
+    mutationFn: (body: ReturnType<typeof growInterestBody>) => apiFetch(GROW_INTEREST_PATH, { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grow-contact", partyId] });
+      queryClient.invalidateQueries({ queryKey: ["grow-contacts"] });
+      queryClient.invalidateQueries({ queryKey: ["grow-relationships"] });
+      queryClient.invalidateQueries({ queryKey: ["grow-today"] });
+      onRecorded();
+      setOpen(false);
+      setSearch("");
+      setResults([]);
+      setPropertyId(null);
+      setRelationshipType("");
+      setErrorMessage(null);
+    },
+    onError: (error) =>
+      setErrorMessage(growInterestErrorText(error instanceof ApiError ? error.status : undefined, apiErrorMessage(error, "Couldn't record this interest."))),
+  });
+
+  if (!canRecord) return null;
+
+  return (
+    <div className="grow-record-interest" data-ae-grow-record-interest>
+      <button type="button" className="btn btn-secondary btn-small" onClick={() => setOpen((value) => !value)}>
+        {open ? "Cancel" : "Record Grow interest"}
+      </button>
+      {open && (
+        <form
+          className="stack grow-inline-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!relationshipType) {
+              setErrorMessage(GROW_INTEREST_TYPE_REQUIRED);
+              return;
+            }
+            setErrorMessage(null);
+            record.mutate(growInterestBody(partyId, propertyId, relationshipType));
+          }}
+        >
+          <label htmlFor="grow-interest-type">Interest</label>
+          <select id="grow-interest-type" value={relationshipType} onChange={(event) => setRelationshipType(event.target.value)}>
+            <option value="">Choose interest…</option>
+            {GROW_PROPERTY_RELATIONSHIP_OPTIONS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <label htmlFor="grow-interest-search">Property (optional)</label>
+          <div className="grow-inline-form-row">
+            <input
+              id="grow-interest-search"
+              type="search"
+              placeholder="Address, suburb, or postcode"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <button type="button" className="btn btn-secondary btn-small" disabled={searchProperties.isPending} onClick={() => searchProperties.mutate(search.trim())}>
+              Search
+            </button>
+          </div>
+          {results.length > 0 && (
+            <ul className="item-list">
+              {results.map((property) => (
+                <li key={property.id}>
+                  <button
+                    type="button"
+                    data-ae-grow-interest-property={property.id}
+                    className={`btn btn-link btn-small${propertyId === property.id ? " active" : ""}`}
+                    onClick={() => setPropertyId((current) => (current === property.id ? null : property.id))}
+                  >
+                    {propertyId === property.id ? "✓ " : ""}
+                    {property.formattedAddress}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="btn btn-primary btn-small" type="submit" disabled={record.isPending}>
+            Record interest
+          </button>
+        </form>
+      )}
+      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+    </div>
+  );
+}
+
 function linkPropertyErrorMessage(error: unknown): string {
   if (error instanceof ApiError && error.status === 404) return "That property couldn't be found.";
+  if (error instanceof ApiError && error.status === 409) return linkFailureText(error, LINK_ALREADY_EXISTS);
   if (error instanceof ApiError && error.status === 403) {
     return apiErrorMessage(error, "You don't have permission to link a property.");
   }
@@ -3474,9 +3608,14 @@ export function GrowContactDetail({
         )}
       </section>
 
+      {/* t228u Priority 2: property_parties is the authoritative contact <-> property link. */}
+      <section className="card" data-ae-desktop-contact-property-links>
+        <ContactPropertyLinks partyId={partyId} canManage={canManageContacts || hasEntitlement("run.access")} headingId="grow-contact-property-links" />
+      </section>
+
       <section className="card">
-        <h2>Properties</h2>
-        <p className="muted">Reuses AE's canonical properties — Grow does not keep a second property record.</p>
+        <h2>Relationship records</h2>
+        <p className="muted">Grow relationship history (type, status, dates). Link property saves a property contact link, shown under Properties above. Older Grow-only rows stay here as history.</p>
         {data.properties.length === 0 && <p className="empty-state">No property relationships recorded.</p>}
         {data.properties.length > 0 && (
           <GrowTableScroll>
@@ -3501,7 +3640,7 @@ export function GrowContactDetail({
                     )}
                   </td>
                   <td>
-                    {p.relationshipType}
+                    {growPropertyRelationshipLabel(p.relationshipType)}
                     {p.isPrimary ? " (primary)" : ""}
                   </td>
                   <td>{p.role ?? "–"}</td>
@@ -3518,6 +3657,7 @@ export function GrowContactDetail({
           </GrowTableScroll>
         )}
         <GrowLinkPropertyForm partyId={partyId} onLinked={invalidate} />
+        <GrowRecordInterestForm partyId={partyId} onRecorded={invalidate} />
       </section>
 
       <GrowContactAppraisalsSection partyId={partyId} linkedProperties={data.properties} />
@@ -3537,7 +3677,7 @@ export function GrowContactDetail({
           <ul className="timeline">
             {data.timeline.map((e) => (
               <li key={e.id}>
-                <span className="when">{new Date(e.occurredAt).toLocaleString()}</span>
+                <span className="when">{formatAuDateTime(e.occurredAt)}</span>
                 <div className="eyebrow">{e.type.replace(/_/g, " ")}</div>
                 <p style={{ whiteSpace: "pre-wrap" }}>{e.summary}</p>
               </li>
@@ -3554,7 +3694,7 @@ export function GrowContactDetail({
           <ul className="timeline">
             {data.activities.map((a) => (
               <li key={a.id}>
-                <span className="when">{new Date(a.occurredAt).toLocaleString()}</span>
+                <span className="when">{formatAuDateTime(a.occurredAt)}</span>
                 <div className="eyebrow">{growActivityTypeLabel(a.activityType)}</div>
                 <p style={a.activityType === "call_summary" ? { whiteSpace: "pre-wrap" } : undefined}>{a.summary}</p>
               </li>

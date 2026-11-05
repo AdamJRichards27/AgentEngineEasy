@@ -7,9 +7,17 @@ import { requireAuth } from "../middlewares/auth.js";
 import { getAppraisalByProperty, getOrCreateAppraisal, updateAppraisal, finaliseAppraisal } from "../lib/appraisals.js";
 import { AppraisalLifecycleClosedError, AppraisalPricingLockedError } from "../lib/appraisalFinaliseGuard.js";
 import { noteGrowPropertyIsolationRejection } from "../lib/grow/isolationRejection.js";
+import { requireAnyEntitlement } from "../middlewares/entitlement.js";
 import { assertPropertyVisibleForWrite, propertyHiddenFromCaller } from "../lib/propertyVisibility.js";
 
 export const appraisalsRouter = Router();
+
+// t234u: the legacy property appraisal routes need a subscription. Grow keeps
+// historical appraisals (t223u), so either product may read; writes need a
+// write-capable key (grow.opportunities.manage, the Grow appraisal builder's
+// manage key, or run.access). Read-only Grow callers can view, not change.
+const canReadLegacyAppraisals = requireAnyEntitlement("grow.access", "run.access");
+const canWriteLegacyAppraisals = requireAnyEntitlement("grow.opportunities.manage", "run.access");
 
 // AE GROW Pilot Readiness WP9 — route-id validation, the same bounded guard
 // routes/grow.ts, routes/communications.ts, routes/growAppraisals.ts and
@@ -98,7 +106,7 @@ async function assertPropertyInBrokerage(propertyId: number, brokerageId: number
   return true;
 }
 
-appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) => {
+appraisalsRouter.get("/by-property/:propertyId", requireAuth, canReadLegacyAppraisals, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -118,7 +126,7 @@ appraisalsRouter.get("/by-property/:propertyId", requireAuth, async (req, res) =
 
 // Idempotent start — reuses an existing in-progress appraisal for this
 // property instead of creating a second one (getOrCreateAppraisal).
-appraisalsRouter.post("/by-property/:propertyId/start", requireAuth, async (req, res) => {
+appraisalsRouter.post("/by-property/:propertyId/start", requireAuth, canWriteLegacyAppraisals, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const user = req.authedUser!;
@@ -144,7 +152,7 @@ const updateAppraisalSchema = z.object({
   comparableSales: z.unknown().optional(),
 });
 
-appraisalsRouter.post("/by-property/:propertyId", requireAuth, async (req, res) => {
+appraisalsRouter.post("/by-property/:propertyId", requireAuth, canWriteLegacyAppraisals, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const parsed = updateAppraisalSchema.safeParse(req.body);
@@ -176,7 +184,7 @@ appraisalsRouter.post("/by-property/:propertyId", requireAuth, async (req, res) 
   }
 });
 
-appraisalsRouter.post("/by-property/:propertyId/finalise", requireAuth, async (req, res) => {
+appraisalsRouter.post("/by-property/:propertyId/finalise", requireAuth, canWriteLegacyAppraisals, async (req, res) => {
   const propertyId = readPropertyIdParam(res, req.params.propertyId);
   if (propertyId === null) return;
   const user = req.authedUser!;

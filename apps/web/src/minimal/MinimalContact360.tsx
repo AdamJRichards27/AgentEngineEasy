@@ -2,8 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
 import { apiErrorMessage, apiFetch } from "../lib/api";
 import type { GrowContact360 } from "../lib/growContact360";
-import { useEntitlements } from "../lib/session";
+import { useEntitlements, useSession } from "../lib/session";
+import { canManageRelationships } from "../lib/relationshipPermission";
 import { MinimalGrowSections } from "./MinimalGrowSections";
+import { ContactPropertyLinks } from "./properties/ContactPropertyLinks";
+import { TapToCall } from "./TapToCall";
+import { ALSO_LISTED_LABEL, GROW_INTEREST_NOTE, GROW_INTEREST_TITLE } from "../lib/growInterest";
+import { contactPropertiesPath, type ContactPropertyRow } from "./properties/minimalPropertyContactsModel";
 import { buildMinimalContactModel, formatContactDate, type MinimalContactModel } from "./minimalContactModel";
 
 // AE Minimal A Contact 360 (read-only). Data is the existing GET /grow/contacts/:partyId, under the same
@@ -14,10 +19,18 @@ import { buildMinimalContactModel, formatContactDate, type MinimalContactModel }
 export default function MinimalContact360() {
   const params = useParams<{ id: string }>();
   const { hasEntitlement } = useEntitlements();
+  const session = useSession();
   const partyId = /^\d+$/.test(params.id ?? "") ? Number(params.id) : null;
   const detail = useQuery<GrowContact360>({
     queryKey: ["grow-contact", partyId],
     queryFn: () => apiFetch(`/grow/contacts/${partyId}`),
+    enabled: partyId !== null,
+  });
+  // t267u: the SAME query (same key and path) ContactPropertyLinks already makes, so React Query shares one request. Its uncapped
+  // `properties` rows (propertyId + role) are what the shared helper matches Grow rows against for "Also listed under Properties".
+  const canonical = useQuery<{ properties: ContactPropertyRow[] }>({
+    queryKey: ["contact-property-links", partyId],
+    queryFn: () => apiFetch(contactPropertiesPath(partyId as number)),
     enabled: partyId !== null,
   });
 
@@ -34,7 +47,16 @@ export default function MinimalContact360() {
     );
   }
   if (!detail.data) return null;
-  return <MinimalContact360View model={buildMinimalContactModel(detail.data, { runAccess: hasEntitlement("run.access") })} />;
+  return (
+    <MinimalContact360View
+      model={buildMinimalContactModel(detail.data, {
+        runAccess: hasEntitlement("run.access"),
+        // Until the canonical links arrive every Grow row is still shown; only the "Also listed" label waits for them.
+        canonicalLinks: (canonical.data?.properties ?? []).map((r) => ({ propertyId: r.propertyId, role: r.role })),
+      })}
+      propertyLinks={{ partyId, canManage: canManageRelationships(hasEntitlement, session.user?.role), canNote: hasEntitlement("grow.contacts.manage") || hasEntitlement("run.access") }}
+    />
+  );
 }
 
 export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry?: () => void }) {
@@ -56,7 +78,14 @@ export function MinimalContactMessage({ text, onRetry }: { text: string; onRetry
   );
 }
 
-export function MinimalContact360View({ model }: { model: MinimalContactModel }) {
+export function MinimalContact360View({
+  model,
+  propertyLinks,
+}: {
+  model: MinimalContactModel;
+  /** t228u: property_parties links (authoritative). Omitted in static renders. */
+  propertyLinks?: { partyId: number; canManage: boolean; canNote?: boolean };
+}) {
   return (
     <div className="am-contact" data-ae-contact="minimal">
       <MinimalGrowSections current="contacts" />
@@ -89,7 +118,10 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
           <dt>Email</dt>
           <dd>{model.email ?? "Not recorded"}</dd>
           <dt>Mobile</dt>
-          <dd>{model.mobile ?? "Not recorded"}</dd>
+          <dd>
+            {model.mobile ?? "Not recorded"}{" "}
+            {model.mobile && propertyLinks ? <TapToCall partyId={propertyLinks.partyId} enabled canNote={propertyLinks.canNote} /> : null}
+          </dd>
           <dt>Last interaction</dt>
           <dd>{model.lastTouchLabel}</dd>
           <dt>Next commitment</dt>
@@ -109,6 +141,38 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
         </section>
       ) : null}
 
+      {propertyLinks ? <ContactPropertyLinks partyId={propertyLinks.partyId} canManage={propertyLinks.canManage} /> : null}
+
+      {propertyLinks && model.growInterest && model.growInterest.count > 0 ? (
+        <section className="am-rail-section" aria-labelledby="am-contact-grow-interest" data-ae-grow-interest>
+          <h2 id="am-contact-grow-interest" className="am-eyebrow">
+            {GROW_INTEREST_TITLE}
+            <span data-ae-interest-count>{` (${model.growInterest.count})`}</span>
+          </h2>
+          <p className="am-empty-note">{GROW_INTEREST_NOTE}</p>
+          <ul className="am-agenda">
+            {model.growInterest.rows.map((r) => (
+              <li key={r.key} className="am-agenda-row" data-ae-grow-kind={r.kind}>
+                <div>
+                  {r.href ? (
+                    <Link href={r.href} className="am-agenda-title">
+                      {r.label}
+                    </Link>
+                  ) : (
+                    <span className="am-agenda-title">{r.label}</span>
+                  )}
+                  <div className="am-agenda-sub">
+                    {`${r.relationship} · ${r.kindLabel}`}
+                    {r.alsoListed ? <span data-ae-also-listed>{` · ${ALSO_LISTED_LABEL}`}</span> : null}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {propertyLinks ? null : (
       <section className="am-rail-section" aria-labelledby="am-contact-properties">
         <h2 id="am-contact-properties" className="am-eyebrow">
           Properties
@@ -137,6 +201,7 @@ export function MinimalContact360View({ model }: { model: MinimalContactModel })
           </ul>
         )}
       </section>
+      )}
 
       <section className="am-rail-section" aria-labelledby="am-contact-notes">
         <h2 id="am-contact-notes" className="am-eyebrow">

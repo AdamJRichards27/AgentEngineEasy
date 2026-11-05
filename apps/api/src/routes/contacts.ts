@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import {
+  auditLogs,
   db,
   growActivities,
   growCommitments,
@@ -23,6 +24,9 @@ import {
 } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
+import { auditAuthorityAction, entitlementOrAuthority, isPitCrew, ownedPartyIds, ownedPartyIdsSql, readWithOptionalAuthority, pitCrewScopeRefusal, recordContactOwner } from "../lib/contactAuthority.js";
+import { auditDuplicateOverride, gateNewContact, visibleDuplicates } from "../lib/contactDuplicates.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
 import { getRelationshipTimeline } from "../lib/relationshipTimeline.js";
 import { commitmentRescheduleSummary, presentStoredActivitySummaries } from "../lib/commitmentRescheduleSummary.js";
 import { resolveTimeZone } from "../lib/commandCentre/timezone.js";
@@ -34,6 +38,7 @@ import {
   visibleLinkedPropertySql,
   visibleOwnedOrLinkedPropertySql,
 } from "../lib/propertyVisibility.js";
+import { recordCallConsentConfirmation } from "../lib/tapToCall.js";
 import { logAudit } from "../lib/audit.js";
 import {
   noteGrowCommitmentIsolationRejection,
@@ -280,7 +285,14 @@ function contactIdentityPayload(party: typeof parties.$inferSelect) {
 
 type ContactDuplicateKind = "email" | "phone";
 
-function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
+/** t261u (review 9 R4): the matched contact's id is shown only to a caller holding contact-read (exact grant), on every duplicate path. */
+async function duplicateIdForCaller(user: Parameters<typeof explainEntitlementDecision>[0], contactId: number | null): Promise<number | null> {
+  if (contactId === null) return null;
+  const canRead = await explainEntitlementDecision(user, "grow.contacts.read").then((d) => d.allowed).catch(() => false);
+  return canRead ? contactId : null;
+}
+
+export function duplicateContactBody(kind: ContactDuplicateKind, contactId: number | null): { error: string; contactId?: number } {
   const error =
     kind === "email"
       ? "A contact with this email already exists."
@@ -298,7 +310,7 @@ async function contactIdentityVisible(brokerageId: number, partyId: number): Pro
 }
 
 /** Null when nothing conflicts. contactId is set only when Contact 360 would return that party. */
-async function findDuplicateContact(
+export async function findDuplicateContact(
   brokerageId: number,
   kind: ContactDuplicateKind,
   value: string,
@@ -422,7 +434,7 @@ function changedContactFields(before: ContactEditValues, after: ContactEditValue
 // GET /grow/contacts — list/search, for the Grow Contacts entry point and any "find a contact"
 // picker elsewhere in Grow. Always scoped to the caller's own brokerage; a client-supplied
 // brokerageId is never trusted (matches every other Grow route in routes/grow.ts).
-contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
+contactsRouter.get("/", requireAuth, readWithOptionalAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
   const brokerageId = req.authedUser!.brokerageId;
   const pageQuery = readGrowListPageQuery(req.query);
   if (!pageQuery.ok) {
@@ -438,6 +450,8 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
   const role = typeof req.query.role === "string" ? req.query.role : undefined;
 
   const conditions = [eq(parties.brokerageId, brokerageId)];
+  // t275u: Pit Crew sees only the contacts of the owner it acts for.
+  if (req.actingFor) conditions.push(sql`${parties.id} in ${ownedPartyIdsSql(brokerageId, req.actingFor.owner.id)}`);
   if (excludeParty.id !== null) conditions.push(sql`${parties.id} <> ${excludeParty.id}`);
   if (search.length > 0) {
     const pattern = `%${search}%`;
@@ -543,7 +557,7 @@ contactsRouter.get("/", requireAuth, requireEntitlement("grow.contacts.read"), a
 // matching normalised phone in this brokerage is a 409 with that contact's id,
 // the same response the new-contact form already turns into "This contact
 // already exists." The phone is stored as typed; only the comparison is normalised.
-contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const parsed = parseContactCreateBody(req.body);
   if (!parsed.ok) {
@@ -551,20 +565,15 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     return;
   }
 
-  if (parsed.email) {
-    const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", parsed.email, null);
-    if (emailDuplicate) {
-      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
-      return;
-    }
-  }
-
-  if (parsed.mobile) {
-    const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", parsed.mobile, null);
-    if (phoneDuplicate) {
-      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
-      return;
-    }
+  // t275u (Owner): the shared duplicate service (lib/contactDuplicates.ts) blocks a
+  // name/email/mobile match by default (409 DUPLICATE_CONTACT with matches, ids only
+  // for callers who may see them); a genuine duplicate needs duplicateOverride.reason
+  // from an authorised user and is audited. (Replaces the t234u confirmDuplicate path;
+  // confirmDuplicate without a reason now answers DUPLICATE_OVERRIDE_REASON_REQUIRED.)
+  const dupGate = await gateNewContact(req, { firstName: parsed.firstName, lastName: parsed.lastName, organisationName: parsed.organisationName, email: parsed.email, mobile: parsed.mobile }, "grow_contacts");
+  if (!dupGate.ok) {
+    res.status(dupGate.status).json(dupGate.body);
+    return;
   }
 
   const [party] = await db
@@ -581,6 +590,20 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     })
     .returning();
 
+  // t236u: optional agent confirmation that the contact agreed to be called.
+  const rawCallConsent = (req.body as Record<string, unknown> | null)?.callConsent;
+  if (rawCallConsent && typeof rawCallConsent === "object" && !Array.isArray(rawCallConsent)) {
+    const cc = rawCallConsent as Record<string, unknown>;
+    await recordCallConsentConfirmation(db, {
+      brokerageId: user.brokerageId,
+      partyId: party.id,
+      userId: user.id,
+      confirmed: cc.confirmed === true,
+      restrictions: typeof cc.restrictions === "string" ? cc.restrictions : null,
+      doNotCall: cc.doNotCall === true,
+    });
+  }
+
   await logAudit({
     brokerageId: user.brokerageId,
     userId: user.id,
@@ -589,7 +612,11 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
     recordId: String(party.id),
   });
 
-  res.status(201).json(createdContactPayload(party));
+  await auditDuplicateOverride(req, dupGate, party.id, "grow_contacts");
+  await recordContactOwner(req, party.id);
+  // An overridden create echoes the (masked) matches it overrode, as the t234u warnings did.
+  const overrideWarnings = dupGate.overridden ? await visibleDuplicates(req, dupGate.hits) : [];
+  res.status(201).json(overrideWarnings.length ? { ...createdContactPayload(party), warnings: overrideWarnings } : createdContactPayload(party));
 });
 
 // PATCH /grow/contacts/:partyId — correct a contact's name, organisation,
@@ -608,7 +635,7 @@ contactsRouter.post("/", requireAuth, requireEntitlement("grow.contacts.manage")
 // route does not copy, move, or rewrite consent, DNC, or suppression rows.
 // A new email or phone therefore has no consent row and marketing fails closed.
 // The audit row lists changed column names only — never the values.
-contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.patch("/:partyId", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   if (!partyId) {
@@ -625,6 +652,13 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
     await noteGrowPartyIsolationRejection(partyId, user.brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const parsed = parseContactPatchBody(req.body);
@@ -655,7 +689,7 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
   if (emailKeyChanged && next.email) {
     const emailDuplicate = await findDuplicateContact(user.brokerageId, "email", next.email, party.id);
     if (emailDuplicate) {
-      res.status(409).json(duplicateContactBody("email", emailDuplicate.contactId));
+      res.status(409).json(duplicateContactBody("email", await duplicateIdForCaller(user, emailDuplicate.contactId)));
       return;
     }
   }
@@ -664,7 +698,7 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
   if (phoneKeyChanged && next.mobile) {
     const phoneDuplicate = await findDuplicateContact(user.brokerageId, "phone", next.mobile, party.id);
     if (phoneDuplicate) {
-      res.status(409).json(duplicateContactBody("phone", phoneDuplicate.contactId));
+      res.status(409).json(duplicateContactBody("phone", await duplicateIdForCaller(user, phoneDuplicate.contactId)));
       return;
     }
   }
@@ -693,6 +727,11 @@ contactsRouter.patch("/:partyId", requireAuth, requireEntitlement("grow.contacts
     recordId: String(updated.id),
     updatedValue: JSON.stringify({ fields: changed }),
   });
+  // t275u: before/after with requester and performer when Pit Crew acts on an owner's authority.
+  if (req.actingFor) {
+    const pick = (o: Record<string, unknown>) => Object.fromEntries(changed.map((f) => [f, o[f] ?? null]));
+    await auditAuthorityAction(req, { action: "grow_contact_updated_on_authority", recordType: "party", recordId: updated.id, before: pick(before as unknown as Record<string, unknown>), after: pick(next as unknown as Record<string, unknown>) });
+  }
 
   res.json(contactIdentityPayload(updated));
 });
@@ -1085,7 +1124,262 @@ async function buildContactability(brokerageId: number, partyId: number) {
 // opportunities, recent activities/commitments, the Relationship Timeline, and the
 // deterministic Contact Intelligence Summary — matching the "understand this relationship in
 // seconds" UX goal (§11) rather than a screen that fires off five separate requests.
-contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.read"), async (req, res) => {
+// t275u (Owner): contact export, scoped and audited. The caller exports only the
+// contacts of the owner it acts for — Pit Crew: the named owner (recorded authority,
+// owner's grow.contacts.read); an agent or admin: their own contacts. Field-level
+// limit: identity and contact fields only (no notes, consent or call data). Every
+// export writes contacts_exported with requester, performer, recipient and row count.
+const EXPORT_FIELDS = ["id", "partyType", "firstName", "lastName", "organisationName", "email", "mobile"] as const;
+const csvCell = (v: unknown) => {
+  const t = v === null || v === undefined ? "" : String(v);
+  // Formula-injection guard for spreadsheet consumers.
+  const safe = /^[=+\-@\t\r]/.test(t) ? `'${t}` : t;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+};
+// Owner t276u: exports are DELIVERED TO THE CONTACT OWNER by default.
+//   POST /exports           prepare (owner = caller; Pit Crew: the named owner on recorded
+//                           authority). Returns metadata only — never the data.
+//   GET  /exports           exports the caller owns or initiated (metadata only).
+//   GET  /exports/:id/download   the owner downloads. Anyone else (e.g. the Pit Crew initiator)
+//                           only after the owner records a separate release to that user.
+//   POST /exports/:id/release    owner-only: explicit release to a named user (reason).
+//   GET  /export            legacy direct download: owner only (Pit Crew refused).
+// Each export is identified by its contact_export_prepared audit row; the scope (owner's
+// contact ids at preparation, fixed field list) is stored there. Every download records the
+// actual recipient, requester (owner), initiating user, owner, scope and timestamp.
+// No schema: audit_logs rows only.
+const EXPORT_TTL_DAYS = 7;
+type ExportMeta = { owner: number; requestedBy: number; initiatedBy: number; initiatedByRole: string; authorityRef: string | null; scope: { kind: "owner_contacts"; fields: readonly string[]; partyIds: number[] }; preparedAt: string };
+
+async function exportRows(brokerageId: number, partyIds: number[]) {
+  if (partyIds.length === 0) return [];
+  return db
+    .select({ id: parties.id, partyType: parties.partyType, firstName: parties.firstName, lastName: parties.lastName, organisationName: parties.organisationName, email: parties.email, mobile: parties.mobile })
+    .from(parties)
+    .where(and(eq(parties.brokerageId, brokerageId), inArray(parties.id, partyIds)))
+    .orderBy(asc(parties.id));
+}
+
+async function prepareExport(req: import("express").Request, ownerId: number): Promise<{ exportId: number; meta: ExportMeta }> {
+  const user = req.authedUser!;
+  const partyIds = (await ownedPartyIds(user.brokerageId, ownerId)).sort((x, y) => x - y);
+  const meta: ExportMeta = {
+    owner: ownerId,
+    requestedBy: ownerId,
+    initiatedBy: user.id,
+    initiatedByRole: user.role,
+    authorityRef: req.actingFor?.authorityRef ?? null,
+    scope: { kind: "owner_contacts", fields: EXPORT_FIELDS, partyIds },
+    preparedAt: new Date().toISOString(),
+  };
+  const exportId = await logAudit(
+    { brokerageId: user.brokerageId, userId: user.id, action: "contact_export_prepared", recordType: "contact_export", recordId: String(ownerId), providerReference: `owner:${ownerId}`, updatedValue: JSON.stringify(meta) },
+    { strict: true },
+  );
+  return { exportId: exportId!, meta };
+}
+
+async function loadExport(brokerageId: number, exportId: number): Promise<{ meta: ExportMeta; createdAt: Date } | null> {
+  const [row] = await db
+    .select({ updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.id, exportId), eq(auditLogs.brokerageId, brokerageId), eq(auditLogs.action, "contact_export_prepared")))
+    .limit(1);
+  if (!row?.updatedValue) return null;
+  return { meta: JSON.parse(row.updatedValue) as ExportMeta, createdAt: row.createdAt };
+}
+
+async function releasedTo(brokerageId: number, exportId: number, ownerId: number, recipientId: number): Promise<number | null> {
+  const [row] = await db
+    .select({ id: auditLogs.id })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, brokerageId), eq(auditLogs.action, "contact_export_released"), eq(auditLogs.recordType, "contact_export"), eq(auditLogs.recordId, String(exportId)), eq(auditLogs.userId, ownerId), eq(auditLogs.providerReference, `recipient:${recipientId}`)))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+async function sendExport(req: import("express").Request, res: import("express").Response, exportId: number, meta: ExportMeta, releaseAuditId: number | null) {
+  const user = req.authedUser!;
+  const rows = await exportRows(user.brokerageId, meta.scope.partyIds);
+  await logAudit(
+    {
+      brokerageId: user.brokerageId,
+      userId: user.id,
+      action: "contacts_exported",
+      recordType: "contact_export",
+      recordId: String(exportId),
+      providerReference: `owner:${meta.owner}`,
+      updatedValue: JSON.stringify({
+        exportId,
+        rows: rows.length,
+        recipient: { userId: user.id, role: user.role },
+        requestedBy: meta.requestedBy,
+        initiatedBy: meta.initiatedBy,
+        owner: meta.owner,
+        scope: { kind: meta.scope.kind, fields: meta.scope.fields, partyCount: meta.scope.partyIds.length },
+        releaseAuditId,
+        authorityRef: meta.authorityRef,
+        at: new Date().toISOString(),
+      }),
+    },
+    { strict: true },
+  );
+  const csv = [EXPORT_FIELDS.join(","), ...rows.map((r) => EXPORT_FIELDS.map((f) => csvCell(r[f])).join(","))].join("\r\n") + "\r\n";
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="contacts-owner-${meta.owner}-export-${exportId}.csv"`);
+  res.setHeader("Cache-Control", "no-store");
+  res.send(csv);
+}
+
+const exportGate = entitlementOrAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read"));
+
+contactsRouter.post("/exports", requireAuth, exportGate, async (req, res) => {
+  const user = req.authedUser!;
+  const ownerId = req.actingFor?.owner.id ?? user.id;
+  const { exportId, meta } = await prepareExport(req, ownerId);
+  res.status(201).json({ exportId, owner: ownerId, deliveredTo: ownerId, initiatedBy: user.id, rows: meta.scope.partyIds.length, fields: EXPORT_FIELDS, status: "ready_for_owner", expiresInDays: EXPORT_TTL_DAYS });
+});
+
+contactsRouter.get("/exports", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const rows = await db
+    .select({ id: auditLogs.id, updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "contact_export_prepared"), or(eq(auditLogs.providerReference, `owner:${user.id}`), eq(auditLogs.userId, user.id))))
+    .orderBy(desc(auditLogs.id))
+    .limit(50);
+  // t280u: status, expiry, releases, owner download and a durable seen marker (audit rows).
+  const ids = rows.map((r) => String(r.id));
+  const events = ids.length
+    ? await db
+        .select({ action: auditLogs.action, recordId: auditLogs.recordId, userId: auditLogs.userId, providerReference: auditLogs.providerReference, createdAt: auditLogs.createdAt })
+        .from(auditLogs)
+        .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.recordType, "contact_export"), inArray(auditLogs.action, ["contact_export_released", "contacts_exported", "contact_export_seen"]), inArray(auditLogs.recordId, ids)))
+        .orderBy(asc(auditLogs.id))
+    : [];
+  const now = Date.now();
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    exports: rows.map((r) => {
+      const m = JSON.parse(r.updatedValue ?? "{}") as ExportMeta & { expiredAt?: string; scope?: { partyCount?: number } };
+      const ev = events.filter((e) => e.recordId === String(r.id));
+      const expiresAt = new Date(r.createdAt.getTime() + EXPORT_TTL_DAYS * 86_400_000);
+      const expired = !!m.expiredAt || expiresAt.getTime() <= now;
+      const ownerDownload = ev.find((e) => e.action === "contacts_exported" && e.userId === m.owner);
+      const seen = ev.find((e) => e.action === "contact_export_seen" && e.userId === m.owner);
+      const mine = m.owner === user.id;
+      const releases = ev
+        .filter((e) => e.action === "contact_export_released")
+        .map((e) => ({ userId: Number(String(e.providerReference ?? "").replace("recipient:", "")), releasedAt: e.createdAt }));
+      const status = expired ? "expired" : ownerDownload ? "downloaded" : "ready";
+      return {
+        exportId: r.id,
+        owner: m.owner,
+        initiatedBy: m.initiatedBy,
+        rows: m.scope?.partyIds?.length || m.scope?.partyCount || 0,
+        preparedAt: r.createdAt,
+        expiresAt: expiresAt.toISOString(),
+        status,
+        ready: status !== "expired",
+        mine,
+        releasedTo: releases,
+        downloadedAt: ownerDownload?.createdAt ?? null,
+        // Seen is the owner's marker; it is only reported to the owner.
+        seen: mine ? !!seen : null,
+        seenAt: mine ? seen?.createdAt ?? null : null,
+        canDownload: status !== "expired" && (mine || releases.some((x) => x.userId === user.id)),
+      };
+    }),
+  });
+});
+
+// t280u: durable seen marker. Owner only; idempotent (a second call returns the first seenAt).
+contactsRouter.post("/exports/:exportId/seen", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const exportId = parsePositiveId(req.params.exportId);
+  const ex = exportId ? await loadExport(user.brokerageId, exportId) : null;
+  if (!ex) {
+    res.status(404).json({ error: "Export not found" });
+    return;
+  }
+  if (ex.meta.owner !== user.id) {
+    res.status(403).json({ error: "Only the contact owner marks an export as seen.", code: "EXPORT_SEEN_OWNER_ONLY" });
+    return;
+  }
+  const [prior] = await db
+    .select({ createdAt: auditLogs.createdAt })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "contact_export_seen"), eq(auditLogs.recordType, "contact_export"), eq(auditLogs.recordId, String(exportId)), eq(auditLogs.userId, user.id)))
+    .limit(1);
+  if (prior) {
+    res.json({ exportId, seen: true, seenAt: prior.createdAt });
+    return;
+  }
+  const seenId = await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "contact_export_seen", recordType: "contact_export", recordId: String(exportId) }, { strict: true });
+  const [seenRow] = await db.select({ createdAt: auditLogs.createdAt }).from(auditLogs).where(eq(auditLogs.id, Number(seenId))).limit(1);
+  res.status(201).json({ exportId, seen: true, seenAt: seenRow?.createdAt ?? new Date() });
+});
+
+contactsRouter.post("/exports/:exportId/release", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const exportId = parsePositiveId(req.params.exportId);
+  const recipientUserId = Number(req.body?.recipientUserId);
+  const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+  const ex = exportId ? await loadExport(user.brokerageId, exportId) : null;
+  if (!ex) {
+    res.status(404).json({ error: "Export not found" });
+    return;
+  }
+  if (isPitCrew(user) || ex.meta.owner !== user.id) {
+    res.status(403).json({ error: "Only the contact owner can release an export to someone else.", code: "EXPORT_RELEASE_OWNER_ONLY" });
+    return;
+  }
+  if (!Number.isInteger(recipientUserId) || recipientUserId !== ex.meta.initiatedBy || recipientUserId === user.id || reason.length < 5 || reason.length > 500) {
+    res.status(422).json({ error: "Release names the user who initiated the export and gives a reason (5-500 characters).", code: "EXPORT_RELEASE_INVALID" });
+    return;
+  }
+  const releaseId = await logAudit(
+    { brokerageId: user.brokerageId, userId: user.id, action: "contact_export_released", recordType: "contact_export", recordId: String(exportId), providerReference: `recipient:${recipientUserId}`, updatedValue: JSON.stringify({ exportId, owner: user.id, recipient: recipientUserId, reason }) },
+    { strict: true },
+  );
+  res.status(201).json({ exportId, releasedTo: recipientUserId, releaseAuditId: releaseId });
+});
+
+contactsRouter.get("/exports/:exportId/download", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const exportId = parsePositiveId(req.params.exportId);
+  const ex = exportId ? await loadExport(user.brokerageId, exportId) : null;
+  if (!ex) {
+    res.status(404).json({ error: "Export not found" });
+    return;
+  }
+  if (Date.now() - ex.createdAt.getTime() > EXPORT_TTL_DAYS * 86_400_000) {
+    res.status(410).json({ error: "This export has expired. Prepare a new one.", code: "EXPORT_EXPIRED" });
+    return;
+  }
+  if (ex.meta.owner === user.id) {
+    await sendExport(req, res, exportId!, ex.meta, null);
+    return;
+  }
+  const release = await releasedTo(user.brokerageId, exportId!, ex.meta.owner, user.id);
+  if (!release) {
+    res.status(403).json({ error: "This export is delivered to the contact owner. Downloading it needs the owner's separate release.", code: "EXPORT_DELIVERED_TO_OWNER" });
+    return;
+  }
+  await sendExport(req, res, exportId!, ex.meta, release);
+});
+
+contactsRouter.get("/export", requireAuth, exportGate, async (req, res) => {
+  const user = req.authedUser!;
+  if (isPitCrew(user)) {
+    res.status(403).json({ error: "Exports are delivered to the contact owner. Prepare one with POST /grow/contacts/exports.", code: "EXPORT_DELIVERED_TO_OWNER" });
+    return;
+  }
+  const { exportId, meta } = await prepareExport(req, user.id);
+  await sendExport(req, res, exportId, meta, null);
+});
+
+contactsRouter.get("/:partyId", requireAuth, readWithOptionalAuthority("grow.contacts.read", requireEntitlement("grow.contacts.read")), async (req, res) => {
   const user = req.authedUser!;
   const brokerageId = user.brokerageId;
   const partyId = parsePositiveId(req.params.partyId);
@@ -1099,6 +1393,13 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
     await noteGrowPartyIsolationRejection(partyId, brokerageId);
     res.status(404).json({ error: "Contact not found in this brokerage" });
     return;
+  }
+  {
+    const scopeRefusal = req.actingFor ? await pitCrewScopeRefusal(req, { partyIds: [partyId] }) : null;
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   // The contact stays brokerage-wide. Property-linked rows are limited to
@@ -1308,13 +1609,20 @@ contactsRouter.get("/:partyId", requireAuth, requireEntitlement("grow.contacts.r
 // may hold several roles at once; assigning a role it already holds is a no-op (the unique
 // index on (partyId, role) is the enforcement, this just makes re-assigning harmless rather than
 // a 500).
-contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/:partyId/roles", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const role = typeof req.body?.role === "string" ? req.body.role : undefined;
   if (!partyId || !role || !(GROW_CONTACT_ROLES as readonly string[]).includes(role)) {
     res.status(400).json({ error: `role must be one of: ${GROW_CONTACT_ROLES.join(", ")}` });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const [party] = await db.select().from(parties).where(and(eq(parties.id, partyId), eq(parties.brokerageId, user.brokerageId))).limit(1);
@@ -1346,17 +1654,25 @@ contactsRouter.post("/:partyId/roles", requireAuth, requireEntitlement("grow.con
     recordId: String(inserted.id),
     updatedValue: JSON.stringify({ partyId, role }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_role_assigned_on_authority", recordType: "party", recordId: partyId, after: { role } });
   res.status(201).json({ role: inserted });
 });
 
 // DELETE /grow/contacts/:partyId/roles/:role
-contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.delete("/:partyId/roles/:role", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const role = req.params.role;
   if (partyId === null) {
     res.status(400).json({ error: "Invalid contact id" });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const [existing] = await db
@@ -1379,6 +1695,7 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
     recordId: String(existing.id),
     previousValue: JSON.stringify({ partyId: existing.partyId, role: existing.role }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_role_removed_on_authority", recordType: "party", recordId: existing.partyId, before: { role: existing.role }, after: null });
   res.status(204).send();
 });
 
@@ -1386,7 +1703,7 @@ contactsRouter.delete("/:partyId/roles/:role", requireAuth, requireEntitlement("
 // Deliberately does not merge records and does not auto-infer anything — every row here is an
 // explicit user action. Both partyId and relatedPartyId are validated against the caller's own
 // brokerage before the row is created.
-contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.post("/:partyId/relationships", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const partyId = parsePositiveId(req.params.partyId);
   const relatedPartyId = parsePositiveId(req.body?.relatedPartyId);
@@ -1403,6 +1720,13 @@ contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("
   if (partyId === relatedPartyId) {
     res.status(400).json({ error: "A contact cannot have a relationship with itself" });
     return;
+  }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [partyId, relatedPartyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
   }
 
   const [party, relatedParty] = await Promise.all([
@@ -1455,12 +1779,13 @@ contactsRouter.post("/:partyId/relationships", requireAuth, requireEntitlement("
     recordId: String(inserted.id),
     updatedValue: JSON.stringify({ partyId, relatedPartyId, relationshipType }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_relationship_created_on_authority", recordType: "grow_contact_relationship", recordId: inserted.id, after: { partyId, relatedPartyId, relationshipType } });
   res.status(201).json({ relationship: inserted });
 });
 
 // DELETE /grow/contacts/relationships/:id — remove a household relationship. Does not affect
 // either party record and does not cascade into any other Grow data.
-contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("grow.contacts.manage"), async (req, res) => {
+contactsRouter.delete("/relationships/:id", requireAuth, entitlementOrAuthority("grow.contacts.manage", requireEntitlement("grow.contacts.manage")), async (req, res) => {
   const user = req.authedUser!;
   const id = parsePositiveId(req.params.id);
   if (id === null) {
@@ -1477,6 +1802,13 @@ contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("gro
     res.status(404).json({ error: "Relationship not found in this brokerage" });
     return;
   }
+  {
+    const scopeRefusal = await pitCrewScopeRefusal(req, { partyIds: [existing.partyId, existing.relatedPartyId] });
+    if (scopeRefusal) {
+      res.status(scopeRefusal.status).json(scopeRefusal.body);
+      return;
+    }
+  }
   await db.delete(growContactRelationships).where(eq(growContactRelationships.id, id));
   await logAudit({
     brokerageId: user.brokerageId,
@@ -1490,6 +1822,7 @@ contactsRouter.delete("/relationships/:id", requireAuth, requireEntitlement("gro
       relationshipType: existing.relationshipType,
     }),
   });
+  if (req.actingFor) await auditAuthorityAction(req, { action: "grow_contact_relationship_removed_on_authority", recordType: "grow_contact_relationship", recordId: existing.id, before: { partyId: existing.partyId, relatedPartyId: existing.relatedPartyId, relationshipType: existing.relationshipType }, after: null });
   res.status(204).send();
 });
 

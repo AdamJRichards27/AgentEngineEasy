@@ -10,6 +10,7 @@ import { GrowRateLimitError } from "../lib/ai/growRateLimiter.js";
 import { AiDailyCapExceededError, getAiUsageSnapshot } from "../lib/ai/dailyUsage.js";
 import { AiUsageLimitsNotConfiguredError } from "../lib/ai/usageLimits.js";
 import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
+import { agentAiAccess, requireAgentAi } from "../lib/agentAiAccess.js";
 
 export const aiRouter = Router();
 
@@ -56,7 +57,8 @@ const askSchema = z
 // permission/entitlement/feature-flag check happens again inside askCopilot()
 // even though requireAuth has already run here - the orchestrator never trusts
 // a route to have already done its job.
-aiRouter.post("/ask", requireAuth, async (req, res) => {
+// t275u: agent-only (lib/agentAiAccess.ts) before any entitlement or AI work.
+aiRouter.post("/ask", requireAuth, requireAgentAi(), async (req, res) => {
   const authedUser = req.authedUser;
   if (authedUser === undefined) {
     res.status(401).json({ error: "Not authenticated" });
@@ -162,15 +164,19 @@ aiRouter.get("/capabilities", requireAuth, async (req, res) => {
   // resolves to undefined, and throws on `.roles` - a real 500 on every
   // request. See routes/__tests__/ai.test.ts for the regression test.
   const tier = await resolveBrokerageTier(authedUser.brokerageId);
+  // t275u: the UI hides Ask AE and the Business Coach for anyone the /ask gate refuses.
+  const agentAi = await agentAiAccess(authedUser);
   res.json({
     tier,
-    copilotEnabled: isRoleEnabled("copilot") && isRoleEntitled(tier, "copilot"),
+    agentAiAllowed: agentAi.allowed,
+    ...(agentAi.allowed ? {} : { agentAiRefusal: agentAi.reason }),
+    copilotEnabled: isRoleEnabled("copilot") && isRoleEntitled(tier, "copilot") && agentAi.allowed,
     // AE GROW Priority 6 Stage C — additive field. False on STARTER (no
     // grow.access), true on GROW/PRO once AI_BUSINESS_COACH_ENABLED is
     // turned on - see featureFlags.ts/entitlements.ts, unchanged by this
     // stage. Existing consumers of this endpoint that only read
     // copilotEnabled are completely unaffected by this addition.
-    businessCoachEnabled: isRoleEnabled("business_coach") && isRoleEntitled(tier, "business_coach"),
+    businessCoachEnabled: isRoleEnabled("business_coach") && isRoleEntitled(tier, "business_coach") && agentAi.allowed,
   });
 });
 

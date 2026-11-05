@@ -1,3 +1,4 @@
+import { setActingAuthority } from "./actingAuthority";
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -111,7 +112,8 @@ export function useEntitlements() {
     select: (data) => data?.entitlements ?? [],
     retry: false,
   });
-  const entitlements = query.data ?? [];
+  // Defensive: only an array is an entitlement list (a test harness that ignores `select` hands back the user).
+  const entitlements = Array.isArray(query.data) ? query.data : [];
   return {
     entitlements,
     isLoading: query.isLoading,
@@ -139,6 +141,7 @@ export async function logoutAndClearSession(queryClient: QueryClient, navigate: 
     // The cookie may already be gone. Still leave the signed-in screen.
   }
   configureOwnerRequestContext(null);
+  setActingAuthority(null);
   queryClient.setQueryData(["session"], null);
   queryClient.removeQueries({
     predicate: (query) => query.queryKey[0] !== "session",

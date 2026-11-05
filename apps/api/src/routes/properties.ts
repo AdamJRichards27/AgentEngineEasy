@@ -19,7 +19,7 @@ import {
 import { publishDomainEvent, currentCorrelationId, incrementCounter, logger } from "@aee/events";
 import { createPropertyDataProvider } from "@aee/integration-property-data";
 import { requireAuth, BROKERAGE_ADMIN_ROLES, type AuthedUser } from "../middlewares/auth.js";
-import { requireEntitlement } from "../middlewares/entitlement.js";
+import { requireAnyEntitlement, requireEntitlement } from "../middlewares/entitlement.js";
 import { restrictedPropertyIdsFor } from "../lib/propertyVisibility.js";
 import { logAudit } from "../lib/audit.js";
 import { initiateAmlIfNeeded } from "../lib/aml.js";
@@ -42,6 +42,10 @@ export const propertiesRouter = Router();
 // same-brokerage existence oracle. Denial is requireEntitlement's
 // existing 403.
 const requiresRunAccess = requireEntitlement("run.access");
+// t234u: legacy property reads (list, detail, workspace, timeline) need an
+// active Grow or Run subscription (or unexpired trial grant). Read-only
+// (grow.contacts.read) is enough; unsubscribed brokerages get 403.
+const canReadProperties = requireAnyEntitlement("grow.contacts.read", "run.access");
 const propertyDataProvider = createPropertyDataProvider();
 
 // AE GROW Pilot Readiness WP6a (D1-residual): a malformed :id is a malformed
@@ -200,7 +204,11 @@ function nonBlank(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-propertiesRouter.post("/", requireAuth, async (req, res) => {
+// t233u: creating a property needs an active Grow or Run subscription (or an
+// unexpired trial grant) with write access: grow.contacts.manage or
+// run.access. Unsubscribed and read-only (grow.contacts.read only) callers
+// get 403. Same rule as the /parties mutations.
+propertiesRouter.post("/", requireAuth, requireAnyEntitlement("grow.contacts.manage", "run.access"), async (req, res) => {
   const parsed = startPropertySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -324,7 +332,7 @@ function propertyListSearch(q: string) {
   );
 }
 
-propertiesRouter.get("/", requireAuth, async (req, res) => {
+propertiesRouter.get("/", requireAuth, canReadProperties, async (req, res) => {
   const user = req.authedUser!;
   const q = propertyListQuery(req.query.q);
   const restrictTo = await restrictedPropertyIdsFor(user);
@@ -345,7 +353,7 @@ propertiesRouter.get("/", requireAuth, async (req, res) => {
 
 // #123 — tenant scoping: previously matched by id alone, so any
 // authenticated user from any brokerage could read any property by id.
-propertiesRouter.get("/:id", requireAuth, async (req, res) => {
+propertiesRouter.get("/:id", requireAuth, canReadProperties, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -368,7 +376,7 @@ propertiesRouter.get("/:id", requireAuth, async (req, res) => {
 // The Property Action Screen's data source (ARCHITECTURE.md §4) — one
 // response shaped for "what needs to happen next", not fifteen sub-screens.
 // #123 — same tenant-scoping fix as GET /:id above.
-propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
+propertiesRouter.get("/:id/workspace", requireAuth, canReadProperties, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -493,7 +501,7 @@ propertiesRouter.get("/:id/workspace", requireAuth, async (req, res) => {
 // Same #123-precedent tenant scoping as every other :id route in this
 // file; canViewFinancials gates the financial-entitlement boundary
 // (commission/funds/agent-paid figures) inside getPropertyTimeline itself.
-propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
+propertiesRouter.get("/:id/timeline", requireAuth, canReadProperties, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const user = req.authedUser!;
@@ -530,7 +538,8 @@ propertiesRouter.get("/:id/timeline", requireAuth, async (req, res) => {
 // only surfaced a prompt, so resolving it is a simple acknowledgement.
 const ownershipReviewSchema = z.object({ notes: z.string().optional() });
 
-propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => {
+// t233u: Run-only property mutation; needs run.access and the property visible to the caller.
+propertiesRouter.post("/:id/ownership-review", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = ownershipReviewSchema.safeParse(req.body);
@@ -541,7 +550,7 @@ propertiesRouter.post("/:id/ownership-review", requireAuth, async (req, res) => 
   const user = req.authedUser!;
 
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
-  if (!property) {
+  if (!property || (await propertyHiddenFromCaller(user, id))) {
     res.status(404).json({ error: "Not found" });
     return;
   }
@@ -582,7 +591,8 @@ const listingDetailsSchema = z.object({
   campaignEndDate: z.coerce.date().optional(),
 });
 
-propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
+// t233u: Run-only property mutation; needs run.access and the property visible to the caller.
+propertiesRouter.post("/:id/listing-details", requireAuth, requiresRunAccess, async (req, res) => {
   const id = parsePositiveId(req.params.id);
   if (id === null) return void res.status(400).json({ error: "Invalid property id." });
   const parsed = listingDetailsSchema.safeParse(req.body);
@@ -592,7 +602,7 @@ propertiesRouter.post("/:id/listing-details", requireAuth, async (req, res) => {
   }
   const user = req.authedUser!;
   const property = await loadPropertyInBrokerage(id, user.brokerageId);
-  if (!property) {
+  if (!property || (await propertyHiddenFromCaller(user, id))) {
     res.status(404).json({ error: "Not found" });
     return;
   }

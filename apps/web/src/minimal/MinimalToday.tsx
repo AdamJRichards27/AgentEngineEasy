@@ -8,11 +8,14 @@ import { formatMinimalHeaderDate } from "../lib/minimalUx";
 import { buildMinimalTodayModel, formatMinimalAsOf, type MinimalTodayCard } from "./minimalTodayModel";
 import { MinimalGrowSections } from "./MinimalGrowSections";
 import MinimalTodayInsightCards from "./momentum/MinimalTodayInsightCards";
+import MobileToday from "./mobile/MobileToday";
+import { useIsPhone } from "./mobile/useIsPhone";
 
 // AE Minimal A Today. The list is GET /grow/today. Channel buttons and the
 // prototype's side cards are not part of this screen.
 
 export default function MinimalToday() {
+  const isPhone = useIsPhone();
   const { user } = useSession();
   const { hasEntitlement } = useEntitlements();
   const today = useQuery<GrowTodaySummary>({
@@ -21,6 +24,8 @@ export default function MinimalToday() {
   });
 
   const dateLabel = formatMinimalHeaderDate(new Date());
+
+  if (isPhone) return <MobileToday />;
 
   return (
     <div className="am-today" data-ae-today="minimal">

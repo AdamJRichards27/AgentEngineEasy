@@ -18,6 +18,9 @@ import {
   type StartAppraisalBody,
 } from "./minimalPropertiesModel";
 import { MinimalPropertiesView, type MinimalPropertiesViewProps, type PropertyChooser } from "./MinimalPropertiesView";
+import { MobilePropertiesView } from "../mobile/MobilePropertiesView";
+import { useIsPhone } from "../mobile/useIsPhone";
+import "../mobile/mobilePropertiesStyles";
 import "./properties.css";
 
 // AE Minimal A Properties page, rendered only inside the Minimal shell
@@ -37,6 +40,8 @@ export default function MinimalProperties() {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
   const { hasEntitlement } = useEntitlements();
+  // On a phone the same container renders the phone view: same queries, same actions, a layout made for a phone. Above 760 px nothing changes.
+  const View = useIsPhone() ? MobilePropertiesView : MinimalPropertiesView;
   const canCreateAppraisal = hasEntitlement("grow.access") && hasEntitlement("grow.opportunities.manage");
   const [searchText, setSearchText] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -137,7 +142,7 @@ export default function MinimalProperties() {
   }
 
   return (
-    <MinimalPropertiesView
+    <View
       cards={cards}
       search={searchText}
       loading={properties.isLoading}

@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 import OwnNameForm from "../components/OwnNameForm";
+import { AuditHistoryCard } from "../components/AuditHistoryCard";
 
 interface CatalogueProduct {
   productId: number;
@@ -162,6 +163,8 @@ export default function Settings() {
           </Link>
         </section>
       )}
+
+      <AuditHistoryCard />
 
       {isAdmin && (
         <section className="card">
