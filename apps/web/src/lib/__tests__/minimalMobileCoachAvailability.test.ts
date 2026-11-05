@@ -40,8 +40,8 @@ test("the hook fails closed (only a literal true shows it), asks only an entitle
   const src = readFileSync(new URL("../../minimal/mobile/useMobileNav.ts", import.meta.url), "utf8");
   assert.match(src, /queryKey: \["ai-capabilities"\]/);
   assert.match(src, /queryFn: \(\) => apiFetch\("\/ai\/capabilities"\)/);
-  assert.match(src, /enabled: !ownerWithoutContext && agentToolsOffered\(entitlements, user\?\.role\)/, "asked only of someone the agent tools would be offered to");
-  assert.match(src, /applyAiAvailability\(nav, \{ coachEnabled: ai\.data\?\.businessCoachEnabled === true, askEnabled: ai\.data\?\.copilotEnabled === true \}\)/, "only a literal true shows either tool");
+  assert.match(src, /enabled: !ownerWithoutContext && aiToolsMayBeOffered\(entitlements\)/, "asked only of a user who holds the entitlement");
+  assert.match(src, /applyAiAvailability\(nav, aiAvailabilityFrom\(ai\.data\)\)/, "the server's answer decides, through one pure function");
   const ask = readFileSync(new URL("../../components/AskAgentEngine.tsx", import.meta.url), "utf8");
   assert.match(ask, /queryKey: \["ai-capabilities"\],\s*queryFn: \(\) => apiFetch<AiCapabilities>\("\/ai\/capabilities"\)/, "the same key and route as the existing probe");
   const api = readFileSync(new URL("../../../../api/src/routes/ai.ts", import.meta.url), "utf8");

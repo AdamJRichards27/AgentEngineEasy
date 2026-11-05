@@ -6,13 +6,31 @@ import { ASK_AE_HREF, BUSINESS_COACH_HREF, type MobileNav } from "./mobileNavMod
 // nowhere. So the phone lists it only when the capability probe says it is on. Fails closed: unknown, loading or failed hides it.
 // Pure: no React, no network. The probe is the same query AskAgentEngine already runs, so it is shared, not repeated.
 
+export interface AiCapabilitiesAnswer {
+  businessCoachEnabled?: boolean;
+  copilotEnabled?: boolean;
+  agentAiAllowed?: boolean;
+}
+
+/**
+ * What the server's answer means for the two tools. The server already combines both flags with agentAiAllowed (its own decision on who may use the
+ * AI: an Agent, an allow-listed administrator; never Pit Crew or a read-only user); an explicit agentAiAllowed:false wins as a defence. Only a literal
+ * true shows a tool; no answer shows neither.
+ */
+export function aiAvailabilityFrom(answer: AiCapabilitiesAnswer | null | undefined): { coachEnabled: boolean; askEnabled: boolean } {
+  if (!answer) return { coachEnabled: false, askEnabled: false };
+  const allowed = answer.agentAiAllowed !== false;
+  return { coachEnabled: allowed && answer.businessCoachEnabled === true, askEnabled: allowed && answer.copilotEnabled === true };
+}
+
 export function applyCoachAvailability(nav: MobileNav, coachEnabled: boolean): MobileNav {
   return applyAiAvailability(nav, { coachEnabled, askEnabled: true });
 }
 
 /**
- * Both agent tools, from the ONE capability probe (GET /ai/capabilities: businessCoachEnabled and copilotEnabled). Each is listed only where the
- * deployment has it on, so no row leads to a "not enabled" page. Fails closed: an unknown, loading or failed probe hides both.
+ * Both AI tools, from the ONE capability probe (GET /ai/capabilities: businessCoachEnabled and copilotEnabled, each already combined by the server
+ * with agentAiAllowed, the server's own decision on who may use them). Each is listed only where the server says so, so no row leads to a refusal or
+ * a "not enabled" page. Fails closed: an unknown, loading or failed probe hides both.
  */
 export function applyAiAvailability(nav: MobileNav, on: { coachEnabled: boolean; askEnabled: boolean }): MobileNav {
   const hidden = new Set<string>();

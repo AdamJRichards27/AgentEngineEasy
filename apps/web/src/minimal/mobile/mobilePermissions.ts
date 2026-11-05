@@ -25,25 +25,14 @@ import { GROW_ACCESS, minimalHasRunAccess } from "../minimalNav";
 export const GROW_CONTACTS_READ = "grow.contacts.read";
 /** The AI entitlement that governs Ask AE and the Business Coach (packages/db ENTITLEMENT_KEYS). */
 export const GROW_AI_USE = "grow.ai.use";
-/** The role the agent tools (Ask AE, Business Coach) belong to. A Brokerage Administrator or Pit Crew does not inherit it. */
-export const AGENT_ROLE = "Agent";
 /**
- * The Grow keys that let a user CHANGE something. A user who holds none of them is read-only on the phone. This is a display inference from the keys
- * the server resolves; the server's own definition of "read-only" is Grok's (see the hand-off), and the API enforces every request regardless.
+ * Whether the phone should even ASK the server about the AI tools (Ask AE, Business Coach): only a user who holds grow.ai.use. This is a plain
+ * server-resolved fact used to avoid a pointless request, NOT an access decision. WHO may use the tools (Agent, an allow-listed administrator;
+ * never Pit Crew or a read-only user) is decided by the server (GET /ai/capabilities: agentAiAllowed, copilotEnabled, businessCoachEnabled) and
+ * the phone shows exactly what it says; it re-derives nothing (lib/agentAiAccess.ts on the server is the single decision).
  */
-export const GROW_WRITE_KEYS: readonly string[] = ["grow.contacts.manage", "grow.activities.manage", "grow.relationships.manage", "grow.opportunities.manage"];
-
-export function isReadOnlyUser(entitlements: readonly string[] | null | undefined): boolean {
-  return !Array.isArray(entitlements) || !GROW_WRITE_KEYS.some((k) => entitlements.includes(k));
-}
-
-/**
- * Who is offered the agent tools (Ask AE and the Business Coach) in More: an AGENT (the role itself, never inherited by a Brokerage Administrator or
- * Pit Crew), who holds grow.ai.use, and who is not read-only. Fails closed: no role, no list or an unknown role gives nothing. Display only: the AI
- * routes enforce grow.ai.use and the deployment flags; enforcing the AGENT role there is a backend matter.
- */
-export function agentToolsOffered(entitlements: readonly string[] | null | undefined, role: string | null | undefined): boolean {
-  return role === AGENT_ROLE && Array.isArray(entitlements) && entitlements.includes(GROW_AI_USE) && !isReadOnlyUser(entitlements);
+export function aiToolsMayBeOffered(entitlements: readonly string[] | null | undefined): boolean {
+  return Array.isArray(entitlements) && entitlements.includes(GROW_AI_USE);
 }
 
 /** Roles that may use Run when the brokerage holds run.access (packages/db USER_ROLES). */
@@ -66,10 +55,6 @@ export interface MobilePermissions {
   run: boolean;
   /** Grow subscriber without run.access: show the single "Add Run" offer (t222u: not unsubscribed, not Run). */
   upgradeToRun: boolean;
-  /** More: Business Coach. Agents only (see agentToolsOffered). */
-  businessCoach: boolean;
-  /** More: Ask AE. Agents only (see agentToolsOffered). */
-  askAe: boolean;
 }
 
 const NONE: MobilePermissions = {
@@ -81,8 +66,6 @@ const NONE: MobilePermissions = {
   searchProperties: false,
   run: false,
   upgradeToRun: false,
-  businessCoach: false,
-  askAe: false,
 };
 
 /**
@@ -103,7 +86,5 @@ export function mobilePermissions(entitlements: readonly string[] | null | undef
     searchProperties: true,
     run: runSubscribed && runRole,
     upgradeToRun: !runSubscribed && hasEntitlement(ctx, GROW_ACCESS),
-    businessCoach: agentToolsOffered(entitlements, role),
-    askAe: agentToolsOffered(entitlements, role),
   };
 }

@@ -3,9 +3,9 @@ import { apiFetch } from "../../lib/api";
 import { useEntitlements, useSession } from "../../lib/session";
 import { marketActivityQueryPath } from "../market/minimalMarketActivityModel";
 import { isFeatureHiddenError, momentumQueryPath } from "../momentum/minimalMomentumModel";
-import { applyAiAvailability } from "./mobileCoachAvailability";
+import { aiAvailabilityFrom, applyAiAvailability, type AiCapabilitiesAnswer } from "./mobileCoachAvailability";
 import { buildMobileNav, type MobileNav } from "./mobileNavModel";
-import { agentToolsOffered } from "./mobilePermissions";
+import { aiToolsMayBeOffered } from "./mobilePermissions";
 
 // AE Mobile (CC Task #64, M2): the one place that builds the phone navigation for a signed-in user.
 // The bottom bar and the More screen both call it, so they always agree. It feeds the corrected PR #280
@@ -35,11 +35,11 @@ export function useMobileNav(): MobileNav {
   });
   // Business Coach is listed only where the deployment has it on. Same key and request as AskAgentEngine's own probe, so it is
   // shared; and it is asked only of a user who holds the entitlement, so nobody else sends the request.
-  const ai = useQuery<{ businessCoachEnabled?: boolean; copilotEnabled?: boolean }>({
+  const ai = useQuery<AiCapabilitiesAnswer>({
     queryKey: ["ai-capabilities"],
     queryFn: () => apiFetch("/ai/capabilities"),
-    // Asked only of someone the phone would offer the agent tools to (an agent holding grow.ai.use who is not read-only): nobody else sends it.
-    enabled: !ownerWithoutContext && agentToolsOffered(entitlements, user?.role),
+    // Asked only of a user who holds grow.ai.use: nobody else sends it. Whether that user may USE the tools is the server's answer, not ours.
+    enabled: !ownerWithoutContext && aiToolsMayBeOffered(entitlements),
     retry: false,
   });
   const nav = buildMobileNav({
@@ -50,5 +50,5 @@ export function useMobileNav(): MobileNav {
     marketActivityAvailable: market.isSuccess,
     momentumAvailable: momentum.isSuccess,
   });
-  return applyAiAvailability(nav, { coachEnabled: ai.data?.businessCoachEnabled === true, askEnabled: ai.data?.copilotEnabled === true });
+  return applyAiAvailability(nav, aiAvailabilityFrom(ai.data));
 }

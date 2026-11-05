@@ -1,5 +1,5 @@
 import { RUN_ACCESS, buildMinimalSidebar, minimalSidebarIsCurrent, minimalSidebarLinks } from "../minimalNav";
-import { GROW_AI_USE, mobilePermissions } from "./mobilePermissions";
+import { GROW_AI_USE, aiToolsMayBeOffered, mobilePermissions } from "./mobilePermissions";
 
 // AE Mobile (CC Task #64, M1): the four primary mobile tabs (Today, People,
 // Properties, Search) and the "More" list. Pure logic: no React, no network,
@@ -135,11 +135,13 @@ export function buildMobileNav(input: MobileNavInput): MobileNav {
   // t222u: the AI Business Coach (formerly "Performance") opens the real coach screen, the classic
   // Grow workspace's coach tab (GrowBusinessCoachTab). Offered with grow.ai.use (UI only; the AI
   // API enforces it). My Momentum stays its own, separate entry.
-  // The agent tools are for AGENTS: the role itself, the entitlement, and not read-only (mobilePermissions.agentToolsOffered). A Brokerage
-  // Administrator or Pit Crew does not inherit them, even in a brokerage whose subscription grants grow.ai.use to everyone.
+  // The AI tools are listed ONLY where the server says this user may use them (applyAiAvailability, from GET /ai/capabilities). Here they are only
+  // candidates for a user who holds the entitlement; until the server answers they are hidden. No role or read-only rule is re-derived on the phone.
   const agentTools: MobileMoreItem[] = [];
-  if (perms.businessCoach) agentTools.push({ key: BUSINESS_COACH_HREF, label: BUSINESS_COACH_LABEL, href: BUSINESS_COACH_HREF, path: "/grow" });
-  if (perms.askAe) agentTools.push({ key: ASK_AE_HREF, label: ASK_AE_LABEL, href: ASK_AE_HREF, path: "/grow" });
+  if (aiToolsMayBeOffered(entitlements)) {
+    agentTools.push({ key: BUSINESS_COACH_HREF, label: BUSINESS_COACH_LABEL, href: BUSINESS_COACH_HREF, path: "/grow" });
+    agentTools.push({ key: ASK_AE_HREF, label: ASK_AE_LABEL, href: ASK_AE_HREF, path: "/grow" });
+  }
   if (agentTools.length > 0) {
     const at = growItems.findIndex((i) => i.href === "/grow/momentum");
     if (at >= 0) growItems.splice(at + 1, 0, ...agentTools);
