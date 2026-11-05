@@ -165,6 +165,16 @@ export default function Settings() {
 
       {isAdmin && (
         <section className="card">
+          <h2>Audit history</h2>
+          <p className="muted">Who did what and when. Changed values stay encrypted unless an authorised Audit Value Reader asks for one entry, with a reason.</p>
+          <Link href="/settings/audit" className="btn btn-secondary btn-small">
+            View Audit history →
+          </Link>
+        </section>
+      )}
+
+      {isAdmin && (
+        <section className="card">
           <h2>Integrations</h2>
           <p className="muted">Connect and manage provider integrations — portals, communications, and financial status feeds (mock/sandbox providers only in this build).</p>
           <Link href="/settings/integrations" className="btn btn-secondary btn-small">

@@ -60,6 +60,7 @@ import { FinancialSummarySection } from "../components/FinancialSummarySection";
 // component with anchor="contact". See that component's own header comment for why this is a
 // shared panel rather than a second bespoke screen.
 import { PropertyIntelligencePanel } from "../components/PropertyIntelligencePanel";
+import { SendDelegationPanel } from "../components/SendDelegationPanel";
 
 interface PropertyOverview {
   id: number;
@@ -1222,6 +1223,7 @@ export default function PropertyWorkspace({ params }: { params: { id: string } }
           )}
           {populatePackage.isError && <p className="error-text">{apiErrorMessage(populatePackage.error, "Couldn't prepare those documents. Try again.")}</p>}
           {sendForSignature.isError && <p className="error-text">{apiErrorMessage(sendForSignature.error, "Couldn't send documents for signature. Try again.")}</p>}
+          {data.documentPackage && <SendDelegationPanel recordType="document_package" recordId={data.documentPackage.id} />}
 
           {data.documentPackage.signatureRequest && (
             <p className="muted">

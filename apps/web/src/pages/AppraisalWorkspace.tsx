@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useParams } from "wouter";
 import { RunGatedLink } from "../components/RunGatedLink";
+import { SendDelegationPanel } from "../components/SendDelegationPanel";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiErrorMessage, apiFetch } from "../lib/api";
 import { DEMO_AI_LABEL, userVisibleAiText } from "../lib/demoAi";
@@ -972,6 +973,7 @@ export default function AppraisalWorkspace() {
               </button>
             </form>
           )}
+          {appraisalId !== null && <SendDelegationPanel recordType="appraisal" recordId={appraisalId} />}
           {appraisal.presentationDocumentId !== null && <p className="muted">Presentation document {appraisal.presentationDocumentId}</p>}
         </section>
       )}

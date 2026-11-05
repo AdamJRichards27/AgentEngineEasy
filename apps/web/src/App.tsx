@@ -49,6 +49,8 @@ const FinancialOperations = lazy(() => import("./pages/FinancialOperations"));
 const Settings = lazy(() => import("./pages/Settings"));
 const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
+const SettingsAudit = lazy(() => import("./pages/SettingsAudit"));
+const GrowExports = lazy(() => import("./pages/GrowExports"));
 const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
@@ -422,11 +424,13 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
             {selectOpportunitiesView(minimalShell, search) === "minimal" ? <MinimalOpportunities /> : <Redirect to="/grow?tab=opportunities" replace />}
           </Route>
           <Route path="/grow/import" component={GrowImport} />
+          <Route path="/grow/exports" component={GrowExports} />
           <Route path="/search">{minimalShell ? <MobileSearchPage /> : <Redirect to="/grow" replace />}</Route>
           <Route path="/more">{minimalShell ? <MobileMorePage /> : <Redirect to="/grow" replace />}</Route>
           <Route path="/settings" component={Settings} />
           <Route path="/settings/integrations" component={SettingsIntegrations} />
           <Route path="/settings/users" component={SettingsUsers} />
+          <Route path="/settings/audit" component={SettingsAudit} />
           <Route>
             <p>Page not found.</p>
           </Route>
