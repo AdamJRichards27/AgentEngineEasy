@@ -51,6 +51,7 @@ const SettingsIntegrations = lazy(() => import("./pages/SettingsIntegrations"));
 const SettingsUsers = lazy(() => import("./pages/SettingsUsers"));
 const SettingsAudit = lazy(() => import("./pages/SettingsAudit"));
 const GrowExports = lazy(() => import("./pages/GrowExports"));
+const GrowHeldImports = lazy(() => import("./pages/GrowHeldImports"));
 const Owner = lazy(() => import("./pages/Owner"));
 const MinimalShell = lazy(() => import("./minimal/MinimalShell"));
 const MinimalToday = lazy(() => import("./minimal/MinimalToday"));
@@ -425,6 +426,7 @@ function AuthenticatedRoutes({ ownerWithoutContext }: { ownerWithoutContext: boo
           </Route>
           <Route path="/grow/import" component={GrowImport} />
           <Route path="/grow/exports" component={GrowExports} />
+          <Route path="/grow/import/held" component={GrowHeldImports} />
           <Route path="/search">{minimalShell ? <MobileSearchPage /> : <Redirect to="/grow" replace />}</Route>
           <Route path="/more">{minimalShell ? <MobileMorePage /> : <Redirect to="/grow" replace />}</Route>
           <Route path="/settings" component={Settings} />

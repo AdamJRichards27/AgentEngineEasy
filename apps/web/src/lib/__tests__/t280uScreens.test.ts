@@ -217,3 +217,11 @@ test("wording: every server code the screens handle has a sentence, and the serv
   assert.equal(codeText({ code: "UNKNOWN_CODE", friendly: "  " }, "fallback"), "fallback");
   assert.equal(codeText(new Error("x"), "fallback"), "fallback");
 });
+
+test("held imports page: an empty list is said in words on the page, drawn as nothing when embedded; a refused user is told who reviews them and gets no controls", () => {
+  assert.equal(heldView([]), null);
+  assert.match(text(heldView([], { showEmpty: true })), /No imports are held for review\./);
+  const refused = heldView([], { forbidden: true });
+  assert.match(text(refused), /reviewed by Administrators and Agents/);
+  assert.equal(hasAttr(refused, "data-ae-held-form"), false);
+});

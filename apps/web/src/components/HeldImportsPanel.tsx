@@ -20,12 +20,17 @@ export interface HeldImportsViewProps {
   busyId: number | null;
   errorText: string | null;
   selfId: number | null;
+  /** On its own page an empty list is said in words; embedded, nothing is drawn. */
+  showEmpty?: boolean;
+  /** The server refused this user (Pit Crew, read-only, other roles). */
+  forbidden?: boolean;
   onDraft: (jobId: number, next: HeldDraft) => void;
   onSubmit: (jobId: number) => void;
 }
 
 export function HeldImportsView(p: HeldImportsViewProps) {
-  if (p.held.length === 0) return null;
+  if (p.forbidden) return <section className="card" data-ae-held-forbidden><h2>Imports held for review</h2><p className="muted">Held imports are reviewed by Administrators and Agents.</p></section>;
+  if (p.held.length === 0) return p.showEmpty ? <section className="card" data-ae-held-none><h2>Imports held for review</h2><p className="empty-state">No imports are held for review.</p></section> : null;
   return (
     <section className="card stack" data-ae-held-imports>
       <h2>Imports held for review ({p.held.length})</h2>
@@ -88,24 +93,24 @@ export function HeldImportsView(p: HeldImportsViewProps) {
   );
 }
 
-export function HeldImportsPanel() {
+export function HeldImportsPanel({ showEmpty = false }: { showEmpty?: boolean } = {}) {
   const qc = useQueryClient();
   const { user } = useSession();
   const [drafts, setDrafts] = useState<Record<number, HeldDraft>>({});
   const [errorText, setErrorText] = useState<string | null>(null);
-  const q = useQuery<HeldImport[]>({
+  const q = useQuery<{ held: HeldImport[]; forbidden: boolean }>({
     queryKey: ["import-held"],
     queryFn: async () => {
       try {
-        return parseHeldImports(await apiFetch("/import/held"));
+        return { held: parseHeldImports(await apiFetch("/import/held")), forbidden: false };
       } catch (e) {
-        if (e instanceof ApiError && e.status === 403) return []; // Pit Crew, read-only, other roles: nothing is drawn
+        if (e instanceof ApiError && e.status === 403) return { held: [], forbidden: true }; // Pit Crew, read-only, other roles: no controls, and the server says why
         throw e;
       }
     },
     retry: false,
   });
-  const needsOwners = (q.data ?? []).some((h) => h.releaseStatus === "held" && h.canAssignAnyOwner);
+  const needsOwners = (q.data?.held ?? []).some((h) => h.releaseStatus === "held" && h.canAssignAnyOwner);
   const owners = useQuery<OwnerChoice[]>({
     queryKey: ["held-owner-choices"],
     enabled: needsOwners,
@@ -117,7 +122,7 @@ export function HeldImportsPanel() {
   });
   const assign = useMutation({
     mutationFn: (jobId: number) => {
-      const row = (q.data ?? []).find((h) => h.importJobId === jobId)!;
+      const row = (q.data?.held ?? []).find((h) => h.importJobId === jobId)!;
       const d = drafts[jobId] ?? { ownerUserId: "", authorityRef: "" };
       const ownerUserId = row.canAssignAnyOwner ? Number(d.ownerUserId) : user?.id;
       return apiFetch(`/import/jobs/${jobId}/owner`, { method: "POST", body: JSON.stringify({ ownerUserId, authorityRef: d.authorityRef.trim() }) });
@@ -127,7 +132,9 @@ export function HeldImportsPanel() {
   });
   return (
     <HeldImportsView
-      held={q.data ?? []}
+      held={q.data?.held ?? []}
+      showEmpty={showEmpty}
+      forbidden={q.data?.forbidden === true}
       owners={owners.data ?? []}
       drafts={drafts}
       busyId={assign.isPending ? (assign.variables ?? null) : null}

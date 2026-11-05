@@ -6,7 +6,6 @@ import { apiFetch, ApiError, apiErrorMessage } from "../lib/api";
 // presentation every other Grow region already uses.
 import { GrowDataRegionStatus } from "../components/GrowDataRegion";
 import { GrowTableScroll } from "../components/GrowTableScroll";
-import { HeldImportsPanel } from "../components/HeldImportsPanel";
 
 // AE GROW Completion W2-B (G-5) — the one way this page turns a failure into a
 // sentence. Every `(mutation.error as ApiError).friendly` on this page used to
@@ -323,8 +322,7 @@ function ImportHistory({
         Bring in your existing contact and property database -- matched against what's already here, never
         overwritten blind.
       </p>
-      <p className="muted"><Link href="/grow/exports">Your contact exports</Link></p>
-      <HeldImportsPanel />
+      <p className="muted"><Link href="/grow/exports">Your contact exports</Link> · <Link href="/grow/import/held">Imports held for review</Link></p>
 
       <section className="card">
         <h2>Start a new import</h2>
