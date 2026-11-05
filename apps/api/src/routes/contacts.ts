@@ -1315,8 +1315,9 @@ contactsRouter.post("/exports/:exportId/seen", requireAuth, async (req, res) => 
     res.json({ exportId, seen: true, seenAt: prior.createdAt });
     return;
   }
-  await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "contact_export_seen", recordType: "contact_export", recordId: String(exportId) }, { strict: true });
-  res.status(201).json({ exportId, seen: true, seenAt: new Date().toISOString() });
+  const seenId = await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "contact_export_seen", recordType: "contact_export", recordId: String(exportId) }, { strict: true });
+  const [seenRow] = await db.select({ createdAt: auditLogs.createdAt }).from(auditLogs).where(eq(auditLogs.id, Number(seenId))).limit(1);
+  res.status(201).json({ exportId, seen: true, seenAt: seenRow?.createdAt ?? new Date() });
 });
 
 contactsRouter.post("/exports/:exportId/release", requireAuth, async (req, res) => {
