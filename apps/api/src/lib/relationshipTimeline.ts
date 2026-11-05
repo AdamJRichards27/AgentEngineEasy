@@ -1,5 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
-import { relationshipStatusWording, relationshipTypeWording } from "./relationshipWording.js";
+import { opportunityStageWording, opportunityStatusWording, opportunityTypeWording, relationshipStatusWording, relationshipTypeWording } from "./relationshipWording.js";
 import { presentStoredActivitySummaries } from "./commitmentRescheduleSummary.js";
 import { linkedPropertyHidden, ownedOrLinkedHidden } from "./propertyVisibility.js";
 import {
@@ -162,7 +162,7 @@ function opportunityUpdatedSummary(opportunity: {
   status: string;
   lostReason: string | null;
 }): string {
-  const base = `Opportunity updated: ${opportunity.opportunityType} (${opportunity.stage}/${opportunity.status}).`;
+  const base = `Opportunity updated: ${opportunityTypeWording(opportunity.opportunityType)} (${opportunityStageWording(opportunity.stage)}/${opportunityStatusWording(opportunity.status)}).`;
   if (opportunity.status !== "Lost") return base;
   const lostReason = opportunity.lostReason?.trim() ?? "";
   if (lostReason.length === 0) return base;
@@ -482,7 +482,7 @@ export async function getRelationshipTimeline(
       id: `opportunity:${o.id}:CREATED`,
       type: "OPPORTUNITY_CREATED",
       occurredAt: o.createdAt.toISOString(),
-      summary: `Opportunity created: ${o.opportunityType} — ${o.reason ?? "no reason recorded"}.`,
+      summary: `Opportunity created: ${opportunityTypeWording(o.opportunityType)} — ${o.reason ?? "no reason recorded"}.`,
       propertyId: o.propertyId,
       propertyLabel,
       opportunityId: o.id,

@@ -43,3 +43,31 @@ export function relationshipTypeWording(type: string): string {
 export function relationshipStatusWording(status: string): string {
   return GROW_RELATIONSHIP_STATUS_LABELS[status] ?? readable(status, "Updated");
 }
+
+// t284u: opportunity History wording. API-side copy of the approved labels in
+// apps/web/src/minimal/opportunities/minimalOpportunitiesModel.ts (TYPE_LABELS and
+// MINIMAL_PIPELINE_COLUMNS). Keep in sync. Never a raw stored key.
+export const OPPORTUNITY_TYPE_LABELS: Readonly<Record<string, string>> = {
+  Listing: "Listing",
+  Appraisal: "Appraisal",
+  PropertyManagement: "Property management",
+  Other: "Other",
+};
+export const OPPORTUNITY_STAGE_LABELS: Readonly<Record<string, string>> = {
+  New: "New",
+  Contacted: "Contacted",
+  Qualified: "Qualified",
+  AppraisalBooked: "Appraisal booked",
+  Converted: "Converted",
+  Lost: "Lost",
+  Closed: "Closed",
+};
+export const OPPORTUNITY_STATUS_LABELS: Readonly<Record<string, string>> = {
+  Open: "Open",
+  Converted: "Converted",
+  Lost: "Lost",
+  Closed: "Closed",
+};
+export const opportunityTypeWording = (v: string) => OPPORTUNITY_TYPE_LABELS[v] ?? readable(v, "Opportunity");
+export const opportunityStageWording = (v: string) => OPPORTUNITY_STAGE_LABELS[v] ?? readable(v, "Stage");
+export const opportunityStatusWording = (v: string) => OPPORTUNITY_STATUS_LABELS[v] ?? readable(v, "Status");
