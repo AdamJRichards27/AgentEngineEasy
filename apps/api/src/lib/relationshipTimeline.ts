@@ -1,4 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { relationshipStatusWording, relationshipTypeWording } from "./relationshipWording.js";
 import { presentStoredActivitySummaries } from "./commitmentRescheduleSummary.js";
 import { linkedPropertyHidden, ownedOrLinkedHidden } from "./propertyVisibility.js";
 import {
@@ -437,8 +438,8 @@ export async function getRelationshipTimeline(
       type: "PROPERTY_RELATIONSHIP_ESTABLISHED",
       occurredAt: r.createdAt.toISOString(),
       summary: propertyLabel
-        ? `Relationship recorded: ${r.relationshipType} at ${propertyLabel}.`
-        : `Relationship recorded: ${r.relationshipType}.`,
+        ? `Relationship recorded: ${relationshipTypeWording(r.relationshipType)} at ${propertyLabel}.`
+        : `Relationship recorded: ${relationshipTypeWording(r.relationshipType)}.`,
       propertyId: r.propertyId,
       propertyLabel,
       opportunityId: null,
@@ -450,7 +451,7 @@ export async function getRelationshipTimeline(
         id: `relationship:${r.id}:UPDATED`,
         type: "PROPERTY_RELATIONSHIP_UPDATED",
         occurredAt: r.updatedAt.toISOString(),
-        summary: `Relationship updated: ${r.relationshipType} (${r.status}).`,
+        summary: `Relationship updated: ${relationshipTypeWording(r.relationshipType)} (${relationshipStatusWording(r.status)}).`,
         propertyId: r.propertyId,
         propertyLabel,
         opportunityId: null,
