@@ -4,7 +4,7 @@ import { SendDelegationPanelView, type SendDelegationPanelViewProps } from "../.
 import { HeldImportsView, type HeldImportsViewProps } from "../../components/HeldImportsPanel";
 import { ExportsView, type ExportsViewProps } from "../../pages/GrowExports";
 import { AuditView, type AuditViewProps } from "../../pages/SettingsAudit";
-import { CODE_WORDS, HELD_REASON_WORDS, actionWords, authorityRefOk, codeText, delegationDetail, heldReasonText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, parseDelegationStatus, parseExports, parseHeldImports, reasonOk, refusalText } from "../t280uContracts";
+import { CODE_WORDS, HELD_REASON_WORDS, UNAVAILABLE_REASON_WORDS, actionWords, auditValuesErrorText, authorityRefOk, codeText, delegationDetail, heldEventText, heldReasonText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, parseDelegationStatus, parseExports, parseHeldImports, reasonOk, refusalText } from "../t280uContracts";
 import { all, text } from "./mobileTreeHelpers";
 
 // Desktop screens for delegation, exports, held imports and audit access (t280u contracts). Fixtures mirror CONTRACTS-t280u.md. Pure views, so every role
@@ -224,4 +224,77 @@ test("held imports page: an empty list is said in words on the page, drawn as no
   const refused = heldView([], { forbidden: true });
   assert.match(text(refused), /reviewed by Administrators and Agents/);
   assert.equal(hasAttr(refused, "data-ae-held-form"), false);
+});
+
+/* ── t282u contract: held imports keep their history; the status list is closed and never drops a row; audit-values refusals are documented ──── */
+const HIST = [
+  { event: "owner_recorded", at: "2026-11-01T01:00:00.000Z", byUserId: 3, ownerUserId: 6, authorityRef: "Initial owner" },
+  { event: "held", at: "2026-11-02T01:00:00.000Z", byUserId: 3, reasonCode: "OWNER_INACTIVE" },
+  { event: "owner_recorded", at: "2026-11-03T01:00:00.000Z", byUserId: 4, ownerUserId: 4, authorityRef: "Accepted at review INSTR-A2" },
+];
+
+test("held imports (t282u): all three statuses parse; a COMPLETED import is listed with its history, its release and no controls", () => {
+  const rows = parseHeldImports({ held: [H({ releaseStatus: "held" }), H({ importJobId: 10, releaseStatus: "released", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" }, history: HIST }), H({ importJobId: 11, jobStatus: "COMPLETED", releaseStatus: "completed", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" }, history: HIST })] });
+  assert.deepEqual(rows.map((r) => r.releaseStatus), ["held", "released", "completed"]);
+  const t = heldView([H({ importJobId: 11, jobStatus: "COMPLETED", releaseStatus: "completed", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" }, history: HIST, canAssignAnyOwner: true })]);
+  assert.ok(hasAttr(t, "data-ae-held-import"), "the completed import is still listed");
+  assert.match(text(all(t, (e) => e.props?.["data-ae-held-pill"] !== undefined)[0]), /Completed/);
+  assert.match(text(t), /Completed\./); assert.match(text(t), /Authority reference: INSTR-A2/);
+  assert.equal(hasAttr(t, "data-ae-held-form"), false, "no assign or take-ownership control once it is completed, whatever flags the row carries");
+  assert.equal(all(t, (e) => e.props?.["data-ae-held-event"] !== undefined).length, 3, "the three history events are shown, oldest first");
+});
+
+test("held imports (t282u): an UNKNOWN status is never dropped and never guessed: it is shown as 'Unknown status', flagged as a contract break, with no action", () => {
+  const rows = parseHeldImports({ held: [H({ releaseStatus: "finished" }), H({ importJobId: 12, releaseStatus: null }), { importJobId: 13 }, null] });
+  assert.equal(rows.length, 2, "only a row with no id or filename cannot be shown");
+  assert.deepEqual(rows.map((r) => r.releaseStatus), ["unknown", "unknown"]);
+  assert.equal(rows[0].rawStatus, "finished");
+  const t = heldView([H({ releaseStatus: "finished", canAssignAnyOwner: true, canAcceptForSelf: true })]);
+  assert.match(text(t), /Unknown status \("finished"\)/); assert.match(text(t), /break in its contract/);
+  assert.equal(hasAttr(t, "data-ae-held-unknown"), true); assert.equal(hasAttr(t, "data-ae-held-form"), false, "an unrecognised status offers no action even if the row says it may");
+  assert.match(text(all(t, (e) => e.props?.["data-ae-held-pill"] !== undefined)[0]), /Unknown status/);
+});
+
+test("held imports (t282u): history events are kept in order and read in words; an unfamiliar event is still shown; names come from the viewer's knowledge", () => {
+  const r = parseHeldImports({ held: [H({ releaseStatus: "released", reasonCode: null, history: [...HIST, { event: "mystery", at: "2026-11-04T00:00:00.000Z", byUserId: 3 }, { event: "held" }] })] })[0];
+  assert.deepEqual(r.history.map((e) => e.event), ["owner_recorded", "held", "owner_recorded", "unknown"], "an event with no time is dropped; an unfamiliar one is kept");
+  const names = (id: number | null) => (id === 4 ? "you" : id === null ? "someone" : `User ${id}`);
+  assert.equal(heldEventText(r.history[1], names), "Held for review: The recorded owner is no longer active.");
+  assert.equal(heldEventText(r.history[2], names), "Owner recorded at review: you. Authority reference: Accepted at review INSTR-A2.");
+  assert.equal(heldEventText({ event: "owner_set", at: "x", byUserId: 3, reasonCode: null, ownerUserId: 6, authorityRef: null }, names), "Owner set at creation: User 6.");
+  const t = heldView([H({ releaseStatus: "released", reasonCode: null, history: HIST })], { names: { 3: "Gus Grow" } });
+  assert.match(text(t), /Gus Grow/); assert.match(text(t), /Held for review: The recorded owner is no longer active\./);
+  assert.doesNotMatch(text(t), /owner_recorded|OWNER_INACTIVE|_/, "no stored key reaches the user");
+});
+
+test("audit values (t282u contract C): every documented refusal has its own sentence, including each 503 reason", () => {
+  const cases: Array<[unknown, RegExp]> = [
+    [{ status: 403, code: "AUDIT_VALUES_RESTRICTED" }, /not authorised to read audited values/],
+    [{ status: 400, code: "AUDIT_VALUES_REASON_REQUIRED" }, /reason of 5 to 500 characters/],
+    [{ status: 400 }, /isn't valid/],
+    [{ status: 404 }, /No readable values are recorded for this entry/],
+    [{ status: 410, code: "AUDIT_VALUE_EXPIRED" }, /past their retention period/],
+    [{ status: 503, code: "AUDIT_VALUE_UNAVAILABLE", reason: "NO_KEY" }, /no decryption key is configured/],
+    [{ status: 503, code: "AUDIT_VALUE_UNAVAILABLE", reason: "KEY_MISMATCH" }, /can't be decrypted with the configured key/],
+    [{ status: 503, code: "AUDIT_VALUE_UNAVAILABLE", reason: "EXPIRED" }, /past their retention period/],
+    [{ status: 503, code: "AUDIT_VALUE_UNAVAILABLE", reason: "NOT_ENCRYPTED" }, /No encrypted values are recorded/],
+    [{ status: 503, code: "AUDIT_VALUE_UNAVAILABLE" }, /can't be decrypted with the configured key/],
+    [{ status: 401 }, /Sign in again/],
+  ];
+  for (const [err, re] of cases) assert.match(auditValuesErrorText(err), re, JSON.stringify(err));
+  assert.equal(auditValuesErrorText(new Error("boom")), "Couldn't show those values.");
+  for (const k of Object.keys(UNAVAILABLE_REASON_WORDS)) assert.doesNotMatch(UNAVAILABLE_REASON_WORDS[k], /_/);
+  assert.equal(refusalText("NOT_ENCRYPTED"), "no encrypted values to show");
+  for (const r of ["NOT_AUTHORISED", "REASON_REQUIRED", "NOT_FOUND", "EXPIRED", "NO_KEY", "KEY_MISMATCH", "NOT_ENCRYPTED"]) assert.doesNotMatch(refusalText(r), /_/, r);
+});
+
+test("audit list states (t282u contract C): the three documented combinations read correctly, and only a readable one can be requested", () => {
+  const state = (o: Record<string, unknown>, caps = CAPS_READER) => audit(caps, [entry(o)]);
+  const t1 = state({ hasEncryptedValues: true, valuesExpired: false });
+  assert.match(text(t1), /Values: Encrypted/); assert.ok(hasAttr(t1, "data-ae-audit-request"));
+  const t2 = state({ hasEncryptedValues: false, valuesExpired: true });
+  assert.match(text(t2), /expired \(past the retention period\)/); assert.equal(hasAttr(t2, "data-ae-audit-request"), false);
+  const t3 = state({ hasEncryptedValues: false, valuesExpired: false });
+  assert.match(text(t3), /none recorded/); assert.equal(hasAttr(t3, "data-ae-audit-request"), false);
+  assert.equal(hasAttr(state({ hasEncryptedValues: true, valuesExpired: false }, CAPS_ADMIN as typeof CAPS_READER), "data-ae-audit-request"), false, "an administrator who is not a value reader is never offered the request");
 });

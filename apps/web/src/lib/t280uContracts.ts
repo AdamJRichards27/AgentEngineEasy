@@ -88,18 +88,61 @@ export function parseExports(raw: unknown): ExportRow[] {
 export const EXPORT_STATUS_LABEL: Record<ExportStatus, string> = { ready: "Ready", downloaded: "Downloaded", expired: "Expired" };
 export const exportScope = (n: number): string => `${n} contact${n === 1 ? "" : "s"}`;
 
-/* ── Held imports ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── */
-export interface HeldImport { importJobId: number; filename: string; totalRows: number; uploadedAt: string; releaseStatus: "held" | "released"; reasonCode: string | null; release: { ownerUserId: number; authorityRef: string; releasedAt: string } | null; canAssignAnyOwner: boolean; canAcceptForSelf: boolean }
+/* ── Held imports (t282u: releaseStatus is a CLOSED list of three; history is kept after release) ────────────────────────────────────────── */
+export type HeldStatus = "held" | "released" | "completed" | "unknown";
+export type HeldEventKind = "held" | "owner_recorded" | "owner_set" | "unknown";
+export interface HeldEvent { event: HeldEventKind; at: string; byUserId: number | null; reasonCode: string | null; ownerUserId: number | null; authorityRef: string | null }
+export interface HeldRelease { ownerUserId: number; releasedByUserId: number | null; authorityRef: string; releasedAt: string }
+export interface HeldImport {
+  importJobId: number;
+  filename: string;
+  jobStatus: string;
+  totalRows: number;
+  uploadedAt: string;
+  /** The server's value if it is one of the three; "unknown" for anything else (never dropped, never guessed: it is shown as an unknown status). */
+  releaseStatus: HeldStatus;
+  rawStatus: string | null;
+  reasonCode: string | null;
+  release: HeldRelease | null;
+  history: HeldEvent[];
+  canAssignAnyOwner: boolean;
+  canAcceptForSelf: boolean;
+}
+
+const HELD_STATUSES: readonly string[] = ["held", "released", "completed"];
+const HELD_EVENTS: readonly string[] = ["held", "owner_recorded", "owner_set"];
 
 export function parseHeldImports(raw: unknown): HeldImport[] {
   const out: HeldImport[] = [];
   for (const h of list(rec(raw)?.held)) {
     const r = rec(h);
-    if (!r || num(r.importJobId) === null || !str(r.filename) || (r.releaseStatus !== "held" && r.releaseStatus !== "released")) continue;
+    // A row needs only its id and name to be shown. An unfamiliar status or event must NOT make a row vanish.
+    if (!r || num(r.importJobId) === null || !str(r.filename)) continue;
+    const status: HeldStatus = HELD_STATUSES.includes(String(r.releaseStatus)) ? (r.releaseStatus as HeldStatus) : "unknown";
     const rel = rec(r.release);
-    out.push({ importJobId: num(r.importJobId)!, filename: str(r.filename)!, totalRows: num(r.totalRows) ?? 0, uploadedAt: str(r.uploadedAt) ?? "", releaseStatus: r.releaseStatus, reasonCode: str(r.reasonCode), release: rel && num(rel.ownerUserId) !== null ? { ownerUserId: num(rel.ownerUserId)!, authorityRef: str(rel.authorityRef) ?? "", releasedAt: str(rel.releasedAt) ?? "" } : null, canAssignAnyOwner: r.canAssignAnyOwner === true, canAcceptForSelf: r.canAcceptForSelf === true });
+    const history: HeldEvent[] = [];
+    for (const e of list(r.history)) {
+      const ev = rec(e);
+      if (!ev || !str(ev.at)) continue;
+      history.push({ event: HELD_EVENTS.includes(String(ev.event)) ? (ev.event as HeldEventKind) : "unknown", at: str(ev.at)!, byUserId: num(ev.byUserId), reasonCode: str(ev.reasonCode), ownerUserId: num(ev.ownerUserId), authorityRef: str(ev.authorityRef) });
+    }
+    out.push({
+      importJobId: num(r.importJobId)!, filename: str(r.filename)!, jobStatus: str(r.jobStatus) ?? "", totalRows: num(r.totalRows) ?? 0, uploadedAt: str(r.uploadedAt) ?? "",
+      releaseStatus: status, rawStatus: status === "unknown" ? String(r.releaseStatus ?? "") : null, reasonCode: str(r.reasonCode),
+      release: rel && num(rel.ownerUserId) !== null ? { ownerUserId: num(rel.ownerUserId)!, releasedByUserId: num(rel.releasedByUserId), authorityRef: str(rel.authorityRef) ?? "", releasedAt: str(rel.releasedAt) ?? "" } : null,
+      history, canAssignAnyOwner: r.canAssignAnyOwner === true, canAcceptForSelf: r.canAcceptForSelf === true,
+    });
   }
   return out;
+}
+/** One history event in words. `nameOf` turns a user id into a name (or "you"); events are never shown as stored keys. */
+export function heldEventText(e: HeldEvent, nameOf: (id: number | null) => string): string {
+  switch (e.event) {
+    case "held": return `Held for review${e.reasonCode ? `: ${heldReasonText(e.reasonCode)}` : "."}`;
+    case "owner_recorded": return `Owner recorded at review: ${nameOf(e.ownerUserId)}${e.authorityRef ? `. Authority reference: ${e.authorityRef}` : ""}.`;
+    case "owner_set": return `Owner set at creation: ${nameOf(e.ownerUserId)}${e.authorityRef ? `. Authority reference: ${e.authorityRef}` : ""}.`;
+    default: return "An event this screen doesn't recognise.";
+  }
 }
 export const HELD_REASON_WORDS: Record<string, string> = {
   OWNER_NOT_FOUND: "No owner is recorded for this import.",
@@ -173,7 +216,7 @@ const sentence = (s: string): string => { const t = s.replace(/[_\-.]+/g, " ").r
 /** An audit action key as a readable sentence ("grow_contact_updated_on_authority" becomes "Grow contact updated on authority"). */
 export const actionWords = sentence;
 export const recordWords = (type: string, id: string): string => `${sentence(type) || "Record"}${id ? ` ${id}` : ""}`;
-export const REFUSAL_WORDS: Record<string, string> = { NOT_AUTHORISED: "not authorised", REASON_REQUIRED: "no reason was given", NOT_FOUND: "entry not found", EXPIRED: "past its retention period", KEY_MISMATCH: "could not be decrypted", NO_KEY: "could not be decrypted" };
+export const REFUSAL_WORDS: Record<string, string> = { NOT_AUTHORISED: "not authorised", REASON_REQUIRED: "no reason was given", NOT_FOUND: "entry not found", EXPIRED: "past its retention period", KEY_MISMATCH: "could not be decrypted", NO_KEY: "could not be decrypted", NOT_ENCRYPTED: "no encrypted values to show" };
 export const refusalText = (r: string | null): string => (r ? REFUSAL_WORDS[r] ?? sentence(r) : "refused");
 
 /* ── Server error codes in plain words (the server's own sentence wins when it sent one) ────────────────────────────────────────────────────── */
@@ -195,6 +238,28 @@ export const CODE_WORDS: Record<string, string> = {
   AUDIT_VALUE_UNAVAILABLE: "These values can't be decrypted with the configured key.",
   AUDIT_ID_INVALID: "That audit entry isn't valid.",
 };
+/** The 503 reasons of POST /audit/contact-values/:auditId (t282u contract C). */
+export const UNAVAILABLE_REASON_WORDS: Record<string, string> = {
+  NO_KEY: "These values can't be shown because no decryption key is configured.",
+  KEY_MISMATCH: "These values can't be decrypted with the configured key.",
+  EXPIRED: "These values are past their retention period and are no longer kept.",
+  NOT_ENCRYPTED: "No encrypted values are recorded for this entry.",
+};
+/**
+ * The audit-values request's refusals in words, one sentence per documented case: 403 AUDIT_VALUES_RESTRICTED, 400 AUDIT_VALUES_REASON_REQUIRED,
+ * 400 invalid id (no code), 404 (not found, another brokerage, or no values / withheld), 410 AUDIT_VALUE_EXPIRED, 503 AUDIT_VALUE_UNAVAILABLE with a reason.
+ */
+export function auditValuesErrorText(error: unknown): string {
+  const e = error as { status?: unknown; code?: unknown; reason?: unknown } | null;
+  const status = typeof e?.status === "number" ? e.status : null;
+  if (e && e.code === "AUDIT_VALUE_UNAVAILABLE" && typeof e.reason === "string" && UNAVAILABLE_REASON_WORDS[e.reason]) return UNAVAILABLE_REASON_WORDS[e.reason];
+  if (e && typeof e.code === "string" && CODE_WORDS[e.code]) return CODE_WORDS[e.code];
+  if (status === 404) return "No readable values are recorded for this entry.";
+  if (status === 400) return "That audit entry isn't valid.";
+  if (status === 403) return CODE_WORDS.AUDIT_VALUES_RESTRICTED;
+  if (status === 401) return "Sign in again to view audited values.";
+  return "Couldn't show those values.";
+}
 export function codeText(error: unknown, fallback: string): string {
   const e = error as { code?: unknown; friendly?: unknown } | null;
   if (e && typeof e.code === "string" && CODE_WORDS[e.code]) return CODE_WORDS[e.code];

@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "../lib/api";
-import { REASON_MAX, REASON_MIN, actionWords, codeText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, reasonOk, recordWords, refusalText, valueRows, when, type AuditAccess, type AuditCapabilities, type AuditEntry, type AuditValues } from "../lib/t280uContracts";
+import { REASON_MAX, REASON_MIN, actionWords, auditValuesErrorText, codeText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, reasonOk, recordWords, refusalText, valueRows, when, type AuditAccess, type AuditCapabilities, type AuditEntry, type AuditValues } from "../lib/t280uContracts";
 
 export interface AuditViewProps {
   caps: AuditCapabilities | null;
@@ -191,7 +191,7 @@ export default function SettingsAudit() {
   const reveal = useMutation({
     mutationFn: () => apiFetch(`/audit/contact-values/${requesting!.auditId}`, { method: "POST", body: JSON.stringify({ reason: requesting!.reason.trim() }) }),
     onSuccess: (raw) => { const v = parseAuditValues(raw); const id = requesting!.auditId; if (v) setShown((s) => ({ ...s, [id]: v })); setErrors((e) => { const { [id]: _drop, ...rest } = e; return rest; }); setRequesting(null); void history.refetch(); },
-    onError: (e) => { const id = requesting!.auditId; setErrors((x) => ({ ...x, [id]: codeText(e, "Couldn't show those values.") })); setRequesting(null); void history.refetch(); },
+    onError: (e) => { const id = requesting!.auditId; setErrors((x) => ({ ...x, [id]: auditValuesErrorText(e) })); setRequesting(null); void history.refetch(); },
   });
   return (
     <AuditView

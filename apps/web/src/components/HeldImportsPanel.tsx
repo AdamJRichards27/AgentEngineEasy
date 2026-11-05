@@ -8,7 +8,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "../lib/api";
 import { useSession } from "../lib/session";
-import { AUTHORITY_REF_MAX, AUTHORITY_REF_MIN, authorityRefOk, codeText, heldReasonText, parseHeldImports, when, type HeldImport } from "../lib/t280uContracts";
+import { AUTHORITY_REF_MAX, AUTHORITY_REF_MIN, authorityRefOk, codeText, heldEventText, heldReasonText, parseHeldImports, when, type HeldImport, type HeldStatus } from "../lib/t280uContracts";
 
 export interface OwnerChoice { id: number; name: string; role: string }
 export interface HeldDraft { ownerUserId: string; authorityRef: string }
@@ -20,6 +20,8 @@ export interface HeldImportsViewProps {
   busyId: number | null;
   errorText: string | null;
   selfId: number | null;
+  /** User names for the history (only an Administrator can look them up); anyone else is shown as "User n", and the viewer as "you". */
+  names?: Record<number, string>;
   /** On its own page an empty list is said in words; embedded, nothing is drawn. */
   showEmpty?: boolean;
   /** The server refused this user (Pit Crew, read-only, other roles). */
@@ -28,13 +30,17 @@ export interface HeldImportsViewProps {
   onSubmit: (jobId: number) => void;
 }
 
+const STATUS_LABEL: Record<HeldStatus, string> = { held: "Held", released: "Released", completed: "Completed", unknown: "Unknown status" };
+const STATUS_PILL: Record<HeldStatus, string> = { held: "pill pill-warning", released: "pill pill-success", completed: "pill", unknown: "pill pill-warning" };
+
 export function HeldImportsView(p: HeldImportsViewProps) {
+  const nameOf = (id: number | null): string => (id === null ? "someone" : id === p.selfId ? "you" : p.names?.[id] ?? `User ${id}`);
   if (p.forbidden) return <section className="card" data-ae-held-forbidden><h2>Imports held for review</h2><p className="muted">Held imports are reviewed by Administrators and Agents.</p></section>;
   if (p.held.length === 0) return p.showEmpty ? <section className="card" data-ae-held-none><h2>Imports held for review</h2><p className="empty-state">No imports are held for review.</p></section> : null;
   return (
     <section className="card stack" data-ae-held-imports>
       <h2>Imports held for review ({p.held.length})</h2>
-      <p className="muted">An import is held when its owner can't be established. Every contact it creates is recorded as the owner's, so an owner must be assigned before it can run.</p>
+      <p className="muted">An import is held when its owner can't be established. Every contact it creates is recorded as the owner's, so an owner must be assigned before it can run. Released and completed imports stay listed, with their history.</p>
       <ul className="item-list">
         {p.held.map((h) => {
           const draft = p.drafts[h.importJobId] ?? { ownerUserId: "", authorityRef: "" };
@@ -47,7 +53,7 @@ export function HeldImportsView(p: HeldImportsViewProps) {
             <li key={h.importJobId} data-ae-held-import={h.importJobId} data-ae-held-status={h.releaseStatus}>
               <div className="pc-item-header">
                 <strong>{h.filename}</strong>
-                <span className={open ? "pill pill-warning" : "pill pill-success"} data-ae-held-pill>{open ? "Held" : "Released"}</span>
+                <span className={STATUS_PILL[h.releaseStatus]} data-ae-held-pill>{STATUS_LABEL[h.releaseStatus]}</span>
               </div>
               <p className="muted">{h.totalRows} row{h.totalRows === 1 ? "" : "s"}{h.uploadedAt ? ` · uploaded ${when(h.uploadedAt)}` : ""}</p>
               {open ? (
@@ -57,11 +63,25 @@ export function HeldImportsView(p: HeldImportsViewProps) {
                     {admin ? "Held for review. Assign an owner to release it." : self ? "Held for review. You can take ownership of this import for yourself, or an administrator can assign the owner." : "Held for review. An administrator must assign the owner."}
                   </p>
                 </>
+              ) : h.releaseStatus === "unknown" ? (
+                <p className="error-text" data-ae-held-state data-ae-held-unknown>
+                  Unknown status{h.rawStatus ? ` ("${h.rawStatus}")` : ""}. The server sent a value this screen doesn't recognise, which is a break in its contract. Please report it. No action is offered.
+                </p>
               ) : (
                 <p className="muted" data-ae-held-state>
-                  Released{h.release ? ` on ${when(h.release.releasedAt)}` : ""}. Authority reference: {h.release?.authorityRef || "none recorded"}.
+                  {h.releaseStatus === "completed" ? "Completed." : "Released; not yet completed."}
+                  {h.release ? ` Owner recorded ${when(h.release.releasedAt)} by ${nameOf(h.release.releasedByUserId)}. Authority reference: ${h.release.authorityRef || "none recorded"}.` : " No owner release was recorded at review."}
                 </p>
               )}
+              {h.history.length > 0 ? (
+                <ul className="muted" data-ae-held-history>
+                  {h.history.map((e, i) => (
+                    <li key={`${e.at}-${i}`} data-ae-held-event={e.event}>
+                      {when(e.at)} · {heldEventText(e, nameOf)} <span>(by {nameOf(e.byUserId)})</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
               {admin || self ? (
                 <form className="stack" data-ae-held-form onSubmit={(e) => { e.preventDefault(); if (ready) p.onSubmit(h.importJobId); }}>
                   {admin ? (
@@ -136,6 +156,7 @@ export function HeldImportsPanel({ showEmpty = false }: { showEmpty?: boolean } 
       showEmpty={showEmpty}
       forbidden={q.data?.forbidden === true}
       owners={owners.data ?? []}
+      names={Object.fromEntries((owners.data ?? []).map((o) => [o.id, o.name]))}
       drafts={drafts}
       busyId={assign.isPending ? (assign.variables ?? null) : null}
       errorText={errorText}
