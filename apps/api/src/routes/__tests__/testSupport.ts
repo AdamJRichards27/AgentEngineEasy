@@ -1,6 +1,7 @@
 import { eq, inArray, and, isNull, sql } from "drizzle-orm";
 import { createHmac } from "node:crypto";
 import { invalidateEntitlementCache } from "../../lib/entitlements/resolver.js";
+import { readSessionCookie, verifySessionToken } from "../../lib/session.js";
 import {
   db,
   users,
@@ -310,16 +311,19 @@ export async function createListedProperty(
   if (populateRes.status !== 200) throw new Error(`populate failed: ${populateRes.status} ${await populateRes.text()}`);
 
   // t277u: only Agents (or an administrator who also holds an authorised Agent role) send.
-  // Fixtures that list as an administrator model that dual role explicitly.
-  {
-    const me = (await (await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie } })).json()) as { user?: { id: number; role: string } };
-    if (me.user?.role === "Brokerage Administrator") {
+  // Fixtures that list as an administrator model that dual role explicitly, only when refused.
+  let sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
+  if (sendRes.status === 403) {
+    // Identify the caller from its own session cookie (not /auth/me, which would warm the
+    // entitlement cache before tests grant integrations entitlements).
+    const uid = verifySessionToken(readSessionCookie(cookie))?.uid;
+    if (uid) {
       const ids = new Set(String(process.env.AE_ADMIN_AGENT_ROLE_USER_IDS ?? "").split(",").filter(Boolean));
-      ids.add(String(me.user.id));
+      ids.add(String(uid));
       process.env.AE_ADMIN_AGENT_ROLE_USER_IDS = [...ids].join(",");
+      sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
     }
   }
-  const sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
   if (sendRes.status !== 201) throw new Error(`send-for-signature failed: ${sendRes.status} ${await sendRes.text()}`);
   const { signatureRequest } = await json<{ signatureRequest: { providerReference: string } }>(sendRes);
   const packageRes = await fetch(`${baseUrl}/api/documents/packages/by-property/${propertyId}`, { headers: { cookie } });

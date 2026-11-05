@@ -292,7 +292,7 @@ export function holdsAuthorisedAgentRole(user: { id: number; role: string }): bo
 }
 
 export const SEND_AUTHORISATION_REQUIRED = "SEND_AUTHORISATION_REQUIRED";
-export function requireSendAuthorisation(recordType: SendRecordType, param: string, entitlementKey: string) {
+export function requireSendAuthorisation(recordType: SendRecordType, param: string, entitlementKey: string | string[]) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const user = req.authedUser;
     const refuseSend = (reason: string) =>
@@ -308,7 +308,12 @@ export function requireSendAuthorisation(recordType: SendRecordType, param: stri
     if (isPitCrew(user)) return refuseSend("PIT_CREW");
     if (SEND_AUTHORISATION_ROLES.includes(user.role)) return next();
     // Not entitled to the product at all: let the route's own entitlement gate answer (403 with its key).
-    const entitled = await explainEntitlementDecision(user, entitlementKey as never).then((d) => d.allowed).catch(() => false);
+    // Every entitlement the route itself gates on must be held, else the route's own gate answers.
+    const keys = Array.isArray(entitlementKey) ? entitlementKey : [entitlementKey];
+    let entitled = true;
+    for (const k of keys) {
+      if (!(await explainEntitlementDecision(user, k as never).then((d) => d.allowed).catch(() => false))) { entitled = false; break; }
+    }
     if (!entitled) return next();
     const id = Number(req.params[param]);
     // A malformed id is not a send: let the route answer its own 400.
