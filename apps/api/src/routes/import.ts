@@ -335,6 +335,67 @@ importRouter.post("/jobs/:id/resolve", requireAuth, importGate("grow.import.revi
 /* B.16-B.19 -- execute + rollback                                      */
 /* -------------------------------------------------------------------- */
 
+// t280u: authorised list of imports held for review (and those released from a hold), with
+// reason codes and release status. Pit Crew never sees or releases held imports. Requires
+// grow.import.execute (the entitlement the release route itself requires).
+importRouter.get("/held", requireAuth, async (req, res, next) => {
+  if (isPitCrew(req.authedUser!)) {
+    res.status(403).json({ error: "Held imports are reviewed by an administrator or the owning agent.", code: "IMPORT_HELD_READ_FORBIDDEN", reason: "PIT_CREW" });
+    return;
+  }
+  next();
+}, requireEntitlement("grow.import.execute"), async (req, res) => {
+  try {
+    const user = req.authedUser!;
+    if (user.role !== "Brokerage Administrator" && user.role !== "Agent") {
+      res.status(403).json({ error: "Held imports are reviewed by an administrator or the owning agent.", code: "IMPORT_HELD_READ_FORBIDDEN", reason: "ROLE" });
+      return;
+    }
+    const heldEver = new Set(
+      (
+        await db
+          .select({ recordId: auditLogs.recordId })
+          .from(auditLogs)
+          .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "import_held_for_review")))
+      ).map((r) => Number(r.recordId)),
+    );
+    const jobs = await listImportJobs(user.brokerageId);
+    const out = [];
+    for (const j of jobs) {
+      if (j.status === "COMPLETED" || j.status === "ROLLED_BACK" || j.status === "CANCELLED") continue;
+      const ownerId = await jobOwnerId(j as never, user.brokerageId);
+      const reasonCode = await ownershipProblem(ownerId, user.brokerageId);
+      if (!reasonCode && !heldEver.has(j.id)) continue;
+      const [rel] = await db
+        .select({ userId: auditLogs.userId, updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
+        .from(auditLogs)
+        .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "import_job_owner_recorded"), eq(auditLogs.recordType, "ImportJob"), eq(auditLogs.recordId, String(j.id))))
+        .orderBy(desc(auditLogs.id))
+        .limit(1);
+      const relMeta = rel?.updatedValue ? (JSON.parse(rel.updatedValue) as { authorityRef?: string; source?: string }) : null;
+      const released = !reasonCode && relMeta?.source === "review";
+      out.push({
+        importJobId: j.id,
+        filename: j.filename,
+        jobStatus: j.status,
+        totalRows: j.totalRows,
+        uploadedAt: j.uploadedAt,
+        initiatedByUserId: j.initiatedByUserId,
+        recordedOwnerUserId: ownerId,
+        releaseStatus: reasonCode ? ("held" as const) : released ? ("released" as const) : ("not_held" as const),
+        reasonCode,
+        release: released ? { ownerUserId: ownerId, releasedByUserId: rel!.userId, authorityRef: relMeta?.authorityRef ?? null, releasedAt: rel!.createdAt } : null,
+        canAssignAnyOwner: !!reasonCode && user.role === "Brokerage Administrator",
+        canAcceptForSelf: !!reasonCode && user.role === "Agent",
+      });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ held: out.filter((o) => o.releaseStatus !== "not_held") });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
 // t276u: record (or re-record) the owner of a held import. A Brokerage Administrator may
 // assign any eligible owner; an Agent may take ownership only for themselves. Pit Crew never.
 importRouter.post("/jobs/:id/owner", requireAuth, requireEntitlement("grow.import.execute"), async (req, res) => {

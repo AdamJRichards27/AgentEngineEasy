@@ -1248,12 +1248,75 @@ contactsRouter.get("/exports", requireAuth, async (req, res) => {
     .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "contact_export_prepared"), or(eq(auditLogs.providerReference, `owner:${user.id}`), eq(auditLogs.userId, user.id))))
     .orderBy(desc(auditLogs.id))
     .limit(50);
+  // t280u: status, expiry, releases, owner download and a durable seen marker (audit rows).
+  const ids = rows.map((r) => String(r.id));
+  const events = ids.length
+    ? await db
+        .select({ action: auditLogs.action, recordId: auditLogs.recordId, userId: auditLogs.userId, providerReference: auditLogs.providerReference, createdAt: auditLogs.createdAt })
+        .from(auditLogs)
+        .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.recordType, "contact_export"), inArray(auditLogs.action, ["contact_export_released", "contacts_exported", "contact_export_seen"]), inArray(auditLogs.recordId, ids)))
+        .orderBy(asc(auditLogs.id))
+    : [];
+  const now = Date.now();
+  res.setHeader("Cache-Control", "no-store");
   res.json({
     exports: rows.map((r) => {
-      const m = JSON.parse(r.updatedValue ?? "{}") as ExportMeta;
-      return { exportId: r.id, owner: m.owner, initiatedBy: m.initiatedBy, rows: m.scope?.partyIds?.length ?? 0, preparedAt: r.createdAt, mine: m.owner === user.id };
+      const m = JSON.parse(r.updatedValue ?? "{}") as ExportMeta & { expiredAt?: string; scope?: { partyCount?: number } };
+      const ev = events.filter((e) => e.recordId === String(r.id));
+      const expiresAt = new Date(r.createdAt.getTime() + EXPORT_TTL_DAYS * 86_400_000);
+      const expired = !!m.expiredAt || expiresAt.getTime() <= now;
+      const ownerDownload = ev.find((e) => e.action === "contacts_exported" && e.userId === m.owner);
+      const seen = ev.find((e) => e.action === "contact_export_seen" && e.userId === m.owner);
+      const mine = m.owner === user.id;
+      const releases = ev
+        .filter((e) => e.action === "contact_export_released")
+        .map((e) => ({ userId: Number(String(e.providerReference ?? "").replace("recipient:", "")), releasedAt: e.createdAt }));
+      const status = expired ? "expired" : ownerDownload ? "downloaded" : "ready";
+      return {
+        exportId: r.id,
+        owner: m.owner,
+        initiatedBy: m.initiatedBy,
+        rows: m.scope?.partyIds?.length || m.scope?.partyCount || 0,
+        preparedAt: r.createdAt,
+        expiresAt: expiresAt.toISOString(),
+        status,
+        ready: status !== "expired",
+        mine,
+        releasedTo: releases,
+        downloadedAt: ownerDownload?.createdAt ?? null,
+        // Seen is the owner's marker; it is only reported to the owner.
+        seen: mine ? !!seen : null,
+        seenAt: mine ? seen?.createdAt ?? null : null,
+        canDownload: status !== "expired" && (mine || releases.some((x) => x.userId === user.id)),
+      };
     }),
   });
+});
+
+// t280u: durable seen marker. Owner only; idempotent (a second call returns the first seenAt).
+contactsRouter.post("/exports/:exportId/seen", requireAuth, async (req, res) => {
+  const user = req.authedUser!;
+  const exportId = parsePositiveId(req.params.exportId);
+  const ex = exportId ? await loadExport(user.brokerageId, exportId) : null;
+  if (!ex) {
+    res.status(404).json({ error: "Export not found" });
+    return;
+  }
+  if (ex.meta.owner !== user.id) {
+    res.status(403).json({ error: "Only the contact owner marks an export as seen.", code: "EXPORT_SEEN_OWNER_ONLY" });
+    return;
+  }
+  const [prior] = await db
+    .select({ createdAt: auditLogs.createdAt })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "contact_export_seen"), eq(auditLogs.recordType, "contact_export"), eq(auditLogs.recordId, String(exportId)), eq(auditLogs.userId, user.id)))
+    .limit(1);
+  if (prior) {
+    res.json({ exportId, seen: true, seenAt: prior.createdAt });
+    return;
+  }
+  await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "contact_export_seen", recordType: "contact_export", recordId: String(exportId) }, { strict: true });
+  res.status(201).json({ exportId, seen: true, seenAt: new Date().toISOString() });
 });
 
 contactsRouter.post("/exports/:exportId/release", requireAuth, async (req, res) => {
