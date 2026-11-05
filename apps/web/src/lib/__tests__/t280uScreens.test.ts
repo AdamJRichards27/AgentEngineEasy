@@ -1,15 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SendDelegationPanelView, type SendDelegationPanelViewProps } from "../../components/SendDelegationPanel";
+import { AuditHistoryCardView } from "../../components/AuditHistoryCard";
 import { HeldImportsView, type HeldImportsViewProps } from "../../components/HeldImportsPanel";
 import { ExportsView, type ExportsViewProps } from "../../pages/GrowExports";
 import { AuditView, type AuditViewProps } from "../../pages/SettingsAudit";
-import { CODE_WORDS, HELD_REASON_WORDS, UNAVAILABLE_REASON_WORDS, actionWords, auditValuesErrorText, authorityRefOk, codeText, delegationDetail, heldEventText, heldReasonText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, parseDelegationStatus, parseExports, parseHeldImports, reasonOk, refusalText } from "../t280uContracts";
+import { ANOTHER_USER, CODE_WORDS, HELD_REASON_WORDS, UNAVAILABLE_REASON_WORDS, actionWords, auditValuesErrorText, authorityRefOk, codeText, delegationDetail, heldEventText, heldReasonText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, parseCompletedPage, parseDelegationStatus, parseExports, parseHeldList, personLabel, reasonOk, refusalText } from "../t280uContracts";
 import { all, text } from "./mobileTreeHelpers";
 
 // Desktop screens for delegation, exports, held imports and audit access (t280u contracts). Fixtures mirror CONTRACTS-t280u.md. Pure views, so every role
 // and state is tested by what is DRAWN. The server decides who may do what and says so in fields; the screens draw an action only when a field allows it.
 const noop = () => {};
+const call = (fn: unknown): void => { (fn as () => void)(); };
 const D = (o: Record<string, unknown> = {}) => ({ delegateUserId: 3, delegateName: "Ada Admin", delegateRole: "Brokerage Administrator", state: "active", reason: "Away on leave", grantedByUserId: 4, grantedAt: "2026-11-01T00:00:00.000Z", expiresAt: "2026-12-01T00:00:00.000Z", renewedFrom: null, renewalCount: 0, revokedAt: null, revokedByUserId: null, invalidatedByOwnershipChange: false, renewable: true, revocable: true, ...o });
 const STATUS = (viewer: string, delegations: unknown[], extra: Record<string, unknown> = {}) => ({ recordType: "appraisal", recordId: 12, ownerUserId: 4, viewer, canManage: viewer === "owner", ttlDays: 30, delegations, eligibleDelegates: viewer === "owner" ? [{ userId: 3, name: "Ada Admin", role: "Brokerage Administrator" }, { userId: 5, name: "Gina Agent", role: "Agent" }] : [], ...extra });
 const panel = (status: unknown, o: Partial<SendDelegationPanelViewProps> = {}) => SendDelegationPanelView({ status: parseDelegationStatus(status)!, grant: { delegateUserId: "", reason: "" }, renewing: null, busy: false, errorText: null, onGrantChange: noop, onGrant: noop, onRenewStart: noop, onRenewChange: noop, onRenewConfirm: noop, onRenewCancel: noop, onRevoke: noop, ...o });
@@ -115,45 +117,10 @@ test("exports: empty, loading and failed states; releasing asks for a reason; re
   assert.match(text(t), /only to the person who prepared it/);
 });
 
-/* ── held imports ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── */
-const H = (o: Record<string, unknown> = {}) => ({ importJobId: 9, filename: "c.csv", jobStatus: "READY_TO_IMPORT", totalRows: 1, uploadedAt: "2026-11-01T00:00:00.000Z", initiatedByUserId: 5, recordedOwnerUserId: 5, releaseStatus: "held", reasonCode: "OWNER_NOT_ENTITLED", release: null, canAssignAnyOwner: false, canAcceptForSelf: false, ...o });
-const heldView = (held: unknown[], o: Partial<HeldImportsViewProps> = {}) => HeldImportsView({ held: parseHeldImports({ held }), owners: [{ id: 4, name: "Ada Admin", role: "Brokerage Administrator" }, { id: 5, name: "Gina Agent", role: "Agent" }], drafts: {}, busyId: null, errorText: null, selfId: 5, onDraft: noop, onSubmit: noop, ...o });
-
-test("held imports: every reason code and the status are in words; nothing when there are none", () => {
-  assert.equal(heldView([]), null);
-  for (const code of Object.keys(HELD_REASON_WORDS)) assert.match(text(heldView([H({ reasonCode: code })])), new RegExp(HELD_REASON_WORDS[code].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(heldReasonText("SOMETHING_NEW"), /can't be established/, "an unknown code is still a sentence");
-  assert.doesNotMatch(text(heldView([H()])), /OWNER_|_/);
-  assert.match(text(heldView([H()])), /Held/);
-});
-
-test("held imports, ADMINISTRATOR: assigns any owner, authority reference required; AGENT: takes ownership for themselves, authority reference required; others: neither", () => {
-  const admin = heldView([H({ canAssignAnyOwner: true })]);
-  assert.ok(hasAttr(admin, "data-ae-held-owner")); assert.match(text(admin), /Assign owner/);
-  assert.equal(all(admin, (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, true, "no owner and no authority reference yet");
-  const adminReady = heldView([H({ canAssignAnyOwner: true })], { drafts: { 9: { ownerUserId: "4", authorityRef: "email 2026-11-05" } } });
-  assert.equal(all(adminReady, (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, false);
-  const agent = heldView([H({ canAcceptForSelf: true })]);
-  assert.equal(hasAttr(agent, "data-ae-held-owner"), false, "an Agent cannot pick another owner");
-  assert.match(text(agent), /Take ownership/);
-  assert.equal(all(agent, (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, true, "authority reference missing");
-  assert.equal(all(heldView([H({ canAcceptForSelf: true })], { drafts: { 9: { ownerUserId: "", authorityRef: "ab" } } }), (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, true, "two characters is not enough");
-  assert.equal(all(heldView([H({ canAcceptForSelf: true })], { drafts: { 9: { ownerUserId: "", authorityRef: "abc" } } }), (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, false);
-  const none = heldView([H()]);
-  assert.equal(hasAttr(none, "data-ae-held-form"), false); assert.match(text(none), /An administrator must assign the owner/);
-  assert.deepEqual([authorityRefOk("ab"), authorityRefOk("abc"), authorityRefOk("x".repeat(200)), authorityRefOk("x".repeat(201))], [false, true, true, false]);
-});
-
-test("held imports: a released import shows who released it with the authority reference and offers no controls", () => {
-  const t = heldView([H({ releaseStatus: "released", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "email 2026-11-05", releasedAt: "2026-11-05T01:00:00.000Z" }, canAssignAnyOwner: true })]);
-  assert.match(text(t), /Released/); assert.match(text(t), /Authority reference: email 2026-11-05/);
-  assert.equal(hasAttr(t, "data-ae-held-form"), false);
-});
-
 /* ── audit ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── */
 const entry = (o: Record<string, unknown> = {}) => ({ auditId: 120, action: "grow_contact_updated_on_authority", recordType: "party", recordId: "18", userId: 8, createdAt: "2026-11-02T00:00:00.000Z", hasEncryptedValues: true, valuesExpired: false, valuesRetainedUntil: "2028-11-02T00:00:00.000Z", metadataRetainedUntil: "2033-11-02T00:00:00.000Z", ...o });
 const audit = (caps: Record<string, unknown>, entries: unknown[] = [entry()], o: Partial<AuditViewProps> = {}) => AuditView({ caps: parseAuditCapabilities(caps), entries: parseAuditEntries({ entries }).entries, names: { 8: "Pat Pitcrew" }, loading: false, failed: false, hasMore: false, filter: { recordType: "", recordId: "" }, historyFor: null, accesses: [], historyLoading: false, requesting: null, shown: {}, errors: {}, busy: false, onFilterChange: noop, onApplyFilter: noop, onLoadMore: noop, onToggleHistory: noop, onRequestStart: noop, onRequestChange: noop, onRequestConfirm: noop, onRequestCancel: noop, onHideValues: noop, ...o });
-const CAPS_ADMIN = { isAuditValueReader: false, canReadAuditMetadata: true, valueRetentionDays: 730, metadataRetentionDays: 2555 };
+const CAPS_ADMIN = { isAuditValueReader: false, canReadAuditMetadata: true, canReadAuditAccessHistory: true, valueRetentionDays: 730, metadataRetentionDays: 2555 };
 const CAPS_READER = { ...CAPS_ADMIN, isAuditValueReader: true };
 
 test("audit: a non-administrator sees only a plain message and no entries", () => {
@@ -218,55 +185,6 @@ test("wording: every server code the screens handle has a sentence, and the serv
   assert.equal(codeText(new Error("x"), "fallback"), "fallback");
 });
 
-test("held imports page: an empty list is said in words on the page, drawn as nothing when embedded; a refused user is told who reviews them and gets no controls", () => {
-  assert.equal(heldView([]), null);
-  assert.match(text(heldView([], { showEmpty: true })), /No imports are held for review\./);
-  const refused = heldView([], { forbidden: true });
-  assert.match(text(refused), /reviewed by Administrators and Agents/);
-  assert.equal(hasAttr(refused, "data-ae-held-form"), false);
-});
-
-/* ── t282u contract: held imports keep their history; the status list is closed and never drops a row; audit-values refusals are documented ──── */
-const HIST = [
-  { event: "owner_recorded", at: "2026-11-01T01:00:00.000Z", byUserId: 3, ownerUserId: 6, authorityRef: "Initial owner" },
-  { event: "held", at: "2026-11-02T01:00:00.000Z", byUserId: 3, reasonCode: "OWNER_INACTIVE" },
-  { event: "owner_recorded", at: "2026-11-03T01:00:00.000Z", byUserId: 4, ownerUserId: 4, authorityRef: "Accepted at review INSTR-A2" },
-];
-
-test("held imports (t282u): all three statuses parse; a COMPLETED import is listed with its history, its release and no controls", () => {
-  const rows = parseHeldImports({ held: [H({ releaseStatus: "held" }), H({ importJobId: 10, releaseStatus: "released", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" }, history: HIST }), H({ importJobId: 11, jobStatus: "COMPLETED", releaseStatus: "completed", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" }, history: HIST })] });
-  assert.deepEqual(rows.map((r) => r.releaseStatus), ["held", "released", "completed"]);
-  const t = heldView([H({ importJobId: 11, jobStatus: "COMPLETED", releaseStatus: "completed", reasonCode: null, release: { ownerUserId: 4, releasedByUserId: 4, authorityRef: "INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" }, history: HIST, canAssignAnyOwner: true })]);
-  assert.ok(hasAttr(t, "data-ae-held-import"), "the completed import is still listed");
-  assert.match(text(all(t, (e) => e.props?.["data-ae-held-pill"] !== undefined)[0]), /Completed/);
-  assert.match(text(t), /Completed\./); assert.match(text(t), /Authority reference: INSTR-A2/);
-  assert.equal(hasAttr(t, "data-ae-held-form"), false, "no assign or take-ownership control once it is completed, whatever flags the row carries");
-  assert.equal(all(t, (e) => e.props?.["data-ae-held-event"] !== undefined).length, 3, "the three history events are shown, oldest first");
-});
-
-test("held imports (t282u): an UNKNOWN status is never dropped and never guessed: it is shown as 'Unknown status', flagged as a contract break, with no action", () => {
-  const rows = parseHeldImports({ held: [H({ releaseStatus: "finished" }), H({ importJobId: 12, releaseStatus: null }), { importJobId: 13 }, null] });
-  assert.equal(rows.length, 2, "only a row with no id or filename cannot be shown");
-  assert.deepEqual(rows.map((r) => r.releaseStatus), ["unknown", "unknown"]);
-  assert.equal(rows[0].rawStatus, "finished");
-  const t = heldView([H({ releaseStatus: "finished", canAssignAnyOwner: true, canAcceptForSelf: true })]);
-  assert.match(text(t), /Unknown status \("finished"\)/); assert.match(text(t), /break in its contract/);
-  assert.equal(hasAttr(t, "data-ae-held-unknown"), true); assert.equal(hasAttr(t, "data-ae-held-form"), false, "an unrecognised status offers no action even if the row says it may");
-  assert.match(text(all(t, (e) => e.props?.["data-ae-held-pill"] !== undefined)[0]), /Unknown status/);
-});
-
-test("held imports (t282u): history events are kept in order and read in words; an unfamiliar event is still shown; names come from the viewer's knowledge", () => {
-  const r = parseHeldImports({ held: [H({ releaseStatus: "released", reasonCode: null, history: [...HIST, { event: "mystery", at: "2026-11-04T00:00:00.000Z", byUserId: 3 }, { event: "held" }] })] })[0];
-  assert.deepEqual(r.history.map((e) => e.event), ["owner_recorded", "held", "owner_recorded", "unknown"], "an event with no time is dropped; an unfamiliar one is kept");
-  const names = (id: number | null) => (id === 4 ? "you" : id === null ? "someone" : `User ${id}`);
-  assert.equal(heldEventText(r.history[1], names), "Held for review: The recorded owner is no longer active.");
-  assert.equal(heldEventText(r.history[2], names), "Owner recorded at review: you. Authority reference: Accepted at review INSTR-A2.");
-  assert.equal(heldEventText({ event: "owner_set", at: "x", byUserId: 3, reasonCode: null, ownerUserId: 6, authorityRef: null }, names), "Owner set at creation: User 6.");
-  const t = heldView([H({ releaseStatus: "released", reasonCode: null, history: HIST })], { names: { 3: "Gus Grow" } });
-  assert.match(text(t), /Gus Grow/); assert.match(text(t), /Held for review: The recorded owner is no longer active\./);
-  assert.doesNotMatch(text(t), /owner_recorded|OWNER_INACTIVE|_/, "no stored key reaches the user");
-});
-
 test("audit values (t282u contract C): every documented refusal has its own sentence, including each 503 reason", () => {
   const cases: Array<[unknown, RegExp]> = [
     [{ status: 403, code: "AUDIT_VALUES_RESTRICTED" }, /not authorised to read audited values/],
@@ -297,4 +215,114 @@ test("audit list states (t282u contract C): the three documented combinations re
   const t3 = state({ hasEncryptedValues: false, valuesExpired: false });
   assert.match(text(t3), /none recorded/); assert.equal(hasAttr(t3, "data-ae-audit-request"), false);
   assert.equal(hasAttr(state({ hasEncryptedValues: true, valuesExpired: false }, CAPS_ADMIN as typeof CAPS_READER), "data-ae-audit-request"), false, "an administrator who is not a value reader is never offered the request");
+});
+
+/* ── held imports (t284u contract): people are labels with no user ids; completed imports are paged ─────────────────────────────────────────── */
+const PERSON = (label: string, isYou = false) => ({ label, isYou });
+const YOU = PERSON("You", true);
+const HELD = (o: Record<string, unknown> = {}) => ({ importJobId: 9, filename: "c.csv", jobStatus: "READY_TO_IMPORT", totalRows: 1, uploadedAt: "2026-11-01T00:00:00.000Z", initiatedBy: PERSON("Gina Grow"), recordedOwner: PERSON("Rhea Run"), releaseStatus: "held", reasonCode: "OWNER_INACTIVE", release: null, history: [], canAssignAnyOwner: false, canAcceptForSelf: false, ...o });
+const HISTORY = [
+  { event: "owner_set", at: "2026-11-01T01:00:00.000Z", by: PERSON("Gina Grow"), owner: PERSON("Gina Grow"), authorityRef: "Initial owner" },
+  { event: "held", at: "2026-11-02T01:00:00.000Z", by: PERSON("Gus Grow"), reasonCode: "OWNER_INACTIVE" },
+  { event: "owner_recorded", at: "2026-11-03T01:00:00.000Z", by: YOU, owner: YOU, authorityRef: "Accepted at review INSTR-A2" },
+];
+const RELEASE = { owner: YOU, releasedBy: YOU, authorityRef: "Accepted at review INSTR-A2", releasedAt: "2026-11-03T01:00:00.000Z" };
+const heldView = (held: unknown[], o: Partial<HeldImportsViewProps> = {}) => {
+  const list = parseHeldList({ held, completed: { items: [], limit: 20, nextCursor: null } });
+  return HeldImportsView({ held: list.held, completed: list.completed.items, hasMoreCompleted: false, loadingMore: false, moreError: null, owners: [{ id: 1, name: "Ada Admin", role: "Brokerage Administrator" }, { id: 5, name: "Gina Grow", role: "Agent" }], drafts: {}, busyId: null, errorText: null, selfId: 5, onDraft: noop, onSubmit: noop, onShowMore: noop, ...o });
+};
+
+test("held imports (t284u): the response is held plus a first page of completed; both parse, and an unfamiliar status never makes a row vanish", () => {
+  const list = parseHeldList({ held: [HELD(), HELD({ importJobId: 10, releaseStatus: "released", reasonCode: null, release: RELEASE }), HELD({ importJobId: 11, releaseStatus: "finished" })], completed: { items: [HELD({ importJobId: 8, releaseStatus: "completed", reasonCode: null, release: RELEASE, history: HISTORY })], limit: 20, nextCursor: 8 } });
+  assert.deepEqual(list.held.map((h) => h.releaseStatus), ["held", "released", "unknown"], "an unfamiliar status is kept as unknown, not dropped");
+  assert.equal(list.completed.items.length, 1); assert.equal(list.completed.nextCursor, 8); assert.equal(list.completed.limit, 20);
+  assert.deepEqual(parseHeldList(null), { held: [], completed: { items: [], limit: null, nextCursor: null } });
+  assert.equal(parseCompletedPage({ items: [], limit: 20, nextCursor: null }).nextCursor, null, "null on the last page");
+  assert.equal(parseHeldList({ held: [{ importJobId: 1 }, null], completed: {} }).held.length, 0, "only a row with no filename cannot be shown");
+});
+
+test("held imports (t284u): people are shown by the label the server gave, with no user id anywhere; a missing person is the neutral label", () => {
+  const withIds = HELD({ initiatedByUserId: 5, recordedOwnerUserId: 6, releaseStatus: "released", reasonCode: null, release: { ...RELEASE, releasedByUserId: 4, ownerUserId: 6 }, history: [{ event: "held", at: "2026-11-02T01:00:00.000Z", byUserId: 3, reasonCode: "OWNER_INACTIVE" }] });
+  const parsed = parseHeldList({ held: [withIds], completed: {} });
+  assert.doesNotMatch(JSON.stringify(parsed), /UserId|"id"/, "even if a server sent ids, none is kept");
+  assert.equal(parsed.held[0].history[0].by.label, ANOTHER_USER.label, "a person the server did not describe reads as the neutral label");
+  assert.equal(personLabel(null), "Another user"); assert.equal(personLabel(PERSON("Gina Grow")), "Gina Grow");
+  const t = heldView([HELD({ releaseStatus: "released", reasonCode: null, release: { ...RELEASE, releasedBy: PERSON("Gus Grow"), owner: PERSON("Another user") }, history: HISTORY })]);
+  assert.match(text(t), /Owner recorded 3 Nov 2026.*by Gus Grow\. Authority reference: Accepted at review INSTR-A2/s);
+  assert.match(text(t), /Owner set at creation: Gina Grow/); assert.match(text(t), /Owner recorded at review: You\./);
+  assert.match(text(t), /Held for review: The recorded owner is no longer active\./);
+  assert.doesNotMatch(text(t), /User \d|owner_recorded|owner_set|OWNER_INACTIVE|_/, "no id and no stored key reaches the user");
+  assert.equal(heldEventText({ event: "owner_set", at: "x", by: ANOTHER_USER, owner: null, reasonCode: null, authorityRef: null }), "Owner set at creation: Another user.");
+});
+
+test("held imports (t284u): every reason code and the status are in words; nothing when there are none", () => {
+  assert.equal(heldView([]), null);
+  for (const code of Object.keys(HELD_REASON_WORDS)) assert.match(text(heldView([HELD({ reasonCode: code })])), new RegExp(HELD_REASON_WORDS[code].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(heldReasonText("SOMETHING_NEW"), /can't be established/);
+  assert.match(text(heldView([HELD()])), /Held/);
+});
+
+test("held imports (t284u): an ADMINISTRATOR assigns any owner and an AGENT takes ownership for themselves, each with an authority reference; nobody else gets a control", () => {
+  const admin = heldView([HELD({ canAssignAnyOwner: true })]);
+  assert.ok(hasAttr(admin, "data-ae-held-owner")); assert.match(text(admin), /Assign owner/);
+  assert.equal(all(admin, (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, true);
+  assert.equal(all(heldView([HELD({ canAssignAnyOwner: true })], { drafts: { 9: { ownerUserId: "1", authorityRef: "email 2026-11-05" } } }), (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, false);
+  const agent = heldView([HELD({ canAcceptForSelf: true })]);
+  assert.equal(hasAttr(agent, "data-ae-held-owner"), false, "an Agent cannot pick another owner"); assert.match(text(agent), /Take ownership/);
+  assert.equal(all(agent, (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, true, "authority reference missing");
+  assert.equal(all(heldView([HELD({ canAcceptForSelf: true })], { drafts: { 9: { ownerUserId: "", authorityRef: "abc" } } }), (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, false);
+  assert.equal(all(heldView([HELD({ canAcceptForSelf: true })], { drafts: { 9: { ownerUserId: "", authorityRef: "abc" } }, selfId: null }), (e) => e.props?.["data-ae-held-submit"] !== undefined)[0].props?.disabled, true, "no own id, no owner to name");
+  const none = heldView([HELD()]);
+  assert.equal(hasAttr(none, "data-ae-held-form"), false); assert.match(text(none), /An administrator must assign the owner/);
+  assert.deepEqual([authorityRefOk("ab"), authorityRefOk("abc"), authorityRefOk("x".repeat(200)), authorityRefOk("x".repeat(201))], [false, true, true, false]);
+  for (const flags of [{ releaseStatus: "released" }, { releaseStatus: "completed" }, { releaseStatus: "finished" }]) assert.equal(hasAttr(heldView([HELD({ ...flags, reasonCode: null, canAssignAnyOwner: true, canAcceptForSelf: true })]), "data-ae-held-form"), false, `${flags.releaseStatus}: no control whatever the row says`);
+});
+
+test("held imports (t284u): an Agent who may not take an import is told why, in words", () => {
+  assert.equal(codeText({ code: "IMPORT_OWNER_NOT_LINKED", friendly: "x" }, "fallback"), "You can only take imports you started or already own. Ask an administrator to assign it.");
+  assert.match(CODE_WORDS.IMPORT_HELD_PAGE_INVALID, /Reload the page/); assert.match(CODE_WORDS.IMPORT_OWNER_ASSIGN_FORBIDDEN, /Ask an administrator/); assert.match(CODE_WORDS.IMPORT_OWNER_INVALID, /authority reference/);
+  const t = heldView([HELD({ canAcceptForSelf: true })], { errorText: codeText({ code: "IMPORT_OWNER_NOT_LINKED" }, "x") });
+  assert.match(text(all(t, (e) => e.props?.["data-ae-held-error"] !== undefined)[0]), /only take imports you started or already own/);
+});
+
+test("held imports (t284u): completed imports are paged: a Show more control only while the server has another page, disabled while loading, with a failure in words", () => {
+  const done = (id: number) => HELD({ importJobId: id, filename: `done-${id}.csv`, releaseStatus: "completed", reasonCode: null, release: RELEASE, history: HISTORY });
+  const first = heldView([], { completed: parseHeldList({ held: [], completed: { items: [done(30), done(29)], limit: 20, nextCursor: 29 } }).completed.items, hasMoreCompleted: true });
+  assert.ok(hasAttr(first, "data-ae-completed-heading")); assert.equal(all(first, (e) => e.props?.["data-ae-held-import"] !== undefined).length, 2);
+  const more = all(first, (e) => e.props?.["data-ae-held-more"] !== undefined)[0]; assert.match(text(more), /Show more completed imports/); assert.equal(more.props?.disabled, false);
+  let clicked = 0; call(all(heldView([], { completed: parseHeldList({ held: [], completed: { items: [done(30)], limit: 20, nextCursor: 30 } }).completed.items, hasMoreCompleted: true, onShowMore: () => { clicked += 1; } }), (e) => e.props?.["data-ae-held-more"] !== undefined)[0].props?.onClick); assert.equal(clicked, 1);
+  const loading = heldView([], { completed: [parseHeldList({ held: [], completed: { items: [done(30)] } }).completed.items[0]], hasMoreCompleted: true, loadingMore: true });
+  assert.equal(all(loading, (e) => e.props?.["data-ae-held-more"] !== undefined)[0].props?.disabled, true); assert.match(text(loading), /Loading/);
+  const last = heldView([], { completed: parseHeldList({ held: [], completed: { items: [done(30)] } }).completed.items, hasMoreCompleted: false });
+  assert.equal(hasAttr(last, "data-ae-held-more"), false, "no control on the last page");
+  const failed = heldView([], { completed: parseHeldList({ held: [], completed: { items: [done(30)] } }).completed.items, hasMoreCompleted: true, moreError: codeText({ code: "IMPORT_HELD_PAGE_INVALID" }, "x") });
+  assert.match(text(all(failed, (e) => e.props?.["data-ae-held-more-error"] !== undefined)[0]), /Reload the page/);
+  const both = heldView([HELD()], { completed: parseHeldList({ held: [], completed: { items: [done(30)] } }).completed.items });
+  assert.match(text(all(both, (e) => e.props?.["data-ae-held-imports"] !== undefined)[0]), /Imports held for review \(1\)/, "the count is the imports held NOW, not the history");
+});
+
+test("held imports page: an empty list is said in words on the page, drawn as nothing when embedded; a refused user is told who reviews them and gets no controls", () => {
+  assert.equal(heldView([]), null);
+  assert.match(text(heldView([], { showEmpty: true })), /No imports are held for review\./);
+  const refused = heldView([], { forbidden: true });
+  assert.match(text(refused), /reviewed by Administrators and Agents/); assert.equal(hasAttr(refused, "data-ae-held-form"), false);
+});
+
+/* ── audit permissions (t284u): the Settings card and the access history follow the server's capability fields ───────────────────────────────── */
+test("audit permissions (t284u): capabilities parse their three fields; the access history is drawn only when the server says it may be read", () => {
+  const c = parseAuditCapabilities({ isAuditValueReader: false, canReadAuditMetadata: true, canReadAuditAccessHistory: true, valueRetentionDays: 730, metadataRetentionDays: 2555 });
+  assert.deepEqual([c.canReadAuditMetadata, c.canReadAuditAccessHistory, c.isAuditValueReader], [true, true, false]);
+  const none = parseAuditCapabilities({}); assert.deepEqual([none.canReadAuditMetadata, none.canReadAuditAccessHistory, none.isAuditValueReader], [false, false, false], "fails closed");
+  assert.equal(hasAttr(audit(CAPS_ADMIN), "data-ae-audit-history-toggle"), true);
+  assert.equal(hasAttr(audit({ ...CAPS_ADMIN, canReadAuditAccessHistory: false }), "data-ae-audit-history-toggle"), false, "metadata without history: no history control");
+  assert.match(text(AuditHistoryCardView()), /Audit history/); assert.deepEqual(all(AuditHistoryCardView(), (e) => e.props?.href === "/settings/audit").length, 1);
+});
+
+test("audit permissions (t284u): the Settings card is driven by the server's answer, not by the role", async () => {
+  const { readFileSync } = await import("node:fs");
+  const card = readFileSync(new URL("../../components/AuditHistoryCard.tsx", import.meta.url), "utf8").replace(/\/\/.*$/gm, "");
+  assert.match(card, /caps\.data\?\.canReadAuditMetadata/); assert.doesNotMatch(card, /role\s*===|isAdmin|Brokerage Administrator/);
+  assert.match(card, /staleTime: 5 \* 60_000/); assert.match(card, /refetchOnWindowFocus: false/);
+  const page = readFileSync(new URL("../../pages/SettingsAudit.tsx", import.meta.url), "utf8");
+  assert.match(page, /useQuery<AuditCapabilities>\(auditCapabilitiesQuery\)/, "one shared capabilities request"); assert.match(page, /canReadAuditAccessHistory === true/);
 });

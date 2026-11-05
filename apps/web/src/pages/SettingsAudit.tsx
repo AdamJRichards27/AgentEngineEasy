@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "../lib/api";
+import { auditCapabilitiesQuery } from "../components/AuditHistoryCard";
 import { REASON_MAX, REASON_MIN, actionWords, auditValuesErrorText, codeText, parseAuditAccesses, parseAuditCapabilities, parseAuditEntries, parseAuditValues, reasonOk, recordWords, refusalText, valueRows, when, type AuditAccess, type AuditCapabilities, type AuditEntry, type AuditValues } from "../lib/t280uContracts";
 
 export interface AuditViewProps {
@@ -89,9 +90,11 @@ export function AuditView(p: AuditViewProps) {
                   Values: {e.valuesExpired ? "expired (past the retention period)" : e.hasEncryptedValues ? "Encrypted" : "none recorded"}
                 </p>
                 <div className="inline-form">
-                  <button type="button" className="btn btn-link" onClick={() => p.onToggleHistory(e.auditId)} data-ae-audit-history-toggle>
-                    {p.historyFor === e.auditId ? "Hide access history" : "Access history"}
-                  </button>
+                  {p.caps?.canReadAuditAccessHistory ? (
+                    <button type="button" className="btn btn-link" onClick={() => p.onToggleHistory(e.auditId)} data-ae-audit-history-toggle>
+                      {p.historyFor === e.auditId ? "Hide access history" : "Access history"}
+                    </button>
+                  ) : null}
                   {p.caps?.isAuditValueReader && e.hasEncryptedValues && !e.valuesExpired && !requesting && !values ? (
                     <button type="button" className="btn btn-secondary btn-small" disabled={p.busy} onClick={() => p.onRequestStart(e.auditId)} data-ae-audit-request>
                       Request values
@@ -156,10 +159,10 @@ export function AuditView(p: AuditViewProps) {
 }
 
 export default function SettingsAudit() {
-  const caps = useQuery<AuditCapabilities>({ queryKey: ["audit-capabilities"], queryFn: async () => parseAuditCapabilities(await apiFetch("/audit/capabilities")), retry: false });
+  const caps = useQuery<AuditCapabilities>(auditCapabilitiesQuery);
   const allowed = caps.data?.canReadAuditMetadata === true;
   const names = useQuery<Record<number, string>>({
-    queryKey: ["audit-user-names"], enabled: allowed, retry: false,
+    queryKey: ["audit-user-names"], enabled: allowed, retry: false, staleTime: 5 * 60_000, refetchOnWindowFocus: false,
     queryFn: async () => { try { const r = await apiFetch<{ users: Array<{ id: number; firstName: string; lastName: string }> }>("/auth/admin/users"); return Object.fromEntries(r.users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()])); } catch { return {}; } },
   });
   const [filter, setFilter] = useState({ recordType: "", recordId: "" });
@@ -184,7 +187,8 @@ export default function SettingsAudit() {
   };
   useEffect(() => { if (allowed) void load(null, true); }, [allowed, applied]); // eslint-disable-line react-hooks/exhaustive-deps
   const [historyFor, setHistoryFor] = useState<number | null>(null);
-  const history = useQuery<AuditAccess[]>({ queryKey: ["audit-access-history", historyFor], enabled: historyFor !== null, retry: false, queryFn: async () => parseAuditAccesses(await apiFetch(`/audit/access-history?auditId=${historyFor}`)) });
+  // Every access-history read is logged by the server, so it is read only when asked for and not refetched on window focus.
+  const history = useQuery<AuditAccess[]>({ queryKey: ["audit-access-history", historyFor], enabled: historyFor !== null && caps.data?.canReadAuditAccessHistory === true, retry: false, staleTime: 60_000, refetchOnWindowFocus: false, queryFn: async () => parseAuditAccesses(await apiFetch(`/audit/access-history?auditId=${historyFor}`)) });
   const [requesting, setRequesting] = useState<{ auditId: number; reason: string } | null>(null);
   const [shown, setShown] = useState<Record<number, AuditValues>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});

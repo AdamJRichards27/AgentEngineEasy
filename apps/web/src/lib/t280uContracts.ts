@@ -88,17 +88,23 @@ export function parseExports(raw: unknown): ExportRow[] {
 export const EXPORT_STATUS_LABEL: Record<ExportStatus, string> = { ready: "Ready", downloaded: "Downloaded", expired: "Expired" };
 export const exportScope = (n: number): string => `${n} contact${n === 1 ? "" : "s"}`;
 
-/* ── Held imports (t282u: releaseStatus is a CLOSED list of three; history is kept after release) ────────────────────────────────────────── */
+/* ── Held imports (t284u: people are display labels with NO user ids; completed imports are paged) ───────────────────────────────────────── */
 export type HeldStatus = "held" | "released" | "completed" | "unknown";
 export type HeldEventKind = "held" | "owner_recorded" | "owner_set" | "unknown";
-export interface HeldEvent { event: HeldEventKind; at: string; byUserId: number | null; reasonCode: string | null; ownerUserId: number | null; authorityRef: string | null }
-export interface HeldRelease { ownerUserId: number; releasedByUserId: number | null; authorityRef: string; releasedAt: string }
+/** A person as the server discloses them: a label to show as given ("You", a colleague's name, or "Another user"). Never an id. */
+export interface Person { label: string; isYou: boolean }
+/** The neutral label where identity disclosure is not authorised, and the fallback for a person the server did not describe. */
+export const ANOTHER_USER: Person = { label: "Another user", isYou: false };
+export interface HeldEvent { event: HeldEventKind; at: string; by: Person; owner: Person | null; reasonCode: string | null; authorityRef: string | null }
+export interface HeldRelease { owner: Person; releasedBy: Person; authorityRef: string | null; releasedAt: string }
 export interface HeldImport {
   importJobId: number;
   filename: string;
   jobStatus: string;
   totalRows: number;
   uploadedAt: string;
+  initiatedBy: Person | null;
+  recordedOwner: Person | null;
   /** The server's value if it is one of the three; "unknown" for anything else (never dropped, never guessed: it is shown as an unknown status). */
   releaseStatus: HeldStatus;
   rawStatus: string | null;
@@ -108,39 +114,63 @@ export interface HeldImport {
   canAssignAnyOwner: boolean;
   canAcceptForSelf: boolean;
 }
+/** One page of completed imports, newest first. `nextCursor` is null on the last page. */
+export interface CompletedPage { items: HeldImport[]; limit: number | null; nextCursor: number | null }
+export interface HeldList { held: HeldImport[]; completed: CompletedPage }
+export const COMPLETED_PAGE_SIZE = 20;
 
 const HELD_STATUSES: readonly string[] = ["held", "released", "completed"];
 const HELD_EVENTS: readonly string[] = ["held", "owner_recorded", "owner_set"];
 
-export function parseHeldImports(raw: unknown): HeldImport[] {
+function person(v: unknown): Person | null {
+  const r = rec(v);
+  const label = r ? str(r.label) : null;
+  return r && label !== null && label.trim().length > 0 ? { label, isYou: r.isYou === true } : null;
+}
+/** A person to show: the server's label as given, or the neutral label when none was described. */
+export const personLabel = (p: Person | null | undefined): string => (p ? p.label : ANOTHER_USER.label);
+
+function parseHeldItems(rows: unknown): HeldImport[] {
   const out: HeldImport[] = [];
-  for (const h of list(rec(raw)?.held)) {
+  for (const h of list(rows)) {
     const r = rec(h);
     // A row needs only its id and name to be shown. An unfamiliar status or event must NOT make a row vanish.
     if (!r || num(r.importJobId) === null || !str(r.filename)) continue;
     const status: HeldStatus = HELD_STATUSES.includes(String(r.releaseStatus)) ? (r.releaseStatus as HeldStatus) : "unknown";
     const rel = rec(r.release);
+    const releaseOwner = rel ? person(rel.owner) : null;
     const history: HeldEvent[] = [];
     for (const e of list(r.history)) {
       const ev = rec(e);
       if (!ev || !str(ev.at)) continue;
-      history.push({ event: HELD_EVENTS.includes(String(ev.event)) ? (ev.event as HeldEventKind) : "unknown", at: str(ev.at)!, byUserId: num(ev.byUserId), reasonCode: str(ev.reasonCode), ownerUserId: num(ev.ownerUserId), authorityRef: str(ev.authorityRef) });
+      history.push({ event: HELD_EVENTS.includes(String(ev.event)) ? (ev.event as HeldEventKind) : "unknown", at: str(ev.at)!, by: person(ev.by) ?? ANOTHER_USER, owner: person(ev.owner), reasonCode: str(ev.reasonCode), authorityRef: str(ev.authorityRef) });
     }
     out.push({
       importJobId: num(r.importJobId)!, filename: str(r.filename)!, jobStatus: str(r.jobStatus) ?? "", totalRows: num(r.totalRows) ?? 0, uploadedAt: str(r.uploadedAt) ?? "",
+      initiatedBy: person(r.initiatedBy), recordedOwner: person(r.recordedOwner),
       releaseStatus: status, rawStatus: status === "unknown" ? String(r.releaseStatus ?? "") : null, reasonCode: str(r.reasonCode),
-      release: rel && num(rel.ownerUserId) !== null ? { ownerUserId: num(rel.ownerUserId)!, releasedByUserId: num(rel.releasedByUserId), authorityRef: str(rel.authorityRef) ?? "", releasedAt: str(rel.releasedAt) ?? "" } : null,
+      release: rel && releaseOwner ? { owner: releaseOwner, releasedBy: person(rel.releasedBy) ?? ANOTHER_USER, authorityRef: str(rel.authorityRef), releasedAt: str(rel.releasedAt) ?? "" } : null,
       history, canAssignAnyOwner: r.canAssignAnyOwner === true, canAcceptForSelf: r.canAcceptForSelf === true,
     });
   }
   return out;
 }
-/** One history event in words. `nameOf` turns a user id into a name (or "you"); events are never shown as stored keys. */
-export function heldEventText(e: HeldEvent, nameOf: (id: number | null) => string): string {
+export function parseCompletedPage(raw: unknown): CompletedPage {
+  const o = rec(raw);
+  return { items: parseHeldItems(o?.items), limit: num(o?.limit), nextCursor: num(o?.nextCursor) };
+}
+/** GET /import/held: held and released imports (unpaged) plus the FIRST page of completed ones. */
+export function parseHeldList(raw: unknown): HeldList {
+  const o = rec(raw);
+  return { held: parseHeldItems(o?.held), completed: parseCompletedPage(o?.completed) };
+}
+/** One history event in words. People are shown by the label the server gave; events are never shown as stored keys. */
+export function heldEventText(e: HeldEvent): string {
+  const owner = personLabel(e.owner);
   switch (e.event) {
     case "held": return `Held for review${e.reasonCode ? `: ${heldReasonText(e.reasonCode)}` : "."}`;
-    case "owner_recorded": return `Owner recorded at review: ${nameOf(e.ownerUserId)}${e.authorityRef ? `. Authority reference: ${e.authorityRef}` : ""}.`;
-    case "owner_set": return `Owner set at creation: ${nameOf(e.ownerUserId)}${e.authorityRef ? `. Authority reference: ${e.authorityRef}` : ""}.`;
+    case "owner_recorded": return `Owner recorded at review: ${owner}${e.authorityRef ? `. Authority reference: ${e.authorityRef}` : ""}.`;
+    case "owner_set": return `Owner set at creation: ${owner}${e.authorityRef ? `. Authority reference: ${e.authorityRef}` : ""}.`;
     default: return "An event this screen doesn't recognise.";
   }
 }
@@ -157,14 +187,14 @@ export const AUTHORITY_REF_MAX = 200;
 export const authorityRefOk = (s: string): boolean => s.trim().length >= AUTHORITY_REF_MIN && s.trim().length <= AUTHORITY_REF_MAX;
 
 /* ── Audit ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── */
-export interface AuditCapabilities { isAuditValueReader: boolean; canReadAuditMetadata: boolean; valueRetentionDays: number | null; metadataRetentionDays: number | null }
+export interface AuditCapabilities { isAuditValueReader: boolean; canReadAuditMetadata: boolean; canReadAuditAccessHistory: boolean; valueRetentionDays: number | null; metadataRetentionDays: number | null }
 export interface AuditEntry { auditId: number; action: string; recordType: string; recordId: string; userId: number | null; createdAt: string; hasEncryptedValues: boolean; valuesExpired: boolean; valuesRetainedUntil: string | null }
 export interface AuditAccess { id: number; userId: number | null; role: string; outcome: "accessed" | "refused"; refusal: string | null; reason: string | null; at: string }
 export interface AuditValues { auditId: number; action: string; before: string | null; after: string | null; fields: string[]; performedBy: { userId: number | null; role: string } | null; requestedByUserId: number | null; authorityRef: string | null }
 
 export function parseAuditCapabilities(raw: unknown): AuditCapabilities {
   const o = rec(raw);
-  return { isAuditValueReader: o?.isAuditValueReader === true, canReadAuditMetadata: o?.canReadAuditMetadata === true, valueRetentionDays: num(o?.valueRetentionDays), metadataRetentionDays: num(o?.metadataRetentionDays) };
+  return { isAuditValueReader: o?.isAuditValueReader === true, canReadAuditMetadata: o?.canReadAuditMetadata === true, canReadAuditAccessHistory: o?.canReadAuditAccessHistory === true, valueRetentionDays: num(o?.valueRetentionDays), metadataRetentionDays: num(o?.metadataRetentionDays) };
 }
 export function parseAuditEntries(raw: unknown): { entries: AuditEntry[]; nextBeforeId: number | null } {
   const o = rec(raw);
@@ -231,6 +261,10 @@ export const CODE_WORDS: Record<string, string> = {
   EXPORT_RELEASE_INVALID: "An export can be released only to the person who prepared it, with a reason of 5 to 500 characters.",
   EXPORT_SEEN_OWNER_ONLY: "Only the owner can mark an export as seen.",
   IMPORT_HELD_READ_FORBIDDEN: "You can't review held imports.",
+  IMPORT_HELD_PAGE_INVALID: "Couldn't load more history. Reload the page and try again.",
+  IMPORT_OWNER_NOT_LINKED: "You can only take imports you started or already own. Ask an administrator to assign it.",
+  IMPORT_OWNER_ASSIGN_FORBIDDEN: "You can't assign the owner of this import. Ask an administrator.",
+  IMPORT_OWNER_INVALID: "That owner can't be assigned. Check the person and the authority reference (3 to 200 characters).",
   AUDIT_METADATA_RESTRICTED: "The audit history is for Administrators.",
   AUDIT_VALUES_RESTRICTED: "You are not authorised to read audited values.",
   AUDIT_VALUES_REASON_REQUIRED: "Give a reason of 5 to 500 characters to view audited values.",
