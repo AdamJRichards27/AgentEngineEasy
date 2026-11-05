@@ -50,6 +50,9 @@ export function HeldImportsView(p: HeldImportsViewProps) {
     const self = open && !admin && h.canAcceptForSelf;
     const ownerValue = admin ? draft.ownerUserId : self && p.selfId !== null ? String(p.selfId) : "";
     const ready = ownerValue !== "" && authorityRefOk(draft.authorityRef);
+    // A completed import that has a history says only "Completed." in its status line: who recorded the owner, and the authority reference, are in the
+    // history (collapsed), not stated twice.
+    const compact = h.releaseStatus === "completed" && h.history.length > 0;
     return (
       <li key={h.importJobId} data-ae-held-import={h.importJobId} data-ae-held-status={h.releaseStatus}>
         <div className="pc-item-header">
@@ -71,17 +74,30 @@ export function HeldImportsView(p: HeldImportsViewProps) {
         ) : (
           <p className="muted" data-ae-held-state>
             {h.releaseStatus === "completed" ? "Completed." : "Released; not yet completed."}
-            {h.release ? ` Owner recorded ${when(h.release.releasedAt)} by ${personLabel(h.release.releasedBy)}. Authority reference: ${h.release.authorityRef || "none recorded"}.` : " No owner release was recorded at review."}
+            {compact ? null : h.release ? ` Owner recorded ${when(h.release.releasedAt)} by ${personLabel(h.release.releasedBy)}. Authority reference: ${h.release.authorityRef || "none recorded"}.` : " No owner release was recorded at review."}
           </p>
         )}
         {h.history.length > 0 ? (
-          <ul className="muted" data-ae-held-history>
-            {h.history.map((e, i) => (
-              <li key={`${e.at}-${i}`} data-ae-held-event={e.event}>
-                {when(e.at)} · {heldEventText(e)} <span>(by {personLabel(e.by)})</span>
-              </li>
-            ))}
-          </ul>
+          compact ? (
+            <details data-ae-held-history-details>
+              <summary className="muted">History</summary>
+              <ul className="muted" data-ae-held-history>
+                {h.history.map((e, i) => (
+                  <li key={`${e.at}-${i}`} data-ae-held-event={e.event}>
+                    {when(e.at)} · {heldEventText(e)} <span>(by {personLabel(e.by)})</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : (
+            <ul className="muted" data-ae-held-history>
+              {h.history.map((e, i) => (
+                <li key={`${e.at}-${i}`} data-ae-held-event={e.event}>
+                  {when(e.at)} · {heldEventText(e)} <span>(by {personLabel(e.by)})</span>
+                </li>
+              ))}
+            </ul>
+          )
         ) : null}
         {admin || self ? (
           <form className="stack" data-ae-held-form onSubmit={(e) => { e.preventDefault(); if (ready) p.onSubmit(h.importJobId); }}>

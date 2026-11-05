@@ -328,3 +328,51 @@ test("audit permissions (t284u): the Settings card is driven by the server's ans
   const page = readFileSync(new URL("../../pages/SettingsAudit.tsx", import.meta.url), "utf8");
   assert.match(page, /useQuery<AuditCapabilities>\(auditCapabilitiesQuery\)/, "one shared capabilities request"); assert.match(page, /canReadAuditAccessHistory === true/);
 });
+
+/* ── t287u: no duplication on completed imports (Owner-approved): "Completed." in the status line, the detail in the collapsed history ───────────── */
+const stateText = (tree: unknown) => text(all(tree, (e) => e.props?.["data-ae-held-state"] !== undefined)[0]).trim();
+const COMPLETED = (o: Record<string, unknown> = {}) => HELD({ releaseStatus: "completed", jobStatus: "COMPLETED", reasonCode: null, release: RELEASE, history: HISTORY, ...o });
+
+test("duplication fix (t287u): a COMPLETED import with a history says only 'Completed.' in its status line; the owner and authority reference are in the history, once", () => {
+  const t = heldView([], { completed: parseHeldList({ held: [], completed: { items: [COMPLETED()] } }).completed.items });
+  assert.equal(stateText(t), "Completed.");
+  const status = text(all(t, (e) => e.props?.["data-ae-held-state"] !== undefined)[0]);
+  assert.doesNotMatch(status, /Authority reference|Owner recorded|Accepted at review/, "nothing of the owner or authority in the status line");
+  const details = all(t, (e) => e.type === "details" && e.props?.["data-ae-held-history-details"] !== undefined);
+  assert.equal(details.length, 1, "the history sits in one collapsed section");
+  assert.notEqual(details[0].props?.open, true, "collapsed by default");
+  assert.match(text(all(details[0], (e) => e.type === "summary")[0]), /History/);
+  assert.equal(all(details[0], (e) => e.props?.["data-ae-held-event"] !== undefined).length, 3, "all three events are in it");
+  const whole = text(t);
+  assert.equal((whole.match(/Accepted at review INSTR-A2/g) ?? []).length, 1, "the authority reference appears exactly once on the row");
+  assert.match(whole, /Owner recorded at review: You\./);
+});
+
+test("duplication fix (t287u): the fix applies ONLY to completed imports with a history; nothing else changes", () => {
+  // completed with NO history: the status line keeps the owner and authority, because it is the only record
+  const bare = heldView([], { completed: parseHeldList({ held: [], completed: { items: [COMPLETED({ history: [] })] } }).completed.items });
+  assert.match(stateText(bare), /Completed\. Owner recorded .* by You\. Authority reference: Accepted at review INSTR-A2\./);
+  assert.equal(all(bare, (e) => e.type === "details").length, 0);
+  // released (not yet completed) with a history: unchanged, detail in the status line and the history open
+  const released = heldView([HELD({ releaseStatus: "released", reasonCode: null, release: RELEASE, history: HISTORY })]);
+  assert.match(stateText(released), /Released; not yet completed\. Owner recorded .* Authority reference: Accepted at review INSTR-A2\./);
+  assert.equal(all(released, (e) => e.type === "details").length, 0, "an open item's history is not collapsed");
+  assert.equal(all(released, (e) => e.props?.["data-ae-held-event"] !== undefined).length, 3);
+  // held: unchanged
+  const held = heldView([HELD({ history: HISTORY })]);
+  assert.equal(all(held, (e) => e.type === "details").length, 0);
+  assert.match(text(held), /Held for review: The recorded owner is no longer active\./);
+  // a completed import with no recorded release and a history: still just "Completed."
+  assert.equal(stateText(heldView([], { completed: parseHeldList({ held: [], completed: { items: [COMPLETED({ release: null })] } }).completed.items })), "Completed.");
+  // controls never appear on a completed import
+  assert.equal(hasAttr(heldView([], { completed: parseHeldList({ held: [], completed: { items: [COMPLETED({ canAssignAnyOwner: true, canAcceptForSelf: true })] } }).completed.items }), "data-ae-held-form"), false);
+});
+
+test("duplication fix (t287u): paging, labels and the 'Show more' control are unchanged (Owner: keep Show more, not numbered pages)", () => {
+  const items = [30, 29].map((id) => COMPLETED({ importJobId: id, filename: `done-${id}.csv` }));
+  const t = heldView([], { completed: parseHeldList({ held: [], completed: { items } }).completed.items, hasMoreCompleted: true });
+  assert.equal(all(t, (e) => e.props?.["data-ae-held-more"] !== undefined).length, 1);
+  assert.match(text(all(t, (e) => e.props?.["data-ae-held-more"] !== undefined)[0]), /Show more completed imports/);
+  assert.equal(all(t, (e) => e.props?.["data-ae-held-import"] !== undefined).length, 2);
+  assert.doesNotMatch(text(t), /Page \d|Next page|Previous/i, "no numbered paging");
+});
