@@ -43,6 +43,7 @@ export function PitCrewAuthorityBar() {
         <button className="btn btn-link" data-ae-pc-authority-clear onClick={() => apply(null)}>
           Stop acting
         </button>
+        <PrepareExport ownerName={acting.ownerName} />
       </section>
     );
   }
@@ -79,5 +80,32 @@ export function PitCrewAuthorityBar() {
       </div>
       {owners.isError ? <p role="alert">Couldn&apos;t load agents.</p> : null}
     </section>
+  );
+}
+
+// t277u: Pit Crew may prepare an authorised export; it is delivered to the owner, not to Pit Crew.
+function PrepareExport({ ownerName }: { ownerName: string }) {
+  const [state, setState] = useState<{ kind: "idle" } | { kind: "busy" } | { kind: "done"; rows: number; expiresInDays: number } | { kind: "error"; text: string }>({ kind: "idle" });
+  const run = async () => {
+    setState({ kind: "busy" });
+    try {
+      const r = await apiFetch<{ rows: number; expiresInDays: number }>("/grow/contacts/exports", { method: "POST", body: JSON.stringify({}) });
+      setState({ kind: "done", rows: r.rows, expiresInDays: r.expiresInDays });
+    } catch (e) {
+      setState({ kind: "error", text: e instanceof Error ? e.message : "Couldn't prepare the export." });
+    }
+  };
+  return (
+    <div className="inline-form">
+      <button className="btn btn-secondary btn-small" data-ae-pc-prepare-export disabled={state.kind === "busy"} onClick={() => void run()}>
+        Prepare contact export for {ownerName}
+      </button>
+      {state.kind === "done" ? (
+        <span data-ae-pc-export-result>
+          Export of {state.rows} contact{state.rows === 1 ? "" : "s"} prepared and delivered to {ownerName}&apos;s export list (expires in {state.expiresInDays} days). You won&apos;t receive the file.
+        </span>
+      ) : null}
+      {state.kind === "error" ? <span role="alert">{state.text}</span> : null}
+    </div>
   );
 }
