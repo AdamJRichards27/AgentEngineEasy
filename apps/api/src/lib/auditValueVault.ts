@@ -15,7 +15,7 @@
 //     refuses unless no envelope uses kid and every envelope verifies. All are idempotent and
 //     write run records to audit_logs.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { and, eq, like, lt, or } from "drizzle-orm";
+import { and, eq, inArray, like, lt, or, type SQL } from "drizzle-orm";
 import { auditLogs, db } from "@aee/db";
 import { logger } from "@aee/events";
 
@@ -139,11 +139,14 @@ export function isPastRetention(createdAt: Date, now: Date = new Date()): boolea
   return now.getTime() - createdAt.getTime() > retentionDays() * 86_400_000;
 }
 
-const envelopeRows = () =>
+/** Optional brokerage scope (operators run globally; tests scope to their own tenants). */
+export type VaultScope = { brokerageIds?: number[] };
+const scoped = (scope?: VaultScope): SQL | undefined => (scope?.brokerageIds?.length ? inArray(auditLogs.brokerageId, scope.brokerageIds) : undefined);
+const envelopeRows = (scope?: VaultScope) =>
   db
     .select({ id: auditLogs.id, previousValue: auditLogs.previousValue, updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
     .from(auditLogs)
-    .where(or(like(auditLogs.previousValue, `%${ENVELOPE_PREFIX}%`), like(auditLogs.updatedValue, `%${ENVELOPE_PREFIX}%`)))
+    .where(and(or(like(auditLogs.previousValue, `%${ENVELOPE_PREFIX}%`), like(auditLogs.updatedValue, `%${ENVELOPE_PREFIX}%`)), scoped(scope)))
     .orderBy(auditLogs.id);
 
 async function runRecord(action: string, detail: Record<string, unknown>): Promise<void> {
@@ -191,10 +194,10 @@ function reencryptText(text: string | null, activeKid: string): { text: string |
 }
 
 /** Re-encrypt every envelope not under the active key. Idempotent; compare-and-set per row. */
-export async function rotateAuditValueKeys(opts: { failOn?: Set<number> } = {}): Promise<{ activeKid: string; examined: number; reencrypted: number; failed: number[] }> {
+export async function rotateAuditValueKeys(opts: { failOn?: Set<number>; scope?: VaultScope } = {}): Promise<{ activeKid: string; examined: number; reencrypted: number; failed: number[] }> {
   const { active } = keyRing();
   if (!active) throw new AuditValueUnavailable("NO_KEY");
-  const rows = await envelopeRows();
+  const rows = await envelopeRows(opts.scope);
   let reencrypted = 0;
   const failed: number[] = [];
   for (const r of rows) {
@@ -214,14 +217,14 @@ export async function rotateAuditValueKeys(opts: { failOn?: Set<number> } = {}):
     }
   }
   const result = { activeKid: active, examined: rows.length, reencrypted, failed };
-  await runRecord("audit_key_rotation_run", { ...result, failed: failed.length, failedIds: failed.slice(0, 50) });
+  await runRecord("audit_key_rotation_run", { ...result, failed: failed.length, failedIds: failed.slice(0, 50), scoped: !!opts.scope?.brokerageIds?.length });
   logger.info("audit_key_rotation_run", { activeKid: active, examined: rows.length, reencrypted, failed: failed.length });
   return result;
 }
 
 /** Decrypt every envelope. Returns per-kid counts and unverifiable row ids. Never returns values. */
-export async function verifyAuditValueKeys(): Promise<{ examined: number; byKid: Record<string, number>; unverified: number[] }> {
-  const rows = await envelopeRows();
+export async function verifyAuditValueKeys(scope?: VaultScope): Promise<{ examined: number; byKid: Record<string, number>; unverified: number[] }> {
+  const rows = await envelopeRows(scope);
   const byKid: Record<string, number> = {};
   const unverified: number[] = [];
   for (const r of rows) {
@@ -245,14 +248,14 @@ export async function verifyAuditValueKeys(): Promise<{ examined: number; byKid:
  * Certify that `kid` can be removed from the key ring. Refuses (and records the refusal) when any
  * envelope still uses kid, any envelope fails to decrypt, or kid is the active key.
  */
-export async function retireAuditValueKey(kid: string): Promise<{ ok: boolean; reason?: string; remaining?: number; unverified?: number }> {
+export async function retireAuditValueKey(kid: string, scope?: VaultScope): Promise<{ ok: boolean; reason?: string; remaining?: number; unverified?: number }> {
   const { active } = keyRing();
-  const v = await verifyAuditValueKeys();
+  const v = await verifyAuditValueKeys(scope);
   const remaining = v.byKid[kid] ?? 0;
   let reason: string | undefined;
   if (kid === active) reason = "KEY_IS_ACTIVE";
   else if (remaining > 0) reason = "ENVELOPES_REMAIN";
   else if (v.unverified.length > 0) reason = "UNVERIFIED_RECORDS";
-  await runRecord(reason ? "audit_key_retirement_refused" : "audit_key_retirement_verified", { kid, reason: reason ?? null, remaining, unverified: v.unverified.length, examined: v.examined });
+  await runRecord(reason ? "audit_key_retirement_refused" : "audit_key_retirement_verified", { kid, reason: reason ?? null, remaining, unverified: v.unverified.length, examined: v.examined, scoped: !!scope?.brokerageIds?.length });
   return reason ? { ok: false, reason, remaining, unverified: v.unverified.length } : { ok: true, remaining: 0, unverified: 0 };
 }
