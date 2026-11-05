@@ -9,6 +9,23 @@ import { and, eq, sql } from "drizzle-orm";
 import { db, users } from "@aee/db";
 import { requireAuth } from "../middlewares/auth.js";
 import { isPitCrew } from "../lib/contactAuthority.js";
+import { explainEntitlementDecision } from "../lib/entitlements/resolver.js";
+
+// t282u: a delegate must be able to SEND the record: active, Agent or Brokerage Administrator,
+// never Pit Crew, and personally holding every entitlement the send route gates on (so
+// read-only seats and unsubscribed users are excluded). Same keys as requireSendAuthorisation.
+export const SEND_ENTITLEMENTS: Record<"appraisal" | "document_package", readonly string[]> = {
+  appraisal: ["grow.access", "grow.opportunities.manage"],
+  document_package: ["run.access"],
+};
+export async function canReceiveDelegation(u: { id: number; role: string; brokerageId: number | null; isActive: boolean }, recordType: "appraisal" | "document_package"): Promise<boolean> {
+  if (!u.brokerageId || !u.isActive || isPitCrew(u as never) || !SEND_DELEGATE_ROLES.includes(u.role)) return false;
+  for (const k of SEND_ENTITLEMENTS[recordType]) {
+    const d = await explainEntitlementDecision({ id: u.id, role: u.role as never, brokerageId: u.brokerageId }, k).catch(() => ({ allowed: false }));
+    if (!d.allowed) return false;
+  }
+  return true;
+}
 import { logAudit } from "../lib/audit.js";
 import { activeSendDelegation, holdsAuthorisedAgentRole, SEND_DELEGATE_ROLES, SEND_DELEGATION_TTL_DAYS, sendRecordOwner } from "../lib/contactAuthority.js";
 
@@ -38,9 +55,10 @@ async function handle(action: "send_authority_delegated" | "send_authority_revok
     res.status(403).json({ error: "Only the owning agent can delegate or revoke sending for this record.", code: "SEND_DELEGATION_OWNER_ONLY" });
     return;
   }
-  const [delegate] = await db.select({ id: users.id, role: users.role }).from(users).where(and(eq(users.id, delegateUserId), eq(users.brokerageId, user.brokerageId))).limit(1);
-  if (!delegate || delegate.id === user.id || !SEND_DELEGATE_ROLES.includes(delegate.role)) {
-    res.status(422).json({ error: "The delegate must be another agent or a brokerage administrator in this brokerage (never Pit Crew).", code: "SEND_DELEGATE_INVALID" });
+  const [delegate] = await db.select({ id: users.id, role: users.role, brokerageId: users.brokerageId, isActive: users.isActive }).from(users).where(and(eq(users.id, delegateUserId), eq(users.brokerageId, user.brokerageId))).limit(1);
+  // Revocation must always work, even for a delegate who has since become ineligible.
+  if (!delegate || delegate.id === user.id || (action === "send_authority_delegated" && !(await canReceiveDelegation(delegate, recordType)))) {
+    res.status(422).json({ error: "The delegate must be another active agent or brokerage administrator in this brokerage who can send this record (never Pit Crew, read-only or unsubscribed users).", code: "SEND_DELEGATE_INVALID" });
     return;
   }
   let renewedFrom: number | null = null;
@@ -121,7 +139,7 @@ sendDelegationsRouter.get("/send-delegations", requireAuth, async (req, res) => 
     latest.get(d)!.push(r);
   }
   const people = new Map(
-    (await db.select({ id: users.id, firstName: users.firstName, lastName: users.lastName, role: users.role, isActive: users.isActive }).from(users).where(eq(users.brokerageId, user.brokerageId))).map((u) => [u.id, u]),
+    (await db.select({ id: users.id, firstName: users.firstName, lastName: users.lastName, role: users.role, isActive: users.isActive, brokerageId: users.brokerageId }).from(users).where(eq(users.brokerageId, user.brokerageId))).map((u) => [u.id, u]),
   );
   const nameOf = (id: number) => {
     const u = people.get(id);
@@ -159,11 +177,12 @@ sendDelegationsRouter.get("/send-delegations", requireAuth, async (req, res) => 
         revocable: isOwner && (state === "active" || state === "expired"),
       };
     });
-  const eligibleDelegates = isOwner
-    ? [...people.values()]
-        .filter((u) => u.id !== user.id && u.isActive && SEND_DELEGATE_ROLES.includes(u.role))
-        .map((u) => ({ userId: u.id, name: nameOf(u.id), role: u.role }))
-    : [];
+  const eligibleDelegates: { userId: number; name: string | null; role: string }[] = [];
+  if (isOwner) {
+    for (const u of people.values()) {
+      if (u.id !== user.id && (await canReceiveDelegation(u, recordType))) eligibleDelegates.push({ userId: u.id, name: nameOf(u.id), role: u.role });
+    }
+  }
   res.setHeader("Cache-Control", "no-store");
   res.json({ recordType, recordId, ownerUserId: owner, viewer: isOwner ? "owner" : isAdmin ? "admin" : "delegate", canManage: isOwner, ttlDays: SEND_DELEGATION_TTL_DAYS, delegations, eligibleDelegates });
 });
