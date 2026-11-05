@@ -94,7 +94,9 @@ auditValuesRouter.get("/audit/capabilities", requireAuth, (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({
     isAuditValueReader: isAuditValueReader(user),
+    // Authoritative for the Settings "Audit history" card and both metadata routes.
     canReadAuditMetadata: user.role === "Brokerage Administrator",
+    canReadAuditAccessHistory: user.role === "Brokerage Administrator",
     valueRetentionDays: retentionDays(),
     metadataRetentionDays: AUDIT_METADATA_RETENTION_DAYS,
   });
@@ -102,7 +104,11 @@ auditValuesRouter.get("/audit/capabilities", requireAuth, (req, res) => {
 
 async function metadataGate(req: import("express").Request, res: import("express").Response, route: string): Promise<boolean> {
   const user = req.authedUser!;
-  if (user.role === "Brokerage Administrator") return true;
+  if (user.role === "Brokerage Administrator") {
+    // t284u: same-brokerage administrators may read metadata and access history; every read is logged.
+    await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "audit_metadata_viewed", recordType: "audit_log", recordId: "0", updatedValue: JSON.stringify({ route, query: { recordType: typeof req.query.recordType === "string" ? req.query.recordType.slice(0, 64) : null, recordId: typeof req.query.recordId === "string" ? req.query.recordId.slice(0, 64) : null, auditId: typeof req.query.auditId === "string" ? req.query.auditId.slice(0, 12) : null }, performedBy: { userId: user.id, role: user.role } }) }, { strict: true });
+    return true;
+  }
   await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "audit_metadata_access_refused", recordType: "audit_log", recordId: "0", updatedValue: JSON.stringify({ route, performedBy: { userId: user.id, role: user.role } }) }, { strict: true });
   res.status(403).json({ error: "Audit history is restricted to brokerage administrators.", code: "AUDIT_METADATA_RESTRICTED" });
   return false;
