@@ -277,11 +277,13 @@ test("t277u 6: held imports — admin assigns or agent accepts for self, authori
   await db.update(users).set({ isActive: false }).where(eq(users.id, w.agent2.user.id));
   assert.equal((await call(w.admin.cookie, "POST", `/import/jobs/${job}/execute`, {})).json?.code, "IMPORT_HELD_FOR_REVIEW");
   for (const h of [{}, auth(w.agent.user.id)]) assert.equal((await call(w.pc.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "INSTR-6" }, h)).status, 403, "Pit Crew cannot release");
-  assert.equal((await call(w.agent.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id })).json?.code, "IMPORT_OWNER_INVALID", "authority reference required");
-  assert.equal((await call(w.agent.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "Accepted at review INSTR-6" })).status, 201, "agent accepts for self");
+  // t284u: an Agent cannot take another Agent's import by id.
+  assert.equal((await call(w.agent.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "Accepted at review INSTR-6" })).json?.code, "IMPORT_OWNER_NOT_LINKED");
+  assert.equal((await call(w.admin.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id })).json?.code, "IMPORT_OWNER_INVALID", "authority reference required");
+  assert.equal((await call(w.admin.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "Assigned at review INSTR-6" })).status, 201, "admin assigns the agent");
   const rec = (await audits(w.brokerageId, "import_job_owner_recorded")).filter((a) => a.recordId === String(job)).sort((a, b) => b.id - a.id)[0];
   const v = JSON.parse(rec.updatedValue ?? "{}");
-  assert.deepEqual([rec.userId, v.owner, v.authorityRef, v.source], [w.agent.user.id, w.agent.user.id, "Accepted at review INSTR-6", "review"]);
+  assert.deepEqual([rec.userId, v.owner, v.authorityRef, v.source], [w.admin.user.id, w.agent.user.id, "Assigned at review INSTR-6", "review"]);
   assert.equal((await call(w.admin.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.admin.user.id, authorityRef: "Admin reassign INSTR-7" })).status, 201, "admin assigns");
 });
 

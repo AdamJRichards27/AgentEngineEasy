@@ -126,15 +126,15 @@ test("t282u 1+2: held imports — Agent sees only own; Admin sees brokerage; his
   // Release (agent accepts for self) -> released, with history and authority reference.
   assert.equal((await call(w.agent.cookie, "POST", `/import/jobs/${jobA}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "Accepted at review INSTR-A2" })).status, 201);
   let a = (await list(w.agent.cookie)).json.held.find((x: { importJobId: number }) => x.importJobId === jobA);
-  assert.deepEqual([a.releaseStatus, a.reasonCode, a.release.authorityRef, a.release.releasedByUserId], ["released", null, "Accepted at review INSTR-A2", w.agent.user.id]);
+  assert.deepEqual([a.releaseStatus, a.reasonCode, a.release.authorityRef, a.release.releasedBy], ["released", null, "Accepted at review INSTR-A2", { label: "You", isYou: true }]);
   const events = a.history.map((e: { event: string }) => e.event);
   assert.ok(events.includes("held") && events.filter((e: string) => e === "owner_recorded").length === 2, JSON.stringify(a.history));
   assert.equal(a.history.find((e: { event: string }) => e.event === "held").reasonCode, "OWNER_INACTIVE");
   // Completed: still listed (history preserved).
   await db.execute(sql`update import_jobs set status = 'COMPLETED' where id = ${jobA}`);
-  a = (await list(w.agent.cookie)).json.held.find((x: { importJobId: number }) => x.importJobId === jobA);
+  a = (await list(w.agent.cookie)).json.completed.items.find((x: { importJobId: number }) => x.importJobId === jobA);
   assert.deepEqual([a.releaseStatus, a.jobStatus, a.canAcceptForSelf, a.canAssignAnyOwner], ["completed", "COMPLETED", false, false]);
-  assert.ok((await list(w.admin.cookie)).json.held.some((x: { importJobId: number; releaseStatus: string }) => x.importJobId === jobA && x.releaseStatus === "completed"));
+  assert.ok((await list(w.admin.cookie)).json.completed.items.some((x: { importJobId: number; releaseStatus: string }) => x.importJobId === jobA && x.releaseStatus === "completed"));
   // Admin view still shows job B held; Pit Crew still cannot release.
   for (const h of [{}, auth(w.agent.user.id)]) assert.equal((await call(w.pc.cookie, "POST", `/import/jobs/${jobB}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "INSTR-B" }, h)).status, 403);
 });
