@@ -175,13 +175,21 @@ test("audit, VALUE READER: Request values only for an entry that has unexpired e
   assert.ok(hasAttr(audit(CAPS_READER), "data-ae-audit-request"));
   assert.equal(hasAttr(audit(CAPS_READER, [entry({ hasEncryptedValues: false })]), "data-ae-audit-request"), false);
   assert.equal(hasAttr(audit(CAPS_READER, [entry({ valuesExpired: true })]), "data-ae-audit-request"), false);
-  assert.match(text(audit(CAPS_READER, [entry({ valuesExpired: true })])), /expired \(past the retention period\)/);
+  // the server reports an expired entry as hasEncryptedValues:false, valuesExpired:true (seen against the real route); both shapes read "expired"
+  for (const shape of [{ valuesExpired: true }, { valuesExpired: true, hasEncryptedValues: false }]) assert.match(text(audit(CAPS_READER, [entry(shape)])), /expired \(past the retention period\)/);
+  assert.equal(hasAttr(audit(CAPS_READER, [entry({ valuesExpired: true, hasEncryptedValues: false })]), "data-ae-audit-request"), false);
   const form = audit(CAPS_READER, [entry()], { requesting: { auditId: 120, reason: "" } });
   assert.equal(all(form, (e) => e.props?.["data-ae-audit-confirm"] !== undefined)[0].props?.disabled, true);
   assert.equal(all(audit(CAPS_READER, [entry()], { requesting: { auditId: 120, reason: "Investigating complaint 55" } }), (e) => e.props?.["data-ae-audit-confirm"] !== undefined)[0].props?.disabled, false);
   assert.equal(hasAttr(audit(CAPS_READER), "data-ae-audit-values"), false, "no values until a reasoned request has been answered");
-  const shown = audit(CAPS_READER, [entry()], { shown: { 120: parseAuditValues({ auditId: 120, action: "x", before: "old@x.test", after: "new@x.test", fields: ["email"] })! } });
-  assert.match(text(all(shown, (e) => e.props?.["data-ae-audit-before"] !== undefined)[0]), /old@x\.test/);
+  // the REAL response shape (seen against the t280u route): before and after are JSON objects of the changed fields, plus who did it and on whose authority
+  const real = parseAuditValues({ auditId: 120, action: "grow_contact_updated_on_authority", before: { mobile: "0491 570 158" }, after: { mobile: "0491 570 300" }, fields: ["mobile"], requestedBy: { userId: 2 }, performedBy: { userId: 8, role: "Pit Crew" }, authorityRef: "email from Gus 2026-11-05" })!;
+  assert.match(real.before ?? "", /0491 570 158/); assert.match(real.after ?? "", /0491 570 300/);
+  assert.equal(parseAuditValues({ auditId: 1, before: "old@x.test", after: null })!.before, "old@x.test", "a plain string still reads as it is");
+  const shown = audit(CAPS_READER, [entry()], { shown: { 120: real } });
+  assert.match(text(all(shown, (e) => e.props?.["data-ae-audit-before"] !== undefined)[0]), /0491 570 158/);
+  assert.match(text(all(shown, (e) => e.props?.["data-ae-audit-after"] !== undefined)[0]), /0491 570 300/);
+  assert.match(text(all(shown, (e) => e.props?.["data-ae-audit-performed"] !== undefined)[0]), /Done by Pat Pitcrew \(Pit Crew\) on the authority of User 2\. Authority reference: email from Gus/);
   assert.match(text(shown), /Shown for this entry only\. This access has been recorded\./);
   assert.equal(hasAttr(shown, "data-ae-audit-request"), false, "no second request while the values are showing");
 });

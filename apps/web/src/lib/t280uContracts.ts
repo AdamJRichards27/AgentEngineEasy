@@ -117,7 +117,7 @@ export const authorityRefOk = (s: string): boolean => s.trim().length >= AUTHORI
 export interface AuditCapabilities { isAuditValueReader: boolean; canReadAuditMetadata: boolean; valueRetentionDays: number | null; metadataRetentionDays: number | null }
 export interface AuditEntry { auditId: number; action: string; recordType: string; recordId: string; userId: number | null; createdAt: string; hasEncryptedValues: boolean; valuesExpired: boolean; valuesRetainedUntil: string | null }
 export interface AuditAccess { id: number; userId: number | null; role: string; outcome: "accessed" | "refused"; refusal: string | null; reason: string | null; at: string }
-export interface AuditValues { auditId: number; action: string; before: string | null; after: string | null; fields: string[] }
+export interface AuditValues { auditId: number; action: string; before: string | null; after: string | null; fields: string[]; performedBy: { userId: number | null; role: string } | null; requestedByUserId: number | null; authorityRef: string | null }
 
 export function parseAuditCapabilities(raw: unknown): AuditCapabilities {
   const o = rec(raw);
@@ -142,11 +142,18 @@ export function parseAuditAccesses(raw: unknown): AuditAccess[] {
   }
   return out;
 }
-/** The decrypted values of ONE entry, shown only after a reasoned request. Only text is accepted; anything else is dropped. */
+/** A decrypted value as text for display: the server sends the stored JSON (usually an object of the changed fields); a string stays as it is. */
+export function valueText(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v, null, 2); } catch { return null; }
+}
+/** The decrypted values of ONE entry, shown only after a reasoned request. */
 export function parseAuditValues(raw: unknown): AuditValues | null {
   const o = rec(raw);
   if (!o || num(o.auditId) === null) return null;
-  return { auditId: num(o.auditId)!, action: str(o.action) ?? "", before: str(o.before), after: str(o.after), fields: list(o.fields).filter((f): f is string => typeof f === "string") };
+  const by = rec(o.performedBy);
+  return { auditId: num(o.auditId)!, action: str(o.action) ?? "", before: valueText(o.before), after: valueText(o.after), fields: list(o.fields).filter((f): f is string => typeof f === "string"), performedBy: by ? { userId: num(by.userId), role: str(by.role) ?? "" } : null, requestedByUserId: num(rec(o.requestedBy)?.userId), authorityRef: str(o.authorityRef) };
 }
 const sentence = (s: string): string => { const t = s.replace(/[_\-.]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase(); return t ? t[0].toUpperCase() + t.slice(1) : ""; };
 /** An audit action key as a readable sentence ("grow_contact_updated_on_authority" becomes "Grow contact updated on authority"). */

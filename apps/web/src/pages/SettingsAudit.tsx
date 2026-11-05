@@ -76,7 +76,7 @@ export function AuditView(p: AuditViewProps) {
                 </div>
                 <p className="muted">{who(e.userId, p.names)} · {when(e.createdAt)}</p>
                 <p className="muted" data-ae-audit-values-state>
-                  Values: {!e.hasEncryptedValues ? "none recorded" : e.valuesExpired ? "expired (past the retention period)" : "Encrypted"}
+                  Values: {e.valuesExpired ? "expired (past the retention period)" : e.hasEncryptedValues ? "Encrypted" : "none recorded"}
                 </p>
                 <div className="inline-form">
                   <button type="button" className="btn btn-link" onClick={() => p.onToggleHistory(e.auditId)} data-ae-audit-history-toggle>
@@ -107,6 +107,13 @@ export function AuditView(p: AuditViewProps) {
                   <div className="card" data-ae-audit-values>
                     <p className="muted">Shown for this entry only. This access has been recorded.</p>
                     {values.fields.length > 0 ? <p className="muted">Fields: {values.fields.join(", ")}</p> : null}
+                    {values.performedBy ? (
+                      <p className="muted" data-ae-audit-performed>
+                        Done by {who(values.performedBy.userId, p.names)}{values.performedBy.role ? ` (${values.performedBy.role})` : ""}
+                        {values.requestedByUserId !== null ? ` on the authority of ${who(values.requestedByUserId, p.names)}` : ""}
+                        {values.authorityRef ? `. Authority reference: ${values.authorityRef}` : ""}
+                      </p>
+                    ) : null}
                     <p><strong>Before</strong></p>
                     <pre data-ae-audit-before>{values.before ?? "(none)"}</pre>
                     <p><strong>After</strong></p>
