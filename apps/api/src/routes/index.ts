@@ -37,6 +37,7 @@ import { launchRouter } from "./launch.js";
 import { pitCrewRouter } from "./pitCrew.js";
 import { sendDelegationsRouter } from "./sendDelegations.js";
 import { auditValuesRouter } from "./auditValues.js";
+import { notificationsRouter } from "./notifications.js";
 import { commandCentreRouter } from "./commandCentre.js";
 import { communicationsRouter } from "./communications.js";
 import { communicationsWebhooksRouter } from "./communicationsWebhooks.js";
@@ -196,6 +197,8 @@ apiRouter.use(pitCrewRouter);
 apiRouter.use(sendDelegationsRouter);
 // t276u: restricted, audited access to encrypted audit values (own full paths).
 apiRouter.use(auditValuesRouter);
+// t277u: derived in-app notifications (export ready, with expiry). Own full paths.
+apiRouter.use(notificationsRouter);
 // Agent Engine 2.0 — Communications Hub (Priority 8): unprefixed mount,
 // same reasoning as exceptionsRouter/launchRouter/pitCrewRouter above —
 // communicationsRouter's own paths span both /properties/:propertyId/

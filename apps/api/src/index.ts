@@ -21,6 +21,7 @@ import { ensureStage2CatalogueSeeded } from "./lib/automation/catalogueBootstrap
 import { registerExceptionEngine } from "./lib/exceptions/bootstrap.js";
 import { registerSignalSweep } from "./lib/propertyIntelligence/sweepBootstrap.js";
 import { registerPitCrewWaitingOnSweep } from "./lib/pitCrew/waitingOnSweepBootstrap.js";
+import { registerRetentionSweep } from "./lib/retentionSweep.js";
 import { registerLaunchEngine } from "./lib/launch/bootstrap.js";
 import { registerCommunicationsEngine } from "./lib/communications/bootstrap.js";
 import { registerFinancialEngine } from "./lib/financial/bootstrap.js";
@@ -122,6 +123,8 @@ registerSignalSweep();
 // PIT_CREW_WAITING_ON_SWEEP_ENABLED=true. Identifies and prioritises
 // overdue items. It does not return them to IN_PROGRESS.
 registerPitCrewWaitingOnSweep();
+// t277u: export expiry + audit-value retention sweep (opt-in: AE_RETENTION_SWEEP_ENABLED=true).
+registerRetentionSweep();
 
 // Agent Engine 2.0 — Property Launch & Campaign Coordination. Registers
 // the AGENCY_AGREEMENT_SIGNED auto-propose handler — same ordering
