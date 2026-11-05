@@ -226,8 +226,8 @@ export async function pitCrewScopeRefusal(req: Request, scope: { partyIds?: numb
 /**
  * Owner t276u: final sending of a proposal (appraisal) or a listing agreement / document
  * package is an AGENT authorisation. Brokerage Administrators keep oversight and review but
- * cannot send by role (an administrator who is the record's own listing agent / appraisal
- * owner sends as that agent). Anyone else may send only on a delegation the owning agent has
+ * cannot send by role. t277u: an administrator who also holds an authorised Agent role
+ * (holdsAuthorisedAgentRole) sends their own records as the Agent. Anyone else may send only on a delegation the owning agent has
  * explicitly recorded for that one record (audit_logs action send_authority_delegated,
  * provider_reference "delegate:<userId>", latest delegated/revoked event wins). Pit Crew never
  * sends, delegated or not. No schema: delegations live in audit_logs.
@@ -246,19 +246,49 @@ export async function sendRecordOwner(brokerageId: number, recordType: SendRecor
   return rows[0]?.owner == null ? null : Number(rows[0].owner);
 }
 
-/** Latest recorded delegation for (record, delegate), still valid only if made by the current owner. */
-export async function activeSendDelegation(brokerageId: number, recordType: SendRecordType, recordId: number, delegateId: number): Promise<{ auditId: number; delegatorId: number } | null> {
+/** t277u: a recorded delegation is valid for 30 days from when it was made (or last renewed). */
+export const SEND_DELEGATION_TTL_DAYS = 30;
+
+/**
+ * Latest recorded delegation for (record, delegate). Valid only when it is the latest
+ * delegated/revoked event, it was made by the record's CURRENT owner (ownership change
+ * invalidates it) and it is under 30 days old (renewal writes a fresh delegated row).
+ */
+export async function activeSendDelegation(
+  brokerageId: number,
+  recordType: SendRecordType,
+  recordId: number,
+  delegateId: number,
+  now: Date = new Date(),
+): Promise<{ auditId: number; delegatorId: number; expiresAt: Date } | null> {
   const owner = await sendRecordOwner(brokerageId, recordType, recordId);
   if (owner === null) return null;
   const rows = (
-    await db.execute(sql`select id, action, user_id from audit_logs
+    await db.execute(sql`select id, action, user_id, created_at from audit_logs
       where brokerage_id = ${brokerageId} and record_type = ${recordType} and record_id = ${String(recordId)}
         and provider_reference = ${`delegate:${delegateId}`} and action in ('send_authority_delegated','send_authority_revoked')
       order by created_at desc, id desc limit 1`)
-  ).rows as { id: number; action: string; user_id: number }[];
+  ).rows as { id: number; action: string; user_id: number; created_at: Date | string }[];
   const r = rows[0];
   if (!r || r.action !== "send_authority_delegated" || Number(r.user_id) !== owner) return null;
-  return { auditId: Number(r.id), delegatorId: owner };
+  const expiresAt = new Date(new Date(r.created_at).getTime() + SEND_DELEGATION_TTL_DAYS * 86_400_000);
+  if (expiresAt.getTime() <= now.getTime()) return null;
+  return { auditId: Number(r.id), delegatorId: owner, expiresAt };
+}
+
+/**
+ * t277u dual roles: a Brokerage Administrator who also holds an authorised Agent role may send
+ * their OWN records as the Agent. users.role is single-valued, so the Agent role of an
+ * administrator is authorised explicitly in deploy config AE_ADMIN_AGENT_ROLE_USER_IDS
+ * (comma-separated user ids; empty by default). See SCHEMA-NEEDS.md for the first-class design.
+ */
+export function holdsAuthorisedAgentRole(user: { id: number; role: string }): boolean {
+  if (user.role === "Agent") return true;
+  if (user.role !== "Brokerage Administrator") return false;
+  return String(process.env.AE_ADMIN_AGENT_ROLE_USER_IDS ?? "")
+    .split(",")
+    .map((x) => Number(x.trim()))
+    .includes(user.id);
 }
 
 export const SEND_AUTHORISATION_REQUIRED = "SEND_AUTHORISATION_REQUIRED";
@@ -283,9 +313,12 @@ export function requireSendAuthorisation(recordType: SendRecordType, param: stri
     const id = Number(req.params[param]);
     // A malformed id is not a send: let the route answer its own 400.
     if (!/^\d+$/.test(String(req.params[param] ?? "")) || id <= 0 || id > 2_147_483_647) return next();
-    // A Brokerage Administrator who is the record's own agent (listing agent / appraisal
-    // owner) sends as that agent — not by administrator role. (Open Owner decision t276u.)
-    if (user.role === "Brokerage Administrator" && (await sendRecordOwner(user.brokerageId, recordType, id).catch(() => null)) === user.id) return next();
+    // t277u: an administrator who ALSO holds an authorised Agent role sends their own records
+    // as the Agent. An administrator-only user needs a valid recorded delegation.
+    if (holdsAuthorisedAgentRole(user) && (await sendRecordOwner(user.brokerageId, recordType, id).catch(() => null)) === user.id) {
+      await logAudit({ brokerageId: user.brokerageId, userId: user.id, action: "send_as_agent_dual_role", recordType, recordId: String(id), updatedValue: JSON.stringify({ performedBy: { userId: user.id, role: user.role }, actingRole: "Agent" }) });
+      return next();
+    }
     if (Number.isInteger(id) && id > 0 && SEND_DELEGATE_ROLES.includes(user.role)) {
       const d = await activeSendDelegation(user.brokerageId, recordType, id, user.id).catch(() => null);
       if (d) {
@@ -295,7 +328,7 @@ export function requireSendAuthorisation(recordType: SendRecordType, param: stri
           action: "send_on_delegated_authority",
           recordType,
           recordId: String(id),
-          updatedValue: JSON.stringify({ delegatedBy: { userId: d.delegatorId }, delegationAuditId: d.auditId, performedBy: { userId: user.id, role: user.role } }),
+          updatedValue: JSON.stringify({ delegatedBy: { userId: d.delegatorId }, delegationAuditId: d.auditId, delegationExpiresAt: d.expiresAt.toISOString(), performedBy: { userId: user.id, role: user.role } }),
           providerReference: `delegation:${d.auditId}`,
         });
         return next();

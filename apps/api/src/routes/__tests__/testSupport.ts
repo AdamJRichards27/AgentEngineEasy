@@ -309,6 +309,16 @@ export async function createListedProperty(
   const populateRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/populate`, { method: "POST", headers });
   if (populateRes.status !== 200) throw new Error(`populate failed: ${populateRes.status} ${await populateRes.text()}`);
 
+  // t277u: only Agents (or an administrator who also holds an authorised Agent role) send.
+  // Fixtures that list as an administrator model that dual role explicitly.
+  {
+    const me = (await (await fetch(`${baseUrl}/api/auth/me`, { headers: { cookie } })).json()) as { user?: { id: number; role: string } };
+    if (me.user?.role === "Brokerage Administrator") {
+      const ids = new Set(String(process.env.AE_ADMIN_AGENT_ROLE_USER_IDS ?? "").split(",").filter(Boolean));
+      ids.add(String(me.user.id));
+      process.env.AE_ADMIN_AGENT_ROLE_USER_IDS = [...ids].join(",");
+    }
+  }
   const sendRes = await fetch(`${baseUrl}/api/documents/packages/${packageId}/send-for-signature`, { method: "POST", headers });
   if (sendRes.status !== 201) throw new Error(`send-for-signature failed: ${sendRes.status} ${await sendRes.text()}`);
   const { signatureRequest } = await json<{ signatureRequest: { providerReference: string } }>(sendRes);
