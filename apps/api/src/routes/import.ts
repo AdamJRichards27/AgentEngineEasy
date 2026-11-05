@@ -8,7 +8,7 @@
 
 import { Router } from "express";
 import multer from "multer";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { auditLogs, db, importJobs, users, type ImportResolution } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth } from "../middlewares/auth.js";
@@ -351,29 +351,30 @@ importRouter.get("/held", requireAuth, async (req, res, next) => {
       res.status(403).json({ error: "Held imports are reviewed by an administrator or the owning agent.", code: "IMPORT_HELD_READ_FORBIDDEN", reason: "ROLE" });
       return;
     }
-    const heldEver = new Set(
-      (
-        await db
-          .select({ recordId: auditLogs.recordId })
-          .from(auditLogs)
-          .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "import_held_for_review")))
-      ).map((r) => Number(r.recordId)),
-    );
+    // t282u: history is preserved. A job is listed if it is held now, was ever recorded as
+    // held, or was ever released at review — including after it completed.
+    const reviewEvents = await db
+      .select({ id: auditLogs.id, action: auditLogs.action, recordId: auditLogs.recordId, userId: auditLogs.userId, updatedValue: auditLogs.updatedValue, providerReference: auditLogs.providerReference, createdAt: auditLogs.createdAt })
+      .from(auditLogs)
+      .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.recordType, "ImportJob"), inArray(auditLogs.action, ["import_held_for_review", "import_job_owner_recorded"])))
+      .orderBy(asc(auditLogs.id));
+    const isAdmin = user.role === "Brokerage Administrator";
     const jobs = await listImportJobs(user.brokerageId);
     const out = [];
     for (const j of jobs) {
-      if (j.status === "COMPLETED" || j.status === "ROLLED_BACK" || j.status === "CANCELLED") continue;
+      if (j.status === "ROLLED_BACK" || j.status === "CANCELLED") continue;
+      const ev = reviewEvents.filter((e) => e.recordId === String(j.id));
+      const reviewReleases = ev.filter((e) => e.action === "import_job_owner_recorded" && (JSON.parse(e.updatedValue ?? "{}") as { source?: string }).source === "review");
       const ownerId = await jobOwnerId(j as never, user.brokerageId);
-      const reasonCode = await ownershipProblem(ownerId, user.brokerageId);
-      if (!reasonCode && !heldEver.has(j.id)) continue;
-      const [rel] = await db
-        .select({ userId: auditLogs.userId, updatedValue: auditLogs.updatedValue, createdAt: auditLogs.createdAt })
-        .from(auditLogs)
-        .where(and(eq(auditLogs.brokerageId, user.brokerageId), eq(auditLogs.action, "import_job_owner_recorded"), eq(auditLogs.recordType, "ImportJob"), eq(auditLogs.recordId, String(j.id))))
-        .orderBy(desc(auditLogs.id))
-        .limit(1);
-      const relMeta = rel?.updatedValue ? (JSON.parse(rel.updatedValue) as { authorityRef?: string; source?: string }) : null;
-      const released = !reasonCode && relMeta?.source === "review";
+      const reasonCode = j.status === "COMPLETED" ? null : await ownershipProblem(ownerId, user.brokerageId);
+      const everHeld = ev.some((e) => e.action === "import_held_for_review") || reviewReleases.length > 0;
+      if (!reasonCode && !everHeld) continue;
+      // t282u: an Agent sees only imports they are authorised for — ones they started, own now,
+      // or released themselves. Never another Agent's filename or import details.
+      if (!isAdmin && !(j.initiatedByUserId === user.id || ownerId === user.id || reviewReleases.some((e) => e.userId === user.id))) continue;
+      const last = reviewReleases[reviewReleases.length - 1];
+      const relMeta = last ? (JSON.parse(last.updatedValue ?? "{}") as { authorityRef?: string }) : null;
+      const releaseStatus = reasonCode ? ("held" as const) : j.status === "COMPLETED" ? ("completed" as const) : ("released" as const);
       out.push({
         importJobId: j.id,
         filename: j.filename,
@@ -382,15 +383,21 @@ importRouter.get("/held", requireAuth, async (req, res, next) => {
         uploadedAt: j.uploadedAt,
         initiatedByUserId: j.initiatedByUserId,
         recordedOwnerUserId: ownerId,
-        releaseStatus: reasonCode ? ("held" as const) : released ? ("released" as const) : ("not_held" as const),
+        releaseStatus,
         reasonCode,
-        release: released ? { ownerUserId: ownerId, releasedByUserId: rel!.userId, authorityRef: relMeta?.authorityRef ?? null, releasedAt: rel!.createdAt } : null,
-        canAssignAnyOwner: !!reasonCode && user.role === "Brokerage Administrator",
+        release: last && !reasonCode ? { ownerUserId: ownerId, releasedByUserId: last.userId, authorityRef: relMeta?.authorityRef ?? null, releasedAt: last.createdAt } : null,
+        history: ev.map((e) => {
+          const m = JSON.parse(e.updatedValue ?? "{}") as { reason?: string; authorityRef?: string; source?: string; owner?: number };
+          return e.action === "import_held_for_review"
+            ? { event: "held" as const, at: e.createdAt, byUserId: e.userId, reasonCode: m.reason ?? null }
+            : { event: m.source === "review" ? ("owner_recorded" as const) : ("owner_set" as const), at: e.createdAt, byUserId: e.userId, ownerUserId: m.owner ?? Number(String(e.providerReference ?? "").replace("owner:", "")), authorityRef: m.authorityRef ?? null };
+        }),
+        canAssignAnyOwner: !!reasonCode && isAdmin,
         canAcceptForSelf: !!reasonCode && user.role === "Agent",
       });
     }
     res.setHeader("Cache-Control", "no-store");
-    res.json({ held: out.filter((o) => o.releaseStatus !== "not_held") });
+    res.json({ held: out });
   } catch (err) {
     handleError(res, err);
   }
