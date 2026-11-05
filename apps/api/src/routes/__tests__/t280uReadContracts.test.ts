@@ -202,8 +202,8 @@ test("t280u 3: held imports list — reason codes and release status; Pit Crew, 
   assert.equal(a.status, 200, a.text);
   const ah = a.json.held.find((x: { importJobId: number }) => x.importJobId === job);
   assert.deepEqual([ah.releaseStatus, ah.reasonCode, ah.canAssignAnyOwner, ah.canAcceptForSelf, ah.release], ["held", "OWNER_INACTIVE", true, false, null]);
-  const g = (await call(w.agent.cookie, "GET", "/import/held")).json.held.find((x: { importJobId: number }) => x.importJobId === job);
-  assert.deepEqual([g.canAssignAnyOwner, g.canAcceptForSelf], [false, true]);
+  // t282u: an Agent no longer sees another Agent's held import.
+  assert.equal((await call(w.agent.cookie, "GET", "/import/held")).json.held.some((x: { importJobId: number }) => x.importJobId === job), false);
   assert.equal((await call(w.agent.cookie, "POST", `/import/jobs/${job}/owner`, { ownerUserId: w.agent.user.id, authorityRef: "Accepted at review INSTR-10" })).status, 201);
   const rel = (await call(w.admin.cookie, "GET", "/import/held")).json.held.find((x: { importJobId: number }) => x.importJobId === job);
   assert.deepEqual([rel.releaseStatus, rel.reasonCode, rel.release.ownerUserId, rel.release.releasedByUserId, rel.release.authorityRef], ["released", null, w.agent.user.id, w.agent.user.id, "Accepted at review INSTR-10"]);
