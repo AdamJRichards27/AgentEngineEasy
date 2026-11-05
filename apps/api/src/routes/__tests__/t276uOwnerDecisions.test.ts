@@ -232,7 +232,7 @@ test("t276u 4: before/after values encrypted at rest, masked in ordinary views, 
     // Retention: past retention → 410, and purge replaces envelopes (metadata kept).
     await db.update(auditLogs).set({ createdAt: sql`now() - interval '3000 days'` }).where(eq(auditLogs.id, row.id));
     assert.equal((await call(w.admin.cookie, "POST", url, { reason: "Complaint review #12" })).status, 410);
-    assert.ok((await purgeExpiredAuditValues()) >= 1);
+    assert.ok((await purgeExpiredAuditValues()).purged >= 1);
     const [purged] = await db.select().from(auditLogs).where(eq(auditLogs.id, row.id));
     assert.equal(purged.previousValue, "[expired]");
     assert.deepEqual(JSON.parse(purged.updatedValue ?? "{}").fields, ["email"]);
