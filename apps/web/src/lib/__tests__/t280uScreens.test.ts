@@ -323,6 +323,8 @@ test("audit permissions (t284u): the Settings card is driven by the server's ans
   const card = readFileSync(new URL("../../components/AuditHistoryCard.tsx", import.meta.url), "utf8").replace(/\/\/.*$/gm, "");
   assert.match(card, /caps\.data\?\.canReadAuditMetadata/); assert.doesNotMatch(card, /role\s*===|isAdmin|Brokerage Administrator/);
   assert.match(card, /staleTime: 5 \* 60_000/); assert.match(card, /refetchOnWindowFocus: false/);
+  const settings = readFileSync(new URL("../../pages/Settings.tsx", import.meta.url), "utf8");
+  assert.match(settings, /<AuditHistoryCard \/>/); assert.doesNotMatch(settings, /View Audit history/, "the role-gated card is gone from the page itself");
   const page = readFileSync(new URL("../../pages/SettingsAudit.tsx", import.meta.url), "utf8");
   assert.match(page, /useQuery<AuditCapabilities>\(auditCapabilitiesQuery\)/, "one shared capabilities request"); assert.match(page, /canReadAuditAccessHistory === true/);
 });

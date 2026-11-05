@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { apiFetch, apiErrorMessage } from "../lib/api";
 import { useSession } from "../lib/session";
 import OwnNameForm from "../components/OwnNameForm";
+import { AuditHistoryCard } from "../components/AuditHistoryCard";
 
 interface CatalogueProduct {
   productId: number;
@@ -163,15 +164,7 @@ export default function Settings() {
         </section>
       )}
 
-      {isAdmin && (
-        <section className="card">
-          <h2>Audit history</h2>
-          <p className="muted">Who did what and when. Changed values stay encrypted unless an authorised Audit Value Reader asks for one entry, with a reason.</p>
-          <Link href="/settings/audit" className="btn btn-secondary btn-small">
-            View Audit history →
-          </Link>
-        </section>
-      )}
+      <AuditHistoryCard />
 
       {isAdmin && (
         <section className="card">
