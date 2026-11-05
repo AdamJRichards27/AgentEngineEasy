@@ -39,8 +39,8 @@ export function HeldImportsView(p: HeldImportsViewProps) {
   if (p.held.length === 0) return p.showEmpty ? <section className="card" data-ae-held-none><h2>Imports held for review</h2><p className="empty-state">No imports are held for review.</p></section> : null;
   return (
     <section className="card stack" data-ae-held-imports>
-      <h2>Imports held for review ({p.held.length})</h2>
-      <p className="muted">An import is held when its owner can't be established. Every contact it creates is recorded as the owner's, so an owner must be assigned before it can run. Released and completed imports stay listed, with their history.</p>
+      <h2>Imports held for review ({p.held.filter((h) => h.releaseStatus === "held").length})</h2>
+      <p className="muted">Held means the owner can't be established. Every contact an import creates is recorded as the owner's, so an owner must be assigned before it can run. Released and completed imports stay listed below with their history.</p>
       <ul className="item-list">
         {p.held.map((h) => {
           const draft = p.drafts[h.importJobId] ?? { ownerUserId: "", authorityRef: "" };
@@ -130,14 +130,18 @@ export function HeldImportsPanel({ showEmpty = false }: { showEmpty?: boolean } 
     },
     retry: false,
   });
-  const needsOwners = (q.data?.held ?? []).some((h) => h.releaseStatus === "held" && h.canAssignAnyOwner);
-  const owners = useQuery<OwnerChoice[]>({
+  // Only an Administrator can look users up: owners to choose from (active Agents and Administrators) and names for the history (everyone, even inactive).
+  const owners = useQuery<{ choices: OwnerChoice[]; names: Record<number, string> }>({
     queryKey: ["held-owner-choices"],
-    enabled: needsOwners,
+    enabled: (q.data?.held ?? []).length > 0 && user?.role === "Brokerage Administrator",
     retry: false,
     queryFn: async () => {
       const r = await apiFetch<{ users: Array<{ id: number; firstName: string; lastName: string; role: string; isActive: boolean }> }>("/auth/admin/users");
-      return r.users.filter((u) => u.isActive && (u.role === "Agent" || u.role === "Brokerage Administrator")).map((u) => ({ id: u.id, name: `${u.firstName} ${u.lastName}`.trim(), role: u.role }));
+      const name = (u: { firstName: string; lastName: string }) => `${u.firstName} ${u.lastName}`.trim();
+      return {
+        choices: r.users.filter((u) => u.isActive && (u.role === "Agent" || u.role === "Brokerage Administrator")).map((u) => ({ id: u.id, name: name(u), role: u.role })),
+        names: Object.fromEntries(r.users.map((u) => [u.id, name(u)])),
+      };
     },
   });
   const assign = useMutation({
@@ -155,8 +159,8 @@ export function HeldImportsPanel({ showEmpty = false }: { showEmpty?: boolean } 
       held={q.data?.held ?? []}
       showEmpty={showEmpty}
       forbidden={q.data?.forbidden === true}
-      owners={owners.data ?? []}
-      names={Object.fromEntries((owners.data ?? []).map((o) => [o.id, o.name]))}
+      owners={owners.data?.choices ?? []}
+      names={owners.data?.names ?? {}}
       drafts={drafts}
       busyId={assign.isPending ? (assign.variables ?? null) : null}
       errorText={errorText}

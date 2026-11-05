@@ -7,7 +7,6 @@ export default function GrowHeldImports() {
   return (
     <div data-ae-held-page>
       <h1>Imports held for review</h1>
-      <p className="muted">An import is held when its owner can't be established. Assign or take ownership with an authority reference and it can go ahead.</p>
       <HeldImportsPanel showEmpty />
       <p className="muted"><Link href="/grow/import">Back to Import</Link></p>
     </div>
