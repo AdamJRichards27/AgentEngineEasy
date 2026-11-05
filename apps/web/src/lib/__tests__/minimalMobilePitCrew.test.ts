@@ -17,9 +17,12 @@ import { text } from "./mobileTreeHelpers";
 const EVERYTHING = ["grow.access", "grow.contacts.read", "grow.contacts.manage", "grow.activities.manage", "grow.relationships.manage", "grow.opportunities.manage", "grow.properties.link", "grow.ai.use", "run.access"];
 const ALL_ON: LinkingFlags = { contactLinkProperty: true, contactEditRole: true, contactUnlink: true, contactEditPrimary: true, contactCanonicalRead: true, propertyLinkContact: true, propertyEditRole: true, propertyEditPrimary: true, propertyUnlink: true };
 
-test("the shared rule never gives Pit Crew relationship management on the phone's behalf: not by run.access, and not even when a brokerage subscription grants every key", () => {
-  assert.equal(canManageRelationships((k) => k === "run.access", "Pit Crew"), false);
-  assert.equal(canManageRelationships((k) => EVERYTHING.includes(k), "Pit Crew"), true, "FIXED BY THE SHARED RULE: an explicit key still counts (so Pit Crew authority granted by the backend as a key is honoured)");
+test("the shared rule gives Pit Crew relationship management ONLY while it holds a contact owner's recorded authority: never by run.access, never by keys, and the phone never sets an authority", () => {
+  const authority = { ownerId: 7, ownerName: "Ada Admin", authorityRef: "email 2026-11-05" };
+  assert.equal(canManageRelationships((k) => k === "run.access", "Pit Crew", null), false, "run.access alone");
+  assert.equal(canManageRelationships((k) => EVERYTHING.includes(k), "Pit Crew", null), false, "not even with every key: Pit Crew acts on the owner's authority, not on a subscription");
+  assert.equal(canManageRelationships((k) => EVERYTHING.includes(k), "Pit Crew", authority), true, "FIXED BY THE SHARED RULE: while acting on a recorded authority (set by the desktop 'Acting for' bar)");
+  assert.equal(canManageRelationships(() => true, "Pit Crew"), false, "the phone's default: no acting authority exists on the phone, so the answer is false");
 });
 
 test("with every key AND every flag ON, a Pit Crew user holding only run.access gets no relationship action; an agent gets them", () => {
