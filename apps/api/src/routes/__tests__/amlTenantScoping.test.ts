@@ -228,9 +228,8 @@ test("POST /api/aml/:verificationId/retry rejects a verification belonging to a 
     method: "POST",
     headers: { cookie: B.agent.cookie },
   });
-  assert.equal(crossTenant.status, 400, "retryAmlVerification throws, and the route maps every error to 400");
-  const body = await json<{ error: string }>(crossTenant);
-  assert.match(body.error, /not found/i);
+  assert.equal(crossTenant.status, 404, "issue #10: cross-brokerage is a 404, indistinguishable from a missing id");
+  assert.deepEqual(await json<{ error: string }>(crossTenant), { error: "Not found" });
 });
 
 test("POST /api/aml/:verificationId/retry succeeds for a caller in the owning brokerage, unchanged", async () => {
@@ -258,9 +257,8 @@ test("POST /api/aml/:verificationId/resolve-exception rejects a verification bel
     headers: { "content-type": "application/json", cookie: B.admin.cookie },
     body: JSON.stringify({ notes: "Reviewed directly with the provider — clearing to proceed." }),
   });
-  assert.equal(crossTenant.status, 400, "resolveAmlException throws, and the route maps every error to 400");
-  const body = await json<{ error: string }>(crossTenant);
-  assert.match(body.error, /not found/i);
+  assert.equal(crossTenant.status, 404, "issue #10: cross-brokerage is a 404, indistinguishable from a missing id");
+  assert.deepEqual(await json<{ error: string }>(crossTenant), { error: "Not found" });
 
   // Prove the exception genuinely was NOT cleared — this is the compliance
   // bypass the fix closes, not just an error-code detail.
@@ -315,4 +313,49 @@ test("GET /api/aml/service-orders/by-property/:propertyId returns nothing for a 
   const sameTenantBody = await json<{ serviceOrders: Array<{ propertyId: number }> }>(sameTenant);
   assert.ok(sameTenantBody.serviceOrders.length > 0, "the owning brokerage must still see its own ServiceOrder for this verification");
   assert.ok(sameTenantBody.serviceOrders.every((so) => so.propertyId === seeded.propertyId));
+});
+
+// --- issue #10: 404 vs 400 contract ------------------------------------------
+
+const MISSING_VERIFICATION_ID = 2_000_000_000;
+
+test("issue #10: retry and resolve-exception answer a missing verification with the same 404 as a cross-brokerage one", async () => {
+  const retry = await fetch(`${baseUrl}/api/aml/${MISSING_VERIFICATION_ID}/retry`, { method: "POST", headers: { cookie: A.agent.cookie } });
+  assert.equal(retry.status, 404);
+  assert.deepEqual(await json<{ error: string }>(retry), { error: "Not found" });
+
+  const resolve = await fetch(`${baseUrl}/api/aml/${MISSING_VERIFICATION_ID}/resolve-exception`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.admin.cookie },
+    body: JSON.stringify({ notes: "Reviewed directly with the provider." }),
+  });
+  assert.equal(resolve.status, 404);
+  assert.deepEqual(await json<{ error: string }>(resolve), { error: "Not found" });
+});
+
+test("issue #10: an own-brokerage verification in the wrong state still answers 400 with its state message", async () => {
+  const seeded = await seedVerification(A.agent.cookie);
+
+  const retry = await fetch(`${baseUrl}/api/aml/${seeded.verificationId}/retry`, { method: "POST", headers: { cookie: A.agent.cookie } });
+  assert.equal(retry.status, 400);
+  assert.match((await json<{ error: string }>(retry)).error, /not in a retryable state/);
+
+  const resolve = await fetch(`${baseUrl}/api/aml/${seeded.verificationId}/resolve-exception`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.admin.cookie },
+    body: JSON.stringify({ notes: "Reviewed directly with the provider." }),
+  });
+  assert.equal(resolve.status, 400);
+  assert.match((await json<{ error: string }>(resolve)).error, /no exception to resolve/);
+});
+
+test("issue #10: resolve-exception without notes is still a 400 validation error", async () => {
+  const seeded = await seedVerification(A.agent.cookie);
+  await failViaWebhook(seeded.providerReference);
+  const res = await fetch(`${baseUrl}/api/aml/${seeded.verificationId}/resolve-exception`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: A.admin.cookie },
+    body: JSON.stringify({ notes: "   " }),
+  });
+  assert.equal(res.status, 400);
 });

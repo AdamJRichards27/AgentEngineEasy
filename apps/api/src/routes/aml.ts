@@ -5,7 +5,7 @@ import { db, amlVerifications, serviceOrders, properties } from "@aee/db";
 import { logger } from "@aee/events";
 import { requireAuth, requireRole, BROKERAGE_ADMIN_ROLES } from "../middlewares/auth.js";
 import { requireEntitlement } from "../middlewares/entitlement.js";
-import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException } from "../lib/aml.js";
+import { initiateAmlIfNeeded, processAmlWebhook, retryAmlVerification, resolveAmlException, AmlVerificationNotFoundError } from "../lib/aml.js";
 import { refreshReadyToListSteps } from "../lib/workflowSteps.js";
 import { logAudit } from "../lib/audit.js";
 
@@ -97,6 +97,12 @@ function isOperatorAuthoredError(err: unknown): err is Error {
  * handlePropertyIntelligenceError.
  */
 function handleAmlError(err: unknown, res: Response, expectedStatus: number): void {
+  // Issue #10: missing and cross-brokerage verifications are indistinguishable
+  // 404s (same body as the by-property routes); state errors keep expectedStatus.
+  if (err instanceof AmlVerificationNotFoundError) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   if (isOperatorAuthoredError(err)) {
     res.status(expectedStatus).json({ error: err.message });
     return;
