@@ -529,6 +529,7 @@ test("GET eligibility polls append zero grow_consent_decisions rows and do not t
   try {
     await holder.query("begin");
     await holder.query("select pg_advisory_xact_lock($1, $2)", [CONSENT_ADVISORY_LOCK_NAMESPACE, A.brokerageId]);
+    let raceTimer: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race([
       Promise.all([
         readEligibility(allowedPartyId),
@@ -536,8 +537,12 @@ test("GET eligibility polls append zero grow_consent_decisions rows and do not t
         readEligibility(reviewPartyId),
         readEligibility(ambiguousPartyId),
       ]).then(() => "ok" as const),
-      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 15_000)),
+      new Promise<string>((resolve) => {
+        // Q-01d: kept, so it can be cleared below; an uncleared 15 s timer held the process open after the file finished.
+        raceTimer = setTimeout(() => resolve("timed-out"), 15_000);
+      }),
     ]);
+    clearTimeout(raceTimer);
     assert.equal(outcome, "ok", "GET eligibility must read through a held consent advisory lock");
   } finally {
     await holder.query("rollback").catch(() => {});
