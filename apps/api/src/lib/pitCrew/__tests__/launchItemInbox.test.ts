@@ -391,9 +391,10 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
         [],
         flagCase.label,
       );
+      // R-F25: the flag-off exception join now carries the flag-on property condition too.
       assert.equal(
         statements.some((query) => query.includes('"risk_exceptions"."property_id" = "pit_crew_responsibility_events"."property_id"')),
-        false,
+        true,
         flagCase.label,
       );
     }
@@ -528,7 +529,7 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
     assert.equal(encoded.includes(LAUNCH_TITLE), true);
   });
 
-  test("flag on excludes an exception on a different property; flag off still returns it and does not read campaign_items", async () => {
+  test("flag on and flag off both exclude an exception on a different property (R-F25); flag off does not read campaign_items", async () => {
     const mismatchExceptionTitle = "Rf25 exception on the other property 4c8e";
     const mismatchExceptionId = await createException(brokerageId, mismatchPropertyId, { title: mismatchExceptionTitle });
     const [assignment] = await db
@@ -571,12 +572,11 @@ describe("R-F24 launch item inbox title", { concurrency: false }, () => {
         statements.push(query);
       });
       try {
-        const { agentInbox } = await readInboxes();
-        const row = agentInbox.items.find((item) => item.sourceRecordId === mismatchExceptionId);
-        assert.ok(row);
-        assert.equal(row.sourceType, "EXCEPTION");
-        assert.equal(row.title, mismatchExceptionTitle);
-        assert.equal(row.propertyId, propertyId);
+        // R-F25: the flag-off exception join now applies the flag-on property rule, so the row is hidden here too.
+        const { agentInbox, adminInbox } = await readInboxes();
+        assert.equal(agentInbox.items.some((item) => item.sourceRecordId === mismatchExceptionId), false);
+        assert.equal(adminInbox.items.some((item) => item.sourceRecordId === mismatchExceptionId), false);
+        assert.equal(JSON.stringify({ agentInbox, adminInbox }).includes(mismatchExceptionTitle), false);
       } finally {
         uninstall();
       }
