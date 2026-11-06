@@ -9,6 +9,8 @@ import {
   PIT_CREW_ITEM_STATUSES,
   isValidPitCrewTransition,
   comparePcWorkItems,
+  comparePcWaitingOnItems,
+  isPcWorkItemOverdue,
   isPitCrewRelevantOwnerType,
   type PcWorkItem,
   type PitCrewItemStatus,
@@ -139,4 +141,44 @@ test("isPitCrewRelevantOwnerType is true only for PIT_CREW and UNASSIGNED_QUEUE"
   assert.equal(isPitCrewRelevantOwnerType("AGENT"), false);
   assert.equal(isPitCrewRelevantOwnerType("BROKERAGE_ADMIN"), false);
   assert.equal(isPitCrewRelevantOwnerType("SYSTEM"), false);
+});
+
+// #29 — WAITING_ON expected-at overdue rule (pure).
+test("isPcWorkItemOverdue: source dueAt rule is unchanged", () => {
+  const now = new Date("2026-10-19T00:00:00Z");
+  const past = new Date("2026-10-18T23:00:00Z");
+  const future = new Date("2026-10-19T01:00:00Z");
+  assert.equal(isPcWorkItemOverdue({ dueAt: past, pcStatus: "CLAIMED", waitingOnExpectedAt: null }, now), true);
+  assert.equal(isPcWorkItemOverdue({ dueAt: future, pcStatus: "CLAIMED", waitingOnExpectedAt: null }, now), false);
+  assert.equal(isPcWorkItemOverdue({ dueAt: null, pcStatus: "IN_PROGRESS", waitingOnExpectedAt: null }, now), false);
+  assert.equal(isPcWorkItemOverdue({ dueAt: now, pcStatus: "CLAIMED", waitingOnExpectedAt: null }, now), false, "strictly before now");
+});
+
+test("isPcWorkItemOverdue: WAITING_ON past expected-at is overdue; future, equal, or null is not", () => {
+  const now = new Date("2026-10-19T00:00:00Z");
+  const past = new Date("2026-10-18T23:59:59Z");
+  const future = new Date("2026-10-19T00:00:01Z");
+  assert.equal(isPcWorkItemOverdue({ dueAt: null, pcStatus: "WAITING_ON", waitingOnExpectedAt: past }, now), true);
+  assert.equal(isPcWorkItemOverdue({ dueAt: null, pcStatus: "WAITING_ON", waitingOnExpectedAt: future }, now), false);
+  assert.equal(isPcWorkItemOverdue({ dueAt: null, pcStatus: "WAITING_ON", waitingOnExpectedAt: now }, now), false);
+  assert.equal(isPcWorkItemOverdue({ dueAt: null, pcStatus: "WAITING_ON", waitingOnExpectedAt: null }, now), false);
+});
+
+test("isPcWorkItemOverdue: a stale expected-at on a non-WAITING_ON status does not count", () => {
+  const now = new Date("2026-10-19T00:00:00Z");
+  const past = new Date("2026-10-18T00:00:00Z");
+  for (const pcStatus of ["UNCLAIMED", "CLAIMED", "IN_PROGRESS", "DONE", "HANDED_BACK", "ESCALATED"] as PitCrewItemStatus[]) {
+    assert.equal(isPcWorkItemOverdue({ dueAt: null, pcStatus, waitingOnExpectedAt: past }, now), false, pcStatus);
+  }
+});
+
+test("comparePcWaitingOnItems: overdue first, then the shared severity/dueAt order", () => {
+  const base = { dueAt: null, overdue: false } as Partial<PcWorkItem>;
+  const critical = { ...base, severity: "CRITICAL", sourceRecordId: "c" } as PcWorkItem;
+  const attentionOverdue = { ...base, severity: "ATTENTION", overdue: true, sourceRecordId: "a" } as PcWorkItem;
+  const infoOverdue = { ...base, severity: "INFORMATION", overdue: true, sourceRecordId: "i" } as PcWorkItem;
+  const sorted = [critical, infoOverdue, attentionOverdue].sort(comparePcWaitingOnItems).map((i) => i.sourceRecordId);
+  assert.deepEqual(sorted, ["a", "i", "c"]);
+  // comparePcWorkItems itself is unchanged: severity still wins there.
+  assert.deepEqual([attentionOverdue, critical].sort(comparePcWorkItems).map((i) => i.sourceRecordId), ["c", "a"]);
 });

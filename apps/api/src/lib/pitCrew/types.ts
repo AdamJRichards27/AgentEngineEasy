@@ -206,6 +206,26 @@ export function comparePcWorkItems(a: PcWorkItem, b: PcWorkItem): number {
   return da - db_;
 }
 
+// #29: an item is overdue when its source dueAt is strictly before now, or
+// when Pit Crew parked it in WAITING_ON and waitingOnExpectedAt is strictly
+// before now. A null expected-at is never overdue by the second rule, which
+// matches sweepOverdueWaitingOn's selection. This is a read-side flag only;
+// it never changes status.
+export function isPcWorkItemOverdue(
+  input: { dueAt: Date | null; pcStatus: PitCrewItemStatus; waitingOnExpectedAt: Date | null },
+  now: Date,
+): boolean {
+  if (input.dueAt && input.dueAt.getTime() < now.getTime()) return true;
+  return input.pcStatus === "WAITING_ON" && input.waitingOnExpectedAt != null && input.waitingOnExpectedAt.getTime() < now.getTime();
+}
+
+// #29: the Waiting On list puts overdue items first, then falls back to the
+// shared severity/dueAt ordering. Other lists keep comparePcWorkItems.
+export function comparePcWaitingOnItems(a: PcWorkItem, b: PcWorkItem): number {
+  if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+  return comparePcWorkItems(a, b);
+}
+
 // Section 6 (PC service boundary) + Section 10: an item counts as "Pit
 // Crew's to see" when the Risk Engine already says so (ownerType PIT_CREW
 // or UNASSIGNED_QUEUE) or when Pit Crew has already touched it (a
