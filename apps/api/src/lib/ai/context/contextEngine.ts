@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { db, properties, brokerages, users, type UserRole } from "@aee/db";
 import { getDashboardOverview } from "../../homeSummary.js";
 import { getTransactionByProperty } from "../../transactions.js";
-import { restrictedPropertyIdsFor } from "../../propertyVisibility.js";
+import { propertyHiddenFromCaller, restrictedPropertyIdsFor } from "../../propertyVisibility.js";
 import { resolveBrokerageTier } from "../entitlements.js";
 import { buildGrowContext } from "./growContext.js";
 import { buildPitCrewContext } from "./pitCrewContext.js";
@@ -72,16 +72,46 @@ async function buildBusinessContext(brokerageId: number): Promise<BusinessContex
 // own brokerage - the same brokerageId scoping every route in this app uses. A
 // property id from another brokerage resolves to null, not an error, so a
 // response never confirms or denies that a foreign id exists.
-export async function buildPropertyContext(brokerageId: number, propertyId: number): Promise<PropertyContext | null> {
+//
+// Owner t171u: when the caller is supplied, the existing own-property rule
+// (lib/propertyVisibility) applies too, exactly as GET /properties/:id,
+// /:id/workspace and /:id/timeline already apply it: an Agent who is not the
+// property's listing agent gets null (Brokerage Administrator and Pit Crew
+// see the whole brokerage). Without this, Copilot handed a colleague's
+// listing (address, stage, timeline, AML status, offers) to an Agent the
+// Property pages already 404. Grow's own context is unaffected: it was
+// already own-property scoped through restrictedPropertyIdsFor below.
+export interface PropertyContextCaller {
+  id: number;
+  role: string;
+  brokerageId: number;
+}
+
+export async function buildPropertyContext(
+  brokerageId: number,
+  propertyId: number,
+  caller?: PropertyContextCaller,
+): Promise<PropertyContext | null> {
   const [row] = await db.select().from(properties).where(eq(properties.id, propertyId));
   if (row === undefined || row.brokerageId !== brokerageId) {
     return null;
   }
+  if (caller !== undefined) {
+    if (caller.brokerageId !== brokerageId) return null;
+    if (await propertyHiddenFromCaller({ id: caller.id, role: caller.role as UserRole, brokerageId }, row.id)) return null;
+  }
   return { id: row.id, address: row.formattedAddress, workflowStage: row.workflowStage };
 }
 
-async function buildTransactionContext(brokerageId: number, propertyId: number): Promise<TransactionSummary | null> {
-  const property = await buildPropertyContext(brokerageId, propertyId);
+// Price-free by construction: id, propertyId and status only. The
+// transaction's purchase price never enters the AI context package
+// (pinned by tools/__tests__/offerPriceAccess.test.ts).
+async function buildTransactionContext(
+  brokerageId: number,
+  propertyId: number,
+  caller?: PropertyContextCaller,
+): Promise<TransactionSummary | null> {
+  const property = await buildPropertyContext(brokerageId, propertyId, caller);
   if (property === null) {
     return null;
   }
@@ -116,10 +146,11 @@ export async function buildContext(input: BuildContextInput): Promise<AiContextP
   // "grow" AND mode is "coach" - a plain Grow Ask AE request (mode "ask" or
   // omitted) never pays for or exposes the coaching-metrics queries.
   let coach: AiContextPackage["coach"] = null;
+  const caller: PropertyContextCaller = { id: input.userId, role: input.userRole, brokerageId: input.brokerageId };
   if (input.contextType === "property" && input.contextId !== null) {
-    property = await buildPropertyContext(input.brokerageId, input.contextId);
+    property = await buildPropertyContext(input.brokerageId, input.contextId, caller);
   } else if (input.contextType === "transaction" && input.contextId !== null) {
-    transaction = await buildTransactionContext(input.brokerageId, input.contextId);
+    transaction = await buildTransactionContext(input.brokerageId, input.contextId, caller);
   } else if (input.contextType === "grow") {
     const restrictToPropertyIds = await restrictedPropertyIdsFor({
       id: input.userId,

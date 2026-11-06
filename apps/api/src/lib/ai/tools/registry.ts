@@ -2,8 +2,14 @@ import { eq } from "drizzle-orm";
 import { db, amlVerifications, type UserRole } from "@aee/db";
 import { BROKERAGE_ADMIN_ROLES } from "../../../middlewares/auth.js";
 import { listOffersForProperty } from "../../offers.js";
-import { getPropertyTimeline } from "../../timeline.js";
+import { getPropertyTimeline, type TimelineItem } from "../../timeline.js";
 import type { AiContextPackage, AiToolDefinition, AiToolResult } from "../types.js";
+import {
+  AI_PRICE_WITHHELD_MARKER,
+  containsPriceKey,
+  resolveAiOfferPriceAccess,
+  scrubDollarFigures,
+} from "./offerPriceAccess.js";
 
 // Tool Registry: every tool here is read-only (riskLevel 0) and wraps an
 // existing service function or a simple scoped read - none of them write to the
@@ -48,20 +54,71 @@ const getTransactionStatus: AiToolDefinition = {
   },
 };
 
+// Owner t165u / t171u: offer prices reach the model only for the listing
+// agent and Brokerage Administrators (tools/offerPriceAccess.ts). Pit Crew
+// (the other brokerage-wide role) gets each offer's id and status with the
+// price key omitted and a withheld marker. An Agent who is not the listing
+// agent (own-property rule), a caller without run.access, another
+// brokerage, or a caller who cannot be confirmed gets no offers at all. Decided here, inside the tool, so no prompt,
+// UI or route change can widen it.
+const NOT_AVAILABLE_ERROR = "This property is not available for this request.";
+const NO_RUN_ACCESS_ERROR = "Offers are part of Run, which this account does not have access to.";
+
 const getOffersForProperty: AiToolDefinition = {
   name: "get_offers_for_property",
-  description: "Read-only list of offers made on the property in context.",
+  description:
+    "Read-only list of offers made on the property in context. Offer prices are included only for the listing agent and Brokerage Administrators; for anyone else each offer carries offerTermsVisible: false and a withheld marker instead of a price.",
   riskLevel: 0,
   async run(ctx) {
     const property = ctx.property;
     if (property === null) {
       return { tool: "get_offers_for_property", ok: false, error: NO_PROPERTY_ERROR };
     }
+    const access = await resolveAiOfferPriceAccess(ctx, property.id);
+    if (access.kind === "denied") {
+      return { tool: "get_offers_for_property", ok: false, error: NOT_AVAILABLE_ERROR };
+    }
+    if (access.kind === "no_run_access") {
+      return { tool: "get_offers_for_property", ok: false, error: NO_RUN_ACCESS_ERROR };
+    }
     const offers = await listOffersForProperty(property.id);
-    const summarized = offers.map((offer) => ({ id: offer.id, status: offer.status, offerPriceCents: offer.offerPriceCents }));
+    const summarized =
+      access.kind === "full"
+        ? offers.map((offer) => ({ id: offer.id, status: offer.status, offerPriceCents: offer.offerPriceCents, offerTermsVisible: true as const }))
+        : offers.map((offer) => ({ id: offer.id, status: offer.status, offerTermsVisible: false as const, offerPrice: AI_PRICE_WITHHELD_MARKER }));
     return { tool: "get_offers_for_property", ok: true, data: summarized };
   },
 };
+
+// Offer and transaction entries in the Property Timeline carry the offer or
+// sale price in their label ("Offer received from X ($...)") and in their
+// detail payload (offerPriceCents / purchasePriceCents). For a caller who may
+// not see offer prices, those figures are removed here, on top of the
+// Timeline's own Brokerage-Administrator-only financial redaction (#131/#134),
+// which still applies to commission, funds and payout entries for everyone
+// else, including the listing agent.
+const PRICE_BEARING_TIMELINE_CATEGORIES = new Set<TimelineItem["category"]>(["Offer", "Transaction"]);
+
+// A caller without run.access gets no offer data at all, so Offer entries
+// are dropped from the timeline for them (dropOfferEntries), not just scrubbed.
+export function redactTimelineForAi(
+  items: TimelineItem[],
+  options: { dropOfferEntries?: boolean } = {},
+): Array<TimelineItem & { priceWithheld?: string }> {
+  const kept = options.dropOfferEntries === true ? items.filter((item) => item.category !== "Offer") : items;
+  return kept.map((item) => {
+    const priceBearing = PRICE_BEARING_TIMELINE_CATEGORIES.has(item.category);
+    const label = priceBearing ? scrubDollarFigures(item.label) : item.label;
+    const dropDetail = item.detail !== undefined && (priceBearing || containsPriceKey(item.detail));
+    if (label === item.label && !dropDetail) return item;
+    const { detail: _detail, ...rest } = item;
+    return {
+      ...rest,
+      label,
+      priceWithheld: AI_PRICE_WITHHELD_MARKER,
+    };
+  });
+}
 
 const getPropertyTimelineTool: AiToolDefinition = {
   name: "get_property_timeline",
@@ -72,14 +129,24 @@ const getPropertyTimelineTool: AiToolDefinition = {
     if (property === null) {
       return { tool: "get_property_timeline", ok: false, error: NO_PROPERTY_ERROR };
     }
+    // Owner t165u / t171u: same access decision as get_offers_for_property.
+    const access = await resolveAiOfferPriceAccess(ctx, property.id);
+    if (access.kind === "denied") {
+      return { tool: "get_property_timeline", ok: false, error: NOT_AVAILABLE_ERROR };
+    }
     // #131/#134 — the Timeline's financial-entitlement boundary applies to
     // every reader, including Copilot: a non-Brokerage-Administrator asking
     // the AI about a property must not get commission/funds/agent-paid
     // figures back through this tool when they couldn't see them on the
-    // Property Workspace page itself.
-    const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(ctx.userRole as UserRole);
+    // Property Workspace page itself. The role is the one access just
+    // re-read from the database, not the request's own claim.
+    const canViewFinancials = BROKERAGE_ADMIN_ROLES.includes(access.role as UserRole);
     const timeline = await getPropertyTimeline(property.id, ctx.brokerageId, canViewFinancials);
-    return { tool: "get_property_timeline", ok: true, data: timeline };
+    return {
+      tool: "get_property_timeline",
+      ok: true,
+      data: access.kind === "full" ? timeline : redactTimelineForAi(timeline, { dropOfferEntries: access.kind === "no_run_access" }),
+    };
   },
 };
 
