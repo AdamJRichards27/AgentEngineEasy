@@ -26,6 +26,8 @@ export const MOCK_PAYMENT_STATUS_PROVIDER_ID = "mock_payment_status_v1";
 export const mockPaymentStatusAdapter: IntegrationAdapter = {
   providerId: MOCK_PAYMENT_STATUS_PROVIDER_ID,
   version: 1,
+  // Inbound-only: every outbound command is refused, so nothing is ever uncertain. Declared fail-closed anyway.
+  recovery: { dedupesOnIdempotencyKey: false },
   capabilities: ["payments.statusSync"] as IntegrationCapability[],
 
   async send(capability: IntegrationCapability, payload: Record<string, unknown>, ctx: AdapterSendContext): Promise<AdapterSendResult> {

@@ -46,7 +46,7 @@ export const COMMUNICATION_MESSAGE_STATUS_TRANSITIONS: Record<CommunicationMessa
   AWAITING_APPROVAL: ["APPROVED", "CANCELLED"],
   APPROVED: ["QUEUED", "CANCELLED"],
   QUEUED: ["SENDING", "CANCELLED", "BLOCKED_BY_CONSENT", "BLOCKED_BY_COST_CONTROL"],
-  SENDING: ["SENT", "FAILED"],
+  SENDING: ["SENT", "FAILED", "MANUAL_REVIEW"],
   SENT: ["DELIVERED", "FAILED", "BOUNCED", "UNDELIVERABLE"],
   // DELIVERED is not quite terminal: a provider can still report a late
   // bounce after first confirming delivery (a real, if rare, case — e.g.
@@ -67,6 +67,9 @@ export const COMMUNICATION_MESSAGE_STATUS_TRANSITIONS: Record<CommunicationMessa
   CANCELLED: [],
   BLOCKED_BY_CONSENT: ["QUEUED", "CANCELLED"],
   BLOCKED_BY_COST_CONTROL: ["QUEUED", "CANCELLED"],
+  // Outbound recovery: only an operator moves a message out of MANUAL_REVIEW (confirmed sent, failed, or an
+  // acknowledged requeue that accepts a possible duplicate).
+  MANUAL_REVIEW: ["SENT", "FAILED", "RETRY_SCHEDULED"],
 };
 
 export function isValidCommunicationStatusTransition(from: CommunicationMessageStatus, to: CommunicationMessageStatus): boolean {

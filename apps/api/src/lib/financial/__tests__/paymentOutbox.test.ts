@@ -171,9 +171,36 @@ describe("scheduleDebitForPaymentRequest — notice period not yet elapsed", () 
   });
 });
 
+// Test isolation (shared test DB): dispatchPendingPaymentOutbox() is a GLOBAL
+// sweep, and other files call it concurrently in the same DB
+// (paymentOutbox.test.ts's sweep test; routes/__tests__/financial.test.ts via
+// POST /api/financial/ops/dispatch-outbox). A default-due PENDING row can be
+// dispatched by another process's sweep (its own sandbox provider, so a
+// different providerRequestRef) between its insert and this file's own
+// dispatch, overwriting the ref this file holds. Pre-creating the
+// SCHEDULE_DEBIT row with nextAttemptAt 24h ahead keeps every sweep away from
+// it; scheduleDebitForPaymentRequest reuses an existing row and dispatches it
+// directly regardless of nextAttemptAt, so the real dispatch path still runs.
+async function reserveScheduleDebitOutboxRow(paymentRequestId: number) {
+  const [row] = await db
+    .insert(financialPaymentOutbox)
+    .values({
+      brokerageId: A.brokerageId,
+      paymentRequestId,
+      action: "SCHEDULE_DEBIT",
+      status: "PENDING",
+      idempotencyKey: `schedule-debit:${paymentRequestId}`,
+      nextAttemptAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    })
+    .returning();
+  return row;
+}
+
 describe("scheduleDebitForPaymentRequest — success and idempotency", () => {
   test("dispatches immediately, moves the payment request to DEBIT_SCHEDULED, and records a ledger event", async () => {
+    const reserved = await reserveScheduleDebitOutboxRow(fixtureReady.paymentRequestId);
     const result = await scheduleDebitForPaymentRequest({ paymentRequestId: fixtureReady.paymentRequestId });
+    assert.equal(result.outboxEntry.id, reserved.id, "the existing SCHEDULE_DEBIT row is reused, not duplicated");
     assert.equal(result.dispatched, true);
     assert.equal(result.paymentRequest.status, "DEBIT_SCHEDULED");
     assert.equal(result.paymentRequest.provider, "sandbox");

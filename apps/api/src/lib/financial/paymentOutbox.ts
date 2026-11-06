@@ -28,8 +28,9 @@
 // below where a payment request's OWN outcome (not just an outbox
 // mechanics detail) changes — see events.ts.
 
-import { eq, and, lte } from "drizzle-orm";
-import { incrementCounter } from "@aee/events";
+import { eq, and, lte, asc, inArray, sql } from "drizzle-orm";
+import { incrementCounter, logger } from "@aee/events";
+import { capabilityOf, decideRecovery, MANUAL_REVIEW_STATUS } from "../outboxRecovery/policy.js";
 import {
   db,
   financialPaymentRequests,
@@ -221,6 +222,10 @@ export async function scheduleDebitForPaymentRequest(input: {
   if (outboxEntry.status === "DISPATCHED") {
     return { paymentRequest: request, outboxEntry, dispatched: true };
   }
+  // F-01: another dispatcher holds a live claim on this row; do not dispatch again. Report "in flight".
+  if (outboxEntry.status === "DISPATCHING" && outboxEntry.nextAttemptAt.getTime() > Date.now()) {
+    return { paymentRequest: request, outboxEntry, dispatched: false };
+  }
 
   const outcome = await dispatchOutboxEntry(outboxEntry);
   return {
@@ -242,6 +247,51 @@ function backoffMinutesFor(attempts: number): number {
   return Math.min(BASE_BACKOFF_MINUTES * 2 ** (attempts - 1), 24 * 60);
 }
 
+/** How long a dispatch claim is held before another dispatcher may reclaim the row (crash recovery). */
+export const OUTBOX_CLAIM_LEASE_MS = 5 * 60 * 1000;
+
+/**
+ * F-01: atomically claims an outbox row for dispatch. PENDING rows are claimed whatever their due time (an explicit
+ * dispatch, as scheduleDebitForPaymentRequest makes, has always ignored backoff; the sweep only selects due rows).
+ * DISPATCHING rows are reclaimed only once their lease has expired, and each reclaim counts as an attempt. The lease
+ * expiry is stored in nextAttemptAt, so no schema change is needed. Returns null when another dispatcher holds it.
+ */
+async function claimOutboxEntry(id: number): Promise<{ entry: FinancialPaymentOutbox; reclaimed: boolean } | null> {
+  const leaseUntil = sql`now() + ${`${OUTBOX_CLAIM_LEASE_MS} milliseconds`}::interval`;
+  const [fresh] = await db
+    .update(financialPaymentOutbox)
+    .set({ status: "DISPATCHING", nextAttemptAt: leaseUntil, updatedAt: new Date() })
+    .where(and(eq(financialPaymentOutbox.id, id), eq(financialPaymentOutbox.status, "PENDING")))
+    .returning();
+  if (fresh) return { entry: fresh, reclaimed: false };
+  const [reclaimed] = await db
+    .update(financialPaymentOutbox)
+    .set({ status: "DISPATCHING", nextAttemptAt: leaseUntil, attempts: sql`${financialPaymentOutbox.attempts} + 1`, updatedAt: new Date() })
+    .where(
+      and(
+        eq(financialPaymentOutbox.id, id),
+        eq(financialPaymentOutbox.status, "DISPATCHING"),
+        lte(financialPaymentOutbox.nextAttemptAt, sql`now()`),
+      ),
+    )
+    .returning();
+  return reclaimed ? { entry: reclaimed, reclaimed: true } : null;
+}
+
+async function movePaymentOutboxToManualReview(entry: FinancialPaymentOutbox, reason: string): Promise<DispatchOutcome> {
+  const [moved] = await db
+    .update(financialPaymentOutbox)
+    .set({ status: MANUAL_REVIEW_STATUS, lastError: `MANUAL_REVIEW: dispatch outcome unknown (${reason})`, updatedAt: new Date() })
+    .where(and(eq(financialPaymentOutbox.id, entry.id), eq(financialPaymentOutbox.status, "DISPATCHING")))
+    .returning();
+  const [current] = moved ? [moved] : await db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.id, entry.id));
+  if (moved) {
+    logger.warn("outbound_recovery_manual_review", { queue: "financial_payment_outbox", outboxId: entry.id, brokerageId: entry.brokerageId, reason });
+    incrementCounter("outbound_recovery_manual_review_total", { queue: "financial_payment_outbox" });
+  }
+  return { outboxEntry: current ?? entry, paymentRequest: null };
+}
+
 /**
  * Dispatches a single outbox entry: calls the provider, and on success
  * both marks the entry DISPATCHED and advances the payment request to
@@ -251,13 +301,38 @@ function backoffMinutesFor(attempts: number): number {
  * human has to intervene past that point (e.g. via reverseDebit's or a
  * future write-off path), not another automatic retry.
  */
-export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): Promise<DispatchOutcome> {
-  if (outboxEntry.status === "DISPATCHED") return { outboxEntry, paymentRequest: null };
-  if (outboxEntry.action !== "SCHEDULE_DEBIT") {
-    throw new Error(`dispatchOutboxEntry does not yet handle action ${outboxEntry.action}.`);
+export async function dispatchOutboxEntry(staleEntry: FinancialPaymentOutbox): Promise<DispatchOutcome> {
+  if (staleEntry.status === "DISPATCHED") return { outboxEntry: staleEntry, paymentRequest: null };
+  if (staleEntry.action !== "SCHEDULE_DEBIT") {
+    throw new Error(`dispatchOutboxEntry does not yet handle action ${staleEntry.action}.`);
   }
 
+  // F-01: claim the row before any side effect. Only the dispatcher whose conditional UPDATE wins proceeds; any
+  // concurrent dispatcher (another instance's timer, the ops route, scheduleDebitForPaymentRequest) gets no row back
+  // and stands down without calling the provider. See evidence-f01/F01-CLAIM-LOCK-DESIGN.md (option 2).
+  const claim = await claimOutboxEntry(staleEntry.id);
+  if (!claim) {
+    const [current] = await db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.id, staleEntry.id));
+    return { outboxEntry: current ?? staleEntry, paymentRequest: null };
+  }
+  const outboxEntry = claim.entry;
+
   try {
+    if (claim.reclaimed && outboxEntry.attempts >= outboxEntry.maxAttempts) {
+      throw new Error(`Dispatch claim expired ${outboxEntry.attempts} time(s) without an outcome; giving up.`);
+    }
+
+    // Outbound recovery: a reclaimed row's previous send has an UNKNOWN outcome. Re-send only when the mandate provider
+    // declares it dedupes on our idempotency key; anything else (including a lookup, which cannot hand back the
+    // providerRequestRef this path must record) goes to MANUAL_REVIEW without calling the provider.
+    if (claim.reclaimed) {
+      const decision = await decideRecovery(capabilityOf(mandatePaymentProvider), outboxEntry.idempotencyKey);
+      if (decision.action !== "RESEND_SAME_KEY") {
+        return await movePaymentOutboxToManualReview(outboxEntry, decision.reason);
+      }
+      logger.warn("financial_payment_outbox_reclaim_resend", { outboxId: outboxEntry.id, attempts: outboxEntry.attempts, reason: decision.reason });
+    }
+
     const [request] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, outboxEntry.paymentRequestId));
     if (!request) throw new Error(`Payment request ${outboxEntry.paymentRequestId} not found.`);
 
@@ -279,8 +354,14 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
     const [dispatchedEntry] = await db
       .update(financialPaymentOutbox)
       .set({ status: "DISPATCHED", dispatchedAt: new Date(), updatedAt: new Date() })
-      .where(eq(financialPaymentOutbox.id, outboxEntry.id))
+      .where(and(eq(financialPaymentOutbox.id, outboxEntry.id), eq(financialPaymentOutbox.status, "DISPATCHING")))
       .returning();
+    if (!dispatchedEntry) {
+      // Our claim was lost (lease expired and another dispatcher reclaimed the row). The provider was called with the
+      // same idempotency key, so it returns the same debit to the new holder; write nothing here.
+      const [current] = await db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.id, outboxEntry.id));
+      return { outboxEntry: current ?? outboxEntry, paymentRequest: null };
+    }
 
     const [updatedRequest] = await db
       .update(financialPaymentRequests)
@@ -292,8 +373,14 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
         scheduledAt: result.scheduledFor ?? new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(financialPaymentRequests.id, request.id))
+      .where(and(eq(financialPaymentRequests.id, request.id), eq(financialPaymentRequests.status, "NOTICE_SENT")))
       .returning();
+    if (!updatedRequest) {
+      // The request already left NOTICE_SENT (e.g. cancelled/waived while we were at the provider). Never overwrite
+      // providerRequestRef or write a second ledger row/event for it.
+      const [current] = await db.select().from(financialPaymentRequests).where(eq(financialPaymentRequests.id, request.id));
+      return { outboxEntry: dispatchedEntry, paymentRequest: current ?? null };
+    }
 
     await recordLedgerEvent({
       brokerageId: updatedRequest.brokerageId,
@@ -331,8 +418,13 @@ export async function dispatchOutboxEntry(outboxEntry: FinancialPaymentOutbox): 
         lastError: (err as Error).message,
         updatedAt: new Date(),
       })
-      .where(eq(financialPaymentOutbox.id, outboxEntry.id))
+      .where(and(eq(financialPaymentOutbox.id, outboxEntry.id), eq(financialPaymentOutbox.status, "DISPATCHING")))
       .returning();
+    if (!updatedEntry) {
+      // F-01: our claim was lost; a stale dispatcher must not flip the row back to PENDING/FAILED.
+      const [current] = await db.select().from(financialPaymentOutbox).where(eq(financialPaymentOutbox.id, outboxEntry.id));
+      return { outboxEntry: current ?? outboxEntry, paymentRequest: null };
+    }
 
     let updatedRequest: FinancialPaymentRequest | null = null;
     if (exhausted) {
@@ -400,10 +492,19 @@ export interface DispatchSweepResult {
  * never lets one entry's error stop the sweep.
  */
 export async function dispatchPendingPaymentOutbox(limit = 20): Promise<DispatchSweepResult> {
+  // Due PENDING rows plus DISPATCHING rows whose claim lease (nextAttemptAt) has expired. Compared with the DB's now()
+  // so a row inserted with the column default (microseconds) is not missed by a JS millisecond Date. Ordered so a
+  // backlog larger than `limit` is drained oldest-due first instead of in arbitrary order.
   const due = await db
     .select()
     .from(financialPaymentOutbox)
-    .where(and(eq(financialPaymentOutbox.status, "PENDING"), lte(financialPaymentOutbox.nextAttemptAt, new Date())))
+    .where(
+      and(
+        inArray(financialPaymentOutbox.status, ["PENDING", "DISPATCHING"]),
+        lte(financialPaymentOutbox.nextAttemptAt, sql`now()`),
+      ),
+    )
+    .orderBy(asc(financialPaymentOutbox.nextAttemptAt), asc(financialPaymentOutbox.id))
     .limit(limit);
 
   const result: DispatchSweepResult = { attempted: due.length, dispatched: 0, stillPending: 0, failed: 0 };

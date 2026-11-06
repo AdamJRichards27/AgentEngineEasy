@@ -67,6 +67,11 @@ export interface MandateWebhookResult {
 
 export interface MandatePaymentProvider {
   name: string;
+  /**
+   * Outbound recovery capability (structurally the API's ProviderRecoveryCapability). Omitted means fail-closed:
+   * a lease-expired SCHEDULE_DEBIT outbox row goes to MANUAL_REVIEW instead of being re-sent.
+   */
+  recovery?: { dedupesOnIdempotencyKey: boolean; lookupByIdempotencyKey?: (idempotencyKey: string) => Promise<"DELIVERED" | "NOT_FOUND" | "UNKNOWN"> };
   scheduleDebit(input: DebitRequest): Promise<DebitResult>;
   /** Only valid while the debit is still "Scheduled" — once it has started Processing there is nothing left to cancel, only reverseDebit. */
   cancelScheduledDebit(providerRequestRef: string): Promise<void>;
@@ -115,6 +120,9 @@ export interface SandboxMandatePaymentProviderConfig {
  */
 export class SandboxMandatePaymentProvider implements MandatePaymentProvider {
   name = "sandbox";
+  // scheduleDebit REPLAYS the cached result for a repeated idempotencyKey (see the class comment): a resend with the
+  // same key cannot schedule a second debit. No lookup method.
+  recovery = { dedupesOnIdempotencyKey: true };
   private scheduled = new Map<string, { mandateProviderRef: string; amountCents: number; status: MandateDebitStatus }>();
   private idempotencyIndex = new Map<string, string>(); // idempotencyKey -> providerRequestRef
   private readonly configuredWebhookSecret: string | undefined;

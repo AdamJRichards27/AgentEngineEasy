@@ -655,3 +655,48 @@ export async function dispatchDueMessages(
   }
   return { dispatchedCount, blockedCount, errorCount, selectedCount: due.length };
 }
+
+/**
+ * Outbound recovery (specs/outbound-message-recovery.md): a message stuck in SENDING longer than this has an unknown
+ * outcome (the dispatcher died between SENDING and SENT/FAILED). It must exceed the slowest provider call.
+ */
+export const STALE_SENDING_THRESHOLD_MS = 15 * 60_000;
+export const RECOVER_STALE_SENDING_LIMIT = 25;
+
+/**
+ * Moves stale SENDING messages to MANUAL_REVIEW. Never re-sends: communication_messages has no claim lease to fence a
+ * resend with, and neither sandbox provider dedupes on the idempotency key, so even a deduping provider is not
+ * re-sent here until a lease exists. Each move goes through applyMessageTransition (version-guarded, audited), so a
+ * dispatcher that finishes concurrently wins and this sweep stands down.
+ */
+export async function recoverStaleSendingMessages(now: Date = new Date(), staleMs: number = STALE_SENDING_THRESHOLD_MS): Promise<{ movedCount: number; skippedCount: number }> {
+  const stale = await db
+    .select()
+    .from(communicationMessages)
+    .where(and(eq(communicationMessages.status, "SENDING"), lte(communicationMessages.updatedAt, new Date(now.getTime() - staleMs))))
+    .orderBy(asc(communicationMessages.updatedAt), asc(communicationMessages.id))
+    .limit(RECOVER_STALE_SENDING_LIMIT);
+  let movedCount = 0;
+  let skippedCount = 0;
+  for (const message of stale) {
+    try {
+      await applyMessageTransition({
+        messageId: message.id,
+        brokerageId: message.brokerageId,
+        toStatus: "MANUAL_REVIEW",
+        expectedVersion: message.version,
+        actorUserId: null,
+        auditAction: "communication_message_manual_review",
+        patch: { failureDetail: "MANUAL_REVIEW: stuck in SENDING; delivery outcome unknown. Not re-sent." },
+      });
+      movedCount++;
+      logger.warn("outbound_recovery_manual_review", { queue: "communication_messages", messageId: message.id, brokerageId: message.brokerageId, reason: "STALE_SENDING" });
+      incrementCounter("outbound_recovery_manual_review_total", { queue: "communications_outbox" });
+    } catch (err) {
+      // A concurrent writer moved the message first (version changed): that writer's outcome stands.
+      if (err instanceof CommunicationConcurrencyError || err instanceof CommunicationTransitionError) skippedCount++;
+      else throw err;
+    }
+  }
+  return { movedCount, skippedCount };
+}

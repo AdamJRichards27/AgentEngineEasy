@@ -11,6 +11,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
+import { db, financialPaymentOutbox } from "@aee/db";
 import { createBrokerageWithUsers, createTransactionFromListedProperty, addSecondBrokerageAdmin, cleanupBrokerages, type DevLoginResult } from "./testSupport.js";
 
 process.env.SESSION_SECRET =
@@ -274,6 +275,24 @@ describe("financial routes — end-to-end PC success fee lifecycle through the A
 
     const noticeRes = await fetch(`${baseUrl}/api/financial/payment-requests/${paymentRequestId}/notice-sent`, { method: "POST", headers: { cookie: A.admin.cookie } });
     assert.equal(noticeRes.status, 200);
+
+    // Test isolation (shared test DB): POST /financial/ops/dispatch-outbox
+    // (below) and paymentOutbox.test.ts call the GLOBAL
+    // dispatchPendingPaymentOutbox() sweep concurrently in the same DB. A
+    // default-due PENDING row can be dispatched by another process's sweep
+    // (its own sandbox provider, so a different providerRequestRef) between
+    // its insert and this route's own dispatch, so the webhook below would
+    // miss. Pre-creating the SCHEDULE_DEBIT row with nextAttemptAt 24h ahead
+    // keeps every sweep away from it; the route reuses an existing row and
+    // dispatches it directly regardless of nextAttemptAt.
+    await db.insert(financialPaymentOutbox).values({
+      brokerageId: A.brokerageId,
+      paymentRequestId,
+      action: "SCHEDULE_DEBIT",
+      status: "PENDING",
+      idempotencyKey: `schedule-debit:${paymentRequestId}`,
+      nextAttemptAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
 
     const scheduleRes = await fetch(`${baseUrl}/api/financial/payment-requests/${paymentRequestId}/schedule-debit`, { method: "POST", headers: { cookie: A.admin.cookie } });
     assert.equal(scheduleRes.status, 200);

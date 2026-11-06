@@ -236,7 +236,7 @@ export const integrationConnectionTransitions = pgTable(
 // communications' own outbox flow.
 // ---------------------------------------------------------------------
 
-export const INTEGRATION_OUTBOX_STATUSES = ["PENDING", "DISPATCHING", "SENT", "FAILED", "RETRY_SCHEDULED", "DEAD_LETTERED", "CANCELLED"] as const;
+export const INTEGRATION_OUTBOX_STATUSES = ["PENDING", "DISPATCHING", "SENT", "FAILED", "RETRY_SCHEDULED", "DEAD_LETTERED", "CANCELLED", "MANUAL_REVIEW"] as const;
 export type IntegrationOutboxStatus = (typeof INTEGRATION_OUTBOX_STATUSES)[number];
 
 export const integrationOutbox = pgTable(
